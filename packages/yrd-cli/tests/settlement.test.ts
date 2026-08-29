@@ -10,9 +10,12 @@ import { join } from "node:path"
 import { Command, createMemoryJournal, event, type Journal } from "@yrd/core"
 import { afterEach, describe, expect, it } from "vitest"
 
+import { createExclusive } from "@yrd/persistence"
+
 import {
   YRD_SETTLEMENT_HOOK_ENV,
   YRD_SETTLEMENT_STATE_ENV,
+  classifySettlementError,
   drainSettlements,
   drainYrdSettlementNotices,
   isQueueRunInvocation,
@@ -249,6 +252,50 @@ describe("settlement cursors", () => {
     const dir = temporaryDir("yrd-settlement-cursor-split-")
     expect(settlementCursorPath(dir, undefined)).toBe(join(dir, "ownerless-v2.json"))
     expect(settlementCursorPath(dir, "@seat/1")).not.toBe(settlementCursorPath(dir, "@seat/2"))
+  })
+})
+
+/** A REAL busy error, produced by the lock itself — not a message-shaped string. */
+async function busyError(): Promise<unknown> {
+  const root = temporaryDir("yrd-settlement-busy-")
+  const exclusive = createExclusive(root, { timeoutMs: 0 })
+  return await exclusive.run(
+    async () => {
+      try {
+        await exclusive.run(async () => undefined, { holder: "settlement-drain owner=@seat/2" })
+      } catch (error) {
+        return error
+      }
+      throw new Error("expected the inner acquisition to be refused")
+    },
+    { holder: "settlement-drain owner=@seat/1" },
+  )
+}
+
+describe("classifySettlementError", () => {
+  it("calls a lost lock race contention when the resident tick gets another turn", async () => {
+    expect(classifySettlementError(await busyError(), { anotherTurnComes: true, consecutiveBusy: 1 })).toBe(
+      "contention",
+    )
+  })
+
+  it("keeps a lost lock race a failure for a one-shot command, which has no next turn", async () => {
+    // The regression this pins: suppressing contention is only honest where a
+    // further attempt is guaranteed. A command that already spent BUSY_RETRIES
+    // has none, so silencing it would drop a real failure.
+    expect(classifySettlementError(await busyError(), { anotherTurnComes: false, consecutiveBusy: 1 })).toBe("failure")
+  })
+
+  it("promotes a long enough run of contention to starvation", async () => {
+    const error = await busyError()
+    expect(classifySettlementError(error, { anotherTurnComes: true, consecutiveBusy: 39 })).toBe("contention")
+    expect(classifySettlementError(error, { anotherTurnComes: true, consecutiveBusy: 40 })).toBe("starvation")
+  })
+
+  it("leaves an ordinary drain failure a failure however long the tick has run", () => {
+    expect(classifySettlementError(new Error("host said no"), { anotherTurnComes: true, consecutiveBusy: 400 })).toBe(
+      "failure",
+    )
   })
 })
 

@@ -48,6 +48,17 @@ const TERMINAL_EVENT_NAMES: ReadonlySet<string> = new Set([
 const HABITANT_ACTIVATION_MS = 1_000
 const HABITANT_TICK_MS = 15_000
 const BUSY_RETRIES = 50
+/**
+ * Consecutive resident ticks that may lose the writer lock before it is news.
+ *
+ * The resident tick drains with ZERO retries on purpose: another drain holding
+ * the lock is settling the same store, and this worker gets another turn in
+ * {@link HABITANT_TICK_MS}. Losing that race is the design working, not a
+ * failure — so it must not be reported as one. What IS news is never winning,
+ * and at one tick per 15s this threshold is the ten minutes past which the
+ * house rule says a waiter is broken rather than slow.
+ */
+const BUSY_STARVATION_TICKS = 40
 const NOTICE_SCAN_CAP = 100
 
 export type YrdSettlementTarget = Readonly<{ key: string; value: string; eventId: string }>
@@ -88,8 +99,8 @@ function detail(error: unknown): string {
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((done) => {
-    setTimeout(done, ms)
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
   })
 }
 
@@ -347,7 +358,11 @@ export async function settleCommittedTerminals(options: SettlementDrainOptions):
   const cursorPath = settlementCursorPath(options.stateDir, hook.owner)
   const journal = options.journal ?? createReadOnlyJournal({ dir: repository.stateDir })
   const evictedThrough = journal.history?.diagnostics().evictedThrough
-  const cursor = await readSettlementCursor(cursorPath, hook.owner, (evictedThrough === undefined ? {} : { evictedThrough }))
+  const cursor = await readSettlementCursor(
+    cursorPath,
+    hook.owner,
+    evictedThrough === undefined ? {} : { evictedThrough },
+  )
   try {
     for await (const batch of journal.read(cursor)) {
       const { targets, integrated } = terminalSettlementTargets(batch.values, hook.key)
@@ -375,6 +390,33 @@ function exclusiveBusy(error: unknown): boolean {
   return detail(error).includes("writer lock is busy")
 }
 
+export type SettlementErrorClass = "contention" | "starvation" | "failure"
+
+/**
+ * What a settlement error IS — the reporter had one word for all three.
+ *
+ * `contention` is another drain holding the writer lock while this caller is
+ * guaranteed a further turn. It is the design working: the resident tick drains
+ * with zero retries precisely because the winner settles the same store and
+ * this worker gets {@link HABITANT_TICK_MS} later. Reporting it as failure put
+ * a line in the runner's log on 37 of 41 measured cycles that nobody could act
+ * on, which is the shape of a warning that has stopped carrying information.
+ *
+ * `starvation` is a RUN of that, long enough that nothing is being settled —
+ * a real condition, and the one worth waking someone for.
+ *
+ * Everything else, including a busy lock with no further turn coming, is
+ * `failure`: a one-shot command that has already spent {@link BUSY_RETRIES}
+ * has no next tick to fix it, so its contention is terminal and stays loud.
+ */
+export function classifySettlementError(
+  error: unknown,
+  context: Readonly<{ anotherTurnComes: boolean; consecutiveBusy: number }>,
+): SettlementErrorClass {
+  if (!context.anotherTurnComes || !exclusiveBusy(error)) return "failure"
+  return context.consecutiveBusy >= BUSY_STARVATION_TICKS ? "starvation" : "contention"
+}
+
 /**
  * One exclusive settlement pass, returning its failure rather than throwing.
  *
@@ -390,22 +432,25 @@ export async function drainSettlements(
   let error: unknown
   for (let attempt = 0; attempt <= options.retries; attempt += 1) {
     try {
-      return await exclusive.run(async () => {
-        try {
-          await settleCommittedTerminals(options)
-          await rm(errorPath, { force: true })
-          return undefined
-        } catch (cause) {
-          await writeJsonAtomically(errorPath, {
-            version: 1,
-            owner: options.hook.owner ?? null,
-            workerPid: process.pid,
-            failedAt: new Date().toISOString(),
-            error: detail(cause),
-          })
-          return cause
-        }
-      }, { holder: `settlement-drain owner=${options.hook.owner ?? "none"}` })
+      return await exclusive.run(
+        async () => {
+          try {
+            await settleCommittedTerminals(options)
+            await rm(errorPath, { force: true })
+            return undefined
+          } catch (cause) {
+            await writeJsonAtomically(errorPath, {
+              version: 1,
+              owner: options.hook.owner ?? null,
+              workerPid: process.pid,
+              failedAt: new Date().toISOString(),
+              error: detail(cause),
+            })
+            return cause
+          }
+        },
+        { holder: `settlement-drain owner=${options.hook.owner ?? "none"}` },
+      )
     } catch (cause) {
       error = cause
       if (!exclusiveBusy(cause) || attempt === options.retries) break
@@ -477,11 +522,41 @@ export async function runYrdSettlementWorker(
   const segments = settlementStateSegments(env)
 
   let lastReportedError: string | undefined
-  const report = async (error: unknown, owner: string | undefined): Promise<void> => {
+  let consecutiveBusy = 0
+  const report = async (
+    error: unknown,
+    owner: string | undefined,
+    // True only for the resident loop's non-final drain, the one caller that is
+    // guaranteed another turn. Suppressing contention is honest exactly there;
+    // for a one-shot command that has already spent BUSY_RETRIES there is no
+    // next turn, so its busy error is a real failure and must stay loud.
+    anotherTurnComes = false,
+  ): Promise<void> => {
     if (error === undefined) {
       lastReportedError = undefined
+      consecutiveBusy = 0
       return
     }
+    // A busy writer lock is contention, not a failure, and the two had one
+    // wording between them: "background work failed". Measured on the resident
+    // runner 2026-08-29, 37 of 41 cycles said it while the store drained
+    // normally under the pid that won — so the line fired on tick rather than
+    // on transition, and nothing anyone could do would change because of it.
+    // Starvation is the real condition here, and it is a RUN, not an event.
+    const busyRun = consecutiveBusy + 1
+    const kind = classifySettlementError(error, { anotherTurnComes, consecutiveBusy: busyRun })
+    if (kind !== "failure") {
+      consecutiveBusy = busyRun
+      // The crossing, once — not every tick of the run that follows it.
+      if (kind === "starvation" && busyRun === BUSY_STARVATION_TICKS) {
+        io.stderr(
+          `warning: Yrd settlement has not won the writer lock in ${BUSY_STARVATION_TICKS} consecutive attempts; ` +
+            `terminal facts are going unsettled. The last holder is named in: ${detail(error)}\n`,
+        )
+      }
+      return
+    }
+    consecutiveBusy = 0
     const message = detail(error)
     try {
       await writeJsonAtomically(noticePath, {
@@ -531,10 +606,10 @@ export async function runYrdSettlementWorker(
       return
     }
     let parentIsExited = false
-    const parentExited = new Promise<void>((done, fail) => {
+    const parentExited = new Promise<void>((resolve, reject) => {
       const lifetime = createReadStream("", { fd: 3, autoClose: true })
-      lifetime.once("end", done)
-      lifetime.once("error", fail)
+      lifetime.once("end", resolve)
+      lifetime.once("error", reject)
       lifetime.resume()
     })
     void parentExited.then(() => {
@@ -546,7 +621,7 @@ export async function runYrdSettlementWorker(
       sleep(HABITANT_ACTIVATION_MS).then(() => false),
     ])
     while (!exitedBeforeActivation && !parentIsExited) {
-      await report(await drain(0), settler.owner)
+      await report(await drain(0), settler.owner, true)
       const exited = await Promise.race([parentExited.then(() => true), sleep(HABITANT_TICK_MS).then(() => false)])
       if (exited) break
     }
