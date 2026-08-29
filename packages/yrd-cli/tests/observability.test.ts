@@ -12,6 +12,7 @@ import { createLogger, type Event } from "loggily"
 import { runObservableCli } from "../examples/observable-cli/index.ts"
 import { runYrdProcess } from "../src/host.ts"
 import {
+  HABITANT_LIFECYCLE_NAMESPACES,
   YRD_LIFECYCLE_LEVELS,
   createYrdLogger,
   observeYrdLifecycle,
@@ -163,6 +164,79 @@ describe("habitant runner observability", () => {
     log.child("process").debug?.("Command finished.")
     log.end()
     expect(human.join("")).toContain("Command finished.")
+  })
+
+  // 2026-08-28: the queue's explanation of an empty run never reached anyone.
+  // The narration allowlist held `yrd:queue:run`; the queue plugin logs on
+  // `yrd.log.child("queue")`, and nothing in src has ever created a `run` child.
+  // A namespace that matches nothing gates its own diagnostics away, and the
+  // gate deletes the METHOD, so `log.info?.(…)` became a no-op with no error
+  // and no stream. Measured on the live runner: 427 WARN and 0 INFO on
+  // `yrd:queue`.
+  it("shows the queue's own explanation of an empty run, on the namespace the queue actually has", () => {
+    const human: string[] = []
+    const config = habitantObservability(resolveYrdObservability({}, {}))
+    const log = createYrdLogger(
+      config,
+      (text) => human.push(text),
+      (event) => (event.kind === "log" ? event.message : undefined),
+    )
+    const queue = log.child("queue")
+
+    expect(queue.info, "the queue plugin's own logger must be able to speak").toBeTypeOf("function")
+    queue.info?.("queue run emitted zero events because nothing is submitted")
+    log.end()
+
+    expect(human.join("")).toContain("nothing is submitted")
+  })
+
+  it("never deletes `info` from a logger — only the `debug`/`trace` payloads the gate was written for", () => {
+    const human: string[] = []
+    const config = habitantObservability(resolveYrdObservability({}, {}))
+    const log = createYrdLogger(
+      config,
+      (text) => human.push(text),
+      (event) => (event.kind === "log" ? event.message : undefined),
+    )
+    const process = log.child("process")
+
+    // Yrd spends INFO on the lines that separate an honest zero from a surface
+    // that never looked. Deleting one is indistinguishable from never reaching
+    // the code, so the source-side gate may not touch that level.
+    expect(process.info, "`info` is a diagnostic level and is never gated away").toBeTypeOf("function")
+    // The optimisation itself stays: heavy payloads are still never built.
+    expect(process.debug, "`debug` off the narration path is still free").toBeUndefined()
+    expect(process.trace).toBeUndefined()
+  })
+
+  it("names only namespaces that some logger in src actually creates", async () => {
+    // The bug above was not a wrong policy, it was a dead string. Nothing
+    // connected the allowlist to the loggers it claims to admit, so an entry
+    // could name a namespace that had never existed and read as deliberate.
+    //
+    // Comments are stripped first, and that is not incidental: the first
+    // version of this check passed against the very bug it was written to
+    // catch, because the comment explaining the dead `child("run")` contained
+    // the string it searched for. Stripping can only over-remove, which fails
+    // loud, so the error direction is the safe one.
+    const root = new URL("../../..", import.meta.url).pathname
+    const sources = new Bun.Glob("packages/*/src/**/*.ts").scan({ cwd: root })
+    let src = ""
+    for await (const file of sources) src += await Bun.file(`${root}/${file}`).text()
+    const code = src.replaceAll(/\/\*[\s\S]*?\*\//g, " ").replaceAll(/\/\/[^\n]*/g, " ")
+
+    expect(code.length, "positive control: the scan read yrd's sources, and stripping left them").toBeGreaterThan(
+      1_000_000,
+    )
+    expect(code, "positive control: a namespace that IS created survives stripping").toContain('child("queue")')
+
+    const unreachable = HABITANT_LIFECYCLE_NAMESPACES.filter((namespace) =>
+      namespace
+        .split(":")
+        .slice(1)
+        .some((segment) => !code.includes(`child("${segment}")`) && !code.includes(`createLogger("yrd:${segment}")`)),
+    )
+    expect(unreachable, "every narration namespace must be one a logger in src can have").toEqual([])
   })
 })
 
@@ -483,12 +557,8 @@ describe("observable CLI exemplar", () => {
         durationMs: expect.any(Number),
       }),
     )
-    const routed = evidence.find(
-      (record) => record.name === "yrd:bay" && record.action === "submit-derived-routed",
-    )
-    expect(routed).toEqual(
-      expect.objectContaining({ branch: "issue/observable", sha: headSha, base: "main" }),
-    )
+    const routed = evidence.find((record) => record.name === "yrd:bay" && record.action === "submit-derived-routed")
+    expect(routed).toEqual(expect.objectContaining({ branch: "issue/observable", sha: headSha, base: "main" }))
     expect(routed?.trace_id, "derived routing must correlate with the submit lifecycle").toBe(submitted?.trace_id)
     expect(
       evidence.find(
