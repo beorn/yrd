@@ -286,6 +286,35 @@ describe("the waiting list derives pendingness from the repository (2026-08-28: 
     expect((await app.queue.unrecordedSubmits())[0]?.landing).toEqual({ state: "pending" })
   })
 
+  it("the waiting list itself can NEVER read `unscanned` while a reader is wired — even as facts move under it", async () => {
+    // The memo's fingerprint makes a MISS possible, and a miss that filled the
+    // list with `unscanned` rows would be useless in a new way rather than the
+    // old way. It cannot happen on this surface by construction: the scan and
+    // the read take the SAME immutable snapshot in one statement, so the
+    // fingerprint is computed twice over the same value and always hits. The
+    // exposure is only for the sync surfaces reading a scan taken earlier in
+    // the pass (the pure reducer), which is the case the moved-fact test above
+    // fences.
+    await using app = await createApp({ scan: ancestryScan(new Set([LANDED_SHA])) })
+    await app.bays.recordBranchSubmit({ branch: "task/pending", sha: PENDING_SHA, base: "main" })
+    const first = await app.queue.unrecordedSubmits()
+    expect(first.map((row) => row.landing)).toEqual([{ state: "pending" }])
+
+    // Move the fact set under it — a new branch AND a re-push of the old one,
+    // which is what a busy bay does between passes — and ask again.
+    await app.bays.recordBranchSubmit({ branch: "task/pending", sha: MOVED_SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "task/landed", sha: LANDED_SHA, base: "main" })
+    const second = await app.queue.unrecordedSubmits()
+    expect(
+      second.map((row) => row.branch),
+      "the newly landed fact is still excluded",
+    ).toEqual(["task/pending"])
+    expect(
+      second.map((row) => row.landing),
+      "and nothing degraded to unscanned",
+    ).toEqual([{ state: "pending" }])
+  })
+
   it("`queue audit` stops paging for landed facts, and the empty-run diagnostic stops considering them", async () => {
     await using app = await createApp({ scan: ancestryScan(new Set([LANDED_SHA])) })
     await app.bays.recordBranchSubmit({ branch: "task/landed", sha: LANDED_SHA, base: "main" })
