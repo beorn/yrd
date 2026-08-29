@@ -15,8 +15,9 @@
  * not the read — and the retired store-keyed answer is reproduced beside each
  * derived one so the delta between them is the assertion, not a claim.
  */
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { safeRemove } from "removely"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type { BaysState } from "@yrd/bay"
@@ -29,7 +30,7 @@ const git = fixtureRefGit()
 const roots: string[] = []
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  await Promise.all(roots.splice(0).map((root) => safeRemove(root, { within: tmpdir(), allowMissing: true })))
 })
 
 /** A sha this repository has never held — the unreadable-fact specimen. */

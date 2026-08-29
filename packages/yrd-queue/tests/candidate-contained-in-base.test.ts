@@ -8,8 +8,9 @@
  * @level l2
  * @consumer @yrd/queue candidate construction
  */
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { safeRemove } from "removely"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
@@ -20,7 +21,7 @@ const FIXTURE_CHANGE_ID = `I${"c0ffee12".repeat(5)}`
 const roots: string[] = []
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  await Promise.all(roots.splice(0).map((root) => safeRemove(root, { within: tmpdir(), allowMissing: true })))
 })
 
 async function git(repo: string, args: readonly string[]): Promise<string> {

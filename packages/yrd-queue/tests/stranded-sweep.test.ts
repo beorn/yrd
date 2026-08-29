@@ -4,8 +4,9 @@
  * @level   l1
  * @consumer @yrd/core/22716-yrd-hardening-program/p2-push-is-submit
  */
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { safeRemove } from "removely"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { applyHostFindingFilter, sweepStrandedRefs, type SweepOptions } from "../src/stranded-sweep.ts"
@@ -371,7 +372,7 @@ describe("sweepStrandedRefs", () => {
       expect(result.findings[0]?.message).toContain("observed locally 11m ago")
       expect(result.missingUpdateClocks).toBe(0)
     } finally {
-      await rm(repo, { recursive: true, force: true })
+      await safeRemove(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -589,7 +590,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
           result.skipped.length,
       )
     } finally {
-      await rm(repo, { recursive: true, force: true })
+      await safeRemove(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 
@@ -635,7 +636,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
       expect(result.skipped).toEqual([])
       expect(result.findings).toEqual([])
     } finally {
-      await rm(repo, { recursive: true, force: true })
+      await safeRemove(repo, { within: tmpdir(), allowMissing: true })
     }
   })
 })
