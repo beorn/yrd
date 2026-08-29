@@ -8694,8 +8694,13 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "component-model-authorization-refused",
     // Both identity refusals: a member with no Change-Id cannot have a
     // candidate written for it, because merged-truth derivation reads that
-    // trailer's ancestry. The cure is the author's (migrate the pre-identity
-    // record), never a retry — nothing about the host changes the answer.
+    // trailer's ancestry. The cure is the author's, never a retry — nothing
+    // about the host changes the answer. It is NOT "migrate the record", which
+    // this comment said until 2026-08-29 and which no verb implements:
+    // identity is deliberately never invented for an existing record. Because
+    // identity is BRANCH-keyed, re-pushing the same branch resolves to the same
+    // legacy change and refuses again. The author delivers the payload under a
+    // NEW branch name, which takes the mint path.
     "candidate-change-id-missing",
     "recut-change-id-missing",
     // A certificate-era composed revision reaching candidate construction:
