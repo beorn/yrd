@@ -1875,7 +1875,9 @@ function changeIdForRevision(existing: DeepReadonly<Change> | undefined, command
   raiseFailure(
     "refusal",
     "legacy-change-id-missing",
-    `yrd: change '${existing.id}' predates stable Change-Id identity; migrate it before rebuilding`,
+    `yrd: change '${existing.id}' predates stable Change-Id identity — there is no migration verb, because identity is never invented for an existing record. Re-pushing THIS branch cannot help: identity is branch-keyed, so it resolves to this same change and refuses again. Deliver the payload under a NEW branch name, which takes the mint path and gets a stable Change-Id: ` +
+      `git push ${RECEIVER_REMOTE_NAME} <new-branch>:refs/for/${baseIdentity(existing.base)}/<issue>. ` +
+      `No work is lost (the payload is on the branch) and no withdraw is needed`,
   )
 }
 
@@ -2453,7 +2455,9 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
     raiseFailure(
       "refusal",
       "legacy-change-id-missing",
-      `yrd: change '${pr.id}' predates stable Change-Id identity; migrate it before rebuilding`,
+      `yrd: change '${pr.id}' predates stable Change-Id identity — there is no migration verb, because identity is never invented for an existing record. Re-pushing THIS branch cannot help: identity is branch-keyed, so it resolves to this same change and refuses again. Deliver the payload under a NEW branch name, which takes the mint path and gets a stable Change-Id: ` +
+        `git push ${RECEIVER_REMOTE_NAME} <new-branch>:refs/for/${baseIdentity(pr.base)}/<issue>. ` +
+        `No work is lost (the payload is on the branch) and no withdraw is needed`,
     )
   }
   const successorSubmitter = predecessor.submitter ?? defaultSubmitter

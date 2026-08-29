@@ -3575,8 +3575,10 @@ async function remergeDirectChangeByMerge(
       kind: "refusal",
       code: "recut-change-id-missing",
       message:
-        `yrd: change '${input.id}' revision ${String(input.revision)} predates stable Change-Id identity; ` +
-        `migrate it before rebuilding`,
+        `yrd: change '${input.id}' revision ${String(input.revision)} predates stable Change-Id identity — ` +
+        `there is no migration verb, because identity is never invented for an existing record. Re-pushing THIS branch cannot help: identity is branch-keyed, so it resolves to this same change and refuses again. Deliver the payload under a NEW branch name, which takes the mint path and gets a stable Change-Id. ` +
+        `Push it to the receiver as 'refs/for/<base>/<issue>' under that new name. No work is lost ` +
+        `(the payload is on the branch) and no withdraw is needed`,
       pr: input.id,
     })
   }

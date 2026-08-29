@@ -1748,10 +1748,30 @@ describe("Queue command adapters", () => {
     ).rejects.toMatchObject({
       failure: {
         code: "recut-change-id-missing",
-        // The remedy has to be one the reader can perform, and it is the same
-        // one plugin.ts already names for a pre-identity record.
-        message: expect.stringContaining("migrate it before rebuilding"),
+        // The remedy has to be one the reader can PERFORM — which this
+        // assertion used to state as a principle while pinning a phrase that
+        // named no action. "migrate it before rebuilding" pointed at a
+        // migration verb that does not exist and was never going to: identity
+        // is deliberately never invented for an existing record. A reader who
+        // followed it re-pushed the same branch, hit the identical refusal
+        // (identity is branch-keyed, so it resolves to the same change), and
+        // stalled. PR2599 sat five hours on exactly this in 2026-08-29.
+        message: expect.stringContaining("NEW branch name"),
       },
+    })
+    // The DEAD END must be named explicitly, or the reader retries the obvious
+    // thing forever and the refusal reads as transient.
+    await expect(
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/no-identity",
+        base: "main",
+        revision: 1,
+        headSha: featureSha,
+        baseSha: oldBaseSha,
+      }),
+    ).rejects.toMatchObject({
+      failure: { message: expect.stringContaining("Re-pushing THIS branch cannot help") },
     })
     // Refusal means nothing was written: main is where the fixture left it.
     expect(await git(repo, ["rev-parse", "main"])).not.toBe(oldBaseSha)
