@@ -52,7 +52,7 @@ import {
   type ContestEvaluatorDef,
   type ContestEvaluatorInput,
   type ContestFinishArgs,
-  type ContestGit,
+  type CommitResolver,
   type ContestPromotion,
   type ContestRecord,
   type ContestRunnerDef,
@@ -400,7 +400,7 @@ function createContests(
     runtime(): DeepReadonly<ContestRuntimeState>
     jobs: Jobs
     bays: HasBays["bays"]
-    git: ContestGit
+    git: CommitResolver
     defaultBase: string
     signal: AbortSignal
     log: ConditionalLogger
@@ -636,7 +636,9 @@ async function ensureExactPR(
   if (
     pr === undefined ||
     !exactPR(pr, pin, record.base) ||
-    (changeDeliveryState(pr) !== "submitted" && changeDeliveryState(pr) !== "ready" && changeDeliveryState(pr) !== "integrated")
+    (changeDeliveryState(pr) !== "submitted" &&
+      changeDeliveryState(pr) !== "ready" &&
+      changeDeliveryState(pr) !== "integrated")
   ) {
     throw new Error(`yrd: selected contest commit was not submitted`)
   }
@@ -889,7 +891,11 @@ function passedRunnerOutput(job: DeepReadonly<Job> | undefined): AttemptRunOutpu
     : undefined
 }
 
-function exactPR(pr: DeepReadonly<Change>, pin: DeepReadonly<z.infer<typeof GitRevisionPinSchema>>, base: string): boolean {
+function exactPR(
+  pr: DeepReadonly<Change>,
+  pin: DeepReadonly<z.infer<typeof GitRevisionPinSchema>>,
+  base: string,
+): boolean {
   return (
     pr.bay === pin.bay &&
     pr.branch === pin.branch &&
@@ -936,7 +942,7 @@ function evaluatorJobDef(evaluator: ContestEvaluatorDef): EvaluatorJobDef {
   })
 }
 
-function promotionJobDef(git: ContestGit): PromotionJobDef {
+function promotionJobDef(git: CommitResolver): PromotionJobDef {
   return createJobDef({
     name: "contest.promotion.verify",
     title: "Verify selected contest revision",
@@ -983,7 +989,7 @@ function definitionMap<Value extends object, Key extends keyof Value>(
   return result
 }
 
-function normalizeGit(git: ContestGit): ContestGit {
+function normalizeGit(git: CommitResolver): CommitResolver {
   return Object.freeze({ revision: TextSchema.parse(git.revision), resolveCommit: git.resolveCommit.bind(git) })
 }
 

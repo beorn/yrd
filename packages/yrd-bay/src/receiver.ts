@@ -128,8 +128,8 @@ export type GitPushReceiver = Readonly<{
  *
  * Present only for submit pushes. Its absence is the signal that the resolver
  * is being asked the OLD question — "does an active bay track this branch?" —
- * and its presence is the signal that no bay exists yet and admission is what
- * creates one.
+ * and its presence is the signal that no bay exists yet and that queueing the
+ * change is what creates one.
  */
 export type ReceiverSubmitIntent = Readonly<{ base: string; name: string }>
 export type ResolveReceiverTarget = (
@@ -160,7 +160,7 @@ export type ReceiverAutoClassification = "draft" | "submit" | "ignore"
  * Classify one branch against the BASE branch's own `.yrd.yml` `auto:` block
  * — draft/ignore/submit glob lists, precedence ignore > submit > draft —
  * given the base's raw config text (never the pushed branch's own; scope
- * authority lives with the trusted, already-landed config, mirroring
+ * authority lives with the trusted, already-merged config, mirroring
  * `readConfigFromBase` in `@yrd/cli/host.ts`) and the branch name. `undefined`
  * yaml means the base has no config at all — the same "no file means the
  * built-in defaults" reading `ReceiverConfigValidator` already uses, never a
@@ -1155,7 +1155,7 @@ async function readPushedBlob(
  * pre-receive and post-receive, same as `validatePin`/`validateSubmitCarrier`
  * above, so a config the base's own queue schema would refuse is rejected at
  * the push itself — the same "unmergeable" guarantee those two already give
- * gitlink pins and carrier ancestry, closing the gap PR1337 fell through
+ * gitlinks and carrier ancestry, closing the gap PR1337 fell through
  * (typecheck, lockfile and manifest gates all passed; nothing ever asked
  * whether the pushed .yrd.yml itself would parse).
  *

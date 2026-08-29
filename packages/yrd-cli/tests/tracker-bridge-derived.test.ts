@@ -9,12 +9,7 @@
 
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import {
-  createBayJobDefs,
-  volatilePrNumberMint,
-  withBays,
-  type BayWorkspace,
-} from "@yrd/bay"
+import { createBayJobDefs, volatilePrNumberMint, withBays, type BayWorkspace } from "@yrd/bay"
 import { runYrd as runYrdRaw, type YrdCliIO } from "@yrd/cli"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -22,7 +17,7 @@ import {
   withContests,
   type AttemptRunOutput,
   type ContestEvaluatorDef,
-  type ContestGit,
+  type CommitResolver,
   type ContestRunnerDef,
 } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
@@ -112,9 +107,13 @@ function contestAdapters() {
     id: "held-out",
     revision: "held-out-v1",
     authority: "held-out",
-    evaluate: async () => ({ status: "completed", conclusion: "success", output: { verdict: "passed", artifacts: [] } }),
+    evaluate: async () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { verdict: "passed", artifacts: [] },
+    }),
   }
-  const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
+  const git: CommitResolver = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   return { runner, evaluator, git }
 }
 
@@ -468,7 +467,10 @@ describe("tracker bridges — DERIVED deliveries", () => {
         runs: ["R1"],
       },
     ])
-    expect(v1.deliveries).toMatchObject([{ pr: "PR1", status: "pushed" }, { pr: "PR2", status: "integrated" }])
+    expect(v1.deliveries).toMatchObject([
+      { pr: "PR1", status: "pushed" },
+      { pr: "PR2", status: "integrated" },
+    ])
   })
 
   it("preserves already-landed equivalence evidence for a derived delivery in both bridge versions", async () => {

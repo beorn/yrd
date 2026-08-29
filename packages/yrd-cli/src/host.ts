@@ -38,7 +38,7 @@ import {
   createHeldOutCommandEvaluator,
   withContests,
   type ContestEvaluatorDef,
-  type ContestGit,
+  type CommitResolver,
   type ContestRunnerDef,
 } from "@yrd/contest"
 import {
@@ -414,7 +414,7 @@ export type DefaultYrdAppOptions = Readonly<{
   issueSources?: readonly IssueSource[]
   contestRunners?: readonly ContestRunnerDef[]
   contestEvaluators?: readonly ContestEvaluatorDef[]
-  contestGit?: ContestGit
+  contestGit?: CommitResolver
   defaultSubmitter?: string
   scope?: Scope
   log?: ConditionalLogger
@@ -1928,7 +1928,7 @@ async function resolveQueueTarget(
   }
 }
 
-function localContestGit(process: Pick<Process, "run">, repo: string): ContestGit {
+function localCommitResolver(process: Pick<Process, "run">, repo: string): CommitResolver {
   return {
     revision: createHash("sha256").update(`yrd-contest-git-v2\0${repo}`).digest("hex"),
     resolveCommit: (ref) => resolveCommit(process, repo, ref),
@@ -1947,7 +1947,7 @@ function bayPath(root: string, bay: string): string {
 function contestAdapters(options: DefaultYrdDefinitionOptions): {
   runners: readonly ContestRunnerDef[]
   evaluators: readonly ContestEvaluatorDef[]
-  git: ContestGit
+  git: CommitResolver
 } {
   const evaluators =
     options.contestEvaluators ??
@@ -1975,7 +1975,7 @@ function contestAdapters(options: DefaultYrdDefinitionOptions): {
       })
     })
   const runners = options.contestRunners ?? []
-  return { runners, evaluators, git: options.contestGit ?? localContestGit(options.process, options.repo) }
+  return { runners, evaluators, git: options.contestGit ?? localCommitResolver(options.process, options.repo) }
 }
 
 /** Compose the built-in workflow from immutable plugins and injected resources. */
@@ -3202,9 +3202,9 @@ export type YrdProcessHostOptions = Pick<
      * (`code`, `pm`) — the queue LABEL run names lead with (item 36). Absent
      * for standalone invocations, which have no config handles yet. */
     repositoryLabel?: string
-    /** Host-evaluated uncarried exemptions. Copied onto IO so both the
+    /** Host-evaluated stranded-refs exemptions. Copied onto IO so both the
      * `queue uncarried` command and the habitant sweeper share one adapter. */
-    uncarriedFilter?: YrdCliIO["filterUncarriedFindings"]
+    strandedFilter?: YrdCliIO["filterStrandedFindings"]
   }>
 
 type YrdRuntimeHostOptions = YrdHostOptions &
@@ -3722,7 +3722,7 @@ async function runYrdProcessHost(
   terminateAfterCleanup: boolean,
   options: YrdProcessHostOptions,
 ): Promise<YrdCliExitCode> {
-  if (options.uncarriedFilter) io.filterUncarriedFindings = options.uncarriedFilter
+  if (options.strandedFilter) io.filterStrandedFindings = options.strandedFilter
   const env = process.env
   const invocation = resolveInvocation(argv)
   if (invocation.args[0] === "receiver-hook") {

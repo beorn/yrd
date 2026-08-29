@@ -349,11 +349,11 @@ export type YrdCliIO = {
   scope?: Pick<Scope, "signal" | "sleep">
   drainSignal?: AbortSignal
   /**
-   * Host-evaluated uncarried exemptions, applied AFTER the sweep.
+   * Host-evaluated stranded-refs exemptions, applied AFTER the sweep.
    * Not `SweepOptions.retiredRefs` — that socket prints "retired" and cannot
    * carry a held-to-date ruling (@i/10-merge-queue/23150).
    */
-  filterUncarriedFindings?: <T extends { ref: string }>(
+  filterStrandedFindings?: <T extends { ref: string }>(
     findings: readonly T[],
   ) => { findings: readonly T[]; exemptionLines?: readonly string[] }
 }

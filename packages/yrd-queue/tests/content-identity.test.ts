@@ -444,6 +444,36 @@ describe("crossBaseDeltaEquality", () => {
     expect(still.differing[0]).toMatchObject({ path: "one.txt", reason: "missing-from-landed" })
   })
 
+  it("never settles a missing path a candidate does not carry either: both-absent is vacuous, not agreement", async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, "keep.txt", "keep\n", "seed keep")
+    const base = await commitFile(repo, "other.txt", "other\n", "seed other")
+    await git.text(repo, ["checkout", "-b", "task/adds-new", base])
+    await Bun.write(join(repo, "keep.txt"), "keep edited\n")
+    await Bun.write(join(repo, "new.txt"), "new\n")
+    await git.text(repo, ["add", "--all"])
+    await git.text(repo, ["commit", "-m", "edit keep and add new"])
+    const authorTip = await git.text(repo, ["rev-parse", "HEAD"])
+    // The merge kept the keep.txt edit and DROPPED new.txt outright.
+    await git.text(repo, ["checkout", "main"])
+    const droppedTip = await commitFile(repo, "keep.txt", "keep edited\n", "merge that lost new.txt")
+
+    const authored = await exactDelta(git, repo, base, authorTip)
+    const landed = await exactDelta(git, repo, base, droppedTip)
+    const strict = crossBaseDeltaEquality(authored, landed)
+    expect(strict.differing[0]).toMatchObject({ path: "new.txt", reason: "missing-from-landed" })
+
+    // The merged tree as its own witness cannot manufacture the dropped path:
+    // absent on both sides is not agreement.
+    const vacuous = await resolveMissingAgainstCandidate(git, repo, landed, strict, landed.candidateTree)
+    expect(vacuous.equal).toBe(false)
+    expect(vacuous.differing[0]).toMatchObject({ path: "new.txt", reason: "missing-from-landed" })
+
+    // So does any candidate that never carried the addition at all.
+    const wrongArtifact = await resolveMissingAgainstCandidate(git, repo, landed, strict, base)
+    expect(wrongArtifact.equal).toBe(false)
+  })
+
   it("never calls an empty delta equal to anything — an empty key is an absence, not a value", async () => {
     const repo = await makeRepo()
     const sha = await commitFile(repo, "a.txt", "one\n", "base")

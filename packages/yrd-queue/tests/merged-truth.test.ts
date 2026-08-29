@@ -442,6 +442,44 @@ describe("mergedByAncestry", () => {
     expect(await mergedByAncestry(git, fixture.index, orphan)).toMatchObject({ kind: "not-merged" })
     await expect(mergedByAncestry(git, fixture.index, "1".repeat(40))).rejects.toThrow()
   })
+
+  /**
+   * The degenerate-containment door-stop. Containment answers YES for free when
+   * both endpoints are the same commit, and a free yes is evidence of nothing —
+   * the same fact `mergeJoinedNothing` records from the merge side. A candidate
+   * that collapsed onto its base is exactly that shape, and certifying it as
+   * merged is the defect these two cases pin.
+   */
+  it("refuses the walked tip against itself: a self-comparison answers unknown, never merged", async () => {
+    const fixture = await acceptanceFixture()
+
+    const answer = await mergedByAncestry(git, fixture.index, fixture.index.tip)
+
+    expect(answer).toMatchObject({ kind: "unknown", reason: "self-comparison", authoredTip: fixture.index.tip })
+    expect(answer.kind === "unknown" ? answer.detail : "").toContain(fixture.index.tip)
+  })
+
+  it("refuses a candidate that collapsed onto its own base, though git does contain it", async () => {
+    const fixture = await acceptanceFixture()
+
+    // The control: mergeA IS contained in the walked tip, so bare containment
+    // says merged — the guard fires on the collapse, not on the commit.
+    expect(await mergedByAncestry(git, fixture.index, fixture.mergeA)).toMatchObject({ kind: "merged" })
+
+    const answer = await mergedByAncestry(git, fixture.index, fixture.mergeA, { base: fixture.mergeA })
+
+    expect(answer).toMatchObject({ kind: "unknown", reason: "collapsed-onto-base", authoredTip: fixture.mergeA })
+    expect(answer.kind === "unknown" ? answer.detail : "").toContain(fixture.mergeA)
+  })
+
+  it("still proves containment by ancestry when the candidate carries work over its base", async () => {
+    const fixture = await acceptanceFixture()
+    const root = await git.text(fixture.repo, ["rev-list", "--max-parents=0", "main"])
+
+    const answer = await mergedByAncestry(git, fixture.index, fixture.tipA, { base: root })
+
+    expect(answer).toEqual({ kind: "merged", authoredTip: fixture.tipA, mergeCommit: fixture.mergeA })
+  })
 })
 
 describe("mergedTruth (combined)", () => {
@@ -475,6 +513,27 @@ describe("mergedTruth (combined)", () => {
     const fixture = await acceptanceFixture()
 
     await expect(mergedTruth(git, fixture.index, {})).rejects.toThrow(/empty question/u)
+  })
+
+  it("falls through to the Change-Id proof when containment degenerates, instead of certifying for free", async () => {
+    const fixture = await acceptanceFixture()
+
+    const answer = await mergedTruth(git, fixture.index, {
+      changeId: ID_A,
+      authoredTip: fixture.mergeA,
+      base: fixture.mergeA,
+    })
+
+    expect(answer).toMatchObject({ kind: "merged", via: "change-id", changeId: ID_A })
+  })
+
+  it("answers the loud unknown when containment degenerates and no lineage proof was asked for", async () => {
+    const fixture = await acceptanceFixture()
+
+    const answer = await mergedTruth(git, fixture.index, { authoredTip: fixture.index.tip })
+
+    expect(answer).toMatchObject({ kind: "unknown", reason: "self-comparison" })
+    expect(answer.kind === "unknown" && "detail" in answer ? answer.detail : "").toContain(fixture.index.tip)
   })
 })
 
@@ -557,5 +616,16 @@ describe("compareMergedTruth — the store agreement harness", () => {
     expect(comparisons).toHaveLength(1)
     expect(comparisons[0]?.agreement).toBe("unknown")
     expect(comparisons[0]?.detail).toContain("neither a changeId nor an authoredTip")
+  })
+
+  it("never certifies a store claim from a collapsed candidate: the tautology reads unknown, not agree", async () => {
+    const fixture = await acceptanceFixture()
+
+    const comparisons = await compareMergedTruth(git, fixture.index, [
+      { member: "PR9", authoredTip: fixture.mergeA, baseSha: fixture.mergeA, merged: true },
+    ])
+
+    expect(comparisons[0]?.agreement).toBe("unknown")
+    expect(comparisons[0]?.detail).toContain(fixture.mergeA)
   })
 })

@@ -1,5 +1,5 @@
 /**
- * @failure The uncarried sweep stops enumerating, reports an empty result it
+ * @failure The stranded sweep stops enumerating, reports an empty result it
  *          cannot justify, or pays per-ref git cost for refs it will discard.
  * @level   l1
  * @consumer @yrd/core/22716-yrd-hardening-program/p2-push-is-submit
@@ -8,8 +8,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { applyHostFindingFilter, sweepUncarriedRefs, type SweepOptions } from "../src/uncarried-sweep.ts"
-import type { RefGit } from "../src/uncarried-facts.ts"
+import { applyHostFindingFilter, sweepStrandedRefs, type SweepOptions } from "../src/stranded-sweep.ts"
+import type { RefGit } from "../src/stranded-facts.ts"
 
 const HOUR = 60 * 60 * 1000
 const NOW = Date.parse("2026-08-11T22:00:00.000Z")
@@ -108,7 +108,7 @@ const realGit: RefGit = {
   },
 }
 
-describe("sweepUncarriedRefs", () => {
+describe("sweepStrandedRefs", () => {
   it("refuses a malformed enumeration row instead of undercounting it", async () => {
     const git = fakeGit({
       "for-each-ref": [
@@ -117,7 +117,7 @@ describe("sweepUncarriedRefs", () => {
       ].join("\n"),
     })
 
-    await expect(sweepUncarriedRefs(git, OPTIONS)).rejects.toThrow(/malformed for-each-ref row.*broken/u)
+    await expect(sweepStrandedRefs(git, OPTIONS)).rejects.toThrow(/malformed for-each-ref row.*broken/u)
   })
 
   it("limits the default population to authored refs", async () => {
@@ -135,7 +135,7 @@ describe("sweepUncarriedRefs", () => {
       authoredOnly: true,
     }
 
-    const result = await sweepUncarriedRefs(git, authored)
+    const result = await sweepStrandedRefs(git, authored)
 
     // This is the dashboard denominator. Counting the default branch, its
     // symbolic alias, or Queue's own candidates makes the rail describe Git
@@ -143,7 +143,7 @@ describe("sweepUncarriedRefs", () => {
     expect(result.scanned).toBe(1)
     expect(result.outsideAgeBound).toBe(1)
 
-    const diagnostic = await sweepUncarriedRefs(git, OPTIONS)
+    const diagnostic = await sweepStrandedRefs(git, OPTIONS)
     expect(diagnostic.scanned).toBe(5)
   })
 
@@ -152,7 +152,7 @@ describe("sweepUncarriedRefs", () => {
     // A namespace that yields nothing is a broken sweep, and a rail that
     // reports it as "nothing stranded" is worse than one that is switched off:
     // it actively asserts health it never measured.
-    await expect(sweepUncarriedRefs(git, OPTIONS)).rejects.toThrow(/enumerated no refs under 'refs\/remotes\/origin'/u)
+    await expect(sweepStrandedRefs(git, OPTIONS)).rejects.toThrow(/enumerated no refs under 'refs\/remotes\/origin'/u)
   })
 
   it("reports the denominator alongside the findings", async () => {
@@ -164,7 +164,7 @@ describe("sweepUncarriedRefs", () => {
       ].join("\n"),
     })
 
-    const result = await sweepUncarriedRefs(git, {
+    const result = await sweepStrandedRefs(git, {
       ...OPTIONS,
       carriedBranches: new Set(["task/carried"]), // as a change records it, without the remote
     })
@@ -182,7 +182,7 @@ describe("sweepUncarriedRefs", () => {
       "for-each-ref": [refLine("origin/task/carried", 2 * HOUR), refLine("origin/task/ancient", 40 * HOUR)].join("\n"),
     })
 
-    await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/carried"]) })
+    await sweepStrandedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/carried"]) })
 
     // One enumeration plus one aggregate reflog scan. Not ls-tree, rev-parse,
     // diff, or a clock process per ref — the ordering is the whole reason a
@@ -205,7 +205,7 @@ describe("sweepUncarriedRefs", () => {
       cherry: "+ 1111111111111111111111111111111111111111\n- 2222222222222222222222222222222222222222",
     })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     expect(result.examined).toBe(1)
     expect(result.findings).toHaveLength(1)
@@ -221,7 +221,7 @@ describe("sweepUncarriedRefs", () => {
 
   it("judges refs against the swept namespace's own base, and names the baseline it used", async () => {
     // The habitant checkout's LOCAL main lags origin/main whenever nothing has
-    // pulled — 18 stale commits inflated the fleet's uncarried count 2.2x
+    // pulled — 18 stale commits inflated the fleet's stranded count 2.2x
     // (@i/10-merge-queue/uncarried-stale-base). The refs being swept live in
     // refs/remotes/origin, so the remote's own base ref is the honest
     // yardstick: this ref's commits are all on origin/main (cherry is empty
@@ -239,7 +239,7 @@ describe("sweepUncarriedRefs", () => {
       "cherry main origin/task/landed": "+ 1111111111111111111111111111111111111111",
     })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     expect(result.baseline).toBe("refs/remotes/origin/main")
     expect(result.examined).toBe(1)
@@ -256,7 +256,7 @@ describe("sweepUncarriedRefs", () => {
       cherry: "+ 1111111111111111111111111111111111111111",
     })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     // fakeGit answers the baseline probe with undefined (no response key), so
     // the sweep must fall back to the caller's base — and still SAY which
@@ -279,7 +279,7 @@ describe("sweepUncarriedRefs", () => {
       cherry: "+ 1111111111111111111111111111111111111111",
     })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     expect(result.findings).toMatchObject([
       {
@@ -300,7 +300,7 @@ describe("sweepUncarriedRefs", () => {
       cherry: "+ 1111111111111111111111111111111111111111",
     })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     // A commit clock cannot prove when this clone observed the ref. Keep the
     // coverage gap loud, but never mint an actionable TTL finding from it.
@@ -314,7 +314,7 @@ describe("sweepUncarriedRefs", () => {
       "reflog show": "refs/remotes/origin/task/stranded@{not-a-date}",
     })
 
-    await expect(sweepUncarriedRefs(git, OPTIONS)).rejects.toThrow(/malformed reflog row/u)
+    await expect(sweepStrandedRefs(git, OPTIONS)).rejects.toThrow(/malformed reflog row/u)
   })
 
   it("refuses an empty reflog timestamp instead of treating it as epoch zero", async () => {
@@ -322,11 +322,11 @@ describe("sweepUncarriedRefs", () => {
       "for-each-ref": refLine("origin/task/stranded", 3 * HOUR),
       "reflog show": "refs/remotes/origin/task/stranded@{}",
     })
-    await expect(sweepUncarriedRefs(emptyReflogClock, OPTIONS)).rejects.toThrow(/malformed reflog row/u)
+    await expect(sweepStrandedRefs(emptyReflogClock, OPTIONS)).rejects.toThrow(/malformed reflog row/u)
   })
 
   it("reads Git's real full-ref reflog selector format", async () => {
-    const repo = await mkdtemp(join(tmpdir(), "yrd-uncarried-clock-"))
+    const repo = await mkdtemp(join(tmpdir(), "yrd-stranded-clock-"))
     try {
       expect((await gitCommand(repo, ["init", "-b", "main"])).success).toBe(true)
       expect((await gitCommand(repo, ["config", "user.name", "Yrd Test"])).success).toBe(true)
@@ -365,7 +365,7 @@ describe("sweepUncarriedRefs", () => {
         ).success,
       ).toBe(true)
 
-      const result = await sweepUncarriedRefs(realGit, { ...OPTIONS, repo })
+      const result = await sweepStrandedRefs(realGit, { ...OPTIONS, repo })
 
       expect(result.findings).toMatchObject([{ ref: "origin/task/clock", ageMs: 11 * 60_000 }])
       expect(result.findings[0]?.message).toContain("observed locally 11m ago")
@@ -383,7 +383,7 @@ describe("sweepUncarriedRefs", () => {
     // 7 recognised as carried, against 810 live changes. The rail's
     // first real run reported carried work as stranded.
     const git = fakeGit({ "for-each-ref": refLine("origin/task/carried", 3 * HOUR) })
-    const result = await sweepUncarriedRefs(git, {
+    const result = await sweepStrandedRefs(git, {
       ...OPTIONS,
       carriedBranches: new Set(["task/carried"]),
     })
@@ -396,7 +396,7 @@ describe("sweepUncarriedRefs", () => {
     // %00 rather than a space separator: a space-split silently truncates such
     // a ref to its first word and then judges a branch that does not exist.
     const git = fakeGit({ "for-each-ref": refLine("origin/task/two words", 40 * HOUR) })
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
     expect(result.scanned).toBe(1)
     expect(result.outsideAgeBound).toBe(1)
   })
@@ -404,7 +404,7 @@ describe("sweepUncarriedRefs", () => {
   it("collapses a revision series to its newest revision and says what it absorbed", async () => {
     // THE noise case, measured 2026-08-14 on the live fleet: 129 findings, of
     // which 62 were earlier `-rN` revisions of a series whose newer revision
-    // was flagged too. Every one of these three revisions is uncarried, past
+    // was flagged too. Every one of these three revisions is stranded, past
     // the TTL, inside the age bound and holds unmerged commits — so without the
     // collapse this sweep reports all three, and an operator pages three times
     // on one piece of work whose only live revision is `-r3`.
@@ -422,7 +422,7 @@ describe("sweepUncarriedRefs", () => {
       cherry: "+ 1111111111111111111111111111111111111111",
     })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     expect(result.findings).toHaveLength(1)
     const [finding] = result.findings
@@ -441,7 +441,7 @@ describe("sweepUncarriedRefs", () => {
   it("lets a carried newest revision suppress its own stranded ancestors", async () => {
     // A change on `-r2` is the strongest evidence `-r1` is spent: the
     // work moved on and something already tracks it. Looking for the superseder
-    // only among UNCARRIED refs would resurrect exactly the row this deletes.
+    // only among STRANDED refs would resurrect exactly the row this deletes.
     const git = fakeGit({
       "for-each-ref": [
         refLine("origin/task/thing-dev3-r1", 5 * HOUR),
@@ -449,7 +449,7 @@ describe("sweepUncarriedRefs", () => {
       ].join("\n"),
     })
 
-    const result = await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/thing-dev3-r2"]) })
+    const result = await sweepStrandedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/thing-dev3-r2"]) })
 
     expect(result.findings).toEqual([])
     expect(result.carried).toBe(1)
@@ -478,7 +478,7 @@ describe("sweepUncarriedRefs", () => {
       cherry: "+ 1111111111111111111111111111111111111111",
     })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     expect(result.superseded).toBe(0)
     expect(result.findings.map((finding) => finding.ref)).toEqual([
@@ -503,7 +503,7 @@ describe("sweepUncarriedRefs", () => {
       cherry: "+ 1111111111111111111111111111111111111111",
     })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     expect(result.findings.map((finding) => finding.ref)).toEqual(["origin/task/thing-dev3-r10"])
     expect(result.superseded).toBe(1)
@@ -528,7 +528,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
     // same orphan under an ORDINARY name, because what it guards is unrelated
     // histories, not a namespace, and a fixture that the exemption swallows
     // would leave the git-128 path with no test at all.
-    const repo = await mkdtemp(join(tmpdir(), "yrd-uncarried-unrelated-"))
+    const repo = await mkdtemp(join(tmpdir(), "yrd-stranded-unrelated-"))
     try {
       const clock = `${String(Math.floor((NOW - 40 * HOUR) / 1000))} +0000`
       const dates = { GIT_AUTHOR_DATE: clock, GIT_COMMITTER_DATE: clock }
@@ -564,7 +564,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
         ).toBe(true)
       }
 
-      const result = await sweepUncarriedRefs(realGit, { ...OPTIONS, repo })
+      const result = await sweepStrandedRefs(realGit, { ...OPTIONS, repo })
 
       // The whole point: the good row survives the bad one.
       expect(result.findings.map((finding) => finding.ref)).toEqual(["origin/task/ordinary"])
@@ -598,7 +598,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
     // ref reached the merge-base probe and was reported as an unenumerable GAP
     // every sweep, forever — a permanent hole in the coverage denominator for a
     // branch that was doing exactly what it was written to do.
-    const repo = await mkdtemp(join(tmpdir(), "yrd-uncarried-archive-orphan-"))
+    const repo = await mkdtemp(join(tmpdir(), "yrd-stranded-archive-orphan-"))
     try {
       const clock = `${String(Math.floor((NOW - 40 * HOUR) / 1000))} +0000`
       const dates = { GIT_AUTHOR_DATE: clock, GIT_COMMITTER_DATE: clock }
@@ -625,7 +625,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
         ).success,
       ).toBe(true)
 
-      const result = await sweepUncarriedRefs(realGit, { ...OPTIONS, repo })
+      const result = await sweepStrandedRefs(realGit, { ...OPTIONS, repo })
 
       // Exempted by policy, not skipped as a fault: the sweep never tried, so
       // this is not a hole in what it could measure.
@@ -661,7 +661,7 @@ describe("policy exemptions", () => {
       cherry: "+ 1111111111111111111111111111111111111111",
     })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     // The archive refs never become findings, and the ordinary one still does:
     // an exemption that also swallowed real work would be the worse bug.
@@ -675,7 +675,7 @@ describe("policy exemptions", () => {
   it("keeps every exempted ref AGED, not merely counted", async () => {
     const git = fakeGit({ "for-each-ref": refLine("origin/rescue/kernel-docs", 5 * HOUR) })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     // A bare count says the class exists; it cannot say the class is growing,
     // which is the only question that would make anyone act on it.
@@ -686,7 +686,7 @@ describe("policy exemptions", () => {
   it("pays no per-ref git cost for an exempted ref", async () => {
     const git = fakeGit({ "for-each-ref": refLine("origin/rescue/kernel-docs", 3 * HOUR) })
 
-    await sweepUncarriedRefs(git, OPTIONS)
+    await sweepStrandedRefs(git, OPTIONS)
 
     // One enumeration plus one aggregate reflog scan — the exemption is a
     // name test, so it belongs with the cheap disqualifiers and must not
@@ -699,13 +699,13 @@ describe("policy exemptions", () => {
   it("retires a ref whose author declared it harvested", async () => {
     const git = fakeGit({ "for-each-ref": refLine("origin/task/bead-bodies-ci-r1", 3 * HOUR) })
 
-    const result = await sweepUncarriedRefs(git, {
+    const result = await sweepStrandedRefs(git, {
       ...OPTIONS,
       // Recorded as a change records a branch: without the remote prefix.
       retiredRefs: new Set(["task/bead-bodies-ci-r1"]),
     })
 
-    // Retire means STOP TRACKING IT AS UNCARRIED, never delete the ref — the
+    // Retire means STOP TRACKING IT AS STRANDED, never delete the ref — the
     // fleet-wide halt on ref deletion is untouched by this mechanism.
     expect(result.findings).toEqual([])
     expect(result.exempted).toMatchObject([{ ref: "origin/task/bead-bodies-ci-r1", disposition: "retired" }])
@@ -714,7 +714,7 @@ describe("policy exemptions", () => {
   it("counts a carried archive ref as carried, so no ref merges in two buckets", async () => {
     const git = fakeGit({ "for-each-ref": refLine("origin/rescue/kernel-docs", 3 * HOUR) })
 
-    const result = await sweepUncarriedRefs(git, {
+    const result = await sweepStrandedRefs(git, {
       ...OPTIONS,
       carriedBranches: new Set(["rescue/kernel-docs"]),
     })
@@ -738,7 +738,7 @@ describe("policy exemptions", () => {
       cherry: "+ 1111111111111111111111111111111111111111",
     })
 
-    const result = await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/carried"]) })
+    const result = await sweepStrandedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/carried"]) })
 
     // Derived a second way. An exclusion outside the identity is how a
     // disclosed count silently becomes an undisclosed one.
@@ -758,7 +758,7 @@ describe("policy exemptions", () => {
   it("never counts an exempted ref as coverage", async () => {
     const git = fakeGit({ "for-each-ref": refLine("origin/rescue/kernel-docs", 3 * HOUR) })
 
-    const result = await sweepUncarriedRefs(git, OPTIONS)
+    const result = await sweepStrandedRefs(git, OPTIONS)
 
     // Exempted refs were never this rail's to measure. Counting them would
     // flatter the coverage with refs it deliberately declined to judge —

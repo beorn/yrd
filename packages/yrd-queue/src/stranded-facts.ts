@@ -6,7 +6,7 @@
  * here is a deliberate answer to a way one of us got it wrong in one evening.
  */
 import type { Git } from "git-super/worktree"
-import type { PayloadKind, PinDirection, PushedRefFact } from "./uncarried.ts"
+import type { PayloadKind, PinDirection, PushedRefFact } from "./stranded.ts"
 
 /**
  * The two git reads this gatherer needs, PROJECTED from the one Git view
@@ -69,7 +69,7 @@ async function pinDirection(
  *
  * The ordering matters: cheap disqualifiers first, so a sweep over thousands of
  * refs does no submodule-repo work for the ones it will discard anyway. On this
- * fleet 1,502 of 1,546 uncarried refs are older than a week and die at the age
+ * fleet 1,502 of 1,546 stranded refs are older than a week and die at the age
  * bound before any git object is read.
  */
 export async function gatherPushedRefFact(git: RefGit, ref: string, options: GatherOptions): Promise<PushedRefFact> {

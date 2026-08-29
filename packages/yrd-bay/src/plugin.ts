@@ -994,7 +994,7 @@ export function createBays(
     if (trackChanged && !trackable) {
       const warning =
         `change '${pr.id}' is ${changeDeliveryState(pr)}; --track was NOT recorded. ` +
-        "Tracking governs future rebuilds, and this change has none."
+        "Tracking governs future re-merges, and this change has none."
       metadata.warnings?.push(warning)
       log?.warn?.(warning, { action: "submit-track-terminal", pr: pr.id })
     }
@@ -2383,7 +2383,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
       "refusal",
       "recut-current-changed",
       `yrd: change '${pr.id}' tracking changed from ${String(args.expectedCurrent.track)} ` +
-        `to ${String(isTracked(pr))} while the rebuild was being computed`,
+        `to ${String(isTracked(pr))} while the re-merge was being computed`,
     )
   }
   if (
@@ -2395,7 +2395,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
       "refusal",
       "recut-current-changed",
       `yrd: change '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha}` +
-        ` to ${changeRevisionNumber(pr)}@${changeHead(pr)} while the rebuild was being computed`,
+        ` to ${changeRevisionNumber(pr)}@${changeHead(pr)} while the re-merge was being computed`,
     )
   }
   // Only Queue authority-consumption results make an identical re-merge an
@@ -2626,7 +2626,7 @@ function reviewFact(
 
 /** A withdrawn/canceled PR still holds its payload, so no OTHER branch may
  * carry that commit — but its OWN branch reopens it in place (D2), which is the
- * whole remedy. Naming it here is the difference between a one-line rebuild and
+ * whole remedy. Naming it here is the difference between a one-line re-merge and
  * forging a tree-identical commit whose only purpose is to change a hash. A
  * live or merged duplicate has no such door, so it keeps the bare refusal
  * rather than a remedy its state would refuse. */
@@ -2739,7 +2739,7 @@ function editPr(state: DeepReadonly<BayState>, args: ChangeEditArgs) {
     raiseFailure(
       "refusal",
       "track-terminal",
-      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; tracking governs future rebuilds and a terminal ` +
+      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; tracking governs future re-merges and a terminal ` +
         `change has none, so the flag was not recorded`,
     )
   }
@@ -2938,7 +2938,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const parsed = ChangeRemergeFactSchema.safeParse(data)
       const remerge = parsed.success ? parsed.data : ChangeRemergeReplaySchema.parse(data)
       const pr = current.prs[remerge.pr]
-      if (pr === undefined) throw new Error(`yrd: no change '${remerge.pr}' to rebuild`)
+      if (pr === undefined) throw new Error(`yrd: no change '${remerge.pr}' to re-merge`)
       const predecessor = pr.revs.find(
         (revision) => revision.n === remerge.predecessor.revision && revision.head === remerge.predecessor.headSha,
       )
@@ -2948,7 +2948,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         predecessor.baseSha !== remerge.predecessor.baseSha ||
         remerge.successor.revision !== changeRevisionNumber(pr) + 1
       ) {
-        throw new Error(`yrd: rebuild history does not match change '${pr.id}'`)
+        throw new Error(`yrd: re-merge history does not match change '${pr.id}'`)
       }
       const proof: ChangeRemergeProof = {
         fromRevision: remerge.fromRevision,
@@ -2961,14 +2961,14 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       }
       const props = predecessor.props
       const submitter = remerge.submitter ?? predecessor.submitter
-      // An admission is a verdict about a tree merged into a base. A rebuild
+      // A checks-before-queueing verdict is about a tree merged into a base. A re-merge
       // that merges on the identical head AND the identical certified base has
       // not changed either, so the verdict is still about this revision's
       // content and carries — exactly as an approved review does below.
       //
-      // Without this a byte-identical rebuild discards its own green: the
-      // carrier drops out of the queue, the runner re-requests, admission
-      // passes, the next rebuild discards it again, and nothing merges while
+      // Without this a byte-identical re-merge discards its own green: the
+      // carrier drops out of the queue, the runner re-requests, the checks
+      // pass, the next re-merge discards it again, and nothing merges while
       // every instrument reads healthy
       // (@i/10-merge-queue/admission-passes-nothing-merges; one carrier reached
       // revision 66). Any real change moves the head or the base and correctly
@@ -2995,7 +2995,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       )
       const approval = effectiveReview?.decision === "approve" ? effectiveReview : undefined
       if (remerge.reviewCarried && approval === undefined) {
-        throw new Error(`yrd: change '${pr.id}' rebuild carries a missing approval`)
+        throw new Error(`yrd: change '${pr.id}' re-merge carries a missing approval`)
       }
       const carriedReview: ChangeReview | undefined =
         remerge.reviewCarried && approval !== undefined
@@ -3465,7 +3465,7 @@ function nextId(prefix: string, records: Readonly<Record<string, unknown>>): str
 
 /** Mint the next PR id against the durable high-water, never the record set
  * alone: `max(existing) + 1` restarts at 1 whenever the store is
- * re-initialized, re-issuing numbers that already name landed changes (22986).
+ * re-initialized, re-issuing numbers that already name merged changes (22986).
  * The record-set max still participates so a store whose mint file was lost
  * but whose records survived keeps counting upward. The new high-water is
  * committed BEFORE the id escapes — a crash between commit and use skips a

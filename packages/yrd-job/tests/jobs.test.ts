@@ -1685,7 +1685,7 @@ describe("localRunner", () => {
     await app.close()
   })
 
-  it("recovers a departed Runner's exact durable lease before replacement admission", async () => {
+  it("recovers a departed Runner's exact durable lease before a replacement Runner starts the job", async () => {
     const app = await jobsApp(delivery())
     const requested = await app.dispatch(app.commands.sender.send, { message: "recover" })
     const job = app.jobs.requested(requested)[0]!

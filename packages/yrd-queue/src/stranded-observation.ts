@@ -1,15 +1,15 @@
 /**
- * The uncarried OBSERVATION vocabulary — how a sweep's counts are allowed to
+ * The stranded OBSERVATION vocabulary — how a sweep's counts are allowed to
  * reach a reader: the minted observation record, its coverage-floor sentence,
  * the bounded count, the denominator ledger line, and the rail phrasing.
- * Moved here from `@yrd/cli`'s queue-status-view so the uncarried domain has
- * ONE home beside `uncarried.ts` / `uncarried-facts.ts` / `uncarried-sweep.ts`
+ * Moved here from `@yrd/cli`'s queue-status-view so the stranded domain has
+ * ONE home beside `stranded.ts` / `stranded-facts.ts` / `stranded-sweep.ts`
  * (5a: one derivation per fact); the sweep's remote-base-aware result (W2a)
  * is the input, and this module is its only phrasing.
  */
-/** One uncarried sweep: what it found AND when it looked. The two travel
+/** One stranded sweep: what it found AND when it looked. The two travel
  * together because either alone is misleading. */
-export type UncarriedObservation = Readonly<{
+export type StrandedObservation = Readonly<{
   /** Stranded refs the sweep confirmed — already past the mergedness filter. */
   count: number
   /** Refs enumerated, so a zero is readable rather than merely small. */
@@ -18,7 +18,7 @@ export type UncarriedObservation = Readonly<{
    * written by older habitants; absence is unknown coverage, never zero. */
   missingUpdateClocks?: number
   /**
-   * Uncarried refs whose update clock WAS retained, so the sweep could judge
+   * Stranded refs whose update clock WAS retained, so the sweep could judge
    * them. With `missingUpdateClocks` this gives the coverage fraction, which
    * `scanned` alone cannot: `scanned` counts carried and superseded refs the
    * rail never had to measure. Optional for status written by older habitants;
@@ -36,7 +36,7 @@ export type UncarriedObservation = Readonly<{
    * `count` while the coverage stayed behind at the one call site that
    * remembered to compute it. Making the derived half part of the record turns
    * "remember to say it is a floor" from a rule into a type: they are minted
-   * once by {@link uncarriedObservation} and travel wherever the count goes.
+   * once by {@link strandedObservation} and travel wherever the count goes.
    */
   floor: string
   bounded: string
@@ -48,7 +48,7 @@ export type UncarriedObservation = Readonly<{
  * through here, so a record that reaches a renderer always knows how much of
  * its own population it managed to measure.
  */
-export function uncarriedObservation(
+export function strandedObservation(
   input: Readonly<{
     count: number
     scanned: number
@@ -56,15 +56,15 @@ export function uncarriedObservation(
     missingUpdateClocks?: number
     observedAt: string
   }>,
-): UncarriedObservation {
+): StrandedObservation {
   return {
     count: input.count,
     scanned: input.scanned,
     ...(input.measurable === undefined ? {} : { measurable: input.measurable }),
     ...(input.missingUpdateClocks === undefined ? {} : { missingUpdateClocks: input.missingUpdateClocks }),
     observedAt: input.observedAt,
-    floor: uncarriedCoverageFloor(input.measurable, input.missingUpdateClocks),
-    bounded: uncarriedFloorCount(input.count, input.missingUpdateClocks),
+    floor: strandedCoverageFloor(input.measurable, input.missingUpdateClocks),
+    bounded: strandedFloorCount(input.count, input.missingUpdateClocks),
   }
 }
 
@@ -75,7 +75,7 @@ export function uncarriedObservation(
  *
  * That last clause is a deliberate ruling (@chief, 2026-08-17), not an
  * oversight, and it is written down here because it looks like a bug to anyone
- * who has just read {@link uncarriedCoverageFloor}: a zero at 15% coverage
+ * who has just read {@link strandedCoverageFloor}: a zero at 15% coverage
  * really is an unmeasured fleet rather than a clean one. The epistemics belong
  * in the rail TEXT, which now always carries `≥` and its coverage sentence.
  * Colouring partial coverage would leave the rail permanently lit on a real
@@ -83,7 +83,7 @@ export function uncarriedObservation(
  * warning becomes noise and gets ignored, which is precisely how the previous
  * one died. Do not add a third colour here; strengthen the sentence instead.
  */
-export function uncarriedRailColor(observation: UncarriedObservation | undefined): string {
+export function strandedRailColor(observation: StrandedObservation | undefined): string {
   return observation !== undefined && observation.count > 0 ? "$fg-warning" : "$fg-muted"
 }
 
@@ -92,12 +92,12 @@ export function uncarriedRailColor(observation: UncarriedObservation | undefined
  *
  * The rail is required to say this next to its count, because the count is a
  * FLOOR and reads exactly like a total. Measured 2026-08-14: 2,442 of 2,786
- * uncarried refs had no retained reflog clock, so the rail saw 12% of its
+ * stranded refs had no retained reflog clock, so the rail saw 12% of its
  * population — and a zero from a 12% reading is not a clean fleet, it is an
  * unmeasured one. One function, shared by the rail and the `queue uncarried`
  * command, so the two surfaces cannot phrase the same gap differently.
  */
-export function uncarriedCoverageFloor(
+export function strandedCoverageFloor(
   measurable: number | undefined,
   missingUpdateClocks: number | undefined,
   unenumerable = 0,
@@ -132,13 +132,13 @@ export function uncarriedCoverageFloor(
  *
  * Exported and shared by EVERY surface that prints one of these counts — the
  * runner-box rail and the `queue uncarried` command — because the bound is the
- * half a reader acts on: "33 uncarried" is a work item, "≥33 of a population
+ * half a reader acts on: "33 stranded" is a work item, "≥33 of a population
  * 15% of which we could measure" is an unknown, and the two were being phrased
  * differently on the two surfaces (@i/10-merge-queue/22925-watch-shows-every-pr).
  * Unknown coverage counts as partial: an older habitant that cannot report its
  * clock gap has not proven it had none.
  */
-export function uncarriedFloorCount(count: number, missingUpdateClocks: number | undefined, unenumerable = 0): string {
+export function strandedFloorCount(count: number, missingUpdateClocks: number | undefined, unenumerable = 0): string {
   // A ref the sweep could not enumerate is unmeasured exactly like a ref with
   // no retained clock: either one makes the count a floor rather than a total.
   const partial = missingUpdateClocks === undefined || missingUpdateClocks > 0 || unenumerable > 0
@@ -146,7 +146,7 @@ export function uncarriedFloorCount(count: number, missingUpdateClocks: number |
 }
 
 /** Every bucket a sweep sorted its refs into, in the order the ledger prints. */
-export type UncarriedBuckets = Readonly<{
+export type StrandedBuckets = Readonly<{
   scanned: number
   carried: number
   exempt: number
@@ -161,7 +161,7 @@ export type UncarriedBuckets = Readonly<{
  * The ledger line that makes a zero believable.
  *
  * ONE function rather than a template at each call site, for the same reason
- * `uncarriedFloorCount` is: the identity
+ * `strandedFloorCount` is: the identity
  *
  *   scanned = carried + exempt + superseded + clocks + aged + examined + unenumerable
  *
@@ -169,7 +169,7 @@ export type UncarriedBuckets = Readonly<{
  * lives in a string literal is one careless edit from silently disappearing.
  * A dropped term does not look like a bug — it looks like a smaller fleet.
  */
-export function uncarriedDenominator(buckets: UncarriedBuckets): string {
+export function strandedDenominator(buckets: StrandedBuckets): string {
   return [
     `scanned ${String(buckets.scanned)}`,
     `${String(buckets.carried)} carried`,
@@ -193,21 +193,21 @@ export function uncarriedDenominator(buckets: UncarriedBuckets): string {
  * observation says so in words — a missing measurement rendering as "0" would
  * claim a healthy queue that nobody looked at.
  */
-export function uncarriedLine(observation: UncarriedObservation | undefined, nowMs: number): string {
-  // Plain language, own label (operator ruling 2026-08-18, item 15): the old
-  // "uncarried not swept" was jargon-fused — two words with no verb between
-  // them reading as one compound term. This still says nothing was measured
-  // (never a bare 0, the same honest-absence rule the rest of this function
-  // upholds) and now names the sweep so the label cannot fuse with whatever
-  // renders next to it.
-  if (observation === undefined) return "UNCARRIED — stranded-refs sweep hasn't produced an observation yet"
+export function strandedLine(observation: StrandedObservation | undefined, nowMs: number): string {
+  // Plain language, own label (operator ruling 2026-08-18, item 15): the label
+  // this replaced read "uncarried not swept" — two words with no verb between
+  // them, fusing into one unreadable compound term. This still says nothing was
+  // measured (never a bare 0, the same honest-absence rule the rest of this
+  // function upholds) and names the sweep with a verb, so the label cannot fuse
+  // with whatever renders next to it.
+  if (observation === undefined) return "STRANDED — the sweep hasn't produced an observation yet"
   const ageMs = Math.max(0, nowMs - Date.parse(observation.observedAt))
   // Both halves are read off the record, not recomputed here: `≥` is not
   // decoration — the count is a floor whenever any candidate went unmeasured,
   // and an operator scanning the rail reads a bare number as a total long
   // before they read the parenthetical that says otherwise.
   return (
-    `uncarried ${observation.bounded} of ${String(observation.scanned)} refs (${observation.floor}), ` +
+    `stranded ${observation.bounded} of ${String(observation.scanned)} refs (${observation.floor}), ` +
     `as of ${humanAge(ageMs)} ago`
   )
 }

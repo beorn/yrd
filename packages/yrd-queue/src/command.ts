@@ -3912,7 +3912,7 @@ async function unauthoredDeletionFailure(
 ): Promise<CandidateFailure | undefined> {
   const removed = await deletedPaths(git, repo, before, merged)
   if (removed.length === 0) return undefined
-  const base = await authoredDeltaBase((cwd, args) => git.run(cwd, args, true), repo, before, headSha)
+  const base = await authoredDeltaBase(git, repo, before, headSha)
   if (base.status === "unreadable") {
     return candidateFailure(
       "deletion-inspection",
@@ -4480,11 +4480,7 @@ async function fillAuthoredGitlinksFromMain(
       continue
     }
     const submoduleRepo = join(repo, gitlink)
-    const main = await resolveSubmoduleMain(
-      (repository, args) => git.run(repository, args, true),
-      submoduleRepo,
-      "origin",
-    )
+    const main = await resolveSubmoduleMain(git, submoduleRepo, "origin")
     if (main.status === "unavailable") {
       return candidateFailure(
         "component-main-inspection-failed",
@@ -4670,7 +4666,7 @@ async function authoredGitlinkPaths(
   headSha: string,
 ): Promise<Readonly<{ status: "passed"; output: readonly string[] }> | CandidateFailure> {
   // HEAD is the composing branch, i.e. the authoritative current base.
-  const base = await authoredDeltaBase((cwd, args) => git.run(cwd, args, true), repo, "HEAD", headSha)
+  const base = await authoredDeltaBase(git, repo, "HEAD", headSha)
   if (base.status === "unreadable") {
     return candidateFailure(
       "gitlink-inspection",
@@ -4878,9 +4874,9 @@ async function fetchSubmoduleMain(
 > {
   // The probe lives beside COMPONENT_MAIN_REF so admission can ask it too. Resolving the
   // fetched ref used to go through the throwing rev-parse helper; a gate cannot afford a throw
-  // from inside a probe, and this file's own git wrapper already promises tolerant callers a
-  // result to classify. Same information, now survivable.
-  const resolved = await resolveSubmoduleMain((repo, args) => git.run(repo, args, true), repository, origin)
+  // from inside a probe, so the probe asks git tolerantly and hands back a result to classify.
+  // Same information, now survivable.
+  const resolved = await resolveSubmoduleMain(git, repository, origin)
   if (resolved.status === "unavailable") {
     return {
       status: "failed",
@@ -6842,7 +6838,7 @@ async function mergeDeletionFloor(
   if (removed.length === 0) return undefined
   const authored = new Set<string>()
   for (const pr of input.prs) {
-    const base = await authoredDeltaBase((cwd, args) => git.run(cwd, args, true), repo, baseSha, pr.headSha)
+    const base = await authoredDeltaBase(git, repo, baseSha, pr.headSha)
     if (base.status === "unreadable") {
       return candidateFailure(
         "carrier-inspection",

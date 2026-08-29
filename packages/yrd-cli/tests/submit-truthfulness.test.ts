@@ -18,7 +18,7 @@
 import { describe, expect, it } from "vitest"
 import { changeDeliveryState, createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
 import { Command, createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
-import { withContests, type ContestGit } from "@yrd/contest"
+import { withContests, type CommitResolver } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type ChangeShape, type StepExecution } from "@yrd/queue"
@@ -90,7 +90,7 @@ async function createCliApp(
     { revision: "merge-v1" },
   )
   const queue = withQueue({ steps: [check, merge] as const, batch: false })
-  const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
+  const git: CommitResolver = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   const contests = withContests({ runners: [], evaluators: [], git })
   const base = pipe(
     createYrdDef(),

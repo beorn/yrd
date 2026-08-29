@@ -87,7 +87,7 @@ import {
   withContests,
   type AttemptRunOutput,
   type ContestEvaluatorDef,
-  type ContestGit,
+  type CommitResolver,
   type ContestRunnerDef,
 } from "@yrd/contest"
 import { fixturePr as timelineFixturePr } from "../dev/queue-timeline-fixtures.ts"
@@ -381,7 +381,7 @@ function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[], waiti
       return { status: "completed", conclusion: "success", output: { verdict: "passed", artifacts: [] } }
     },
   }
-  const git: ContestGit = {
+  const git: CommitResolver = {
     revision: "git-v1",
     resolveCommit(ref) {
       const pin = pins.get(ref)

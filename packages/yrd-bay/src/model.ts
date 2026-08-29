@@ -314,9 +314,9 @@ export type BranchLifecycle =
     >
   | Readonly<
       BranchLifecycleBase & {
-        status: "landed"
+        status: "merged"
         headSha: string
-        landed: Readonly<{ pr: PRId; revision: number; at: string; commit: string }>
+        merged: Readonly<{ pr: PRId; revision: number; at: string; commit: string }>
       }
     >
   | Readonly<
@@ -327,7 +327,15 @@ export type BranchLifecycle =
       }
     >
 
-/** W2-facing delivery label derived from canonical PR/ChangeRev facts. Never stored. */
+/** W2-facing delivery label derived from canonical PR/ChangeRev facts. Never stored.
+ *
+ * Vocabulary (about/glossary.md, the ratified struck list): `integrated` is a
+ * LIVE word — proven ancestry on shared main — and stays. `already-landed`
+ * carries struck `landed`; its surface word is **already-merged**. The
+ * spelling survives here because it is the value `@yrd/cli` and `@yrd/queue`
+ * compare against and the journal already carries (`pr/already-landed`); a
+ * value rename is a cross-package cut, not a yrd-bay one. Anything printing
+ * this label to a person says the surface word. */
 export type ChangeDeliveryState =
   | "pushed"
   | "submitted"
@@ -423,8 +431,8 @@ export const ChangeAdmissionStepSchema = z
         code: "custom",
         message:
           step.status === "passed"
-            ? "a passed entry-check step cannot carry a receipt"
-            : "a failed entry-check step requires a receipt",
+            ? "a passed entry-check step cannot carry a result"
+            : "a failed entry-check step requires a result",
         path: ["receipt"],
       })
     }
@@ -557,8 +565,9 @@ export type ChangeRev = Readonly<{
   props?: ChangeProps
   composition?: CompositionV1
   recut?: ChangeRemergeProof
-  /** Admission is a verdict about this immutable revision, not a merge
-   * attempt. A later base revalidation replaces it on the same revision. */
+  /** Checks before queueing (`admission`) are a verdict about this immutable
+   * revision, not a merge attempt. A later base revalidation replaces it on the
+   * same revision. */
   admission?: ChangeAdmission
 }> &
   ChangeRevClock
@@ -639,7 +648,7 @@ export type Change = Readonly<{
   merged: boolean
   /** Opt-in "merge into latest": when true, the habitant observes the live
    * branch before each Queue cycle. A moved head is recorded as a revision,
-   * preflighted, and prepared for Queue admission when its verdict permits; a
+   * preflighted, and prepared for queueing when its verdict permits; a
    * manual implicit re-merge uses the same recording rule. Each run still executes
    * one frozen recorded revision. Absent means untracked — the reproducibility
    * refusal stands. */
@@ -714,7 +723,7 @@ export function parseChangeSelector(selector: string): ParsedChangeSelector | un
  * The `pr#` prefix is an assertion about the record's KIND, so it is spent only
  * on an id `PRIdSchema` actually claims. `PRId` is a bare `string` alias
  * (`type PRId = string`), and `QueueMemberId` is string-derived too, so no call
- * site can be made type-safe against passing a pin-advance id here — the
+ * site can be made type-safe against passing a min-commit change's id here — the
  * discrimination exists only at runtime, and this is the one place that asks.
  * Without the ask, `yrdpin#357` printed as `pr#yrdpin#357`: a false kind that
  * also stutters, on all three renderer call sites at once
@@ -868,7 +877,7 @@ export function changeRevisionLineage(pr: Change, revision = currentChangeRev(pr
   const lineage: ChangeRev[] = []
   const seen = new Set<number>()
   while (current !== undefined) {
-    if (seen.has(current.n)) throw new Error(`yrd: change '${pr.id}' has a cyclic rebuild history`)
+    if (seen.has(current.n)) throw new Error(`yrd: change '${pr.id}' has a cyclic re-merge history`)
     seen.add(current.n)
     lineage.unshift(current)
     const predecessor = current.recut?.fromRevision
@@ -876,7 +885,7 @@ export function changeRevisionLineage(pr: Change, revision = currentChangeRev(pr
     current = byRevision.get(predecessor)
     if (current === undefined) {
       throw new Error(
-        `yrd: change '${pr.id}' rebuilt revision ${lineage[0]?.n ?? revision} lost its predecessor ${predecessor}`,
+        `yrd: change '${pr.id}' re-merged revision ${lineage[0]?.n ?? revision} lost its predecessor ${predecessor}`,
       )
     }
   }
@@ -899,11 +908,11 @@ export function checksRequested(pr: Change): boolean {
  * The live check request for the current revision, identified by CONTENT.
  *
  * A request asks "check this tree". The tree is `headSha`, and nothing else
- * here identifies it. The revision ordinal does not: a mechanical rebuild that
+ * here identifies it. The revision ordinal does not: a mechanical re-merge that
  * merges on byte-identical content mints a new ordinal while the head — and so
  * the meaning of the request — is unchanged. Keying on the ordinal made such a
- * rebuild discard the request, so the carrier fell out of the queue, the runner
- * re-requested, admission passed, and the next rebuild discarded it again.
+ * re-merge discard the request, so the carrier fell out of the queue, the runner
+ * re-requested, the checks passed, and the next re-merge discarded it again.
  * Nothing merged for three hours with every instrument reading green
  * (@i/10-merge-queue/admission-passes-nothing-merges; one carrier reached
  * revision 66). New content moves `headSha` and still invalidates.
@@ -1135,9 +1144,9 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
       ) {
         return {
           ...base,
-          status: "landed",
+          status: "merged",
           headSha: bay.headSha,
-          landed: {
+          merged: {
             pr: pr.id,
             revision: current.n,
             at: mergedAt,

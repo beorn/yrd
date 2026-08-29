@@ -46,7 +46,7 @@ Running past it truncates the CAPTURE. It does not terminate the child, does not
 throw, and does not change the exit status: a child's output VOLUME is not a
 correctness signal, and killing the supervising process over it turns one
 verbose test run into a fleet-wide outage. That is not hypothetical — while this
-cap threw, a single chatty check restarted the resident queue runner five times
+cap threw, a single chatty check restarted the habitant queue runner five times
 in one day (257–261 on 2026-08-28, four of them `exit code 3`), losing whatever
 check was in flight each time (`job-lost`) and destroying the very output that
 would have explained it.
@@ -81,7 +81,7 @@ packages receive a `Process`; they do not call `Bun.spawn` themselves.
 `git-super` retries a read-only Git call it detects as stalled. One queue run
 makes roughly ninety sequential Git calls, and at a measured 20–40% per-call
 stall rate against origin the chance that all ninety succeed is vanishing — that
-compounding, rather than any queue defect, is why the queue could land nothing
+compounding, rather than any queue defect, is why the queue could merge nothing
 for hours (git-super `3652bfe`, 2026-08-21).
 
 The cost is paid on genuine failures. A submodule that really is unreachable is

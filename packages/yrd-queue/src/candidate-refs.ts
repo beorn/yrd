@@ -35,7 +35,7 @@
  */
 import type { DeepReadonly } from "@yrd/core"
 import { Queues, type QueueRecord, type QueuesState } from "./model.ts"
-import type { RefGit } from "./uncarried-facts.ts"
+import type { RefGit } from "./stranded-facts.ts"
 
 export const CANDIDATE_REF_NAMESPACE = "refs/yrd/candidates"
 

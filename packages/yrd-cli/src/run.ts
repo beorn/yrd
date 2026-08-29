@@ -84,7 +84,7 @@ import {
   sweepCandidateRefs,
   applyHostFindingFilter,
   parseSubmoduleModelChangeAuthorizationValue,
-  sweepUncarriedRefs,
+  sweepStrandedRefs,
   type CandidateRefSweepResult,
   type ChangeSnapshot,
   type QueueRecord,
@@ -150,11 +150,11 @@ import {
   type QueueTimelineStatusFilter,
   type HabitantInstalledPlan,
   type RunnerSourcePin,
-  type UncarriedObservation,
-  uncarriedCoverageFloor,
-  uncarriedDenominator,
-  uncarriedFloorCount,
-  uncarriedObservation,
+  type StrandedObservation,
+  strandedCoverageFloor,
+  strandedDenominator,
+  strandedFloorCount,
+  strandedObservation,
   type QueueStatusResult,
 } from "@yrd/queue"
 import {
@@ -666,7 +666,7 @@ function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
   return { queueId: driver.queueId, epoch: driver.epoch, lastMerged }
 }
 
-function parseUncarriedObservation(value: unknown): UncarriedObservation | undefined {
+function parseStrandedObservation(value: unknown): StrandedObservation | undefined {
   if (value === undefined) return undefined
   if (typeof value !== "object" || value === null) {
     raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner uncarried is invalid")
@@ -727,7 +727,7 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
   // Minted, never spread: a `status.json` written by an older habitant carries
   // no coverage fields, and re-deriving them HERE is what keeps a stale record
   // honest rather than letting it reach a renderer as a bare count.
-  return uncarriedObservation({
+  return strandedObservation({
     count,
     scanned,
     ...(missingUpdateClocks === undefined ? {} : { missingUpdateClocks }),
@@ -810,7 +810,7 @@ function parseHabitantRunnerStatus(text: string): QueueTimelineRunner {
   const lastTickAt = habitantRunnerTimestamp(record.lastTickAt, "lastTickAt")
   const queueProgress = parseHabitantRunnerProgress(record.queueProgress)
   const driver = parseQueueDriverEpoch(record.driver)
-  const uncarried = parseUncarriedObservation(record.uncarried)
+  const uncarried = parseStrandedObservation(record.uncarried)
   const retention = parseJournalRetentionObservation(record.retention)
   const staleDrafts = parseFindingsField(record.staleDrafts, "staleDrafts")
   const needsPerson = parseFindingsField(record.needsPerson, "needsPerson")
@@ -1966,10 +1966,10 @@ export async function startHabitantRunnerHeartbeat(
     queueProgress?: (now: string) => QueueRunnerProgress
     /** Exact policy already resolved by the mutable journal; never re-derived here. */
     retention?: JournalRetentionPolicy
-    /** Last uncarried sweep, if one has completed. Returning undefined is a
+    /** Last stranded-refs sweep, if one has completed. Returning undefined is a
      * real answer — the rail says the sweep hasn't produced an observation
      * yet rather than 0. */
-    uncarried?: () => UncarriedObservation | undefined
+    uncarried?: () => StrandedObservation | undefined
     driver?: Readonly<{
       queueId: string
       epoch?: string
@@ -8611,16 +8611,16 @@ function sweepGit(process: Pick<Process, "run">): RefGit {
 /** Admission is meant to happen ON the push, so a ref is only "mid-flight" for
  * minutes. Refs older than a day are history rather than work — measured, an
  * unbounded rail reports 1,546 rows on its first run and is switched off. */
-const UNCARRIED_TTL_MS = 10 * 60 * 1000
-const UNCARRIED_AGE_BOUND_MS = 24 * 60 * 60 * 1000
+const STRANDED_TTL_MS = 10 * 60 * 1000
+const STRANDED_AGE_BOUND_MS = 24 * 60 * 60 * 1000
 
 /** How often the habitant recomputes the sweep. It costs seconds, so it cannot
  * ride the heartbeat; stranded work is a minutes-to-hours concern, not a
  * per-tick one. */
-const UNCARRIED_SWEEP_INTERVAL_MS = 10 * 60 * 1000
+const STRANDED_SWEEP_INTERVAL_MS = 10 * 60 * 1000
 
 /**
- * The habitant's uncarried sweeper.
+ * The habitant's stranded-refs sweeper.
  *
  * The heartbeat writer is synchronous and the sweep is seconds of git I/O, so
  * this keeps the last OBSERVATION and refreshes it out of band. `observe()`
@@ -8634,20 +8634,20 @@ const UNCARRIED_SWEEP_INTERVAL_MS = 10 * 60 * 1000
  * signal. The failure is logged as well, because a rail that only degrades
  * quietly still needs someone to know why.
  */
-function createUncarriedSweeper(
+function createStrandedSweeper(
   app: YrdCliApp,
   io: YrdCliIO,
   base: string,
   log: Pick<YrdCliApp["log"], "warn">,
-): Readonly<{ observe: () => UncarriedObservation | undefined }> {
+): Readonly<{ observe: () => StrandedObservation | undefined }> {
   const cwd = io.repositoryRoot ?? io.cwd ?? globalThis.process.cwd()
-  let latest: UncarriedObservation | undefined
+  let latest: StrandedObservation | undefined
   let inFlight = false
   let lastAttemptMs = 0
 
   const refresh = async (startedMs: number): Promise<void> => {
     await using sweepProcess = createProcess()
-    const result = await sweepUncarriedRefs(sweepGit(sweepProcess), {
+    const result = await sweepStrandedRefs(sweepGit(sweepProcess), {
       repo: cwd,
       base,
       namespace: "refs/remotes/origin",
@@ -8657,11 +8657,11 @@ function createUncarriedSweeper(
       // after this sweep (applyHostFindingFilter). retiredRefs cannot carry it.
       retiredRefs: new Set<string>(),
       nowMs: startedMs,
-      ttlMs: UNCARRIED_TTL_MS,
-      ageBoundMs: UNCARRIED_AGE_BOUND_MS,
+      ttlMs: STRANDED_TTL_MS,
+      ageBoundMs: STRANDED_AGE_BOUND_MS,
     })
-    const filtered = applyHostFindingFilter(result.findings, io.filterUncarriedFindings)
-    latest = uncarriedObservation({
+    const filtered = applyHostFindingFilter(result.findings, io.filterStrandedFindings)
+    latest = strandedObservation({
       count: filtered.findings.length,
       scanned: result.scanned,
       missingUpdateClocks: result.missingUpdateClocks,
@@ -8678,12 +8678,12 @@ function createUncarriedSweeper(
   return {
     observe: () => {
       const nowMs = new Date(io.now?.() ?? Date.now()).getTime()
-      if (!inFlight && nowMs - lastAttemptMs >= UNCARRIED_SWEEP_INTERVAL_MS) {
+      if (!inFlight && nowMs - lastAttemptMs >= STRANDED_SWEEP_INTERVAL_MS) {
         lastAttemptMs = nowMs
         inFlight = true
         void refresh(nowMs)
           .catch((error: unknown) => {
-            log.warn?.("uncarried sweep failed; the rail will show its previous observation aging", { error })
+            log.warn?.("stranded-refs sweep failed; the rail will show its previous observation aging", { error })
           })
           .finally(() => {
             inFlight = false
@@ -8694,7 +8694,7 @@ function createUncarriedSweeper(
   }
 }
 
-async function queueUncarried(
+async function queueStranded(
   app: YrdCliApp,
   options: JsonOption & Readonly<{ base?: string; namespace?: string }>,
   io: YrdCliIO,
@@ -8706,7 +8706,7 @@ async function queueUncarried(
   // found; it is work someone already decided about.
   const carriedBranches = new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch))
   await using process = createProcess()
-  const result = await sweepUncarriedRefs(sweepGit(process), {
+  const result = await sweepStrandedRefs(sweepGit(process), {
     repo: cwd,
     base,
     namespace: options.namespace ?? "refs/remotes/origin",
@@ -8717,18 +8717,18 @@ async function queueUncarried(
     // ref held to a date by a named verdict (@i/10-merge-queue/23150).
     retiredRefs: new Set<string>(),
     nowMs: new Date(io.now?.() ?? Date.now()).getTime(),
-    ttlMs: UNCARRIED_TTL_MS,
-    ageBoundMs: UNCARRIED_AGE_BOUND_MS,
+    ttlMs: STRANDED_TTL_MS,
+    ageBoundMs: STRANDED_AGE_BOUND_MS,
   })
-  const filtered = applyHostFindingFilter(result.findings, io.filterUncarriedFindings)
+  const filtered = applyHostFindingFilter(result.findings, io.filterStrandedFindings)
   const findings = filtered.findings
 
-  // The counts print on BOTH paths, not just the empty one. "no uncarried refs"
+  // The counts print on BOTH paths, not just the empty one. "no stranded refs"
   // alone cannot be told apart from a sweep that looked at nothing, and this
   // rail's whole job is to be believable when it reads zero.
   // Built by the shared helper, never inline: the identity this line exists to
   // let a reader check is only enforceable if one function owns every term.
-  const denominator = uncarriedDenominator({
+  const denominator = strandedDenominator({
     scanned: result.scanned,
     carried: result.carried,
     exempt: result.exempted.length,
@@ -8740,12 +8740,12 @@ async function queueUncarried(
   })
   // The same sentence the rail shows, from the same function: a reader must not
   // have to work out from the raw ledger that the count is a floor.
-  const floor = uncarriedCoverageFloor(result.measurable, result.missingUpdateClocks, result.skipped.length)
+  const floor = strandedCoverageFloor(result.measurable, result.missingUpdateClocks, result.skipped.length)
   // The findings count is bounded by the SAME helper the rail uses. It used to
   // print bare, so the command contradicted the rail's own reasoning about the
-  // very number it was reporting — and a bare "0 uncarried refs" from a 15%
+  // very number it was reporting — and a bare "0 stranded refs" from a 15%
   // reading is the exact "clean fleet" claim the floor exists to refuse.
-  const bounded = uncarriedFloorCount(findings.length, result.missingUpdateClocks, result.skipped.length)
+  const bounded = strandedFloorCount(findings.length, result.missingUpdateClocks, result.skipped.length)
   const exemptionBlock = filtered.exemptionLines.length === 0 ? [] : [...filtered.exemptionLines, ""]
   const lines = findings.map((finding) => `${finding.ref}  ${finding.message}`)
   // Named on BOTH paths, including the "nothing found" one — that is the path
@@ -8770,7 +8770,7 @@ async function queueUncarried(
       ? [
           ...exemptionBlock,
           ...skippedBlock,
-          `${bounded} uncarried refs (${floor}) — ${denominator} · judged against ${result.baseline}`,
+          `${bounded} stranded refs (${floor}) — ${denominator} · judged against ${result.baseline}`,
         ].join("\n")
       : [
           ...exemptionBlock,
@@ -11244,7 +11244,7 @@ export async function followQueueRuns(
   const heartbeat = habitant
     ? await startHabitantRunnerHeartbeat(io, {
         queueProgress: (now) => habitantQueueProgress(app, now),
-        uncarried: createUncarriedSweeper(app, io, base, app.log).observe,
+        uncarried: createStrandedSweeper(app, io, base, app.log).observe,
         staleDrafts: (now) => staleDraftFindings(app, now, draftThresholdMs),
         needsPerson: (now) => needsPersonFindings(app, now),
         // The plan THIS process built, from the live runtime object, so the
@@ -12523,7 +12523,7 @@ function buildProgram(
     .option("--base <branch>", "base branch the refs are judged against")
     .option("--namespace <ref>", "ref namespace to sweep")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await queueUncarried(installed(), options, io)))
+    .action(async (options) => setExit(await queueStranded(installed(), options, io)))
   queue
     .command("pause [base]")
     .description("pause new queue runs")

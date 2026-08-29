@@ -19,7 +19,7 @@
  * window it cares about.
  */
 import { describe, expect, it } from "vitest"
-import { classifyPushedRef, compareRevisions, revisionOf, type PushedRefFact } from "../src/uncarried.ts"
+import { classifyPushedRef, compareRevisions, revisionOf, type PushedRefFact } from "../src/stranded.ts"
 
 const HOUR = 60 * 60 * 1000
 const NOW = Date.parse("2026-08-10T12:00:00.000Z")

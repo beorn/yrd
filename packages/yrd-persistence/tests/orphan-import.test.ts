@@ -1,5 +1,5 @@
 /**
- * @failure Importing a preserved orphan journal can revive phantom domain state, duplicate live identities, or lose provenance.
+ * @failure Importing a preserved orphan journal can revive phantom domain state, duplicate live identities, or lose the record of which orphan file and row each imported record came from.
  * @level l1
  * @consumer @yrd/persistence
  */

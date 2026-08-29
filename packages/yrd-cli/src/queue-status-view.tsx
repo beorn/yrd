@@ -193,9 +193,9 @@ import {
   type TimelineStepCell,
   timestamp,
   toIso,
-  uncarriedLine,
-  type UncarriedObservation,
-  uncarriedRailColor,
+  strandedLine,
+  type StrandedObservation,
+  strandedRailColor,
   withTimelineLineage,
 } from "@yrd/queue"
 import {
@@ -347,14 +347,14 @@ export {
   runRevisionClock,
   runRevisionClockRead,
   stepNamesOfRun,
-  type UncarriedBuckets,
-  uncarriedCoverageFloor,
-  uncarriedDenominator,
-  uncarriedFloorCount,
-  uncarriedLine,
-  type UncarriedObservation,
-  uncarriedObservation,
-  uncarriedRailColor,
+  type StrandedBuckets,
+  strandedCoverageFloor,
+  strandedDenominator,
+  strandedFloorCount,
+  strandedLine,
+  type StrandedObservation,
+  strandedObservation,
+  strandedRailColor,
 } from "@yrd/queue"
 
 type QueueNounIdProps = Omit<React.ComponentProps<typeof NounId>, "noun" | "value" | "revision">
@@ -528,20 +528,20 @@ export type QueueTimelineRunner = Readonly<{
   /** Content of the driver lease. Probes assert this, never a process/service suffix. */
   driver?: QueueDriverEpoch
   /**
-   * Last uncarried sweep, carried as a MEASUREMENT rather than a number.
+   * Last stranded-refs sweep, carried as a MEASUREMENT rather than a number.
    *
    * The sweep costs seconds, so it runs on its own cadence and cannot be
    * recomputed per render. That makes the count a stored belief, and a stored
    * belief rendered as if it were current is the shape that cost this fleet
    * most: a value derived in truth, authored in practice, with nothing
    * asserting the two agree. `observedAt` is what keeps it honest — the rail
-   * renders "N uncarried, as of 4m ago" and a dead runner reads "as of 3h ago"
+   * renders "N stranded, as of 4m ago" and a dead runner reads "as of 3h ago"
    * instead of a confident zero.
    *
    * Absent means NOT MEASURED, which must never render as 0. A queue with no
    * stranded refs and a queue nobody has swept are different facts.
    */
-  uncarried?: UncarriedObservation
+  uncarried?: StrandedObservation
   /** ISO time the habitant wrote its exit marker on shutdown. The status file is
    * NEVER deleted on close — it is left with this marker so a successor can still
    * reclaim this pid's leases (idempotently). Absent while the runner is live. */
@@ -4558,7 +4558,7 @@ function TimelineRunnerBox({
   // while running normally the `$ …` command line renders BLUE (the marker
   // color) with the pulsing activity marker, and every INFORMATIONAL rail is
   // muted grey so the activity line carries the eye — but severity text
-  // NEVER mutes: a warning source/uncarried rail and every error row keep
+  // NEVER mutes: a warning source/stranded rail and every error row keep
   // the box's severity color regardless of runner activity (muting must
   // never dim an error; the pre-27 build muted a behind-pin warning while
   // running, which is exactly the bug this rule bans).
@@ -4613,16 +4613,16 @@ function TimelineRunnerBox({
           </Text>
         </MarkerRow>
       )}
-      {/* Its own rail, per acceptance: pushed-and-uncarried is invisible from
+      {/* Its own rail, per acceptance: pushed-and-stranded is invisible from
           every other surface here, because a ref with no change has no
           candidate and so appears in no row. Colour rules live in
-          `uncarriedRailColor` — only genuine stranded work earns attention,
+          `strandedRailColor` — only genuine stranded work earns attention,
           and a warning-colored rail never mutes (item 27). Coverage is
           carried by the TEXT, never by the colour. */}
       {runner === null ? null : (
         <MarkerRow>
-          <Text color={uncarriedRailColor(runner.uncarried)} wrap="truncate" minWidth={0}>
-            {uncarriedLine(runner.uncarried, now)}
+          <Text color={strandedRailColor(runner.uncarried)} wrap="truncate" minWidth={0}>
+            {strandedLine(runner.uncarried, now)}
           </Text>
         </MarkerRow>
       )}

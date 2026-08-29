@@ -23,7 +23,7 @@ import {
   type SourceRewrite,
 } from "@yrd/queue"
 import { projectionLookupFromEntries } from "../src/projection-index.ts"
-import type { RefGit } from "../src/uncarried-facts.ts"
+import type { RefGit } from "../src/stranded-facts.ts"
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const NOW_MS = Date.UTC(2026, 7, 14, 12, 0, 0)

@@ -131,7 +131,16 @@ export type ContestEvaluatorDef = Readonly<{
   ): JobResult<EvaluatorResult> | Promise<JobResult<EvaluatorResult>>
 }>
 
-export type ContestGit = Readonly<{
+/**
+ * "What commit does this ref name?" — and the `revision` that stamps the answer.
+ *
+ * Not a narrowing of git-super's `Git`: no caller here runs git commands. It is
+ * a resolver port, named for the question rather than its consumer, so a second
+ * consumer cannot read it as an invitation to mint one of its own. `revision`
+ * feeds the promotion job's definition revision, so a resolver that changes how
+ * it answers invalidates the verdicts cached against it.
+ */
+export type CommitResolver = Readonly<{
   revision: string
   resolveCommit(ref: string, signal?: AbortSignal): string | undefined | Promise<string | undefined>
 }>
@@ -337,6 +346,6 @@ export type ContestActions = Readonly<{
 export type WithContestsOptions = Readonly<{
   runners: readonly ContestRunnerDef[]
   evaluators: readonly ContestEvaluatorDef[]
-  git: ContestGit
+  git: CommitResolver
   defaultBase?: string
 }>

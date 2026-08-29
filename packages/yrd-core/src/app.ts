@@ -1014,7 +1014,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     if (checkpointStore?.save === undefined || checkpointIdentity === undefined) {
       // A load-only consumer can never flush; checkpoint freshness belongs to
       // the writer. Enforcing here wedges every command behind a writer-side
-      // gap (2026-07-20 outage: CI admissions froze on cold-fold debt).
+      // gap (2026-07-20 outage: CI stopped taking new work on cold-fold debt).
       if (!checkpointWarning && checkpointDebt() >= PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES) {
         checkpointWarning = true
         coreLog.info?.("Yrd's saved state will be updated by the next write-capable command.")

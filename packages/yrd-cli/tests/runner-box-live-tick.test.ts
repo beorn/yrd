@@ -27,7 +27,7 @@ import {
 } from "../dev/queue-timeline-fixtures.ts"
 import { HABITANT_RUNNER_HEARTBEAT_MS, QUEUE_WATCH_CLOCK_INTERVAL_MS } from "../src/run.ts"
 import {
-  uncarriedObservation,
+  strandedObservation,
   queueHealthMarker,
   QueueTimelineView,
   RUNNER_VIEW_STALE_MS,
@@ -51,7 +51,7 @@ function runnerConfig() {
     queueProgress: { state: "healthy" as const, observedAt: freshAgo },
     sourcePin: { state: "behind" as const, commits: 3 },
     implementationSource: "abc1234",
-    uncarried: uncarriedObservation({ count: 5, scanned: 100, missingUpdateClocks: 0, observedAt: freshAgo }),
+    uncarried: strandedObservation({ count: 5, scanned: 100, missingUpdateClocks: 0, observedAt: freshAgo }),
   }
 }
 

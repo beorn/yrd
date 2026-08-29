@@ -60,7 +60,7 @@ function record(result: Awaited<ReturnType<Bays["submitSelection"]>>): Change {
 /** Seed a journal with one change per entry (all on the given branch, so the
  * branch collides), then boot an app on it. A seed with `live: true` stops at
  * pushed+submitted (a live delivery, as the record lane would have left it);
- * otherwise it lands as integrated at `commit`. The live seeds replaced the
+ * otherwise it is integrated at `commit`. The live seeds replaced the
  * direct-branch Q1 mint these fixtures used before the legacy mint retired —
  * a direct resubmit now routes to the derived lane and mints nothing. */
 async function appWithIntegrated(
@@ -93,7 +93,7 @@ async function appWithIntegrated(
       { id: nextId(), name: "pr/submitted", ts: at, data: { pr, revision: 1, headSha } },
     ]
     if (live === true) return delivered
-    if (commit === undefined) throw new Error(`seed ${pr}: an integrated seed needs its landing commit`)
+    if (commit === undefined) throw new Error(`seed ${pr}: an integrated seed needs its merge commit`)
     return [
       ...delivered,
       {
