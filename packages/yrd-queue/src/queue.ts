@@ -603,6 +603,37 @@ function unrecordedSubmits(
  * them (`compose-derived-refused`'s emission site) to every row that reports
  * the branch. The two zeros stay distinguishable: "composed and never saw this
  * fact" is not "no compose has run here" (ruling 22895).
+ *
+ * BOUNDARY, not an oversight: this memory is per-PROCESS, and only the runner
+ * composes. `yrd queue audit` is a different process, so it always reads
+ * `passes() === 0` and renders the never-looked answer.
+ *
+ * It cannot re-derive instead, and the reason is worth keeping. Attempting the
+ * derivation reaches `mintDerivedMemberIdentity` -> `mintChangeId`
+ * (derived-member.ts:93) -> `mint.commit` (yrd-bay/src/plugin.ts:3475) ->
+ * pr-mint.ts:91, an fsync+rename into pr-mint.json that refuses to move its
+ * high-water backwards. That mint is durable and LIVE: the CLI wires
+ * `createDurablePrNumberMint({ dir: stateDir })` (yrd-cli/src/host.ts:2061)
+ * and `stateDir` is `join(<git-common-dir>, "yrd")`
+ * (yrd-cli/src/repository.ts:127), which every linked worktree SHARES with its
+ * primary. So an audit that "just attempts it" would burn a real PR number per
+ * waiting row, per run, from whatever worktree the operator happened to be
+ * standing in — turning the one read-only command a person runs when the queue
+ * looks stuck into a writer against production state.
+ *
+ * A dry-run stopping short of the mint does not rescue it either: all three
+ * refusals precede the mint (derived-admission.ts:748, :754, :778), but the
+ * only code the fleet has ever emitted, `derived-change-id-missing`
+ * (378 of 378 events across 130 runner logs, 2026-08-28), needs the async git
+ * trailer read (host.ts:2069 -> :2696), and `audit` is sync by contract
+ * (queue.ts:3826 — its consumers are sync health probes).
+ *
+ * Derive-at-read governs facts ABOUT STATE: is this branch landed, is it
+ * recorded. "Did anyone attempt this, and what came back" is an EVENT. No
+ * snapshot can answer it, because the mint side-effect means only one process
+ * is permitted to try. The destination is therefore to JOURNAL the refusal —
+ * `queue/admission/refused` (queue.ts:1449) is already this exact fact for the
+ * record lane — so every process reads the cause at read time.
  */
 function composeAnswer(branch: string, sha: string, wiring: DerivedAdmissionWiring): string {
   const observation = wiring.composes.read(branch, sha)
