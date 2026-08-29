@@ -1541,7 +1541,8 @@ describe("subsumption never reads a no-op carrier as a landing", () => {
       })
       expect(result.next).toBe(
         `yrd pr withdraw PR1 --burn-payload --reason "superseded: ${repo.landedHead.slice(0, 12)} is reachable ` +
-          `from ${repo.targetBaseSha.slice(0, 12)} (proved by git merge-base --is-ancestor)"`,
+          `from ${repo.targetBaseSha.slice(0, 12)} (proved by git merge-base --is-ancestor; ` +
+          `spends revision 1 payload at ${repo.landedHead.slice(0, 12)})"`,
       )
     } finally {
       rmSync(repo.dir, { recursive: true, force: true })
@@ -1722,7 +1723,8 @@ describe("a payload burn is never ordered on a comparison that did not run", () 
       })
       expect(result.next).toBe(
         `yrd pr withdraw PR1 --burn-payload --reason "superseded: merging ${repo.twinHead.slice(0, 12)} into ` +
-          `${repo.targetBaseSha.slice(0, 12)} reproduces its tree exactly (proved by git merge-tree)"`,
+          `${repo.targetBaseSha.slice(0, 12)} reproduces its tree exactly (proved by git merge-tree; ` +
+          `spends revision 1 payload at ${repo.twinHead.slice(0, 12)})"`,
       )
     } finally {
       rmSync(repo.dir, { recursive: true, force: true })
@@ -1777,6 +1779,74 @@ describe("a payload burn is never ordered on a comparison that did not run", () 
       expect(result.next).toBe("yrd pr submit topic/divergent")
       expect(output.stdout()).toContain("subsumed-by: nothing — no comparison concluded subsumption")
       expect(output.stdout()).not.toContain("--burn-payload")
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("a payload burn is never ordered on a proof about a different commit", () => {
+  /** The measured specimen (PR2599, 2026-08-29). The tracked-drift path passes
+   * the LIVE branch head as `proposedHeadSha`, so the subsumption proof is about
+   * the live head while the withdraw it orders spends the FROZEN revision's
+   * payload. Both readings are true at once when the frozen revision is built on
+   * top of a commit that landed: `landedHead` is reachable from main, and
+   * `divergentHead` — the real payload, 330 lines in the live case — is not. */
+  async function driftedOntoALandedCommit(repo: ReturnType<typeof noopCarrierRepository>) {
+    const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+    await app.bays.submit({
+      branch: "topic/divergent",
+      headSha: repo.divergentHead,
+      base: "main",
+      baseSha: repo.sourceBaseSha,
+    })
+    return app
+  }
+
+  it("refuses when the proof's subject is not the revision head the withdraw would spend", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await driftedOntoALandedCommit(repo)
+      const output = outputIO({ cwd: repo.dir, columns: 400 })
+      const failure = await preflightRemerge(
+        app,
+        "PR1",
+        {
+          queue: true,
+          revision: 1,
+          // The degraded live head: a commit that IS reachable from main, so the
+          // oracle "proves" subsumption — about the wrong object.
+          proposedHeadSha: repo.landedHead,
+          expectedCurrent: { revision: 1, headSha: repo.divergentHead, track: true },
+        },
+        output.io,
+      ).then(
+        (result) => result,
+        (error: unknown) => failureFact(error),
+      )
+      expect(failure).toMatchObject({ kind: "refusal", code: "recut-preflight-proof-subject-mismatch" })
+      // The refusal must name BOTH shas, or a reader cannot tell which object
+      // was proved and which would be destroyed.
+      expect((failure as { message: string }).message).toContain(repo.landedHead.slice(0, 8))
+      expect((failure as { message: string }).message).toContain(repo.divergentHead.slice(0, 8))
+      expect((failure as { message: string }).message).not.toContain("--burn-payload")
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+
+  it("POSITIVE CONTROL: the same revision without a proposed head is not refused by this guard", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await driftedOntoALandedCommit(repo)
+      const output = outputIO({ cwd: repo.dir, columns: 400 })
+      const outcome = await preflightRemerge(app, "PR1", { queue: true }, output.io).then(
+        (result) => result,
+        (error: unknown) => failureFact(error),
+      )
+      // Without this control the guard could be refusing everything and the
+      // test above would still pass.
+      expect(outcome).not.toMatchObject({ code: "recut-preflight-proof-subject-mismatch" })
     } finally {
       rmSync(repo.dir, { recursive: true, force: true })
     }

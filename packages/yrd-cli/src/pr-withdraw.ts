@@ -581,6 +581,37 @@ export async function preflightRemerge(
     )
   }
   if (subsumed) {
+    // SUBJECT CHECK, and it comes first: a SUBSUMED-WITHDRAW spends revision
+    // `source.n`'s payload identity, which lives at `source.head`. So the
+    // subsumption must be proved ABOUT that commit. When a caller proposes a
+    // different head — the tracked-drift path passes the LIVE branch head
+    // (`proposedHeadSha: freshness.liveHead`) — the proof answers a question
+    // about the proposed content and says NOTHING about the frozen payload the
+    // withdraw would destroy.
+    //
+    // Measured 2026-08-29 on PR2599: the oracle proved `e2016c4dfe92 is
+    // reachable from fb2d5a94167c` and ordered `--burn-payload` on frozen
+    // revision 5 at `46126a051c`, which is not an ancestor of main and carried
+    // 330 unlanded lines. Both statements were true at once, because rev 5 is
+    // built ON TOP of the commit proved reachable — so the "proof" was a fact
+    // about the revision's own BASE. Of the three evidence lines the two that
+    // read strongest were tautologies (pin-distance was main against main;
+    // tree-proof was about the base), and `patch-id: no match` — the only
+    // content-level signal — was the only one telling the truth.
+    //
+    // Drift itself is not an error: the verdict falls through to RECUT, whose
+    // remedy is resubmitting from the branch tip. What is refused is spending a
+    // payload on a proof about a different commit.
+    if (candidateHeadSha !== source.head) {
+      raiseFailure(
+        "refusal",
+        "recut-preflight-proof-subject-mismatch",
+        `yrd: change '${pr.id}' revision ${source.n} proved subsumption about ${short(candidateHeadSha)}, but a ` +
+          `withdraw spends this revision's payload at ${short(source.head)} — different commits, so the proof says ` +
+          `nothing about what would be destroyed. Re-prove it against ${short(source.head)}, or resubmit from the ` +
+          `branch tip; spend no payload on this reading`,
+      )
+    }
     // A SUBSUMED-WITHDRAW verdict prints the payload-spend acknowledgement with
     // it, so it must never be reached on evidence a no-op carrier also produces:
     // see {@link authoredContent}.
@@ -622,7 +653,8 @@ export async function preflightRemerge(
         // comparison's name in the reason it records. A burn ordered with no named
         // proof travels onward as a human-relayed instruction that nobody can audit.
         `yrd pr withdraw ${pr.id} --burn-payload ` +
-        `--reason "superseded: ${subsumedBy.detail} (proved by ${subsumedBy.check})"`
+        `--reason "superseded: ${subsumedBy.detail} (proved by ${subsumedBy.check}; ` +
+        `spends revision ${source.n} payload at ${short(source.head)})"`
       : verdict === "RECUT-FORCE" || verdict === "RECUT"
         ? `yrd pr submit ${pr.branch}`
         : options.queue === true
