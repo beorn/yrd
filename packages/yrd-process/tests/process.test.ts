@@ -10,6 +10,8 @@ import { join } from "node:path"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { createProcess, shellCommand, type Spawn } from "@yrd/process"
 
+const silentLog = createLogger("test", [{ level: "silent" }])
+
 function bytes(value: string): ReadableStream<Uint8Array> {
   return new Blob([value]).stream()
 }
@@ -253,7 +255,7 @@ describe("Process", () => {
         killed.push(signal as NodeJS.Signals)
       },
     })
-    await using process = createProcess({ maxOutputBytes: 12, inject: { spawn } })
+    await using process = createProcess({ maxOutputBytes: 12, inject: { spawn, log: silentLog } })
 
     const result = await process.run({ argv: ["noisy"] })
 
@@ -274,7 +276,7 @@ describe("Process", () => {
       signalCode: null,
       kill() {},
     })
-    await using process = createProcess({ maxOutputBytes: 100, inject: { spawn } })
+    await using process = createProcess({ maxOutputBytes: 100, inject: { spawn, log: silentLog } })
 
     const { stdout } = await process.run({ argv: ["noisy"] })
 
@@ -307,7 +309,7 @@ describe("Process", () => {
       signalCode: null,
       kill() {},
     })
-    await using process = createProcess({ maxOutputBytes: 40, inject: { spawn } })
+    await using process = createProcess({ maxOutputBytes: 40, inject: { spawn, log: silentLog } })
 
     const result = await process.run({ argv: ["noisy"] })
 
@@ -325,7 +327,7 @@ describe("Process", () => {
       signalCode: null,
       kill() {},
     })
-    await using process = createProcess({ maxOutputBytes: 50, inject: { spawn } })
+    await using process = createProcess({ maxOutputBytes: 50, inject: { spawn, log: silentLog } })
 
     const result = await process.run({ argv: ["noisy"] })
 
@@ -365,7 +367,7 @@ describe("Process", () => {
       signalCode: null,
       kill() {},
     })
-    await using process = createProcess({ maxOutputBytes: 20, inject: { spawn } })
+    await using process = createProcess({ maxOutputBytes: 20, inject: { spawn, log: silentLog } })
 
     let observed = 0
     const result = await process.run({
@@ -393,7 +395,7 @@ describe("Process", () => {
       signalCode: null,
       kill() {},
     })
-    await using process = createProcess({ maxOutputBytes: 40, inject: { spawn } })
+    await using process = createProcess({ maxOutputBytes: 40, inject: { spawn, log: silentLog } })
 
     const result = await process.run({ argv: ["unicode"] })
 
@@ -427,7 +429,11 @@ describe("Process", () => {
   })
 
   it("lets a real flooding child run to completion and reports its own exit code", async () => {
-    await using process = createProcess({ env: { PATH: Bun.env.PATH }, maxOutputBytes: 2_000 })
+    await using process = createProcess({
+      env: { PATH: Bun.env.PATH },
+      maxOutputBytes: 2_000,
+      inject: { log: silentLog },
+    })
 
     const result = await process.run({
       argv: shellCommand("yes FLOODLINE | head -n 20000; exit 3"),
@@ -455,7 +461,7 @@ describe("Process", () => {
       signalCode: null,
       kill() {},
     })
-    await using process = createProcess({ maxOutputBytes: 100, inject: { spawn } })
+    await using process = createProcess({ maxOutputBytes: 100, inject: { spawn, log: silentLog } })
 
     const result = await process.run({ argv: ["noisy"], noProgressTimeoutMs: 500 })
 
