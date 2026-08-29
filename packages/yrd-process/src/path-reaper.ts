@@ -59,6 +59,9 @@ export type PathHolderCensus = Readonly<{
   coverage: PathHolderCoverage
 }>
 
+/** Test wiring may replace only the observation boundary; settlement remains one implementation. */
+export type PathHolderCensusReader = (path: string) => Promise<PathHolderCensus>
+
 export type PathReapResult = Readonly<{
   targetedPids: readonly number[]
   survivorPids: readonly number[]
@@ -71,11 +74,21 @@ export type PathReapResult = Readonly<{
 }>
 
 export async function reapOwnedPath(path: string, gracefulMs: number, killMs: number): Promise<PathReapResult> {
+  return reapOwnedPathWithCensus(path, gracefulMs, killMs, inspectPathHolderCensus)
+}
+
+/** @internal Required-dependency seam used by createProcess's test-only wiring. */
+export async function reapOwnedPathWithCensus(
+  path: string,
+  gracefulMs: number,
+  killMs: number,
+  inspect: PathHolderCensusReader,
+): Promise<PathReapResult> {
   const root = await canonicalPath(path)
   const protectedPids = await currentProcessAncestry()
   const signalFailures: string[] = []
   const targeted = new Set<number>()
-  const census = async () => pathProcessHolderCensus(root)
+  const census = async () => inspect(root)
   const killable = async (): Promise<number[]> =>
     uniquePids((await census()).holders.map(({ pid }) => pid)).filter((pid) => pid > 1 && !protectedPids.has(pid))
   const signal = (pids: readonly number[], value: "SIGTERM" | "SIGKILL"): void => {
