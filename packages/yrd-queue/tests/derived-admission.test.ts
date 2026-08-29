@@ -564,7 +564,7 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
       readSubmitEnrichment: () => ({ changeId: CHANGE_ID, props: { bead: "22991" }, issue: "22991" }),
     })
     await app.bays.recordBranchSubmit({ branch: "issue/post-door", sha: SHA, base: "main" })
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/post-door"])
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/post-door"])
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
     expect(app.state().bays.prs).toEqual({})
@@ -580,13 +580,13 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
       issue: "22991",
     })
     // Served ⇒ the refusal row retires everywhere it rendered.
-    expect(app.queue.unrecordedSubmits()).toEqual([])
+    expect(await app.queue.unrecordedSubmits()).toEqual([])
     const audit = app.queue.audit({ now: "2026-01-02T00:00:00.000Z" })
     expect(audit.findings.filter((finding) => finding.code === "unrecorded-submit")).toEqual([])
     // Not yet served stays visible: a second ref-only branch with no compose
     // between keeps its row — the row is "not picked up", never silence.
     await app.bays.recordBranchSubmit({ branch: "issue/waiting", sha: RESUBMIT_SHA, base: "main" })
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/waiting"])
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/waiting"])
   })
 
   it("replay converges over a journal holding recordless terminal events, with zero store writes for the derived era (A5 full)", async () => {
@@ -624,7 +624,7 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
       log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]),
     })
     await app.bays.recordBranchSubmit({ branch: "task/agent-branch", sha: SHA, base: "main" })
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["task/agent-branch"])
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["task/agent-branch"])
 
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
@@ -638,7 +638,7 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
 
     // Served — the refusal row retires, and no compose-derived-refused warn
     // fired for the branch (the old regime's dead end).
-    expect(app.queue.unrecordedSubmits()).toEqual([])
+    expect(await app.queue.unrecordedSubmits()).toEqual([])
     const refused = events.filter(
       (event) => event.kind === "log" && event.level === "warn" && event.props?.action === "compose-derived-refused",
     )
@@ -794,7 +794,7 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
     )
     expect(warn).toBeDefined()
     expect(warn?.message).toMatch(/every row stands until the mint exists/)
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/unadmittable"])
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/unadmittable"])
   })
 
   // ————— @i/10-yrd/23996: the empty return that said nothing —————

@@ -165,7 +165,7 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
       // nothing else. The receiver accepted the submit ref and projected the fact —
       // this dispatch IS post-receive's exact write. No `pr create`, no record, ever.
       await app.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: SHA, base: "main" })
-      expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/ref-only"])
+      expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/ref-only"])
       expect(app.state().bays.prs).toEqual({})
 
       const runs = await app.queue.run({}, runtime)
@@ -186,7 +186,7 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
       })
       expect(queueMint.highWater()).toBe(1)
       expect(app.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: SHA, base: "main" })
-      expect(app.queue.unrecordedSubmits()).toEqual([])
+      expect(await app.queue.unrecordedSubmits()).toEqual([])
       expect(actionsLogged(events)).toContain("compose-derived-admitted")
 
       // Idempotence: the authority is consumed by the retained merge run, so
@@ -218,7 +218,7 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
     expect(changeDeliveryState(app.state().bays.prs[existing.id] ?? existing)).toBe("integrated")
     expect(Object.values(app.state().bays.prs).some((pr) => pr.branch === "issue/ref-only")).toBe(false)
     expect(queueMint.highWater()).toBe(0)
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/ref-only"])
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/ref-only"])
     expect(app.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: SHA })
   })
 
@@ -237,7 +237,7 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
     // approval still stands as the visible row it was.
     expect(app.state().bays.prs).toEqual({})
     expect(app.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: SHA, base: "main" })
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/ref-only"])
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/ref-only"])
   })
 
   it("a submit whose exact payload an open record already carries fails the compose loudly and derives nothing", async () => {
@@ -250,7 +250,7 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
     // as the untyped duplicate-payload error, which the compose never swallows.
     await expect(app.queue.run({}, runtime)).rejects.toThrow("payload already recorded as change 'PR1'")
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/duplicate"])
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/duplicate"])
   })
 
   it("a terminal-record branch re-submitted in git at a NEW head COMPOSES as its derived re-entry (Q1)", async () => {
@@ -346,7 +346,7 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
       run.prs.some((member) => member.branch === "issue/healthy"),
     )
     expect(healthyRun?.prs[0]).toMatchObject({ headSha: SHA })
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/gone"])
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/gone"])
     const skip = events.find(
       (event) =>
         event.kind === "log" &&

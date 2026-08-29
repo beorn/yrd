@@ -263,13 +263,17 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
     await app.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: SHA, base: "main" })
 
     // Status surface: the unrecorded list and the branch-keyed derivation agree.
-    const unrecorded = app.queue.unrecordedSubmits()
+    const unrecorded = await app.queue.unrecordedSubmits()
     expect(unrecorded).toEqual([
       {
         branch: "issue/ref-only",
         sha: SHA,
         base: "main",
         at: "2026-01-01T00:00:00.000Z",
+        // Pendingness is DERIVED from the repository, and this fixture wires no
+        // repository reader — so the row says `unscanned` rather than claiming
+        // the fact is still waiting. Three states, never two.
+        landing: { state: "unresolved", reason: "unscanned", detail: expect.any(String) },
         // `createQueueApp` configures no `prNumberMint`, so the row reports the
         // wiring it OBSERVED rather than listing what it might be
         // (@i/10-yrd/23996-derived-empty-silent). The old spelling asserted the
@@ -320,7 +324,7 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
     // live record's branch gets its submit ref (re-)projected.
     const pr = await submit(app, "issue/both")
     await app.bays.recordBranchSubmit({ branch: "issue/both", sha: SHA, base: "main" })
-    expect(app.queue.unrecordedSubmits()).toEqual([])
+    expect(await app.queue.unrecordedSubmits()).toEqual([])
     const derived = app.queue.deriveChange("issue/both")
     expect(derived.record?.id).toBe(pr)
     expect(derived.eligibility).toEqual(app.queue.eligibility(pr))
@@ -332,7 +336,7 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
     await using app = await createQueueApp()
     await app.bays.recordBranchSubmit({ branch: "issue/gone", sha: SHA, base: "main" })
     await app.bays.recordBranchUnsubmit({ branch: "issue/gone", reason: "deleted" })
-    expect(app.queue.unrecordedSubmits()).toEqual([])
+    expect(await app.queue.unrecordedSubmits()).toEqual([])
     expect(app.queue.deriveChange("issue/gone")).toEqual({
       branch: "issue/gone",
       authority: { lane: "none", cell: { record: "none", submit: "none" } },

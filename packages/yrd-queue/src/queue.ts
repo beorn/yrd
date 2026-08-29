@@ -128,6 +128,7 @@ import {
   type ChangeSnapshot,
   type DerivedChange,
   type ResolvedMember,
+  type SubmitLanding,
   type UnrecordedSubmit,
 } from "./model.ts"
 import {
@@ -139,10 +140,12 @@ import {
   materializeDerivedRunMembers,
   landedSubmitBranches,
   NO_LANDED_SUBMIT_SCAN,
+  submitLandingReader,
   type DerivedAuthorityLookup,
   type DerivedRunMember,
   type DerivedSubmitEnrichment,
   type LandedSubmitScan,
+  type SubmitLandingReader,
 } from "./derived-admission.ts"
 import {
   activeQueueRootIds,
@@ -375,6 +378,90 @@ function queueRunNoRunnablePRs(
  */
 type DerivedAdmissionWiring = Readonly<{ mint: boolean; enrichment: boolean }>
 
+/**
+ * The queue's landing answer, taken ONCE per set of standing facts and shared
+ * by every surface that reports pendingness.
+ *
+ * Why a memo rather than a git call per consumer: the answer costs one
+ * first-parent walk per base plus one containment query per fact, and four
+ * surfaces ask the same question in the same tick — the compose's own
+ * exclusion, the empty-run diagnostic beside it, the `queue/run` reducer, and
+ * `queue audit`. Two of those four are SYNCHRONOUS by construction (a pure
+ * reducer, and an audit whose consumers are sync callbacks), so they cannot
+ * take the answer themselves; threading the compose's own scan to them is what
+ * makes derive-at-read reach them at all.
+ *
+ * A memo that can go stale would be worse than no memo, so it cannot: the scan
+ * is keyed by a FINGERPRINT of the exact facts it was taken over (branch→sha),
+ * and a reader whose facts do not match that fingerprint answers `unscanned`
+ * rather than the previous head's verdict. The only two outcomes are the
+ * repository's real answer for these facts, or a row that says nobody asked.
+ * Never a stale one.
+ */
+type SubmitLandingMemo = Readonly<{
+  /** Is a repository reader configured at all? Absent, every read is `unscanned` —
+   * the record store is deliberately NOT a fallback (see {@link submitLandingReader}). */
+  wired: boolean
+  /** Take the repository's answer for exactly these facts, reusing it when the
+   * facts have not moved since the last scan. */
+  scan(bays: DeepReadonly<BaysState>): Promise<LandedSubmitScan | undefined>
+  /** The answer already taken for exactly these facts, without asking git.
+   * `surface` names who could not ask, so an `unscanned` row is attributable. */
+  reader(bays: DeepReadonly<BaysState>, surface: string): SubmitLandingReader
+}>
+
+/** The fingerprint a memoized scan is keyed by: every standing fact's
+ * branch→sha, order-independent. Any push, retirement or re-push changes it,
+ * which is exactly when a previous answer stops applying. */
+function submitFactsFingerprint(bays: DeepReadonly<BaysState>): string {
+  return Object.entries(bays.submits)
+    .map(([branch, submit]) => `${branch}\u0000${submit.sha}`)
+    .toSorted()
+    .join("\u0001")
+}
+
+function createSubmitLandingMemo(
+  scanLandedSubmits: QueueOptions<readonly AnyStepDef[]>["scanLandedSubmits"],
+): SubmitLandingMemo {
+  let memo: Readonly<{ fingerprint: string; scan: LandedSubmitScan }> | undefined
+  return {
+    wired: scanLandedSubmits !== undefined,
+    async scan(bays) {
+      if (scanLandedSubmits === undefined) return undefined
+      const fingerprint = submitFactsFingerprint(bays)
+      if (memo?.fingerprint === fingerprint) return memo.scan
+      const scan = await scanLandedSubmits({ bays })
+      memo = { fingerprint, scan }
+      return scan
+    },
+    reader(bays, surface) {
+      if (scanLandedSubmits === undefined) {
+        // Deliberately NOT attributed to a surface: an unconfigured reader is a
+        // property of the PROCESS, identical for every caller in it. Naming the
+        // caller here would make two surfaces report the same fact with two
+        // different messages, and these surfaces are congruent by contract —
+        // the unrecorded list, the branch-keyed derivation and the empty-run
+        // diagnostic must agree row for row.
+        return submitLandingReader(
+          undefined,
+          "no scanLandedSubmits reader is configured for the queue plugin, so nothing in this process can ask " +
+            "the repository whether a standing fact already landed; the change-record store is deliberately " +
+            "not consulted, because its answer was wrong for every recordless branch and every merge-time rebuild",
+        )
+      }
+      if (memo === undefined || memo.fingerprint !== submitFactsFingerprint(bays)) {
+        return submitLandingReader(
+          undefined,
+          `${surface} holds no landing scan for the standing facts it is reading` +
+            (memo === undefined ? "" : " (the last scan was taken over a different set of facts)") +
+            `; take one with queue.scanLanding() before reading, or read a surface that does`,
+        )
+      }
+      return submitLandingReader(memo.scan)
+    },
+  }
+}
+
 /** The one derivation of {@link DerivedAdmissionWiring} from configuration, so
  * the compose's own reading of what is wired and the reading the audit prints
  * can never disagree. */
@@ -387,15 +474,31 @@ function derivedAdmissionWiring(
 
 /**
  * The approvals the queue can see but not run: every projected submit ref
- * whose branch has no PR record. A record for the branch — in ANY state —
- * wins, because the record is what candidates, runs and checks are keyed by,
- * and a withdrawn or integrated record already tells the reader more than the
- * bare ref can.
+ * whose branch has no PR record, MINUS the ones whose content the repository
+ * already carries. A record for the branch — in ANY state — wins, because the
+ * record is what candidates, runs and checks are keyed by, and a withdrawn or
+ * integrated record already tells the reader more than the bare ref can.
+ *
+ * `landing` is REQUIRED and has no default. This projection used to be pure
+ * over `bays.submits` and never asked git at all, so a fact whose content had
+ * long since merged stayed on the waiting list forever and was re-reported on
+ * every pass — measured 2026-08-28 on the live bay, 11 of 16 standing facts
+ * were already ancestors of `origin/main`, each printing a retirement command
+ * for a human to run and burying the five genuinely-pending changes. The cure
+ * is not to retire the fact (a write that must not be missed, and whose
+ * false positive DELETES A LIVE APPROVAL unrecoverably) but to stop storing
+ * the answer: pendingness is derived at read, so a landed fact leaves the list
+ * because nothing can put it there, not because anything deleted it.
+ *
+ * Three states, never two ({@link SubmitLanding}): `landed` drops the row,
+ * `unresolved` keeps it and says why git could not answer, `pending` keeps it
+ * plain. An unanswerable fact is never folded into either verdict.
  */
 function unrecordedSubmits(
   bays: DeepReadonly<BaysState>,
   queues: DeepReadonly<QueuesState>,
   wiring: DerivedAdmissionWiring,
+  landing: SubmitLandingReader,
 ): UnrecordedSubmit[] {
   const recorded = new Set(Object.values(bays.prs).map((pr) => pr.branch))
   return (
@@ -417,7 +520,14 @@ function unrecordedSubmits(
           ) === undefined,
       )
       .toSorted(([left], [right]) => left.localeCompare(right))
-      .map(([branch, submit]) => unrecordedSubmit(branch, submit, wiring))
+      // Derive-at-read, the whole point: a fact the repository already carries
+      // is NOT pending, so it never becomes a row. Nothing was retired to make
+      // that true, so the ref may be swept on any schedule — or never — and
+      // this list stays right either way.
+      .flatMap(([branch, submit]) => {
+        const state = landing({ branch, sha: submit.sha })
+        return state.state === "landed" ? [] : [unrecordedSubmit(branch, submit, wiring, state)]
+      })
   )
 }
 
@@ -439,30 +549,57 @@ function unrecordedSubmit(
   branch: string,
   submit: DeepReadonly<BaysState["submits"][string]>,
   wiring: DerivedAdmissionWiring,
+  landing: Exclude<SubmitLanding, Readonly<{ state: "landed" }>>,
 ): UnrecordedSubmit {
   const provenance = `branch '${branch}' is submitted in git (${submit.sha.slice(0, 12)} for '${submit.base}', since ${submit.at})`
+  // NO SILENT ERRORS: a row the repository could not be asked about must not
+  // read like one it answered "still waiting" for. The reason travels in the
+  // MESSAGE as well as the `landing` field, because the audit finding and the
+  // empty-run diagnostic both print only the message.
+  const unresolved =
+    landing.state === "unresolved"
+      ? ` — NOTE: whether this fact's content already landed is UNVERIFIED here (${landing.reason}: ${landing.detail}), ` +
+        `so this row may be a fact that merged long ago; 'yrd queue audit' re-derives it against the repository`
+      : ""
+  const message = (body: string): string => body + unresolved
   return {
     branch,
     sha: submit.sha,
     base: submit.base,
     at: submit.at,
+    landing,
     reason: {
       code: "unrecorded-submit",
-      message: wiring.mint
-        ? `${provenance} and runs as a DERIVED member once the queue's next compose admits it (S6) — ` +
-          `derived admission IS wired here (PR-number mint configured` +
-          `${
-            wiring.enrichment
-              ? ""
-              : `; no git enrichment reader, so an admitted member gets a synthetic change id — that does not ` +
-                `block admission`
-          }), so this row is waiting on a compose: either no runner is composing, or the derivation refused ` +
-          `(action 'compose-derived-refused' in the habitant runner log names the branch and why)`
-        : `${provenance} and cannot run: derived admission is UNWIRED here — no PR-number mint is configured ` +
-          `for the queue plugin (the durable pr-mint.json store the bays plugin shares), so no compose can ` +
-          `admit it and this row stands until the mint exists (S6)`,
+      message: message(
+        wiring.mint
+          ? `${provenance} and runs as a DERIVED member once the queue's next compose admits it (S6) — ` +
+              `derived admission IS wired here (PR-number mint configured` +
+              `${
+                wiring.enrichment
+                  ? ""
+                  : `; no git enrichment reader, so an admitted member gets a synthetic change id — that does not ` +
+                    `block admission`
+              }), so this row is waiting on a compose: either no runner is composing, or the derivation refused ` +
+              `(action 'compose-derived-refused' in the habitant runner log names the branch and why)`
+          : `${provenance} and cannot run: derived admission is UNWIRED here — no PR-number mint is configured ` +
+              `for the queue plugin (the durable pr-mint.json store the bays plugin shares), so no compose can ` +
+              `admit it and this row stands until the mint exists (S6)`,
+      ),
     },
   }
+}
+
+/** One branch's waiting-list row, or NO row when the repository already carries
+ * the fact's content. The same rule {@link unrecordedSubmits} applies over the
+ * whole population, kept in one place so a single-branch read and the list can
+ * never disagree about what "still waiting" means. */
+function unrecordedRow(
+  branch: string,
+  submit: DeepReadonly<BaysState["submits"][string]>,
+  wiring: DerivedAdmissionWiring,
+  landing: SubmitLanding,
+): Readonly<{ unrecorded?: UnrecordedSubmit }> {
+  return landing.state === "landed" ? {} : { unrecorded: unrecordedSubmit(branch, submit, wiring, landing) }
 }
 
 function queueRunNoSubmittedPRs(
@@ -1047,8 +1184,25 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
    * that the DERIVED lane has not yet admitted at their current sha (S6) —
    * visible with the reason, retiring once a retained run snapshot serves the
    * branch. The record wins when one exists for the branch.
+   *
+   * ASYNC because pendingness is DERIVED, not stored: a fact whose content the
+   * repository already carries is not on this list, and answering that needs
+   * git. It is therefore also the surface that takes the scan every sync
+   * reader on this object then shares ({@link Queue.scanLanding}).
    */
-  unrecordedSubmits(snapshot?: DeepReadonly<QueueRuntimeState>): readonly UnrecordedSubmit[]
+  unrecordedSubmits(snapshot?: DeepReadonly<QueueRuntimeState>): Promise<readonly UnrecordedSubmit[]>
+  /**
+   * Take the repository's landing answer for the standing facts as they are
+   * NOW, and hold it for the sync readers on this object ({@link Queue.audit},
+   * {@link Queue.deriveChange}, the `queue/run` reducer's empty-selection
+   * diagnostic), which cannot take one themselves.
+   *
+   * Answers `undefined` when no repository reader is configured — and says so
+   * loudly. It never falls back to the change-record store: that store's answer
+   * is the defect this replaced. A caller that skips this still gets correct
+   * rows, each marked `unscanned` rather than silently claimed pending.
+   */
+  scanLanding(snapshot?: DeepReadonly<QueueRuntimeState>): Promise<LandedSubmitScan | undefined>
   /** One branch, both sources (record + submit ref), one answer — including
    * the S6 newest-truth arbitration verdict (`authority`), advisory while
    * record writes still flow. */
@@ -1159,11 +1313,17 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
     ...(options.requires === undefined ? {} : { requires: z.array(QueueRequirementSchema).parse(options.requires) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
+  // ONE memo for the whole plugin: the pure `queue/run` reducer and the runtime
+  // object are built in different scopes and both report pendingness, so the
+  // scan the compose takes has to be reachable from both or the reducer can
+  // never have an answer at all.
+  const landing = createSubmitLandingMemo(options.scanLandedSubmits)
   const commands = createQueueCommands(
     steps,
     byName,
     needsPersonOwner,
     derivedAdmissionWiring(options.prNumberMint, options.readSubmitEnrichment),
+    landing,
     options.prepareCandidate !== undefined,
   )
 
@@ -1253,7 +1413,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.recordMerge,
             options.prNumberMint,
             options.readSubmitEnrichment,
-            options.scanLandedSubmits,
+            landing,
             options.isSubmitSuperseded,
             configuredRunner,
             progress,
@@ -1314,7 +1474,7 @@ function createQueue<Shape extends ChangeShape>(
   recordMerge: QueueOptions<readonly AnyStepDef[]>["recordMerge"],
   derivedMint: PrNumberMint | undefined,
   readSubmitEnrichment: QueueOptions<readonly AnyStepDef[]>["readSubmitEnrichment"],
-  scanLandedSubmits: QueueOptions<readonly AnyStepDef[]>["scanLandedSubmits"],
+  landing: SubmitLandingMemo,
   isSubmitSuperseded: QueueOptions<readonly AnyStepDef[]>["isSubmitSuperseded"],
   configuredRunner: Runner | undefined,
   progress: QueueProgressPolicy,
@@ -1329,6 +1489,26 @@ function createQueue<Shape extends ChangeShape>(
   // a standing submit fact has not been admitted answers from the same two
   // bits the compose itself acts on (@i/10-yrd/23996-derived-empty-silent).
   const wiring = derivedAdmissionWiring(derivedMint, readSubmitEnrichment)
+  /** Take the repository's landing answer, saying so loudly when this process
+   * has no reader for it. Hoisted out of the returned object so the projection
+   * below never reaches it through `this`: a destructured
+   * `const { unrecordedSubmits } = queue` must still ask git. */
+  const takeLandingScan = async (snapshot: DeepReadonly<RuntimeState>): Promise<LandedSubmitScan | undefined> => {
+    if (!landing.wired) {
+      log.warn?.(
+        "queue cannot ask the repository which standing submit facts already landed: no scanLandedSubmits " +
+          "reader is configured for the queue plugin. Every waiting-list row this process reports is " +
+          "UNVERIFIED — the change-record store is deliberately not consulted, because its answer was wrong " +
+          "for every recordless branch and every merge-time rebuild",
+        {
+          action: "queue-landing-scan-unconfigured",
+          submits: Object.keys(snapshot.bays.submits).length,
+        },
+      )
+      return undefined
+    }
+    return  landing.scan(snapshot.bays)
+  }
   const reportZeroEventRun = (value: JsonValue | undefined): boolean => {
     const covered = QueueRunReuseCoveredSchema.safeParse(value)
     if (covered.success) {
@@ -1503,7 +1683,7 @@ function createQueue<Shape extends ChangeShape>(
     // question wrongly for every recordless branch and for every merge-time
     // rebuild, and a quiet fall-back to it is exactly how the double-merge
     // came back unannounced. No scan means no exclusion and one loud line.
-    if (scanLandedSubmits === undefined) {
+    if (!landing.wired) {
       log.warn?.(
         "queue compose cannot ask the repository which standing submit facts already landed: no " +
           "scanLandedSubmits reader is configured for the queue plugin. Landed content excludes NOTHING on " +
@@ -1516,8 +1696,7 @@ function createQueue<Shape extends ChangeShape>(
         },
       )
     }
-    const landedScan =
-      scanLandedSubmits === undefined ? NO_LANDED_SUBMIT_SCAN : await scanLandedSubmits({ bays: snapshot.bays })
+    const landedScan = (await landing.scan(snapshot.bays)) ?? NO_LANDED_SUBMIT_SCAN
     for (const stale of landedScan.landed) {
       if (skip.has(stale.branch)) continue
       log.warn?.(
@@ -3054,7 +3233,17 @@ function createQueue<Shape extends ChangeShape>(
               ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
             })
             const rejected = diagnostic.decisions.filter(({ eligibility }) => !eligibility.runnable)
-            const unrecorded = unrecordedSubmits(snapshot.bays, snapshot.queues, wiring)
+            // Reuses the scan this compose already took (same tick, same facts,
+            // so the memo answers without a second walk); takes one if the pass
+            // never reached the derive step. A landed fact is not a considered
+            // row — it is not waiting on anything.
+            await landing.scan(snapshot.bays)
+            const unrecorded = unrecordedSubmits(
+              snapshot.bays,
+              snapshot.queues,
+              wiring,
+              landing.reader(snapshot.bays, "the selectorless compose's empty-run diagnostic"),
+            )
             if (rejected.length > 0 || (diagnostic.decisions.length === 0 && unrecorded.length > 0)) {
               reportZeroEventRun(queueRunNoRunnablePRs(rejected, authoritySteps, unrecorded))
             } else if (diagnostic.decisions.length === 0) {
@@ -3517,7 +3706,23 @@ function createQueue<Shape extends ChangeShape>(
         },
       )
     },
-    audit: (options = {}) => auditQueues(runtime(), steps, progress, needsPersonOwner, wiring, options),
+    audit: (options = {}) => {
+      const snapshot = runtime()
+      // Sync by contract — its consumers are sync callbacks (health probes, the
+      // watcher's stale-draft projection) — so it reads the scan the compose
+      // took rather than taking one. A long-lived runner composes every few
+      // minutes and is therefore always answered; a fresh short-lived process
+      // must call `scanLanding()` first, and every row says so if it did not.
+      return auditQueues(
+        snapshot,
+        steps,
+        progress,
+        needsPersonOwner,
+        wiring,
+        landing.reader(snapshot.bays, "'queue audit'"),
+        options,
+      )
+    },
     eligibility(selector, projected) {
       // Called once per change by the queue views, and the single largest stage of a
       // cold `queue ls` — resolveChange plus checkEligibility together dominate it.
@@ -3532,12 +3737,26 @@ function createQueue<Shape extends ChangeShape>(
       const snapshot = projected ?? runtime()
       return Object.values(snapshot.bays.prs).map((pr) => ChangeEligibility(snapshot, pr, steps, needsPersonOwner))
     },
-    unrecordedSubmits(projected) {
+    async scanLanding(projected) {
+      return  takeLandingScan(projected ?? runtime())
+    },
+    async unrecordedSubmits(projected) {
       const snapshot = projected ?? runtime()
-      return unrecordedSubmits(snapshot.bays, snapshot.queues, wiring)
+      // ASYNC because the answer needs git. It used to be a pure projection
+      // over `bays.submits` that never asked, which is why landed facts stood
+      // on this list forever; making the call site await is the honest cost of
+      // deriving pendingness instead of storing it.
+      await takeLandingScan(snapshot)
+      return unrecordedSubmits(
+        snapshot.bays,
+        snapshot.queues,
+        wiring,
+        landing.reader(snapshot.bays, "queue.unrecordedSubmits()"),
+      )
     },
     deriveChange(branch, projected) {
       const snapshot = projected ?? runtime()
+      const branchLanding = landing.reader(snapshot.bays, "queue.deriveChange()")
       const records = Object.values(snapshot.bays.prs).filter((pr) => pr.branch === branch)
       // Legacy first-match, deliberately NOT the arbitration's newest-truth
       // pick: every pre-S6 consumer keeps its exact answer while writes still
@@ -3552,7 +3771,7 @@ function createQueue<Shape extends ChangeShape>(
         ...(submit === undefined ? {} : { submit }),
         ...(record !== undefined || submit === undefined
           ? {}
-          : { unrecorded: unrecordedSubmit(branch, submit, wiring) }),
+          : unrecordedRow(branch, submit, wiring, branchLanding({ branch, sha: submit.sha }))),
         authority: arbitrateDerivedChange(records, submit),
       }
     },
@@ -3888,6 +4107,7 @@ function createQueueCommands(
   byName: ReadonlyMap<string, RuntimeStep>,
   needsPersonOwner: string,
   wiring: DerivedAdmissionWiring,
+  landing: SubmitLandingMemo,
   requiresPreparedCandidate = false,
 ): QueueCommands {
   const admissionStep = command({
@@ -4025,7 +4245,16 @@ function createQueueCommands(
       const prs = selectionResult.prs
       if (prs.length === 0) {
         const rejected = selectionResult.decisions.filter(({ eligibility }) => !eligibility.runnable)
-        const unrecorded = unrecordedSubmits(state.bays, state.queues, wiring)
+        // A reducer cannot read git, so it reads the scan the compose that
+        // dispatched it already took — matched by fingerprint, so a fact that
+        // moved between the two answers `unscanned` rather than inheriting the
+        // previous head's verdict.
+        const unrecorded = unrecordedSubmits(
+          state.bays,
+          state.queues,
+          wiring,
+          landing.reader(state.bays, "the queue/run reducer, which is pure and cannot read git"),
+        )
         return {
           events: [],
           value:
@@ -6778,6 +7007,7 @@ function auditQueues(
   progress: QueueProgressPolicy,
   needsPersonOwner: string,
   wiring: DerivedAdmissionWiring,
+  landing: SubmitLandingReader,
   options: QueueAuditOptions,
 ): QueueAuditEmission {
   // Emissions, not readings: every code pushed below — or written inline into
@@ -6863,7 +7093,7 @@ function auditQueues(
     // carries, so nothing can run it (branch-is-change 2a). Same grace as a
     // draft, so a push that is about to be followed by its `pr submit` does
     // not page; same consumer contract — the watcher reads this, never git.
-    for (const submit of unrecordedSubmits(state.bays, state.queues, wiring)) {
+    for (const submit of unrecordedSubmits(state.bays, state.queues, wiring, landing)) {
       const atMs = parseAuditTime(submit.at, "branch submit clock")
       if (auditNowMs - atMs <= DRAFT_STRANDED_GRACE_MS) continue
       findings.push({

@@ -7115,6 +7115,12 @@ async function queueAuditReport(
   services: YrdCliServices,
   now?: string,
 ): Promise<Readonly<{ findings: readonly QueueAuditFinding[]; comparison?: QueueEnvironmentAuditComparison }>> {
+  // Take the repository's landing answer BEFORE the sync audit reads it: this
+  // is a short-lived process that never composes, so without this every
+  // `unrecorded-submit` row would report itself unverified. The audit stays
+  // sync (its other consumers are sync callbacks); priming is what lets the
+  // operator-facing waiting list derive pendingness rather than assume it.
+  await app.queue.scanLanding()
   // The widening boundary: both inputs are QueueAuditEmission, so every code
   // above this line is closed over YRD_QUEUE_AUDIT_FINDING_CODES. Downstream is
   // display and JSON, where a finding may equally be one a foreign version
@@ -7758,6 +7764,12 @@ async function buildQueueListSnapshot(
   // with no habitant yet) simply absent. Watch has the journal in hand and can
   // always afford this; the health PROBE cannot, which is why it reads the
   // habitant-precomputed field instead (queueRunnerHealth in this file).
+  // Prime the landing scan before the sync audit behind `staleDraftFindings`
+  // reads it: this surface pages a human about branches that are waiting, and a
+  // fact whose content already landed is not waiting. `watch` has the journal
+  // in hand and can afford the repository read for the same reason the comment
+  // above says it can afford this projection at all.
+  await app.queue.scanLanding()
   const staleDrafts = staleDraftFindings(
     app,
     new Date(now).toISOString(),

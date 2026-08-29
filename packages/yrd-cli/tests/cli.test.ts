@@ -1335,7 +1335,7 @@ describe("runYrd", () => {
     expect(
       queuePayload.results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished]),
     ).toEqual([])
-    expect(app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/direct", sha: HEAD_SHA }])
+    expect(await app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/direct", sha: HEAD_SHA }])
 
     // A same-head resubmit is an idempotent fact renewal, same envelope shape.
     const resubmit = outputIO({ resolveRevision: async () => HEAD_SHA })
@@ -3318,11 +3318,11 @@ describe("runYrd", () => {
     })
     expect(checkRuns).toEqual([])
     expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/ledger", sha: HEAD_SHA }])
+    expect(await app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/ledger", sha: HEAD_SHA }])
 
     await app.queue.run({}, { runner: "test", leaseMs: 60_000 })
     expect(checkRuns).toEqual(["check"])
-    expect(app.queue.unrecordedSubmits()).toEqual([])
+    expect(await app.queue.unrecordedSubmits()).toEqual([])
 
     const second = outputIO({ resolveRevision: async () => "2".repeat(40) })
     expect(
@@ -4896,7 +4896,7 @@ describe("runYrd", () => {
     expect(checkRuns).toEqual(["check"])
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(app.state().bays.prs).toEqual({})
-    expect(app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/retry", sha: HEAD_SHA }])
+    expect(await app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/retry", sha: HEAD_SHA }])
 
     behavior.failingCheck = false
     const submit = outputIO({ resolveRevision: () => Promise.resolve(MERGED_SHA) })
@@ -5103,7 +5103,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "submit", "topic/second", "--json"), second.io), second.stderr()).toBe(0)
     expect(app.bays.state().submits["topic/second"]).toMatchObject({ sha: MERGED_SHA })
     expect(app.state().bays.prs).toEqual({})
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["topic/first", "topic/second"])
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["topic/first", "topic/second"])
     expect(checkRuns).toEqual([])
     expect(await app.queue.history()).toEqual([])
   })

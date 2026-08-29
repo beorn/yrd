@@ -809,12 +809,54 @@ export type ChangeEligibility = Readonly<{
  * appear; once a retained run snapshot names the branch at this exact sha,
  * the member's own rows take over and this one retires.
  */
+/**
+ * Why a standing submit fact's landing question has no answer for this reader.
+ *
+ * `degenerate` and `unreadable` are the repository's own two non-answers
+ * (@yrd/queue `UnresolvedSubmitReason`). `unscanned` is this reader's: nothing
+ * asked the repository at all, because the surface is a pure reducer or a
+ * projection read that ran before any scan primed the queue. It is NEVER a
+ * verdict — a row carrying it says so in its own message.
+ */
+export type SubmitLandingUnresolved = "degenerate" | "unreadable" | "unscanned"
+
+/**
+ * Is a standing submit fact still waiting, and how do we know?
+ *
+ * THREE states, never two. Ancestry is not a total predicate: a rebased
+ * landing rewrites content identity, so the original tip is not an ancestor
+ * and reads as not-landed forever, and merged-truth's own degeneracies
+ * (self-comparison, collapsed-onto-base) answer nothing at all. Collapsing an
+ * unanswerable fact into either `pending` or `landed` is how a waiting list
+ * lies in one direction or the other, so the unanswerable case carries its own
+ * state and its own reason.
+ *
+ * `landed` never appears on a rendered row — a landed fact is not pending, so
+ * it is absent from the waiting list entirely. The state exists so the reader
+ * that decides absence and the reader that decides annotation are the SAME
+ * derivation.
+ */
+export type SubmitLanding =
+  | Readonly<{ state: "pending" }>
+  | Readonly<{ state: "landed"; mergeCommit?: string }>
+  | Readonly<{ state: "unresolved"; reason: SubmitLandingUnresolved; detail: string }>
+
 export type UnrecordedSubmit = Readonly<{
   branch: string
   sha: string
   base: string
   /** When the receiver projected the approval. */
   at: string
+  /**
+   * What the REPOSITORY says about this fact, derived at read time — never a
+   * stored bit, and never the change-record store's answer.
+   *
+   * A row exists only when this is not `landed`: pendingness is derived, so a
+   * fact whose content main already carries stops being reported without
+   * anything retiring the ref. Retirement becomes housekeeping the report no
+   * longer depends on.
+   */
+  landing: SubmitLanding
   reason: Readonly<{
     code: "unrecorded-submit"
     message: string

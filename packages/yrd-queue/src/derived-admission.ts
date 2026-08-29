@@ -59,6 +59,7 @@ import {
   type QueueRecord,
   type QueuesState,
   type RunId,
+  type SubmitLanding,
 } from "./model.ts"
 import { mergedByAncestry, type MergedTruthGit, type MergedTruthIndex } from "./merged-truth.ts"
 import { projectionLookupGet } from "./projection-lookup.ts"
@@ -641,6 +642,71 @@ export function landedSubmitBranches(scan: LandedSubmitScan): ReadonlySet<string
     ...scan.landed.map((row) => row.branch),
     ...scan.unresolved.filter((row) => row.reason === "degenerate").map((row) => row.branch),
   ])
+}
+
+/** One fact's landing answer, read at the moment the question is asked. */
+export type SubmitLandingReader = (fact: Readonly<{ branch: string; sha: string }>) => SubmitLanding
+
+/**
+ * The one derivation of "is this standing fact still pending?", from a scan the
+ * repository produced.
+ *
+ * This is the whole point of the derive-at-read shape: the WAITING LIST asks
+ * git, so a landed fact stops being reported the moment its content is on the
+ * base — no `branch/unsubmitted { reason: "superseded" }` write, no second
+ * thing that must happen, no false-positive retirement deleting a live
+ * approval. The submit ref keeps what only it can hold — the consent triple
+ * `{sha, base, at}`, since ancestry has no clock and cannot say anyone approved
+ * anything — and loses only the pending BIT, which it was never the authority
+ * for. The ref can then be garbage-collected on any schedule, or never, without
+ * correctness depending on it.
+ *
+ * `scan === undefined` is NOT "nothing landed". It is `unscanned`: no reader
+ * asked, so every fact answers unresolved and says which surface could not ask.
+ * The change-record store is deliberately not consulted as a fallback — its
+ * answer is the defect this replaced (see {@link landedSubmits}), and a quiet
+ * fall-back to it would restore exactly the report this fixes.
+ *
+ * A scan answers only for the (branch, sha) it was taken over. A fact whose sha
+ * moved since the scan is UNANSWERED, not not-landed: it re-reads as
+ * `unscanned` naming the sha the scan held, so a re-push mid-read can never
+ * inherit the previous head's verdict.
+ */
+export function submitLandingReader(
+  scan: LandedSubmitScan | undefined,
+  unscannedDetail = "no landing scan was taken for this read",
+): SubmitLandingReader {
+  if (scan === undefined) {
+    return () => ({ state: "unresolved", reason: "unscanned", detail: unscannedDetail })
+  }
+  const landed = new Map(scan.landed.map((row) => [row.branch, row] as const))
+  const unresolved = new Map(scan.unresolved.map((row) => [row.branch, row] as const))
+  return ({ branch, sha }) => {
+    const hit = landed.get(branch)
+    if (hit !== undefined) {
+      if (hit.sha !== sha) return staleScanAnswer(branch, sha, hit.sha, unscannedDetail)
+      return { state: "landed", ...(hit.mergeCommit === undefined ? {} : { mergeCommit: hit.mergeCommit }) }
+    }
+    const open = unresolved.get(branch)
+    if (open !== undefined) {
+      if (open.sha !== sha) return staleScanAnswer(branch, sha, open.sha, unscannedDetail)
+      return { state: "unresolved", reason: open.reason, detail: open.detail }
+    }
+    // Absent from BOTH lists is the scan's own not-landed answer: `landedSubmits`
+    // walks every branch in `bays.submits` and pushes each to one list or
+    // neither, so omission is a verdict here rather than a gap.
+    return { state: "pending" }
+  }
+}
+
+function staleScanAnswer(branch: string, sha: string, scanned: string, unscannedDetail: string): SubmitLanding {
+  return {
+    state: "unresolved",
+    reason: "unscanned",
+    detail:
+      `the landing scan answered for '${branch}' at ${scanned}, but the standing fact now reads ${sha} — ` +
+      `the fact moved since the scan, so its landing is unanswered here (${unscannedDetail})`,
+  }
 }
 
 /**
