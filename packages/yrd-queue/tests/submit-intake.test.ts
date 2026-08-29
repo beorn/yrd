@@ -356,3 +356,96 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
     expect(skip, "the vanished commit must be skipped loudly, never silently").toBeDefined()
   })
 })
+
+/**
+ * @failure The row a reader reaches answers "why is this branch not running?"
+ * by naming the log action that would answer it — the question restated as its
+ * own answer.
+ *
+ * Measured 2026-08-28 over the 130 runner logs in
+ * `main.hab/run/sessions/yrd-runner/`: 425 `unrecorded-submit` considered rows
+ * carried the tail "either no runner is composing, or the derivation refused
+ * (action 'compose-derived-refused' in the habitant runner log names the
+ * branch and why)", while the 20 most RECENT logs contained zero
+ * `compose-derived-refused` events. So the pointer resolved to nothing, and
+ * "idle" and "stuck" printed the same bytes for a week.
+ *
+ * The compose holds the real cause at the instant it declines and threw it
+ * into a log line. These tests fence carrying it instead — and fence the two
+ * zeros staying distinct (ruling 22895): "composed and did not see this fact"
+ * is not "no compose has run here".
+ */
+describe("a standing row names the condition that actually stopped its derivation", () => {
+  const GONE = "e".repeat(40)
+  /** The host's typed refusal when the approved commit no longer resolves. */
+  const vanishing = ({ sha }: Readonly<{ branch: string; sha: string }>) => {
+    if (sha === GONE) {
+      raiseFailure(
+        "refusal",
+        "derived-commit-vanished",
+        `yrd: submitted commit ${GONE.slice(0, 12)} is not in this repository`,
+      )
+    }
+    return { changeId: `I${sha}` }
+  }
+
+  it("a refused derivation puts its OWN code and message on the row, never a pointer at the log that logged it", async () => {
+    await using app = await createApp({ readSubmitEnrichment: vanishing })
+    await app.bays.recordBranchSubmit({ branch: "issue/gone", sha: GONE, base: "main" })
+    await app.queue.run({}, runtime)
+
+    const [row] = await app.queue.unrecordedSubmits()
+    expect(row?.branch).toBe("issue/gone")
+    const reason = row?.reason.message ?? ""
+    expect(reason, "the refusal must not send the reader to the surface that refused").not.toContain(
+      "compose-derived-refused",
+    )
+    expect(reason, "the typed code travels from the compose to the row").toContain("derived-commit-vanished")
+    expect(reason, "and so does the cause it names").toContain("is not in this repository")
+
+    // Congruence: the compose runs in the runtime scope and this diagnostic is
+    // built by the PURE reducer, a different scope of the same process. One
+    // shared memory or the two halves disagree about why a row stands.
+    const empty = await app.dispatch(app.commands.queue.run, {})
+    expect(empty.events).toEqual([])
+    expect(empty.value).toMatchObject({
+      kind: "no-runnable-prs",
+      considered: [{ branch: "issue/gone", code: "unrecorded-submit" }],
+    })
+    const considered = (empty.value as { considered: readonly { reason: string }[] }).considered[0]?.reason ?? ""
+    expect(considered).not.toContain("compose-derived-refused")
+    expect(considered).toContain("derived-commit-vanished")
+  })
+
+  it("a process that never composed says THAT, instead of reporting a refusal it never observed", async () => {
+    await using app = await createApp({ readSubmitEnrichment: vanishing })
+    await app.bays.recordBranchSubmit({ branch: "issue/gone", sha: GONE, base: "main" })
+
+    // No compose has run: `yrd queue audit` and the pure reducer are this
+    // state, and the one thing they must never do is answer as if they looked.
+    const [row] = await app.queue.unrecordedSubmits()
+    const reason = row?.reason.message ?? ""
+    expect(reason).not.toContain("compose-derived-refused")
+    expect(reason, "the zero says WHICH zero it is").toContain("no compose has run in this process")
+    expect(reason, "and never claims a refusal it did not see").not.toContain("REFUSED")
+  })
+
+  it("a refusal never outlives the fact it was about: a re-push at a new head stops reporting the old cause", async () => {
+    await using app = await createApp({ readSubmitEnrichment: vanishing })
+    await app.bays.recordBranchSubmit({ branch: "issue/gone", sha: GONE, base: "main" })
+    await app.queue.run({}, runtime)
+    expect((await app.queue.unrecordedSubmits())[0]?.reason.message).toContain("derived-commit-vanished")
+
+    // The author amends and re-pushes. The old refusal was about a sha that no
+    // longer stands, so the row must not inherit it — a stale cause reads
+    // exactly like a current one and is worse than none.
+    await app.bays.recordBranchSubmit({ branch: "issue/gone", sha: SHA, base: "main" })
+    const reason = (await app.queue.unrecordedSubmits())[0]?.reason.message ?? ""
+    expect(reason).not.toContain("derived-commit-vanished")
+    expect(reason).not.toContain("compose-derived-refused")
+    expect(reason, "it names the pass count it does have, and whose fact it is").toContain(
+      "none of them acted on this fact",
+    )
+    expect(reason).toContain(SHA.slice(0, 12))
+  })
+})

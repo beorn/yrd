@@ -365,9 +365,9 @@ function queueRunNoRunnablePRs(
 }
 
 /**
- * The derived lane's admission wiring, as THIS process configured it — the one
- * half of "why is this row still here" that is observable from a projection
- * read, and the half that cost the most to answer by hand.
+ * The derived lane's admission wiring — BOTH halves of "why is this row still
+ * here": what this process CONFIGURED (`mint`, `enrichment`), and what its
+ * composes actually OBSERVED per branch (`composes`).
  *
  * Only `mint` blocks: with no PR-number mint the compose admits nothing, so
  * every row stands (see {@link deriveRefOnlyMembers}). A missing `enrichment`
@@ -375,8 +375,62 @@ function queueRunNoRunnablePRs(
  * nothing — the audit line used to name the two together as one "unwired"
  * cause, which is why a reader could not act on it
  * (@i/10-yrd/23996-derived-empty-silent).
+ *
+ * `composes` is the observed half. The configured half alone could never say
+ * why a WIRED lane still left a row standing, so the row said "either no
+ * runner is composing, or the derivation refused — read action
+ * 'compose-derived-refused' in the runner log", which is the question restated
+ * as its own answer. The compose holds the real cause at the instant it
+ * declines; carrying it here is what lets every row name it.
  */
-type DerivedAdmissionWiring = Readonly<{ mint: boolean; enrichment: boolean }>
+type DerivedAdmissionWiring = Readonly<{ mint: boolean; enrichment: boolean; composes: ComposeObservations }>
+
+/**
+ * What one compose did about one branch. `refused` carries the typed failure
+ * VERBATIM — the code and the message the derivation raised, never a
+ * restatement — because the row that reports it is the surface a reader
+ * reaches for and the log line is the one they cannot.
+ */
+type ComposeObservation =
+  | Readonly<{ outcome: "refused"; code: string; message: string }>
+  | Readonly<{ outcome: "superseded" }>
+  | Readonly<{ outcome: "derived" }>
+
+/**
+ * This process's compose memory, keyed by branch AND the exact sha it acted
+ * on, so an observation can never be reported about a fact that has since
+ * moved.
+ *
+ * `passes` exists to keep a zero honest: no observation for a branch means
+ * "this process composed and did not see this fact" only when `passes > 0`.
+ * At zero it means NOBODY LOOKED HERE — a projection read (`yrd queue audit`,
+ * the pure reducer) is a different process from the runner, and the two must
+ * not render the same sentence (ruling 22895).
+ */
+type ComposeObservations = Readonly<{
+  passes(): number
+  pass(): void
+  observe(branch: string, sha: string, observation: ComposeObservation): void
+  read(branch: string, sha: string): ComposeObservation | undefined
+}>
+
+function createComposeObservations(): ComposeObservations {
+  const seen = new Map<string, Readonly<{ sha: string; observation: ComposeObservation }>>()
+  let passes = 0
+  return {
+    passes: () => passes,
+    pass: () => {
+      passes += 1
+    },
+    observe: (branch, sha, observation) => {
+      seen.set(branch, { sha, observation })
+    },
+    read: (branch, sha) => {
+      const entry = seen.get(branch)
+      return entry === undefined || entry.sha !== sha ? undefined : entry.observation
+    },
+  }
+}
 
 /**
  * The queue's landing answer, taken ONCE per set of standing facts and shared
@@ -468,8 +522,9 @@ function createSubmitLandingMemo(
 function derivedAdmissionWiring(
   mint: PrNumberMint | undefined,
   enrichment: QueueOptions<readonly AnyStepDef[]>["readSubmitEnrichment"],
+  composes: ComposeObservations,
 ): DerivedAdmissionWiring {
-  return { mint: mint !== undefined, enrichment: enrichment !== undefined }
+  return { mint: mint !== undefined, enrichment: enrichment !== undefined, composes }
 }
 
 /**
@@ -532,6 +587,49 @@ function unrecordedSubmits(
 }
 
 /**
+ * What THIS process's compose did about THIS fact, in words a reader can act
+ * on — never a pointer at another surface.
+ *
+ * The retired tail said "either no runner is composing, or the derivation
+ * refused (action 'compose-derived-refused' in the habitant runner log names
+ * the branch and why)". That answered the question with the question: the row
+ * a reader reaches is the waiting-list row, and it sent them to a log action
+ * to learn the cause the compose had already computed and thrown away —
+ * measured 2026-08-28 over 130 runner logs, 425 rows carried that sentence
+ * while the 20 most recent logs contained ZERO `compose-derived-refused`
+ * events, so the surface it named answered nothing at all.
+ *
+ * The refusal's own code and message now travel from the compose that raised
+ * them (`compose-derived-refused`'s emission site) to every row that reports
+ * the branch. The two zeros stay distinguishable: "composed and never saw this
+ * fact" is not "no compose has run here" (ruling 22895).
+ */
+function composeAnswer(branch: string, sha: string, wiring: DerivedAdmissionWiring): string {
+  const observation = wiring.composes.read(branch, sha)
+  if (observation === undefined) {
+    return wiring.composes.passes() === 0
+      ? `no compose has run in this process, so nothing here has tried to derive it — this is a projection read, ` +
+          `not the runner that composes; the runner reports any refusal on this same row, in its own queue-run ` +
+          `diagnostic`
+      : `this process ran ${wiring.composes.passes()} compose pass(es) and none of them acted on this fact ` +
+          `(${sha.slice(0, 12)}): the fact arrived or moved since, and the next compose answers for it`
+  }
+  if (observation.outcome === "refused") {
+    return `the last compose REFUSED to derive it — ${observation.code}: ${observation.message}`
+  }
+  if (observation.outcome === "superseded") {
+    return (
+      `the last compose declined to derive it because its base already contains this content: the fact is ` +
+      `stale — retire it (git push ${RECEIVER_REMOTE_NAME} :refs/yrd/submit/${branch})`
+    )
+  }
+  return (
+    `the last compose DID derive an admission for it, so this row was read before that admission was recorded; ` +
+    `the next read retires it`
+  )
+}
+
+/**
  * One standing approval the queue can see but not run, and WHY — the observed
  * wiring first, never a list of possibilities.
  *
@@ -579,8 +677,7 @@ function unrecordedSubmit(
                   ? ""
                   : `; no git enrichment reader, so an admitted member gets a synthetic change id — that does not ` +
                     `block admission`
-              }), so this row is waiting on a compose: either no runner is composing, or the derivation refused ` +
-              `(action 'compose-derived-refused' in the habitant runner log names the branch and why)`
+              }), and ${composeAnswer(branch, submit.sha, wiring)}`
           : `${provenance} and cannot run: derived admission is UNWIRED here — no PR-number mint is configured ` +
               `for the queue plugin (the durable pr-mint.json store the bays plugin shares), so no compose can ` +
               `admit it and this row stands until the mint exists (S6)`,
@@ -1318,11 +1415,17 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
   // scan the compose takes has to be reachable from both or the reducer can
   // never have an answer at all.
   const landing = createSubmitLandingMemo(options.scanLandedSubmits)
+  // ONE compose memory for the whole plugin, for the SAME reason `landing`
+  // above is shared: the pure `queue/run` reducer, the audit and the runtime
+  // all report why a row still stands, and only the runtime composes. A
+  // per-scope memo would let the two halves of one process disagree about
+  // whether anything ever tried to derive a branch.
+  const composes = createComposeObservations()
   const commands = createQueueCommands(
     steps,
     byName,
     needsPersonOwner,
-    derivedAdmissionWiring(options.prNumberMint, options.readSubmitEnrichment),
+    derivedAdmissionWiring(options.prNumberMint, options.readSubmitEnrichment, composes),
     landing,
     options.prepareCandidate !== undefined,
   )
@@ -1414,6 +1517,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.prNumberMint,
             options.readSubmitEnrichment,
             landing,
+            composes,
             options.isSubmitSuperseded,
             configuredRunner,
             progress,
@@ -1475,6 +1579,7 @@ function createQueue<Shape extends ChangeShape>(
   derivedMint: PrNumberMint | undefined,
   readSubmitEnrichment: QueueOptions<readonly AnyStepDef[]>["readSubmitEnrichment"],
   landing: SubmitLandingMemo,
+  composes: ComposeObservations,
   isSubmitSuperseded: QueueOptions<readonly AnyStepDef[]>["isSubmitSuperseded"],
   configuredRunner: Runner | undefined,
   progress: QueueProgressPolicy,
@@ -1488,7 +1593,7 @@ function createQueue<Shape extends ChangeShape>(
   // Read ONCE from this process's configuration: every surface that reports why
   // a standing submit fact has not been admitted answers from the same two
   // bits the compose itself acts on (@i/10-yrd/23996-derived-empty-silent).
-  const wiring = derivedAdmissionWiring(derivedMint, readSubmitEnrichment)
+  const wiring = derivedAdmissionWiring(derivedMint, readSubmitEnrichment, composes)
   /** Take the repository's landing answer, saying so loudly when this process
    * has no reader for it. Hoisted out of the returned object so the projection
    * below never reaches it through `this`: a destructured
@@ -1507,7 +1612,7 @@ function createQueue<Shape extends ChangeShape>(
       )
       return undefined
     }
-    return  landing.scan(snapshot.bays)
+    return landing.scan(snapshot.bays)
   }
   const reportZeroEventRun = (value: JsonValue | undefined): boolean => {
     const covered = QueueRunReuseCoveredSchema.safeParse(value)
@@ -1672,6 +1777,11 @@ function createQueue<Shape extends ChangeShape>(
    */
   const deriveRefOnlyMembers = async (skip: ReadonlySet<string>): Promise<DerivedRunMember[]> => {
     const snapshot = runtime()
+    // Counted BEFORE any early return: a pass that ends lane-empty or
+    // mint-missing still looked, and every row's zero case turns on the
+    // difference between "looked and did not see this fact" and "nobody
+    // looked here".
+    composes.pass()
     // One lane consumes one push, decided by LIVE ownership plus landed
     // content (see derivedLaneBranches). The PR2139 incident cell — a fact
     // standing at content the repository already carries — is excluded there
@@ -1796,6 +1906,7 @@ function createQueue<Shape extends ChangeShape>(
             base: submit.base,
           },
         )
+        composes.observe(branch, submit.sha, { outcome: "superseded" })
         supersededCount += 1
         continue
       }
@@ -1873,6 +1984,7 @@ function createQueue<Shape extends ChangeShape>(
           ...(enrichment === undefined ? {} : { enrichment }),
         })
         derived.push(member)
+        composes.observe(branch, submit.sha, { outcome: "derived" })
         log.info?.("queue compose derived an admission for a branch submitted only in git", {
           action: "compose-derived-admitted",
           branch,
@@ -1886,6 +1998,11 @@ function createQueue<Shape extends ChangeShape>(
         if (fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
           throw error
         }
+        // The row that stands is the surface a reader reaches; this log line
+        // is the one they cannot. Carry the typed cause to the row VERBATIM
+        // before logging it, so the two never disagree and neither has to
+        // point at the other.
+        composes.observe(branch, submit.sha, { outcome: "refused", code: fact.code, message: fact.message })
         log.warn?.("queue compose could not derive an admission for a submitted branch; its row stands", {
           action: "compose-derived-refused",
           branch,
@@ -3738,7 +3855,7 @@ function createQueue<Shape extends ChangeShape>(
       return Object.values(snapshot.bays.prs).map((pr) => ChangeEligibility(snapshot, pr, steps, needsPersonOwner))
     },
     async scanLanding(projected) {
-      return  takeLandingScan(projected ?? runtime())
+      return takeLandingScan(projected ?? runtime())
     },
     async unrecordedSubmits(projected) {
       const snapshot = projected ?? runtime()
