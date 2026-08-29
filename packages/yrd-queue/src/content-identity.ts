@@ -35,7 +35,7 @@ import type { RefGit } from "./uncarried-facts.ts"
 /** The one member `exactDelta` needs from the package's exported repository
  * handle. `run` throws on non-zero exit, which is the error contract here too:
  * an unreadable identity is a loud failure, never an empty delta. */
-export type ExactDeltaGit = Pick<RefGit, "run">
+export type ExactDeltaGit = Pick<RefGit, "text">
 
 /**
  * How a path changed between the two trees, straight from git's raw status
@@ -197,9 +197,9 @@ function parseRawDiff(raw: string): readonly ExactDeltaEntry[] {
  * never a fallback: every failure to resolve, run, or parse throws.
  */
 export async function exactDelta(git: ExactDeltaGit, repo: string, base: string, tree: string): Promise<ExactDelta> {
-  const baseTree = await git.run(repo, ["rev-parse", "--verify", `${base}^{tree}`])
-  const candidateTree = await git.run(repo, ["rev-parse", "--verify", `${tree}^{tree}`])
-  const raw = await git.run(repo, [
+  const baseTree = await git.text(repo, ["rev-parse", "--verify", `${base}^{tree}`])
+  const candidateTree = await git.text(repo, ["rev-parse", "--verify", `${tree}^{tree}`])
+  const raw = await git.text(repo, [
     "diff",
     ...EXACT_DELTA_DIFF_OPTIONS,
     "--raw",
@@ -433,7 +433,7 @@ async function treeEntryAt(
   tree: string,
   path: string,
 ): Promise<Readonly<{ mode: string; oid: string }> | undefined> {
-  const listed = await git.run(repo, ["ls-tree", "-z", tree, "--", path])
+  const listed = await git.text(repo, ["ls-tree", "-z", tree, "--", path])
   const record = listed.split("\0").find((row) => row !== "")
   if (record === undefined) return undefined
   const match = /^([0-7]{6}) \S+ (\S+)\t/u.exec(record)

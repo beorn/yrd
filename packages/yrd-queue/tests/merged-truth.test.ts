@@ -46,18 +46,18 @@ async function makeRepo(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "yrd-merged-truth-"))
   roots.push(root)
   const repo = join(root, "repo")
-  await git.run(root, ["init", "-b", "main", "repo"])
+  await git.text(root, ["init", "-b", "main", "repo"])
   await Bun.write(join(repo, "base.txt"), "base\n")
-  await git.run(repo, ["add", "--", "base.txt"])
-  await git.run(repo, ["commit", "-m", "chore: base"])
+  await git.text(repo, ["add", "--", "base.txt"])
+  await git.text(repo, ["commit", "-m", "chore: base"])
   return repo
 }
 
 async function commitFile(repo: string, path: string, content: string, messages: readonly string[]): Promise<string> {
   await Bun.write(join(repo, path), content)
-  await git.run(repo, ["add", "--", path])
-  await git.run(repo, ["commit", ...messages.flatMap((message) => ["-m", message])])
-  return git.run(repo, ["rev-parse", "HEAD"])
+  await git.text(repo, ["add", "--", path])
+  await git.text(repo, ["commit", ...messages.flatMap((message) => ["-m", message])])
+  return git.text(repo, ["rev-parse", "HEAD"])
 }
 
 function synthesisTrailers(changeId: string, operation: "merge" | "compose"): string {
@@ -78,14 +78,13 @@ async function queueMerge(
     subject?: string
   }>,
 ): Promise<Readonly<{ authoredTip: string; mergeCommit: string }>> {
-  await git.run(repo, ["checkout", "-q", "-b", options.branch])
+  await git.text(repo, ["checkout", "-q", "-b", options.branch])
   const authoredTip = await commitFile(repo, options.file, `${options.file}\n`, [`feat: ${options.file}`])
-  await git.run(repo, ["checkout", "-q", "main"])
+  await git.text(repo, ["checkout", "-q", "main"])
   const subject = options.subject ?? `yrd: merge ${options.member} revision ${String(options.revision)}`
-  const messages =
-    options.changeId === undefined ? [subject] : [subject, synthesisTrailers(options.changeId, "merge")]
-  await git.run(repo, ["merge", "--no-ff", ...messages.flatMap((message) => ["-m", message]), options.branch])
-  const mergeCommit = await git.run(repo, ["rev-parse", "HEAD"])
+  const messages = options.changeId === undefined ? [subject] : [subject, synthesisTrailers(options.changeId, "merge")]
+  await git.text(repo, ["merge", "--no-ff", ...messages.flatMap((message) => ["-m", message]), options.branch])
+  const mergeCommit = await git.text(repo, ["rev-parse", "HEAD"])
   return { authoredTip, mergeCommit }
 }
 
@@ -111,10 +110,10 @@ type Fixture = Readonly<{
 async function acceptanceFixture(): Promise<Fixture> {
   const repo = await makeRepo()
 
-  await git.run(repo, ["checkout", "-q", "-b", "task/a"])
+  await git.text(repo, ["checkout", "-q", "-b", "task/a"])
   const tipA = await commitFile(repo, "a.txt", "a\n", ["feat: a", `Change-Id: ${ID_X}`])
-  await git.run(repo, ["checkout", "-q", "main"])
-  await git.run(repo, [
+  await git.text(repo, ["checkout", "-q", "main"])
+  await git.text(repo, [
     "merge",
     "--no-ff",
     "-m",
@@ -123,13 +122,13 @@ async function acceptanceFixture(): Promise<Fixture> {
     synthesisTrailers(ID_A, "merge"),
     "task/a",
   ])
-  const mergeA = await git.run(repo, ["rev-parse", "HEAD"])
+  const mergeA = await git.text(repo, ["rev-parse", "HEAD"])
 
   const merged = await queueMerge(repo, { branch: "task/b", file: "b.txt", member: "PR2", revision: 1 })
 
-  await git.run(repo, ["checkout", "-q", "-b", "task/c"])
+  await git.text(repo, ["checkout", "-q", "-b", "task/c"])
   const tipC = await commitFile(repo, "c.txt", "c\n", ["feat: c"])
-  await git.run(repo, ["checkout", "-q", "main"])
+  await git.text(repo, ["checkout", "-q", "main"])
 
   const mergedD = await queueMerge(repo, {
     branch: "task/d",
@@ -214,10 +213,10 @@ describe("buildMergedTruthIndex", () => {
 
   it("surfaces a hand merge (default git subject, no member) as a specimen too", async () => {
     const repo = await makeRepo()
-    await git.run(repo, ["checkout", "-q", "-b", "task/e"])
+    await git.text(repo, ["checkout", "-q", "-b", "task/e"])
     await commitFile(repo, "e.txt", "e\n", ["feat: e"])
-    await git.run(repo, ["checkout", "-q", "main"])
-    await git.run(repo, ["merge", "--no-ff", "-m", "Merge branch 'task/e'", "task/e"])
+    await git.text(repo, ["checkout", "-q", "main"])
+    await git.text(repo, ["merge", "--no-ff", "-m", "Merge branch 'task/e'", "task/e"])
 
     const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
 
@@ -261,10 +260,10 @@ describe("buildMergedTruthIndex", () => {
 
   it("recovers the change id from a surviving Merge-Change-Id when Change-Id was dropped", async () => {
     const repo = await makeRepo()
-    await git.run(repo, ["checkout", "-q", "-b", "task/f"])
+    await git.text(repo, ["checkout", "-q", "-b", "task/f"])
     await commitFile(repo, "f.txt", "f\n", ["feat: f"])
-    await git.run(repo, ["checkout", "-q", "main"])
-    await git.run(repo, [
+    await git.text(repo, ["checkout", "-q", "main"])
+    await git.text(repo, [
       "merge",
       "--no-ff",
       "-m",
@@ -383,10 +382,10 @@ describe("mergedByChangeId", () => {
 
   it("never lets member context filter a member-less hand merge out of the veto", async () => {
     const repo = await makeRepo()
-    await git.run(repo, ["checkout", "-q", "-b", "task/e"])
+    await git.text(repo, ["checkout", "-q", "-b", "task/e"])
     await commitFile(repo, "e.txt", "e\n", ["feat: e"])
-    await git.run(repo, ["checkout", "-q", "main"])
-    await git.run(repo, ["merge", "--no-ff", "-m", "Merge branch 'task/e'", "task/e"])
+    await git.text(repo, ["checkout", "-q", "main"])
+    await git.text(repo, ["merge", "--no-ff", "-m", "Merge branch 'task/e'", "task/e"])
     const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
 
     expect(mergedByChangeId(index, ID_C, { member: "PR9" })).toMatchObject({ kind: "unknown" })
@@ -435,10 +434,10 @@ describe("mergedByAncestry", () => {
 
   it("answers not-merged for unrelated history and throws for an object the repository lacks", async () => {
     const fixture = await acceptanceFixture()
-    await git.run(fixture.repo, ["checkout", "-q", "--orphan", "orphan"])
-    await git.run(fixture.repo, ["commit", "--allow-empty", "-m", "orphan root"])
-    const orphan = await git.run(fixture.repo, ["rev-parse", "HEAD"])
-    await git.run(fixture.repo, ["checkout", "-q", "main"])
+    await git.text(fixture.repo, ["checkout", "-q", "--orphan", "orphan"])
+    await git.text(fixture.repo, ["commit", "--allow-empty", "-m", "orphan root"])
+    const orphan = await git.text(fixture.repo, ["rev-parse", "HEAD"])
+    await git.text(fixture.repo, ["checkout", "-q", "main"])
 
     expect(await mergedByAncestry(git, fixture.index, orphan)).toMatchObject({ kind: "not-merged" })
     await expect(mergedByAncestry(git, fixture.index, "1".repeat(40))).rejects.toThrow()
@@ -544,9 +543,7 @@ describe("compareMergedTruth — the store agreement harness", () => {
   it("disagrees when the store says not merged but the repository carries the change", async () => {
     const fixture = await acceptanceFixture()
 
-    const comparisons = await compareMergedTruth(git, fixture.index, [
-      { member: "PR1", changeId: ID_A, merged: false },
-    ])
+    const comparisons = await compareMergedTruth(git, fixture.index, [{ member: "PR1", changeId: ID_A, merged: false }])
 
     expect(comparisons[0]?.agreement).toBe("disagree")
     expect(comparisons[0]?.detail).toContain("repository carries the change")

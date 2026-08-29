@@ -64,14 +64,14 @@ for (const line of leg1Disagree) console.log(`  DISAGREE ${line}`)
 await using runtime = createProcess({ cwd: repo })
 const processGit = adaptProcessGit(runtime, { timeoutMs: 120_000 })
 const git: MergedTruthGit = {
-  run: async (cwd, args) => {
+  text: async (cwd: string, args: readonly string[]) => {
     const result = await processGit.run({ repo: cwd, args })
     if (result.code !== 0 || result.timedOut === true || result.failure !== undefined) {
       throw new Error(`s4-parity: git ${args.join(" ")} failed (${result.code}): ${result.stderr}`)
     }
     return result.stdout.trim()
   },
-  optional: async (cwd, args) => {
+  optionalText: async (cwd: string, args: readonly string[]) => {
     const result = await processGit.run({ repo: cwd, args })
     if (result.timedOut === true || result.failure !== undefined) {
       throw new Error(`s4-parity: git ${args.join(" ")} did not run: ${result.stderr}`)

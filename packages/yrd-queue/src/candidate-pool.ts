@@ -6,7 +6,7 @@ import type { Process } from "@yrd/process"
 import type { ConditionalLogger } from "loggily"
 import { materializeSubmodulesWithProcess } from "git-super/submodules"
 import type { GitProcess } from "git-super/process"
-import { createGitWorktreeStore, type GitWorktreeStore } from "git-super/worktree"
+import { createGit, createGitWorktreeStore, type GitWorktreeStore } from "git-super/worktree"
 
 /**
  * Bounded warm candidate-worktree pool (merge-queue R40).
@@ -105,53 +105,9 @@ export function createCandidatePoolGit(
   })
 }
 
-export type PoolGitCommands = Readonly<{
-  run(
-    repo: string,
-    args: readonly string[],
-    allowFailure?: boolean,
-    timeoutMs?: number,
-  ): Promise<Readonly<{ code: number; stdout: string; stderr: string }>>
-}>
-
-/**
- * The pool's positional, TRIMMING, throwing view of the one Git transport.
- *
- * Exported because the timeout contract below is a production lesson, not an
- * implementation detail, and a lesson worth a comment is worth a test that can
- * reach it without standing up a pool.
- *
- * The trim is load-bearing, and used to be an undocumented difference between
- * two otherwise identical `{code, stdout, stderr}` transports: `resolveCommit`
- * returns this `stdout` and passes it straight to `reset --hard <sha>`, so a
- * raw sha carrying its trailing newline breaks the reset. Any future merge of
- * these transports must keep the trim on THIS side of the boundary.
- */
-export function poolGitCommands(gitProcess: GitProcess): PoolGitCommands {
-  return Object.freeze({
-    async run(repo, args, allowFailure = false, timeoutMs = GIT_TIMEOUT_MS) {
-      const result = await gitProcess.run({ repo, args, timeoutMs })
-      if (result.timedOut === true) {
-        // A timed-out subprocess was killed mid-operation. For allowFailure
-        // callers (best-effort cleanup like `worktree remove`, `rebase --abort`)
-        // that is a FAILED RESULT they already handle — throwing here instead
-        // escaped past every refusal path and killed the habitant (2026-07-23).
-        const message = `yrd: git ${args.join(" ")} timed out after ${String(timeoutMs)}ms`
-        if (!allowFailure) throw new Error(message)
-        return { code: result.code === 0 ? 124 : result.code, stdout: result.stdout.trim(), stderr: message }
-      }
-      const completed = { code: result.code, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
-      if (!allowFailure && completed.code !== 0) {
-        throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
-      }
-      return completed
-    },
-  })
-}
-
 export function createCandidatePool(options: CandidatePoolOptions): CandidatePool {
   const { repo, parent, git: gitProcess } = options
-  const git = poolGitCommands(gitProcess)
+  const git = createGit(gitProcess, globalThis.process.env, GIT_TIMEOUT_MS)
   const worktrees = Promise.resolve(
     options.worktrees ??
       createGitWorktreeStore({
@@ -300,8 +256,9 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
   }
 
   async function resolveCommit(worktree: string, ref: string): Promise<string> {
-    const parsed = await git.run(worktree, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])
-    return parsed.stdout
+    // A VALUE, not a payload: this sha is passed straight to `reset --hard`,
+    // where a trailing newline breaks the reset.
+    return git.text(worktree, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])
   }
 
   /** Reset a warm worktree to `ref` and PROVE it is residue-free. Fail closed:
@@ -329,8 +286,8 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
       const cleaned = await git.run(worktree, ["clean", "-fdx"], true)
       if (cleaned.code !== 0) return record(false, cleaned.stderr || cleaned.stdout || "clean -fdx failed")
       await materialize(worktree, ref)
-      const head = await git.run(worktree, ["rev-parse", "--verify", "--end-of-options", "HEAD"], true)
-      if (head.code !== 0 || head.stdout !== target) return record(false, "HEAD does not match the candidate")
+      const head = await git.optionalText(worktree, ["rev-parse", "--verify", "--end-of-options", "HEAD"])
+      if (head !== target) return record(false, "HEAD does not match the candidate")
       const dirty = await git.run(
         worktree,
         ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"],

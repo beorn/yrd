@@ -3417,8 +3417,8 @@ export async function rebuildCandidateByMerge(
   // has real commits beyond target that a bare fast-forward still delivers —
   // caught by recut-absorbed-payload.test.ts: target genuinely an ancestor of
   // headSha, but headSha carries one more authored commit beyond it.
-  const refGit: Pick<import("./content-identity.ts").ExactDeltaGit, "run"> = {
-    async run(r, a) {
+  const refGit: Pick<import("./content-identity.ts").ExactDeltaGit, "text"> = {
+    async text(r, a) {
       const result = await git.run(r, a, true)
       if (result.code !== 0) {
         throw new Error(`git ${a.join(" ")} exited ${result.code}: ${(result.stderr || result.stdout).trim()}`)

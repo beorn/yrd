@@ -133,7 +133,7 @@ type EnumeratedCandidateRef = Readonly<{ ref: string; sha: string; clockMs?: num
  * git allows and a space split would silently truncate it.
  */
 async function enumerateCandidateRefs(git: RefGit, repo: string): Promise<readonly EnumeratedCandidateRef[]> {
-  const listing = await git.run(repo, [
+  const listing = await git.text(repo, [
     "for-each-ref",
     "--format=%(refname)%00%(objectname)%00%(committerdate:unix)",
     CANDIDATE_REF_NAMESPACE,
@@ -314,12 +314,12 @@ export async function pruneCandidateRefs(
   const kept: Array<Readonly<{ ref: string; reason: string }>> = []
   for (const finding of options.findings) {
     if (finding.disposition !== "reclaimable") continue
-    const current = await git.optional(options.repo, ["rev-parse", "--verify", `${finding.ref}^{commit}`])
+    const current = await git.optionalText(options.repo, ["rev-parse", "--verify", `${finding.ref}^{commit}`])
     if (current !== finding.sha) {
       kept.push({ ref: finding.ref, reason: `moved since the inventory read (now ${current ?? "absent"})` })
       continue
     }
-    const removed = await git.optional(options.repo, ["update-ref", "-d", finding.ref, finding.sha])
+    const removed = await git.optionalText(options.repo, ["update-ref", "-d", finding.ref, finding.sha])
     if (removed === undefined) {
       kept.push({ ref: finding.ref, reason: "git refused the compare-and-delete" })
       continue

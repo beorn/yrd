@@ -169,7 +169,7 @@ async function fileMaterial(
   const shared = { path: entry.path, kind: entry.kind, object: entry.object, modeDelta: exactDeltaModeDelta(entry) }
   if (entry.object === "gitlink") return { ...shared, content: opaqueContent(entry, "gitlink") }
   if (entry.kind === "typechange") return { ...shared, content: opaqueContent(entry, "opaque") }
-  const raw = await git.run(repo, [
+  const raw = await git.text(repo, [
     "diff",
     ...EXACT_DELTA_DIFF_OPTIONS,
     ...BINDING_KEY_DIFF_OPTIONS,

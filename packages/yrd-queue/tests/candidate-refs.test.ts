@@ -54,7 +54,7 @@ function sourceRewriteFixture(
  * bug the denominators exist to catch. */
 function fakeGit(rows: readonly Readonly<{ ref: string; sha: string; ageMs?: number }>[]): RefGit {
   return {
-    async run(_repo, args) {
+    async text(_repo, args) {
       if (
         args[0] !== "for-each-ref" ||
         args[2] !== CANDIDATE_REF_NAMESPACE ||
@@ -68,7 +68,7 @@ function fakeGit(rows: readonly Readonly<{ ref: string; sha: string; ageMs?: num
         )
         .join("\n")
     },
-    async optional() {
+    async optionalText() {
       throw new Error("the sweep must not need optional reads")
     },
   }
@@ -444,10 +444,10 @@ describe("candidate refs", () => {
       const refs = new Map([[ref, tip]])
       const deletes: string[] = []
       const git: RefGit = {
-        async run() {
-          throw new Error("prune must only use optional reads")
+        async text() {
+          throw new Error("prune must only use optionalText reads")
         },
-        async optional(_repo, args) {
+        async optionalText(_repo, args) {
           if (args[0] === "rev-parse") {
             const key = (args[2] ?? "").replace(/\^\{commit\}$/u, "")
             return refs.get(key)
@@ -476,10 +476,10 @@ describe("candidate refs", () => {
     function pruneGit(refs: Map<string, string>) {
       const deletes: string[] = []
       const git: RefGit = {
-        async run() {
-          throw new Error("the prune pass must only use optional reads")
+        async text() {
+          throw new Error("the prune pass must only use optionalText reads")
         },
-        async optional(_repo, args) {
+        async optionalText(_repo, args) {
           if (args[0] === "rev-parse") {
             const ref = (args[2] ?? "").replace(/\^\{commit\}$/u, "")
             return refs.get(ref)

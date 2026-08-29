@@ -215,7 +215,7 @@ export type SweepResult = Readonly<{
 /** Gitlink paths standing on the base, read from tree mode 160000. Never
  * guessed from a path shape: `vendor/` holds plain directories too. */
 async function gitlinkPathsOf(git: RefGit, repo: string, base: string): Promise<ReadonlySet<string>> {
-  const tree = await git.run(repo, ["ls-tree", "-r", base])
+  const tree = await git.text(repo, ["ls-tree", "-r", base])
   const paths = tree
     .split("\n")
     .filter((line) => line.startsWith("160000 "))
@@ -251,7 +251,11 @@ type EnumeratedRef = Readonly<{
  * decoration — branch names may contain anything a ref format allows, and a
  * space-split would silently truncate them. */
 async function enumeratedRefs(git: RefGit, repo: string, namespace: string): Promise<readonly EnumeratedRef[]> {
-  const listing = await git.run(repo, ["for-each-ref", "--format=%(refname)%00%(refname:short)%00%(symref)", namespace])
+  const listing = await git.text(repo, [
+    "for-each-ref",
+    "--format=%(refname)%00%(refname:short)%00%(symref)",
+    namespace,
+  ])
   return listing
     .split("\n")
     .filter((line) => line !== "")
@@ -282,7 +286,7 @@ async function latestRefUpdates(
   repo: string,
   refs: ReadonlySet<string>,
 ): Promise<ReadonlyMap<string, number>> {
-  const listing = await git.run(repo, ["reflog", "show", "--all", "--date=unix", "--format=%gD"])
+  const listing = await git.text(repo, ["reflog", "show", "--all", "--date=unix", "--format=%gD"])
   const updates = new Map<string, number>()
   for (const line of listing.split("\n")) {
     if (line === "") continue
@@ -470,7 +474,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
   const namespaceBase = `${namespace}/${base}`
   const baseline =
     survivors.length > 0 &&
-    (await git.optional(repo, ["rev-parse", "--verify", "--quiet", `${namespaceBase}^{commit}`])) !== undefined
+    (await git.optionalText(repo, ["rev-parse", "--verify", "--quiet", `${namespaceBase}^{commit}`])) !== undefined
       ? namespaceBase
       : base
   const gitlinkPaths = survivors.length === 0 ? new Set<string>() : await gitlinkPathsOf(git, repo, baseline)
@@ -487,8 +491,8 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     // trustworthy — once the tip is known good, an absent merge base means
     // unrelated histories rather than "something around here is broken", so
     // the row can be reported as a fact instead of a shrug.
-    const tipSha = await git.run(repo, ["rev-parse", `${survivor.ref}^{commit}`])
-    const mergeBase = await git.optional(repo, ["merge-base", baseline, survivor.ref])
+    const tipSha = await git.text(repo, ["rev-parse", `${survivor.ref}^{commit}`])
+    const mergeBase = await git.optionalText(repo, ["merge-base", baseline, survivor.ref])
     if (mergeBase === undefined) {
       skipped.push({ ref: survivor.ref, tipSha, reason: `no merge base with '${baseline}' — unrelated histories` })
       continue

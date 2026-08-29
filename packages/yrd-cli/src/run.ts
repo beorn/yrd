@@ -2568,7 +2568,7 @@ function derivedTrackerDelivery(
   }
   const run = app.queue.get(record.id)
   const integration = run?.integration
-  if (run !== undefined && run.status === "completed" && run.conclusion === "success" && integration !== undefined) {
+  if (run?.status === "completed" && run.conclusion === "success" && integration !== undefined) {
     const at = run.finishedAt ?? record.passedAt ?? record.startedAt
     const alreadyLanded = integration.alreadyLanded
     if (alreadyLanded !== undefined) {
@@ -8594,10 +8594,10 @@ async function queueAudit(
  */
 function sweepGit(process: Pick<Process, "run">): RefGit {
   return {
-    async run(repo, args) {
+    async text(repo, args) {
       return (await runQueueGit(process, repo, args)).trim()
     },
-    async optional(repo, args) {
+    async optionalText(repo, args) {
       try {
         return (await runQueueGit(process, repo, args)).trim()
       } catch (error) {

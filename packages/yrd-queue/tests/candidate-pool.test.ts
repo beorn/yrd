@@ -12,10 +12,10 @@ import { createProcess, type Process, type ProcessRequest, type ProcessResult } 
 import { createLogger, type Event as LogEvent } from "loggily"
 import type { JobResult } from "@yrd/job"
 import type { GitProcess } from "git-super/process"
+import { createGit } from "git-super/worktree"
 import {
   createCandidatePool,
   createCandidatePoolGit,
-  poolGitCommands,
   worktreeContexts,
   type CandidatePool,
 } from "../src/candidate-pool.ts"
@@ -176,7 +176,7 @@ const passed: JobResult<{ ok: true }> = { status: "completed", conclusion: "succ
 describe("warm candidate pool", () => {
   it("bounds and names a blackholed Git process", async () => {
     let request: ProcessRequest | undefined
-    const git = poolGitCommands(
+    const git = createGit(
       createCandidatePoolGit({
         async run(input): Promise<ProcessResult> {
           request = input
@@ -191,6 +191,8 @@ describe("warm candidate pool", () => {
           }
         },
       }),
+      {},
+      120_000,
     )
 
     await expect(git.run("/blackholed-repository", ["fetch", "origin"])).rejects.toThrow(

@@ -54,12 +54,12 @@ function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][
   }
   return {
     calls,
-    async run(_repo, args) {
+    async text(_repo, args) {
       const value = answer(args)
       if (value === undefined) throw new Error(`unexpected git call: ${args.join(" ")}`)
       return value
     },
-    async optional(_repo, args) {
+    async optionalText(_repo, args) {
       return answer(args)
     },
   }
@@ -97,12 +97,12 @@ async function gitCommand(
 }
 
 const realGit: RefGit = {
-  async run(repo, args) {
+  async text(repo, args) {
     const result = await gitCommand(repo, args)
     if (!result.success) throw new Error(`git ${args.join(" ")} failed: ${result.stdout}`)
     return result.stdout
   },
-  async optional(repo, args) {
+  async optionalText(repo, args) {
     const result = await gitCommand(repo, args)
     return result.success ? result.stdout : undefined
   },

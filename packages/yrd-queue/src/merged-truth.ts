@@ -44,7 +44,7 @@ import type { RefGit } from "./uncarried-facts.ts"
  * handle. `run` throws on non-zero — an unreadable repository is a loud
  * failure, never an empty index. `optional` serves the one question where a
  * non-zero exit is a real answer (`merge-base` on unrelated histories). */
-export type MergedTruthGit = Pick<RefGit, "run" | "optional">
+export type MergedTruthGit = Pick<RefGit, "text" | "optionalText">
 
 /** The synthesis acts the queue stamps into main's first-parent line. */
 export type QueueSynthesisOperation = "merge" | "compose"
@@ -223,9 +223,10 @@ export async function buildMergedTruthIndex(
     GitShaSchema.parse(sha)
     if (exception.disposition === "carries-change") ChangeIdSchema.parse(exception.changeId)
   }
-  const tip = await git.run(repo, ["rev-parse", "--verify", `${options.tip}^{commit}`])
-  const stop = options.stop === undefined ? undefined : await git.run(repo, ["rev-parse", "--verify", `${options.stop}^{commit}`])
-  const log = await git.run(repo, [
+  const tip = await git.text(repo, ["rev-parse", "--verify", `${options.tip}^{commit}`])
+  const stop =
+    options.stop === undefined ? undefined : await git.text(repo, ["rev-parse", "--verify", `${options.stop}^{commit}`])
+  const log = await git.text(repo, [
     "log",
     "--first-parent",
     "--no-show-signature",
@@ -422,8 +423,8 @@ export async function mergedByAncestry(
   index: MergedTruthIndex,
   authoredTip: string,
 ): Promise<MergedByAncestry> {
-  const tip = await git.run(index.repo, ["rev-parse", "--verify", `${authoredTip}^{commit}`])
-  const base = await git.optional(index.repo, ["merge-base", tip, index.tip])
+  const tip = await git.text(index.repo, ["rev-parse", "--verify", `${authoredTip}^{commit}`])
+  const base = await git.optionalText(index.repo, ["merge-base", tip, index.tip])
   if (base !== tip) return { kind: "not-merged", authoredTip: tip }
   const mergeCommit = index.mergeBySecondParent.get(tip)
   return { kind: "merged", authoredTip: tip, ...(mergeCommit === undefined ? {} : { mergeCommit }) }
@@ -492,7 +493,13 @@ export async function mergedTruth(
     }
     const lineage = mergedByChangeId(index, changeId, context)
     return lineage.kind === "merged"
-      ? { kind: "merged", via: "change-id", changeId, authoredTip: ancestry.authoredTip, occurrences: lineage.occurrences }
+      ? {
+          kind: "merged",
+          via: "change-id",
+          changeId,
+          authoredTip: ancestry.authoredTip,
+          occurrences: lineage.occurrences,
+        }
       : { ...lineage, authoredTip: ancestry.authoredTip }
   }
   if (changeId === undefined) {
@@ -584,7 +591,11 @@ function compareOne(claim: StoreMergedClaim, derived: MergedTruth): MergedTruthC
           agreement: "disagree",
           detail: `store says merged but no commit in the ${String(derived.commitsWalked)}-commit window carries the change`,
         }
-      : { ...base, agreement: "agree", detail: `both say not merged over a specimen-free ${String(derived.commitsWalked)}-commit window` }
+      : {
+          ...base,
+          agreement: "agree",
+          detail: `both say not merged over a specimen-free ${String(derived.commitsWalked)}-commit window`,
+        }
   }
   if (!claim.merged) {
     return {

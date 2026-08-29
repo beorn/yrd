@@ -55,26 +55,26 @@ async function execGit(
 
 /**
  * Repository handle over the fixture's own env-hardened git, structurally
- * compatible with the package's exported `RefGit` (`run` throws on non-zero,
- * `optional` answers undefined instead), plus `exec` for the assertions that
+ * compatible with the package's exported `RefGit` (`text` throws on non-zero,
+ * `optionalText` answers undefined instead), plus `exec` for the assertions that
  * need the exit code itself (e.g. proving a merge CONFLICTS).
  */
 export type FixtureGit = Readonly<{
-  run(repo: string, args: readonly string[]): Promise<string>
-  optional(repo: string, args: readonly string[]): Promise<string | undefined>
+  text(repo: string, args: readonly string[]): Promise<string>
+  optionalText(repo: string, args: readonly string[]): Promise<string | undefined>
   exec(repo: string, args: readonly string[]): Promise<Readonly<{ code: number; stdout: string; stderr: string }>>
 }>
 
 export function fixtureRefGit(): FixtureGit {
   return {
-    async run(repo, args) {
+    async text(repo, args) {
       const result = await execGit(repo, args)
       if (result.code !== 0) {
         throw new Error(`git -C ${repo} ${args.join(" ")} exited ${result.code}: ${result.stderr || result.stdout}`)
       }
       return result.stdout
     },
-    async optional(repo, args) {
+    async optionalText(repo, args) {
       const result = await execGit(repo, args)
       return result.code === 0 ? result.stdout : undefined
     },
@@ -85,23 +85,23 @@ export function fixtureRefGit(): FixtureGit {
 async function initRepo(root: string, name: string): Promise<string> {
   const git = fixtureRefGit()
   const repo = join(root, name)
-  await git.run(root, ["init", "-b", "main", name])
+  await git.text(root, ["init", "-b", "main", name])
   return repo
 }
 
 async function commitFile(repo: string, path: string, content: string, message: string): Promise<string> {
   const git = fixtureRefGit()
   await Bun.write(join(repo, path), content)
-  await git.run(repo, ["add", "--", path])
-  await git.run(repo, ["commit", "-m", message])
-  return git.run(repo, ["rev-parse", "HEAD"])
+  await git.text(repo, ["add", "--", path])
+  await git.text(repo, ["commit", "-m", message])
+  return git.text(repo, ["rev-parse", "HEAD"])
 }
 
 async function commitGitlink(repo: string, path: string, oid: string, message: string): Promise<string> {
   const git = fixtureRefGit()
-  await git.run(repo, ["update-index", "--add", "--cacheinfo", `160000,${oid},${path}`])
-  await git.run(repo, ["commit", "-m", message])
-  return git.run(repo, ["rev-parse", "HEAD"])
+  await git.text(repo, ["update-index", "--add", "--cacheinfo", `160000,${oid},${path}`])
+  await git.text(repo, ["commit", "-m", message])
+  return git.text(repo, ["rev-parse", "HEAD"])
 }
 
 /** What main did between the author's base and its own new tip, relative to
@@ -156,7 +156,7 @@ export async function movedBaseFixture(
   const baseOne = await commitFile(repo, "main-only.txt", "main line one\n", "base: main-only file")
 
   const authorBranch = "task/moved-base-author"
-  await git.run(repo, ["checkout", "-b", authorBranch, baseOne])
+  await git.text(repo, ["checkout", "-b", authorBranch, baseOne])
   // The author edits the TOP region of the shared file.
   const authorTip = await commitFile(
     repo,
@@ -165,7 +165,7 @@ export async function movedBaseFixture(
     "author: edit shared top",
   )
 
-  await git.run(repo, ["checkout", "main"])
+  await git.text(repo, ["checkout", "main"])
   const mainPaths: string[] = options.mainMoves === "disjoint-paths" ? ["main-only.txt"] : [SHARED_FILE]
   const baseTwo =
     options.mainMoves === "disjoint-paths"
@@ -232,9 +232,9 @@ export async function bothSidesMovedGitlinkFixture(): Promise<MovedGitlinkFixtur
   const submoduleRepo = await initRepo(root, "submodule")
   const baseGitlink = await commitFile(submoduleRepo, "lib.txt", "s0\n", "submodule: s0")
   const mainGitlink = await commitFile(submoduleRepo, "lib.txt", "s0\ns1\n", "submodule: s1 (main's move)")
-  await git.run(submoduleRepo, ["checkout", "-b", "author-side", baseGitlink])
+  await git.text(submoduleRepo, ["checkout", "-b", "author-side", baseGitlink])
   const authorGitlink = await commitFile(submoduleRepo, "author.txt", "s2\n", "submodule: s2 (author's move)")
-  await git.run(submoduleRepo, ["checkout", "main"])
+  await git.text(submoduleRepo, ["checkout", "main"])
 
   const superRepo = await initRepo(root, "super")
   const gitlinkPath = "vendor/dep"
@@ -246,9 +246,9 @@ export async function bothSidesMovedGitlinkFixture(): Promise<MovedGitlinkFixtur
   )
   const baseSha = await commitGitlink(superRepo, gitlinkPath, baseGitlink, "super: record gitlink at s0")
   const authorBranch = "task/moved-gitlink-author"
-  await git.run(superRepo, ["checkout", "-b", authorBranch, baseSha])
+  await git.text(superRepo, ["checkout", "-b", authorBranch, baseSha])
   const authorTip = await commitGitlink(superRepo, gitlinkPath, authorGitlink, "super: author moves gitlink to s2")
-  await git.run(superRepo, ["checkout", "main"])
+  await git.text(superRepo, ["checkout", "main"])
   const mainTip = await commitGitlink(superRepo, gitlinkPath, mainGitlink, "super: main moves gitlink to s1")
 
   return {
@@ -317,23 +317,23 @@ export async function emptyCandidateFixture(): Promise<EmptyCandidateFixture> {
   const base = await commitFile(repo, path, "before\n", "base: feature file")
 
   const firstBranch = "sibling/first"
-  await git.run(repo, ["checkout", "-b", firstBranch, base])
+  await git.text(repo, ["checkout", "-b", firstBranch, base])
   const commitX = await commitFile(repo, path, "after\n", "X: the shared change")
   const firstTip = commitX
 
   const secondBranch = "sibling/second"
-  await git.run(repo, ["checkout", "-b", secondBranch, base])
-  await git.run(repo, ["cherry-pick", commitX])
-  const pickOfX = await git.run(repo, ["rev-parse", "HEAD"])
-  await git.run(repo, ["revert", "--no-edit", pickOfX])
-  const revertOfX = await git.run(repo, ["rev-parse", "HEAD"])
-  await git.run(repo, ["revert", "--no-edit", revertOfX])
-  const restoreOfX = await git.run(repo, ["rev-parse", "HEAD"])
+  await git.text(repo, ["checkout", "-b", secondBranch, base])
+  await git.text(repo, ["cherry-pick", commitX])
+  const pickOfX = await git.text(repo, ["rev-parse", "HEAD"])
+  await git.text(repo, ["revert", "--no-edit", pickOfX])
+  const revertOfX = await git.text(repo, ["rev-parse", "HEAD"])
+  await git.text(repo, ["revert", "--no-edit", revertOfX])
+  const restoreOfX = await git.text(repo, ["rev-parse", "HEAD"])
   const secondTip = restoreOfX
 
-  await git.run(repo, ["checkout", "main"])
-  await git.run(repo, ["merge", "--no-ff", "-m", "merge the first sibling", firstTip])
-  const mainTip = await git.run(repo, ["rev-parse", "HEAD"])
+  await git.text(repo, ["checkout", "main"])
+  await git.text(repo, ["merge", "--no-ff", "-m", "merge the first sibling", firstTip])
+  const mainTip = await git.text(repo, ["rev-parse", "HEAD"])
 
   return {
     root,
