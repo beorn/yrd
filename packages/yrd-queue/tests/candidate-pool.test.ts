@@ -11,12 +11,13 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type Event as LogEvent } from "loggily"
 import type { JobResult } from "@yrd/job"
+import type { GitProcess } from "git-super/process"
 import {
   createCandidatePool,
   createCandidatePoolGit,
+  poolGitCommands,
   worktreeContexts,
   type CandidatePool,
-  type CandidatePoolGit,
 } from "../src/candidate-pool.ts"
 
 // Real-git integration with file-protocol submodules; generous bound so heavy
@@ -108,11 +109,13 @@ type GitFault = (args: readonly string[]) => boolean
 
 /** Wrap a real pool Git so specific argv return a nonzero result — a deterministic
  * stand-in for a clean/foreach/remove that fails on a real repository. */
-function faultingGit(base: CandidatePoolGit, fault: { current: GitFault }): CandidatePoolGit {
+function faultingGit(base: GitProcess, fault: { current: GitFault }): GitProcess {
   return {
-    run: async (repo, args, allowFailure, timeoutMs) => {
-      if (fault.current(args)) return { code: 1, stdout: "", stderr: `injected fault: ${args.join(" ")}` }
-      return base.run(repo, args, allowFailure, timeoutMs)
+    run: async (request) => {
+      if (fault.current(request.args)) {
+        return { code: 1, stdout: "", stderr: `injected fault: ${request.args.join(" ")}` }
+      }
+      return base.run(request)
     },
   }
 }
@@ -173,20 +176,22 @@ const passed: JobResult<{ ok: true }> = { status: "completed", conclusion: "succ
 describe("warm candidate pool", () => {
   it("bounds and names a blackholed Git process", async () => {
     let request: ProcessRequest | undefined
-    const git = createCandidatePoolGit({
-      async run(input): Promise<ProcessResult> {
-        request = input
-        return {
-          exitCode: 124,
-          signal: "SIGTERM",
-          stdout: "",
-          stderr: "",
-          durationMs: input.timeoutMs ?? 0,
-          timedOut: true,
-          verdict: "TIMED_OUT",
-        }
-      },
-    })
+    const git = poolGitCommands(
+      createCandidatePoolGit({
+        async run(input): Promise<ProcessResult> {
+          request = input
+          return {
+            exitCode: 124,
+            signal: "SIGTERM",
+            stdout: "",
+            stderr: "",
+            durationMs: input.timeoutMs ?? 0,
+            timedOut: true,
+            verdict: "TIMED_OUT",
+          }
+        },
+      }),
+    )
 
     await expect(git.run("/blackholed-repository", ["fetch", "origin"])).rejects.toThrow(
       "git fetch origin timed out after 120000ms",

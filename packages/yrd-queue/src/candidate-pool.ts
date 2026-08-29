@@ -4,7 +4,8 @@ import { join } from "node:path"
 import type { RunnerContextRequest, RunnerContexts, RuntimeContext } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import type { ConditionalLogger } from "loggily"
-import { materializeSubmodules } from "git-super/submodules"
+import { materializeSubmodulesWithProcess } from "git-super/submodules"
+import type { GitProcess } from "git-super/process"
 import { createGitWorktreeStore, type GitWorktreeStore } from "git-super/worktree"
 
 /**
@@ -30,28 +31,13 @@ import { createGitWorktreeStore, type GitWorktreeStore } from "git-super/worktre
  * merely to this phase. Enable with -vv, as with every other span here.
  */
 
-/** The narrow Git surface the pool drives. Structural to keep the pool decoupled
- * from the command module's private `createGit` (which the pool would otherwise
- * form an import cycle with). `command.ts` passes its own `git`; the host builds
- * one via {@link createCandidatePoolGit}. */
-export type CandidatePoolGit = Readonly<{
-  run(
-    repo: string,
-    args: readonly string[],
-    allowFailure?: boolean,
-    timeoutMs?: number,
-  ): Promise<CandidatePoolGitResult>
-}>
-
-export type CandidatePoolGitResult = Readonly<{ code: number; stdout: string; stderr: string }>
-
 export type CandidatePoolOptions = Readonly<{
   repo: string
   /** Directory under which warm worktrees are materialized (the Bays root). */
   parent: string
   /** Maximum concurrent warm worktrees held for this repository. */
   capacity?: number
-  git: CandidatePoolGit
+  git: GitProcess
   worktrees?: GitWorktreeStore | Promise<GitWorktreeStore>
   log?: ConditionalLogger
 }>
@@ -96,30 +82,65 @@ type AcquireOutcome = "hit" | "miss" | "residue-evicted"
 export function createCandidatePoolGit(
   process: Pick<Process, "run">,
   environment: NodeJS.ProcessEnv = globalThis.process.env,
-): CandidatePoolGit {
+): GitProcess {
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
   env.KM_NO_AUTO_SUBMODULE_UPDATE = "1"
   return Object.freeze({
-    async run(repo, args, allowFailure = false, timeoutMs = GIT_TIMEOUT_MS): Promise<CandidatePoolGitResult> {
+    async run(request) {
       const result = await process.run({
-        argv: ["git", "-C", repo, ...args],
-        cwd: repo,
-        env,
-        timeoutMs,
+        argv: ["git", "-C", request.repo, ...request.args],
+        cwd: request.repo,
+        env: { ...env, ...request.env },
+        timeoutMs: request.timeoutMs ?? GIT_TIMEOUT_MS,
       })
-      if (result.timedOut) {
+      return {
+        code: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        timedOut: result.timedOut,
+      }
+    },
+  })
+}
+
+export type PoolGitCommands = Readonly<{
+  run(
+    repo: string,
+    args: readonly string[],
+    allowFailure?: boolean,
+    timeoutMs?: number,
+  ): Promise<Readonly<{ code: number; stdout: string; stderr: string }>>
+}>
+
+/**
+ * The pool's positional, TRIMMING, throwing view of the one Git transport.
+ *
+ * Exported because the timeout contract below is a production lesson, not an
+ * implementation detail, and a lesson worth a comment is worth a test that can
+ * reach it without standing up a pool.
+ *
+ * The trim is load-bearing, and used to be an undocumented difference between
+ * two otherwise identical `{code, stdout, stderr}` transports: `resolveCommit`
+ * returns this `stdout` and passes it straight to `reset --hard <sha>`, so a
+ * raw sha carrying its trailing newline breaks the reset. Any future merge of
+ * these transports must keep the trim on THIS side of the boundary.
+ */
+export function poolGitCommands(gitProcess: GitProcess): PoolGitCommands {
+  return Object.freeze({
+    async run(repo, args, allowFailure = false, timeoutMs = GIT_TIMEOUT_MS) {
+      const result = await gitProcess.run({ repo, args, timeoutMs })
+      if (result.timedOut === true) {
         // A timed-out subprocess was killed mid-operation. For allowFailure
         // callers (best-effort cleanup like `worktree remove`, `rebase --abort`)
         // that is a FAILED RESULT they already handle — throwing here instead
         // escaped past every refusal path and killed the habitant (2026-07-23).
-        const message = `yrd: git ${args.join(" ")} timed out after ${timeoutMs}ms`
+        const message = `yrd: git ${args.join(" ")} timed out after ${String(timeoutMs)}ms`
         if (!allowFailure) throw new Error(message)
-        return { code: result.exitCode === 0 ? 124 : result.exitCode, stdout: result.stdout.trim(), stderr: message }
+        return { code: result.code === 0 ? 124 : result.code, stdout: result.stdout.trim(), stderr: message }
       }
-
-      const completed = { code: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+      const completed = { code: result.code, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
       if (!allowFailure && completed.code !== 0) {
         throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
       }
@@ -129,12 +150,13 @@ export function createCandidatePoolGit(
 }
 
 export function createCandidatePool(options: CandidatePoolOptions): CandidatePool {
-  const { repo, parent, git } = options
+  const { repo, parent, git: gitProcess } = options
+  const git = poolGitCommands(gitProcess)
   const worktrees = Promise.resolve(
     options.worktrees ??
       createGitWorktreeStore({
         repo,
-        git,
+        gitProcess,
         timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
       }),
   )
@@ -256,7 +278,7 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     // borrowed sixteen times off local disk produced the same record.
     // `child` keeps them distinguishable as `yrd:submodules:*` rather than
     // colliding with this `yrd:materialize` span.
-    const updated = await materializeSubmodules(git, {
+    const updated = await materializeSubmodulesWithProcess(gitProcess, {
       worktree,
       referenceWorktree: repo,
       force: true,

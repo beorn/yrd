@@ -241,9 +241,9 @@ async function rollbackProvisionHookFailure(
 export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<BayWorkspace> {
   const repo = resolve(options.repo)
   const baysRoot = resolve(options.baysRoot ?? `${repo}/.bays`)
-  const worktrees = createGitWorktreeStore(options)
-  const { git } = worktrees
   const transport = adaptProcessGit(options.process, { env: options.env, timeoutMs: GIT_TIMEOUT_MS })
+  const worktrees = createGitWorktreeStore({ ...options, gitProcess: transport })
+  const { git } = worktrees
   if (options.intakeRemote !== undefined) {
     // Older Yrd versions set this in shared config, making plain `git push` target the Bay receiver.
     await worktrees.removeLegacySharedPushDefault()

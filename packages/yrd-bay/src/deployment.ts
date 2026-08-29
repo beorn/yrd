@@ -4,7 +4,7 @@ import { chmod, link, mkdir, open, readFile, readdir, realpath, stat, unlink } f
 import { join, resolve } from "node:path"
 import { systemClock, type JsonValue } from "@yrd/core"
 import { createJobDef, type JobDef } from "@yrd/job"
-import type { Process } from "@yrd/process"
+import { adaptProcessGit, type Process } from "@yrd/process"
 import { createGitWorktreeStore, type GitWorktreeStoreOptions } from "git-super/worktree"
 import * as z from "zod"
 
@@ -268,7 +268,10 @@ function assertExactRelease(
 }
 
 export async function createGitDeploymentStore(options: GitDeploymentStoreOptions) {
-  const worktrees = createGitWorktreeStore(options)
+  const worktrees = createGitWorktreeStore({
+    ...options,
+    gitProcess: adaptProcessGit(options.process, { env: options.env }),
+  })
   const deploymentsRoot = resolve(options.deploymentsRoot ?? join(worktrees.repo, ".yrd-deployments"))
   const rootsRoot = join(deploymentsRoot, "roots")
   const recordsRoot = join(deploymentsRoot, "records")
