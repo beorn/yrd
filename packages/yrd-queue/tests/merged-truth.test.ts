@@ -629,3 +629,103 @@ describe("compareMergedTruth — the store agreement harness", () => {
     expect(comparisons[0]?.detail).toContain(fixture.mergeA)
   })
 })
+
+/**
+ * The walk reads what a synthesis commit STATES, not how its subject reads.
+ *
+ * Before this, member and revision were regexed out of the subject. That works
+ * while the vocabulary stands still and fails catastrophically when it moves: a
+ * subject the regex misses turns the commit into a specimen, and one specimen
+ * makes every not-found lookup in the window answer the loud unknown.
+ */
+describe("synthesis facts come from trailers, with the subject as the pre-epoch fallback", () => {
+  const ID_T = `Id${"0".repeat(39)}`
+
+  /** Queue-merge with an explicit trailer block, so a case can state the
+   * trailers and the subject independently — which is the whole point here. */
+  async function mergeWith(
+    repo: string,
+    options: Readonly<{ branch: string; file: string; subject: string; trailers: string }>,
+  ): Promise<string> {
+    await git.text(repo, ["checkout", "-q", "-b", options.branch])
+    await commitFile(repo, options.file, `${options.file}\n`, [`feat: ${options.file}`])
+    await git.text(repo, ["checkout", "-q", "main"])
+    await git.text(repo, ["merge", "--no-ff", "-m", options.subject, "-m", options.trailers, options.branch])
+    return git.text(repo, ["rev-parse", "HEAD"])
+  }
+
+  it("resolves a fully-trailered commit whose SUBJECT the regex cannot parse", async () => {
+    // The failure this exists to prevent, made concrete: a future vocabulary.
+    // `yrd: land ...` is not `merge` or `compose`, so QUEUE_SYNTHESIS_SUBJECT
+    // misses it entirely — and before trailers that alone was enough to make
+    // the commit a specimen and poison every lookup in the window.
+    const repo = await makeRepo()
+    const commit = await mergeWith(repo, {
+      branch: "issue/future-vocabulary",
+      file: "future.txt",
+      subject: "yrd: land PR9001 attempt 3",
+      trailers: `Change-Id: ${ID_T}\nMerge-Change-Id: ${ID_T}-merge\nYrd-Member: PR9001\nYrd-Revision: 3`,
+    })
+    const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
+
+    expect(index.specimens, "a stated commit must never become a specimen").toEqual([])
+    const found = mergedByChangeId(index, ID_T)
+    expect(found.kind).toBe("merged")
+    const occurrence = found.kind === "merged" ? found.occurrences[0] : undefined
+    expect(occurrence?.commit).toBe(commit)
+    expect(occurrence?.member, "member comes from the trailer").toBe("PR9001")
+    expect(occurrence?.revision, "revision comes from the trailer").toBe(3)
+    expect(occurrence?.operation, "operation comes from Merge-Change-Id, not the subject").toBe("merge")
+  })
+
+  it("makes a trailer that CONTRADICTS its subject a specimen rather than picking one", async () => {
+    // Both sources present and disagreeing means the funnel wrote two different
+    // answers. Silently preferring either would index a fact no one stated.
+    const repo = await makeRepo()
+    await mergeWith(repo, {
+      branch: "issue/disagreeing",
+      file: "disagree.txt",
+      subject: "yrd: merge PR100 revision 1",
+      trailers: `Change-Id: ${ID_T}\nMerge-Change-Id: ${ID_T}-merge\nYrd-Member: PR999\nYrd-Revision: 7`,
+    })
+    const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
+
+    expect(index.specimens).toHaveLength(1)
+    expect(index.specimens[0]?.detail).toContain("PR999")
+    expect(index.specimens[0]?.detail).toContain("PR100")
+
+    // The LINEAGE still resolves, and that is correct rather than lenient: the
+    // Change-Id trailer is unambiguous, so whether the change landed is a
+    // question this commit answers plainly. Only the member and revision are
+    // contested, and those are context, not identity.
+    const found = mergedByChangeId(index, ID_T)
+    expect(found.kind, "an unambiguous Change-Id still answers the landing question").toBe("merged")
+
+    // What must NOT happen is the contested context being guessed. Neither the
+    // trailer's answer nor the subject's is carried, because the commit gives
+    // no basis to prefer one over the other.
+    const occurrence = found.kind === "merged" ? found.occurrences[0] : undefined
+    expect(occurrence?.member, "a contested member is withheld, never picked").toBeUndefined()
+    expect(occurrence?.revision, "and so is the revision").toBeUndefined()
+  })
+
+  it("still reads pre-epoch history, which carries no such trailers", async () => {
+    // Backward compatibility is the assertion: every commit written before this
+    // change has only a subject, and must resolve exactly as it always did.
+    const repo = await makeRepo()
+    await mergeWith(repo, {
+      branch: "issue/pre-epoch",
+      file: "old.txt",
+      subject: "yrd: merge PR42 revision 2",
+      trailers: `Change-Id: ${ID_T}\nMerge-Change-Id: ${ID_T}-merge`,
+    })
+    const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
+
+    expect(index.specimens).toEqual([])
+    const found = mergedByChangeId(index, ID_T)
+    const occurrence = found.kind === "merged" ? found.occurrences[0] : undefined
+    expect(occurrence?.member).toBe("PR42")
+    expect(occurrence?.revision).toBe(2)
+    expect(occurrence?.operation).toBe("merge")
+  })
+})

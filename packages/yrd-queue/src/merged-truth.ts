@@ -148,7 +148,14 @@ export type MergedTruthIndexOptions = Readonly<{
 }>
 
 const WALK_FORMAT =
-  "%H%x09%P%x09%(trailers:key=Change-Id,valueonly,separator=%x2c)%x09%(trailers:key=Merge-Change-Id,valueonly,separator=%x2c)%x09%s"
+  "%H%x09%P%x09%(trailers:key=Change-Id,valueonly,separator=%x2c)%x09%(trailers:key=Merge-Change-Id,valueonly,separator=%x2c)" +
+  "%x09%(trailers:key=Yrd-Member,valueonly,separator=%x2c)%x09%(trailers:key=Yrd-Revision,valueonly,separator=%x2c)%x09%s"
+
+/** The trailer keys the queue stamps its own synthesis facts on. Spelled once,
+ * here, and consumed by {@link WALK_FORMAT}; `command.ts` writes them through
+ * the single message funnel. */
+export const YRD_MEMBER_TRAILER_KEY = "Yrd-Member"
+export const YRD_REVISION_TRAILER_KEY = "Yrd-Revision"
 
 /** Old-era subjects omit ` revision N` (`yrd: compose PR112`), so the
  * revision group is optional; the member is never optional. */
@@ -166,6 +173,92 @@ type ParsedSynthesisSubject = Readonly<{
   member: string
   revision?: number
 }>
+
+/**
+ * The synthesis facts a commit STATES, preferred over the ones its subject
+ * implies.
+ *
+ * The subject regex is not wrong today — the queue writes every synthesis
+ * subject through one funnel, so producer and consumer cannot drift while both
+ * stay put. What it cannot survive is the vocabulary MOVING. A subject this
+ * regex fails to parse does not degrade gracefully: the commit becomes a
+ * {@link MergedTruthSpecimen}, and one specimen makes every not-found lookup in
+ * the window answer the loud unknown instead of the truth. A rename nobody
+ * thought was risky would take the lineage index down to "cannot say".
+ *
+ * So a fully-trailered commit is read WITHOUT the subject at all. All three
+ * facts are already stated: `Yrd-Member` and `Yrd-Revision` carry the member
+ * and revision, and the operation comes from `Merge-Change-Id`, which has
+ * always embedded it as `<change-id>-<operation>`. Nothing here parses prose.
+ *
+ * The subject remains the fallback and must: every commit before this change
+ * carries no such trailers, and pre-epoch history has to keep resolving. Where
+ * BOTH are present they are cross-checked, and a disagreement is never silently
+ * resolved — it means the funnel wrote two different answers, and the caller is
+ * told rather than handed whichever is read first.
+ */
+function resolveSynthesis(row: WalkRow): Readonly<{ parsed?: ParsedSynthesisSubject; unreadable: readonly string[] }> {
+  const fromSubject = parseSynthesisSubject(row.subject)
+  const member = row.memberValues[0]
+  const revisionRaw = row.revisionValues[0]
+  if (member === undefined && revisionRaw === undefined) {
+    // Pre-epoch: the subject is all there is, and that is not an error.
+    return { ...(fromSubject === undefined ? {} : { parsed: fromSubject }), unreadable: [] }
+  }
+
+  const unreadable: string[] = []
+  const operations = new Set(
+    row.mergeChangeIdValues
+      .map((value) => MERGE_CHANGE_ID_VALUE.exec(value)?.groups?.["operation"])
+      .filter((operation): operation is string => operation !== undefined),
+  )
+  // One commit performs one act. Two different embedded operations is a
+  // synthesis whose own trailers disagree about what it did.
+  if (operations.size > 1) {
+    unreadable.push(`Merge-Change-Id trailers embed conflicting operations ${[...operations].join(", ")}`)
+  }
+  const operation = (operations.size === 1 ? [...operations][0] : undefined) ?? fromSubject?.operation
+  if (operation === undefined) {
+    unreadable.push(
+      `commit carries ${YRD_MEMBER_TRAILER_KEY}/${YRD_REVISION_TRAILER_KEY} trailers but neither a ` +
+        `Merge-Change-Id embedding its operation nor a parseable subject, so what it did is unknown`,
+    )
+  }
+
+  let revision: number | undefined = fromSubject?.revision
+  if (revisionRaw !== undefined) {
+    const parsedRevision = Number(revisionRaw)
+    if (!Number.isSafeInteger(parsedRevision) || parsedRevision < 1) {
+      unreadable.push(`${YRD_REVISION_TRAILER_KEY} trailer value '${revisionRaw}' is not a revision number`)
+    } else {
+      if (fromSubject?.revision !== undefined && fromSubject.revision !== parsedRevision) {
+        unreadable.push(
+          `${YRD_REVISION_TRAILER_KEY} trailer says ${String(parsedRevision)} but the subject says ` +
+            `${String(fromSubject.revision)}`,
+        )
+      }
+      revision = parsedRevision
+    }
+  }
+  if (member !== undefined && fromSubject !== undefined && member !== fromSubject.member) {
+    unreadable.push(`${YRD_MEMBER_TRAILER_KEY} trailer says '${member}' but the subject names '${fromSubject.member}'`)
+  }
+  const resolvedMember = member ?? fromSubject?.member
+  if (resolvedMember === undefined) {
+    unreadable.push(`${YRD_REVISION_TRAILER_KEY} trailer is present but no member is stated by trailer or subject`)
+  }
+
+  if (unreadable.length > 0) return { unreadable }
+  if (operation === undefined || resolvedMember === undefined) return { unreadable }
+  return {
+    parsed: {
+      operation: operation as QueueSynthesisOperation,
+      member: resolvedMember,
+      ...(revision === undefined ? {} : { revision }),
+    },
+    unreadable: [],
+  }
+}
 
 function parseSynthesisSubject(subject: string): ParsedSynthesisSubject | undefined {
   const match = QUEUE_SYNTHESIS_SUBJECT.exec(subject)
@@ -187,20 +280,27 @@ type WalkRow = Readonly<{
   parents: readonly string[]
   changeIdValues: readonly string[]
   mergeChangeIdValues: readonly string[]
+  memberValues: readonly string[]
+  revisionValues: readonly string[]
   subject: string
 }>
 
 function parseWalkRow(row: string): WalkRow {
   const fields = row.split("\t")
-  // Five fixed fields with the subject LAST: a tab inside a subject is legal,
-  // so everything past the fourth separator is subject text.
-  if (fields.length < 5) throw new Error(`yrd: malformed merged-truth walk row '${row}'`)
-  const [commit, parentsField, changeIdField, mergeChangeIdField] = fields
+  // SEVEN fixed fields with the subject LAST: a tab inside a subject is legal,
+  // so everything past the sixth separator is subject text. The count is the
+  // load-bearing part — adding a field ahead of the subject without moving this
+  // slice would silently read the new trailer AS the subject and hand every
+  // synthesis commit an unparseable one, turning the whole walk into specimens.
+  if (fields.length < 7) throw new Error(`yrd: malformed merged-truth walk row '${row}'`)
+  const [commit, parentsField, changeIdField, mergeChangeIdField, memberField, revisionField] = fields
   if (
     commit === undefined ||
     parentsField === undefined ||
     changeIdField === undefined ||
-    mergeChangeIdField === undefined
+    mergeChangeIdField === undefined ||
+    memberField === undefined ||
+    revisionField === undefined
   ) {
     throw new Error(`yrd: malformed merged-truth walk row '${row}'`)
   }
@@ -212,7 +312,9 @@ function parseWalkRow(row: string): WalkRow {
     parents: parentsField === "" ? [] : parentsField.split(" "),
     changeIdValues: splitTrailerValues(changeIdField),
     mergeChangeIdValues: splitTrailerValues(mergeChangeIdField),
-    subject: fields.slice(4).join("\t"),
+    memberValues: splitTrailerValues(memberField),
+    revisionValues: splitTrailerValues(revisionField),
+    subject: fields.slice(6).join("\t"),
   }
 }
 
@@ -259,7 +361,12 @@ export async function buildMergedTruthIndex(
 
   rows.forEach((row, distanceFromTip) => {
     const parsed = parseWalkRow(row)
-    const synthesis = parseSynthesisSubject(parsed.subject)
+    // Trailers first, subject as the pre-epoch fallback. A disagreement between
+    // the two is carried into `unreadable` below rather than resolved here, so
+    // a commit whose own facts contradict each other becomes a specimen — loud
+    // — instead of quietly indexing whichever source is read first.
+    const synthesisResolution = resolveSynthesis(parsed)
+    const synthesis = synthesisResolution.parsed
     const enrichment = synthesis === undefined ? {} : synthesis
 
     for (const parent of parsed.parents.slice(1)) {
@@ -270,7 +377,7 @@ export async function buildMergedTruthIndex(
 
     // Resolve every lineage claim the commit makes; collect what cannot be read.
     const resolvedIds: string[] = []
-    const unreadable: string[] = []
+    const unreadable: string[] = [...synthesisResolution.unreadable]
     for (const value of parsed.changeIdValues) {
       if (ChangeIdSchema.safeParse(value).success) resolvedIds.push(value)
       else unreadable.push(`Change-Id trailer value '${value}' is not a change id`)

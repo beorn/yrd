@@ -4258,7 +4258,16 @@ function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepEx
         `Change-Id identity — migrate it before rebuilding`,
     )
   }
-  return `${subject}\n\nChange-Id: ${pr.changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, pr.changeId)}`
+  // The member and revision are STATED, not left to be regexed back out of the
+  // subject. The subject stays exactly as it reads today — people find these
+  // commits by it — but merged-truth no longer depends on parsing prose the
+  // vocabulary is free to change. A subject the walk fails to parse does not
+  // degrade gracefully: the commit becomes a specimen, and one specimen makes
+  // every not-found lineage lookup in that window answer the loud unknown.
+  return (
+    `${subject}\n\nChange-Id: ${pr.changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, pr.changeId)}\n` +
+    `Yrd-Member: ${pr.id}\nYrd-Revision: ${String(pr.revision)}`
+  )
 }
 
 /** The revision prop that carries a @cto ruling authorizing a component-model

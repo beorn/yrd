@@ -769,6 +769,19 @@ describe("rebuildCandidateByMerge — the change's identity trailer", () => {
     expect(
       await git.text(fixture.repo, ["show", "-s", "--format=%(trailers:key=Merge-Change-Id,valueonly)", result.sha]),
     ).toBe(`${CHANGE_ID}-merge`)
+
+    // The member and revision are STATED too, so the walk never has to regex
+    // them back out of the subject. Same one-line-per-trailer property as
+    // above: a duplicate stamp would show as a second line.
+    expect(
+      await git.text(fixture.repo, ["show", "-s", "--format=%(trailers:key=Yrd-Member,valueonly)", result.sha]),
+    ).toBe("PR1")
+    expect(
+      await git.text(fixture.repo, ["show", "-s", "--format=%(trailers:key=Yrd-Revision,valueonly)", result.sha]),
+    ).toBe("1")
+
+    // And the subject is unchanged — people find these commits by reading it.
+    expect(await git.text(fixture.repo, ["show", "-s", "--format=%s", result.sha])).toBe("yrd: merge PR1 revision 1")
   })
 
   it("13. stamps the shaset wrapper it synthesizes on top of that merge, marked compose", async () => {
