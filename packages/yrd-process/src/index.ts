@@ -3,7 +3,13 @@ import { createFailure } from "@yrd/core"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { accessSync, constants, statSync } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
-import { pathReapFailure, reapOwnedPath, type PathReapResult } from "./path-reaper.ts"
+import {
+  pathReapFailure,
+  reapOwnedPath,
+  reapOwnedPathWithCensus,
+  type PathHolderCensusReader,
+  type PathReapResult,
+} from "./path-reaper.ts"
 
 export {
   adaptProcessGit,
@@ -28,6 +34,7 @@ export {
   type LinuxPathHolderCoverage,
   type PathHolder,
   type PathHolderCensus,
+  type PathHolderCensusReader,
   type PathHolderCoverage,
   type PathHolderSourceCoverage,
   type PathHolderUnavailableCoverage,
@@ -236,6 +243,8 @@ export function createProcess(
       log?: ConditionalLogger
       now?: () => number
       spawn?: Spawn
+      /** Test-only observation seam. Production callers always use the host census. */
+      pathHolderCensus?: PathHolderCensusReader
     }>
   }> = {},
 ): Process {
@@ -243,6 +252,7 @@ export function createProcess(
   const log = options.inject?.log?.child("process") ?? createLogger("yrd:process")
   const now = options.inject?.now ?? performance.now.bind(performance)
   const spawn = options.inject?.spawn ?? spawnProcess
+  const pathHolderCensus = options.inject?.pathHolderCensus
   const cwd = options.cwd ?? process.cwd()
   const env = definedEnv(options.env ?? process.env)
   const maxOutputBytes = positiveInteger(options.maxOutputBytes ?? 16 * 1024 * 1024, "maxOutputBytes")
@@ -271,7 +281,10 @@ export function createProcess(
     closing = true
     return (closePromise ??= scope[Symbol.asyncDispose]())
   }
-  const reapPath = (path: string) => reapOwnedPath(path, killGraceMs, postKillReapGraceMs)
+  const reapPath = (path: string) =>
+    pathHolderCensus === undefined
+      ? reapOwnedPath(path, killGraceMs, postKillReapGraceMs)
+      : reapOwnedPathWithCensus(path, killGraceMs, postKillReapGraceMs, pathHolderCensus)
   return {
     async run(request) {
       if (closing || scope.disposed) throw new Error("yrd: Process is closed")
