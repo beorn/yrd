@@ -10392,7 +10392,12 @@ export async function refreshTrackedQueueRevisions(
           })
         } catch (settlementError) {
           const settlementFailure = failureFact(settlementError)
-          if (settlementFailure?.kind !== "refusal" || settlementFailure.code !== "comment-current-changed") {
+          // Both codes mean "this ONE candidate's settlement did not stick", and
+          // neither is a reason to lose the cycle. `review-ref-conflict` was
+          // previously a bare Error, so it fell through this guard and killed
+          // the runner's cycle — which starved every OTHER candidate behind it.
+          const deferrable = new Set(["comment-current-changed", "review-ref-conflict"])
+          if (settlementFailure?.kind !== "refusal" || !deferrable.has(settlementFailure.code)) {
             throw settlementError
           }
           const outcome: HabitantTrackedRevisionTransition = {
@@ -10405,10 +10410,19 @@ export async function refreshTrackedQueueRevisions(
             message: settlementFailure.message,
           }
           outcomes.push(outcome)
-          app.log.info?.("Skipped settling a tracked change preflight because the change changed.", {
-            action: "queue-track-settlement-deferred",
-            ...outcome,
-          })
+          // The reason is named from the CODE rather than assumed: this handler
+          // now covers two different causes, and "the change changed" is true of
+          // only one of them.
+          app.log.info?.(
+            settlementFailure.code === "comment-current-changed"
+              ? "Skipped settling a tracked change preflight because the change changed."
+              : "Skipped settling a tracked change preflight because its settlement ref already records a " +
+                "different fact; deferring this candidate so the cycle continues.",
+            {
+              action: "queue-track-settlement-deferred",
+              ...outcome,
+            },
+          )
           continue
         }
         const outcome: HabitantTrackedRevisionTransition = {

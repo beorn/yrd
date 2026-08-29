@@ -2618,7 +2618,16 @@ function reviewFact(
           ? "decision" in prior && "decision" in fact && prior.decision === fact.decision && prior.note === fact.note
           : !("decision" in prior) && !("decision" in fact) && prior.note === fact.note)
       if (same) return { events: [] }
-      throw new Error(`yrd: review ref '${fact.ref}' already records a different fact`)
+      // A TYPED refusal, not a bare Error. A bare Error is loud but UNROUTABLE:
+      // no caller can classify it, so it propagates past the per-candidate
+      // handler and takes down the runner's whole cycle. Measured 2026-08-29 —
+      // one change's conflicting preflight comment aborted every cycle for
+      // three hours and starved every other change in the queue.
+      raiseFailure(
+        "refusal",
+        "review-ref-conflict",
+        `yrd: review ref '${fact.ref}' already records a different fact`,
+      )
     }
   }
   return { events: [event(kind === "review" ? "pr/reviewed" : "pr/commented", fact)] }
