@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path"
+import { raiseFailure } from "@yrd/core"
 import { adaptProcessGit, gitFailure, type Process } from "@yrd/process"
 import { GIT_PLUMBING_TIMEOUT_MS } from "./git-timeouts.ts"
 
@@ -21,6 +22,36 @@ export type LiveBranchObservation =
   | Readonly<{ ok: false; phase: "observer"; detail: string; target: string }>
 
 export type BranchCommitResolver = (ref: string) => string | undefined | Promise<string | undefined>
+
+/** What one consumer calls each unobservable phase, built only for the phase
+ * that fired. */
+export type UnobservedBranchNaming = Readonly<
+  Record<"observer" | "absent" | "fetch" | "resolve", () => Readonly<{ code: string; message: string }>>
+>
+
+/**
+ * The ONE reading of an unobservable branch. Consumers bring their own codes
+ * and remedies; they do not bring their own opinion about what a phase MEANS.
+ *
+ * `absent` is a REFUSAL and everything else is a retryable CONFIGURATION fault,
+ * and that split is the whole point of this function existing rather than a
+ * fourth hand-copied ladder. Origin answering authoritatively that the branch is
+ * gone is a settled fact about the change; every other failure is weather — the
+ * observer was never installed, the fetch did not land, the ref did not
+ * resolve — and treating weather as a settled fact is how a healthy submission
+ * gets withdrawn (`refsfor-withdrawn-carrier`), while treating a settled fact as
+ * weather is how a burn gets ordered from a head nobody checked (PR2599,
+ * @i/10-yrd/absent-branch-is-terminal).
+ *
+ * Returns the observed head, or raises. It never returns a substitute: a caller
+ * that cannot see the branch gets no sha to guess with, which is the property
+ * the recorded-`source.head` fallback did not have.
+ */
+export function requireObservedBranchHead(observed: LiveBranchObservation, naming: UnobservedBranchNaming): string {
+  if (observed.ok) return observed.head
+  const named = naming[observed.phase]()
+  raiseFailure(observed.phase === "absent" ? "refusal" : "configuration", named.code, named.message)
+}
 
 async function runGit(process: Pick<Process, "run">, cwd: string, args: readonly string[]) {
   const git = adaptProcessGit(process, { timeoutMs: GIT_PLUMBING_TIMEOUT_MS })

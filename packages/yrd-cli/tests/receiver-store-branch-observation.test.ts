@@ -19,6 +19,8 @@ import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
+import { runYrd } from "@yrd/cli"
+import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createProcess } from "@yrd/process"
 import { withMerge, withQueue, withStep, type ChangeShape, type StepExecution } from "@yrd/queue"
@@ -209,6 +211,50 @@ describe("a receiver-owned carrier survives the habitant's tracked-observation p
     expect(evicted.message).toContain("the receiver store does not own")
     const gone = Object.values(app.state().bays.prs).find((pr) => pr.branch === GONE)
     expect(gone).toMatchObject({ state: "closed", merged: false })
+    log.end()
+  })
+
+  it("refuses an absent branch on `pr view --json`, exactly as the human path does", async () => {
+    // The observation used to run only under `!json`, so the machine-readable
+    // path skipped it entirely: `pr view PR1` refused for a person and
+    // `pr view PR1 --json` answered as if the change were ordinary, for every
+    // script and every robot — which are what act on a stuck head
+    // (@i/10-yrd/absent-branch-is-terminal). Same branch, same repository, both
+    // shapes must refuse.
+    const fixture = await repository()
+    const log = createLogger("yrd", [{ level: "silent" }])
+    const app = await trackedApp(fixture.mainSha, log)
+    const cliApp = app as unknown as YrdCliApp
+    await app.bays.submit({ branch: GONE, headSha: fixture.goneHead, base: "main", baseSha: fixture.mainSha })
+
+    await using process = createProcess({ env: { PATH: Bun.env.PATH } })
+    const services = {
+      process,
+      queueReadModel: testQueueReadModel(cliApp),
+    } as unknown as YrdCliServices
+
+    for (const argv of [
+      ["pr", "view", "PR1"],
+      ["pr", "view", "PR1", "--json"],
+    ]) {
+      const out: string[] = []
+      const err: string[] = []
+      const io = {
+        ...liveIO(fixture.repo),
+        stdout: (text: string) => out.push(text),
+        stderr: (text: string) => err.push(text),
+      } as unknown as YrdCliIO
+
+      const exit = await runYrd(cliApp, argv, io, services)
+
+      const shape = argv.join(" ")
+      expect(exit, `expected '${shape}' to exit nonzero`).not.toBe(0)
+      expect(err.join(""), `expected '${shape}' to name the absent branch`).toContain(GONE)
+      expect(err.join(""), `expected '${shape}' to say the source is gone`).toContain("gone from origin")
+      // Nothing renderable escaped: a caller parsing stdout must not get a
+      // document describing a change whose source does not exist.
+      expect(out.join(""), `expected '${shape}' to print no change document`).toBe("")
+    }
     log.end()
   })
 

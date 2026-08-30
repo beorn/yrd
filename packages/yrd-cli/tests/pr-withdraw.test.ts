@@ -1657,6 +1657,13 @@ describe("a payload burn is never ordered on a comparison that did not run", () 
    * live submissions were ordered destroyed on this reading in one day
    * (PR2191 / PR2226 / PR2245, @i/10-yrd/subsumed-verdict-is-vacuous). */
   async function degenerate(repo: ReturnType<typeof noopCarrierRepository>) {
+    // The submission's branch has to EXIST for this scenario to be the one it
+    // claims: a bay cut from the tip is a live branch whose head is that tip.
+    // The fixture named it without creating it, which nothing noticed while the
+    // preflight never asked about the branch; now that it refuses on an
+    // unobservable source, an uncreated branch would make this test assert the
+    // absence refusal instead of the degenerate-range one it is about.
+    git(repo.dir, "branch", "-f", "topic/cut-from-tip", repo.targetBaseSha)
     const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.targetBaseSha }) })
     await app.bays.submit({
       branch: "topic/cut-from-tip",
@@ -1694,6 +1701,47 @@ describe("a payload burn is never ordered on a comparison that did not run", () 
       expect(rendered).not.toContain("resolve:")
       // No verdict was printed at all, so nothing can be relayed onward.
       expect(output.stdout()).toBe("")
+      expect(output.stdout()).not.toContain("SUBSUMED-WITHDRAW")
+      expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses a change whose source branch is gone, instead of proving a verdict from its recorded head", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      // PR2599's exact shape (2026-08-29). The recorded head is still a
+      // READABLE OBJECT in this repository — so `headPresent` passes and every
+      // content check has something to chew on — but the branch that named it
+      // is gone from the receiver. On that reading the oracle proved
+      // reachability and ordered `--burn-payload` on a frozen revision carrying
+      // 330 unlanded lines; it was caught by hand, minutes from destruction.
+      // `git branch -D` here is the specimen, in a throwaway fixture repo.
+      const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+      await app.bays.submit({
+        branch: "topic/landed",
+        headSha: repo.landedHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+      git(repo.dir, "branch", "-D", "topic/landed")
+
+      const output = outputIO({ cwd: repo.dir })
+      const failure = await preflightRemerge(app, "PR1", { json: true }, output.io).then(
+        (result) => result,
+        (error: unknown) => failureFact(error),
+      )
+
+      // Named, and about the BRANCH — not a head-missing message about a sha
+      // that is perfectly readable.
+      expect(failure).toMatchObject({ code: "recut-preflight-branch-absent" })
+      expect(failure).not.toHaveProperty("verdict")
+      expect((failure as { message: string }).message).toContain("topic/landed")
+      // The whole point: no verdict was computed and nothing can be relayed on
+      // to spend this revision's payload.
+      expect(output.stdout()).toBe("")
+      expect(output.stdout()).not.toContain("--burn-payload")
       expect(output.stdout()).not.toContain("SUBSUMED-WITHDRAW")
       expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     } finally {

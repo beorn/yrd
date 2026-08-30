@@ -26,7 +26,8 @@ import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
 import { ChangeResultView } from "./queue-status-view.tsx"
 import { projectChangeTaskStatus } from "./task-status.ts"
-import type { PruneGitFacts, YrdCliApp, YrdCliIO } from "./types.ts"
+import { observeLiveBranch, requireObservedBranchHead } from "./remote-branch.ts"
+import type { PruneGitFacts, YrdCliApp, YrdCliIO, YrdCliServices } from "./types.ts"
 
 type JsonOption = Readonly<{ json?: boolean }>
 
@@ -452,6 +453,11 @@ export async function preflightRemerge(
   selector: string,
   options: RemergePreflightOptions,
   io: YrdCliIO,
+  /** The Git process the branch observation needs to ask ORIGIN whether the
+   * source branch still exists. Optional because `io.pruneGit` answers instead
+   * wherever the caller injects deterministic facts; when neither is present
+   * the observation refuses rather than assuming the branch is there. */
+  services?: Pick<YrdCliServices, "process">,
 ): Promise<RemergePreflightResult> {
   if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
     usage("--revision must be a positive integer")
@@ -487,6 +493,62 @@ export async function preflightRemerge(
       `yrd: change '${pr.id}' targets base '${pr.base}' but neither 'origin/${pr.base}' nor '${pr.base}' resolves to a commit here`,
     )
   }
+  // THE SOURCE MUST BE THERE BEFORE ANY VERDICT IS COMPUTED — for every change,
+  // not only the tracked-drift one.
+  //
+  // A caller in tracked-drift passes `proposedHeadSha`, which the tracked loop
+  // already resolved through `observeLiveBranch` and already refuses absence on.
+  // EVERY OTHER CHANGE fell through to the recorded `source.head` and this
+  // oracle never asked about the branch at all — so a change whose branch was
+  // gone from the receiver still got a full verdict, computed from a sha that
+  // was merely present as an object. Measured 2026-08-29 on PR2599: the oracle
+  // proved reachability for a commit that was neither the branch's live head
+  // nor the frozen revision it proposed to burn, and ordered `--burn-payload`
+  // on 330 unlanded lines; it was caught by hand. `headPresent` below does not
+  // cover this and never could — it asks whether a SHA is an object here, and
+  // the sha was. The question nobody asked is whether the BRANCH still exists.
+  //
+  // Observed through the same ladder `pr view` and the re-merge path use, so
+  // the three cannot disagree about what absence means. Any unobservable phase
+  // stops the verdict: this verb's next act is destruction, and there is no
+  // reading of "I could not see the source" that justifies proceeding to one.
+  const observedHead = requireObservedBranchHead(
+    await observeLiveBranch(services?.process, cwd, pr.branch, git.resolveCommit),
+    {
+      observer: () => ({
+        code: "recut-preflight-branch-observer-missing",
+        message: `yrd: cannot observe live branch '${pr.branch}' before classifying change '${pr.id}'`,
+      }),
+      absent: () => ({
+        code: "recut-preflight-branch-absent",
+        message:
+          `yrd: change '${pr.id}' cannot be classified: its source branch '${pr.branch}' is gone from origin, ` +
+          `so no verdict about revision ${source.n} can be proved and no payload may be spent on one\n` +
+          retireFactCommand(pr.branch),
+      }),
+      fetch: () => ({
+        code: "recut-preflight-branch-refresh-failed",
+        message:
+          `yrd: could not refresh live branch '${pr.branch}' from origin while classifying change '${pr.id}'\n` +
+          `retry: yrd pr remerge ${pr.id} --preflight`,
+      }),
+      resolve: () => ({
+        code: "recut-preflight-branch-absent",
+        message:
+          `yrd: change '${pr.id}' names source branch '${pr.branch}', which resolves to no commit here — ` +
+          `neither 'origin/${pr.branch}' nor '${pr.branch}'. Revision ${source.n}'s recorded head ` +
+          `${short(source.head)} may still be a readable object, and that proves nothing about the branch: ` +
+          `no verdict is computed and no payload is spent on a source that is not there\n` +
+          `inspect: git rev-parse --verify origin/${pr.branch}^{commit}`,
+      }),
+    },
+  )
+  // The SUBJECT is unchanged: a SUBSUMED-WITHDRAW spends revision `source.n`'s
+  // payload identity, which lives at `source.head`, so the proof must still be
+  // about that commit and the observation above is a precondition, never a
+  // substitute for it. Swapping in the live head here is exactly the confusion
+  // that made PR2599's proof answer a question about the revision's own base.
+  void observedHead
   const candidateHeadSha = options.proposedHeadSha ?? source.head
   const checks = await contentChecks(candidateHeadSha, targetBaseSha, git)
   if (!checks.headPresent) {
