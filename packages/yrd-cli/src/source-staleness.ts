@@ -103,7 +103,7 @@ export type HabitantSourceStall = Readonly<{
  * plan no longer matches the base tip's declared one and has no in-place
  * reload wired. `reason` names which; absent reads as `"source-stale"`, the
  * only reason that existed before 2026-08-30. Deliberately one shape — a
- * reader (the queue status projection, `queue audit`, `watch`) checks one
+ * reader (the status projection, `queue audit`, `watch`) checks one
  * file for "why did this habitant last recycle" instead of several.
  */
 export type HabitantSourceRecycle = Readonly<{

@@ -628,7 +628,7 @@ export type QueueTimelineRunner = Readonly<{
    * The last recycle any habitant in this lineage attempted — merged in from
    * `source-recycle.json` by `habitantRunnerStatus` (run.ts), the ONE read
    * every consumer of this projection shares (`watch`, `queue list --check`,
-   * `queue status`). `reason` says WHY a fresh process was requested
+   * `queue list --check`). `reason` says WHY a fresh process was requested
    * (`"source-stale"` or `"installed-plan-stale"`, 23192 leg c); `attemptedAt`
    * says when. A designed recycle exits unclean by construction (the
    * supervisor re-execs onto it), so this is what turns that into "recycled

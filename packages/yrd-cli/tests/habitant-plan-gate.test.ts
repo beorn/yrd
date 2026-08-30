@@ -181,7 +181,7 @@ describe("the habitant's per-cycle declared-plan gate", () => {
     expect(notice?.message).not.toContain("error:")
     expect(notice?.props).toMatchObject({ bootedSha: headSha, headSha: "b".repeat(40), staleSteps: ["second"] })
 
-    // The projection read: `queue status`/`watch`/`queue audit` all resolve
+    // The projection read: `queue list --check`/`watch`/`queue audit` all resolve
     // the runner through `habitantRunnerStatus`, which now merges
     // `source-recycle.json` in as `lastRecycle` — the smallest read that lets
     // any of them say "recycled for a plan change at <time>" instead of
