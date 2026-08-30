@@ -1,3 +1,4 @@
+import { raiseFailure } from "@yrd/core"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
 import { Issue, IssueRefSchema, IssueSchema, type IssueRef, type IssueSource } from "./issues.ts"
@@ -13,7 +14,29 @@ type SourceOptions = Readonly<{
 }>
 
 const IssueFieldsSchema = IssueSchema.omit({ ref: true })
-const ISSUE_SOURCE_TIMEOUT_MS = 30_000
+/**
+ * Measured 2026-08-30 against this fleet's only configured issue source
+ * (`createKmIssueSource`, `km show --one --context --json <id>`, run against
+ * the live `/hh/pm` vault — @i/10-yrd/tracker-timeout-is-not-source-unavailable):
+ * N=22 real reads (12 sequential + 10 fired concurrently, to probe shared-vault
+ * contention) — min 1286ms, median 1487ms, p90 1842ms, max 1854ms. Every
+ * observed read, including under self-induced 10-way contention, finished
+ * under 2s.
+ *
+ * That baseline cannot be reconciled with this bead's own motivating incident
+ * — a legitimate (non-hung) `yrd issue` read that took 28,344ms in production
+ * — because this sandbox has no way to safely reproduce fleet-wide fan-out
+ * contention (many concurrent agents across many bays) against the shared
+ * vault without risking the vault other agents were actively using. That one
+ * historical sample is real measured evidence, not a guess, and it is the
+ * only data point available for the tail this bound has to survive.
+ * `@cto`'s own ruling on that incident characterized the prior 20_000ms bound
+ * as "roughly 3x too tight" — so the bound below is that ruling applied
+ * literally (3 x 20_000ms), which also clears the one documented worst-case
+ * read (28,344ms) with ~2.1x margin, while staying more than 30x above every
+ * latency this fleet's configured source produced under measurement.
+ */
+const ISSUE_SOURCE_TIMEOUT_MS = 60_000
 const KmContextSchema = z.object({
   node: z.object({
     title: z.string().optional(),
@@ -103,7 +126,23 @@ function createIssueSource(
         timeoutMs: ISSUE_SOURCE_TIMEOUT_MS,
       })
       if (result.timedOut) {
-        throw new Error(`yrd: issue source '${sourceId}' timed out after ${ISSUE_SOURCE_TIMEOUT_MS}ms`)
+        // A distinct code from the generic 'issue-source-failed'
+        // infrastructure catch-all — so a caller (human or `--json` reader)
+        // can tell a slow-but-otherwise-live source from a genuinely dead one
+        // without parsing this message's free text. `raiseFailure` throws a
+        // YrdFailure; issues.ts's resolve() rethrows any error that already
+        // carries a failure fact unchanged instead of collapsing it into
+        // 'issue-source-failed', so this code and message survive to the CLI
+        // intact. Like its 'issue-source-*' siblings, this is a CLI-
+        // invocation-time-only code (issues.resolve() is never called from
+        // inside the queue's Run/Job engine — see run.ts's three call sites),
+        // so it is deliberately not registered in YRD_REFUSAL_CODES, which
+        // that closed vocabulary's own header comment excludes by design.
+        raiseFailure(
+          "infrastructure",
+          "issue-source-timeout",
+          `yrd: issue source '${sourceId}' timed out after ${result.durationMs}ms; bound ${ISSUE_SOURCE_TIMEOUT_MS}ms`,
+        )
       }
       if (result.exitCode !== 0) {
         throw new Error(
