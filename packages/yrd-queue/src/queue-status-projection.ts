@@ -435,7 +435,14 @@ export type QueueLogAttempt = Readonly<{
 type QueueAttemptResult =
   | Readonly<{ status: "passed"; output: JsonValue }>
   | Readonly<{ status: "failed"; error: JobError; output?: JsonValue }>
-  | Readonly<{ status: "lost"; reason: string }>
+  // A "lose" transition (Jobs.recover(), the habitant-runner-restart/dead-
+  // lease reclaim path) closes an attempt the runner never got to interpret.
+  // `code` is always "job-lost" — the SAME registered YRD_REFUSAL_CODES
+  // member `terminalJobError` (queue.ts) already derives from a Job's own
+  // `conclusion: "timed_out"` — so this completed-but-uninterpreted attempt
+  // is never a bare, unclassifiable `lost` outcome
+  // (@i/10-yrd/every-attempt-records-a-verdict).
+  | Readonly<{ status: "lost"; reason: string; code: "job-lost" }>
 
 export type QueueAttempt = QueueLogAttempt &
   Readonly<{
@@ -581,7 +588,7 @@ async function scanQueueLogAttempts(events: AsyncIterable<Event> | Iterable<Even
       durationMs,
       result:
         transition.type === "lose"
-          ? { status: "lost", reason: transition.reason }
+          ? { status: "lost", reason: transition.reason, code: "job-lost" }
           : transition.result.conclusion === "success"
             ? { status: "passed", output: transition.result.output }
             : {
