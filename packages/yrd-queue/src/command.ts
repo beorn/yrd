@@ -6546,6 +6546,22 @@ type PinnedCandidateResult =
   | Readonly<{ checked: PinnedCandidate }>
   | Readonly<{ error: Readonly<{ code: string; message: string }> }>
 
+/** Every refusal below names what was actually compared — this queue's own
+ * stored checkpoint identity, the Candidate's base/Candidate sha pair, and
+ * once a certificate exists, its manifest hash and declared edges — so the
+ * refusal is reproducible from its own printed text and a dead landing path
+ * is never discovered only by a human reading the habitant runner's log by
+ * hand (@i/10-yrd/checkpoint-refusal-names-its-input).
+ *
+ * Remedy order is not arbitrary. For the three path-* codes the cheap cure is
+ * almost always THIS runner's own checkout having drifted from the recorded
+ * gitlink: restoring it changes `currentIdentity` and commonly clears the
+ * refusal with no code change. Only once the checkout is confirmed correct
+ * does the manifest itself need a corrected edge — a shipped code change, and
+ * therefore the expensive cure, named second. certificate-missing/-stale are
+ * a different shape: the Candidate's OWN certificate is what is wrong, so the
+ * cheap cure there is re-running checks-before-queueing for it, never a
+ * checkout sync. */
 function checkpointMigrationAdmissionRefusal(
   candidate: PinnedCandidate,
   currentIdentity: string,
@@ -6555,13 +6571,21 @@ function checkpointMigrationAdmissionRefusal(
   if (certificate === undefined || attestation === undefined) {
     return {
       code: "checkpoint-migration-certificate-missing",
-      message: `Candidate '${candidate.candidateSha}' has no certified checkpoint migration manifest`,
+      message:
+        `Candidate '${candidate.candidateSha}' on base '${candidate.baseSha}' has no certified checkpoint migration manifest\n` +
+        `compared: this queue's stored checkpoint identity '${currentIdentity}' against the Candidate's certificate, which is absent\n` +
+        "cause: the Candidate was checked without checkpoint migration certification attached — an older or differently-configured check run\n" +
+        "remedy: re-run checks-before-queueing for this Candidate so it certifies a manifest; if checks already ran on the current build and still produced none, that check run itself is the defect to chase next",
     }
   }
   if (certificate.baseSha !== candidate.baseSha || certificate.candidateSha !== candidate.candidateSha) {
     return {
       code: "checkpoint-migration-certificate-stale",
-      message: `checkpoint migration certificate does not bind Candidate '${candidate.candidateSha}' on base '${candidate.baseSha}'`,
+      message:
+        `certificate manifest '${attestation.hash}' is bound to base '${certificate.baseSha}' Candidate '${certificate.candidateSha}', not the current base '${candidate.baseSha}' Candidate '${candidate.candidateSha}'\n` +
+        `compared: the certificate's own base/Candidate binding against the Candidate now being merged; this queue's stored checkpoint identity is '${currentIdentity}'\n` +
+        "cause: the Candidate moved — rebased or re-pinned — after it was checked, so its certificate no longer describes the commit pair being merged\n" +
+        "remedy: re-run checks-before-queueing against the current base so a fresh certificate binds the moved Candidate; the stale certificate cannot be reused",
     }
   }
 
@@ -6573,13 +6597,24 @@ function checkpointMigrationAdmissionRefusal(
     existing.push(edge)
     edgesBySource.set(edge.from, existing)
   }
+  const compared =
+    `compared: this queue's stored checkpoint identity '${currentIdentity}' against target '${target}' declared by ` +
+    `certificate manifest '${attestation.hash}' (base '${candidate.baseSha}' Candidate '${candidate.candidateSha}')`
+  const checkoutRemedy =
+    "remedy: sync or restore this runner's own checkout to the recorded gitlink first — a running identity that " +
+    "drifted from what was certified is the common cause and clears with no code change; only once the checkout " +
+    "is confirmed correct does the manifest need a corrected edge, which is a code change"
   const visited = new Set<string>()
   let identity = currentIdentity
   while (identity !== target) {
     if (visited.has(identity)) {
       return {
         code: "checkpoint-migration-path-cyclic",
-        message: `checkpoint migration path from '${currentIdentity}' cycles before target '${target}'`,
+        message:
+          `path from stored identity '${currentIdentity}' to target '${target}' cycles back to '${identity}' via [${[...visited].map((step) => `'${step}'`).join(" -> ")}]\n` +
+          `${compared}\n` +
+          "cause: the manifest declares a migration edge back into an identity already visited on this walk, so no path from the stored identity reaches the target\n" +
+          checkoutRemedy,
       }
     }
     visited.add(identity)
@@ -6587,13 +6622,21 @@ function checkpointMigrationAdmissionRefusal(
     if (next.length === 0) {
       return {
         code: "checkpoint-migration-path-missing",
-        message: `checkpoint migration manifest has no path from stored identity '${currentIdentity}' to target '${target}'`,
+        message:
+          `manifest has no edge from '${identity}' toward target '${target}' (walk started at stored identity '${currentIdentity}')\n` +
+          `${compared}\n` +
+          "cause: the manifest's declared edges stop short of the target from this identity\n" +
+          checkoutRemedy,
       }
     }
     if (next.length > 1) {
       return {
         code: "checkpoint-migration-path-ambiguous",
-        message: `checkpoint migration manifest has ${next.length} edges from identity '${identity}'`,
+        message:
+          `manifest has ${next.length} edges from identity '${identity}' (to [${next.map((edge) => `'${edge.to}'`).join(", ")}]) while walking stored identity '${currentIdentity}' toward target '${target}'\n` +
+          `${compared}\n` +
+          "cause: the manifest declares more than one successor from this identity, so the path is not deterministic\n" +
+          checkoutRemedy,
       }
     }
     identity = next[0]?.to ?? identity
