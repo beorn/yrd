@@ -1,4 +1,4 @@
-import { canonicalRefusalCode, type RefusalCode } from "@yrd/queue"
+import { canonicalRefusalCode, type CanonicalRefusalCodeOptions, type RefusalCode } from "@yrd/queue"
 
 /**
  * Where a reader SEES a failure for themselves — an exact artifact path, or a
@@ -180,9 +180,18 @@ export const REFUSAL_CURES: Readonly<Partial<Record<RefusalCode, CureEntry>>> = 
  * alias table first so an older spelling of a registered code — and every
  * dynamic `<purpose>-failed` step code, which canonicalizes to `check-failed`
  * — reaches the same entry.
+ *
+ * Pass `dynamicStepFamily: false` when the code did NOT come from a durable
+ * step result. A CLI verb's own `-failed` code is not a step name, and the
+ * suffix family cannot tell the difference: see
+ * {@link CanonicalRefusalCodeOptions}.
  */
-export function refusalCure(code: string, message: string): RefusalCureText | undefined {
-  const canonical = canonicalRefusalCode(code)
+export function refusalCure(
+  code: string,
+  message: string,
+  options: CanonicalRefusalCodeOptions = {},
+): RefusalCureText | undefined {
+  const canonical = canonicalRefusalCode(code, options)
   if (canonical === undefined) return undefined
   const entry = CURE_CENSUS[canonical]
   return entry === undefined ? undefined : Object.freeze(entry(message))

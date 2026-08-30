@@ -611,6 +611,13 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
       expect(typo.stderr()).toContain(
         "error: cannot resolve issue 'friendly': configured source 'km' failed: Node not found: friendly",
       )
+      // …and NOTHING about checks. `issue-source-failed` ends in `-failed`, so
+      // the dynamic step-failure family folded it onto `check-failed` and
+      // attached that code's cure — a cure for a different cause, printed
+      // under a refusal about a typo'd issue id.
+      expect(typo.stderr()).not.toContain("The check judged the WORK")
+      expect(typo.stderr()).not.toContain("yrd pr runs")
+      expect(typo.stderr()).not.toContain("yrd pr submit")
     } finally {
       restoreEnv("TEST_ISSUE_MISSING", previousMissing)
     }

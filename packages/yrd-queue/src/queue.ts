@@ -9551,16 +9551,32 @@ export const YRD_REFUSAL_CODE_ALIASES: Readonly<Record<string, RefusalCode>> = {
  */
 const DYNAMIC_STEP_FAILURE_CODE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-failed$/u
 
+/** Whether the {@link DYNAMIC_STEP_FAILURE_CODE} family may be consulted.
+ *
+ * It exists for ONE producer shape — a durable Job/Run error code built from a
+ * repo's own configured step name — and a caller that is not classifying such
+ * a result must say so, because the family matches by suffix alone. Every code
+ * a CLI verb raises that happens to end in `-failed` otherwise acquires the
+ * `check-failed` identity, and with it a cure about checks: `yrd bay open
+ * --issue <typo>` printed "The check judged the WORK, not the queue" because
+ * `issue-source-failed` ends in `-failed`, and nineteen codes across the
+ * codebase did the same. */
+export type CanonicalRefusalCodeOptions = Readonly<{ dynamicStepFamily?: boolean }>
+
 /** A raw failure code, resolved to its registered canonical spelling — itself
  * if already canonical, its mapped form if it is a registered alias, the
  * generic `check-failed` if it matches the {@link DYNAMIC_STEP_FAILURE_CODE}
- * shape, or `undefined` if it is outside the closed vocabulary entirely. The
- * one gate every consumer that must not silently misclassify an unknown code
- * shares. */
-export function canonicalRefusalCode(code: string): RefusalCode | undefined {
+ * shape AND the caller is classifying a durable step result, or `undefined` if
+ * it is outside the closed vocabulary entirely. The one gate every consumer
+ * that must not silently misclassify an unknown code shares. */
+export function canonicalRefusalCode(
+  code: string,
+  options: CanonicalRefusalCodeOptions = {},
+): RefusalCode | undefined {
   if (YRD_REFUSAL_CODE_SET.has(code)) return code as RefusalCode
   const alias = YRD_REFUSAL_CODE_ALIASES[code]
   if (alias !== undefined) return alias
+  if (options.dynamicStepFamily === false) return undefined
   return DYNAMIC_STEP_FAILURE_CODE.test(code) ? "check-failed" : undefined
 }
 
