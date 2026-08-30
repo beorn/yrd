@@ -265,6 +265,14 @@ import {
   type HabitantSourceRecycle,
   type HabitantSourceStall,
 } from "./source-staleness.ts"
+import { HABITANT_EXIT } from "./habitant-exit.ts"
+import {
+  decideHabitantMemory,
+  foldMemoryCap,
+  HABITANT_RSS_CAP_DEFAULT_MB,
+  HABITANT_RSS_CAP_ENV,
+  type HabitantMemoryStall,
+} from "./habitant-memory.ts"
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { retainedWorkspaceNote } from "./workspace-retention.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
@@ -462,20 +470,25 @@ const HABITANT_MAINTENANCE_INTERVAL_MS = 60_000
  * work (D3). An operator-requested stop that FINISHES (drain complete) exits 0;
  * a signal-forced interruption exits non-zero so the habitant breaker records
  * the failure instead of mistaking interrupted work for a clean lifetime. */
-const HABITANT_INTERRUPTED_EXIT: YrdCliExitCode = 3
+const HABITANT_INTERRUPTED_EXIT: YrdCliExitCode = HABITANT_EXIT.interrupted
 /** A habitant that restarts itself out of presumptive poisoned-observer state
- * (22474 specimen 3) exits with the same UNCLEAN code as a signal-forced stop:
- * both mean "this runner stopped with queue work outstanding" and must count
- * against the habitant breaker. The distinguishing evidence is the loud
- * `resident-refusal-stall-restart` record, not the code. */
-const HABITANT_POISONED_EXIT: YrdCliExitCode = HABITANT_INTERRUPTED_EXIT
+ * (22474 specimen 3) still means "this runner stopped with queue work
+ * outstanding" and still counts against the habitant breaker — but it says so
+ * in its OWN code. The loud `resident-refusal-stall-restart` record remains the
+ * detail; it is no longer the only thing that separates this from a signal. */
+const HABITANT_POISONED_EXIT: YrdCliExitCode = HABITANT_EXIT.poisoned
 /** A habitant that recycles itself onto a source its own checkout has moved past
- * (@yrd/core/stale-runner-never-recycles box 1) exits with the same UNCLEAN code
- * as every other "stopped with queue work outstanding" case, so the supervisor's
- * restart budget counts it and a flapping checkout cannot restart forever.
- * The distinguishing evidence is the typed `resident-source-stale-restart`
- * record, never the code — the code is deliberately not a new dialect. */
-const HABITANT_SOURCE_STALE_EXIT: YrdCliExitCode = HABITANT_INTERRUPTED_EXIT
+ * (@yrd/core/stale-runner-never-recycles box 1). Its own code, for the same
+ * reason as the poisoned exit above: the typed `resident-source-stale-restart`
+ * record is the detail, and the supervisor — which has the code and not the
+ * record — can now tell this apart from an interruption it should count
+ * differently. */
+const HABITANT_SOURCE_STALE_EXIT: YrdCliExitCode = HABITANT_EXIT["source-stale"]
+/** A habitant that crossed its declared RSS cap and stood down at a cycle
+ * boundary rather than waiting for the kernel's OOM killer to take it, and the
+ * in-flight run with it. The one condition a fresh process does not by itself
+ * cure, hence the only one dispositioned `restart-with-backoff`. */
+const HABITANT_MEMORY_CAP_EXIT: YrdCliExitCode = HABITANT_EXIT["memory-cap"]
 
 /** Overrides {@link HABITANT_SOURCE_STALE_BEHIND}; `0` disables the recycle and
  * leaves the staleness visible-only. A runtime knob rather than project config:
@@ -498,6 +511,23 @@ function habitantSourceStaleThreshold(env: NodeJS.ProcessEnv = process.env): num
     )
   }
   return parsed
+}
+
+/** Read the declared RSS cap, in BYTES, or undefined when no cap is declared.
+ * Unparseable is raised for the same reason the staleness threshold raises it:
+ * an operator who declared a cap and silently got the default instead would
+ * learn about it from an unexplained restart — or, worse, from its absence. */
+function habitantRssCapBytes(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = env[HABITANT_RSS_CAP_ENV]?.trim()
+  const megabytes = raw === undefined || raw === "" ? HABITANT_RSS_CAP_DEFAULT_MB : Number(raw)
+  if (!Number.isSafeInteger(megabytes) || megabytes < 0) {
+    raiseFailure(
+      "configuration",
+      "habitant-rss-cap-invalid",
+      `yrd: ${HABITANT_RSS_CAP_ENV} must be a non-negative integer number of megabytes (0 disables the cap), not '${raw ?? ""}'`,
+    )
+  }
+  return megabytes === 0 ? undefined : megabytes * 1024 * 1024
 }
 
 function habitantRunnerStatusPath(cwd: string, stateDir?: string): string | undefined {
@@ -11325,6 +11355,57 @@ export async function habitantSourceHealth(
   return { stall: next, recycle: true }
 }
 
+/** Resident bytes for this process, or undefined when the runtime cannot say.
+ * `process.memoryUsage.rss()` is used rather than `/proc/self/status` so the
+ * check works wherever Yrd runs, not only on Linux. */
+function processRssBytes(io: Pick<YrdCliIO, "rssBytes">): number | undefined {
+  if (io.rssBytes !== undefined) return io.rssBytes()
+  try {
+    const rss = process.memoryUsage.rss()
+    return Number.isSafeInteger(rss) && rss > 0 ? rss : undefined
+  } catch {
+    // silent-fallback-allow: a runtime that cannot report its own resident set
+    // makes the cap UNMEASURABLE, which `foldMemoryCap` renders as "no window"
+    // and never as "under cap". Nothing is reported healthy on this catch —
+    // the habitant simply keeps serving, exactly as it does today with no cap
+    // at all, and the OOM killer remains the outer bound it already was.
+    return undefined
+  }
+}
+
+/**
+ * Fold one settled cycle into the RSS-cap window and say whether this habitant
+ * should stand down over its own size.
+ *
+ * Gated on `habitant` for the same reason the source check is: exiting is only
+ * an actuator when something re-execs us. A one-shot `yrd queue run code
+ * --once` and a bare programmatic follow have no supervisor, and killing them
+ * over a cap would lose the work instead of respawning past it.
+ */
+export function habitantMemoryHealth(
+  app: Pick<YrdCliApp, "log">,
+  io: Pick<YrdCliIO, "rssBytes">,
+  stall: HabitantMemoryStall | undefined,
+  habitant: boolean,
+  capBytes: number | undefined,
+): Readonly<{ stall: HabitantMemoryStall | undefined; standDown: boolean }> {
+  if (!habitant || capBytes === undefined) return { stall: undefined, standDown: false }
+  const next = foldMemoryCap(stall, { rssBytes: processRssBytes(io), capBytes })
+  const action = decideHabitantMemory(next)
+  if (action.kind === "serve") return { stall: next, standDown: false }
+  const mb = (bytes: number): string => String(Math.round(bytes / (1024 * 1024)))
+  app.log.warn?.(
+    `Queue runner resident set is ${mb(action.rssBytes)} MB against a declared cap of ${mb(action.capBytes)} MB after ${String(action.observations)} consecutive observations; standing down so the supervisor respawns a fresh process.`,
+    {
+      action: "habitant-memory-cap-restart",
+      rssBytes: action.rssBytes,
+      capBytes: action.capBytes,
+      observations: action.observations,
+    },
+  )
+  return { stall: next, standDown: true }
+}
+
 /**
  * D1b — the habitant's per-tick unscoped lease-expiry recovery sweep. `recover`
  * with NO runner arg settles any orphaned running Job whose lease has lapsed,
@@ -11476,6 +11557,12 @@ export async function followQueueRuns(
   // — is the `source-recycle.json` record, not this variable.
   let sourceStall: HabitantSourceStall | undefined
   const sourceStaleThreshold = habitantSourceStaleThreshold()
+  // Consecutive cycles observing this process over its declared RSS cap. Also
+  // process-scoped: it is a claim about THIS process's size, and there is
+  // nothing durable to carry across a respawn — a fresh process starts small,
+  // which is the entire reason standing down is worth doing.
+  let memoryStall: HabitantMemoryStall | undefined
+  const rssCapBytes = habitantRssCapBytes()
   let firstCycle = true
   let lastMaintenanceAt = 0
 
@@ -11543,6 +11630,13 @@ export async function followQueueRuns(
         const idleSource = await habitantSourceHealth(app, io, sourceStall, habitant, sourceStaleThreshold)
         sourceStall = idleSource.stall
         if (idleSource.recycle) return HABITANT_SOURCE_STALE_EXIT
+        // Same boundary and the same reasoning as the staleness exit above: no
+        // run is in flight on this branch by construction, so standing down
+        // over the cap abandons nothing. An idle habitant is also where the
+        // growth is least excusable and most often noticed.
+        const idleMemory = habitantMemoryHealth(app, io, memoryStall, habitant, rssCapBytes)
+        memoryStall = idleMemory.stall
+        if (idleMemory.standDown) return HABITANT_MEMORY_CAP_EXIT
         if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
@@ -11582,6 +11676,12 @@ export async function followQueueRuns(
       const source = await habitantSourceHealth(app, io, sourceStall, habitant, sourceStaleThreshold)
       sourceStall = source.stall
       if (source.recycle) return HABITANT_SOURCE_STALE_EXIT
+      // The in-flight run has just finished, so this exit drains cleanly rather
+      // than abandoning work — which is precisely what the OOM killer this cap
+      // replaces could never promise.
+      const memory = habitantMemoryHealth(app, io, memoryStall, habitant, rssCapBytes)
+      memoryStall = memory.stall
+      if (memory.standDown) return HABITANT_MEMORY_CAP_EXIT
       if (drainRequested()) {
         if (runs.every(Queues.terminal)) {
           // Operator drain finished with no in-flight work left — the one clean stop.

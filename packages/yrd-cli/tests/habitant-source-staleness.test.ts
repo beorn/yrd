@@ -44,10 +44,22 @@ describe("habitant source staleness — the window", () => {
     expect(after(9, behind(4))?.observations).toBe(9)
   })
 
-  it("opens no window below the threshold — one commit is routinely our own merge", () => {
-    expect(foldSourceStaleness(undefined, behind(1))).toBeUndefined()
-    expect(after(5, behind(1))).toBeUndefined()
-    expect(foldSourceStaleness(undefined, behind(HABITANT_SOURCE_STALE_BEHIND))?.observations).toBe(1)
+  it("opens a window on ONE commit — the majority of Yrd advances are exactly that big", () => {
+    // The threshold was 2 until 2026-08-30, defended by "a single commit is
+    // routinely the merge the habitant itself just produced". It is not: this
+    // check compares against the YRD source checkout, and the habitant's
+    // merges land in the queue repository, which cannot advance that head at
+    // all. Measured over the last 60 gitlink advances to `vendor/yrd`, 35
+    // carried exactly one commit — so at 2, most Yrd fixes could not deploy to
+    // a running habitant without a later unrelated advance carrying them.
+    expect(HABITANT_SOURCE_STALE_BEHIND).toBe(1)
+    expect(foldSourceStaleness(undefined, behind(1))?.observations).toBe(1)
+    expect(after(2, behind(1))?.observations).toBe(2)
+  })
+
+  it("opens no window below the threshold", () => {
+    expect(foldSourceStaleness(undefined, behind(0))).toBeUndefined()
+    expect(after(5, behind(0))).toBeUndefined()
   })
 
   it("opens no window on an unmeasurable read — undefined is not zero and not evidence", () => {
