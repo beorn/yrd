@@ -130,6 +130,8 @@ import {
   type Process,
   type ProcessResult,
   type PathHolderCensus,
+  recordedPidIsRunning,
+  recordedPidLivenessSync,
   type PathHolderCensusReader,
   type PathHolder,
 } from "@yrd/process"
@@ -3046,14 +3048,18 @@ function habitantRunnerLockOwnerPid(stateDir: string): number | undefined {
   }
 }
 
+/**
+ * Whether the process a record names is running — the one shared verdict
+ * (`@yrd/process` recordedPidLiveness), not a fourth copy of `kill -0`.
+ *
+ * These callers assert no identity: the resident-runner records they read carry
+ * a logical `startedAt` rather than an observed process start (see
+ * `habitantRunnerRunning`), and the advisory writer lock records nothing but a
+ * pid. Both gaps are closed by RECORDING an observed start, never by comparing
+ * against a timestamp some other clock wrote.
+ */
 function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (cause) {
-    // ESRCH = no such process (dead). EPERM and friends = exists but not signalable — treat as live.
-    return (cause as NodeJS.ErrnoException).code !== "ESRCH"
-  }
+  return recordedPidIsRunning(recordedPidLivenessSync({ pid }))
 }
 
 function assertHabitantSupportsJournalVersion(stateDir: string, target: number): void {
