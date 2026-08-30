@@ -31,7 +31,10 @@ import {
   isConcurrentCheckabilityConflict,
   resolveBay,
   resolveBase,
+  hasChangeRecord,
+  needsReview,
   resolveChange,
+  resolveChangeMatch,
   requireLiveChange,
   getChangeRecord,
   type Bay,
@@ -98,6 +101,9 @@ import {
   type QueueAuditFinding,
   type QueueSummary,
   type Run,
+  queueChangeNotFoundMessage,
+  queueChanges,
+  resolveQueueChange,
 } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
 import {
@@ -3413,10 +3419,16 @@ async function resolveBayOpen(
   if (issue !== undefined && resolved.issueResolved !== true) {
     await app.issues.resolve(app.issues.ref(issue))
   }
+  const openState = stateOf(app)
+  // Both lanes: a change delivered through the receiver is a legitimate `--pr`
+  // target — it has a branch to seed the bay from — and refusing it with
+  // "create it explicitly" told the operator to make a change that already
+  // existed.
   const targetedPr =
     options.pr === undefined
       ? undefined
-      : (app.bays.pr(options.pr) ?? refusal(`no change '${options.pr}'; create it explicitly before using --pr`))
+      : (resolveQueueChange(openState.bays, openState.queues, options.pr) ??
+        refusal(`no change '${options.pr}'; create it explicitly before using --pr`))
   const generated = generatedBayName()
   const branchSeed =
     issue === undefined
@@ -6294,8 +6306,35 @@ async function readComposition(path: string | undefined, io: YrdCliIO): Promise<
   }
 }
 
+/**
+ * The ONE way a `change`/`pr` verb turns a selector into a change — both
+ * admission lanes, one derivation.
+ *
+ * It used to be the record store alone (`app.bays.pr`, then the record-lane
+ * live guard), which is why `yrd pr view PR2706` answered `no change 'PR2706'
+ * — searched 2155 change(s)` while the queue was running PR2706's checks and
+ * had merged PR2651 and PR2702–PR2705: post-S6 a `refs/for/` push mints no
+ * record, so ~55 live changes were outside the only population these verbs
+ * could see (@i/10-yrd, 2026-08-30). The record path is unchanged and still
+ * wins — `resolveQueueChange` asks the store first — so no answer the record
+ * lane already gave has moved.
+ *
+ * The record-lane LIVE guard is kept for record-backed selectors: it is what
+ * refuses a branch alias whose changes are all terminal, and dropping it here
+ * would let a mutating verb through on a change the store considers closed.
+ */
 function requiredPr(app: YrdCliApp, selector: string): Change {
-  return app.bays.pr(selector) ?? requireLiveChange(stateOf(app).bays, selector)
+  const state = stateOf(app)
+  const derived = resolveQueueChange(state.bays, state.queues, selector)
+  if (derived !== undefined && !hasChangeRecord(state.bays, derived.id)) return derived
+  // Absence is reported with the denominator of what was actually searched.
+  // Falling straight through to the record-lane guard would print the record
+  // store's size — the under-count that made three seats read a live change's
+  // absence as their own typo.
+  if (derived === undefined && resolveChangeMatch(state.bays, selector) === undefined) {
+    raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state.bays, state.queues, selector))
+  }
+  return app.bays.pr(selector) ?? requireLiveChange(state.bays, selector)
 }
 
 type ChangeMergeOutcome =
@@ -6578,8 +6617,12 @@ async function listPrs(
     options.issue !== undefined ||
     options.needsReview === true ||
     options.reviewer !== undefined
-  const matching = app.bays
-    .prs()
+  // BOTH lanes. `app.bays.prs()` is the change-RECORD store, and post-S6 a
+  // `refs/for/<base>/<change>` push mints no record — so listing it alone
+  // stopped this surface at PR2599 while the queue was merging PR2706
+  // (@i/10-yrd, 2026-08-30). `queueChanges` is the same derivation `pr view`
+  // resolves through, so the two verbs cannot disagree about the population.
+  const matching = queueChanges(state.bays, state.queues)
     .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
     .toSorted((left, right) => compareNatural(left.id, right.id))
@@ -6597,7 +6640,11 @@ async function listPrs(
     .map((pr) => ({
       pr,
       eligibility: app.queue.eligibility(pr.id),
-      needsReview: app.bays.needsReview(pr.id, options.reviewer),
+      // The pure predicate over the change we already hold, not the
+      // selector facade: that facade resolves through the record store and
+      // throws for a derived member, which is how a widened `pr list` fell
+      // over on the first recordless row it reached.
+      needsReview: needsReview(pr, options.reviewer),
     }))
     .filter(
       ({ pr, eligibility }) =>
@@ -6763,7 +6810,9 @@ async function viewChangeRuns(
     if (pr === undefined) {
       const confirmed = await app.journalSnapshot()
       if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
-      pr = requireLiveChange(snapshot.state.bays, selector)
+      pr =
+        resolveQueueChange(snapshot.state.bays, snapshot.state.queues, selector) ??
+        requireLiveChange(snapshot.state.bays, selector)
     }
     const runs = changeQueueRuns(app, pr)
     const attempts = await queueAttempts(services)
@@ -8483,7 +8532,10 @@ function resolveQueueTargets(
   const selected = new Set<string>()
   if (base !== undefined) bases.add(selectedBase(state, base))
   for (const selector of selectors) {
-    const pr = resolveChange(state.bays, selector)
+    // Both lanes, like every other selector surface: a queue scope named by a
+    // derived member's id must widen to that member's base and identities, not
+    // fall through to `selectedBase` and be read as a branch name.
+    const pr = resolveQueueChange(state.bays, state.queues, selector)
     if (pr === undefined) bases.add(selectedBase(state, selector))
     else {
       bases.add(pr.base)
@@ -8494,7 +8546,7 @@ function resolveQueueTargets(
   if (filterPr !== undefined) {
     // Same consolidation as selectedCheckPRs: one not-found message, worded by
     // the bay model, so `queue run <unknown>` reports what it searched too.
-    const found = resolveChange(state.bays, filterPr) ?? requireLiveChange(state.bays, filterPr)
+    const found = resolveQueueChange(state.bays, state.queues, filterPr) ?? requireLiveChange(state.bays, filterPr)
     canonicalFilter = found.id
     scopeChangeIdentities(selected, found)
     bases.add(found.base)

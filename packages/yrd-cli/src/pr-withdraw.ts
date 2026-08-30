@@ -3,10 +3,10 @@ import type { GitProcessResult } from "git-super/process"
 import { createElement } from "react"
 import {
   currentChangeRev,
+  hasChangeRecord,
   isLiveChange,
   changeDeliveryState,
   changeNeedsAuthor,
-  changeNotFoundMessage,
   type BaysState,
   type Change,
   type ProjectedBranchSubmit,
@@ -15,6 +15,8 @@ import { raiseFailure, type DeepReadonly } from "@yrd/core"
 import {
   buildMergedTruthIndex,
   derivedLaneBranches,
+  queueChangeNotFoundMessage,
+  resolveQueueChange,
   landedSubmitBranches,
   landedSubmits,
   Queues,
@@ -50,9 +52,13 @@ function short(sha: string): string {
  * withdrawn. An unknown selector and a terminal change are both loud failures —
  * never a silent no-op. */
 function requiredLivePr(app: YrdCliApp, selector: string): Change {
-  const pr = app.bays.pr(selector)
+  const state = app.state()
+  // Both lanes. A derived-lane change resolves here so `pr withdraw PR2706`
+  // reaches its own refusal (a submission withdrawn by removing the submit
+  // ref) instead of the not-found sentence, which read as "you mistyped it".
+  const pr = resolveQueueChange(state.bays, state.queues, selector)
   if (pr === undefined) {
-    raiseFailure("refusal", "pr-missing", changeNotFoundMessage(app.state().bays, selector))
+    raiseFailure("refusal", "pr-missing", queueChangeNotFoundMessage(state.bays, state.queues, selector))
   }
   const delivery = changeDeliveryState(pr)
   if (!isLiveChange(pr)) {
@@ -60,6 +66,18 @@ function requiredLivePr(app: YrdCliApp, selector: string): Change {
       "refusal",
       "pr-terminal",
       `yrd: change '${pr.id}' is ${delivery}; a terminal change cannot be withdrawn`,
+    )
+  }
+  // Withdrawal spends a RECORD's payload identity. A derived-lane change has
+  // no record to spend — its submission IS the git ref — so name the one cure
+  // rather than let the record-lane guard refuse it with a sentence about a
+  // change that "does not exist" when the queue is running it.
+  if (!hasChangeRecord(state.bays, pr.id)) {
+    raiseFailure(
+      "refusal",
+      "pr-derived-lane",
+      `yrd: change '${pr.id}' is a derived-lane submission on branch '${pr.branch}'; it has no record to withdraw — ` +
+        `retire the standing fact instead: ${retireFactCommand(pr.branch)}`,
     )
   }
   return pr as Change

@@ -23,7 +23,6 @@ import {
   changeRevisionNumber,
   changeSourceReadyAt,
   resolveBase,
-  changeNotFoundMessage,
   resolveChange,
   reviewState,
   hasChangeRecord,
@@ -134,6 +133,7 @@ import {
   type SubmitLanding,
   type UnrecordedSubmit,
 } from "./model.ts"
+import { queueChangeNotFoundMessage, resolveQueueChange } from "./change-population.ts"
 import {
   DerivedRunMemberSchema,
   deriveRunMemberArgs,
@@ -2767,7 +2767,8 @@ function createQueue<Shape extends ChangeShape>(
 
   const cancelAdmissionJobsForRevision = async (args: CancelAdmissionJobsArgs): Promise<readonly string[]> => {
     const pr = resolveChange(runtime().bays, args.pr)
-    if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(runtime().bays, args.pr))
+    if (pr === undefined)
+      raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(runtime().bays, runtime().queues, args.pr))
     if (!pr.revs.some((revision) => revision.n === args.revision)) {
       raiseFailure("refusal", "pr-revision-not-found", `yrd: change '${pr.id}' has no revision ${args.revision}`)
     }
@@ -2959,7 +2960,12 @@ function createQueue<Shape extends ChangeShape>(
     for (const selector of selectors) {
       try {
         const pr = resolveChange(runtime().bays, selector) ?? derived.find((member) => member.id === selector)
-        if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(runtime().bays, selector))
+        if (pr === undefined)
+          raiseFailure(
+            "refusal",
+            "pr-not-found",
+            queueChangeNotFoundMessage(runtime().bays, runtime().queues, selector),
+          )
         const snapshot = runtime()
         const delivery = changeDeliveryState(pr)
         if (delivery === "integrated" || delivery === "already-landed") {
@@ -3138,7 +3144,11 @@ function createQueue<Shape extends ChangeShape>(
               : requestedSelectors.map((selector) => {
                   const pr = resolveChange(snapshot.bays, selector)
                   if (pr === undefined) {
-                    raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
+                    raiseFailure(
+                      "refusal",
+                      "pr-not-found",
+                      queueChangeNotFoundMessage(snapshot.bays, snapshot.queues, selector),
+                    )
                   }
                   return pr
                 })
@@ -3159,7 +3169,8 @@ function createQueue<Shape extends ChangeShape>(
       const base = queueBase(snapshot, args.base)
       const allowedPRs = args.allowedPRs.map((selector) => {
         const pr = resolveChange(snapshot.bays, selector)
-        if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
+        if (pr === undefined)
+          raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(snapshot.bays, snapshot.queues, selector))
         return pr.id
       })
       await actions.pause({ ...args, base, allowedPRs })
@@ -4064,8 +4075,14 @@ function createQueue<Shape extends ChangeShape>(
       // cold `queue ls` — resolveChange plus checkEligibility together dominate it.
       return stage("eligibility", () => {
         const snapshot = projected ?? runtime()
-        const pr = resolveChange(snapshot.bays, selector)
-        if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
+        // BOTH lanes: `pr view PR2706` asks for eligibility by id, and a
+        // derived member's id resolves only through the change population.
+        // Reading `bays.prs` here is what made every `pr` verb refuse a change
+        // the queue was actively running.
+        const pr = resolveQueueChange(snapshot.bays, snapshot.queues, selector)
+        if (pr === undefined) {
+          raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(snapshot.bays, snapshot.queues, selector))
+        }
         return ChangeEligibility(snapshot, pr, steps, needsPersonOwner)
       })
     },
@@ -4128,9 +4145,13 @@ function createQueue<Shape extends ChangeShape>(
         selectors === undefined
           ? Object.values(snapshot.bays.prs)
           : selectors.map((selector) => {
-              const pr = resolveChange(snapshot.bays, selector)
+              const pr = resolveQueueChange(snapshot.bays, snapshot.queues, selector)
               if (pr === undefined) {
-                raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
+                raiseFailure(
+                  "refusal",
+                  "pr-not-found",
+                  queueChangeNotFoundMessage(snapshot.bays, snapshot.queues, selector),
+                )
               }
               return pr
             })
@@ -4973,7 +4994,8 @@ function createQueueCommands(
       // DERIVED member (S6) is attributable through the id-seam — its identity
       // lives in retained run snapshots, never the record store.
       const member = resolveMemberById(state.bays, state.queues, args.pr)
-      if (member === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
+      if (member === undefined)
+        raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state.bays, state.queues, args.pr))
       const revision =
         member.source === "record"
           ? { n: currentChangeRev(member.record).n, head: currentChangeRev(member.record).head }
@@ -5021,7 +5043,8 @@ function createQueueCommands(
     params: SettleAdmissionRefusalSchema,
     apply(state: DeepReadonly<RuntimeState>, args: SettleAdmissionRefusalArgs) {
       const pr = getChangeRecord(state.bays, args.pr)
-      if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
+      if (pr === undefined)
+        raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state.bays, state.queues, args.pr))
       const current = currentChangeRev(pr)
       if (current.n !== args.revision || current.head !== args.headSha) {
         raiseFailure(
@@ -5062,7 +5085,8 @@ function createQueueCommands(
     params: ChangeIntegratedSchema,
     apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof ChangeIntegratedSchema>) {
       const pr = getChangeRecord(state.bays, args.pr)
-      if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
+      if (pr === undefined)
+        raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state.bays, state.queues, args.pr))
       const revision = currentChangeRev(pr)
       const exact =
         changeDeliveryState(pr) === "integrated" &&
@@ -8074,7 +8098,11 @@ function recordedPlanDrift(
   return undefined
 }
 
-function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): Change[] | undefined {
+function explicitPRs(
+  state: DeepReadonly<BaysState>,
+  queues: DeepReadonly<QueuesState>,
+  args: QueueRunArgs,
+): Change[] | undefined {
   // `prs: []` beside a non-empty `derived` is an EXPLICIT selection of exactly
   // those derived members (the compose's candidate dispatch for an all-derived
   // partition); a bare empty/absent `prs` stays the implicit queue.
@@ -8083,7 +8111,14 @@ function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): Change
   if (selectors === undefined) return undefined
   const prs = selectors.map((selector) => {
     const pr = resolveChange(state, selector)
-    if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state, selector))
+    // An EXPLICIT selection stays record-only on purpose: a derived member
+    // enters a run through `args.derived`, under the submit-fact CAS, and
+    // resolving one here would admit it without that check. Only the refusal's
+    // denominator widens, so `--pr PR2706` says what it really searched and
+    // names the lane the change is on instead of reading as a typo.
+    if (pr === undefined) {
+      raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state, queues, selector))
+    }
     return pr
   })
   const ids = new Set<string>()
@@ -8118,7 +8153,7 @@ function requestedPRs(
   implicitBefore?: QueuePosition,
 ): Change[] {
   const state = runtime.bays
-  const explicit = explicitPRs(state, args)
+  const explicit = explicitPRs(state, runtime.queues, args)
   // Derived members (S6): materialized beside the records and ranked by the
   // same submit clock. Explicit selections append them verbatim — the driver
   // only passes what it selected — while the implicit queue interleaves them.
@@ -8170,7 +8205,7 @@ function resumableQueueRoots(
   args: QueueRunArgs,
   steps: readonly RuntimeStep[],
 ): Run[] {
-  const explicit = explicitPRs(state.bays, args)
+  const explicit = explicitPRs(state.bays, state.queues, args)
   const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
   const admissions = admissionSteps(steps)
   const requested = args.steps === undefined ? undefined : selectSteps(steps, args.steps)
