@@ -11,6 +11,9 @@ import {
   parseOwnerPid,
   parseYrdBayProtections,
   protectionEvidenceForBay,
+  protectionGapEvidenceForBay,
+  protectionNotConsumedEvidenceForBay,
+  UNRECEIPTED_CLAIM_NOT_CONSUMED_FLOOR_MS,
   type BayStatusFacts,
 } from "../src/bay-status.ts"
 
@@ -328,5 +331,281 @@ describe("classifyBayStatus", () => {
       }),
     )
     expect(text).toMatch(/base main@cccccccccccc/)
+  })
+})
+
+/**
+ * @failure A Hab launch claim with no receipt read as `provider unavailable`, so 69 Bays were refused
+ *          with no claim named, no cure named, and no age that could ever settle it.
+ * @level l2
+ * @consumer @yrd/cli bay status · admin bay prune
+ * @bead @i/10-yrd/bay-prune-without-data-loss
+ */
+describe("the consumer verdict on an unreceipted host claim", () => {
+  const NOW = Date.parse("2026-08-30T12:00:00.000Z")
+  const CURE = "re-run the Hab launch for @dev/4, or clear its stale claim"
+
+  const envelope = (
+    extra: Record<string, unknown>,
+    providers: readonly Record<string, unknown>[] = completeProviders,
+  ) =>
+    JSON.stringify({
+      schema: "yrd-bay-protections/2",
+      providers,
+      protections: [],
+      ...extra,
+    })
+
+  const bay = { id: "B369", path: "/repo/.bays/B369" }
+
+  const factsFrom = (raw: string): BayStatusFacts => {
+    const protections = parseYrdBayProtections(raw, { nowMs: NOW })
+    return {
+      ...base,
+      bayId: bay.id,
+      path: bay.path,
+      ownerPid: 9,
+      ownerAlive: false,
+      protectedBy: protectionEvidenceForBay(protections, bay),
+      protectionGaps: protectionGapEvidenceForBay(protections, bay),
+      consumerNotConsumed: protectionNotConsumedEvidenceForBay(protections, bay),
+    }
+  }
+
+  it("passes when every claim has a current receipt", () => {
+    const report = classifyBayStatus(factsFrom(envelope({})))
+    const consumer = report.lines.find((line) => line.class === "consumer")
+
+    expect(consumer).toMatchObject({ verdict: "PASS" })
+    expect(report.exit).toBe(0)
+  })
+
+  it("rules a claim NOT-CONSUMED past the floor instead of refusing the Bay forever", () => {
+    // The B369 shape: worktree, commits, stash and pr all PASS, and the ONLY
+    // thing refusing the Bay is a launch claim whose receipt never appeared. A
+    // claim that went unreceipted past the floor did not survive to hold a
+    // workspace, so its absence is the fact — the population can shrink again.
+    const report = classifyBayStatus(
+      factsFrom(
+        envelope({
+          claims: [
+            {
+              provider: "hab-launch-claims",
+              claim: "hab-launch/@dev/4",
+              claimedAt: new Date(NOW - UNRECEIPTED_CLAIM_NOT_CONSUMED_FLOOR_MS - 3_600_000).toISOString(),
+              cure: CURE,
+            },
+          ],
+        }),
+      ),
+    )
+    const consumer = report.lines.find((line) => line.class === "consumer")
+
+    expect(consumer).toMatchObject({ verdict: "PASS" })
+    expect(consumer?.evidence).toContain("hab-launch/@dev/4")
+    expect(consumer?.evidence).toContain("NOT-CONSUMED")
+    expect(report.exit).toBe(0)
+    expect(report.safe).toBe(true)
+  })
+
+  it("names the claim id and its cure while the claim is still inside the floor", () => {
+    // Still undecided — but an UNKNOWN a reader cannot act on is the defect this
+    // row exists to remove, so the claim identifies itself and says what settles it.
+    const report = classifyBayStatus(
+      factsFrom(
+        envelope({
+          claims: [
+            {
+              provider: "hab-launch-claims",
+              claim: "hab-launch/@dev/4",
+              claimedAt: new Date(NOW - 3_600_000).toISOString(),
+              cure: CURE,
+            },
+          ],
+        }),
+      ),
+    )
+    const consumer = report.lines.find((line) => line.class === "consumer")
+
+    expect(consumer).toMatchObject({ verdict: "UNKNOWN" })
+    expect(consumer?.evidence).toContain("hab-launch/@dev/4")
+    expect(consumer?.evidence).toContain(CURE)
+    expect(report.exit).toBe(2)
+  })
+
+  it("accepts epoch milliseconds as well as an ISO instant, and refuses anything else", () => {
+    const claim = (claimedAt: unknown) =>
+      envelope({
+        claims: [{ provider: "hab-launch-claims", claim: "hab-launch/@dev/4", claimedAt, cure: CURE }],
+      })
+
+    expect(
+      classifyBayStatus(factsFrom(claim(NOW - UNRECEIPTED_CLAIM_NOT_CONSUMED_FLOOR_MS - 1_000))).lines.find(
+        (line) => line.class === "consumer",
+      ),
+    ).toMatchObject({ verdict: "PASS" })
+    expect(() => parseYrdBayProtections(claim("last tuesday"), { nowMs: NOW })).toThrow(/claimedAt/u)
+    expect(() => parseYrdBayProtections(claim(undefined), { nowMs: NOW })).toThrow(/claimedAt/u)
+  })
+
+  it("refuses a claim from a provider the census never declared", () => {
+    expect(() =>
+      parseYrdBayProtections(
+        envelope({
+          claims: [{ provider: "made-up-provider", claim: "x", claimedAt: NOW, cure: CURE }],
+        }),
+        { nowMs: NOW },
+      ),
+    ).toThrow(/not a declared provider/u)
+  })
+
+  it("an unreachable provider stays UNKNOWN and names its cure", () => {
+    // The other half of the row: a provider that genuinely could not be read is a
+    // REFUSAL, never a claim verdict, and it must carry the action that clears it.
+    const report = classifyBayStatus(
+      factsFrom(
+        envelope({}, [
+          {
+            provider: "hab-launch-claims",
+            status: "unavailable",
+            evidence: "could not read current Hab launch claims from /hh/dev: EACCES",
+            cure: "restore read access to the Hab state root",
+          },
+          ...completeProviders.slice(1),
+        ]),
+      ),
+    )
+    const consumer = report.lines.find((line) => line.class === "consumer")
+
+    expect(consumer).toMatchObject({ verdict: "UNKNOWN" })
+    expect(consumer?.evidence).toContain("hab-launch-claims")
+    expect(consumer?.evidence).toContain("restore read access to the Hab state root")
+    expect(report.exit).toBe(2)
+  })
+
+  it("tells the host which field to set when an unavailable provider declares no cure", () => {
+    const report = classifyBayStatus(
+      factsFrom(
+        envelope({}, [
+          {
+            provider: "hab-launch-claims",
+            status: "unavailable",
+            evidence: "could not read current Hab launch claims from /hh/dev: EACCES",
+          },
+          ...completeProviders.slice(1),
+        ]),
+      ),
+    )
+    const consumer = report.lines.find((line) => line.class === "consumer")
+
+    expect(consumer).toMatchObject({ verdict: "UNKNOWN" })
+    expect(consumer?.evidence).toContain("YRD_BAY_PROTECTIONS.providers[].cure")
+  })
+
+  it("keeps a live protection blocking, ahead of any claim verdict", () => {
+    const protections = parseYrdBayProtections(
+      JSON.stringify({
+        schema: "yrd-bay-protections/2",
+        providers: completeProviders,
+        protections: [
+          {
+            bay: "B369",
+            path: "/repo/.bays/B369",
+            source: "hab-launch-claim",
+            evidence: "current Hab launch claim @dev/4 records workspace /repo/.bays/B369",
+          },
+        ],
+        claims: [
+          {
+            provider: "hab-launch-claims",
+            claim: "hab-launch/@dev/9",
+            claimedAt: new Date(NOW - UNRECEIPTED_CLAIM_NOT_CONSUMED_FLOOR_MS - 1_000).toISOString(),
+            cure: CURE,
+          },
+        ],
+      }),
+      { nowMs: NOW },
+    )
+    const report = classifyBayStatus({
+      ...base,
+      bayId: bay.id,
+      path: bay.path,
+      ownerPid: 9,
+      ownerAlive: false,
+      protectedBy: protectionEvidenceForBay(protections, bay),
+      protectionGaps: protectionGapEvidenceForBay(protections, bay),
+      consumerNotConsumed: protectionNotConsumedEvidenceForBay(protections, bay),
+    })
+
+    expect(report.lines.find((line) => line.class === "consumer")).toMatchObject({ verdict: "BLOCK" })
+    expect(report.exit).toBe(1)
+  })
+
+  it("applies the same one verdict to a closed-degenerate Bay", () => {
+    // Two ladders, one consumer rule: a closed-degenerate Bay used to run its own
+    // copy of this ranking, so the two could drift.
+    const protections = parseYrdBayProtections(
+      JSON.stringify({
+        schema: "yrd-bay-protections/2",
+        providers: completeProviders,
+        protections: [],
+        claims: [
+          {
+            provider: "hab-launch-claims",
+            claim: "hab-launch/@dev/4",
+            claimedAt: new Date(NOW - UNRECEIPTED_CLAIM_NOT_CONSUMED_FLOOR_MS - 1_000).toISOString(),
+            cure: CURE,
+          },
+        ],
+      }),
+      { nowMs: NOW },
+    )
+    const report = classifyBayStatus({
+      bayId: "B280",
+      name: "pathless",
+      branch: "task/pathless",
+      closedDegenerate: true,
+      consumerNotConsumed: protectionNotConsumedEvidenceForBay(protections, { id: "B280" }),
+    })
+
+    expect(report.exit).toBe(0)
+    expect(report.lines.find((line) => line.class === "consumer")?.evidence).toContain("NOT-CONSUMED")
+  })
+})
+
+/**
+ * @failure A recycled pid answered `kill -0`, so B58's Bay reported a live owner for days.
+ * @level l2
+ * @consumer @yrd/cli bay status
+ * @bead @i/10-yrd/bay-prune-without-data-loss
+ */
+describe("owner liveness evidence", () => {
+  it("reports the liveness verdict's own words rather than a signal it never sent", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 4242,
+      ownerAlive: false,
+      ownerEvidence:
+        "pid 4242 started 2026-08-30T09:00:00.000Z, after the record that names it; the recorded owner is gone and its pid was reused",
+    })
+    const owner = report.lines.find((line) => line.class === "owner")
+
+    expect(owner).toMatchObject({ verdict: "PASS" })
+    expect(owner?.evidence).toContain("pid was reused")
+    expect(owner?.evidence).not.toContain("ESRCH")
+  })
+
+  it("keeps an unprovable owner UNKNOWN, never dead", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 4242,
+      ownerEvidence: "pid 4242 exists but its identity could not be read: EACCES",
+    })
+
+    expect(report.lines.find((line) => line.class === "owner")).toMatchObject({
+      verdict: "UNKNOWN",
+      evidence: expect.stringContaining("EACCES"),
+    })
+    expect(report.exit).toBe(2)
   })
 })

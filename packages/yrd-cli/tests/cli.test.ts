@@ -3695,6 +3695,12 @@ describe("runYrd", () => {
       runner: "cli-test",
       leaseMs: 60_000,
     })
+    // AT FAILURE TIME: the failing transition itself stamps the closure, so no
+    // later sweep has to notice the Bay and no window exists in which a pathless
+    // Bay still holds its branch name (@i/10-yrd/bay-prune-without-data-loss).
+    const failed = app.bays.get("B1")
+    expect(failed?.closedAt).toBe(failed?.closure?.at)
+    expect(failed?.closedAt).toBeTruthy()
     expect(app.bays.get("B1")).toMatchObject({
       status: "closed",
       closure: { kind: "closed-degenerate" },
@@ -4012,6 +4018,57 @@ describe("runYrd", () => {
       excluded: [],
       outcomes: { prunable: [], kept: [], paged: [] },
     })
+  })
+
+  it("keeps a non-empty census that pruned nothing a FAILURE exit, kept and paged alike", async () => {
+    // @i/10-yrd/bay-prune-without-data-loss item 5, asserted so it cannot be
+    // quietly relaxed into a success: a sweep that examined bays and reclaimed
+    // none has not done its job, and the timer driving it must be able to tell
+    // that from a clean sweep. The live census that examined 135 and pruned 0
+    // exited 1 for exactly this reason — that exit is the signal, not the bug.
+    // The ONLY zero-pruned census that succeeds is the one with nothing to
+    // examine, which the sibling test above pins at exit 0.
+    const kept = await createApp()
+    await openTestBay(kept, { name: "protected", branch: "topic/kept" })
+    const keptOutput = outputIO({
+      bayProtections: [
+        { bay: "B1", path: "/repo/.bays/B1", source: "inhab-status", evidence: "Inhab status home @dev.1 is ready" },
+      ],
+    })
+    expect(await runYrd(kept, yrd("admin", "bay", "prune", "--json"), keptOutput.io)).toBe(1)
+    expect(JSON.parse(keptOutput.stdout())).toMatchObject({
+      examined: 1,
+      outcomes: { prunable: [], kept: [{ bay: "B1", reasons: ["consumer"] }], paged: [] },
+    })
+
+    // The paged arm: nothing BLOCKS, but the census could not certify absence,
+    // and an uncertifiable census must not report the same exit as a clean one.
+    // Every unprovable class is named, not just the first — a partial reason list
+    // would let a reader think one cure clears the Bay when three are open.
+    const paged = await createApp()
+    await openTestBay(paged, { name: "unprovable", branch: "topic/paged" })
+    const pagedOutput = outputIO({
+      bayProtections: [
+        {
+          bay: "*",
+          path: "*",
+          source: "live-process-cwd-unavailable",
+          evidence: "provider herdr-live-sessions unavailable: socket refused connection",
+        },
+      ],
+    })
+    expect(await runYrd(paged, yrd("admin", "bay", "prune", "--json"), pagedOutput.io)).toBe(1)
+    const pagedResult = JSON.parse(pagedOutput.stdout()) as {
+      examined: number
+      outcomes: {
+        prunable: readonly string[]
+        kept: readonly unknown[]
+        paged: readonly { bay: string; reasons: readonly string[] }[]
+      }
+    }
+    expect(pagedResult).toMatchObject({ examined: 1, outcomes: { prunable: [], kept: [] } })
+    expect(pagedResult.outcomes.paged.map((row) => row.bay)).toEqual(["B1"])
+    expect(pagedResult.outcomes.paged[0]?.reasons).toContain("consumer")
   })
 
   it("admin bay prune decides a missing worktree from its persisted head", async () => {

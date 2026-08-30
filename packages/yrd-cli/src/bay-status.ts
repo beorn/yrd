@@ -21,6 +21,26 @@ export const YRD_BAY_PROTECTION_PROVIDERS = [
 ] as const
 export const HISTORICAL_BAY_OWNER_AGE_FLOOR_MS = 48 * 60 * 60 * 1_000
 
+/**
+ * A host claim yrd proved cannot be consuming a workspace, carried as evidence
+ * on the consumer PASS line rather than as a gap.
+ *
+ * `YRD_BAY_PROTECTION_UNKNOWN_SOURCE`'s sibling: both are synthesized by the
+ * parser rather than declared by the host, and neither is a real protection, so
+ * `protectionEvidenceForBay` must exclude both.
+ */
+export const YRD_BAY_PROTECTION_NOT_CONSUMED_SOURCE = "host-claim-not-consumed" as const
+
+/**
+ * The age past which an unreceipted host claim is NOT-CONSUMED.
+ *
+ * Deliberately the SAME number as the ownerless-Bay floor, not a second policy:
+ * both answer one question — how long a host fact may go unconfirmed before its
+ * absence is itself the fact. A claim whose receipt never appeared inside that
+ * window did not survive to hold anything.
+ */
+export const UNRECEIPTED_CLAIM_NOT_CONSUMED_FLOOR_MS = HISTORICAL_BAY_OWNER_AGE_FLOOR_MS
+
 export function freshOriginBranchMissing(exitCode: number | null): boolean | undefined {
   if (exitCode === 0) return false
   if (exitCode === 1) return true
@@ -64,14 +84,24 @@ export type BayStatusFacts = Readonly<{
   ownerPid?: number
   /** The command checking status is the process that owns this Bay. */
   ownerIsCaller?: boolean
-  /** Result of `kill -0` when ownerPid is set; undefined if not checked. */
+  /** Whether the RECORDED owner is running when ownerPid is set; undefined when
+   * its identity could not be established. Derived from one liveness verdict
+   * (`@yrd/process` recordedPidLiveness), never from a bare `kill -0`: a pid is a
+   * recycled resource, so "some process answers" is not "the owner is alive". */
   ownerAlive?: boolean
+  /** That verdict's own words, so a Bay released because its pid was REUSED does
+   * not report itself as an owner that exited. */
+  ownerEvidence?: string
   /** Elapsed time since this Bay was opened. */
   ageMs?: number
   /** Host-owned live consumers that still reference this Bay. */
   protectedBy?: readonly string[]
   /** Host-owned consumer probes that could not establish absence. */
   protectionGaps?: readonly string[]
+  /** Host claims proven NOT-CONSUMED by age. They block nothing, and they are
+   * reported on the consumer PASS line so the reason this Bay stopped being
+   * paged stays legible to whoever audits the census. */
+  consumerNotConsumed?: readonly string[]
   /** `git status --porcelain` empty when path exists. */
   worktreeDirty?: boolean
   worktreeMissing?: boolean
@@ -118,8 +148,12 @@ export function parseOwnerPid(...candidates: readonly (string | undefined)[]): n
   return undefined
 }
 
-export function parseYrdBayProtections(raw: string | undefined): readonly YrdBayProtection[] {
+export function parseYrdBayProtections(
+  raw: string | undefined,
+  options: Readonly<{ nowMs?: number }> = {},
+): readonly YrdBayProtection[] {
   if (raw === undefined) return []
+  const nowMs = options.nowMs ?? Date.now()
   let value: unknown
   try {
     value = JSON.parse(raw)
@@ -156,11 +190,20 @@ export function parseYrdBayProtections(raw: string | undefined): readonly YrdBay
     }
     const evidence = protectionProviderText(provider["evidence"], index, "evidence")
     if (status === "unavailable") {
+      // An unreachable provider is a REFUSAL, and a refusal the reader cannot act
+      // on is half-written: it must name the provider (it always did) and the cure
+      // (it did not). A host that declares no cure is told exactly which field to
+      // set, rather than leaving every future reader to rediscover it.
+      const cure = provider["cure"] === undefined ? undefined : protectionProviderText(provider["cure"], index, "cure")
       unavailableProviders.push({
         bay: "*",
         path: "*",
         source: YRD_BAY_PROTECTION_UNKNOWN_SOURCE,
-        evidence: `provider ${name} unavailable: ${evidence}`,
+        evidence:
+          `provider ${name} unavailable: ${evidence} — ` +
+          (cure === undefined
+            ? `no cure declared; the host must set ${YRD_BAY_PROTECTIONS_ENV}.providers[].cure for ${name}`
+            : `cure: ${cure}`),
       })
     }
   }
@@ -184,8 +227,106 @@ export function parseYrdBayProtections(raw: string | undefined): readonly YrdBay
       evidence: protectionText(protection["evidence"], index, "evidence"),
     }
   })
-  return [...protections, ...unavailableProviders]
+  return [...protections, ...unavailableProviders, ...parseUnreceiptedClaims(envelope["claims"], seenProviders, nowMs)]
 }
+
+/**
+ * Host claims the provider READ but whose consumption it could not confirm.
+ *
+ * A claim without a current receipt is a fact about that claim, not an outage of
+ * the provider that read it. Collapsing the two is what produced an anonymous
+ * `provider hab-launch-claims unavailable` that named no cure and refused an
+ * entire Bay population indefinitely. Yrd owns what the fact means, and owns it
+ * once:
+ *
+ * - past `UNRECEIPTED_CLAIM_NOT_CONSUMED_FLOOR_MS` the claim is dead and cannot
+ *   be holding a workspace — NOT-CONSUMED, which blocks nothing;
+ * - below the floor it is genuinely undecided, and says so naming its own claim
+ *   id and the cure that would settle it.
+ *
+ * Both shapes address every Bay (`bay: "*"`): a claim with no receipt is exactly
+ * a claim whose workspace reference is unknown, so it can name no single Bay.
+ */
+function parseUnreceiptedClaims(
+  value: unknown,
+  declaredProviders: ReadonlySet<string>,
+  nowMs: number,
+): YrdBayProtection[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.claims must be an array`)
+  return value.map((row, index): YrdBayProtection => {
+    if (typeof row !== "object" || row === null || Array.isArray(row)) {
+      throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.claims[${index}] must be an object`)
+    }
+    const claim = row as Record<string, unknown>
+    const provider = claimText(claim["provider"], index, "provider")
+    if (!declaredProviders.has(provider)) {
+      throw new TypeError(
+        `${YRD_BAY_PROTECTIONS_ENV}.claims[${index}].provider is not a declared provider: ${JSON.stringify(provider)}`,
+      )
+    }
+    const id = claimText(claim["claim"], index, "claim")
+    const cure = claimText(claim["cure"], index, "cure")
+    const ageMs = nowMs - claimedAtMs(claim["claimedAt"], index)
+    const floor = describeClaimAge(UNRECEIPTED_CLAIM_NOT_CONSUMED_FLOOR_MS)
+    if (ageMs >= UNRECEIPTED_CLAIM_NOT_CONSUMED_FLOOR_MS) {
+      return {
+        bay: "*",
+        path: "*",
+        source: YRD_BAY_PROTECTION_NOT_CONSUMED_SOURCE,
+        evidence: `${provider} claim ${id} went ${describeClaimAge(ageMs)} with no current receipt (floor ${floor}): NOT-CONSUMED`,
+      }
+    }
+    return {
+      bay: "*",
+      path: "*",
+      source: YRD_BAY_PROTECTION_UNKNOWN_SOURCE,
+      evidence:
+        `${provider} claim ${id} has no current receipt after ${describeClaimAge(ageMs)}, ` +
+        `below the ${floor} NOT-CONSUMED floor — cure: ${cure}`,
+    }
+  })
+}
+
+/** Accepts an ISO-8601 instant or epoch milliseconds; refuses anything else. */
+function claimedAtMs(value: unknown, index: number): number {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new TypeError(
+        `${YRD_BAY_PROTECTIONS_ENV}.claims[${index}].claimedAt must be a positive epoch-millisecond integer`,
+      )
+    }
+    return value
+  }
+  const text = claimText(value, index, "claimedAt")
+  const parsed = Date.parse(text)
+  if (Number.isNaN(parsed)) {
+    throw new TypeError(
+      `${YRD_BAY_PROTECTIONS_ENV}.claims[${index}].claimedAt must be an ISO-8601 instant or epoch milliseconds: ${JSON.stringify(text)}`,
+    )
+  }
+  return parsed
+}
+
+/** Whole hours: a claim age is compared against a 48h floor, so minutes are noise. */
+function describeClaimAge(ms: number): string {
+  return `${String(Math.max(0, Math.round(ms / 3_600_000)))}h`
+}
+
+function claimText(value: unknown, index: number, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.claims[${index}].${field} must be a non-empty string`)
+  }
+  return value
+}
+
+/** The parser's own rows, which are verdicts about the census rather than
+ * host-declared protections. Every selector partitions on this set, so a new
+ * synthetic source can never silently read as a live protection. */
+const SYNTHETIC_PROTECTION_SOURCES: ReadonlySet<string> = new Set([
+  YRD_BAY_PROTECTION_UNKNOWN_SOURCE,
+  YRD_BAY_PROTECTION_NOT_CONSUMED_SOURCE,
+])
 
 export function protectionEvidenceForBay(
   protections: readonly YrdBayProtection[],
@@ -194,8 +335,24 @@ export function protectionEvidenceForBay(
   return protections
     .filter(
       (protection) =>
-        protection.source !== YRD_BAY_PROTECTION_UNKNOWN_SOURCE &&
+        !SYNTHETIC_PROTECTION_SOURCES.has(protection.source) &&
         (protection.bay === bay.id || (bay.path !== undefined && protection.path === bay.path)),
+    )
+    .map((protection) => protection.evidence)
+}
+
+/** Claims proven NOT-CONSUMED: reported, never blocking. */
+export function protectionNotConsumedEvidenceForBay(
+  protections: readonly YrdBayProtection[],
+  bay: Readonly<{ id: string; path?: string }>,
+): string[] {
+  return protections
+    .filter(
+      (protection) =>
+        protection.source === YRD_BAY_PROTECTION_NOT_CONSUMED_SOURCE &&
+        (protection.bay === "*" ||
+          protection.bay === bay.id ||
+          (bay.path !== undefined && protection.path === bay.path)),
     )
     .map((protection) => protection.evidence)
 }
@@ -247,24 +404,35 @@ function livePRLine(prs: readonly string[], branch: string, derivedLaneSubmitLiv
   return { class: "pr", verdict: "PASS", evidence: "no live change references this Bay" }
 }
 
-function classifyClosedDegenerateBay(facts: BayStatusFacts): BayStatusReport {
+/**
+ * The one consumer verdict.
+ *
+ * A generic host seam: Yrd never imports the consumer's policy, it only ranks
+ * the evidence the host supplied. Both the ordinary and the closed-degenerate
+ * ladder call this, so a Bay can never be classified by two consumer rules that
+ * drift apart — they differ only in the words a clean result uses.
+ *
+ * Rank: a live reference BLOCKS; an unestablished absence is UNKNOWN; otherwise
+ * the Bay passes, carrying any claim this census proved NOT-CONSUMED so a reader
+ * can see which facts were ruled on rather than inferring it from silence.
+ */
+function consumerLine(facts: BayStatusFacts, cleanEvidence: string): BayStatusLine {
   const consumers = facts.protectedBy ?? []
+  if (consumers.length > 0) return { class: "consumer", verdict: "BLOCK", evidence: consumers.join("; ") }
   const gaps = facts.protectionGaps ?? []
-  let consumer: BayStatusLine
-  if (consumers.length > 0) {
-    consumer = { class: "consumer", verdict: "BLOCK", evidence: consumers.join("; ") }
-  } else if (gaps.length > 0) {
-    consumer = { class: "consumer", verdict: "UNKNOWN", evidence: gaps.join("; ") }
-  } else {
-    consumer = {
-      class: "consumer",
-      verdict: "PASS",
-      evidence: "closed-degenerate Bay has no live external consumer reference",
-    }
+  if (gaps.length > 0) return { class: "consumer", verdict: "UNKNOWN", evidence: gaps.join("; ") }
+  const notConsumed = facts.consumerNotConsumed ?? []
+  return {
+    class: "consumer",
+    verdict: "PASS",
+    evidence: notConsumed.length === 0 ? cleanEvidence : `${cleanEvidence}; ${notConsumed.join("; ")}`,
   }
+}
+
+function classifyClosedDegenerateBay(facts: BayStatusFacts): BayStatusReport {
   const lines: readonly BayStatusLine[] = [
     { class: "owner", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace owner" },
-    consumer,
+    consumerLine(facts, "closed-degenerate Bay has no live external consumer reference"),
     { class: "worktree", verdict: "PASS", evidence: "closed-degenerate: no worktree path was ever recorded" },
     { class: "commits", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace tip to preserve" },
     { class: "stash", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace stash" },
@@ -315,42 +483,23 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
     lines.push({
       class: "owner",
       verdict: "UNKNOWN",
-      evidence: `pid ${facts.ownerPid} present but liveness not checked`,
+      evidence: facts.ownerEvidence ?? `pid ${facts.ownerPid} present but liveness not checked`,
     })
   } else if (facts.ownerAlive) {
     lines.push({
       class: "owner",
       verdict: "BLOCK",
-      evidence: `owner pid ${facts.ownerPid} is live (kill -0 succeeded)`,
+      evidence: facts.ownerEvidence ?? `owner pid ${facts.ownerPid} is live`,
     })
   } else {
     lines.push({
       class: "owner",
       verdict: "PASS",
-      evidence: `owner pid ${facts.ownerPid} is dead (kill -0 ESRCH)`,
+      evidence: facts.ownerEvidence ?? `owner pid ${facts.ownerPid} is not running`,
     })
   }
 
-  // consumer — a generic host seam; Yrd never imports the consumer's policy.
-  if ((facts.protectedBy?.length ?? 0) > 0) {
-    lines.push({
-      class: "consumer",
-      verdict: "BLOCK",
-      evidence: (facts.protectedBy ?? []).join("; "),
-    })
-  } else if ((facts.protectionGaps?.length ?? 0) > 0) {
-    lines.push({
-      class: "consumer",
-      verdict: "UNKNOWN",
-      evidence: (facts.protectionGaps ?? []).join("; "),
-    })
-  } else {
-    lines.push({
-      class: "consumer",
-      verdict: "PASS",
-      evidence: "no live external consumer references this Bay",
-    })
-  }
+  lines.push(consumerLine(facts, "no live external consumer references this Bay"))
 
   // worktree
   if (facts.path === undefined || facts.worktreeMissing === true) {

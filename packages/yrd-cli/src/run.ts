@@ -68,6 +68,9 @@ import {
   createProcess,
   pathReapDeletionFailure,
   type GitSyncReadCommand,
+  recordedPidIsRunning,
+  recordedPidLiveness,
+  recordedPidLivenessSync,
   type Process,
   type ProcessResult,
 } from "@yrd/process"
@@ -216,6 +219,7 @@ import {
   parseOwnerPid,
   parseYrdBayProtections,
   protectionGapEvidenceForBay,
+  protectionNotConsumedEvidenceForBay,
   protectionEvidenceForBay,
   freshOriginBranchMissing,
   YRD_BAY_PROTECTIONS_ENV,
@@ -928,16 +932,25 @@ export async function habitantRunnerStatus(cwd: string, stateDir?: string): Prom
   }
 }
 
-/** Whether the recorded pid still names a live process. ESRCH is proof it is
- * gone; EPERM proves the opposite — a process exists that this user does not
- * own — so only ESRCH may retire a runner. */
+/**
+ * Whether the recorded runner pid is still running. One shared verdict
+ * (`@yrd/process`), so display and reclaim can never disagree.
+ *
+ * No identity is asserted here, and that is deliberate rather than an oversight.
+ * The status record's `startedAt` is a LOGICAL timestamp written under the
+ * caller's clock — `io.now()` in tests, a restored journal event on replay — not
+ * the operating system's start time for that process, so comparing it against
+ * `/proc` would call a live runner recycled whenever the two clocks differ, and
+ * reclaim would then recover runs out from under a runner that is still working.
+ * That is the expensive direction of the error.
+ *
+ * Closing it properly means RECORDING the identity instead of inferring it: the
+ * habitant writes its own observed start (`observePidSync(process.pid)`) into
+ * the status record, and this compares the two `/proc` readings exactly, immune
+ * to any clock. Until that field exists, a runner pid answers as it always did.
+ */
 function habitantRunnerRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (cause) {
-    return (cause as NodeJS.ErrnoException).code !== "ESRCH"
-  }
+  return recordedPidIsRunning(recordedPidLivenessSync({ pid }))
 }
 
 /** The status file is no longer deleted on close (D1a) — a departed runner leaves
@@ -1975,22 +1988,14 @@ export function planHabitantRunnerReclaim(
   return { reclaim: true, runner: `yrd-cli:${prior.pid}` }
 }
 
-function habitantRunnerProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (cause) {
-    // ESRCH means no such process — dead, safe to reclaim. Any other error
-    // (EPERM in particular) means the process exists but we cannot signal it;
-    // treat it as alive and skip reclaim.
-    return (cause as NodeJS.ErrnoException).code !== "ESRCH"
-  }
-}
-
 async function reclaimDeadHabitantRunner(app: YrdCliApp, io: YrdCliIO): Promise<void> {
   const cwd = io.cwd ?? process.cwd()
   const prior = await habitantRunnerStatus(cwd)
-  const decision = planHabitantRunnerReclaim(prior, process.pid, habitantRunnerProcessAlive)
+  // Reclaim consumes the same verdict display does — one liveness rule, so
+  // recovery can never disagree with the projection about whether the prior
+  // runner is still there. This replaced a second, byte-identical bare-signal
+  // helper that existed only because nothing owned the question.
+  const decision = planHabitantRunnerReclaim(prior, process.pid, habitantRunnerRunning)
   if (!decision.reclaim) return
   const runs = await app.queue.recover({
     recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
@@ -4167,7 +4172,7 @@ async function closeBays(
   const protections = activeBayProtections(io)
   for (const bay of bays) {
     const report = classifyBayStatus(
-      gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+      await gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
     )
     if (options.force !== true && report.exit !== 0) {
       refused.push(report)
@@ -4293,28 +4298,30 @@ function requiredPersistedBayHead(head: string | undefined): string {
 }
 
 /** Gather live facts for one bay; classification stays pure in bay-status.ts (22290). */
-function gatherBayStatusFacts(
+async function gatherBayStatusFacts(
   app: YrdCliApp,
   bay: Bay,
   repoRoot: string,
   remoteTrackingFresh: boolean,
   protections: readonly YrdBayProtection[],
   now: number,
-): BayStatusFacts {
+): Promise<BayStatusFacts> {
   const ownerPid = parseOwnerPid(bay.name, bay.by)
   const ownerIsCaller = ownerPid === process.pid
+  // The owner necessarily preceded the Bay it opened, so the Bay's own open time
+  // is the identity this record already had: a process at that pid which started
+  // later is a REUSE of the number, not the owner. B58 sat refused for days on a
+  // bare `kill -0` that could not tell those apart.
+  const bayOpenedAtMs = Date.parse(bay.openedAt)
   let ownerAlive: boolean | undefined
+  let ownerEvidence: string | undefined
   if (ownerPid !== undefined) {
-    try {
-      process.kill(ownerPid, 0)
-      ownerAlive = true
-    } catch (error) {
-      const code =
-        typeof error === "object" && error !== null && "code" in error
-          ? String((error as { code?: unknown }).code)
-          : undefined
-      ownerAlive = code === "ESRCH" ? false : undefined
-    }
+    const report = await recordedPidLiveness({
+      pid: ownerPid,
+      ...(Number.isFinite(bayOpenedAtMs) ? { runningSinceMs: bayOpenedAtMs } : {}),
+    })
+    ownerEvidence = report.evidence
+    ownerAlive = report.liveness === "unknown" ? undefined : report.liveness === "live"
   }
 
   const path = bay.path
@@ -4455,9 +4462,14 @@ function gatherBayStatusFacts(
       id: bay.id,
       ...(path === undefined ? {} : { path }),
     }),
+    consumerNotConsumed: protectionNotConsumedEvidenceForBay(protections, {
+      id: bay.id,
+      ...(path === undefined ? {} : { path }),
+    }),
     ...(ownerPid === undefined ? {} : { ownerPid }),
     ...(ownerPid === undefined ? {} : { ownerIsCaller }),
     ...(ownerAlive === undefined ? {} : { ownerAlive }),
+    ...(ownerEvidence === undefined ? {} : { ownerEvidence }),
     ...(ageMs === undefined ? {} : { ageMs }),
     ...(worktreeDirty === undefined ? {} : { worktreeDirty }),
     ...(worktreeMissing === undefined ? {} : { worktreeMissing }),
@@ -4497,7 +4509,14 @@ async function bayStatusCommand(
   const protections = activeBayProtections(io)
   const reports: BayStatusReport[] = await Promise.all(
     bays.map(async (bay) => {
-      const facts = gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())
+      const facts = await gatherBayStatusFacts(
+        app,
+        bay,
+        cwd,
+        remoteTrackingFresh,
+        protections,
+        io.now?.() ?? Date.now(),
+      )
       const effectiveBase = await app.bays.effectiveBase(bay.id)
       return classifyBayStatus({ ...facts, effectiveBase })
     }),
@@ -4639,8 +4658,12 @@ async function bayPruneCommand(
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
   const remoteTrackingFresh = await refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
-  const reports = open.map((bay) =>
-    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())),
+  const reports = await Promise.all(
+    open.map(async (bay) =>
+      classifyBayStatus(
+        await gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+      ),
+    ),
   )
   const approvalPath = options.approval === undefined ? undefined : resolve(cwd, options.approval)
   const approval = approvalPath === undefined ? undefined : await readBayPruneApproval(approvalPath)
@@ -6482,9 +6505,11 @@ async function listBays(
   if (options.check === true) {
     const remoteTrackingFresh = await refreshBayStatusOrigin(cwd)
     const protections = activeBayProtections(io)
-    reports = open.map((bay) =>
-      classifyBayStatus(
-        gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+    reports = await Promise.all(
+      open.map(async (bay) =>
+        classifyBayStatus(
+          await gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now()),
+        ),
       ),
     )
   }
