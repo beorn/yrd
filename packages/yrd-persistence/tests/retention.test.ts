@@ -329,6 +329,13 @@ describe("journal retention window", () => {
     }
   })
 
+  // Large replay: two full 300-frame journal workloads (bounded + unbounded)
+  // built and paged through a real SQLite journal. Isolated measured cost
+  // (2026-08-30): ~0.7-0.75s. Budget below was set in 9319a804 after this
+  // crossed the bare 5s vitest default 4 of 7 runs on main itself under
+  // ordinary fleet load (load average ~30) — a false-red gate on the
+  // instrument, not the change. 30s is >5x the worst measured cost and
+  // follows this repo's trailing-arg precedent (22 other files).
   it("drops history past the window and gives the pages back", async () => {
     const frames = Array.from({ length: 300 }, (_, index) => frame(`bounded-${String(index)}`))
 

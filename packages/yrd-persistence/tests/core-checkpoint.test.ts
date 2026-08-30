@@ -423,6 +423,12 @@ describe("persistent Core projection checkpoint", () => {
     ])
   })
 
+  // Large replay: 4,097 real dispatches through a real SQLite-backed journal.
+  // Isolated measured cost (2026-08-30): ~1.6-2.1s. Budget below was set in
+  // 9319a804 after this crossed the bare 5s vitest default 4 of 7 runs on
+  // main itself under ordinary fleet load (load average ~30) — a false-red
+  // gate on the instrument, not the change. 30s is >5x the worst measured
+  // cost and follows this repo's trailing-arg precedent (22 other files).
   it("bounds the warm result cache while exact old retries and complete events stay journal-backed", async () => {
     const definition = counterDefinition()
     const indexed = indexedCheckpointJournal()
