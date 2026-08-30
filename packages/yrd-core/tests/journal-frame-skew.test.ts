@@ -133,6 +133,47 @@ describe("journal frame vocabulary skew", () => {
     }
   })
 
+  it("classifies a compatibility object's own shape growth as skew, not a raw ZodError, and names the unrecognized key", () => {
+    // Regression for the residue of frame-vocabulary-skew-degrades: a compatibility
+    // object with an extra key beside `version` (e.g. written by a newer yrd) used
+    // to die as a raw ZodError out of `journalFrameSkew`, before classification ever
+    // ran. Existing tests never cover this because `frame()` only ever produces a
+    // well-formed `{ version }` compatibility object.
+    const value = { ...frame(), compatibility: { version: AHEAD, requires: ["some-capability"] } }
+
+    expect(journalFrameSkew(value)).toEqual({
+      kind: "reader-behind",
+      compiled: JOURNAL_READER_VERSION,
+      declared: AHEAD,
+    })
+    expect(() => parseJournalFrame(value)).toThrow(
+      new RegExp(`v${AHEAD}.*compiled capability v${JOURNAL_READER_VERSION}.*requires.*update this checkout`, "isu"),
+    )
+    try {
+      parseJournalFrame(value)
+      expect.unreachable("a compatibility object this reader cannot read must refuse, not throw a raw ZodError")
+    } catch (error) {
+      expect(error).toMatchObject({ failure: { kind: "refusal", code: "journal-version-skew" } })
+    }
+  })
+
+  it("does not blame skew for an unrecognized compatibility key at this reader's own version", () => {
+    // Companion to the case above: the same shape defect at (or below) this
+    // reader's own compiled version is an ordinary malformed frame, not a fleet
+    // version spread, so it must not be sent through the skew refusal — that
+    // would send the operator to upgrade a checkout that was never the problem.
+    const value = { ...frame(), compatibility: { version: JOURNAL_READER_VERSION, requires: ["some-capability"] } }
+
+    expect(journalFrameSkew(value).kind).toBe("same")
+    expect(() => parseJournalFrame(value)).toThrow()
+    try {
+      parseJournalFrame(value)
+      expect.unreachable("a malformed compatibility object must still fail")
+    } catch (error) {
+      expect(error).not.toMatchObject({ failure: { code: "journal-version-skew" } })
+    }
+  })
+
   it("keeps no site branching on the compiled/declared pair outside the classifier", () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const packagesRoot = join(here, "..", "..")

@@ -92,9 +92,37 @@ export function journalFrameCompatibility(value: unknown): JournalCompatibility 
   return JournalCompatibilitySchema.parse(value.compatibility)
 }
 
-/** How one frame value's own declaration stands against this reader. */
+/**
+ * A lenient read of a frame's declared compatibility version, used only to
+ * CLASSIFY skew (see {@link journalFrameSkew}). It never throws: an object
+ * whose `compatibility.version` is a positive integer reads that version;
+ * everything else — an absent stamp, a non-object compatibility, a
+ * non-integer or non-positive version, an unrecognized key sitting beside an
+ * otherwise well-formed version — reads as undefined, exactly like an absent
+ * stamp (`classifyJournalFrameVersion` folds that to declared version 0).
+ *
+ * This is deliberately looser than {@link JournalCompatibilitySchema}: the
+ * declared version is only ever the EXPLANATION for a parse this reader
+ * cannot satisfy, never itself a trigger for one — see the doc comment on
+ * {@link parseJournalFrame}. Any other shape defect, including an
+ * unrecognized key, is left for the strict frame schema to reject, so it is
+ * classified by `parseJournalFrame` instead of raised here as a bare
+ * `ZodError` ahead of that decision.
+ */
+function declaredJournalFrameVersion(value: unknown): number | undefined {
+  if (typeof value !== "object" || value === null || !("compatibility" in value)) return undefined
+  const compatibility = (value as { compatibility: unknown }).compatibility
+  if (typeof compatibility !== "object" || compatibility === null) return undefined
+  const version = (compatibility as { version?: unknown }).version
+  return typeof version === "number" && Number.isInteger(version) && version >= 1 ? version : undefined
+}
+
+/** How one frame value's own declaration stands against this reader. Reads
+ * leniently — see {@link declaredJournalFrameVersion} — so a defect in the
+ * compatibility object's own shape is classified by the strict frame schema
+ * in {@link parseJournalFrame}, never thrown here ahead of that decision. */
 export function journalFrameSkew(value: unknown): JournalFrameSkew {
-  return classifyJournalFrameVersion(JOURNAL_READER_VERSION, journalFrameCompatibility(value)?.version)
+  return classifyJournalFrameVersion(JOURNAL_READER_VERSION, declaredJournalFrameVersion(value))
 }
 
 /**
