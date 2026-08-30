@@ -1145,6 +1145,13 @@ export async function habitantRunnerLeaseHeld(cwd: string): Promise<boolean> {
  * driver can contend for git state.
  */
 export async function refuseOneShotQueueRunUnderResidentLease(cwd: string): Promise<void> {
+  // No Git queue dir under this cwd ⇒ no resident lease can exist to contend
+  // with — return and let the command's own repository resolution speak with
+  // its ordinary error. This pre-gate is advisory and must never out-rank the
+  // App's own cwd handling: measured 2026-08-30, raising here turned 23
+  // `tests/cli.test.ts` exit-code assertions into infrastructure exit 3s,
+  // because the fixtures drive whole queue flows against abstracted repos.
+  if (queueGitDir(cwd) === undefined) return
   const lease = await habitantRunnerLeaseObservation(cwd)
   if (!lease.held) return
   const holder =
