@@ -30,9 +30,11 @@ import {
 } from "./domain.ts"
 import { asFailure, failureFact, raiseFailure } from "./failure.ts"
 import {
-  assertJournalReaderCompatibility,
+  classifyJournalFrameVersion,
   JOURNAL_READER_VERSION,
+  journalFrameCompatibility,
   parseJournalFrame,
+  raiseJournalFrameSkew,
   type JournalCompatibility,
   type JournalFrame,
 } from "./frame.ts"
@@ -541,7 +543,7 @@ function assertEmittedFieldVocabulary(
     // the prototype and compare as though it carried a version.
     const declared = Object.hasOwn(definition.fields, field) ? definition.fields[field] : undefined
     const required = declared ?? definition.reader
-    if (required > compatibility.version) {
+    if (classifyJournalFrameVersion(compatibility.version, required).kind === "reader-behind") {
       raiseFailure(
         "configuration",
         "journal-field-version-skew",
@@ -561,7 +563,7 @@ function validateJournalEvents(events: JournalEvents): void {
         `yrd: event '${name}' has invalid minimum reader version '${definition.reader}'`,
       )
     }
-    if (definition.reader > JOURNAL_READER_VERSION) {
+    if (classifyJournalFrameVersion(JOURNAL_READER_VERSION, definition.reader).kind === "reader-behind") {
       raiseFailure(
         "configuration",
         "journal-event-reader-unsupported",
@@ -569,7 +571,7 @@ function validateJournalEvents(events: JournalEvents): void {
       )
     }
     for (const [field, version] of Object.entries(definition.fields)) {
-      if (version > JOURNAL_READER_VERSION) {
+      if (classifyJournalFrameVersion(JOURNAL_READER_VERSION, version).kind === "reader-behind") {
         raiseFailure(
           "configuration",
           "journal-field-reader-unsupported",
@@ -1339,7 +1341,6 @@ export async function createYrd<State extends object, Commands extends CommandTr
       const unknownNames = options?.unknownNames ?? "skip"
       for await (const batch of journal.read(after, before)) {
         for (const value of batch.values) {
-          assertJournalReaderCompatibility(value)
           for (const applied of journalFrameEvents(value)) {
             const validated = canonicalEvent(applied, "replay")
             if (validated !== undefined) {
@@ -1772,7 +1773,18 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
   if (!plainRecord(value) || !plainRecord(value.command) || !plainRecord(value.cause) || !Array.isArray(value.events)) {
     throw new Error("checkpoint contains an invalid journal frame")
   }
-  const compatibility = assertJournalReaderCompatibility(value)
+  const compatibility = journalFrameCompatibility(value)
+  /**
+   * A checkpoint written by a newer habitant is the fleet-spread case again, so
+   * a checkpoint frame this reader cannot read owes the SAME refusal as a
+   * journal frame it cannot read — named from one message, in `frame.ts`.
+   * Anything this reader is not behind is an ordinary corrupt checkpoint.
+   */
+  const skew = classifyJournalFrameVersion(JOURNAL_READER_VERSION, compatibility?.version)
+  const invalid = (what: "frame" | "event"): never => {
+    if (skew.kind === "reader-behind") raiseJournalFrameSkew(skew, `checkpoint journal ${what}`)
+    throw new Error(`checkpoint contains an invalid journal ${what}`)
+  }
   const command = value.command
   const cause = value.cause
   const jsonPostorder: object[] = []
@@ -1798,7 +1810,7 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
     (Object.hasOwn(value, "value") && !checkpointJson(value.value, jsonPostorder)) ||
     !exactKeys(value, ["cause", "command", "events", "value", "compatibility"])
   ) {
-    throw new Error("checkpoint contains an invalid journal frame")
+    invalid("frame")
   }
   for (const applied of value.events) {
     if (
@@ -1812,7 +1824,7 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
       !EventSchema.shape.ts.safeParse(applied.ts).success ||
       !checkpointJson(applied.data, jsonPostorder)
     ) {
-      throw new Error("checkpoint contains an invalid journal event")
+      invalid("event")
     }
   }
   assertCheckpointCause(command, cause, commandHashes)
@@ -1845,11 +1857,17 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
  * What callers receive is still fully validated, and more strictly than the
  * frame parse validated it: `canonicalEvent` parses each `data` against that
  * event's own schema (or its replay schema) and then re-parses the whole event
- * through the strict `EventSchema`. The one frame-level gate with no per-event
- * equivalent is the journal reader-version refusal, so `events()` keeps calling
- * `assertJournalReaderCompatibility` — an O(1) field check, 9ms across the same
- * 45.6k frames. This mirrors `parseCheckpointFrame`, which already trades the
- * full Zod clone for targeted checks on already-validated results.
+ * through the strict `EventSchema`. This mirrors `parseCheckpointFrame`, which
+ * already trades the full Zod clone for targeted checks on already-validated
+ * results.
+ *
+ * There is no frame-version gate here, and there must not be one. A frame's
+ * declared version says the writer knew more words, never that this generator
+ * needs any of them: `events()` surfaces only events, and an event whose name
+ * this reader does not know is already quarantined by `canonicalEvent` and
+ * reported by `unknownEventNames()`. The gate that does exist is the envelope
+ * parse in `parseJournalFrame`, which every frame reaching here has already
+ * passed.
  *
  * A malformed value still fails loud here rather than yielding partial events.
  */

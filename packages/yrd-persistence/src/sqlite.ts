@@ -5,6 +5,7 @@ import { basename, join } from "node:path"
 import { gunzipSync } from "node:zlib"
 import { constants, Database } from "bun:sqlite"
 import {
+  classifyJournalFrameVersion,
   JOURNAL_READER_VERSION,
   classifyJournalHistory,
   createFailure,
@@ -456,9 +457,18 @@ function retentionBound<Fallback extends number | undefined>(
   return parsed
 }
 
+/**
+ * A writer may only ask for vocabulary its own build actually has, so this is
+ * the one direction of frame skew that stays fatal: `reader-behind` here means
+ * this process would stamp frames it cannot itself read back.
+ */
 function journalWriterVersion(value: number | undefined): number {
   const version = value ?? 0
-  if (!Number.isSafeInteger(version) || version < 0 || version > JOURNAL_READER_VERSION) {
+  if (
+    !Number.isSafeInteger(version) ||
+    version < 0 ||
+    classifyJournalFrameVersion(JOURNAL_READER_VERSION, version).kind === "reader-behind"
+  ) {
     throw new RangeError(
       `yrd: journal writer version must be an integer from 0 through ${String(JOURNAL_READER_VERSION)}`,
     )
@@ -1345,12 +1355,21 @@ function initialJournalVersionFloor(runtime: Context, rows: readonly LegacyRow[]
   return fresh ? runtime.writerVersion : observed
 }
 
+/**
+ * The floor records the vocabulary every habitant of this journal must have.
+ *
+ * A floor ABOVE this reader is therefore not corruption — it is the ordinary
+ * fleet spread, seen from the older side, and refusing it here refused every
+ * verb that appends. Only a floor that is not a version at all is invalid. The
+ * write this floor actually guards is still checked, against the frame being
+ * appended, at the append site.
+ */
 function readJournalVersionFloor(database: Database): number {
   const value = database
     .query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?")
     .get(JOURNAL_VERSION_FLOOR)?.value
   const version = value === undefined ? Number.NaN : Number(value)
-  if (!Number.isSafeInteger(version) || version < 0 || version > JOURNAL_READER_VERSION) {
+  if (!Number.isSafeInteger(version) || version < 0) {
     throw new Error(`yrd: journal version floor '${value ?? "missing"}' is invalid`)
   }
   return version

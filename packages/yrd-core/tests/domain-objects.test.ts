@@ -267,7 +267,7 @@ describe("Yrd domain objects", () => {
     expect(Object.isFrozen(definition)).toBe(true)
   })
 
-  it("refuses a future journal frame against the compiled reader capability", () => {
+  it("reads a future journal frame whose newer vocabulary this read never needs", () => {
     const command = Core.Command.parse({
       id: "00000000-0000-7000-8000-000000000001",
       op: "test.record",
@@ -282,6 +282,34 @@ describe("Yrd domain objects", () => {
       command,
       events: [],
       compatibility: { version: Core.JOURNAL_READER_VERSION + 1 },
+    }
+
+    // The declared version alone used to refuse the whole replay, and one such
+    // frame stopped every verb in every older tree. It is now a classification,
+    // not a gate: the reader's own parse decides. Both directions of that
+    // decision live in `journal-frame-skew.test.ts`.
+    expect(Core.journalFrameSkew(value).kind).toBe("reader-behind")
+    expect(Core.parseJournalFrame(value).compatibility).toEqual({
+      version: Core.JOURNAL_READER_VERSION + 1,
+    })
+  })
+
+  it("refuses a future journal frame whose envelope this reader cannot satisfy", () => {
+    const command = Core.Command.parse({
+      id: "00000000-0000-7000-8000-000000000001",
+      op: "test.record",
+    })
+    const value = {
+      cause: Core.CauseSchema.parse({
+        id: "00000000-0000-7000-8000-000000000002",
+        commandId: command.id,
+        op: command.op,
+        commandHash: Core.Command.hash(command),
+      }),
+      command,
+      events: [],
+      compatibility: { version: Core.JOURNAL_READER_VERSION + 1 },
+      provenance: { writer: "a newer build" },
     }
 
     expect(() => Core.parseJournalFrame(value)).toThrow(`compiled capability v${Core.JOURNAL_READER_VERSION}`)
