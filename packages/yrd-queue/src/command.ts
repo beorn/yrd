@@ -3569,6 +3569,28 @@ export async function rebuildCandidateByMerge(
  * `repo`, not bay state, so it belongs at this seam regardless of which side
  * built the candidate.
  */
+/**
+ * The one home for the "no migration verb" remedy, shared by both raise sites
+ * that refuse a pre-identity record: `recut-change-id-missing` here, and
+ * `candidate-change-id-missing` in `candidateChangeCommitMessage` below.
+ * Identity is deliberately never invented for an existing record — there is
+ * no migration verb, and re-pushing the SAME branch resolves to the same
+ * change (identity is branch-keyed) and refuses again identically. The only
+ * way out is the mint path: a fresh branch name gets a fresh, stable
+ * Change-Id. One copy so the two sites cannot say two different things about
+ * the same dead end — `candidateChangeCommitMessage`'s copy said "migrate it
+ * before rebuilding" until this fix, naming a verb that does not exist and
+ * was never going to; a reader who followed it re-pushed the unchanged
+ * branch, hit the identical refusal, and stalled (PR2599, five hours,
+ * 2026-08-29).
+ */
+const NO_CHANGE_ID_MIGRATION_REMEDY =
+  "there is no migration verb, because identity is never invented for an existing record. Re-pushing THIS " +
+  "branch cannot help: identity is branch-keyed, so it resolves to this same change and refuses again. Deliver " +
+  "the payload under a NEW branch name, which takes the mint path and gets a stable Change-Id. Push it to the " +
+  "receiver as 'refs/for/<base>/<issue>' under that new name. No work is lost (the payload is on the branch) " +
+  "and no withdraw is needed"
+
 async function remergeDirectChangeByMerge(
   git: Git,
   repo: string,
@@ -3596,9 +3618,7 @@ async function remergeDirectChangeByMerge(
       code: "recut-change-id-missing",
       message:
         `yrd: change '${input.id}' revision ${String(input.revision)} predates stable Change-Id identity — ` +
-        `there is no migration verb, because identity is never invented for an existing record. Re-pushing THIS branch cannot help: identity is branch-keyed, so it resolves to this same change and refuses again. Deliver the payload under a NEW branch name, which takes the mint path and gets a stable Change-Id. ` +
-        `Push it to the receiver as 'refs/for/<base>/<issue>' under that new name. No work is lost ` +
-        `(the payload is on the branch) and no withdraw is needed`,
+        NO_CHANGE_ID_MIGRATION_REMEDY,
       pr: input.id,
     })
   }
@@ -3876,8 +3896,7 @@ async function unauthoredDeletionFailure(
   if (base.status === "unreadable") {
     return candidateFailure(
       "deletion-inspection",
-      `could not measure the deletions change '${pr}' branch '${headSha}' authors against '${before}': ` +
-        `${base.detail}; restore readable history before merging a payload that deletes paths`,
+      `could not measure the deletions change '${pr}' branch '${headSha}' authors against '${before}': ${base.detail}`,
     )
   }
   const authored = new Set(await deletedPaths(git, repo, base.sha, headSha))
@@ -3887,8 +3906,7 @@ async function unauthoredDeletionFailure(
   return candidateFailure(
     "unauthored-path-deletion",
     `merging change '${pr}' branch '${headSha}' deletes [${shown}], which its authored diff against ` +
-      `'${base.sha}' never deletes; the merge resolved away merged work the branch never authored removing\n` +
-      `remedy: merge current base '${before}' into the branch, restore the merged content, and push`,
+      `'${base.sha}' never deletes; the merge resolved away merged work the branch never authored removing`,
     ".",
     unauthored,
   )
@@ -3993,8 +4011,7 @@ async function droppedContributionFailure(
   const unreadable = (path: string, detail: string): CandidateFailure =>
     candidateFailure(
       "contribution-inspection",
-      `could not read '${path}' while witnessing what merging change '${pr}' branch '${headSha}' kept: ` +
-        `${detail}; restore readable history before merging a merge whose result cannot be compared with its parents`,
+      `could not read '${path}' while witnessing what merging change '${pr}' branch '${headSha}' kept: ${detail}`,
     )
 
   const found = await git.run(repo, ["merge-base", "--all", before, headSha], true)
@@ -4084,8 +4101,7 @@ async function droppedContributionFailure(
   return candidateFailure(
     "dropped-parent-contribution",
     `merging change '${pr}' branch '${headSha}' produced a result that drops content neither parent ` +
-      `authored removing: ${shown}${drops.length > 4 ? ", …" : ""}\n${scope}\n` +
-      `remedy: merge current base '${before}' into the branch, restore the dropped content, and push`,
+      `authored removing: ${shown}${drops.length > 4 ? ", …" : ""}\n${scope}`,
     ".",
     [...new Set(drops.map((drop) => drop.path))],
   )
@@ -4277,7 +4293,7 @@ function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepEx
       "candidate-change-id-missing",
       `change '${pr.id}' revision ${String(pr.revision)} has no Change-Id, so the ${operation} commit ` +
         `'${subject}' would land unattributable to merged-truth derivation; the change predates stable ` +
-        `Change-Id identity — migrate it before rebuilding`,
+        `Change-Id identity — ${NO_CHANGE_ID_MIGRATION_REMEDY}`,
     )
   }
   // The member and revision are STATED, not left to be regexed back out of the
@@ -4639,8 +4655,7 @@ async function authoredGitlinkPaths(
   if (base.status === "unreadable") {
     return candidateFailure(
       "gitlink-inspection",
-      `could not inspect authored gitlinks for '${headSha}': ${base.detail}; ` +
-        "restore readable history before declaring submodule min commits",
+      `could not inspect authored gitlinks for '${headSha}': ${base.detail}`,
     )
   }
   const paths = await changedPaths(git, repo, base.sha, headSha)
@@ -5021,7 +5036,7 @@ async function planSubmoduleMainPromotionGroup(
       }
     }
     if (containment.status === "drops-merged") {
-      const message = `merged pin '${pin.path}' '${pin.sha}' does not contain planned submodule target '${targetSha}' at '${origin}' and would drop merged commits:\n${containment.commits}\nremedy: merge submodule target '${targetSha}' into the submodule work for '${pin.path}', then push and resubmit`
+      const message = `merged pin '${pin.path}' '${pin.sha}' does not contain planned submodule target '${targetSha}' at '${origin}' and would drop merged commits:\n${containment.commits}`
       return {
         status: "failed",
         error: submoduleMainFailure(

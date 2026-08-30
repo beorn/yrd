@@ -2529,7 +2529,10 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "refusal",
         code: "unauthored-path-deletion",
-        message: expect.stringMatching(/merged-mint\.md.*authored diff.*merge current base/isu),
+        // The remedy is not tested here: it lives in the CLI's registered
+        // cure (refusal-cure.ts's `droppedContentCure`), proved by
+        // refusal-cure-census.test.ts's needs-author coverage sweep.
+        message: expect.stringMatching(/merged-mint\.md.*authored diff.*never authored removing/isu),
       },
     })
   })
@@ -2669,11 +2672,12 @@ describe("Queue command adapters", () => {
         kind: "refusal",
         code: "dropped-parent-contribution",
         // Order-independent on purpose: the refusal must name the file, the
-        // exact line it lost, WHICH parent contributed it, and the remedy —
-        // but which of those it says first is prose, not contract.
-        message: expect.stringMatching(
-          /(?=.*features\.ts)(?=.*FEATURE_ALPHA)(?=.*merge current base)(?=.*restore the dropped content)/isu,
-        ),
+        // exact line it lost, and WHICH parent contributed it — which of
+        // those it says first is prose, not contract. The remedy is not
+        // tested here: it lives in the CLI's registered cure
+        // (refusal-cure.ts's `droppedContentCure`), proved by
+        // refusal-cure-census.test.ts's needs-author coverage sweep.
+        message: expect.stringMatching(/(?=.*features\.ts)(?=.*FEATURE_ALPHA)(?=.*carried by the merge-queue base)/isu),
       },
     })
   })
@@ -7380,7 +7384,12 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "carrier-drops-landed",
-        message: expect.stringMatching(/divergent main.*merge submodule target.*push and resubmit/isu),
+        // The remedy is not tested here: it lives in the CLI's registered
+        // cure (refusal-cure.ts's `carrier-drops-landed` entry), proved by
+        // refusal-cure-census.test.ts's needs-author coverage sweep.
+        message: expect.stringMatching(
+          /does not contain planned submodule target.*would drop merged commits.*divergent main/isu,
+        ),
         evidence: {
           kind: "component-main-outcomes",
           results: [],
@@ -7572,8 +7581,11 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "carrier-drops-landed",
+        // The remedy is not tested here: it lives in the CLI's registered
+        // cure (refusal-cure.ts's `carrier-drops-landed` entry), proved by
+        // refusal-cure-census.test.ts's needs-author coverage sweep.
         message: expect.stringMatching(
-          /protected submodule merge after resolution.*merge submodule target.*push and resubmit/isu,
+          /does not contain planned submodule target.*would drop merged commits.*protected submodule merge after resolution/isu,
         ),
       },
     })

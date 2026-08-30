@@ -13,6 +13,7 @@
  * defect this file exists to catch.
  */
 import { describe, expect, it } from "vitest"
+import { canonicalRefusalCode, COMPOSITION_FAILURE_BUCKETS } from "@yrd/queue"
 import { actionableFailure, formatActionableFailure, formatHumanFailure } from "../src/actionable-error.ts"
 import { classifyRefusalRemedy } from "../src/refusal-remedy.ts"
 import { REFUSAL_CURES, refusalCure, type RefusalCureText } from "../src/refusal-cure.ts"
@@ -161,6 +162,79 @@ describe("the refusal-cure census names only cures that exist", () => {
         { branch: "task/x", delivery: "submitted" },
       )
       expect(remedy.kind, `'${code}' became mechanically self-applicable`).toBe("judgment")
+    }
+  })
+})
+
+/**
+ * @failure The census above only ever proves what IS registered is sound; it
+ * never proved the needs-author vocabulary was COVERED. `REFUSAL_CURES` held
+ * 6 codes and 0 of the 16 `COMPOSITION_FAILURE_BUCKETS["needs-author"]`
+ * (queue.ts) names — every one of those refusals stops an author with a
+ * remedy that, if it existed at all, lived only as prose inside the raw
+ * `message` string: invisible to `--json`, and invisible to this file's own
+ * sweep, which walks `Object.keys(REFUSAL_CURES)` and so cannot see a code
+ * that never became a key. This sweep reads the bucket instead — the SAME
+ * live source `composition-failure-buckets.test.ts` derives its own
+ * denominator from — so a code added to (or renamed out of) the bucket moves
+ * this sweep's target too, and a future cure written only into a message
+ * string (never into the registry) reddens here immediately rather than
+ * waiting for the next person who asks the registry "what is the cure for
+ * code X" and gets nothing.
+ */
+describe("the refusal-cure census covers every needs-author code", () => {
+  const NEEDS_AUTHOR_CODES = [...COMPOSITION_FAILURE_BUCKETS["needs-author"]]
+
+  it("derives a non-trivial needs-author set (denominator guard against a vacuous sweep)", () => {
+    expect(NEEDS_AUTHOR_CODES.length).toBeGreaterThanOrEqual(16)
+  })
+
+  it("gives every needs-author code a REGISTERED cure — CURE_CENSUS or ESCALATION_CENSUS — never bare prose a producer's message happens to carry", () => {
+    const uncured: string[] = []
+    for (const code of NEEDS_AUTHOR_CODES) {
+      // `authored-gitlink` is handled by its own dual-arm special case in
+      // `actionableFailure` (actionable-error.ts): the ordinary arm prints
+      // its own remedy, the component-model arm escalates through
+      // ESCALATION_CENSUS. A neutral probe message below only ever exercises
+      // the ordinary arm — escalation-census.test.ts already censuses both
+      // arms directly — so this sweep excludes it by name rather than
+      // reading a neutral message as "uncovered".
+      if (code === "authored-gitlink") continue
+      const canonical = canonicalRefusalCode(code)
+      const registeredCure = canonical !== undefined && CODES.includes(canonical)
+      // A neutral probe: no retained-workspace marker, no check headline, no
+      // component-model prose — so a code that escalates here does so from
+      // ESCALATION_CENSUS membership alone, never from message content.
+      const failure = actionableFailure({ code, message: `yrd: change 'PR1' refused with ${code}` })
+      if (!registeredCure && failure.escalation === undefined) uncured.push(code)
+    }
+    expect(uncured, `needs-author code(s) with no registered cure: ${uncured.join(", ")}`).toEqual([])
+  })
+
+  it("names the fourteen self-serve needs-author codes this batch registered — a positive control naming the exact set the sweep above proved, so a future deletion of one entry fails HERE too, pinpointed by name", () => {
+    const selfServe = [
+      "candidate-change-id-missing",
+      "recut-change-id-missing",
+      "contribution-inspection",
+      "deletion-inspection",
+      "gitlink-inspection",
+      "refused-path-inspection",
+      "payload-certificate",
+      "dropped-parent-contribution",
+      "unauthored-path-deletion",
+      "min-commit-unpublished",
+      "carrier-drops-landed",
+      "composition-retired",
+      "refused-path",
+      "wrapper-mismatch",
+    ]
+    // The escalation-gated two plus this list account for the whole bucket —
+    // proof this list is not a subset that happens to pass, but the complete
+    // complement.
+    const escalated = ["authored-gitlink", "component-model-authorization-refused"]
+    expect(selfServe.toSorted()).toEqual(NEEDS_AUTHOR_CODES.filter((code) => !escalated.includes(code)).toSorted())
+    for (const code of selfServe) {
+      expect(CODES, `'${code}' is a needs-author code with no CURE_CENSUS entry`).toContain(code)
     }
   })
 })

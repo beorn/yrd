@@ -87,6 +87,74 @@ function refusedCheck(message: string): string | undefined {
   return quotedValue(message, /^(?:yrd:\s*)?([a-z][a-z0-9-]*)\s+(?:command|launcher)\s+exited\b/iu)
 }
 
+/** `yrd pr runs <change>` as evidence, exactly when the message actually
+ * names a change — never with the `refusedChange` placeholder, which would
+ * print a literal `<change>` a reader cannot run. Composition-time refusals
+ * (candidate build, before a merge) commonly name the change this way; the
+ * ones that don't are repo-wide or submodule-scoped, not this change's alone. */
+function changeRunsEvidence(message: string): readonly string[] {
+  return quotedValue(message, /change '([^']+)'/iu) === undefined ? [] : [`yrd pr runs ${refusedChange(message)}`]
+}
+
+/**
+ * Shared by `candidate-change-id-missing` and `recut-change-id-missing`: a
+ * pre-identity record gets a stable Change-Id only by taking the mint path —
+ * a fresh branch — never by "migrating" the existing one, which no verb
+ * implements. Re-pushing the SAME branch resolves to the same change
+ * (identity is branch-keyed) and refuses again identically. See command.ts's
+ * `NO_CHANGE_ID_MIGRATION_REMEDY`, the message-side half of the same fix
+ * (`candidate-change-id-missing`'s producer said "migrate it before
+ * rebuilding" until that fix — a verb that does not exist).
+ */
+function noChangeIdCure(message: string): RefusalCureText {
+  return {
+    blocked:
+      "There is no migration verb — identity is never invented for an existing record, and re-pushing this " +
+      "same branch resolves to the same change and refuses again (identity is branch-keyed). Delivering the " +
+      "payload under a NEW branch name takes the mint path and gets a stable Change-Id (see cause).",
+    evidence: changeRunsEvidence(message),
+    resolution: [],
+  }
+}
+
+/**
+ * Shared by the five codes where composing this candidate needed to read
+ * `subject` across a git commit range and could not (a `git diff`/`merge-base`
+ * that exited non-zero) — a fact about the branch's own git history, never
+ * about the queue. Restoring readable history (an unshallow fetch, or
+ * whatever git could not read, per the cause above) is the fix; resubmitting
+ * the unchanged branch reads the identical range and refuses the same way.
+ */
+function unreadableRangeCure(subject: string): CureEntry {
+  return (message) => ({
+    blocked:
+      `Composing this candidate needs to read ${subject} across a git commit range, and the compose step ` +
+      `could not (see cause) — a fact about the branch's own git history, not about the queue. Restoring ` +
+      `readable history is the fix; resubmitting the unchanged branch reads the identical range and refuses ` +
+      `the same way.`,
+    evidence: changeRunsEvidence(message),
+    resolution: [],
+  })
+}
+
+/**
+ * Shared by the two codes where a merge produced a result that drops content
+ * neither parent's branch authored removing — `subject` names what. The fix
+ * is the author's own merge of the current base, which turns the drop into a
+ * reviewable diff; resubmitting the unchanged branch reproduces the
+ * identical drop.
+ */
+function droppedContentCure(subject: string): CureEntry {
+  return (message) => ({
+    blocked:
+      `The merge dropped ${subject} (see cause for what, and against what). Merging the current base into the ` +
+      `branch and restoring that content is the fix; resubmitting the unchanged branch reproduces the identical ` +
+      `drop.`,
+    evidence: changeRunsEvidence(message),
+    resolution: [],
+  })
+}
+
 /**
  * THE CURE CENSUS — for a refusal that STOPPED someone, what they read and
  * what they run.
@@ -224,6 +292,82 @@ const CURE_CENSUS: Readonly<Partial<Record<RefusalCode, CureEntry>>> = {
       `and restoring that access is the cure no Yrd verb performs.`,
     evidence: [`yrd pr runs ${refusedChange(message)}`],
     resolution: [`yrd gitlink advance ${refusedSubmodule(message)}`],
+  }),
+  // THE NEEDS-AUTHOR BATCH: every code COMPOSITION_FAILURE_BUCKETS (queue.ts)
+  // buckets `needs-author` that is not already censused elsewhere. Two of the
+  // sixteen are deliberately ABSENT from this table: `authored-gitlink` and
+  // `component-model-authorization-refused` need @cto's authority, not a
+  // self-serve step, and are censused in ESCALATION_CENSUS
+  // (actionable-error.ts) instead — the two tables stay disjoint by design
+  // (refusal-cure-census.test.ts's needs-author sweep excludes the first by
+  // name and finds the second escalated).
+  //
+  // Before this batch, 0 of the sixteen had a registered cure here: the
+  // remedy each producer already prints lived only as message prose,
+  // invisible to `--json` and to a reader asking the registry "what is the
+  // cure for code X" — and one of them (`candidate-change-id-missing`) had
+  // gone STALE: its "migrate it before rebuilding" line named a verb that
+  // does not exist, fixed alongside this batch in command.ts (one shared
+  // constant with `recut-change-id-missing`'s already-corrected wording).
+  //
+  // None of these fourteen prints a MECHANICAL resolution: every one needs an
+  // author action no Yrd verb performs (restore readable history, land a
+  // commit on a submodule's own main, merge the current base, drop a path,
+  // deliver under a new branch). `resolution` therefore stays EMPTY across
+  // this whole batch — never a bare `yrd pr submit <branch>` alone, which
+  // `classifyRefusalRemedy` (refusal-remedy.ts) would read as a complete,
+  // self-applicable redelivery drill and let the runner loop resubmitting an
+  // unchanged branch against a refusal that fails it identically every time.
+  "candidate-change-id-missing": noChangeIdCure,
+  "recut-change-id-missing": noChangeIdCure,
+  "contribution-inspection": unreadableRangeCure("the lines each parent's branch kept"),
+  "deletion-inspection": unreadableRangeCure("the deletions this change authors"),
+  "gitlink-inspection": unreadableRangeCure("the gitlinks this change authors"),
+  "refused-path-inspection": unreadableRangeCure("the payload paths this change touches"),
+  "payload-certificate": unreadableRangeCure("a stable identity for this change's diff"),
+  "dropped-parent-contribution": droppedContentCure("content neither parent authored removing"),
+  "unauthored-path-deletion": droppedContentCure("paths this change's own authored diff never deletes"),
+  // The author's gitlink is a min commit, never a value — it needs the same
+  // fast-forward-first framing `authoredGitlinkFailure`'s ordinary arm
+  // (actionable-error.ts) already uses for the sibling `authored-gitlink`
+  // code, not a copy of the generic tail this used to fall through to.
+  "min-commit-unpublished": (message) => ({
+    blocked:
+      "Get the named commit onto the submodule's own main first (see cause) — the queue cannot promote a min " +
+      "commit it cannot reach there, and no retry of this command changes that.",
+    evidence: changeRunsEvidence(message),
+    resolution: [],
+  }),
+  "carrier-drops-landed": (message) => ({
+    blocked:
+      "The submodule side of this change would drop commits already landed on the submodule's target (see " +
+      "cause) — merging that target into the submodule work and pushing it is the fix; resubmitting the " +
+      "unchanged branch reproduces the identical drop.",
+    evidence: changeRunsEvidence(message),
+    resolution: [],
+  }),
+  "composition-retired": (message) => ({
+    blocked:
+      "Composed revisions are retired — nothing rebuilds a composition record. Submit the root change with " +
+      "its authored gitlink bumps instead; the queue fills the shaset from each submodule's main itself.",
+    evidence: changeRunsEvidence(message),
+    resolution: [],
+  }),
+  "refused-path": (message) => ({
+    blocked:
+      "These paths sit outside what this branch may carry (see cause) — moving them to where they belong is " +
+      "the author's own edit; no Yrd verb performs it, and resubmitting the unchanged branch touches the same " +
+      "paths and refuses again.",
+    evidence: changeRunsEvidence(message),
+    resolution: [],
+  }),
+  "wrapper-mismatch": (message) => ({
+    blocked:
+      "The queue's own generated gitlink-wrapper commit did not come out matching what this composition " +
+      "expected (see cause) — whatever the detail above names as unexpected is the author's to fix first; a " +
+      "fresh composition then rebuilds the wrapper from the current base and each submodule's main.",
+    evidence: changeRunsEvidence(message),
+    resolution: [],
   }),
 }
 
