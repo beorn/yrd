@@ -2763,6 +2763,27 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
       expect(refused).not.toContain("yrd pr submit")
       expect(refused).not.toContain("withdrawn")
     })
+
+    it("tells a WITHDRAWN collision where the work goes, and never names the retired reopen", async () => {
+      await using app = (await createHarness()).app
+      await app.bays.submit({ branch: "topic/burned", headSha: HEAD_1, base: "main", baseSha: BASE })
+      await app.bays.closePr({ pr: "PR1", reason: "withdrawn by mistake" })
+      expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "withdrawn" })
+
+      const refused = await app.bays
+        .submit({ branch: "topic/other", headSha: HEAD_1, base: "main", baseSha: BASE })
+        .then(() => undefined)
+        .catch((error: unknown) => (error as Error).message)
+
+      expect(refused).toContain("payload already recorded as change 'PR1'")
+      // This remedy used to print `yrd pr submit topic/burned` and call it the
+      // reopen. The D2 door retired with the legacy mint, so that command
+      // refuses `pr-not-pushed` on the very change the message is about —
+      // asserted ABSENT so reintroducing it is red rather than quietly fine.
+      expect(refused).not.toContain("yrd pr submit")
+      expect(refused).toContain("nothing reopens it in place")
+      expect(refused).toContain("yrd bay open --bay <name>")
+    })
   })
 })
 
