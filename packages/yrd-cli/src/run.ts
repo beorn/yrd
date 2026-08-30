@@ -275,6 +275,16 @@ import {
   submodulePinPublications,
   unreachableSubmodulePins,
 } from "./pr-submodule-publication.ts"
+import { backwardGitlinkRefusal, gitlinkDirections, resolveBaseTip } from "./gitlink-forward-only.ts"
+import {
+  formatGitlinkAdvancePlan,
+  gitlinkAdvanceName,
+  planGitlinkAdvance,
+  publishMinCommit,
+  pushGitlinkAdvanceBranch,
+  resolveSubmoduleOperand,
+  writeGitlinkAdvanceCommit,
+} from "./gitlink-advance.ts"
 import { mergeAuthorityBoundary } from "./merge-authority-boundary.ts"
 import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-failure.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
@@ -4929,9 +4939,71 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
       `yrd: change '${pr.id}' changes submodule pins that are not on their submodule's main:\n${detail}`,
     )
   }
-  // Every remaining pin is a straightforward update, published and on its submodule's main —
-  // admitted. The queue's own composition-time fill writes the shaset value at merge; this
-  // gate's only job was to stop refusing what that machinery can now safely process.
+  // Every remaining pin is a straightforward update, published and on its submodule's main.
+  // Legitimacy is settled; MONOTONICITY is a separate question and nothing above asks it.
+  // PR2118 (2026-08-27) is the specimen: every sha it wrote was published and on its
+  // submodule's main, so it reached exactly this line clean, while merging it would have
+  // reverted eight commits across three submodules for zero unique content.
+  await requireForwardOnlyGitlinks(pr, changed, services, io)
+  // Both questions answered. The queue's own composition-time fill writes the shaset value
+  // at merge; this gate's job was to stop refusing what that machinery can safely process,
+  // and to stop admitting what it must never carry.
+}
+
+/**
+ * Monotonicity, asked against main's CURRENT gitlink — the second of the two independent
+ * questions an authored gitlink must answer (ADR `2026-08-27-pin-legitimacy-is-not-monotonicity`).
+ *
+ * `changed` is the change's OWN diff, so a branch that writes no gitlink never reaches here
+ * however far its base has fallen behind — the exemption the ruling required, and the reason
+ * this is not a tree comparison against main.
+ *
+ * The comparison re-reads main's tip every time it runs, and it runs on every path that
+ * admits a revision, including the re-merge and preflight passes the queue's own cycle drives
+ * (`executeRemergeChange`, `applyPreflightVerdict`). A green answer is therefore never a
+ * stored fact that can be cited later: main moves, the question is asked again against where
+ * main now is.
+ */
+async function requireForwardOnlyGitlinks(
+  pr: Change,
+  changed: readonly { path: string; pin: string; repository: string }[],
+  services: YrdCliServices,
+  io: YrdCliIO,
+): Promise<void> {
+  if (services.process === undefined || changed.length === 0) return
+  const repo = io.cwd ?? process.cwd()
+  const baseTipSha = await resolveBaseTip({ process: services.process, repo, base: pr.base })
+  if (baseTipSha === undefined) {
+    raiseFailure(
+      "refusal",
+      "pr-base-unresolved",
+      `yrd: change '${pr.id}' base '${pr.base}' resolves to no ref in '${repo}', so its gitlinks cannot be ` +
+        "compared with main's current values; fetch the base branch, then retry",
+    )
+  }
+  const directions = await gitlinkDirections({
+    process: services.process,
+    repo,
+    baseTipSha,
+    gitlinks: changed.map(({ path, pin, repository }) => ({ path, gitlink: pin, repository })),
+  })
+  const undetermined = directions.filter((entry) => entry.state === "undetermined")
+  if (undetermined.length > 0) {
+    raiseFailure(
+      "refusal",
+      "gitlink-comparison-undetermined",
+      `yrd: change '${pr.id}' writes gitlinks that could not be compared with main's current values:\n` +
+        undetermined.map(({ path, reason }) => `submodule '${path}': ${reason}`).join("\n"),
+    )
+  }
+  const backward = directions.filter((entry) => entry.state === "backward")
+  if (backward.length > 0) {
+    raiseFailure(
+      "refusal",
+      "gitlink-moves-backward",
+      `yrd: change '${pr.id}' moves submodule gitlinks backwards:\n${backwardGitlinkRefusal(backward)}`,
+    )
+  }
 }
 
 async function requireQueueableSubmodulePinsForCommand(
@@ -6799,6 +6871,82 @@ async function queuedChangePositions(app: YrdCliApp, base: string, io: YrdCliIO)
   )
   const ordered = app.queue.admissionOrder().filter((id) => candidates.has(id))
   return new Map(ordered.map((id, index) => [id, index + 1]))
+}
+
+/**
+ * `yrd gitlink advance <submodule> [<sha>|main]` — the whole delivery of a submodule
+ * gitlink bump, in one command.
+ *
+ * Thirteen of these landed on hh main on 2026-08-29/30 and all thirteen were hand-written:
+ * a bespoke subject, a hand-cut branch, a hand-staged gitlink, a hand-driven submit. Every
+ * piece was already here and proven — the min-commit rule, the forward-only rule, the bay,
+ * the submit path — and nothing composed them, so an author redid the composition each time
+ * and no two results looked alike.
+ *
+ * Order matters and is the design: everything that can REFUSE runs first, in
+ * `planGitlinkAdvance`, before a branch, a bay or a push exists. A refusal that has already
+ * cut a branch leaves litter for the next person to find and reason about.
+ */
+async function advanceSubmoduleGitlink(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  submoduleOperand: string,
+  target: string | undefined,
+  options: JsonOption & Readonly<{ dryRun?: boolean }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  if (services.process === undefined) configuration("gitlink advance requires the process-backed Yrd runtime")
+  const cwd = io.cwd ?? process.cwd()
+  const root = superprojectRoot(cwd)
+  if (root === undefined) refusal(`'${cwd}' is not inside a Git repository, so it records no submodule gitlinks`)
+  const base = services.base ?? "main"
+  const submodule = resolveSubmoduleOperand(submoduleOperand, readSubmoduleEntries(root))
+  const plan = await planGitlinkAdvance({
+    process: services.process,
+    repo: root,
+    base,
+    submodule: { name: basename(submodule.path), path: submodule.path },
+    target: target ?? "main",
+  })
+
+  if (options.dryRun === true) {
+    await printResult(io, jsonEnabled(options), { command: "gitlink.advance", plan }, formatGitlinkAdvancePlan(plan))
+    return 0
+  }
+
+  const published = await publishMinCommit(services.process, plan)
+  if (published !== undefined) io.stderr(`${published}\n`)
+
+  const prepared = await prepareOwnedBay(app, undefined, { bay: gitlinkAdvanceName(plan.name, plan.to) }, io)
+  if (prepared === undefined) return 1
+  const worktree = prepared.bay.path
+  if (worktree === undefined) throw new Error(`yrd: bay '${prepared.bay.id}' opened without a worktree path`)
+  await writeGitlinkAdvanceCommit(services.process, worktree, plan)
+  await pushGitlinkAdvanceBranch(services.process, worktree, prepared.identity.branch)
+
+  const exit = await applyChangeSelectionVerb(app, services, [prepared.identity.branch], options, io, "pr.submit")
+  if (exit !== 0) return exit
+
+  // The two facts an author needs back from one invocation: which change this became, and
+  // where it sits. `pr view` can answer both later; having to run it is the composition
+  // failing at the last step.
+  const submitted = app.bays.pr(prepared.identity.branch)
+  if (submitted === undefined) {
+    raiseFailure(
+      "infrastructure",
+      "advance-change-missing",
+      `yrd: the gitlink advance submitted branch '${prepared.identity.branch}' but no change records it; ` +
+        `inspect: yrd pr status`,
+    )
+  }
+  const position = (await queuedChangePositions(app, submitted.base, io)).get(submitted.id)
+  if (!jsonEnabled(options)) {
+    io.stdout(
+      `${submitted.id} ${position === undefined ? "submitted" : `queued at position ${position}`} — ` +
+        `advance ${plan.path} ${plan.from.slice(0, 7)}..${plan.to.slice(0, 7)}\n`,
+    )
+  }
+  return 0
 }
 
 async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO, services: YrdCliServices): Promise<void> {
@@ -12888,6 +13036,23 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await refuseChangeMerge(installed(), selector, options, io)))
 
+  const gitlink = program.command("gitlink").description("advance the submodule commits this repository records")
+  gitlink.helpCommand(false)
+  gitlink
+    .command("advance <submodule> [target]")
+    .description("advance one submodule's gitlink to a min commit and submit it, in one step")
+    .addHelpText(
+      "after",
+      "\nTarget defaults to 'main' — the submodule's own main tip. A sha or branch that\n" +
+        "descends from that main is fast-forwarded onto it first (submodules land directly);\n" +
+        "anything else refuses, because no gitlink may name a commit its submodule never took.",
+    )
+    .option("--dry-run", "settle and print the advance without publishing, committing or submitting")
+    .option("--json", "emit stable JSON")
+    .action(async (submodule, target, options) =>
+      setExit(await advanceSubmoduleGitlink(installed(), installedServices(), submodule, target, options, io)),
+    )
+
   program
     .command("check <name...>")
     .description("run configured required checks in the current working tree")
@@ -13172,8 +13337,10 @@ async function executeYrd(
         kind: "usage",
         code: "retired-command",
         message:
-          "yrd intent is retired; advancing a submodule min commit is an ordinary change — fast-forward the submodule's " +
-          "own main to the target, then run 'yrd pr submit <branch>'",
+          "yrd intent is retired; advancing a submodule min commit is an ordinary change — run " +
+          "'yrd gitlink advance <submodule> [<sha>|main]', which fast-forwards that submodule's own main, " +
+          "writes the gitlink bump and submits it. By hand it is still fast-forward the submodule's own main, " +
+          "then 'yrd pr submit <branch>'",
       }),
       { json: invocation.args.includes("--json") },
     )

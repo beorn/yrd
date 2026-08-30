@@ -67,6 +67,18 @@ const ALLOWLIST: readonly Allowed[] = [
       "pipeline actuation, not printed advice.",
   },
   {
+    file: "yrd-cli/src/gitlink-advance.ts",
+    reason:
+      "Both `refs/heads` pushes are `yrd gitlink advance`'s own actuation, invoked from " +
+      "`advanceSubmoduleGitlink` in run.ts and never printed to anyone. `publishMinCommit` fast-forwards the " +
+      "submodule's own main to a commit the plan already proved descends from it — the direct push submodules " +
+      "get because they are `landing: none`, and it runs only when the operand named a commit main does not " +
+      "already carry. `pushGitlinkAdvanceBranch` publishes the advance's own fresh branch (HEAD:refs/heads/" +
+      "<branch>) so `pr submit` has a ref to record — the same shape, and the same reason, as the allowlisted " +
+      "Bay checkpoint push in yrd-bay/src/git.ts. Neither is a force, a lease override, or a merge-path write; " +
+      "this file's remedy strings name only `git log` and `git fetch`.",
+  },
+  {
     file: "yrd-cli/src/bay-status.ts",
     reason:
       "Its only 'git stash' hit is the diagnostic evidence string \"could not inspect git stash list\" — it " +
