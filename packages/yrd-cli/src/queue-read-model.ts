@@ -251,7 +251,13 @@ function projectQueueFrame(database: Database, entry: JournalViewEntry): void {
       transition.type === "lose" ? "lost" : transition.result.conclusion === "success" ? "passed" : "failed"
     const result =
       transition.type === "lose"
-        ? { status: "lost" as const, reason: transition.reason }
+        ? // A completed-but-uninterpreted attempt: the habitant runner never
+          // rendered a verdict (restart/dead-lease reclaim). `code` is always
+          // "job-lost" — the SAME registered refusal code `terminalJobError`
+          // (yrd-queue's queue.ts) derives from a Job's own `conclusion:
+          // "timed_out"` — so this row is never a bare, unclassifiable `lost`
+          // outcome (@i/10-yrd/every-attempt-records-a-verdict).
+          { status: "lost" as const, reason: transition.reason, code: "job-lost" as const }
         : transition.result.conclusion === "success"
           ? { status: "passed" as const, output: transition.result.output }
           : {

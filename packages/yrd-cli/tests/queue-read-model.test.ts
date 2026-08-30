@@ -133,6 +133,54 @@ function legacyAttemptEvents(): readonly Event[] {
   ]
 }
 
+/** A check attempt the habitant runner never got to interpret: the runner
+ * disappeared mid-run (a restart, matching the runner respawn shape) and
+ * `jobs.recover()` closes it with a "lose" transition instead of a "finish".
+ * @i/10-yrd/every-attempt-records-a-verdict — this completed-but-uninterpreted
+ * attempt must record a coded machine failure, never a bare `lost` outcome
+ * with no code to classify it by. */
+function lostAttemptEvents(): readonly Event[] {
+  const job = uuid("job:lost")
+  return [
+    EventSchema.parse({
+      id: job,
+      name: "job/requested",
+      ts: "2026-08-30T12:00:00.000Z",
+      data: {
+        definition: "queue.step.check",
+        revision: "check-v1",
+        input: { run: "R1", step: "check", index: 0 },
+        key: "queue:R1:0",
+      },
+    }),
+    EventSchema.parse({
+      id: uuid("start:lost"),
+      name: "job/transitioned",
+      ts: "2026-08-30T12:00:01.000Z",
+      data: {
+        type: "start",
+        id: job,
+        attempt: 1,
+        runner: "yrd-test",
+        leaseExpiresAt: "2026-08-30T12:01:01.000Z",
+      },
+    }),
+    EventSchema.parse({
+      id: uuid("lose:lost"),
+      name: "job/transitioned",
+      ts: "2026-08-30T12:00:05.000Z",
+      data: {
+        type: "lose",
+        id: job,
+        attempt: 1,
+        runner: "yrd-test",
+        leaseExpiresAt: "2026-08-30T12:01:01.000Z",
+        reason: "runner disappeared",
+      },
+    }),
+  ]
+}
+
 describe("queue read model", () => {
   it("answers an empty repository without creating Journal authority", async () => {
     const dir = await directory()
@@ -237,6 +285,33 @@ describe("queue read model", () => {
         },
       ],
     })
+  })
+
+  it("records a coded machine failure for a runner-lost attempt, never a bare lost outcome", async () => {
+    const dir = await directory()
+    const model = createQueueReadModel({ dir })
+    const journal = createJournal({
+      dir,
+      views: [model.view],
+    })
+    const events = lostAttemptEvents()
+
+    await journal.append(journalFrame("lost", events), 0)
+
+    // The SQL-backed production read model and the pure-fold parity oracle
+    // (queueLogAttempts, the explicit fallback for Journals that cannot
+    // contribute views) must agree on the shape — a change touching only
+    // one of the two would pass this file's other parity test while still
+    // shipping a divergent, uncoded "lost" attempt through the other path.
+    const parity = await queueLogAttempts(events)
+    await expect(model.snapshot()).resolves.toMatchObject({ attempts: parity })
+
+    const expected = {
+      outcome: "lost",
+      result: { status: "lost", reason: "runner disappeared", code: "job-lost" },
+    }
+    expect(parity).toMatchObject([expected])
+    await expect(model.snapshot()).resolves.toMatchObject({ attempts: [expected] })
   })
 
   it("caches an unchanged cursor and invalidates the cache after an explicit rebuild", async () => {

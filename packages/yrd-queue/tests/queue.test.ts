@@ -4314,6 +4314,86 @@ describe("Queue", () => {
     expect(checks).toBe(3)
   })
 
+  it("a job-lost checks-before-queueing reuse never aliases a fresh check-request's identity (@i/10-yrd/every-attempt-records-a-verdict)", async () => {
+    // Empirical proof for the bead's row-2 acceptance line — "jobKey/check-run
+    // keys include the check-request generation; a job-lost reuse cannot alias
+    // a terminal attempt's identity" — against the CURRENT checks-before-
+    // queueing mechanism, before deciding whether admissionJobKey's string format
+    // itself needs to change. `hasFreshRevisionCheckAuthority` already keys
+    // "fresh" on the SAME generation concept the bead names (the check-request
+    // tally vs. authorities spent, @yrd/core/rebuilt-carrier-denied-retry) —
+    // this test drives the exact runner-restart shape (a job/lose transition,
+    // never a finish) through it live.
+    let checks = 0
+    await using app = await createQueueApp({
+      resolveBaseSha: () => BASE,
+      check: () => {
+        checks += 1
+        return { status: "completed" as const, conclusion: "success" as const, output: { checked: true } }
+      },
+    })
+
+    const specimen = await submitBranch(app, "issue/runner-restart-mid-check")
+    await app.bays.requestChecks({ pr: specimen.id, baseSha: BASE })
+
+    // No `runOptions` passed: dispatchAdmissions requests the checks-before-
+    // queueing Job (admissionJobKey) but attaches no runner, so it lands
+    // "queued" rather than running the check callback — the same "requested,
+    // not yet interpreted" shape a habitant runner leaves when it restarts
+    // before a started attempt reaches its own start transition.
+    await app.queue.admit({ prs: [specimen.id] })
+    const requested = Object.values(app.state().jobs.byId).find(
+      (job) => job.definition === "queue.step.check" && job.status === "queued",
+    )
+    if (requested === undefined) throw new Error("expected a queued checks-before-queueing Job")
+    expect(checks).toBe(0)
+
+    // The runner starts the check, then disappears mid-run — recover()'s
+    // lease-expiry reclaim, the exact mechanism `jobs.recover()` uses in
+    // production (checkpoint-refusal-names-its-input's habitant restarts).
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: requested.id,
+      attempt: 1,
+      runner: "expired-runner",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+    await expect(app.jobs.recover({ now: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([requested.id])
+    expect(checks).toBe(0)
+
+    // A drain pass with NO new check-request: the tally still reads 1 against
+    // this base. Re-polling the same generation must never silently mint a
+    // second checking attempt from the stale terminal Job — it stays refused,
+    // on the SAME identity, at the SAME requestCount.
+    await app.queue.run({}, runtime)
+    expect(changeAdmission(app.bays.pr(specimen.id)!)).toMatchObject({
+      status: "refused",
+      baseSha: BASE,
+      requestCount: 1,
+      kind: "infrastructure",
+    })
+    expect(app.state().jobs.byId[requested.id]).toMatchObject({ attempt: 1, conclusion: "timed_out" })
+    expect(checks).toBe(0)
+
+    // A genuinely fresh check-request (generation 2) must earn its OWN
+    // checking attempt — never read back the generation-1 terminal Job's
+    // stale "timed_out" verdict as if it belonged to this request.
+    await app.bays.requestChecks({ pr: specimen.id, baseSha: BASE })
+    await app.queue.run({}, runtime)
+
+    expect(changeAdmission(app.bays.pr(specimen.id)!)).toMatchObject({
+      status: "passed",
+      baseSha: BASE,
+      requestCount: 2,
+    })
+    expect(app.queue.eligibility(specimen.id)).toMatchObject({ checks: { status: "passed" } })
+    // The SAME Job identity carries the new attempt (queue-level retry, not a
+    // second Job at a colliding key) — attempt 2 supersedes attempt 1's lost
+    // verdict rather than leaving two live, ambiguous claimants on one key.
+    expect(app.state().jobs.byId[requested.id]).toMatchObject({ attempt: 2, conclusion: "success" })
+    expect(checks).toBe(1)
+  })
+
   it("integrates a checks-passed PR while another admission's check is still in flight", async () => {
     await using app = await createQueueApp({
       check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
