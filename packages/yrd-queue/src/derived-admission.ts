@@ -48,6 +48,7 @@ import {
   type BaysState,
   type Change,
   type ChangeProps,
+  type CompositionV1,
   type PrNumberMint,
   type ProjectedBranchSubmit,
 } from "@yrd/bay"
@@ -148,7 +149,7 @@ export function materializeDerivedRunMembers(
  *
  * Answers `undefined` when nothing merged this sha — the honest "still open".
  */
-function derivedIntegration(
+export function derivedIntegration(
   queues: DeepReadonly<QueuesState>,
   member: Readonly<{ branch: string; headSha: string }>,
 ): Readonly<{ run: RunId; at: string; proof: IntegrationProof }> | undefined {
@@ -223,17 +224,76 @@ function materializeDerivedRunMember(
         `'${duplicate.id}' (${duplicate.branch}) — one payload under two identities needs a human`,
     )
   }
-  // `state` and `merged` are PROJECTED, never literal: a member whose merging
-  // run settled reads closed+merged, carrying the same proof shape the record
-  // lane's `pr/integrated`/`pr/already-landed` reducers write. Both fields are
-  // set from one source so they can never disagree — `integratedChangeShape`
-  // throws on a merged change with no proof, so a half-projection is a crash.
-  const landed = derivedIntegration(queues, member)
-  const alreadyLanded = landed?.proof.alreadyLanded
-  return {
+  return derivedChange(queues, {
     id: member.id,
     branch: member.branch,
     base: submit.base,
+    revision: member.revision,
+    headSha: submit.sha,
+    submittedAt: submit.at,
+    changeId: member.changeId,
+    ...(member.props === undefined ? {} : { props: member.props }),
+    ...(member.issue === undefined ? {} : { issue: member.issue }),
+    ...(member.title === undefined ? {} : { title: member.title }),
+  })
+}
+
+/**
+ * The stable facts a derived-lane change is shaped from — identity, the
+ * revision it stands at, and when it was submitted. Deliberately NOT a
+ * `DerivedRunMember`: admission reads them from the live submit fact under a
+ * CAS, a READER reads the same fields back off the retained `ChangeSnapshot`
+ * the run journaled, and both must produce the same change or the two lanes
+ * have drifted again.
+ */
+export type DerivedChangeFacts = Readonly<{
+  id: string
+  branch: string
+  base: string
+  revision: number
+  headSha: string
+  submittedAt: string
+  changeId?: string
+  props?: ChangeProps
+  issue?: string
+  title?: string
+  composition?: CompositionV1
+}>
+
+/**
+ * THE shape of a derived-lane change — one function, both directions.
+ *
+ * A derived member is recordless by design, so nothing stores this value; it
+ * is derived on every read, at admission (from the live submit fact) and at
+ * lookup (from the retained snapshot). Sharing the shaper is the whole point:
+ * `pr view` and the queue must never disagree about whether PR2706 is open,
+ * because there is only one expression that can answer.
+ *
+ * `state` and `merged` are PROJECTED, never literal: a member whose merging
+ * run settled reads closed+merged, carrying the same proof shape the record
+ * lane's `pr/integrated`/`pr/already-landed` reducers write. Both fields are
+ * set from one source so they can never disagree — `integratedChangeShape`
+ * throws on a merged change with no proof, so a half-projection is a crash.
+ */
+export function derivedChange(queues: DeepReadonly<QueuesState>, facts: DerivedChangeFacts): Change {
+  const landed = derivedIntegration(queues, { branch: facts.branch, headSha: facts.headSha })
+  const alreadyLanded = landed?.proof.alreadyLanded
+  // The revision carries the SAME terminal fact the change-level fields state.
+  // `currentTerminalFact` cross-checks the two and throws when they disagree,
+  // so a merged change whose revision clock has no terminal is a crash on
+  // every surface that projects delivery history (`pr list` reached it first).
+  const terminal =
+    landed === undefined
+      ? undefined
+      : {
+          kind: alreadyLanded === undefined ? ("integrated" as const) : ("already-landed" as const),
+          at: landed.at,
+          run: landed.run,
+        }
+  return {
+    id: facts.id,
+    branch: facts.branch,
+    base: facts.base,
     state: landed === undefined ? "open" : "closed",
     merged: landed !== undefined,
     ...(landed === undefined
@@ -248,25 +308,27 @@ function materializeDerivedRunMember(
                 alreadyLanded: { baseSha: landed.proof.baseSha, ...alreadyLanded },
               }),
         }),
-    ...(member.title === undefined ? {} : { title: member.title }),
-    ...(member.issue === undefined ? {} : { issue: member.issue }),
-    submittedAt: submit.at,
+    ...(facts.title === undefined ? {} : { title: facts.title }),
+    ...(facts.issue === undefined ? {} : { issue: facts.issue }),
+    submittedAt: facts.submittedAt,
     revs: [
       {
-        n: member.revision,
-        changeId: member.changeId,
-        head: submit.sha,
-        base: submit.base,
-        ...(member.props === undefined ? {} : { props: member.props }),
-        pushedAt: submit.at,
-        submittedAt: submit.at,
+        n: facts.revision,
+        ...(facts.changeId === undefined ? {} : { changeId: facts.changeId }),
+        head: facts.headSha,
+        base: facts.base,
+        ...(facts.props === undefined ? {} : { props: facts.props }),
+        ...(facts.composition === undefined ? {} : { composition: facts.composition }),
+        pushedAt: facts.submittedAt,
+        submittedAt: facts.submittedAt,
+        ...(terminal === undefined ? {} : { terminal }),
       },
     ],
     reviews: [],
     comments: [],
     // The standing check authority a live submit fact carries for exactly its
     // sha (design §2: no event, no projection — the fact is the authority).
-    checkRequests: [{ revision: member.revision, headSha: submit.sha, at: submit.at }],
+    checkRequests: [{ revision: facts.revision, headSha: facts.headSha, at: facts.submittedAt }],
   }
 }
 

@@ -781,9 +781,21 @@ export function isChangeRevisionSelector(pr: string): boolean {
  * Two lookalikes are deliberately NOT routed here — `plugin.ts`'s terminal
  * association and the queue's legacy-terminal invariant are internal `throw`s
  * about a corrupt journal, not an operator whose selector found nothing.
+ *
+ * `searchedCount` is a REQUIRED parameter with no default, and that is the
+ * point. It used to be `Object.keys(state.prs).length`, computed here — which
+ * silently made every caller claim it had searched the change-RECORD store
+ * even after the S6 door stopped minting records for `refs/for/` pushes. The
+ * denominator then reported 2155 while a live change sat outside it, and the
+ * number built to make an empty answer falsifiable was itself the false part
+ * (@i/10-yrd, 2026-08-30). A default would restore exactly that: the
+ * under-count is what a caller gets by NOT thinking, so the type makes not
+ * thinking impossible. A caller that searched both lanes passes
+ * `queueChangeCount`; one that really did search only the record store passes
+ * {@link recordChangeCount} and says so at the call site.
  */
-export function changeNotFoundMessage(state: BaysState, selector: string): string {
-  const searched = `searched ${Object.keys(state.prs).length} change(s)`
+export function changeNotFoundMessage(state: BaysState, selector: string, searchedCount: number): string {
+  const searched = `searched ${String(searchedCount)} change(s)`
   if (parseChangeSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
     return `yrd: no change '${selector}' — ${searched}`
   }
@@ -1258,6 +1270,15 @@ export function isLiveChange(pr: Change): boolean {
   return pr.state === "open"
 }
 
+/** How many changes the RECORD store holds — the honest denominator for a
+ * lookup that searched only it. Named rather than inlined so a call site
+ * passing it to {@link changeNotFoundMessage} states which population it
+ * searched instead of spelling an index expression that reads like the whole
+ * truth. */
+export function recordChangeCount(bays: DeepReadonly<Pick<BaysState, "prs">>): number {
+  return Object.keys(bays.prs).length
+}
+
 /**
  * S6 receiver-dispatch rule: intake is the grandfathered RECORD lane's act,
  * and only a branch a LIVE record already owns takes a revision through it. A
@@ -1372,7 +1393,12 @@ export type LiveChange = Change & { readonly [liveBrand]: true }
 export function requireLiveChange(state: BaysState, selector: string): LiveChange {
   const resolution = resolveChangeMatch(state, selector)
   if (resolution === undefined) {
-    raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state, selector))
+    // The record store IS this guard's whole search space, truthfully: it is
+    // the boundary for record-lane MUTATIONS, and a derived-lane change has no
+    // record to mutate. yrd-bay cannot see the queue's snapshots anyway (the
+    // dependency runs the other way), so a wider count here would be a number
+    // this function did not earn.
+    raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state, selector, recordChangeCount(state)))
   }
   const pr = resolution.value
   if (resolution.revision !== undefined) {
