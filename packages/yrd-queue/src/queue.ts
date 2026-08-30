@@ -9267,6 +9267,14 @@ export const YRD_REFUSAL_CODES = [
   "admission-refusal-loop",
   "admission-refusal-needs-person",
   "admission-refused",
+  // The gitlink-advance verb's own `-failed` refusals (yrd 9e6af249 /
+  // 2fd122a9). Registered NOT because they become a persisted Run/Job failure
+  // — they are `raiseFailure` CLI refusals — but because every one of them
+  // ends in `-failed`, and an unregistered `-failed` code is precisely what
+  // the dynamic step family used to swallow: each printed "The check judged
+  // the WORK, not the queue" for a refused git push. Registered, they resolve
+  // to themselves, and the cure census answers them for what they are.
+  "advance-branch-push-failed",
   "artifact-root-unresolved",
   "attempt-base-mismatch",
   "attempt-pin-mismatch",
@@ -9336,7 +9344,16 @@ export const YRD_REFUSAL_CODES = [
   "gate-script-diff-failed",
   "gate-script-missing-at-base",
   "gate-script-overlay-failed",
+  // The advance's own commit in its bay was refused — commonly by the
+  // repository's pre-commit hook, whose text the message carries. Registered
+  // but deliberately given NO cure entry: the producer already prints a quoted
+  // `'yrd in <bay>'`, which `embeddedYrdCommands` lifts, and a second copy is
+  // how a wrong cure outlives the fix to the first.
+  "gitlink-commit-failed",
   "gitlink-inspection",
+  // The index write in the advance's own bay failed, leaving that bay open
+  // with the submodule already checked out at the target.
+  "gitlink-stage-failed",
   // `yrd gitlink advance` could not bring its bay's submodule to the target, so nothing
   // downstream — the repository's own pre-commit hook first among them — can prove the
   // gitlink it is about to stage moves forward.
@@ -9371,6 +9388,7 @@ export const YRD_REFUSAL_CODES = [
   "merge-rollback-failed",
   "merge-unauthored-deletion",
   "merge-verification-failed",
+  "min-commit-publish-failed",
   "min-commit-unpublished",
   "missing-pr",
   // TEST-FIXTURE-ONLY narrative codes (queue-watch-round6.test.ts's fictional

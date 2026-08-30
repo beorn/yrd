@@ -56,6 +56,22 @@ function refusedSubmodule(message: string): string {
   return quotedValue(message, /submodule '([^']+)'/iu) ?? "<submodule>"
 }
 
+/** The worktree a gitlink-advance refusal names — as `('<path>')` after the
+ * bay it belongs to, or as `from '<path>'`. Where the reader looks, so the
+ * evidence is a place and not a description of one. */
+function advanceWorktree(message: string): string {
+  return (
+    quotedValue(message, /\('([^']+)'\)/u) ?? quotedValue(message, /\bfrom '([^']+)'/iu) ?? "<advance worktree>"
+  )
+}
+
+/** The bay a gitlink-advance refusal left standing (`in bay '<name>'`). The
+ * bay is the whole point of the cure: the work is not lost, and a reader who
+ * is not told its name opens a second one. */
+function refusedBay(message: string): string {
+  return quotedValue(message, /\bbay '([^']+)'/iu) ?? "<bay>"
+}
+
 /**
  * The artifact a step failure already named. `configuredCommand` writes
  * `; full output: <path>` into every non-zero-exit refusal, so this is a
@@ -157,6 +173,46 @@ const CURE_CENSUS: Readonly<Partial<Record<RefusalCode, CureEntry>>> = {
       ],
     }
   },
+  // THE GITLINK ADVANCE'S OWN REFUSALS. Each ends in `-failed`, so each used
+  // to render the `check-failed` cure — "The check judged the WORK, not the
+  // queue", `yrd pr runs <change>`, `yrd pr submit <branch>` — in the human
+  // text and in the `--json` failure document alike, for a git push that no
+  // check ever judged. `gitlink-commit-failed` is deliberately ABSENT: its
+  // producer already prints a quoted `'yrd in <bay>'`, which
+  // `embeddedYrdCommands` lifts, and the census's membership rule is that a
+  // second copy of a cure is how the wrong one outlives the fix to the first.
+  //
+  // The push of the ADVANCE branch to the superproject's origin, after the
+  // gitlink commit was already made.
+  "advance-branch-push-failed": (message) => ({
+    blocked:
+      `The gitlink commit was already made and the bay still holds it, so nothing about the advance needs redoing ` +
+      `— this is the push of its branch to the superproject's origin. A refused remote is not a fact about the ` +
+      `commit: the base ref's protection or this host's push credential is what changed, and no Yrd verb reaches ` +
+      `either.`,
+    evidence: [advanceWorktree(message)],
+    resolution: [],
+  }),
+  // The publish of the target onto the SUBMODULE's own main — a different
+  // remote from the one every other step of the advance touches.
+  "min-commit-publish-failed": (message) => ({
+    blocked:
+      `This is a push to the OWN origin of submodule '${refusedSubmodule(message)}', not the superproject's: a ` +
+      `gitlink ` +
+      `may only record a commit that is already on the component's main, and that publish is what was refused. ` +
+      `Re-running the advance repeats the same push and the same refusal until that main accepts the commit.`,
+    evidence: [`git -C ${refusedSubmodule(message)} log --oneline origin/main..HEAD`],
+    resolution: [`yrd gitlink advance ${refusedSubmodule(message)}`],
+  }),
+  // The index write inside the advance's own bay.
+  "gitlink-stage-failed": (message) => ({
+    blocked:
+      `The bay is open with the submodule already checked out at the target; only the index write failed, so the ` +
+      `work is not lost. Re-running the advance opens a SECOND bay rather than reusing this one, which is why the ` +
+      `step below joins the existing one.`,
+    evidence: [advanceWorktree(message)],
+    resolution: [`yrd in ${refusedBay(message)}`],
+  }),
   // Bucketed infra-retry, so a transport blip clears itself — but the SAME
   // code is raised for a submodule main this host genuinely cannot read, which
   // no retry clears. Naming both, and which is which, is the cure: "could not
