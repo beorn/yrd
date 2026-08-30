@@ -2841,6 +2841,50 @@ type RuntimeInvocationIO = YrdCliIO & {
   [RuntimeChildArgv]?: readonly string[]
 }
 
+/**
+ * WHERE THE OPERATOR IS STANDING — the one derivation, for every question of
+ * the form "which bay/branch is this invocation in?".
+ *
+ * `io.cwd` cannot answer it. The process host overwrites `io.cwd` with the
+ * DISCOVERED repository worktree (`host.ts`, the runtime io it hands the
+ * command tree), so by the time any command reads it, the operator's own
+ * directory is gone and every caller sees the repository root instead.
+ *
+ * Measured (@yrd/bay-submit-record/22958): `yrd --repo <root> bay submit` run
+ * from inside bay B1 inferred its selector from the ROOT's current branch —
+ * `main` — and submitted the base tip to the derived lane. Exit 0, a success
+ * envelope naming branch `main`, and a fact the queue can never select
+ * (`compose-derived-fact-landing-unresolved`: the authored tip IS the walked
+ * tip, so containment holds for free and nothing is ever merged). The bay's
+ * real commit was never submitted at all. That is the bead's consequence class
+ * exactly — a submission that can never run is indistinguishable, on every
+ * surface an author reads, from one that is merely waiting its turn.
+ *
+ * The ambient directory survives under {@link RuntimeInvocationCwd}, set on
+ * this same io before the host's assignment lands. `yrd in`/`bay run` already
+ * read it for this reason; this is that read, named once, so the submit path
+ * and the guest-attach path cannot disagree about where the operator stands.
+ *
+ * The fallback is the in-process test seam: `runYrd(app, argv, io)` sets no
+ * symbol, and there `io.cwd` IS the ambient directory.
+ *
+ * CONTAINMENT IS THE WHOLE RULE, and dropping it inverts the defect. Standing
+ * somewhere unrelated to the selected repository — outside Git entirely, or in
+ * a different checkout — the ambient directory says nothing about THIS
+ * repository, and `--repo` is the operator's whole statement of intent. So the
+ * ambient answer is taken only where it is an answer about this repository:
+ * inside its worktree (a Bay lives under it) or under its repository root.
+ * Otherwise the selected worktree stands, which is what `--repo` selected.
+ */
+function invocationCwd(io: YrdCliIO): string {
+  const worktree = io.cwd ?? process.cwd()
+  const ambient = (io as RuntimeInvocationIO)[RuntimeInvocationCwd]
+  if (ambient === undefined) return worktree
+  const inRepository =
+    within(worktree, ambient) || (io.repositoryRoot !== undefined && within(io.repositoryRoot, ambient))
+  return inRepository ? ambient : worktree
+}
+
 type RuntimeBootstrap = Readonly<{
   ambientCwd: string
   env: NodeJS.ProcessEnv
@@ -3703,8 +3747,7 @@ async function enterBay(
 ): Promise<YrdCliExitCode> {
   const processService = services.process
   if (processService === undefined) configuration("yrd in requires the process-backed Yrd runtime")
-  const runtime = io as RuntimeInvocationIO
-  const bay = resolveGuestBay(app, selector, runtime[RuntimeInvocationCwd] ?? io.cwd ?? process.cwd())
+  const bay = resolveGuestBay(app, selector, invocationCwd(io))
   const child = await runBayChild(processService, bay, guestArgv(services, argv), io, {
     env: services.environment ?? process.env,
     onStart() {
@@ -3996,7 +4039,7 @@ async function refreshBays(
   io: YrdCliIO,
 ): Promise<void> {
   const state = stateOf(app)
-  const bays = selectedBays(state.bays, selectors, io.cwd ?? process.cwd(), "refresh")
+  const bays = selectedBays(state.bays, selectors, invocationCwd(io), "refresh")
   const refreshed: Bay[] = []
   for (const bay of bays) {
     refreshed.push(await refreshBay(app, bay, io))
@@ -4160,7 +4203,7 @@ async function closeBays(
   options: { withdraw?: boolean; json?: boolean; force?: boolean; quiet?: boolean; requireAll?: boolean },
   io: YrdCliIO,
 ): Promise<readonly Bay[]> {
-  const cwd = io.cwd ?? process.cwd()
+  const cwd = invocationCwd(io)
   // --force requires an explicit bay name/id (no empty selector = all open).
   if (options.force === true && selectors.length === 0) {
     usage("bay close --force requires an explicit bay selector (no glob/all)")
@@ -4498,7 +4541,7 @@ async function bayStatusCommand(
   options: { json?: boolean },
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  const cwd = io.cwd ?? process.cwd()
+  const cwd = invocationCwd(io)
   const bays =
     selectors.length === 0
       ? app.bays.list().filter((bay) => bay.status !== "closed")
@@ -5876,7 +5919,7 @@ async function applyChangeSelection(
   const createOnly = command === "pr.create"
   const props = parseProps(options.prop)
   const state = stateOf(app)
-  const cwd = io.cwd ?? process.cwd()
+  const cwd = invocationCwd(io)
   const local = currentBay(state.bays, cwd)
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
   const prs: Change[] = []
@@ -6021,7 +6064,7 @@ function submitRequiredCheckContexts(
   selectors: readonly string[],
   io: YrdCliIO,
 ): readonly Readonly<{ cwd: string; ref?: string }>[] {
-  const cwd = io.cwd ?? process.cwd()
+  const cwd = invocationCwd(io)
   const state = stateOf(app)
   const local = currentBay(state.bays, cwd)
   const currentBranch = currentGitBranch(cwd, io)
@@ -6049,7 +6092,7 @@ function submitRequiredCheckContexts(
  * before guards spend work on the stale branch expectation. Explicit PR and
  * branch selectors deliberately bypass this preflight. */
 function refuseTerminalBaySubmitBinding(app: YrdCliApp, selectors: readonly string[], io: YrdCliIO): void {
-  const cwd = io.cwd ?? process.cwd()
+  const cwd = invocationCwd(io)
   const local = currentBay(stateOf(app).bays, cwd)
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
   for (const selector of inferred) {
@@ -6953,7 +6996,7 @@ function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
 
 function currentPr(app: YrdCliApp, io: YrdCliIO): Change {
   const state = stateOf(app)
-  const cwd = io.cwd ?? process.cwd()
+  const cwd = invocationCwd(io)
   const bay = currentBay(state.bays, cwd)
   const branch = bay?.branch ?? currentGitBranch(cwd, io)
   const pr =
@@ -12844,7 +12887,7 @@ function buildProgram(
           selectors,
           { dryRun: options.dryRun, message: options.message, messageFile: options.file },
           io,
-          changeStateDeps(io, () => currentGitBranch(io.cwd ?? process.cwd(), io), installedServices().process),
+          changeStateDeps(io, () => currentGitBranch(invocationCwd(io), io), installedServices().process),
         ),
       ),
     )

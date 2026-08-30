@@ -545,9 +545,21 @@ export async function preflightRemerge(
     }),
     fetch: () => ({
       code: "recut-preflight-branch-refresh-failed",
+      // `yrd pr remerge` — what this arm prescribed until now — is not a verb
+      // the program has: the real CLI answers `unknown command 'remerge' (Did
+      // you mean 'merge'?)` and exits 2, so the one reader who followed the
+      // remedy was told to type something that cannot run. It is the stale-
+      // remedy class @yrd/bay-submit-record/22958 rides, and the refusal-cure
+      // census cannot catch it: that census walks REFUSAL_CURES, and this
+      // remedy lives in a message string instead of a registered cure.
+      //
+      // A transport fault has no Yrd cure — the same answer `transportRemedy`
+      // already gives for an unreachable origin — so this names the access
+      // check and stops, rather than inventing a verb to fill the slot.
       message:
         `yrd: could not refresh live branch '${pr.branch}' from origin while classifying change '${pr.id}'\n` +
-        `retry: yrd pr remerge ${pr.id} --preflight`,
+        `no Yrd verb cures a transport fault — restore access to origin, then re-run the same command\n` +
+        `check access: git fetch origin ${pr.branch}`,
     }),
     resolve: () => ({
       code: "recut-preflight-branch-absent",
