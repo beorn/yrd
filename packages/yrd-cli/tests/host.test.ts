@@ -588,8 +588,15 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // needs rewriting. The predecessor 381cdb9e — what shared main's vendor pin
     // 18d9b83dbb19 computes, and the ledger's own superseded last entry — gains
     // a retained edge below.
+    // Conscious update 2026-08-30 (@i/10-yrd/absent-branch-is-terminal): the
+    // queue retires a standing submit fact whose candidate cannot merge.
+    // Three inputs move the identity at once and none rewrites a stored
+    // record — `queues.retiredSubmits` in initialState, the registered
+    // `queue/submit/retired` event, and `Candidate.conflicts` as another
+    // optional key in an accepted input shape. The predecessor 74775b57 —
+    // the ledger's own superseded last entry — gains a retained edge below.
     const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1")
+    expect(first.manifest.targetIdentity).toBe("1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -2020,7 +2027,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1")
+    expect(rewritten.checkpoint_identity).toBe("1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2109,7 +2116,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1")
+    expect(rewritten.checkpoint_identity).toBe("1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4")
     redatabase.close()
   })
 
@@ -3684,6 +3691,10 @@ checks: [{check: {run: "true"}}]
       // Production journal stored identity 2026-08-26 (cursor 92592), the
       // composition immediately before 22991 phase 2's statuses cut.
       { from: "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25", to: releasedHop },
+      // The ledger's superseded last entry — what every deployment has been
+      // asked to store since 2026-08-28 — retained across the submit-fact
+      // retirement bump (@i/10-yrd/absent-branch-is-terminal, 2026-08-30).
+      { from: "74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1", to: releasedHop },
       { from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7", to: releasedHop },
       // Production journal stored identity, read read-only from /hh's live
       // journal 2026-08-26 at cursor 91511 (evictedThrough 27609, so rebuild
