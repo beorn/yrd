@@ -2681,6 +2681,21 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   if (bay.status === "opening" || bay.status === "closing") {
     throw new Error(`yrd: bay '${bay.id}' is ${bay.status}; wait for its workspace job`)
   }
+  // A live, unwithdrawn change still resolves through this bay's mutable workspace
+  // (@yrd/submit-records-or-refuses box 3, originally bead 23160: deleting the bay
+  // strands it) — so this must run BEFORE the already-closed/--force shortcut below,
+  // not after. changeForBay(bay.id) misses a bay whose OWN provision failed before a
+  // change was ever bound to it, but resolveChange(bay.branch) still catches it: a
+  // later bay that reused this bay's freed branch (the B280/B286 branch-release
+  // regression above) can carry a live change on that SAME branch string, and no
+  // prune path — --force here, or the timer-driven `admin bay prune --apply` that
+  // calls this same closeBay — may ever delete a bay a live change still depends on.
+  const pr = changeForBay(current, bay.id) ?? resolveChange(current, bay.branch)
+  if (pr !== undefined && changeDeliveryState(pr) !== "pushed" && isLiveChange(pr) && args.withdraw !== true) {
+    throw new Error(
+      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; run it through the merge queue before closing, or pass --withdraw`,
+    )
+  }
   if (bay.status === "closed") {
     // --force is the explicit, announced override (@i/10-yrd/bay-prune-without-data-loss,
     // the B280/B286 shape): a bay that already auto-closed (e.g. closed-degenerate on
@@ -2689,15 +2704,11 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
     // left to release. The bare (non-force) refusal stays — it is useful information for
     // a caller who did not ask for the override — but --force makes an already-closed
     // bay an idempotent success instead of a hard error, matching --force's contract of
-    // bypassing bay status rather than compounding it.
+    // bypassing bay status rather than compounding it. The live-change guard above
+    // still applies first, unconditionally — --force overrides Bay status, never a live
+    // change.
     if (args.force === true) return { events: [] }
     throw new Error(`yrd: bay '${bay.id}' is already closed`)
-  }
-  const pr = changeForBay(current, bay.id) ?? resolveChange(current, bay.branch)
-  if (pr !== undefined && changeDeliveryState(pr) !== "pushed" && isLiveChange(pr) && args.withdraw !== true) {
-    throw new Error(
-      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; run it through the merge queue before closing, or pass --withdraw`,
-    )
   }
   return {
     events: [
