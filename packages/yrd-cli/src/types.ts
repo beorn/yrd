@@ -26,7 +26,7 @@ import type { QueueReadModel } from "./queue-read-model.ts"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 import type { RetainedWorkspace } from "./workspace-retention.ts"
 
-export type YrdCliExitCode = 0 | 1 | 2 | 3
+export type YrdCliExitCode = 0 | 1 | 2 | 3 | 10 | 11 | 12
 
 export type JournalRetentionPolicy = ResolvedRetention
 
@@ -329,6 +329,14 @@ export type YrdCliIO = {
   leaseMs?: number
   concurrency?: number
   now?: () => number
+  /**
+   * This process's resident set in bytes, for the habitant's own RSS cap check.
+   * Absent means "ask the runtime" (`process.memoryUsage.rss()`), which is what
+   * the host does; naming it lets a regression force a size without allocating
+   * one. Returning undefined means the size is UNMEASURABLE — never zero, and
+   * never grounds for standing down.
+   */
+  rssBytes?: () => number | undefined
   resolveRevision?(ref: string, cwd: string): Promise<string | undefined>
   /** Parent SHAs of one commit in the invocation repository — the linear-root
    * gate's evidence at entrances that hold a sha rather than a branch

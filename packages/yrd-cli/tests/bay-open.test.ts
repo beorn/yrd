@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/host.ts"
-import type { YrdCliIO } from "../src/types.ts"
+import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
 
 const roots: string[] = []
@@ -1745,7 +1745,7 @@ function output(cwd: string): {
   }
 }
 
-function yrd(repo: string, io: YrdCliIO, ...args: string[]): Promise<0 | 1 | 2 | 3> {
+function yrd(repo: string, io: YrdCliIO, ...args: string[]): Promise<YrdCliExitCode> {
   return runYrdProcess([process.execPath, "/usr/local/bin/yrd", "--repo", repo, ...args], io)
 }
 

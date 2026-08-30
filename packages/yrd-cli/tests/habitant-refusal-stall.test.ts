@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest"
 import { foldRefusalStall, HABITANT_REFUSAL_STALL_CYCLES, type HabitantRefusalStall } from "../src/refusal-remedy.ts"
 import { followQueueRuns } from "../src/run.ts"
+import { HABITANT_EXIT } from "../src/habitant-exit.ts"
 import { createHabitantHarness } from "./support/habitant-harness.ts"
 
 const HEAD = "1".repeat(40)
@@ -122,8 +123,10 @@ describe("habitant refusal stall — the runner restarts itself instead of loopi
   it("exits UNCLEAN with the evidence once the all-candidate refusal run hits the threshold", async () => {
     const h = habitantHarness(true)
 
-    // 3 = the unclean/interrupted exit code; `restart: on-failure` re-execs.
-    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(3)
+    // The unclean exit `restart: on-failure` re-execs — and since 2026-08-30
+    // the poisoned condition's OWN code, not the interrupted one it used to
+    // share, so a supervisor reading only the code can tell them apart.
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(HABITANT_EXIT.poisoned)
 
     // Restarts on the threshold cycle itself, not one later.
     expect(h.cycles()).toBe(HABITANT_REFUSAL_STALL_CYCLES)

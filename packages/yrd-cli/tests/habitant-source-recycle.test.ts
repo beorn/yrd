@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { followQueueRuns, habitantSourceHealth } from "../src/run.ts"
 import { createHabitantHarness } from "./support/habitant-harness.ts"
 import { HABITANT_SOURCE_STALE_OBSERVATIONS, type HabitantSourceStall } from "../src/source-staleness.ts"
+import { HABITANT_EXIT } from "../src/habitant-exit.ts"
 import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -142,11 +143,15 @@ describe("habitant source recycle — noticing the gap", () => {
     expect(f.warnings).toEqual([])
   })
 
-  it("does not recycle one commit behind — that is routinely the merge we just produced", async () => {
+  it("does not recycle below whatever threshold it was given", async () => {
+    // `observe` passes 2 explicitly. The SHIPPING threshold is 1 since
+    // 2026-08-30 — see HABITANT_SOURCE_STALE_BEHIND, whose old "one commit is
+    // routinely the merge we just produced" defence described a comparison
+    // against the queue repository that this check has not made for some time.
     const source = staleSource(1)
     const f = fixture(source.bootedSha, source.root)
 
-    expect((await f.observe(10)).recycle).toBe(false)
+    expect((await f.observe(10, 2)).recycle).toBe(false)
   })
 
   it("never recycles a non-habitant follow — exiting is only an actuator under a supervisor", async () => {
@@ -314,8 +319,11 @@ describe("habitant source recycle — the quiet queue, where a runner actually g
       now: () => Date.parse("2026-08-29T21:40:00.000Z") + cycles * 61_000,
     } as unknown as YrdCliIO
 
-    // 3 = the unclean exit; hab's restart=on-failure re-execs onto the checkout.
-    await expect(followQueueRuns(h.app, [], { interval: 1 }, io, h.gate)).resolves.toBe(3)
+    // The unclean exit hab's restart=on-failure re-execs onto the checkout —
+    // and since 2026-08-30 its OWN code, not the interrupted one it used to
+    // share, so a supervisor reading only the code can still tell the two
+    // apart.
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, io, h.gate)).resolves.toBe(HABITANT_EXIT["source-stale"])
 
     expect(h.warnings).toContainEqual(
       expect.objectContaining({
