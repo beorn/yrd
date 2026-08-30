@@ -504,10 +504,6 @@
 
     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
 
-    "@yrd/core/loggily": ["loggily@github:beorn/loggily#d235700", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-d235700", "sha512-+OfyKMFVUO3JnZQcGeLl0acVr1JgymJajJ8R/bCFPeEE8il/02jm+xth63Mkf1Bm1TzAMleNuXI8AUMTd9hB1g=="],
-
-    "@yrd/process/loggily": ["loggily@github:beorn/loggily#d235700", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "beorn-loggily-d235700", "sha512-+OfyKMFVUO3JnZQcGeLl0acVr1JgymJajJ8R/bCFPeEE8il/02jm+xth63Mkf1Bm1TzAMleNuXI8AUMTd9hB1g=="],
-
     "git-super/@silvery/command": ["@silvery/command@0.23.2", "", {}, "sha512-/JhPzi2VTlleF+uYREkV5SdZm5CfimGCwq3XoKBTXbozK+p4zOFyoRoFGPBnToqQCYQb6x0R8nGX9ag3HZjfbw=="],
 
     "git-super/@silvery/commander": ["@silvery/commander@0.23.2", "", { "dependencies": { "@silvery/ansi": "0.23.2", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-hJz9U6/SuSWgRpne00ES3vxiIM+2PuJLvXgQ4SwfjLPJxwAw/q6bWLKvwIT8WhdeaiPikZuYsxpO3RBU7o2PSQ=="],
