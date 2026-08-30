@@ -7185,6 +7185,13 @@ describe("runYrd", () => {
                   "Start or restart the habitant queue runner, then verify it requests required checks for 'PR1'.",
                 ],
               },
+              {
+                code: "queue-liveness-wedged",
+                pr: "PR1",
+                specimen: "queue:main:liveness-wedged",
+                since: "2026-07-13T12:00:00.000Z",
+                blockedMs: 30 * 60_000,
+              },
             ],
           },
         })
