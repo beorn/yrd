@@ -7211,6 +7211,41 @@ function auditQueues(
       // hand here is a second definition of "current" that can only ever drift.
       const revision = currentChangeRev(pr)
       const pushedAtMs = parseAuditTime(revision.pushedAt, "pr pushed clock")
+      // A submit that RAN and lost its durable write leaves exactly this
+      // wreckage: `pr/pushed` was written, `pr/submitted` was not, so the change
+      // reads as `pushed` and fell into the draft walk below. Two things were
+      // wrong with letting it. The grace — deliberately long enough for a
+      // "deliberate push-review-submit pause" — is measuring a pause that
+      // already ended in a failure, so the audit reported `findings: []` for
+      // the first 15 minutes, which is precisely the window the author is
+      // still at the terminal and can retry. And `draft-stranded`'s message
+      // says "nothing has submitted it", which sends the reader hunting an
+      // author who did push the button (PR2006, 2026-08-24).
+      //
+      // One fact the record already carries separates them, with no new
+      // stored state and no clock: an EARLIER revision of this same change was
+      // submitted. A change that never got past its first push has no such
+      // revision and stays the draft walk's, below.
+      const priorSubmitted = pr.revs.findLast((entry) => entry.submittedAt !== undefined)
+      if (priorSubmitted !== undefined) {
+        findings.push({
+          code: "submit-interrupted",
+          message:
+            `change '${pr.id}' (${pr.branch}) recorded revision ${revision.n} pushed at ${revision.pushedAt}` +
+            `${revision.submitter === undefined ? "" : ` by ${revision.submitter}`} with no submit fact, while ` +
+            `revision ${priorSubmitted.n} was submitted at ${priorSubmitted.submittedAt ?? "an unrecorded time"}: ` +
+            "a submit ran and its durable write did not complete, so this revision is invisible to the queue",
+          pr: pr.id,
+          specimen: `pr:${pr.id}`,
+          since: revision.pushedAt,
+          blockedMs: Math.max(0, auditNowMs - pushedAtMs),
+          ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
+          // Re-running the same submit re-records the revision; nothing has to
+          // be re-pushed, because the push is the half that survived.
+          resolution: [`yrd pr submit ${pr.branch}`],
+        })
+        continue
+      }
       if (auditNowMs - pushedAtMs <= DRAFT_STRANDED_GRACE_MS) continue
       const certification = draftReviewCertification(pr)
       findings.push({
@@ -8989,6 +9024,11 @@ export const YRD_REFUSAL_CODES = [
   "step-revision-drift",
   "step-selection-superseded",
   "step-unavailable",
+  // The interrupted-submit audit finding (auditQueues), registered for the
+  // same reason as every other finding code here: it classifies through
+  // `failureDisposition` instead of throwing. The fall-through disposition is
+  // the right one — the author re-runs the submit, no automation retries it.
+  "submit-interrupted",
   // Alternates-audit census findings (alternates-audit.ts) — like every
   // other YRD_QUEUE_AUDIT_FINDING_CODES member above, registered so a
   // finding code surfacing through a presentation path classifies instead

@@ -1184,6 +1184,14 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "queue-hold-ttl-missing",
   "queue-hold-expired",
   "draft-stranded",
+  /** A submit whose durable write did not complete: the change's current
+   * revision carries a push with no submit fact while an EARLIER revision was
+   * submitted, so a submit demonstrably ran and lost its record write. Split
+   * from `draft-stranded` because the two need opposite handling — a draft may
+   * legitimately sit un-submitted for a while (hence that walk's grace), while
+   * this revision is already known to be wreckage the moment it exists, and
+   * "nothing has submitted it" is false about it. */
+  "submit-interrupted",
   "unrecorded-submit",
   "run-without-submit-ancestry",
   "run-without-check-ancestry",
