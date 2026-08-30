@@ -9,10 +9,13 @@ import { isAbsolute, join } from "node:path"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/host.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
+import type { PathHolder, PathHolderCensus, PathHolderCensusReader } from "@yrd/process"
 import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
 
 const roots: string[] = []
 const spawnedYrdProcesses = new Set<ReturnType<typeof Bun.spawn>>()
+const pathHolderFixtures = new Set<(path: string) => Promise<PathHolder | undefined>>()
+let spawnedPathHolderCensus = "complete-empty"
 const CLAIM = "@km/test/s2-fixture"
 const BRANCH = "task/s2-fixture"
 const BOUNDED_ONE_SECOND_LOOP =
@@ -64,6 +67,8 @@ afterAll(async () => {
 
 afterEach(async () => {
   await stopSpawnedYrdProcesses()
+  pathHolderFixtures.clear()
+  spawnedPathHolderCensus = "complete-empty"
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
@@ -215,6 +220,7 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
         stdout: "ignore",
         stderr: "ignore",
       })
+      const releaseHolder = holdPathInCensus(held.pid, bayPath)
       try {
         expect(isPidAlive(held.pid)).toBe(true)
         const closed = output(repo)
@@ -228,6 +234,7 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
           bays: [expect.objectContaining({ name: "docs", nativeStatus: "closed", status: "done" })],
         })
       } finally {
+        releaseHolder()
         killQuiet(held.pid)
       }
     } finally {
@@ -308,6 +315,11 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     ].join("\n")
     const run = output(repo)
     let escapedPid = 0
+    const releaseEscapedHolder = dynamicPathHolder(async (path) => {
+      const pidText = await readFile(escapedPidPath, "utf8").catch(() => "")
+      const pid = Number(pidText.trim().split(/\s+/u)[0])
+      return pid > 1 && isPidAlive(pid) ? { pid, source: "cwd", target: path } : undefined
+    })
     try {
       expect(
         await yrd(
@@ -337,6 +349,7 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
         if (isPidAlive(escapedPid)) throw new Error(`setsid descendant ${escapedPid} survived Bay close`)
       }, 2_000)
     } finally {
+      releaseEscapedHolder()
       killQuiet(escapedPid)
     }
   })
@@ -660,6 +673,9 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
 
   it("attaches PID-addressed guests by selector or cwd without taking the owner's Bay lifecycle", async () => {
     const { repo } = await repository()
+    const spawnedCensusPath = join(repo, "..", "spawned-path-holders.json")
+    await writeFile(spawnedCensusPath, `${JSON.stringify({ complete: true, holders: [] })}\n`)
+    spawnedPathHolderCensus = `file:${spawnedCensusPath}`
     const ownerStop = join(repo, "..", "owner.stop")
     const owner = spawnYrd(
       repo,
@@ -702,6 +718,13 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     ).toBe(0)
     const guestOne = await readFile(join(repo, ".bays", "B1", "guest-one.pid"), "utf8")
     const guestTwo = await readFile(join(repo, ".bays", "B1", "guest-two.pid"), "utf8")
+    await writeFile(
+      spawnedCensusPath,
+      `${JSON.stringify({
+        complete: true,
+        holders: [{ pid: Number(guestOne), source: "cwd", target: join(repo, ".bays", "B1") }],
+      })}\n`,
+    )
     expect(guestOne).toMatch(/^\d+$/u)
     expect(guestTwo).toMatch(/^\d+$/u)
     expect(guestTwo).not.toBe(guestOne)
@@ -1472,7 +1495,13 @@ printf ran > "$YRD_TEST_SHELL_LOG"
         "-c",
         'read value && test "$value" = payload',
       ],
-      { cwd: repo, env: process.env, stdin: new Blob(["payload\n"]), stdout: "pipe", stderr: "pipe" },
+      {
+        cwd: repo,
+        env: { ...process.env, YRD_TEST_PATH_HOLDER_CENSUS: "complete-empty" },
+        stdin: new Blob(["payload\n"]),
+        stdout: "pipe",
+        stderr: "pipe",
+      },
     )
     const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
     expect(exitCode, stderr).toBe(0)
@@ -1522,7 +1551,12 @@ printf ran > "$YRD_TEST_SHELL_LOG"
         "-c",
         `printf started > child.started; ${BOUNDED_ONE_SECOND_LOOP}`,
       ],
-      { cwd: repo, env: process.env, stdout: "pipe", stderr: "pipe" },
+      {
+        cwd: repo,
+        env: { ...process.env, YRD_TEST_PATH_HOLDER_CENSUS: "complete-empty" },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
     )
     await eventually(async () => access(join(repo, ".bays", "B1", "child.started")))
 
@@ -1577,7 +1611,12 @@ printf ran > "$YRD_TEST_SHELL_LOG"
         "-c",
         "printf payload > post-child.txt",
       ],
-      { cwd: repo, env: process.env, stdout: "pipe", stderr: "pipe" },
+      {
+        cwd: repo,
+        env: { ...process.env, YRD_TEST_PATH_HOLDER_CENSUS: "complete-empty" },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
     )
     await eventually(async () => access(marker))
 
@@ -1746,7 +1785,43 @@ function output(cwd: string): {
 }
 
 function yrd(repo: string, io: YrdCliIO, ...args: string[]): Promise<YrdCliExitCode> {
-  return runYrdProcess([process.execPath, "/usr/local/bin/yrd", "--repo", repo, ...args], io)
+  return runYrdProcess([process.execPath, "/usr/local/bin/yrd", "--repo", repo, ...args], io, {
+    testPathHolderCensus: fixturePathHolderCensus,
+  })
+}
+
+const fixturePathHolderCensus: PathHolderCensusReader = async (path): Promise<PathHolderCensus> => ({
+  holders: (await Promise.all([...pathHolderFixtures].map(async (fixture) => fixture(path)))).filter(
+    (holder): holder is PathHolder => holder !== undefined,
+  ),
+  coverage:
+    process.platform === "linux"
+      ? {
+          platform: "linux",
+          scope: "same-uid",
+          procRoot: "bay-open-test-fixture",
+          complete: true,
+          processes: { enumerated: 0, sameUid: 0, otherUid: 0, unavailable: { exited: 0, denied: 0 } },
+          sources: {
+            cwd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            exe: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            root: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            maps: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            fd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+          },
+        }
+      : { platform: "darwin", mechanism: "lsof", complete: true },
+})
+
+function dynamicPathHolder(fixture: (path: string) => Promise<PathHolder | undefined>): () => void {
+  pathHolderFixtures.add(fixture)
+  return () => pathHolderFixtures.delete(fixture)
+}
+
+function holdPathInCensus(pid: number, target: string): () => void {
+  return dynamicPathHolder(async (path) =>
+    path === target && isPidAlive(pid) ? { pid, source: "cwd", target } : undefined,
+  )
 }
 
 function spawnYrd(repo: string, ...args: string[]) {
@@ -1754,7 +1829,7 @@ function spawnYrd(repo: string, ...args: string[]) {
     [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "--repo", repo, ...args],
     {
       cwd: repo,
-      env: process.env,
+      env: { ...process.env, YRD_TEST_PATH_HOLDER_CENSUS: spawnedPathHolderCensus },
       stdout: "pipe",
       stderr: "pipe",
     },
