@@ -60,9 +60,7 @@ function refusedSubmodule(message: string): string {
  * bay it belongs to, or as `from '<path>'`. Where the reader looks, so the
  * evidence is a place and not a description of one. */
 function advanceWorktree(message: string): string {
-  return (
-    quotedValue(message, /\('([^']+)'\)/u) ?? quotedValue(message, /\bfrom '([^']+)'/iu) ?? "<advance worktree>"
-  )
+  return quotedValue(message, /\('([^']+)'\)/u) ?? quotedValue(message, /\bfrom '([^']+)'/iu) ?? "<advance worktree>"
 }
 
 /** The bay a gitlink-advance refusal left standing (`in bay '<name>'`). The

@@ -9587,10 +9587,7 @@ export type CanonicalRefusalCodeOptions = Readonly<{ dynamicStepFamily?: boolean
  * shape AND the caller is classifying a durable step result, or `undefined` if
  * it is outside the closed vocabulary entirely. The one gate every consumer
  * that must not silently misclassify an unknown code shares. */
-export function canonicalRefusalCode(
-  code: string,
-  options: CanonicalRefusalCodeOptions = {},
-): RefusalCode | undefined {
+export function canonicalRefusalCode(code: string, options: CanonicalRefusalCodeOptions = {}): RefusalCode | undefined {
   if (YRD_REFUSAL_CODE_SET.has(code)) return code as RefusalCode
   const alias = YRD_REFUSAL_CODE_ALIASES[code]
   if (alias !== undefined) return alias
