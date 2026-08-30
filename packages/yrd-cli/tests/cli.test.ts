@@ -125,6 +125,7 @@ import {
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
+import { HABITANT_EXIT } from "../src/habitant-exit.ts"
 import { MergeAuthorityBoundary } from "../src/merge-authority-boundary.ts"
 import { queueStats } from "../src/time-stats.ts"
 import { YRD_VERSION } from "../src/version.ts"
@@ -2683,6 +2684,111 @@ describe("runYrd", () => {
     const tolerant = outputIO()
     const tolerantApp = await createApp()
     expect(await runYrd(tolerantApp, yrd("queue", "run", "--once"), tolerant.io, mismatchOnly)).toBe(0)
+  })
+
+  it("recycles a TRUE habitant instead of refusing loud, when its installed plan goes stale", async () => {
+    // Same refusal, same fixture shape as the previous test — the ONE
+    // difference is `io.runner` naming a habitant below. A supervisor is
+    // actually watching, so the follow loop must redirect
+    // `requireInstalledDeclaredPlan`'s refusal into the designed exit (23192
+    // leg c) instead of letting it reach the generic "error:" printer the
+    // previous test just pinned: a "notice:" line, and a distinct exit code
+    // that never collides with the refusal code 1 above it. (The record this
+    // exit writes, and the projection read that surfaces it as `lastRecycle`,
+    // are proved in habitant-plan-gate.test.ts, alongside this same gate's
+    // two sibling outcomes — the exec-reload request and the reload-exhausted
+    // refusal.) Measured 2026-08-30: this exact branch fired seven times in
+    // production and every one read as a failure.
+    const comparison: QueueEnvironmentAuditComparison = {
+      base: "main",
+      tip: {
+        sha: "b".repeat(40),
+        configAuthority: ".yrd.yml",
+        configBlobSha: "2".repeat(40),
+        steps: ["check", "second", "merge"],
+        batchSize: 1,
+      },
+      installed: { source: "this-process", steps: ["check", "merge"], batchSize: 1 },
+    }
+    const services: YrdCliServices = {
+      queue: {
+        auditEnvironment: async () => ({
+          findings: [
+            {
+              code: "installed-plan-stale",
+              message:
+                "yrd: this process installed check→merge (batch 1), but main tip bbbbbbbb (config blob 22222222) " +
+                "declares check→second→merge (batch 1): step 'second' is declared at the tip but not installed in " +
+                "this process. Restart this queue runner so it builds the declared steps.",
+            },
+          ],
+          comparison,
+        }),
+      },
+    }
+    // The gate exactly as `queue run`'s follow-mode command action builds it
+    // when no in-place reload is wired (`reloadInPlace` omitted) — the branch
+    // actually firing in production.
+    const gate = () => runInternals.requireInstalledDeclaredPlan(services)
+
+    const app = await createApp()
+    const warnings: Array<{ message: string; props: Record<string, unknown> }> = []
+    const viewer = {
+      ...app,
+      log: {
+        ...app.log,
+        warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }),
+      },
+    } as TestApp
+    // A real git repo, not the fixture's fake `/repo`: the habitant heartbeat
+    // that starts before the gate runs resolves its status path from `cwd`
+    // via `git rev-parse --git-common-dir` (never from `io.stateDir` — that
+    // field is a different call site's override), so a non-repository `cwd`
+    // refuses before ever reaching the behavior under test.
+    const repo = mkdtempSync(join(tmpdir(), "yrd-plan-stale-recycle-"))
+    execFileSync("git", ["init", "-q", repo])
+    const io = outputIO({ runner: "yrd-cli:test-habitant", cwd: repo }).io
+
+    const exit = await runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate, services)
+
+    expect(exit).toBe(HABITANT_EXIT["installed-plan-stale"])
+    expect(exit, "must never share the generic refusal code a genuine failure gets").not.toBe(1)
+
+    const notice = warnings.find((w) => w.props.action === "resident-plan-stale-restart")
+    expect(notice).toBeDefined()
+    expect(notice?.message).toMatch(/^notice: yrd:/u)
+    expect(notice?.message).not.toContain("error:")
+    expect(notice?.message).toContain("second")
+    expect(notice?.props).toMatchObject({
+      bootedSha: "1".repeat(40),
+      headSha: "b".repeat(40),
+      staleSteps: ["second"],
+    })
+  })
+
+  it("publishes an OBSERVED wall-clock start from this process's own boot, alongside the logical one", async () => {
+    // `startedAt` is written under the caller's clock (`io.now()` here, a
+    // restored journal event on replay) — never the operating system's start
+    // time for this process (`habitantRunnerRunning`'s doc comment in
+    // run.ts). `observedStartedAt` closes that gap: a `/proc` read of THIS
+    // process's own boot (`observePidSync`, @yrd/process), taken once at
+    // heartbeat startup. The two clocks are never expected to agree — the
+    // test only pins that BOTH are published and BOTH parse.
+    const repo = mkdtempSync(join(tmpdir(), "yrd-observed-start-"))
+    execFileSync("git", ["init", "-q", repo])
+    const io = outputIO({ cwd: repo }).io
+
+    const heartbeat = await runInternals.startHabitantRunnerHeartbeat(io)
+    await heartbeat.close(true)
+
+    const status = await runInternals.habitantRunnerStatus(repo)
+    expect(status?.startedAt).toBe(new Date(Date.parse("2026-07-09T12:01:00.000Z")).toISOString())
+    expect(typeof status?.observedStartedAt).toBe("string")
+    expect(Number.isFinite(Date.parse(status?.observedStartedAt ?? ""))).toBe(true)
+    // A real read of the CURRENT test process — bounded loosely (minutes, not
+    // milliseconds) so it never flakes on a slow CI host, tight enough to
+    // catch the two fields being swapped or one silently reusing the other.
+    expect(Math.abs(Date.now() - Date.parse(status?.observedStartedAt ?? "0"))).toBeLessThan(10 * 60_000)
   })
 
   it("expires a hold on an otherwise idle follow tick without exiting the runner", async () => {
@@ -7783,6 +7889,10 @@ describe("runYrd", () => {
         expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual({
           pid: process.pid,
           startedAt: "2026-07-13T12:00:00.000Z",
+          // This test process's own real boot time, from `observePidSync` —
+          // unrelated to the frozen `now: () => now` every other field here
+          // is written under, so only its shape is checked.
+          observedStartedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u),
           lastTickAt: "2026-07-13T12:00:00.000Z",
           journalVersions: [1, 2, 3],
           // The dedicated RUNNER box renders stale-runner details as `[pid] <command>`.

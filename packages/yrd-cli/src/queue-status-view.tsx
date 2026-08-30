@@ -29,6 +29,7 @@ import {
 import { compareNatural, stageAsync, type Event, type JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import { derivedLaneBranches, isDerivedMemberId } from "@yrd/queue"
+import type { HabitantSourceRecycle } from "./source-staleness.ts"
 import type {
   Candidate,
   InstalledStep,
@@ -514,8 +515,23 @@ export function timelineRetainedRows(
 
 export type QueueTimelineRunner = Readonly<{
   pid: number
+  /** LOGICAL start time, written under the caller's clock — `io.now()` in
+   * tests, a restored journal event on replay — never the operating system's
+   * start time for this process. Kept for the callers already reading it;
+   * prefer {@link QueueTimelineRunner.observedStartedAt} for anything that
+   * derives an age or an uptime, and never assume the two agree. */
   startedAt: string
   lastTickAt: string
+  /**
+   * OBSERVED start time: this process's own `/proc` (or platform-equivalent)
+   * read of when IT started, taken once at boot (`observePidSync`, @yrd/process
+   * pid-identity). Immune to the clock skew and replay substitution that make
+   * `startedAt` unsafe to compare against a live process's actual age — the gap
+   * a live runner's log flagged as unclosed (`habitantRunnerRunning` in
+   * run.ts). Absent on status records written before this field existed, or
+   * when the platform could not be read; both fall back to `startedAt`.
+   */
+  observedStartedAt?: string
   /** Queue-outcome progress captured by the habitant from the canonical audit.
    * Absent only for status records written before progress-aware heartbeats. */
   queueProgress?: QueueRunnerProgress
@@ -608,6 +624,20 @@ export type QueueTimelineRunner = Readonly<{
    * than this field), and the probe says so rather than comparing nothing.
    */
   installedPlan?: HabitantInstalledPlan
+  /**
+   * The last recycle any habitant in this lineage attempted — merged in from
+   * `source-recycle.json` by `habitantRunnerStatus` (run.ts), the ONE read
+   * every consumer of this projection shares (`watch`, `queue list --check`,
+   * `queue status`). `reason` says WHY a fresh process was requested
+   * (`"source-stale"` or `"installed-plan-stale"`, 23192 leg c); `attemptedAt`
+   * says when. A designed recycle exits unclean by construction (the
+   * supervisor re-execs onto it), so this is what turns that into "recycled
+   * for a plan change at <time>" instead of an unexplained restart.
+   *
+   * Absent means no recycle has ever been attempted for this queue's runner —
+   * never rendered as "stalled" or as any other unrelated state.
+   */
+  lastRecycle?: HabitantSourceRecycle
 }>
 
 export type QueueTimelineProjection = Readonly<{
@@ -4222,13 +4252,16 @@ export function QueueTopLine({
  * on-screen for up to that long even though real time keeps passing — the
  * exact freeze the operator reported.
  */
-function runnerTiming(
+export function runnerTiming(
   projection: QueueTimelineProjection,
   nowMs: number,
 ): Readonly<{ ageMs: number; uptimeMs: number }> | null {
   const runner = projection.runner
   if (runner === null) return null
-  const startedAt = Date.parse(runner.startedAt)
+  // The OBSERVED start when this runner published one; the logical `startedAt`
+  // only for a status record written before that field existed. Never the
+  // other way — `startedAt` is the caller's clock, not this process's own.
+  const startedAt = Date.parse(runner.observedStartedAt ?? runner.startedAt)
   const lastTickAt = Date.parse(runner.lastTickAt)
   if (![nowMs, startedAt, lastTickAt].every(Number.isFinite)) {
     throw new Error("yrd: queue runner projection contains an invalid timestamp")

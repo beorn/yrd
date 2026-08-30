@@ -66,6 +66,7 @@ import {
   adaptProcessGit,
   cleanGitEnvironment,
   createProcess,
+  observePidSync,
   pathReapDeletionFailure,
   type GitSyncReadCommand,
   recordedPidIsRunning,
@@ -500,6 +501,13 @@ const HABITANT_SOURCE_STALE_EXIT: YrdCliExitCode = HABITANT_EXIT["source-stale"]
  * in-flight run with it. The one condition a fresh process does not by itself
  * cure, hence the only one dispositioned `restart-with-backoff`. */
 const HABITANT_MEMORY_CAP_EXIT: YrdCliExitCode = HABITANT_EXIT["memory-cap"]
+/** A habitant that recycles because the base tip's declared plan no longer
+ * matches what this process installed at boot, and no in-place reload was
+ * available to fix it live (23192 leg c). Its own code, for the same reason
+ * as the source-stale exit above: the loud `resident-plan-stale-restart`
+ * record is the detail, and this exit no longer shares `refusal`'s generic
+ * code 1 with a genuine failure a supervisor should treat differently. */
+const HABITANT_PLAN_STALE_EXIT: YrdCliExitCode = HABITANT_EXIT["installed-plan-stale"]
 
 /** Overrides {@link HABITANT_SOURCE_STALE_BEHIND}; `0` disables the recycle and
  * leaves the staleness visible-only. A runtime knob rather than project config:
@@ -904,6 +912,9 @@ function parseHabitantRunnerStatus(text: string): QueueTimelineRunner {
   return {
     pid: record.pid as number,
     startedAt,
+    ...(record.observedStartedAt === undefined
+      ? {}
+      : { observedStartedAt: habitantRunnerTimestamp(record.observedStartedAt, "observedStartedAt") }),
     lastTickAt,
     ...(queueProgress === undefined ? {} : { queueProgress }),
     ...(driver === undefined ? {} : { driver }),
@@ -924,12 +935,23 @@ function parseHabitantRunnerStatus(text: string): QueueTimelineRunner {
 export async function habitantRunnerStatus(cwd: string, stateDir?: string): Promise<QueueTimelineRunner | null> {
   const path = habitantRunnerStatusPath(cwd, stateDir)
   if (path === undefined) return null
+  let status: QueueTimelineRunner
   try {
-    return parseHabitantRunnerStatus(await readFile(path, "utf8"))
+    status = parseHabitantRunnerStatus(await readFile(path, "utf8"))
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null
     throw cause
   }
+  // The last recycle this lineage attempted (`source-recycle.json`, shared by
+  // every habitant designed exit — `HabitantSourceRecycle`), merged in here so
+  // every consumer of this projection (`watch`, `queue list --check`, `queue
+  // status`) gets it from the one place they already read runner status, in
+  // preference to duplicating this read at each call site. Absent is the
+  // overwhelmingly common case (no recycle ever attempted) and costs nothing:
+  // `readHabitantSourceRecycle` degrades silently rather than raising over a
+  // bookkeeping file that only ever adds context.
+  const lastRecycle = await readHabitantSourceRecycle(cwd, stateDir)
+  return lastRecycle === undefined ? status : { ...status, lastRecycle }
 }
 
 /**
@@ -946,8 +968,14 @@ export async function habitantRunnerStatus(cwd: string, stateDir?: string): Prom
  *
  * Closing it properly means RECORDING the identity instead of inferring it: the
  * habitant writes its own observed start (`observePidSync(process.pid)`) into
- * the status record, and this compares the two `/proc` readings exactly, immune
- * to any clock. Until that field exists, a runner pid answers as it always did.
+ * the status record as `observedStartedAt` (added 2026-08-30, alongside the
+ * age fix in `runnerAgeMs`'s callers and `runnerTiming` in
+ * queue-status-view.tsx), and this compares the two `/proc` readings exactly,
+ * immune to any clock. Wiring `observedStartedAt` into `runningSinceMs` below
+ * is a follow-on, not done here: this feeds RECLAIM (recovering another
+ * runner's leases), a destructive-adjacent surface that earns its own change
+ * and its own tests rather than riding in on a lifecycle-record fix. Until
+ * that wiring lands, a runner pid answers as it always did.
  */
 function habitantRunnerRunning(pid: number): boolean {
   return recordedPidIsRunning(recordedPidLivenessSync({ pid }))
@@ -1839,7 +1867,10 @@ async function queueRunnerHealth(
 
     const hasQueuedWork = app !== undefined && queuedDeliveryCount(app) > 0
     if (runnerStatus === "fresh" && hasQueuedWork && runnerAgeMs !== undefined && runner !== null) {
-      const runnerUptimeMs = now - Date.parse(runner.startedAt)
+      // OBSERVED start when published; `startedAt` (the caller's clock, not
+      // this process's own) only for a record written before that field
+      // existed.
+      const runnerUptimeMs = now - Date.parse(runner.observedStartedAt ?? runner.startedAt)
       if (runnerUptimeMs >= 3 * 60 * 60_000) {
         const expectedLastMerged = app === undefined ? undefined : habitantDriverLastMerged(app, base)
         const lastMergedMs = expectedLastMerged ? Date.parse(expectedLastMerged.at) : 0
@@ -2094,6 +2125,18 @@ export async function startHabitantRunnerHeartbeat(
     return new Date(now).toISOString()
   }
   const startedAt = nowIso()
+  // Observed once at boot, from this process's OWN clock via /proc (or the
+  // platform equivalent) — never `io.now()`, which is the caller's clock and
+  // exactly what `startedAt` above already is (the gap `habitantRunnerRunning`
+  // flags: a logical timestamp is unsafe to compare against a live process's
+  // actual age). `kind !== "identified"` — a platform this cannot read —
+  // means "not measured", written as absent, never standing in `startedAt`'s
+  // value for it.
+  const bootObservation = observePidSync(process.pid)
+  const observedStartedAt =
+    bootObservation.kind === "identified" && bootObservation.identity.startedAtMs !== undefined
+      ? new Date(bootObservation.identity.startedAtMs).toISOString()
+      : undefined
   let recordedProgress: QueueRunnerProgress | undefined
   const driverEpoch = options.driver === undefined ? undefined : (options.driver.epoch ?? randomUUID())
   if (options.retention !== undefined && driverEpoch === undefined) {
@@ -2123,6 +2166,7 @@ export async function startHabitantRunnerHeartbeat(
     const status: QueueTimelineRunner = {
       pid: process.pid,
       startedAt,
+      ...(observedStartedAt === undefined ? {} : { observedStartedAt }),
       lastTickAt,
       ...(queueProgress === undefined ? {} : { queueProgress }),
       // Omitted, never zeroed: absent means not measured, and the rail must be
@@ -8868,7 +8912,12 @@ export async function requireInstalledDeclaredPlan(
     }
     reload.request(stale, consecutive + 1)
   }
-  raiseFailure("refusal", stale.code, stale.message)
+  // `cause` carries the comparison this finding was read from, never surfaced
+  // by `failureFact` (which only sees kind/code/message) but readable off the
+  // thrown Error by a caller that already knows this refusal's shape — the
+  // habitant follow loop, so it can name the stale steps and the tip's
+  // revision in its designed-exit notice without a second audit read.
+  throw createFailure({ kind: "refusal", code: stale.code, message: stale.message }, result.comparison)
 }
 
 function ordinal(count: number): string {
@@ -11395,11 +11444,28 @@ async function readHabitantSourceRecycle(
     const parsed: unknown = JSON.parse(await readFile(path, "utf8"))
     if (typeof parsed !== "object" || parsed === null) return undefined
     const record = parsed as Record<string, unknown>
-    const { bootedSha, headSha, attemptedAt } = record
+    const { bootedSha, headSha, attemptedAt, reason, staleSteps } = record
     if (typeof bootedSha !== "string" || typeof headSha !== "string" || typeof attemptedAt !== "string") {
       return undefined
     }
-    return Object.freeze({ bootedSha, headSha, attemptedAt })
+    // `reason`/`staleSteps` are absent on records written before 2026-08-30 —
+    // degrade to "no reason recorded" (read as `"source-stale"` by
+    // `decideHabitantSource`) rather than raising over an older, still-valid
+    // record shape.
+    if (reason !== undefined && reason !== "source-stale" && reason !== "installed-plan-stale") return undefined
+    if (
+      staleSteps !== undefined &&
+      (!Array.isArray(staleSteps) || staleSteps.some((step) => typeof step !== "string"))
+    ) {
+      return undefined
+    }
+    return Object.freeze({
+      bootedSha,
+      headSha,
+      attemptedAt,
+      ...(reason === undefined ? {} : { reason }),
+      ...(staleSteps === undefined ? {} : { staleSteps: Object.freeze([...staleSteps]) as readonly string[] }),
+    })
   } catch {
     // silent-fallback-allow: a missing file is the overwhelmingly common case
     // and is not an error, and a corrupt one degrades to "no prior attempt" —
@@ -11476,6 +11542,7 @@ export async function habitantSourceHealth(
     return { stall: next, recycle: false }
   }
   await writeHabitantSourceRecycle(cwd, io.stateDir, {
+    reason: "source-stale",
     bootedSha: action.bootedSha,
     headSha: action.headSha,
     attemptedAt: new Date(io.now?.() ?? Date.now()).toISOString(),
@@ -11492,6 +11559,114 @@ export async function habitantSourceHealth(
     },
   )
   return { stall: next, recycle: true }
+}
+
+/** Step names whose declaration differs between what this process installed
+ * and what the base tip now declares — the symmetric difference by name. A
+ * revision-only or reorder-only delta (the SAME names, a different command
+ * revision or order) has an empty symmetric difference by construction; the
+ * full declared set names the delta instead, since every step's provenance is
+ * suspect once ANY of it moved, not only a step whose name changed. */
+export function habitantPlanStaleSteps(comparison: QueueEnvironmentAuditComparison): readonly string[] {
+  const installed = new Set(comparison.installed?.steps ?? [])
+  const tip = new Set(comparison.tip.steps)
+  const added = comparison.tip.steps.filter((name) => !installed.has(name))
+  const dropped = comparison.installed === undefined ? [] : comparison.installed.steps.filter((name) => !tip.has(name))
+  const delta = [...added, ...dropped]
+  return delta.length > 0 ? delta : comparison.tip.steps
+}
+
+/**
+ * A habitant's designed response to `requireInstalledDeclaredPlan` refusing
+ * because this process's installed plan is stale and no in-place reload was
+ * available to fix it live (23192 leg c). The remedy is identical to
+ * {@link habitantSourceHealth}'s — finish cleanly, exit unclean, let the
+ * supervisor re-exec a process that installs the current plan — so the
+ * record, the notice and the exit all follow the same shape, sharing the SAME
+ * recycle file ({@link HabitantSourceRecycle}) rather than a parallel one.
+ *
+ * Whether to call this at all is the CALLER's job, not this function's,
+ * mirroring `habitantSourceHealth`: exiting is only an actuator when
+ * something re-execs us, and a one-shot or bare follow has no next cycle to
+ * recycle into — which is exactly why `requireInstalledDeclaredPlan` itself
+ * keeps refusing loudly for both. Only the habitant follow loop catches that
+ * refusal and redirects it here.
+ */
+export async function habitantPlanRecycle(
+  app: Pick<YrdCliApp, "log">,
+  io: YrdCliIO,
+  finding: Readonly<{ code: string; message: string }>,
+  comparison: QueueEnvironmentAuditComparison | undefined,
+): Promise<YrdCliExitCode> {
+  const bootedSha = habitantBootedSha(io.implementationSource) ?? "unknown"
+  const headSha = comparison?.tip.sha ?? "unknown"
+  const staleSteps = comparison === undefined ? undefined : habitantPlanStaleSteps(comparison)
+  const attemptedAt = new Date(io.now?.() ?? Date.now()).toISOString()
+  const cwd = io.cwd ?? process.cwd()
+  await writeHabitantSourceRecycle(cwd, io.stateDir, {
+    reason: "installed-plan-stale",
+    bootedSha,
+    headSha,
+    attemptedAt,
+    ...(staleSteps === undefined ? {} : { staleSteps }),
+  })
+  const revision = headSha === "unknown" ? "unknown" : headSha.slice(0, 8)
+  const blob = comparison?.tip.configBlobSha === undefined ? "none" : comparison.tip.configBlobSha.slice(0, 8)
+  const base = comparison?.base ?? "the base"
+  const steps = staleSteps === undefined || staleSteps.length === 0 ? "the declared steps" : staleSteps.join(", ")
+  // "notice:", never "error:" — a designed exit a supervisor is about to fix
+  // by relaunching must not read like a genuine failure (measured 2026-08-30:
+  // seven of these misread as failures and paged @cto). The rich delta text
+  // `requireInstalledDeclaredPlan` built stays available as `reason` below,
+  // structured, for whoever debugs this after the fact.
+  app.log.warn?.(
+    `notice: yrd: this runner's installed plan is stale — ${base} tip ${revision} (config blob ${blob}) now ` +
+      `declares ${steps} differently than what this process installed at git:${bootedSha}. Recycling: the ` +
+      "supervisor relaunches this runner, which installs the currently declared steps on boot.",
+    {
+      action: "resident-plan-stale-restart",
+      bootedSha,
+      headSha,
+      ...(staleSteps === undefined ? {} : { staleSteps }),
+      reason: finding.message,
+    },
+  )
+  return HABITANT_PLAN_STALE_EXIT
+}
+
+/**
+ * Run the declared-plan gate, catching ONLY the one refusal a habitant with a
+ * next cycle can recycle from instead of dying loud (see
+ * {@link habitantPlanRecycle}). Every other outcome — a clean pass, the
+ * exec-reload control transfer, the reload-exhausted refusal naming a source
+ * that cannot build the declared steps, or an unrelated failure — passes
+ * through unchanged: only `requireInstalledDeclaredPlan`'s terminal "no
+ * reload wired" refusal, and only when `habitant` says a supervisor will
+ * relaunch this process, is redirected here instead of propagating. A
+ * one-shot or bare follow (`habitant` false) gets `undefined` back from
+ * neither branch — it never calls this at all, keeping `gate()`'s own loud
+ * refusal as its only outcome, per that function's own contract.
+ */
+export async function habitantGate(
+  gate: () => Promise<void>,
+  habitant: boolean,
+  app: Pick<YrdCliApp, "log">,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode | undefined> {
+  try {
+    await gate()
+    return undefined
+  } catch (error) {
+    if (habitant) {
+      const fact = failureFact(error)
+      if (fact?.code === "installed-plan-stale") {
+        const comparison =
+          error instanceof Error ? (error.cause as QueueEnvironmentAuditComparison | undefined) : undefined
+        return await habitantPlanRecycle(app, io, fact, comparison)
+      }
+    }
+    throw error
+  }
 }
 
 /** Resident bytes for this process, or undefined when the runtime cannot say.
@@ -11752,7 +11927,8 @@ export async function followQueueRuns(
       // Re-read the base tip's declared plan before EACH cycle: a config change
       // while watching reloads the habitant in place, never lets a fresh cycle
       // prepare candidates a stale step set would then refuse.
-      await gate()
+      const staleAtOpen = await habitantGate(gate, habitant, app, io)
+      if (staleAtOpen !== undefined) return staleAtOpen
       if (maintenanceDue) lastMaintenanceAt = cycleNow
       let runRequired = starting || refreshed || holdExpired
       // D1b — bounded maintenance lease-expiry recovery sweep. ONLY the habitant
@@ -11783,7 +11959,8 @@ export async function followQueueRuns(
       // Run under the pre-re-merge gate snapshot.
       if (await prepareHabitantQueueCycle(app, services, io, remedied, observation)) {
         runRequired = true
-        await gate()
+        const staleAfterPrepare = await habitantGate(gate, habitant, app, io)
+        if (staleAfterPrepare !== undefined) return staleAfterPrepare
       }
       if (!runRequired && !drainRequested()) {
         // Box 1 of @yrd/core/stale-runner-never-recycles, the half that was
