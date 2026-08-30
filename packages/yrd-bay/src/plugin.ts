@@ -2635,23 +2635,39 @@ function reviewFact(
   return { events: [event(kind === "review" ? "pr/reviewed" : "pr/commented", fact)] }
 }
 
-/** A withdrawn/canceled PR still holds its payload, so no OTHER branch may
- * carry that commit — but its OWN branch reopens it in place (D2), which is the
- * whole remedy. Naming it here is the difference between a one-line re-merge and
- * forging a tree-identical commit whose only purpose is to change a hash. A
- * live or merged duplicate has no such door, so it keeps the bare refusal
+/** Where the work goes when a withdrawn/canceled change's RECORD still holds
+ * this payload. Naming it is the difference between continuing the work and
+ * forging a tree-identical commit whose only purpose is to change a hash.
+ *
+ * Both halves of what this said until now were measured false at the pin:
+ *  - "its OWN branch reopens it in place (D2)" — the D2 reopen door retired
+ *    with the legacy mint (72c0282e), so the `yrd pr submit <branch>` it
+ *    prescribed refuses `pr-not-pushed` on exactly the change it is about;
+ *  - "no other branch can carry it" — post-S6 a change's identity is its
+ *    BRANCH (`refs/for/main/<issue>`, the derived lane), not its payload's
+ *    Change-Id, so the same content on a new branch is admitted as a NEW
+ *    change (measured: `pr submit` → derived lane, exit 0).
+ *
+ * So the remedy is the one the burn notice carries: nothing reopens this
+ * record in place, and the work continues in a new bay/branch.
+ *
+ * A live or merged duplicate has no such answer, so it keeps the bare refusal
  * rather than a remedy its state would refuse. */
 function duplicatePayloadRemedy(duplicate: DeepReadonly<Change>): string {
   const delivery = changeDeliveryState(duplicate)
   if (delivery !== "withdrawn" && delivery !== "canceled") return ""
   const at = delivery === "withdrawn" ? duplicate.withdrawnAt : duplicate.canceledAt
   return (
-    `; ${duplicate.id} is ${delivery}${at === undefined ? "" : ` (${at})`} and still holds this payload, ` +
-    "so no other branch can carry it — resubmitting its own branch reopens it in place, " +
-    `no rebuilt commit needed; run 'yrd pr submit ${duplicate.branch}'`
+    `; ${duplicate.id} is ${delivery}${at === undefined ? "" : ` (${at})`} and its record still holds this ` +
+    "payload — nothing reopens it in place. Continue the work in a new bay — 'yrd bay open --bay <name>' — " +
+    "where the same content is admitted as a new change by the derived lane"
   )
 }
 
+/** Record-lane seam door: it guards payload uniqueness across CHANGE RECORDS,
+ * which the derived lane does not mint — kept only until
+ * @yrd/core/22991-branch-is-change-delete-the-pr-record retires the record and
+ * the branch is the change outright, at which point this guard dies with it. */
 function refuseDuplicatePayload(
   state: DeepReadonly<BaysState>,
   headSha: string,
