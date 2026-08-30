@@ -9875,7 +9875,8 @@ function ChangeEligibility(
         // but a producer that lies is a second copy of the wrong answer.
         message:
           `change '${pr.id}' required check failed${run}; checks re-run on new content only — amend or rebase ` +
-          `the branch and push it again (git push origin HEAD:refs/for/${baseIdentity(pr.base)}/<issue>)`,
+          `the branch and push it again ` +
+          `(git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${baseIdentity(pr.base)}/<issue>)`,
       })
     }
     if (required && !reviewed.approved) {

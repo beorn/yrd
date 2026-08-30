@@ -9,6 +9,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+import type { FailureKind } from "@yrd/core"
 import {
   canonicalRefusalCode,
   COMPOSITION_FAILURE_BUCKETS,
@@ -83,7 +84,13 @@ function derivedEmittedCodes(): readonly string[] {
  * closed-vocabulary test above stayed green: `canonicalRefusalCode` resolved
  * them, just not to themselves.
  */
-function derivedRaisedCodes(): readonly Readonly<{ kind: string; code: string }>[] {
+const FAILURE_KINDS = ["usage", "configuration", "refusal", "infrastructure"] as const satisfies readonly FailureKind[]
+
+function isFailureKind(value: string): value is FailureKind {
+  return (FAILURE_KINDS as readonly string[]).includes(value)
+}
+
+function derivedRaisedCodes(): readonly Readonly<{ kind: FailureKind; code: string }>[] {
   const files: string[] = []
   for (const pkgDir of readdirSync(packagesRoot)) {
     const src = join(packagesRoot, pkgDir, "src")
@@ -93,12 +100,15 @@ function derivedRaisedCodes(): readonly Readonly<{ kind: string; code: string }>
       continue
     }
   }
-  const seen = new Map<string, { kind: string; code: string }>()
+  const seen = new Map<string, { kind: FailureKind; code: string }>()
   for (const file of files) {
     const source = readFileSync(file, "utf8")
     for (const match of source.matchAll(/raiseFailure\(\s*"([a-z]+)"\s*,\s*"([a-z][a-z0-9-]*)"/g)) {
       const [, kind, code] = match
-      if (kind === undefined || code === undefined) continue
+      // A first argument that is not a FailureKind means the regex matched
+      // something that is not a raiseFailure call — drop it rather than carry a
+      // fabricated kind into the assertions below.
+      if (kind === undefined || code === undefined || !isFailureKind(kind)) continue
       if (!seen.has(code)) seen.set(code, { kind, code })
     }
   }
