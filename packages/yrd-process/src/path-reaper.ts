@@ -29,6 +29,19 @@ export type PathHolderSourceCoverage = Readonly<{
   unavailable: PathHolderUnavailableCoverage
 }>
 
+/**
+ * A same-uid proc the census could not fully observe, identified as far as the
+ * world-readable side of `/proc` allows. `/proc/N/stat` stays readable even for
+ * dumpable-0 session procs (systemd --user, sd-pam, sshd-session), so identity
+ * costs no privilege. `denied` names exactly which observations failed.
+ */
+export type UnreadableProcess = Readonly<{
+  pid: number
+  comm?: string
+  ppid?: number
+  denied: readonly ("process" | "cwd" | "exe" | "root" | "maps" | "fd")[]
+}>
+
 export type LinuxPathHolderCoverage = Readonly<{
   platform: "linux"
   /** Linux filters numeric proc entries to the caller's UID before inspecting holder sources. */
@@ -43,6 +56,10 @@ export type LinuxPathHolderCoverage = Readonly<{
     unavailable: PathHolderUnavailableCoverage
   }>
   sources: Readonly<Record<"cwd" | "exe" | "root" | "maps" | "fd", PathHolderSourceCoverage>>
+  /** Every same-uid proc behind the denied counts, identified — the counts say
+   * HOW MANY observations were hidden, this says WHO hid them. Optional for
+   * censuses recorded before the field existed. */
+  unreadable?: readonly UnreadableProcess[]
 }>
 
 export type DarwinPathHolderCoverage = Readonly<{
@@ -143,14 +160,49 @@ export function pathReapFailure(result: PathReapResult): string | undefined {
  * Settlement failure plus the stronger coverage proof required before deleting
  * an owned path. Blindness is a deletion refusal, not a generic process-run failure.
  */
-export function pathReapDeletionFailure(result: PathReapResult): string | undefined {
+export function pathReapDeletionFailure(
+  result: PathReapResult,
+  tolerateUnreadablePids?: ReadonlySet<number>,
+): string | undefined {
   const parts = [pathReapFailure(result)]
-  if (result.survivorCoverage === undefined) {
+  const coverage = result.survivorCoverage
+  if (coverage === undefined) {
     parts.push("path-holder census coverage missing; deletion cannot be certified")
-  } else if (!result.survivorCoverage.complete) {
-    parts.push(
-      `path-holder census incomplete; deletion cannot be certified: ${JSON.stringify(result.survivorCoverage)}`,
-    )
+  } else if (!coverage.complete) {
+    const unreadable = coverage.platform === "linux" ? (coverage.unreadable ?? []) : []
+    // Tolerance certifies ONLY when every denied observation is attributable to
+    // a NAMED pid and every named pid was explicitly tolerated. A census whose
+    // counts exceed its named identities keeps refusing — an unnamed denial can
+    // never be waived, whatever the flag says.
+    const namedDenials = unreadable.reduce((sum, proc) => sum + proc.denied.length, 0)
+    const countedDenials =
+      coverage.platform === "linux"
+        ? coverage.processes.unavailable.denied +
+          Object.values(coverage.sources).reduce((sum, source) => sum + source.unavailable.denied, 0)
+        : 1
+    const fullyAttributed = unreadable.length > 0 && namedDenials === countedDenials
+    const tolerated =
+      tolerateUnreadablePids !== undefined &&
+      tolerateUnreadablePids.size > 0 &&
+      fullyAttributed &&
+      unreadable.every(({ pid }) => tolerateUnreadablePids.has(pid))
+    if (!tolerated) {
+      const identities =
+        unreadable.length === 0
+          ? "no denied pids were identified"
+          : `unreadable: ${unreadable
+              .slice(0, 10)
+              .map(
+                ({ pid, comm, ppid, denied }) =>
+                  `pid ${pid}${comm === undefined ? "" : ` (${comm}${ppid === undefined ? "" : `, ppid ${ppid}`})`} via ${denied.join(",")}`,
+              )
+              .join("; ")}${unreadable.length > 10 ? ` … ${unreadable.length - 10} more` : ""}`
+      parts.push(
+        `path-holder census incomplete; deletion cannot be certified: ${identities}; ` +
+          `cure: verify each pid is unrelated to the path, then re-run with --tolerate-unreadable <pid,…> naming exactly those pids; ` +
+          `coverage: ${JSON.stringify(coverage)}`,
+      )
+    }
   }
   const failures = parts.filter((part): part is string => part !== undefined)
   return failures.length === 0 ? undefined : failures.join("; ")
@@ -289,6 +341,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
     maps: emptySourceCoverage(),
     fd: emptySourceCoverage(),
   }
+  const unreadable: UnreadableProcess[] = []
   const matches = await Promise.all(
     numericEntries.map(async (entry): Promise<PathHolder[]> => {
       const pid = Number(entry.name)
@@ -296,6 +349,9 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       const metadata = await observeSource(() => stat(proc), undefined)
       if (metadata.availability !== "readable") {
         processCoverage.unavailable[metadata.availability] += 1
+        if (metadata.availability === "denied") {
+          unreadable.push({ pid, ...(await observeProcessIdentity(proc)), denied: ["process"] })
+        }
         return []
       }
       if (metadata.value?.uid !== uid) {
@@ -315,6 +371,20 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       recordSourceCoverage(sourceCoverage.root, processRoot.availability)
       recordSourceCoverage(sourceCoverage.maps, mappedFiles.availability)
       recordSourceCoverage(sourceCoverage.fd, descriptors.availability)
+      const deniedSources = (
+        [
+          ["cwd", cwd.availability],
+          ["exe", executable.availability],
+          ["root", processRoot.availability],
+          ["maps", mappedFiles.availability],
+          ["fd", descriptors.availability],
+        ] as const
+      )
+        .filter(([, availability]) => availability === "denied")
+        .map(([name]) => name)
+      if (deniedSources.length > 0) {
+        unreadable.push({ pid, ...(await observeProcessIdentity(proc)), denied: deniedSources })
+      }
       const holders: PathHolder[] = []
       if (cwd.value !== undefined && pathWithin(root, cwd.value)) {
         holders.push({ pid, source: "cwd", target: cwd.value })
@@ -348,6 +418,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       complete,
       processes: processCoverage,
       sources: sourceCoverage,
+      ...(unreadable.length === 0 ? {} : { unreadable: [...unreadable].sort((a, b) => a.pid - b.pid) }),
     },
   }
 }
@@ -474,6 +545,25 @@ async function observeProcessDescriptors(
     value: links.flatMap(({ name, observed }) =>
       observed.value === undefined ? [] : [{ name, target: observed.value }],
     ),
+  }
+}
+
+/** Identity from the world-readable `/proc/N/stat` (readable even for dumpable-0
+ * procs): `pid (comm) state ppid …`, comm parsed by the LAST `)` because comm
+ * may itself contain parentheses. Best-effort: identity failure never hides
+ * the denial it decorates. */
+async function observeProcessIdentity(proc: string): Promise<{ comm?: string; ppid?: number }> {
+  try {
+    const contents = await readFile(`${proc}/stat`, "utf8")
+    const open = contents.indexOf("(")
+    const close = contents.lastIndexOf(")")
+    if (open === -1 || close === -1 || close < open) return {}
+    const comm = contents.slice(open + 1, close)
+    const rest = contents.slice(close + 1).trim().split(/\s+/u)
+    const ppid = Number(rest[1])
+    return { comm, ...(Number.isSafeInteger(ppid) ? { ppid } : {}) }
+  } catch {
+    return {}
   }
 }
 

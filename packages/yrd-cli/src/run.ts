@@ -4236,6 +4236,7 @@ async function certifyBayProcessesStopped(
   processService: Pick<Process, "reapPath"> | undefined,
   bay: Bay,
   path: string | undefined,
+  tolerateUnreadable?: ReadonlySet<number>,
 ): Promise<void> {
   // Provision can fail before a workspace exists. There is then no path-owned
   // process tree to reap; explicit force-close must still be able to drive the
@@ -4243,7 +4244,7 @@ async function certifyBayProcessesStopped(
   if (path === undefined) return
   if (processService === undefined) configuration("bay close requires the process-backed Yrd runtime")
   const reaped = await processService.reapPath(path)
-  const failure = pathReapDeletionFailure(reaped)
+  const failure = pathReapDeletionFailure(reaped, tolerateUnreadable)
   if (failure !== undefined) {
     throw new Error(`yrd: Bay '${bay.name}' process-tree teardown failed: ${failure}`)
   }
@@ -4253,7 +4254,7 @@ async function closeBayWithProcessReap(
   app: YrdCliApp,
   services: YrdCliServices,
   bay: Bay,
-  options: Readonly<{ withdraw?: boolean; force?: boolean }>,
+  options: Readonly<{ withdraw?: boolean; force?: boolean; tolerateUnreadable?: ReadonlySet<number> }>,
   io: YrdCliIO,
   jobContext: string,
 ): Promise<Bay> {
@@ -4262,30 +4263,56 @@ async function closeBayWithProcessReap(
   // ownership root. This closes the attach-between-census-and-delete race.
   const path =
     services.resolveBayWorkspacePath === undefined ? bay.path : services.resolveBayWorkspacePath(bay.id, bay.path)
-  await certifyBayProcessesStopped(services.process, bay, path)
+  await certifyBayProcessesStopped(services.process, bay, path, options.tolerateUnreadable)
   const closing = await app.bays.close({
     bay: bay.id,
     ...(options.withdraw === true ? { withdraw: true } : {}),
     ...(options.force === true ? { force: true } : {}),
   })
-  await certifyBayProcessesStopped(services.process, bay, path)
+  await certifyBayProcessesStopped(services.process, bay, path, options.tolerateUnreadable)
   assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), jobContext)
   const closed = app.bays.get(bay.id)
   if (closed === undefined) throw new Error(`yrd: Bay '${bay.name}' disappeared while it was closing`)
   return closed
 }
 
+function parseToleratedUnreadablePids(value: string | undefined): ReadonlySet<number> | undefined {
+  if (value === undefined) return undefined
+  const pids = value.split(",").map((part) => part.trim()).filter((part) => part !== "")
+  if (pids.length === 0) usage("bay close --tolerate-unreadable requires at least one pid")
+  const parsed = new Set<number>()
+  for (const pid of pids) {
+    const numeric = Number(pid)
+    if (!/^\d+$/u.test(pid) || !Number.isSafeInteger(numeric) || numeric <= 1) {
+      usage(`bay close --tolerate-unreadable requires positive pids, found '${pid}'`)
+    }
+    parsed.add(numeric)
+  }
+  return parsed
+}
+
 async function closeBays(
   app: YrdCliApp,
   services: YrdCliServices,
   selectors: readonly string[],
-  options: { withdraw?: boolean; json?: boolean; force?: boolean; quiet?: boolean; requireAll?: boolean },
+  options: {
+    withdraw?: boolean
+    json?: boolean
+    force?: boolean
+    quiet?: boolean
+    requireAll?: boolean
+    tolerateUnreadable?: string
+  },
   io: YrdCliIO,
 ): Promise<readonly Bay[]> {
   const cwd = invocationCwd(io)
   // --force requires an explicit bay name/id (no empty selector = all open).
   if (options.force === true && selectors.length === 0) {
     usage("bay close --force requires an explicit bay selector (no glob/all)")
+  }
+  const tolerateUnreadable = parseToleratedUnreadablePids(options.tolerateUnreadable)
+  if (tolerateUnreadable !== undefined && selectors.length === 0) {
+    usage("bay close --tolerate-unreadable requires an explicit bay selector (no glob/all)")
   }
   const bays = selectedBays(stateOf(app).bays, selectors, cwd, "close")
   const closed: Bay[] = []
@@ -4315,10 +4342,18 @@ async function closeBays(
         app,
         services,
         bay,
-        { withdraw: options.withdraw, force: options.force },
+        { withdraw: options.withdraw, force: options.force, tolerateUnreadable },
         io,
         `bay '${bay.id}' close`,
       )
+      if (tolerateUnreadable !== undefined) {
+        // The waiver is part of the operation's record: say exactly which pids
+        // the operator vouched for while this bay's teardown was certified.
+        await printHuman(
+          io,
+          `bay close ${bay.id} ${bay.name}: census gaps tolerated for unreadable pid(s) ${[...tolerateUnreadable].sort((a, b) => a - b).join(", ")} (operator flag)`,
+        )
+      }
       if (withdrawing.length > 0) {
         await app.queue.cancel({
           prs: withdrawing.map((pr) => pr.id),
@@ -13166,6 +13201,10 @@ function buildProgram(
     .description("close work bays (checks bay status first; needs --force to override)")
     .option("--withdraw", "withdraw a live change before closing")
     .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
+    .option(
+      "--tolerate-unreadable <pids>",
+      "certify teardown despite census gaps caused by EXACTLY these unreadable pids (comma-separated; each waiver is printed)",
+    )
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
       await closeBays(installed(), installedServices(), selectors, options, io)

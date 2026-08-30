@@ -48,6 +48,7 @@ export {
   pathReapFailure,
   type DarwinPathHolderCoverage,
   type LinuxPathHolderCoverage,
+  type UnreadableProcess,
   type PathHolder,
   type PathHolderCensus,
   type PathHolderCensusReader,

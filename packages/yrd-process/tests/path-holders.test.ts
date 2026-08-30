@@ -172,6 +172,9 @@ describe("inspectPathHolders", () => {
           fd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
         },
       })
+      expect(census.coverage).toMatchObject({
+        unreadable: [{ pid: 4242, denied: ["maps"] }],
+      })
       const reap = {
         targetedPids: [],
         survivorPids: [],
@@ -181,7 +184,44 @@ describe("inspectPathHolders", () => {
         signalFailures: [],
       }
       expect(pathReapFailure(reap)).toBeUndefined()
-      expect(pathReapDeletionFailure(reap)).toMatch(/census incomplete.*same-uid.*denied/iu)
+      // The refusal names the pid — the discriminating fact, not only counts.
+      expect(pathReapDeletionFailure(reap)).toMatch(/census incomplete.*pid 4242 via maps/iu)
+      expect(pathReapDeletionFailure(reap)).toMatch(/--tolerate-unreadable/u)
+      // Waiving exactly the named pid certifies; waiving a different pid never does.
+      expect(pathReapDeletionFailure(reap, new Set([4242]))).toBeUndefined()
+      expect(pathReapDeletionFailure(reap, new Set([9999]))).toMatch(/pid 4242 via maps/iu)
+    },
+  )
+
+  test.runIf(process.platform === "linux")(
+    "denied counts without named pids can never be tolerated",
+    async () => {
+      // An injected census claims denials it cannot attribute to a pid — the
+      // tolerance flag must not certify what the census could not name.
+      const reap = {
+        targetedPids: [],
+        survivorPids: [],
+        survivorHolders: [],
+        survivorCoverage: {
+          platform: "linux",
+          scope: "same-uid",
+          procRoot: "injected-unnamed-denials",
+          complete: false,
+          processes: { enumerated: 2, sameUid: 2, otherUid: 0, unavailable: { exited: 0, denied: 1 } },
+          sources: {
+            cwd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+            exe: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+            root: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+            maps: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+            fd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+          },
+        },
+        forcedKill: false,
+        signalFailures: [],
+      } as const
+      expect(pathReapDeletionFailure(reap, new Set([4242, 9999]))).toMatch(
+        /no denied pids were identified/iu,
+      )
     },
   )
 
