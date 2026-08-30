@@ -512,43 +512,42 @@ export async function preflightRemerge(
   // the three cannot disagree about what absence means. Any unobservable phase
   // stops the verdict: this verb's next act is destruction, and there is no
   // reading of "I could not see the source" that justifies proceeding to one.
-  const observedHead = requireObservedBranchHead(
-    await observeLiveBranch(services?.process, cwd, pr.branch, git.resolveCommit),
-    {
-      observer: () => ({
-        code: "recut-preflight-branch-observer-missing",
-        message: `yrd: cannot observe live branch '${pr.branch}' before classifying change '${pr.id}'`,
-      }),
-      absent: () => ({
-        code: "recut-preflight-branch-absent",
-        message:
-          `yrd: change '${pr.id}' cannot be classified: its source branch '${pr.branch}' is gone from origin, ` +
-          `so no verdict about revision ${source.n} can be proved and no payload may be spent on one\n` +
-          retireFactCommand(pr.branch),
-      }),
-      fetch: () => ({
-        code: "recut-preflight-branch-refresh-failed",
-        message:
-          `yrd: could not refresh live branch '${pr.branch}' from origin while classifying change '${pr.id}'\n` +
-          `retry: yrd pr remerge ${pr.id} --preflight`,
-      }),
-      resolve: () => ({
-        code: "recut-preflight-branch-absent",
-        message:
-          `yrd: change '${pr.id}' names source branch '${pr.branch}', which resolves to no commit here — ` +
-          `neither 'origin/${pr.branch}' nor '${pr.branch}'. Revision ${source.n}'s recorded head ` +
-          `${short(source.head)} may still be a readable object, and that proves nothing about the branch: ` +
-          `no verdict is computed and no payload is spent on a source that is not there\n` +
-          `inspect: git rev-parse --verify origin/${pr.branch}^{commit}`,
-      }),
-    },
-  )
-  // The SUBJECT is unchanged: a SUBSUMED-WITHDRAW spends revision `source.n`'s
-  // payload identity, which lives at `source.head`, so the proof must still be
-  // about that commit and the observation above is a precondition, never a
-  // substitute for it. Swapping in the live head here is exactly the confusion
-  // that made PR2599's proof answer a question about the revision's own base.
-  void observedHead
+  // Called for the REFUSAL, not for the head it returns — see below.
+  requireObservedBranchHead(await observeLiveBranch(services?.process, cwd, pr.branch, git.resolveCommit), {
+    observer: () => ({
+      code: "recut-preflight-branch-observer-missing",
+      message: `yrd: cannot observe live branch '${pr.branch}' before classifying change '${pr.id}'`,
+    }),
+    absent: () => ({
+      code: "recut-preflight-branch-absent",
+      message:
+        `yrd: change '${pr.id}' cannot be classified: its source branch '${pr.branch}' is gone from origin, ` +
+        `so no verdict about revision ${source.n} can be proved and no payload may be spent on one\n` +
+        retireFactCommand(pr.branch),
+    }),
+    fetch: () => ({
+      code: "recut-preflight-branch-refresh-failed",
+      message:
+        `yrd: could not refresh live branch '${pr.branch}' from origin while classifying change '${pr.id}'\n` +
+        `retry: yrd pr remerge ${pr.id} --preflight`,
+    }),
+    resolve: () => ({
+      code: "recut-preflight-branch-absent",
+      message:
+        `yrd: change '${pr.id}' names source branch '${pr.branch}', which resolves to no commit here — ` +
+        `neither 'origin/${pr.branch}' nor '${pr.branch}'. Revision ${source.n}'s recorded head ` +
+        `${short(source.head)} may still be a readable object, and that proves nothing about the branch: ` +
+        `no verdict is computed and no payload is spent on a source that is not there\n` +
+        `inspect: git rev-parse --verify origin/${pr.branch}^{commit}`,
+    }),
+  })
+  // The observed head is deliberately DISCARDED. The subject of this
+  // classification is unchanged: a SUBSUMED-WITHDRAW spends revision
+  // `source.n`'s payload identity, which lives at `source.head`, so the proof
+  // must still be about that commit — the observation above is a precondition,
+  // never a substitute for it. Swapping the live head in here is exactly the
+  // confusion that made PR2599's "proof" answer a question about the
+  // revision's own base while reading as three passing checks.
   const candidateHeadSha = options.proposedHeadSha ?? source.head
   const checks = await contentChecks(candidateHeadSha, targetBaseSha, git)
   if (!checks.headPresent) {
