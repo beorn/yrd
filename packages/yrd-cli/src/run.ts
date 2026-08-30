@@ -227,6 +227,7 @@ import {
   type BayStatusClass,
   type BayStatusFacts,
   type BayStatusReport,
+  type BayStatusSubmoduleFacts,
 } from "./bay-status.ts"
 import { diagnostic, printHuman, printResult, printResultWithWarnings } from "./output.tsx"
 import {
@@ -4411,6 +4412,152 @@ function requiredPersistedBayHead(head: string | undefined): string {
   return head
 }
 
+/**
+ * Ancestor-or-patch-id-equivalent tip durability against a resolved
+ * `origin/main`. Shared by the root worktree and every submodule
+ * (bay-status.ts `commitDurabilityVerdict` ranks whatever this returns): a bay
+ * whose root tip sat safely on origin but whose submodule held an unpublished
+ * commit used to classify SAFE, because only the root was ever asked this
+ * question (B399, 2026-08-30). Extracted verbatim from the single root
+ * computation this used to be — same three-way fallback (ancestor, then
+ * patch-id via `cherry`, then any advertised ref that contains the tip), same
+ * failure shape (an unreadable `origin/main` or a failed rev-list/cherry both
+ * read UNKNOWN, never PASS).
+ *
+ * `originMain` is read from `originRoot`, which the root's own caller keeps
+ * distinct from `gitRoot`: a Bay's `path` is normally a linked worktree of
+ * `repoRoot` sharing its remote-tracking refs, but preferring the
+ * superproject's own view is what the freshly-refreshed-and-pruned
+ * `remoteTrackingFresh` flag actually describes (`refreshBayStatusOrigin`
+ * fetches `repoRoot`, not `path`). A submodule has no such split — its own
+ * directory is both.
+ */
+function measureCommitDurability(
+  gitRoot: string,
+  originRoot: string,
+  head: string,
+  remoteTrackingFresh: boolean,
+): Pick<BayStatusFacts, "tipMerged" | "tipDurableAt" | "tipMergedUnknown" | "aheadOfOrigin" | "uniquePatches"> {
+  let tipMerged: boolean | undefined
+  let tipDurableAt: string | undefined
+  let tipMergedUnknown: boolean | undefined
+  let aheadOfOrigin: number | undefined
+  let uniquePatches: number | undefined
+  try {
+    const originMain = gitSync(originRoot, ["rev-parse", "origin/main"]).trim()
+    try {
+      gitSync(gitRoot, ["merge-base", "--is-ancestor", head, originMain])
+      tipMerged = true
+      tipDurableAt = "origin/main"
+      aheadOfOrigin = 0
+      uniquePatches = 0
+    } catch {
+      tipMerged = false
+      try {
+        const counts = gitSync(gitRoot, ["rev-list", "--left-right", "--count", `${originMain}...${head}`])
+          .trim()
+          .split(/\s+/u)
+          .map(Number)
+        const ahead = counts[1]
+        if (Number.isSafeInteger(ahead)) aheadOfOrigin = ahead
+      } catch {
+        tipMergedUnknown = true
+      }
+      try {
+        uniquePatches = gitSync(gitRoot, ["cherry", originMain, head])
+          .split("\n")
+          .filter((line) => line.startsWith("+ ")).length
+        if (uniquePatches === 0) {
+          tipMerged = true
+          tipDurableAt = "origin/main (same changes)"
+          tipMergedUnknown = undefined
+        } else if (remoteTrackingFresh) {
+          const remoteRef = gitSync(gitRoot, [
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "--contains",
+            head,
+            "refs/remotes/origin/",
+          ])
+            .split("\n")
+            .map((ref) => ref.trim())
+            .find((ref) => ref !== "" && ref !== "origin")
+          if (remoteRef !== undefined) {
+            tipDurableAt = remoteRef
+            tipMergedUnknown = undefined
+          }
+        } else {
+          tipMergedUnknown = true
+        }
+      } catch {
+        tipMergedUnknown = true
+      }
+    }
+  } catch {
+    tipMergedUnknown = true
+  }
+  return { tipMerged, tipDurableAt, tipMergedUnknown, aheadOfOrigin, uniquePatches }
+}
+
+/** One row of `git submodule status --recursive`: a leading ` `/`+`/`-`/`U`
+ * marker, the checked-out sha, and the displaypath — nested-safe (e.g.
+ * `km/apps/maddoc` reports as one row, not one row per level). Only `-`
+ * (not initialized) means there is no working tree at `path` to inspect. */
+const SUBMODULE_STATUS_LINE = /^([ +\-U])([0-9a-f]{40,64}) (\S+)(?: .*)?$/u
+
+async function listBaySubmodules(
+  path: string,
+): Promise<readonly Readonly<{ path: string; sha: string; initialized: boolean }>[]> {
+  const output = await gitAsync(path, ["submodule", "status", "--recursive"])
+  return output
+    .split(/\r?\n/u)
+    .filter((line) => line !== "")
+    .map((line) => {
+      const match = SUBMODULE_STATUS_LINE.exec(line)
+      if (match?.[2] === undefined || match[3] === undefined) {
+        throw new Error(`yrd: could not parse 'git submodule status --recursive' row '${line}'`)
+      }
+      return { path: match[3], sha: match[2], initialized: match[1] !== "-" }
+    })
+}
+
+/** Refresh one submodule's OWN origin — never the superproject's — so its
+ * commit-durability check runs against a fresh, pruned view of that
+ * component's remote, exactly like the root worktree's own refresh. */
+async function refreshSubmoduleOrigin(submodulePath: string): Promise<boolean> {
+  try {
+    await gitAsync(submodulePath, ["fetch", "--prune", "--quiet", "origin"])
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Every submodule under `path`'s worktree, at every depth — mirrors what bay
+ * provisioning actually materializes (`materializeSubmodules`, git-super's
+ * worktree store), so this walk sees exactly the tree `bay open`/`bay run`
+ * already checked out. An uninitialized submodule (`-` status) holds no local
+ * commits this Bay could lose, so it is skipped rather than measured — that is
+ * the SAME "nothing local to lose" PASS the root worktree already gets when
+ * its own path is missing, not a gap in coverage. Each initialized submodule
+ * is fetched and classified through the SAME ladder as the root worktree
+ * (`measureCommitDurability` above; B399, 2026-08-30).
+ */
+async function gatherBaySubmoduleFacts(path: string): Promise<readonly BayStatusSubmoduleFacts[]> {
+  const submodules = await listBaySubmodules(path)
+  return Promise.all(
+    submodules
+      .filter((submodule) => submodule.initialized)
+      .map(async (submodule): Promise<BayStatusSubmoduleFacts> => {
+        const submodulePath = `${path}/${submodule.path}`
+        const remoteTrackingFresh = await refreshSubmoduleOrigin(submodulePath)
+        const durability = measureCommitDurability(submodulePath, submodulePath, submodule.sha, remoteTrackingFresh)
+        return { path: submodule.path, sha: submodule.sha, remoteTrackingFresh, ...durability }
+      }),
+  )
+}
+
 /** Gather live facts for one bay; classification stays pure in bay-status.ts (22290). */
 async function gatherBayStatusFacts(
   app: YrdCliApp,
@@ -4450,6 +4597,8 @@ async function gatherBayStatusFacts(
   const branchMissingFromOrigin = originBranchMissing(repoRoot, bay.branch, remoteTrackingFresh)
   let stashAttributed = 0
   let stashUnknown: boolean | undefined
+  let submodules: readonly BayStatusSubmoduleFacts[] | undefined
+  let submodulesUnknown: boolean | undefined
 
   if (path === undefined) {
     worktreeMissing = undefined
@@ -4471,65 +4620,25 @@ async function gatherBayStatusFacts(
 
     const persistedHead = bay.headSha
     if (worktreeMissing !== true || persistedHead !== undefined) {
+      const gitRoot = worktreeMissing === true ? repoRoot : path
+      let head: string | undefined
       try {
-        const gitRoot = worktreeMissing === true ? repoRoot : path
-        const head =
+        head =
           worktreeMissing === true
             ? requiredPersistedBayHead(persistedHead)
             : gitSync(path, ["rev-parse", "HEAD"]).trim()
         tipProofSource = worktreeMissing === true ? "persisted Bay head" : "live worktree HEAD"
-        // Prefer superproject origin/main when bay is a linked worktree of the repo.
-        const originMain = gitSync(repoRoot, ["rev-parse", "origin/main"]).trim()
-        try {
-          gitSync(gitRoot, ["merge-base", "--is-ancestor", head, originMain])
-          tipMerged = true
-          tipDurableAt = "origin/main"
-          aheadOfOrigin = 0
-          uniquePatches = 0
-        } catch {
-          tipMerged = false
-          try {
-            const counts = gitSync(gitRoot, ["rev-list", "--left-right", "--count", `${originMain}...${head}`])
-              .trim()
-              .split(/\s+/u)
-              .map(Number)
-            const ahead = counts[1]
-            if (Number.isSafeInteger(ahead)) aheadOfOrigin = ahead
-          } catch {
-            tipMergedUnknown = true
-          }
-          try {
-            uniquePatches = gitSync(gitRoot, ["cherry", originMain, head])
-              .split("\n")
-              .filter((line) => line.startsWith("+ ")).length
-            if (uniquePatches === 0) {
-              tipMerged = true
-              tipDurableAt = "origin/main (same changes)"
-              tipMergedUnknown = undefined
-            } else if (remoteTrackingFresh) {
-              const remoteRef = gitSync(gitRoot, [
-                "for-each-ref",
-                "--format=%(refname:short)",
-                "--contains",
-                head,
-                "refs/remotes/origin/",
-              ])
-                .split("\n")
-                .map((ref) => ref.trim())
-                .find((ref) => ref !== "" && ref !== "origin")
-              if (remoteRef !== undefined) {
-                tipDurableAt = remoteRef
-                tipMergedUnknown = undefined
-              }
-            } else {
-              tipMergedUnknown = true
-            }
-          } catch {
-            tipMergedUnknown = true
-          }
-        }
       } catch {
         tipMergedUnknown = true
+      }
+      if (head !== undefined) {
+        // Prefer superproject origin/main when bay is a linked worktree of the repo.
+        const durability = measureCommitDurability(gitRoot, repoRoot, head, remoteTrackingFresh)
+        tipMerged = durability.tipMerged
+        tipDurableAt = durability.tipDurableAt
+        tipMergedUnknown = durability.tipMergedUnknown
+        aheadOfOrigin = durability.aheadOfOrigin
+        uniquePatches = durability.uniquePatches
       }
     }
 
@@ -4543,6 +4652,12 @@ async function gatherBayStatusFacts(
           .filter((line) => line.trim() !== "" && tokens.some((token) => line.includes(token))).length
       } catch {
         stashUnknown = true
+      }
+
+      try {
+        submodules = await gatherBaySubmoduleFacts(path)
+      } catch {
+        submodulesUnknown = true
       }
     }
   }
@@ -4597,6 +4712,8 @@ async function gatherBayStatusFacts(
     ...(branchMissingFromOrigin === undefined ? {} : { branchMissingFromOrigin }),
     stashAttributed,
     ...(stashUnknown === undefined ? {} : { stashUnknown }),
+    ...(submodules === undefined ? {} : { submodules }),
+    ...(submodulesUnknown === undefined ? {} : { submodulesUnknown }),
     openChangeIds,
     derivedLaneSubmitLive,
   }
@@ -6577,6 +6694,18 @@ async function projectedLifecycles(
   )
 }
 
+/** The bay's worktree HEAD, read now — not the persisted `bay.headSha` record,
+ * which is only as fresh as the last write that touched it. `undefined` when
+ * there is no live worktree to read (no path, or the path is gone). */
+function liveBayHeadSha(path: string | undefined): string | undefined {
+  if (path === undefined) return undefined
+  try {
+    return gitSync(path, ["rev-parse", "HEAD"]).trim()
+  } catch {
+    return undefined
+  }
+}
+
 async function listBays(
   app: YrdCliApp,
   options: JsonOption & Readonly<{ all?: boolean; check?: boolean; closed?: boolean; landing?: boolean }>,
@@ -6601,18 +6730,6 @@ async function listBays(
         ? allBays.filter(isTerminal)
         : allBays.filter((bay) => !isTerminal(bay))
   const visibleBayIds = new Set(bays.map((bay) => bay.id))
-  const prs = app.bays.prs()
-  const jsonBays = bays.map((bay) => {
-    const pr =
-      prs.findLast((candidate) => candidate.bay === bay.id) ??
-      prs.findLast((candidate) => candidate.branch === bay.branch)
-    return {
-      ...bay,
-      nativeStatus: bay.status,
-      status: statuses.get(bay.id),
-      ...(pr === undefined ? {} : { pr: { id: pr.id, status: changeDeliveryState(pr) } }),
-    }
-  })
   const open = bays.filter((bay) => !isTerminal(bay))
   const cwd = io.cwd ?? process.cwd()
   let reports: BayStatusReport[] | undefined
@@ -6627,6 +6744,35 @@ async function listBays(
       ),
     )
   }
+  // Keyed by bay id so each row's `safety` is copied from ITS OWN report —
+  // the JSON payload used to carry `bays[]` and `reports[]` as two separate
+  // arrays with no join key on the row itself, so a reader had to re-derive
+  // the pairing `bay list --check --json` already knew and could get it wrong.
+  const reportsByBay = reports === undefined ? undefined : new Map(reports.map((report) => [report.bay, report]))
+  const prs = app.bays.prs()
+  const jsonBays = bays.map((bay) => {
+    const pr =
+      prs.findLast((candidate) => candidate.bay === bay.id) ??
+      prs.findLast((candidate) => candidate.branch === bay.branch)
+    const report = reportsByBay?.get(bay.id)
+    const liveHeadSha = options.check === true ? liveBayHeadSha(bay.path) : undefined
+    return {
+      ...bay,
+      nativeStatus: bay.status,
+      status: statuses.get(bay.id),
+      ...(pr === undefined ? {} : { pr: { id: pr.id, status: changeDeliveryState(pr) } }),
+      ...(report === undefined
+        ? {}
+        : {
+            safety: {
+              exit: report.exit,
+              safe: report.safe,
+              evidence: report.lines.map((line) => line.evidence),
+            },
+          }),
+      ...(liveHeadSha === undefined ? {} : { liveHeadSha, stale: liveHeadSha !== bay.headSha }),
+    }
+  })
   const safety =
     reports === undefined
       ? undefined

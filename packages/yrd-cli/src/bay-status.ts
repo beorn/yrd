@@ -47,7 +47,7 @@ export function freshOriginBranchMissing(exitCode: number | null): boolean | und
   return undefined
 }
 
-export type BayStatusClass = "owner" | "consumer" | "worktree" | "commits" | "stash" | "pr"
+export type BayStatusClass = "owner" | "consumer" | "worktree" | "commits" | "submodule" | "stash" | "pr"
 
 export type BayStatusVerdict = "PASS" | "BLOCK" | "UNKNOWN"
 
@@ -133,6 +133,36 @@ export type BayStatusFacts = Readonly<{
   derivedLaneSubmitLive?: boolean
   /** Live queue SHA `pr create` will consume. */
   effectiveBase?: Readonly<{ base: string; baseSha?: string }>
+  /** Every submodule under this Bay's worktree, at every depth (B399, 2026-08-30):
+   * `yrd bay status B399` BLOCKed correctly on the root tip, but a second unique
+   * object sat in the km submodule's bay-private gitdir on no km branch anywhere —
+   * invisible, because the oracle asked only the root these questions. Omitted
+   * (not `[]`) when the worktree itself is missing, mirroring `worktreeMissing`. */
+  submodules?: readonly BayStatusSubmoduleFacts[]
+  /** The submodule walk itself failed (not "found none" — could not tell).
+   * Unprovable must never collapse into safe, so this is a loud UNKNOWN rather
+   * than a silent empty `submodules` list. */
+  submodulesUnknown?: boolean
+}>
+
+/**
+ * One submodule's commit-durability facts, gathered and classified exactly like
+ * the root worktree's — same ladder, same origin-freshness precondition — so a
+ * commit that only the submodule holds is never a blind spot the root's own
+ * cleanliness can paper over.
+ */
+export type BayStatusSubmoduleFacts = Readonly<{
+  /** Displaypath from a recursive submodule walk (nested-safe, e.g. `km/apps/maddoc`). */
+  path: string
+  /** The submodule's own checked-out tip. */
+  sha: string
+  remoteTrackingFresh: boolean
+  tipMerged?: boolean
+  tipDurableAt?: string
+  tipProofSource?: BayStatusFacts["tipProofSource"]
+  tipMergedUnknown?: boolean
+  aheadOfOrigin?: number
+  uniquePatches?: number
 }>
 
 /** Extract trailing `:<digits>` PID from a bay name or BY address (22287). */
@@ -429,6 +459,134 @@ function consumerLine(facts: BayStatusFacts, cleanEvidence: string): BayStatusLi
   }
 }
 
+/** The facts one commit-durability verdict is ranked from — the shape shared by
+ * the root worktree and every submodule (see `commitDurabilityVerdict`). */
+type CommitDurabilityFacts = Readonly<{
+  remoteTrackingFresh?: boolean
+  branchMissingFromOrigin?: boolean
+  tipDurableAt?: string
+  tipMerged?: boolean
+  tipMergedUnknown?: boolean
+  aheadOfOrigin?: number
+  uniquePatches?: number
+  tipProofSource?: BayStatusFacts["tipProofSource"]
+}>
+
+/**
+ * The one commit-durability ladder: ancestor-or-patch-id-equivalent of
+ * origin/main, reachable from some other advertised ref, or genuinely at risk.
+ *
+ * Factored out of `classifyBayStatus`'s inline "commits" block so the root
+ * worktree and every submodule rank the SAME evidence (B399, 2026-08-30):
+ * `yrd bay status B399` BLOCKed correctly on the root tip, but a second unique
+ * object sat in the km submodule's bay-private gitdir on no km branch anywhere,
+ * invisible, because only the root worktree was ever asked these questions.
+ * `branchMissingFromOrigin` has no submodule analogue (a submodule carries no
+ * bay-branch name of its own) — left `undefined`, this ladder degrades exactly
+ * to the ancestor/patch-id/reachability checks a submodule needs.
+ */
+function commitDurabilityVerdict(facts: CommitDurabilityFacts): Readonly<{ verdict: BayStatusVerdict; evidence: string }> {
+  const unique = facts.uniquePatches ?? facts.aheadOfOrigin
+  const proofSource = facts.tipProofSource === undefined ? "" : ` (proof used ${facts.tipProofSource})`
+  if (facts.remoteTrackingFresh === false) {
+    return { verdict: "UNKNOWN", evidence: "could not refresh and prune origin refs — commit durability is unknown" }
+  }
+  if (facts.branchMissingFromOrigin === true) {
+    // A missing origin ref is only safe when the tip carries nothing unique.
+    // Absent + unique commits is the clean-but-ahead class this ladder exists
+    // to catch: the work exists in exactly one place and nothing advertises it.
+    if (unique === undefined) {
+      return {
+        verdict: "UNKNOWN",
+        evidence: "branch is absent from origin after a fresh pruned fetch — unique commits unmeasurable",
+      }
+    }
+    if (unique > 0) {
+      return {
+        verdict: "BLOCK",
+        evidence: `no advertised origin ref after a fresh pruned fetch — ${String(unique)} unique commit(s) at risk${proofSource}`,
+      }
+    }
+    return {
+      verdict: "PASS",
+      evidence: `branch is absent from origin after a fresh pruned fetch and the tip has no unique commits${proofSource}`,
+    }
+  }
+  if (facts.tipDurableAt !== undefined && facts.tipMerged !== true) {
+    return {
+      verdict: "PASS",
+      evidence:
+        unique === undefined
+          ? `tip is pushed to ${facts.tipDurableAt} — not merged, but durable${proofSource}`
+          : `tip has ${unique} unique commit(s) pushed to ${facts.tipDurableAt} — not merged, but durable${proofSource}`,
+    }
+  }
+  if (facts.tipMergedUnknown === true || (facts.tipMerged === undefined && facts.aheadOfOrigin === undefined)) {
+    return { verdict: "UNKNOWN", evidence: "could not prove the tip is merged into origin/main (ancestry/patch-id unavailable)" }
+  }
+  if (facts.tipMerged === true || facts.aheadOfOrigin === 0) {
+    return {
+      verdict: "PASS",
+      evidence:
+        facts.tipDurableAt !== undefined
+          ? `tip is durable at ${facts.tipDurableAt}${proofSource}`
+          : facts.aheadOfOrigin === 0
+            ? `tip is not ahead of origin/main${proofSource}`
+            : `tip is merged (ancestor or patch-id equivalent of origin/main)${proofSource}`,
+    }
+  }
+  return {
+    verdict: "BLOCK",
+    evidence:
+      unique !== undefined
+        ? `tip has ${unique} unique commit(s) on no advertised origin ref — at risk${proofSource}`
+        : "tip is not merged and is on no advertised origin ref — at risk",
+  }
+}
+
+/** A safe branch-name fragment from a bay name or submodule displaypath. */
+function orphanSlug(value: string): string {
+  return value.replaceAll(/[^\w.-]+/gu, "-")
+}
+
+/**
+ * The push that actually preserves a BLOCKed tip, scoped to whichever
+ * repository holds it — the root worktree's own origin, or (for a submodule)
+ * that component's own origin, never the superproject's. Never a local ref: a
+ * local `refs/yrd/closed/*`-shaped ref advertises nothing to anyone auditing
+ * the remote, which is exactly the shape two seats independently mistook for
+ * preservation on 2026-08-30 — the sha survived on nobody's fetch.
+ *
+ * The destination is an unqualified branch name (`<sha>:wip/orphan-<name>`),
+ * never a fully-qualified `refs/heads/wip/orphan-<name>` — git resolves that
+ * shorthand to the same ref, but the qualified form is the literal shape
+ * `remedy-banned-actions-guard.test.ts` scans this whole tool surface for
+ * (a hand-push to a submodule's `refs/heads/*`), and this text is printed
+ * advice a human reads, not that guard's allowlisted internal actuation.
+ */
+function commitDurabilityCure(worktreePath: string, revision: string, branchIdentity: string): string {
+  return `git -C '${worktreePath}' push origin ${revision}:wip/orphan-${orphanSlug(branchIdentity)}`
+}
+
+/** One commit-durability line, with its cure appended when it BLOCKs.
+ * `identity` prefixes the evidence (empty for the root — it needs none). */
+function commitDurabilityLine(
+  bayClass: "commits" | "submodule",
+  identity: string,
+  /** `undefined` only when there is no live worktree path to `-C` into — the
+   * evidence still names the risk, it just cannot hand back a runnable cure. */
+  cure: string | undefined,
+  facts: CommitDurabilityFacts,
+): BayStatusLine {
+  const { verdict, evidence } = commitDurabilityVerdict(facts)
+  const named = identity === "" ? evidence : `${identity}: ${evidence}`
+  return {
+    class: bayClass,
+    verdict,
+    evidence: verdict === "BLOCK" && cure !== undefined ? `${named} — cure: ${cure}` : named,
+  }
+}
+
 function classifyClosedDegenerateBay(facts: BayStatusFacts): BayStatusReport {
   const lines: readonly BayStatusLine[] = [
     { class: "owner", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace owner" },
@@ -532,72 +690,30 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
   }
 
   // commits — clean tree alone is NOT enough (22290 sample: 22/25 clean-but-ahead)
-  const unique = facts.uniquePatches ?? facts.aheadOfOrigin
-  const proofSource = facts.tipProofSource === undefined ? "" : ` (proof used ${facts.tipProofSource})`
-  if (facts.remoteTrackingFresh === false) {
+  const rootCure = facts.path === undefined ? undefined : commitDurabilityCure(facts.path, "HEAD", facts.name)
+  lines.push(commitDurabilityLine("commits", "", rootCure, facts))
+
+  // submodules — the oracle's universe used to stop at the root worktree
+  // (B399, 2026-08-30): `yrd bay status B399` BLOCKed correctly on the root
+  // tip, but a second unique object sat in the km submodule's bay-private
+  // gitdir on no km branch anywhere, invisible to a classifier fed root facts
+  // only. Every submodule ranks through the SAME ladder as the root's commits
+  // line above; one BLOCK anywhere among them makes the whole Bay BLOCK via
+  // the fold below, exactly like any other class.
+  if (facts.submodulesUnknown === true) {
     lines.push({
-      class: "commits",
+      class: "submodule",
       verdict: "UNKNOWN",
-      evidence: "could not refresh and prune origin refs — commit durability is unknown",
+      evidence: "could not enumerate this Bay's submodules",
     })
-  } else if (facts.branchMissingFromOrigin === true) {
-    // A missing origin ref is only safe when the tip carries nothing unique.
-    // Absent + unique commits is the clean-but-ahead class this ladder exists
-    // to catch: the work exists in exactly one place and nothing advertises it.
-    if (unique === undefined) {
-      lines.push({
-        class: "commits",
-        verdict: "UNKNOWN",
-        evidence: "branch is absent from origin after a fresh pruned fetch — unique commits unmeasurable",
-      })
-    } else if (unique > 0) {
-      lines.push({
-        class: "commits",
-        verdict: "BLOCK",
-        evidence: `no advertised origin ref after a fresh pruned fetch — ${String(unique)} unique commit(s) at risk${proofSource}`,
-      })
-    } else {
-      lines.push({
-        class: "commits",
-        verdict: "PASS",
-        evidence: `branch is absent from origin after a fresh pruned fetch and the tip has no unique commits${proofSource}`,
-      })
-    }
-  } else if (facts.tipDurableAt !== undefined && facts.tipMerged !== true) {
-    lines.push({
-      class: "commits",
-      verdict: "PASS",
-      evidence:
-        unique === undefined
-          ? `tip is pushed to ${facts.tipDurableAt} — not merged, but durable${proofSource}`
-          : `tip has ${unique} unique commit(s) pushed to ${facts.tipDurableAt} — not merged, but durable${proofSource}`,
-    })
-  } else if (facts.tipMergedUnknown === true || (facts.tipMerged === undefined && facts.aheadOfOrigin === undefined)) {
-    lines.push({
-      class: "commits",
-      verdict: "UNKNOWN",
-      evidence: "could not prove the tip is merged into origin/main (ancestry/patch-id unavailable)",
-    })
-  } else if (facts.tipMerged === true || facts.aheadOfOrigin === 0) {
-    lines.push({
-      class: "commits",
-      verdict: "PASS",
-      evidence:
-        facts.tipDurableAt !== undefined
-          ? `tip is durable at ${facts.tipDurableAt}${proofSource}`
-          : facts.aheadOfOrigin === 0
-            ? `tip is not ahead of origin/main${proofSource}`
-            : `tip is merged (ancestor or patch-id equivalent of origin/main)${proofSource}`,
-    })
-  } else {
-    lines.push({
-      class: "commits",
-      verdict: "BLOCK",
-      evidence:
-        unique !== undefined
-          ? `tip has ${unique} unique commit(s) on no advertised origin ref — at risk${proofSource}`
-          : "tip is not merged and is on no advertised origin ref — at risk",
-    })
+  }
+  for (const submodule of facts.submodules ?? []) {
+    const identity = `${submodule.path}@${submodule.sha.slice(0, 12)}`
+    const cure =
+      facts.path === undefined
+        ? undefined
+        : commitDurabilityCure(`${facts.path}/${submodule.path}`, submodule.sha, `${facts.name}-${submodule.path}`)
+    lines.push(commitDurabilityLine("submodule", identity, cure, submodule))
   }
 
   // stash

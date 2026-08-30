@@ -429,6 +429,80 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     expect(humanList.stdout()).toContain("blocked")
   })
 
+  /**
+   * @failure `yrd bay status B399` BLOCKed correctly on the root tip, but a
+   *          second unique object sat in the km submodule's bay-private
+   *          gitdir on no km branch anywhere — invisible, because
+   *          `gatherBayStatusFacts` gathered root facts only. The classifier
+   *          now walks every submodule through the same commit-durability
+   *          ladder, so a clean root can no longer hide a dirty submodule.
+   */
+  it("BLOCKs on an unpublished submodule commit even when the root worktree stays clean (B399)", async () => {
+    const { repo, submodulePath } = await repositoryWithSubmodule()
+    const kept = output(repo)
+    expect(
+      await yrd(repo, kept.io, "bay", "run", "--keep", "--bay", "submodule-drift", "--", "sh", "-c", "true"),
+      kept.stderr(),
+    ).toBe(0)
+
+    const bayPath = await activeBayPath(repo, "submodule-drift")
+
+    // The root worktree stays exactly clean — the defect this proves fixed
+    // is a clean root no longer hiding a dirty submodule.
+    expect(await git(bayPath, "status", "--porcelain")).toBe("")
+
+    // An ordinary commit inside the submodule, never pushed anywhere.
+    const submoduleDir = join(bayPath, submodulePath)
+    await writeFile(join(submoduleDir, "drift.txt"), "unpublished\n")
+    await git(submoduleDir, "add", "drift.txt")
+    await git(submoduleDir, "commit", "-qm", "submodule: unpublished work")
+    const submoduleSha = await git(submoduleDir, "rev-parse", "HEAD")
+
+    const status = output(repo)
+    expect(
+      await yrd(repo, status.io, "bay", "status", "submodule-drift", "--json"),
+      `${status.stdout()}${status.stderr()}`,
+    ).toBe(1)
+    const payload = JSON.parse(status.stdout()) as {
+      reports: readonly {
+        exit: number
+        lines: readonly { class: string; verdict: string; evidence: string }[]
+      }[]
+    }
+    expect(payload.reports[0]?.exit).toBe(1)
+    // The ROOT's own "commits" line stays clean — the block is coming from
+    // the submodule the oracle used to be blind to, not the root worktree.
+    expect(payload.reports[0]?.lines.find((line) => line.class === "commits")).toMatchObject({ verdict: "PASS" })
+    const submoduleLine = payload.reports[0]?.lines.find((line) => line.class === "submodule")
+    expect(submoduleLine?.verdict).toBe("BLOCK")
+    expect(submoduleLine?.evidence).toContain(`${submodulePath}@${submoduleSha.slice(0, 12)}`)
+    expect(submoduleLine?.evidence).toContain("cure:")
+
+    // `bay close` is the actual data-loss guard, not just the diagnostic.
+    const closeAttempt = output(repo)
+    expect(
+      await yrd(repo, closeAttempt.io, "bay", "close", "submodule-drift"),
+      "bay close must refuse while the submodule holds an unpublished commit",
+    ).not.toBe(0)
+
+    // `bay list --check --json` carries the same verdict on the row itself,
+    // matched by bay id rather than requiring a second lookup into `reports[]`.
+    const listed = output(repo)
+    expect(await yrd(repo, listed.io, "bay", "list", "--check", "--json"), listed.stderr()).toBe(0)
+    const listPayload = JSON.parse(listed.stdout()) as {
+      bays: readonly {
+        name: string
+        safety?: { exit: number; safe: boolean | null; evidence: readonly string[] }
+      }[]
+    }
+    const row = listPayload.bays.find((bay) => bay.name === "submodule-drift")
+    expect(row?.safety).toMatchObject({ exit: 1, safe: false })
+    expect(row?.safety?.evidence.some((line) => line.includes(submodulePath))).toBe(true)
+
+    // Force-close so the fixture does not leak a still-open Bay.
+    await yrd(repo, output(repo).io, "bay", "close", "--force", "submodule-drift")
+  })
+
   it("accepts a patch-equivalent merge even when commit ancestry differs", async () => {
     const { repo } = await repository()
     const kept = output(repo)
@@ -1691,6 +1765,36 @@ async function packagedRepository(): Promise<{ repo: string }> {
   await git(fixture.repo, "commit", "-qm", "declare dependencies")
   await git(fixture.repo, "push", "-q", "origin", "main")
   return fixture
+}
+
+/**
+ * `repository()` plus one real, pushed submodule at `dep` — a genuine second
+ * remote a bay's provisioning materializes, not a stand-in, so gathering its
+ * facts exercises the same git plumbing a real submodule does (B399).
+ */
+async function repositoryWithSubmodule(): Promise<{ repo: string; submodulePath: string }> {
+  const { repo } = await repository()
+  const root = join(repo, "..")
+  const submoduleOrigin = join(root, "dep-origin.git")
+  const submoduleSeed = join(root, "dep-seed")
+  // `-b main` on the BARE init too: without it the bare repo's own HEAD
+  // symref keeps pointing at whatever `init.defaultBranch` says (often not
+  // "main"), so once the seed pushes "main" as an ordinary branch ref, HEAD
+  // still resolves to nothing — `submodule add` then clones a repo whose
+  // checkout is "a branch yet to be born" and fails to check anything out.
+  await git(root, "init", "-q", "--bare", "-b", "main", submoduleOrigin)
+  await git(root, "init", "-q", "-b", "main", submoduleSeed)
+  await git(submoduleSeed, "config", "user.name", "Yrd Test")
+  await git(submoduleSeed, "config", "user.email", "yrd@example.invalid")
+  await writeFile(join(submoduleSeed, "README.md"), "dep\n")
+  await git(submoduleSeed, "add", "README.md")
+  await git(submoduleSeed, "commit", "-qm", "dep main")
+  await git(submoduleSeed, "remote", "add", "origin", submoduleOrigin)
+  await git(submoduleSeed, "push", "-q", "-u", "origin", "main")
+  await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", submoduleOrigin, "dep")
+  await git(repo, "commit", "-qm", "add dep submodule")
+  await git(repo, "push", "-q", "origin", "main")
+  return { repo, submodulePath: "dep" }
 }
 
 /**
