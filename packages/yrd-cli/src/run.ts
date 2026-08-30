@@ -275,6 +275,7 @@ import {
   submodulePinPublications,
   unreachableSubmodulePins,
 } from "./pr-submodule-publication.ts"
+import { backwardGitlinkRefusal, gitlinkDirections, resolveBaseTip } from "./gitlink-forward-only.ts"
 import { mergeAuthorityBoundary } from "./merge-authority-boundary.ts"
 import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-failure.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
@@ -4929,9 +4930,71 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
       `yrd: change '${pr.id}' changes submodule pins that are not on their submodule's main:\n${detail}`,
     )
   }
-  // Every remaining pin is a straightforward update, published and on its submodule's main —
-  // admitted. The queue's own composition-time fill writes the shaset value at merge; this
-  // gate's only job was to stop refusing what that machinery can now safely process.
+  // Every remaining pin is a straightforward update, published and on its submodule's main.
+  // Legitimacy is settled; MONOTONICITY is a separate question and nothing above asks it.
+  // PR2118 (2026-08-27) is the specimen: every sha it wrote was published and on its
+  // submodule's main, so it reached exactly this line clean, while merging it would have
+  // reverted eight commits across three submodules for zero unique content.
+  await requireForwardOnlyGitlinks(pr, changed, services, io)
+  // Both questions answered. The queue's own composition-time fill writes the shaset value
+  // at merge; this gate's job was to stop refusing what that machinery can safely process,
+  // and to stop admitting what it must never carry.
+}
+
+/**
+ * Monotonicity, asked against main's CURRENT gitlink — the second of the two independent
+ * questions an authored gitlink must answer (ADR `2026-08-27-pin-legitimacy-is-not-monotonicity`).
+ *
+ * `changed` is the change's OWN diff, so a branch that writes no gitlink never reaches here
+ * however far its base has fallen behind — the exemption the ruling required, and the reason
+ * this is not a tree comparison against main.
+ *
+ * The comparison re-reads main's tip every time it runs, and it runs on every path that
+ * admits a revision, including the re-merge and preflight passes the queue's own cycle drives
+ * (`executeRemergeChange`, `applyPreflightVerdict`). A green answer is therefore never a
+ * stored fact that can be cited later: main moves, the question is asked again against where
+ * main now is.
+ */
+async function requireForwardOnlyGitlinks(
+  pr: Change,
+  changed: readonly { path: string; pin: string; repository: string }[],
+  services: YrdCliServices,
+  io: YrdCliIO,
+): Promise<void> {
+  if (services.process === undefined || changed.length === 0) return
+  const repo = io.cwd ?? process.cwd()
+  const baseTipSha = await resolveBaseTip({ process: services.process, repo, base: pr.base })
+  if (baseTipSha === undefined) {
+    raiseFailure(
+      "refusal",
+      "pr-base-unresolved",
+      `yrd: change '${pr.id}' base '${pr.base}' resolves to no ref in '${repo}', so its gitlinks cannot be ` +
+        "compared with main's current values; fetch the base branch, then retry",
+    )
+  }
+  const directions = await gitlinkDirections({
+    process: services.process,
+    repo,
+    baseTipSha,
+    gitlinks: changed.map(({ path, pin, repository }) => ({ path, gitlink: pin, repository })),
+  })
+  const undetermined = directions.filter((entry) => entry.state === "undetermined")
+  if (undetermined.length > 0) {
+    raiseFailure(
+      "refusal",
+      "gitlink-comparison-undetermined",
+      `yrd: change '${pr.id}' writes gitlinks that could not be compared with main's current values:\n` +
+        undetermined.map(({ path, reason }) => `submodule '${path}': ${reason}`).join("\n"),
+    )
+  }
+  const backward = directions.filter((entry) => entry.state === "backward")
+  if (backward.length > 0) {
+    raiseFailure(
+      "refusal",
+      "gitlink-moves-backward",
+      `yrd: change '${pr.id}' moves submodule gitlinks backwards:\n${backwardGitlinkRefusal(backward)}`,
+    )
+  }
 }
 
 async function requireQueueableSubmodulePinsForCommand(

@@ -6,7 +6,7 @@ import { changedCommitGitlinks, readCommitGitlinks } from "git-super/commit-grap
 import { remoteContainsCommit } from "git-super/push"
 import type { Git } from "git-super/worktree"
 
-const GIT_TIMEOUT_MS = 30_000
+export const GIT_TIMEOUT_MS = 30_000
 
 /**
  * A `Pick<Git, "run">` over this command's supervised process port.
@@ -14,8 +14,12 @@ const GIT_TIMEOUT_MS = 30_000
  * The shared gates it feeds ask git tolerantly and classify the exit code, so
  * this reports a non-zero exit rather than throwing; only a TIMEOUT is fatal,
  * because "git never finished" is not an answer.
+ *
+ * Exported for `gitlink-forward-only.ts`, which asks the same repositories the
+ * same way and must classify the same exit codes. A second adapter there would
+ * be a second timeout and a second definition of "git could not tell".
  */
-function processGit(process: Pick<Process, "run">): Pick<Git, "run"> {
+export function processGit(process: Pick<Process, "run">): Pick<Git, "run"> {
   return {
     run: async (repo, args) => {
       const result: ProcessResult = await process.run({
