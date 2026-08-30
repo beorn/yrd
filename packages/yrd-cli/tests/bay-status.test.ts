@@ -378,8 +378,11 @@ describe("the submodule commit-durability ladder (B399)", () => {
     // origin — an unqualified branch name, never a `refs/heads/`-qualified
     // one (that literal shape is what remedy-banned-actions-guard.test.ts
     // scans this whole tool surface for as a hand-push to a submodule).
-    expect(submodule?.evidence).toContain("cure: git -C '/repo/.bays/B1/deps/widgets' push origin")
-    expect(submodule?.evidence).toContain(`${submoduleSha}:wip/orphan-example-deps-widgets`)
+    expect(submodule?.evidence).toContain("cure: git -C '/repo/.bays/B1/deps/widgets' branch")
+    // the two-step cure: a raw-sha one-refspec push refuses (git 2.54.0), and
+    // refs/heads/ literals are guard-banned — the branch is named first
+    expect(submodule?.evidence).toContain(`branch -- wip/orphan-example-deps-widgets ${submoduleSha}`)
+    expect(submodule?.evidence).toContain('push origin wip/orphan-example-deps-widgets')
     expect(submodule?.evidence).not.toContain("refs/heads/")
   })
 

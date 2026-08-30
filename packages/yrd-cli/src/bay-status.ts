@@ -557,15 +557,20 @@ function orphanSlug(value: string): string {
  * the remote, which is exactly the shape two seats independently mistook for
  * preservation on 2026-08-30 — the sha survived on nobody's fetch.
  *
- * The destination is an unqualified branch name (`<sha>:wip/orphan-<name>`),
- * never a fully-qualified `refs/heads/wip/orphan-<name>` — git resolves that
- * shorthand to the same ref, but the qualified form is the literal shape
- * `remedy-banned-actions-guard.test.ts` scans this whole tool surface for
- * (a hand-push to a submodule's `refs/heads/*`), and this text is printed
- * advice a human reads, not that guard's allowlisted internal actuation.
+ * Two steps, not one refspec. The one-refspec shorthand
+ * (push origin <sha>:wip/orphan-<name>) REFUSES for a raw-sha source to a
+ * new name — measured on git 2.54.0, 2026-08-30: "The <src> part of the
+ * refspec is a commit object. Did you mean ... ':refs/heads/...'?" — and
+ * the qualified form git suggests is the literal shape
+ * `remedy-banned-actions-guard.test.ts` scans this tool surface for (a
+ * hand-push to a submodule's `refs/heads/*`). Naming the sha as a local
+ * branch first sidesteps both: git infers the ref type from the branch
+ * source, and the printed advice carries no `refs/heads/` literal. The
+ * `--` ends option parsing so the generated name can never read as a flag.
  */
 function commitDurabilityCure(worktreePath: string, revision: string, branchIdentity: string): string {
-  return `git -C '${worktreePath}' push origin ${revision}:wip/orphan-${orphanSlug(branchIdentity)}`
+  const orphan = `wip/orphan-${orphanSlug(branchIdentity)}`
+  return `git -C '${worktreePath}' branch -- ${orphan} ${revision} && git -C '${worktreePath}' push origin ${orphan}`
 }
 
 /** One commit-durability line, with its cure appended when it BLOCKs.
