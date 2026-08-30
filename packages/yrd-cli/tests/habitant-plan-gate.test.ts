@@ -9,7 +9,13 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { raiseFailure } from "@yrd/core"
 import { strandedLine } from "../src/queue-status-view.tsx"
-import { followQueueRuns, requestYrdRuntimeReload, habitantRunnerStatus } from "../src/run.ts"
+import {
+  followQueueRuns,
+  requestYrdRuntimeReload,
+  requireInstalledDeclaredPlan,
+  habitantRunnerStatus,
+} from "../src/run.ts"
+import { HABITANT_EXIT } from "../src/habitant-exit.ts"
 import { createHabitantHarness } from "./support/habitant-harness.ts"
 
 const roots: string[] = []
@@ -118,6 +124,77 @@ describe("the habitant's per-cycle declared-plan gate", () => {
         state: "stalled",
         observedAt: expect.any(String),
         findings: [{ code: "installed-plan-reload-exhausted", message }],
+      },
+    })
+  })
+
+  it("recycles a stale plan into a designed exit when no in-place reload is wired — the branch a real supervised habitant actually takes", async () => {
+    // The OTHER branch through `requireInstalledDeclaredPlan`'s refusal: no
+    // `reloadInPlace.request` is wired (this IS the shape `queue run`'s
+    // follow-mode command action builds when `bootstrap`/`lineage` are
+    // unavailable, and it is what a live production habitant hit seven times
+    // 2026-08-30 04:39–06:09 PDT, every one misread as a failure). A
+    // supervised habitant must not let this reach the generic "error:"
+    // refusal — cli.test.ts "exits non-zero on every habitant refusal" pins
+    // that a NON-habitant follow correctly keeps failing loud instead.
+    const repo = await queueRepository()
+    const headSha = await git(repo, "rev-parse", "HEAD")
+    const harness = createHabitantHarness({ run: async () => [] })
+    Object.assign(harness.io, {
+      cwd: repo,
+      repositoryRoot: repo,
+      runner: "yrd-cli:plan-recycle",
+      implementationSource: `git:${headSha}`,
+    })
+    const comparison = {
+      base: "main",
+      tip: {
+        sha: "b".repeat(40),
+        configAuthority: ".yrd.yml",
+        configBlobSha: "2".repeat(40),
+        steps: ["check", "second", "merge"],
+        batchSize: 1,
+      },
+      installed: { source: "this-process" as const, steps: ["check", "merge"], batchSize: 1 },
+    }
+    const gate = () =>
+      requireInstalledDeclaredPlan({
+        queue: {
+          auditEnvironment: async () => ({
+            findings: [
+              {
+                code: "installed-plan-stale" as const,
+                message: "yrd: this process installed check→merge, but main tip declares check→second→merge",
+              },
+            ],
+            comparison,
+          }),
+        },
+      })
+
+    const exit = await followQueueRuns(harness.app, [], { json: true, interval: 1 }, harness.io, gate)
+
+    expect(exit).toBe(HABITANT_EXIT["installed-plan-stale"])
+    expect(exit, "must never share the generic refusal code a genuine failure gets").not.toBe(1)
+    const notice = harness.warnings.find((w) => w.props.action === "resident-plan-stale-restart")
+    expect(notice?.message).toMatch(/^notice: yrd:/u)
+    expect(notice?.message).not.toContain("error:")
+    expect(notice?.props).toMatchObject({ bootedSha: headSha, headSha: "b".repeat(40), staleSteps: ["second"] })
+
+    // The projection read: `queue status`/`watch`/`queue audit` all resolve
+    // the runner through `habitantRunnerStatus`, which now merges
+    // `source-recycle.json` in as `lastRecycle` — the smallest read that lets
+    // any of them say "recycled for a plan change at <time>" instead of
+    // nothing (this designed exit records no heartbeat `stalled` progress;
+    // that state is reserved for a genuine reload-exhausted failure, the
+    // sibling test above).
+    await expect(habitantRunnerStatus(repo)).resolves.toMatchObject({
+      lastRecycle: {
+        reason: "installed-plan-stale",
+        bootedSha: headSha,
+        headSha: "b".repeat(40),
+        staleSteps: ["second"],
+        attemptedAt: expect.any(String),
       },
     })
   })

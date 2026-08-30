@@ -143,6 +143,59 @@ describe("RUNNER box live coarse tick (@yrd/cli/runner-box-live-tick, items 16/1
       vi.useRealTimers()
     }
   })
+
+  it("renders uptime from the OBSERVED start, never the logical one, when both are present", async () => {
+    // `startedAt` is written under the caller's clock (`io.now()` in tests, a
+    // restored journal event on replay); `observedStartedAt` is this
+    // process's own `/proc` read at boot (added 2026-08-30, run.ts
+    // `startHabitantRunnerHeartbeat`). They can legitimately disagree — here,
+    // a `startedAt` that claims 6 hours of uptime against a process that
+    // actually booted 10 minutes ago — and the box a human reads must show
+    // the real one, or a replayed/backdated record reads as a runner far
+    // older than the process actually is.
+    const pr = fixturePr("PR19", "submitted", "2026-07-13T11:25:00.000Z", "Running")
+    const run = fixtureRun("RR", [pr], "running", "2026-07-13T11:40:00.000Z", {
+      steps: [fixtureStep("check", fixtureJob("JRR-check", "running"))],
+    })
+    const projection = fixtureSnapshot(fixtureResult([pr], [run]), {
+      runner: {
+        ...runnerConfig(),
+        startedAt: "2026-07-13T06:00:00.000Z",
+        observedStartedAt: "2026-07-13T11:50:00.000Z",
+      },
+    }).projection
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW)
+    const render = createRenderer({ cols: 120, rows: 40 })
+    const app = render(createElement(QueueTimelineView, { projection, columns: 120, nav: true, paneChrome: true }))
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("uptime 10:00")
+      expect(app.text).not.toContain("uptime 6:00:00")
+    } finally {
+      app.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it("falls back to the logical start when no observed one was ever published", async () => {
+    // A status record written before `observedStartedAt` existed (or by a
+    // platform `observePidSync` could not read) must keep behaving exactly as
+    // it did before this field was added — the pre-existing `runnerConfig()`
+    // fixture below carries no `observedStartedAt` at all.
+    const projection = processingSnapshot().projection
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW)
+    const render = createRenderer({ cols: 120, rows: 40 })
+    const app = render(createElement(QueueTimelineView, { projection, columns: 120, nav: true, paneChrome: true }))
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("uptime 1:00:00")
+    } finally {
+      app.unmount()
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe("RUNNER box state-conditional coloring (@yrd/cli/runner-box-severity-never-muted, item 27)", () => {

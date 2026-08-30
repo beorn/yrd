@@ -28,11 +28,17 @@ describe("habitant exit taxonomy — one code per condition", () => {
   it("gives every condition a DISTINCT code", () => {
     const codes = CONDITIONS.map((condition) => HABITANT_EXIT[condition])
     expect(new Set(codes).size).toBe(codes.length)
-    expect(codes.length).toBe(4)
+    expect(codes.length).toBe(5)
   })
 
-  it("names the four conditions the supervisor has to tell apart", () => {
-    expect(CONDITIONS.toSorted()).toEqual(["interrupted", "memory-cap", "poisoned", "source-stale"])
+  it("names the five conditions the supervisor has to tell apart", () => {
+    expect(CONDITIONS.toSorted()).toEqual([
+      "installed-plan-stale",
+      "interrupted",
+      "memory-cap",
+      "poisoned",
+      "source-stale",
+    ])
   })
 
   it("leaves `interrupted` on 3 — the contract every non-habitant caller already speaks", () => {
@@ -55,13 +61,15 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
   })
 
   it("paces ONLY the condition a fresh process does not itself cure", () => {
-    // Poisoned observation and stale source are both cured by the restart —
-    // a new process is not poisoned, and it boots the source that moved.
+    // Poisoned observation, stale source, and a stale installed plan are all
+    // cured by the restart — a new process is not poisoned, it boots the
+    // source that moved, and it installs whatever the tip currently declares.
     // Outgrowing a memory cap is not: the successor will grow the same way, so
     // restarting it hot converts a memory problem into a spawn storm.
     expect(HABITANT_EXIT_DISPOSITION["memory-cap"]).toBe("restart-with-backoff")
     expect(HABITANT_EXIT_DISPOSITION.poisoned).toBe("restart-immediately")
     expect(HABITANT_EXIT_DISPOSITION["source-stale"]).toBe("restart-immediately")
+    expect(HABITANT_EXIT_DISPOSITION["installed-plan-stale"]).toBe("restart-immediately")
     expect(HABITANT_EXIT_DISPOSITION.interrupted).toBe("restart-immediately")
   })
 

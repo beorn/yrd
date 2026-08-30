@@ -41,6 +41,13 @@ export const HABITANT_EXIT = {
   /** The process crossed its declared RSS cap and stood down before the kernel
    * did it for us. */
   "memory-cap": 12,
+  /** Recycle because the base tip's declared plan no longer matches the plan
+   * this process installed at boot, and no in-place reload was available to
+   * fix it live (23192 leg c, `plan-audit.ts` `installed-plan-stale`). Measured
+   * 2026-08-30, 04:39–06:09 PDT: seven of these, one per gate-touching merge,
+   * all by design — and all seven read as failures because this exit shared
+   * `refusal`'s generic code 1 with every genuine one. */
+  "installed-plan-stale": 13,
 } as const
 
 export type HabitantExitCondition = keyof typeof HABITANT_EXIT
@@ -64,6 +71,9 @@ export const HABITANT_EXIT_DISPOSITION: Readonly<Record<HabitantExitCondition, H
     poisoned: "restart-immediately",
     "source-stale": "restart-immediately",
     "memory-cap": "restart-with-backoff",
+    // A fresh process installs whatever the base tip declares at boot, which
+    // is exactly the cure — same reasoning as `source-stale`.
+    "installed-plan-stale": "restart-immediately",
   })
 
 /**

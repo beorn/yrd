@@ -741,6 +741,41 @@ describe("the run gate without a queue administration", () => {
     const services: YrdCliServices = { queue: {} }
     await expect(requireInstalledDeclaredPlan(services)).rejects.toThrow(/queue.audit capability is not installed/u)
   })
+
+  it("carries the comparison it read as the refusal's `cause`, for a habitant to redirect without re-auditing", async () => {
+    // `failureFact` only sees kind/code/message — it never surfaces `cause`.
+    // The habitant follow loop (run.ts `habitantGate`) reads `error.cause`
+    // directly to build its designed-exit notice and record without a second
+    // `auditEnvironment` call; this pins that the comparison actually rides
+    // along, and that the ordinary refusal shape every OTHER caller reads
+    // (kind/code/message) is unchanged by carrying it.
+    const comparison: QueueEnvironmentAuditComparison = {
+      base: "main",
+      tip: {
+        sha: "b".repeat(40),
+        configAuthority: ".yrd.yml",
+        configBlobSha: "2".repeat(40),
+        steps: ["check", "second", "merge"],
+        batchSize: 1,
+      },
+      installed: { source: "this-process", steps: ["check", "merge"], batchSize: 1 },
+    }
+    const services: YrdCliServices = {
+      queue: {
+        auditEnvironment: async () => ({
+          findings: [{ code: "installed-plan-stale", message: "yrd: this process installed check→merge …" }],
+          comparison,
+        }),
+      },
+    }
+    const failure = await requireInstalledDeclaredPlan(services).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    )
+    expect(failureFact(failure)).toMatchObject({ kind: "refusal", code: "installed-plan-stale" })
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).cause).toEqual(comparison)
+  })
 })
 
 describe("the supervisor probe compares the plan the habitant published", () => {

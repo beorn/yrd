@@ -96,13 +96,34 @@ export type HabitantSourceStall = Readonly<{
  * The last recycle this habitant lineage attempted, read back after the
  * re-exec. It is the only evidence a fresh process has that it is the SECOND
  * try, and it is what separates a recycle that works from a restart loop.
+ *
+ * Shared by every habitant designed-exit that recycles onto a fresh process —
+ * not source-staleness alone. `run.ts` writes the same file (and this same
+ * shape) for `installed-plan-stale` (23192 leg c): a habitant whose installed
+ * plan no longer matches the base tip's declared one and has no in-place
+ * reload wired. `reason` names which; absent reads as `"source-stale"`, the
+ * only reason that existed before 2026-08-30. Deliberately one shape — a
+ * reader (the queue status projection, `queue audit`, `watch`) checks one
+ * file for "why did this habitant last recycle" instead of several.
  */
 export type HabitantSourceRecycle = Readonly<{
-  /** The sha the previous process was running when it gave up. */
+  /** Which designed exit wrote this record. Absent on records written before
+   * this field existed, which were all `"source-stale"`. */
+  reason?: "source-stale" | "installed-plan-stale"
+  /** The sha the previous process was running when it gave up. For
+   * `"installed-plan-stale"`, the sha this process booted from
+   * (`habitantBootedSha`) — the analogous "what this process was running"
+   * fact, read the same way the source-staleness check already reads it. */
   bootedSha: string
-  /** The sha it expected to come back as. */
+  /** The sha it expected to come back as. For `"installed-plan-stale"`, the
+   * base tip sha whose declared plan disagreed with what this process
+   * installed. */
   headSha: string
   attemptedAt: string
+  /** Step names whose declaration differs between what this process installed
+   * and what the tip now declares. Only present for `reason:
+   * "installed-plan-stale"`. */
+  staleSteps?: readonly string[]
 }>
 
 export type HabitantSourceAction =
@@ -159,6 +180,14 @@ export function foldSourceStaleness(
  * how to exit would exit forever. One attempt per (booted, head) pair is the
  * bound; the supervisor's restart budget is the outer guard behind it, not the
  * first line of defense.
+ *
+ * `lastRecycle` is read from a file `run.ts` now shares with the
+ * `installed-plan-stale` designed exit (see {@link HabitantSourceRecycle}).
+ * Only a record this SAME check wrote suppresses a retry here — a plan-stale
+ * recycle's `(bootedSha, headSha)` pair can coincide with a source-staleness
+ * one (both are read off the same booted process and can land on the same
+ * repository tip), and treating that coincidence as "already tried" would
+ * suppress a source recycle nothing has actually attempted yet.
  */
 export function decideHabitantSource(
   stall: HabitantSourceStall | undefined,
@@ -167,8 +196,9 @@ export function decideHabitantSource(
 ): HabitantSourceAction {
   if (stall === undefined || stall.observations < observations) return { kind: "serve" }
   const { bootedSha, headSha, behind } = stall
-  if (lastRecycle?.bootedSha === bootedSha && lastRecycle.headSha === headSha) {
-    return Object.freeze({ kind: "checkout-behind", bootedSha, headSha, behind, attemptedAt: lastRecycle.attemptedAt })
+  const ownRecycle = (lastRecycle?.reason ?? "source-stale") === "source-stale" ? lastRecycle : undefined
+  if (ownRecycle?.bootedSha === bootedSha && ownRecycle.headSha === headSha) {
+    return Object.freeze({ kind: "checkout-behind", bootedSha, headSha, behind, attemptedAt: ownRecycle.attemptedAt })
   }
   return Object.freeze({ kind: "recycle", bootedSha, headSha, behind, observations: stall.observations })
 }
