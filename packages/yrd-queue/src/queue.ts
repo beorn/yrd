@@ -9144,6 +9144,17 @@ export const YRD_REFUSAL_CODES = [
   "pin-ref-mismatch",
   "pin-resolution-failed",
   "pr-not-checkable",
+  // `pr view`'s four branch-observation outcomes. Emitted since the surface
+  // existed; invisible to this census until the three copies of the
+  // observation ladder collapsed onto `requireObservedBranchHead`, which
+  // turned positional `raiseFailure(kind, code, …)` arguments into `code:`
+  // literals the scanner reads (@i/10-yrd/absent-branch-is-terminal) — the
+  // same way `proposed-commit-missing` below surfaced. `pr-view-branch-absent`
+  // now fires under `--json` too, where the observation used to be skipped.
+  "pr-view-branch-absent",
+  "pr-view-branch-head-missing",
+  "pr-view-branch-observer-missing",
+  "pr-view-branch-refresh-failed",
   // Re-merge Phase 1 turned recordProposedHead's codeCarrierRefusal
   // indirection into a direct `code:` literal (command.ts), so the census
   // sees the producer it previously missed.
@@ -9167,11 +9178,25 @@ export const YRD_REFUSAL_CODES = [
   "record-mint-retired",
   "recut-base-missing",
   "recut-branch-absent",
+  // The re-merge path's other three observation outcomes, alongside the
+  // `absent` one above; same census-visibility note as the `pr-view-branch-*`
+  // block.
+  "recut-branch-head-missing",
+  "recut-branch-observer-missing",
+  "recut-branch-refresh-failed",
   // A pre-identity change reaching the rebuild seam: it cannot be rebuilt,
   // because the candidate would carry no Change-Id (command.ts,
   // remergeDirectChangeByMerge). Migration is the author-side cure.
   "recut-change-id-missing",
   "recut-current-changed",
+  // NEW: the withdraw/subsumption preflight now observes the source branch for
+  // EVERY change before computing any verdict. `recut-preflight-branch-absent`
+  // is the refusal that stands where PR2599 got a `--burn-payload` instruction
+  // computed from a recorded head nobody had checked the branch for
+  // (@i/10-yrd/absent-branch-is-terminal).
+  "recut-preflight-branch-absent",
+  "recut-preflight-branch-observer-missing",
+  "recut-preflight-branch-refresh-failed",
   "recut-publish",
   "refusal-remedy-needs-withdraw",
   "refused-path",

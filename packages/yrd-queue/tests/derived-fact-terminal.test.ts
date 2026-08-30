@@ -198,6 +198,27 @@ describe("a standing submit fact derives at most ONE live change", () => {
     expect(actionsLogged(events)).toContain("compose-derived-fact-retired")
   })
 
+  it("the retirement survives a fresh projection over the same journal", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    const queueMint = volatilePrNumberMint()
+    {
+      await using app = await createApp({ journal, id, queueMint, prepareCandidate: conflictingCandidate })
+      await app.bays.recordBranchSubmit({ branch: "issue/conflicting", sha: SHA, base: "main" })
+      await app.queue.run({}, runtime)
+      expect(app.state().queues.retiredSubmits["issue/conflicting"]).toMatchObject({ sha: SHA, pr: "PR1" })
+    }
+
+    // A restart must not un-retire the fact: if the row lived only in memory,
+    // the next process would derive the fact afresh and the loop would resume
+    // on every runner restart — which is exactly how a 17-hour one goes
+    // unnoticed. The retirement is a journal event, so it replays.
+    await using replayed = await createApp({ journal, id, queueMint, prepareCandidate: conflictingCandidate })
+    expect(replayed.state().queues.retiredSubmits["issue/conflicting"]).toMatchObject({ sha: SHA, pr: "PR1" })
+    await replayed.queue.run({}, runtime)
+    expect(queueMint.highWater(), "a restart must not re-derive a retired fact").toBe(1)
+  })
+
   it("a rebased push re-projects the fact at a new sha, and the retirement stops applying", async () => {
     const queueMint = volatilePrNumberMint()
     // Mergeable on the SECOND pass models the author's cure: the retirement is
