@@ -7,6 +7,7 @@
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
+import { actionableFailure, formatHumanFailure } from "../../yrd-cli/src/actionable-error.ts"
 import { createLogger } from "loggily"
 import {
   createBayJobDefs,
@@ -401,8 +402,33 @@ describe("native needs-author lifecycle", () => {
     expect(eligibility.runnable).toBe(false)
     expect(eligibility.reason?.code).toBe("required-check-failed")
     expect(eligibility.reason?.result).toBeUndefined()
-    expect(eligibility.reason?.message).toContain("fix the branch and push")
+    expect(eligibility.reason?.message).toContain("push it again")
     expect(eligibility.reason?.message).not.toContain("submit it again")
+  })
+
+  it("names a cure that exists: new content, never a verb that requests fresh checks", async () => {
+    // The admission text offered "or request fresh checks" while no Yrd verb
+    // requests checks — a refusal naming an operation nobody can perform, the
+    // class ruling 8 calls an instrument that lies. A check run is minted BY a
+    // revision, so the only cure is new content on the branch.
+    await using app = await createQueueApp(() => ({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "check-failed", message: "unit tests failed" },
+    }))
+    const pr = await submitWithChecks(app, "topic/no-such-verb")
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+
+    const message = app.queue.eligibility(pr).reason?.message ?? ""
+    expect(message).not.toContain("request fresh checks")
+    expect(message).toContain("new content")
+    expect(message).toContain("refs/for/")
+
+    // The rendered bytes a reader sees, not the source literal (the
+    // 2026-08-27 ADR's obligation).
+    const rendered = formatHumanFailure(actionableFailure({ code: "required-check-failed", message }))
+    expect(rendered).not.toContain("request fresh checks")
+    expect(rendered).toContain("resolve: yrd pr submit <branch>")
   })
 
   it("lets a later queue run discover a submitted+requested PR that submit never drained", async () => {

@@ -9206,7 +9206,21 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "component-model-authorizer-unavailable",
     "component-model-identity-unavailable",
   ]),
-  "plain-rejected": new Set<string>(["intent-base-moved", "intent-batch-refused", "intent-component-unknown"]),
+  "plain-rejected": new Set<string>([
+    "intent-base-moved",
+    "intent-batch-refused",
+    "intent-component-unknown",
+    // A checkpoint-migration certificate is minted BY a check run and never by
+    // the author's branch, so neither re-authoring nor a merge retry reaches
+    // it. Unbucketed, both codes fell through `failureDisposition` to the
+    // author default — the measured cost this whole vocabulary was built
+    // around, an operator's certificate billed to an author and a submit
+    // authority consumed with it. Not `infra-retry`: retrying the MERGE
+    // refuses identically, so an auto-requeue disposition would be a second
+    // instrument that lies.
+    "checkpoint-migration-certificate-missing",
+    "checkpoint-migration-certificate-stale",
+  ]),
 } as const
 
 const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
@@ -9253,6 +9267,14 @@ export const YRD_REFUSAL_CODES = [
   "admission-refusal-loop",
   "admission-refusal-needs-person",
   "admission-refused",
+  // The gitlink-advance verb's own `-failed` refusals (yrd 9e6af249 /
+  // 2fd122a9). Registered NOT because they become a persisted Run/Job failure
+  // — they are `raiseFailure` CLI refusals — but because every one of them
+  // ends in `-failed`, and an unregistered `-failed` code is precisely what
+  // the dynamic step family used to swallow: each printed "The check judged
+  // the WORK, not the queue" for a refused git push. Registered, they resolve
+  // to themselves, and the cure census answers them for what they are.
+  "advance-branch-push-failed",
   "artifact-root-unresolved",
   "attempt-base-mismatch",
   "attempt-pin-mismatch",
@@ -9322,7 +9344,16 @@ export const YRD_REFUSAL_CODES = [
   "gate-script-diff-failed",
   "gate-script-missing-at-base",
   "gate-script-overlay-failed",
+  // The advance's own commit in its bay was refused — commonly by the
+  // repository's pre-commit hook, whose text the message carries. Registered
+  // but deliberately given NO cure entry: the producer already prints a quoted
+  // `'yrd in <bay>'`, which `embeddedYrdCommands` lifts, and a second copy is
+  // how a wrong cure outlives the fix to the first.
+  "gitlink-commit-failed",
   "gitlink-inspection",
+  // The index write in the advance's own bay failed, leaving that bay open
+  // with the submodule already checked out at the target.
+  "gitlink-stage-failed",
   // `yrd gitlink advance` could not bring its bay's submodule to the target, so nothing
   // downstream — the repository's own pre-commit hook first among them — can prove the
   // gitlink it is about to stage moves forward.
@@ -9357,6 +9388,7 @@ export const YRD_REFUSAL_CODES = [
   "merge-rollback-failed",
   "merge-unauthored-deletion",
   "merge-verification-failed",
+  "min-commit-publish-failed",
   "min-commit-unpublished",
   "missing-pr",
   // TEST-FIXTURE-ONLY narrative codes (queue-watch-round6.test.ts's fictional
@@ -9537,16 +9569,29 @@ export const YRD_REFUSAL_CODE_ALIASES: Readonly<Record<string, RefusalCode>> = {
  */
 const DYNAMIC_STEP_FAILURE_CODE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-failed$/u
 
+/** Whether the {@link DYNAMIC_STEP_FAILURE_CODE} family may be consulted.
+ *
+ * It exists for ONE producer shape — a durable Job/Run error code built from a
+ * repo's own configured step name — and a caller that is not classifying such
+ * a result must say so, because the family matches by suffix alone. Every code
+ * a CLI verb raises that happens to end in `-failed` otherwise acquires the
+ * `check-failed` identity, and with it a cure about checks: `yrd bay open
+ * --issue <typo>` printed "The check judged the WORK, not the queue" because
+ * `issue-source-failed` ends in `-failed`, and nineteen codes across the
+ * codebase did the same. */
+export type CanonicalRefusalCodeOptions = Readonly<{ dynamicStepFamily?: boolean }>
+
 /** A raw failure code, resolved to its registered canonical spelling — itself
  * if already canonical, its mapped form if it is a registered alias, the
  * generic `check-failed` if it matches the {@link DYNAMIC_STEP_FAILURE_CODE}
- * shape, or `undefined` if it is outside the closed vocabulary entirely. The
- * one gate every consumer that must not silently misclassify an unknown code
- * shares. */
-export function canonicalRefusalCode(code: string): RefusalCode | undefined {
+ * shape AND the caller is classifying a durable step result, or `undefined` if
+ * it is outside the closed vocabulary entirely. The one gate every consumer
+ * that must not silently misclassify an unknown code shares. */
+export function canonicalRefusalCode(code: string, options: CanonicalRefusalCodeOptions = {}): RefusalCode | undefined {
   if (YRD_REFUSAL_CODE_SET.has(code)) return code as RefusalCode
   const alias = YRD_REFUSAL_CODE_ALIASES[code]
   if (alias !== undefined) return alias
+  if (options.dynamicStepFamily === false) return undefined
   return DYNAMIC_STEP_FAILURE_CODE.test(code) ? "check-failed" : undefined
 }
 
@@ -9820,7 +9865,15 @@ function ChangeEligibility(
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return verdict({
         code: "required-check-failed",
-        message: `change '${pr.id}' required check failed${run}; fix the branch and push, or request fresh checks`,
+        // "or request fresh checks" named an operation NO verb performs: a check
+        // run is minted BY a revision, so the only thing that produces a fresh
+        // one is new content. Naming the push spelling keeps the cure
+        // executable — the cure census answers this code wherever it renders,
+        // but a producer that lies is a second copy of the wrong answer.
+        message:
+          `change '${pr.id}' required check failed${run}; checks re-run on new content only — amend or rebase ` +
+          `the branch and push it again ` +
+          `(git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${baseIdentity(pr.base)}/<issue>)`,
       })
     }
     if (required && !reviewed.approved) {

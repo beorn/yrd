@@ -53,7 +53,12 @@ function indexOf(runs: readonly RecordedRun[], cwd: string, ...argv: readonly st
   return runs.findIndex((run) => run.cwd === cwd && argv.every((token) => run.argv.includes(token)))
 }
 
-type FailureDocument = Readonly<{ code: string; message: string; resolution: readonly string[] }>
+type FailureDocument = Readonly<{
+  code: string
+  message: string
+  resolution: readonly string[]
+  blocked?: string
+}>
 
 /**
  * The `--json` failure document, parsed out of the stream it was printed on.
@@ -172,6 +177,16 @@ exit 1
     // The machine-readable remedy names the bay too, rather than the submit advice a change
     // that was never committed cannot use.
     expect(document.resolution).toContain(`yrd in ${bayId}`)
+
+    // …and carries NOTHING of the required-check cure. `gitlink-commit-failed` ends in
+    // `-failed`, so the dynamic step-failure family folded it onto `check-failed` and the
+    // `--json` document went out with that code's reasoning attached: a refused pre-commit
+    // guard explained as a check that judged the work, and steps for a change the advance
+    // never submitted. The human stream showed the same sentence.
+    expect(document.blocked ?? "").not.toContain("The check judged the WORK")
+    expect(document.resolution).not.toContain("yrd pr submit <branch>")
+    expect(document.resolution).not.toContain("yrd pr runs <change>")
+    expect(output).not.toContain("The check judged the WORK")
 
     // The bay really is preserved with the advance staged — the claim the message makes.
     expect(await git(bay, "rev-parse", ":dep")).toBe(fixture.main[2])

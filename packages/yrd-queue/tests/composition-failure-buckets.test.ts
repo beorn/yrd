@@ -65,6 +65,13 @@ describe("composition failure buckets — the partition is total and disjoint", 
       // classify.
       "candidate-change-id-missing",
       "recut-change-id-missing",
+      // The checkpoint-migration admission refusal: returned as a plain
+      // `{ code, message }` from `checkpointMigrationAdmissionRefusal` on the
+      // MERGE path rather than as a candidateFailure, and still a run/admission
+      // error the buckets must classify — unbucketed it billed the author for a
+      // certificate a check run mints.
+      "checkpoint-migration-certificate-missing",
+      "checkpoint-migration-certificate-stale",
     ])
     for (const [name, set] of BUCKETS) {
       for (const code of set) {

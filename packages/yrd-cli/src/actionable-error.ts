@@ -1,5 +1,6 @@
 import { dirname } from "node:path"
 import type { ChangeDeliveryState } from "@yrd/bay"
+import type { FailureKind } from "@yrd/core"
 import { canonicalRefusalCode, SUBMODULE_MODEL_CHANGE_PROP, type RefusalCode } from "@yrd/queue"
 import { failureSlug } from "./failure-slug.ts"
 import { heldQueueBase, quotedValue, refusalCure, refusedChange, type FailureEvidence } from "./refusal-cure.ts"
@@ -7,7 +8,19 @@ import { retainedWorkspaceFromMessage, type RetainedWorkspace } from "./workspac
 
 export type { FailureEvidence } from "./refusal-cure.ts"
 
-export type FailureLike = Readonly<{ code: string; message: string; resolution?: readonly string[] }>
+export type FailureLike = Readonly<{
+  code: string
+  message: string
+  resolution?: readonly string[]
+  /**
+   * Present exactly when this is a CLI-invocation failure fact (`raiseFailure`
+   * / `createFailure`), absent on a durable `JobError`, which is the minimal
+   * `{code,message}` pair. That difference is the whole discriminator this
+   * projection needs: a durable code may be `<step-name>-failed` built from a
+   * repo's configured plan, and a raised one never is.
+   */
+  kind?: FailureKind
+}>
 
 /** Who may authorize a refusal past, and the concrete act that does it.
  * `reason` names the authority; each step is one thing a person does — never a
@@ -353,7 +366,12 @@ export function actionableFailure(failure: FailureLike): ActionableFailure {
   // message or a live audit already supplied wins over it (the census's
   // membership rule — a second copy of a cure is how the wrong one outlives
   // the fix to the first, fc6bd709).
-  const cure = refusalCure(failure.code, failure.message)
+  // The dynamic `<step-name>-failed` family is for DURABLE step results only.
+  // A CLI-invocation failure carries a `kind`; a JobError never does — so the
+  // presence of a kind is the fact that says "this code is not a step name",
+  // and attaching by it is what stops a refusal about a typo'd issue id from
+  // printing a cure about checks (the exit-3 boilerplate residue).
+  const cure = refusalCure(failure.code, failure.message, { dynamicStepFamily: failure.kind === undefined })
   if (cure !== undefined) {
     const resolution = commands.length > 0 ? commands : cure.resolution
     return Object.freeze({
