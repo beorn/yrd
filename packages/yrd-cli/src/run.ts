@@ -1445,15 +1445,20 @@ export function habitantQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
   // carries it in the WHY column, and delivering it to its named owner is
   // @i/10-yrd/needs-person-reaches-only-the-log. A refusing change needs an
   // OWNER, not a dead runner.
-  const findings = app.queue
-    .audit({ now })
-    .findings.filter(
-      (finding) =>
-        finding.code === "queue-progress-stalled" ||
-        finding.code === "queue-never-started" ||
-        finding.code === "queue-hold-ttl-missing" ||
-        finding.code === "queue-hold-expired",
-    )
+  const findings = app.queue.audit({ now }).findings.filter(
+    (finding) =>
+      finding.code === "queue-progress-stalled" ||
+      finding.code === "queue-never-started" ||
+      finding.code === "queue-hold-ttl-missing" ||
+      finding.code === "queue-hold-expired" ||
+      // @i/10-yrd/queue-liveness-pair: safe here for the same reason
+      // `queue-progress-stalled` above already is and `admission-refusal-loop`
+      // is not — it names no PR to blame and requires no single author to
+      // act, so continuing to run (once whatever is blocking the base is
+      // fixed, by any means) is always a live path, never the PR2599
+      // deadlock where the only fix was refused startup itself.
+      finding.code === "queue-liveness-wedged",
+  )
   return findings.length === 0 ? { state: "healthy", observedAt: now } : { state: "stalled", observedAt: now, findings }
 }
 
@@ -11438,6 +11443,30 @@ export async function habitantRecoverySweep(
 }
 
 /**
+ * The other half of the D1b tick (@i/10-yrd/queue-liveness-pair): loudly logs
+ * the (eligible, advanced-since-last-tick) pair's own finding when it fires,
+ * at the SAME cadence {@link habitantRecoverySweep} above already ticks at —
+ * see that function's doc comment for why the two answer different
+ * questions. Reads {@link habitantQueueProgress}'s own audit call, never a
+ * second derivation, so this can never disagree with service health about
+ * whether the queue is draining; loggily-only, matching every other habitant
+ * log line.
+ */
+export function logQueueLivenessWedge(app: YrdCliApp, now: string): void {
+  const progress = habitantQueueProgress(app, now)
+  if (progress.state !== "stalled") return
+  for (const finding of progress.findings) {
+    if (finding.code !== "queue-liveness-wedged") continue
+    app.log.warn?.(finding.message, {
+      action: "resident-queue-liveness-wedged",
+      ...(finding.pr === undefined ? {} : { pr: finding.pr }),
+      ...(finding.blockedMs === undefined ? {} : { blockedMs: finding.blockedMs }),
+      ...(finding.since === undefined ? {} : { since: finding.since }),
+    })
+  }
+}
+
+/**
  * Run every revision-preparation robot in the habitant's single-writer cycle.
  * Ordering is load-bearing: track the authored branch first, refresh that
  * frozen revision onto the queue base second, then repair prior admission
@@ -11600,6 +11629,14 @@ export async function followQueueRuns(
         const beforeRecovery = app.state()
         lastSweepAt = await habitantRecoverySweep(app, io, lastSweepAt)
         runRequired ||= app.state() !== beforeRecovery
+        // @i/10-yrd/queue-liveness-pair: attached to the SAME cadence as the
+        // sweep above, so the log stream that shows "recover succeeded ...
+        // runs: []" every tick also carries the half that line cannot answer.
+        // The lease-expiry sweep above asks "is the process alive"; this asks
+        // "is the queue draining" — 22928's own distinction — computed from
+        // the identical shared predicate `habitantQueueProgress` already
+        // feeds service health with, never a second reader.
+        logQueueLivenessWedge(app, new Date(cycleNow).toISOString())
       }
       // The optional default preserves the narrow followQueueRuns test/programmatic
       // seam. The installed CLI always supplies the recutter; a caller that does

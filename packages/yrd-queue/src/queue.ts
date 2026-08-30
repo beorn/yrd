@@ -7665,6 +7665,10 @@ function auditQueues(
   findings.push(
     ...queueProgressAuditFindings(state, queueProgressQueue(state, steps), refusalFindings, progress, options),
   )
+  // The (eligible, advanced-since-last-tick) pair (@i/10-yrd/queue-liveness-pair):
+  // computed once here, independent of refusalFindings by construction, so it
+  // can never inherit queueProgressAuditFindings' per-base suppression.
+  findings.push(...queueLivenessAuditFindings(state, steps, progress, options))
   return { findings }
 }
 
@@ -7868,6 +7872,84 @@ function queueProgressAuditFindings(
       pr: first.id,
       specimen: `queue:${base}`,
       count: started.length,
+      since,
+      blockedMs,
+    })
+  }
+  return findings
+}
+
+/**
+ * The (eligible, advanced-since-last-tick) queue liveness pair
+ * (@i/10-yrd/queue-liveness-pair, superseding @yrd/core/22928-runner-liveness-pair).
+ *
+ * A heartbeat answers "is the process alive" — every OTHER finding in this
+ * file already answers that. Nothing computed "is the queue draining":
+ * eligible=0 -> idle is correct however stale the tick; eligible>0 and
+ * nothing advanced across N ticks -> wedged however fresh the tick, however
+ * healthy every other read (22928's own words).
+ *
+ * `eligible` is deliberately NOT `runnablePRs`'s output (measured: a PR
+ * claimed by its own active-but-`waiting` run reads `runnable: false, reason:
+ * "claimed"` and drops OUT of `runnablePRs`/`freshnessCandidateBatches` the
+ * instant compose starts it — so a PR stuck forever inside one run, exactly
+ * the "minting phantom changes, never landing" specimen this bead is about,
+ * would read `eligible: 0`, i.e. falsely IDLE, under that predicate). Instead
+ * it reuses {@link queueProgressQueue} verbatim — the SAME population
+ * {@link queueProgressAuditFindings} already walks one function up, chosen
+ * there for exactly this reason ("deliberately broader than admissionQueue
+ * ... outstanding until a Queue run merges"). Whether it "advanced" is read
+ * off the queue's own last-merge clock ({@link latestQueueMergeMs} — never
+ * main's tip, per nothing-alarms-on-failing-checks) measured against when the
+ * work became ready, the same `blockedMs` idiom as that function.
+ *
+ * Deliberately NEVER suppressed the way `queue-progress-stalled` is. That
+ * finding skips a base once `admissionChecks` (check-REQUESTS since the base
+ * went idle) falls short of `progress.minAdmissionChecks` — correct for its
+ * own purpose (one losable race should not page), but measured: a PR
+ * admitted once, whose run then hangs in a single long `waiting` merge
+ * attempt, never accumulates a second admission check and so never crosses
+ * that bar — permanently suppressed, not merely delayed. It also skips a base
+ * whose head-of-line PR already carries an `admission-refusal-loop` finding,
+ * and that code is itself deliberately excluded from the habitant's
+ * service-health gate (`habitantQueueProgress`, @yrd/cli run.ts) so one bad
+ * PR can never brick the runner (PR2599, 2026-08-29) — together leaving a
+ * base whose head-of-line PR is standing in a refusal loop invisible to BOTH
+ * the progress finding and service health at once. This finding carries no
+ * PR blame, requires no repeat admission attempt, and is never suppressed by
+ * either; it only ever answers "is the queue draining", so it is safe to
+ * admit to service health without repeating PR2599's failure mode.
+ */
+function queueLivenessAuditFindings(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  progress: QueueProgressPolicy,
+  options: QueueAuditOptions,
+): QueueAuditFindingEmission[] {
+  if (options.now === undefined) return []
+  const eligible = queueProgressQueue(state, steps)
+  if (eligible.length === 0) return []
+  const nowMs = parseAuditTime(options.now, "now")
+  const findings: QueueAuditFindingEmission[] = []
+  const byBase = Map.groupBy(eligible, (pr) => baseIdentity(pr.base))
+  for (const [base, prs] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    const latestMergeMs = latestQueueMergeMs(state, base)
+    const readyAtMs = Math.min(...prs.map((pr) => parseAuditTime(queueProgressTime(pr), `queue time for ${pr.id}`)))
+    const sinceMs = Math.max(readyAtMs, latestMergeMs ?? readyAtMs)
+    const blockedMs = Math.max(0, nowMs - sinceMs)
+    if (blockedMs < progress.noLandingMs) continue
+    const first = prs[0]
+    if (first === undefined) continue
+    const since = new Date(sinceMs).toISOString()
+    findings.push({
+      code: "queue-liveness-wedged",
+      message:
+        `Queue '${base}' has ${prs.length} eligible ${prs.length === 1 ? "change" : "changes"} outstanding ` +
+        `and no merge for ${formatRefusalSpan(blockedMs)} (since ${since}); this reads independently of any ` +
+        `admission-refusal finding and repeat-admission bar, and is never suppressed by either. Head: '${first.id}'.`,
+      pr: first.id,
+      specimen: `queue:${base}:liveness-wedged`,
+      count: prs.length,
       since,
       blockedMs,
     })
@@ -9242,6 +9324,11 @@ export const YRD_REFUSAL_CODES = [
   "queue-environment-refused",
   "queue-hold-expired",
   "queue-hold-ttl-missing",
+  // @i/10-yrd/queue-liveness-pair. Same shape as admission-refusal-loop above
+  // (a queue-diagnostic audit finding, never a per-run failure code): no
+  // dedicated failureDisposition branch, falls through to the generic
+  // { state: "failed", owner: "author" } default like its siblings.
+  "queue-liveness-wedged",
   "queue-never-started",
   "queue-only-merger",
   "queue-paused",

@@ -6923,7 +6923,30 @@ describe("runYrd", () => {
       since: "2026-07-09T12:00:00.000Z",
       blockedMs: 600_000,
     }
-    let findings: Array<typeof noMerge | typeof neverStarted | typeof refusalLoop | typeof expiredHold> = []
+    // @i/10-yrd/queue-liveness-pair: the (eligible, advanced-since-last-tick)
+    // pair. Unlike `refusalLoop` above, this names no PR to blame and is
+    // never suppressed by an admission-refusal finding for the same base
+    // (queue.ts queueLivenessAuditFindings), so it is safe to admit here —
+    // the 2026-08-2x specimen (a base whose head-of-line PR stood in a
+    // refusal loop was invisible to BOTH `queue-progress-stalled`, which
+    // suppresses itself when a refusal finding names the same head, and this
+    // projection, which excludes `admission-refusal-loop` on purpose) is
+    // exactly the gap this finding closes.
+    const queueLivenessWedged = {
+      code: "queue-liveness-wedged",
+      message:
+        "Queue 'main' has 1 runnable change eligible right now and no merge for 30m (since " +
+        "2026-07-09T11:40:00.000Z); this reads independently of any admission-refusal finding and is never " +
+        "suppressed by one. Head: 'PR1'.",
+      pr: "PR1",
+      specimen: "queue:main:liveness-wedged",
+      count: 1,
+      since: "2026-07-09T11:40:00.000Z",
+      blockedMs: 1_800_000,
+    }
+    let findings: Array<
+      typeof noMerge | typeof neverStarted | typeof refusalLoop | typeof expiredHold | typeof queueLivenessWedged
+    > = []
     const progressApp = {
       state: () => app.state(),
       queue: { audit: () => ({ findings }) },
@@ -6975,6 +6998,24 @@ describe("runYrd", () => {
       state: "stalled",
       observedAt: "2026-07-09T12:10:00.000Z",
       findings: [expiredHold],
+    })
+
+    findings = [queueLivenessWedged]
+    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
+      state: "stalled",
+      observedAt: "2026-07-09T12:10:00.000Z",
+      findings: [queueLivenessWedged],
+    })
+
+    // The SAME base standing in an admission-refusal loop AND a liveness
+    // wedge at once — the 2026-08-2x specimen — still stalls on the liveness
+    // finding alone: it is computed independently and carries no PR blame, so
+    // `admission-refusal-loop`'s exclusion above cannot also blind THIS read.
+    findings = [refusalLoop, queueLivenessWedged]
+    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
+      state: "stalled",
+      observedAt: "2026-07-09T12:10:00.000Z",
+      findings: [queueLivenessWedged],
     })
   })
 
