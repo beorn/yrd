@@ -70,6 +70,48 @@ const LEGACY_V3_FILE = "events-v3.jsonl"
 const LEGACY_CUTOVER = `{"v":4,"cutover":"${LEGACY_MANIFEST_FILE}"}\n`
 const SQLITE_CUTOVER_VERSION = 1
 const SCHEMA_VERSION = 2
+
+/**
+ * How a journal's recorded schema version stands against the one the reading
+ * process compiled against.
+ *
+ * The asymmetry between the two skewed directions is the point, and it is not a
+ * preference. A migration only ever ADDS structure, so a reader one schema
+ * BEHIND still finds every column it compiled against; the columns it cannot
+ * see are ones it never asks for, and reading the rest is sound. A reader AHEAD
+ * of the journal is the opposite case — the structure it compiled against does
+ * not exist yet, and the only correct move is to migrate the journal, never to
+ * read around the gap.
+ *
+ * Which direction is TOLERATED decides whether an ordinary version spread stops
+ * the fleet. A spread across checkouts always leaves some trees behind the
+ * journal, and every verb opens the journal, so refusing that direction refuses
+ * `pr submit` for everyone at once — measured twice, 2026-07-17 and again
+ * 2026-08-17 with four live source versions.
+ *
+ * Converging those trees onto one version is a separate job and deliberately
+ * not attempted here: it belongs to `@i/10-yrd/git-super-one-layer` work
+ * package B. This makes the spread survivable; it does not close it.
+ */
+export type JournalSchemaSkew =
+  | Readonly<{ kind: "same"; compiled: number; found: number }>
+  | Readonly<{ kind: "reader-behind"; compiled: number; found: number }>
+  | Readonly<{ kind: "journal-behind"; compiled: number; found: number }>
+  | Readonly<{ kind: "unreadable"; compiled: number }>
+
+/**
+ * The one decision point for a `(compiled, found)` pair. Every journal open
+ * routes its version question through here — see `assertComplete`, the single
+ * funnel all fifteen open sites call — so no site carries its own branch and
+ * the two skewed directions cannot drift apart.
+ */
+export function classifyJournalSchema(compiled: number, found: number | undefined): JournalSchemaSkew {
+  if (found === undefined) return { kind: "unreadable", compiled }
+  if (found === compiled) return { kind: "same", compiled, found }
+  if (found > compiled) return { kind: "reader-behind", compiled, found }
+  return { kind: "journal-behind", compiled, found }
+}
+
 const JOURNAL_VIEWS_GENERATION = "journal_views_generation"
 const JOURNAL_VERSION_FLOOR = "journal_version_floor"
 const HISTORY_EVICTED_THROUGH = "history_evicted_through"
@@ -465,10 +507,13 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
       if (before !== undefined) assertCursor(before)
       const batches =
         mode === "mutable"
-          ? await runtime.exclusive.run(async () => {
-              await ensureDatabase(runtime)
-              return readBatches(runtime, after, before)
-            }, { holder: "journal-read" })
+          ? await runtime.exclusive.run(
+              async () => {
+                await ensureDatabase(runtime)
+                return readBatches(runtime, after, before)
+              },
+              { holder: "journal-read" },
+            )
           : await readBatches(runtime, after, before)
       for (const batch of batches) yield batch
     },
@@ -594,10 +639,13 @@ async function inspectCheckpoint(runtime: Context, mode: JournalMode): Promise<J
     })
   }
   if (mode === "read-only") return load()
-  return runtime.exclusive.run(async () => {
-    await ensureDatabase(runtime)
-    return load()
-  }, { holder: "checkpoint-load" })
+  return runtime.exclusive.run(
+    async () => {
+      await ensureDatabase(runtime)
+      return load()
+    },
+    { holder: "checkpoint-load" },
+  )
 }
 
 async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Promise<boolean> {
@@ -750,7 +798,7 @@ async function readBatches(
 
   using database = openReadOnly(runtime.path)
   return readTransaction(database, () => {
-    const { head, snapshot } = assertComplete(database, runtime.path)
+    const { head, snapshot } = assertComplete(database, runtime.path, runtime.log)
     const end = before ?? head
     validateRange(after, end, head)
     // Serving this range would mean handing back a history with a hole in it and
@@ -860,16 +908,19 @@ async function withMutableDatabase<Result>(
 ): Promise<Result> {
   assertMutablePlatform(runtime)
   try {
-    return await runtime.exclusive.run(async () => {
-      await ensureDatabase(runtime)
-      const database = openMutable(runtime)
-      try {
-        return operation(database)
-      } finally {
-        checkpointWal(runtime, database)
-        database.close()
-      }
-    }, { holder })
+    return await runtime.exclusive.run(
+      async () => {
+        await ensureDatabase(runtime)
+        const database = openMutable(runtime)
+        try {
+          return operation(database)
+        } finally {
+          checkpointWal(runtime, database)
+          database.close()
+        }
+      },
+      { holder },
+    )
   } catch (error) {
     rethrowSqliteBusy(error)
   }
@@ -886,7 +937,7 @@ function openMutable(runtime: Context, verifyViews = true): Database {
     database.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, 1)
     const row = database.query<{ journal_mode: string }, []>("PRAGMA journal_mode = WAL").get()
     if (row?.journal_mode.toLowerCase() !== "wal") throw new Error("yrd: SQLite would not enable WAL journal mode")
-    const { head } = assertComplete(database, runtime.path)
+    const { head } = assertComplete(database, runtime.path, runtime.log)
     if (verifyViews) assertJournalViews(database, runtime.views, head)
     return database
   } catch (error) {
@@ -898,16 +949,20 @@ function openMutable(runtime: Context, verifyViews = true): Database {
 async function ensureDatabase(runtime: Context, verifyViews = true): Promise<void> {
   assertMutablePlatform(runtime)
   if (await exists(runtime.path)) {
-    let userVersion: number | undefined
+    let schema: JournalSchemaSkew
     let maintenancePending = false
     {
       using database = openReadOnly(runtime.path)
-      userVersion = database.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
-      maintenancePending = userVersion === SCHEMA_VERSION && readMetadata(database, "maintenance_pending") === "1"
+      const userVersion = database.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
+      schema = classifyJournalSchema(SCHEMA_VERSION, userVersion)
+      maintenancePending = schema.kind === "same" && readMetadata(database, "maintenance_pending") === "1"
     }
-    if (userVersion === 1) {
+    // v1 is the one journal-behind version this reader can repair by itself.
+    // Every other backward version has no migration here and meets the funnel's
+    // refusal below; a reader-behind journal needs no repair at all.
+    if (schema.kind === "journal-behind" && schema.found === 1) {
       await migrateSchemaV1(runtime)
-    } else if (userVersion === SCHEMA_VERSION && maintenancePending) {
+    } else if (schema.kind === "same" && maintenancePending) {
       await finishSchemaMaintenance(runtime)
     }
     {
@@ -917,7 +972,7 @@ async function ensureDatabase(runtime: Context, verifyViews = true): Promise<voi
     }
     ensureJournalVersionFloor(runtime)
     using complete = openReadOnly(runtime.path)
-    const { head } = assertComplete(complete, runtime.path)
+    const { head } = assertComplete(complete, runtime.path, runtime.log)
     if (verifyViews) assertJournalViews(complete, runtime.views, head)
     await finalizeExistingSqliteCutover(runtime, complete)
     return
@@ -1027,42 +1082,45 @@ async function installJournalViews(runtime: Context): Promise<void> {
 
 async function rebuildJournalViews(runtime: Context): Promise<JournalViewRebuildResult> {
   assertMutablePlatform(runtime)
-  return runtime.exclusive.run(async () => {
-    await ensureDatabase(runtime, false)
-    const database = openMutable(runtime, false)
-    try {
-      const { head } = assertComplete(database, runtime.path)
-      const entries = liveJournalEntries(database)
-      await runtime.phase("journal-views-rebuild-prepared", {
-        cursor: head,
-        frames: entries.length,
-        views: runtime.views.length,
-      })
-      database.run("BEGIN IMMEDIATE")
+  return runtime.exclusive.run(
+    async () => {
+      await ensureDatabase(runtime, false)
+      const database = openMutable(runtime, false)
       try {
-        incrementJournalViewsGeneration(database)
-        for (const view of runtime.views) view.reset(database)
-        database.run("DELETE FROM journal_views")
-        registerJournalViews(database, runtime.views)
-        for (const entry of entries) applyJournalViews(database, runtime.views, entry)
-        setJournalViewsCursor(database, runtime.views, head)
-        assertJournalViews(database, runtime.views, head)
-        database.run("COMMIT")
-      } catch (error) {
-        rollback(database)
-        throw error
+        const { head } = assertComplete(database, runtime.path)
+        const entries = liveJournalEntries(database)
+        await runtime.phase("journal-views-rebuild-prepared", {
+          cursor: head,
+          frames: entries.length,
+          views: runtime.views.length,
+        })
+        database.run("BEGIN IMMEDIATE")
+        try {
+          incrementJournalViewsGeneration(database)
+          for (const view of runtime.views) view.reset(database)
+          database.run("DELETE FROM journal_views")
+          registerJournalViews(database, runtime.views)
+          for (const entry of entries) applyJournalViews(database, runtime.views, entry)
+          setJournalViewsCursor(database, runtime.views, head)
+          assertJournalViews(database, runtime.views, head)
+          database.run("COMMIT")
+        } catch (error) {
+          rollback(database)
+          throw error
+        }
+        await runtime.phase("journal-views-rebuild-committed", {
+          cursor: head,
+          frames: entries.length,
+          views: runtime.views.length,
+        })
+        return { cursor: head, frames: entries.length, views: runtime.views.length }
+      } finally {
+        checkpointWal(runtime, database)
+        database.close()
       }
-      await runtime.phase("journal-views-rebuild-committed", {
-        cursor: head,
-        frames: entries.length,
-        views: runtime.views.length,
-      })
-      return { cursor: head, frames: entries.length, views: runtime.views.length }
-    } finally {
-      checkpointWal(runtime, database)
-      database.close()
-    }
-  }, { holder: "journal-views-rebuild" })
+    },
+    { holder: "journal-views-rebuild" },
+  )
 }
 
 async function finishSchemaMaintenance(runtime: Context): Promise<void> {
@@ -1450,10 +1508,35 @@ function incrementJournalViewsGeneration(database: Database): void {
   writeMetadata(database, JOURNAL_VIEWS_GENERATION, String(generation + 1))
 }
 
-function assertComplete(database: Database, path: string): Readonly<{ head: number; snapshot: SnapshotHeader }> {
+/**
+ * The single funnel every journal open passes through, and therefore the only
+ * place the schema classification is enforced. A `reader-behind` journal is
+ * reported and read; every other mismatch still refuses.
+ *
+ * `log` is supplied by the three operation-entry funnels — `readBatches`,
+ * `openMutable` and `ensureDatabase` — and omitted by the twelve nested calls,
+ * which would only repeat the same line once per open.
+ */
+function assertComplete(
+  database: Database,
+  path: string,
+  log?: ConditionalLogger,
+): Readonly<{ head: number; snapshot: SnapshotHeader; schema: JournalSchemaSkew }> {
   const userVersion = database.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
-  if (userVersion !== SCHEMA_VERSION) {
-    throw new Error(`yrd: unsupported or incomplete SQLite journal schema at ${path} (v${userVersion ?? "missing"})`)
+  const schema = classifyJournalSchema(SCHEMA_VERSION, userVersion)
+  if (schema.kind === "journal-behind" || schema.kind === "unreadable") {
+    throw new Error(
+      `yrd: unsupported or incomplete SQLite journal schema at ${path} (v${userVersion ?? "missing"}); ` +
+        `this reader compiled against v${SCHEMA_VERSION} and must migrate the journal before reading it`,
+    )
+  }
+  if (schema.kind === "reader-behind") {
+    // Degraded, never silent: the read continues on the columns this version
+    // knows, and says so, because a skew nobody can see is one nobody converges.
+    log?.warn?.(
+      `Journal schema v${schema.found} at ${path} is newer than this reader's v${schema.compiled}; ` +
+        `reading the columns this version knows.`,
+    )
   }
   if (readMetadata(database, "migration_complete") !== "1") {
     throw new Error(`yrd: incomplete SQLite journal migration at ${path}`)
@@ -1549,7 +1632,7 @@ function assertComplete(database: Database, path: string): Readonly<{ head: numb
   if (readMetadata(database, "facts_head") !== String(head)) {
     throw new Error(`yrd: SQLite journal lookup facts are not bound to head ${head}`)
   }
-  return { head, snapshot }
+  return { head, snapshot, schema }
 }
 
 function hasJournalViewRegistry(database: Database): boolean {
