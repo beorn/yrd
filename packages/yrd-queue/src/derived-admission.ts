@@ -392,7 +392,11 @@ export function isDerivedMemberId(id: string, recordIds: ReadonlySet<string>): b
  * branch's genuinely NEW head composes here — post-purge the derived lane is
  * the only re-entry (Q1).
  */
-export function derivedLaneBranches(bays: DeepReadonly<BaysState>, landedBranches: ReadonlySet<string>): string[] {
+export function derivedLaneBranches(
+  bays: DeepReadonly<BaysState>,
+  landedBranches: ReadonlySet<string>,
+  retiredBranches: ReadonlySet<string> = new Set(),
+): string[] {
   return Object.keys(bays.submits)
     .filter((branch) => {
       const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
@@ -412,6 +416,16 @@ export function derivedLaneBranches(bays: DeepReadonly<BaysState>, landedBranche
       //   wholesale would strand every resubmit.
       if (records.some((pr) => isLiveChange(pr as Change))) return false
       if (landedBranches.has(branch)) return false
+      // - a fact the queue RETIRED at exactly this sha derives nothing more:
+      //   the change it already produced cannot progress, and deriving a
+      //   second one mints a number that will refuse identically. This is the
+      //   derived lane's own live-ownership test, which the record test above
+      //   structurally cannot make — a derived change is recordless BY DESIGN,
+      //   so `bays.prs` is empty for its branch and every pass reads a fact
+      //   nobody owns. Passed in, sha-matched by the caller, for the same
+      //   reason `landedBranches` is: this function stays pure over
+      //   `BaysState`, and the retirement lives in the queue's projection.
+      if (retiredBranches.has(branch)) return false
       return arbitrateDerivedChange(records as Change[], bays.submits[branch]).lane === "derived"
     })
     .toSorted()
@@ -665,12 +679,15 @@ export async function landedSubmits(
             (answer.mergeCommit === undefined ? "" : ` (merged by ${answer.mergeCommit})`)
           : `${submit.sha} is NOT contained in ${index.tip}, but its change ` +
             `'${String(answer.changeId)}' already landed there` +
-            (answer.occurrences === undefined || answer.occurrences[0] === undefined
+            (answer.occurrences?.[0] === undefined
               ? ""
               : ` as ${answer.occurrences[0].commit} (${answer.occurrences[0].subject})`) +
             " — this fact is a superseded revision of a landed change"
       if (store === "not-landed") {
-        disagree("landed", `no terminal record on '${branch}' names ${submit.sha} as its integration commit, but ${proof}`)
+        disagree(
+          "landed",
+          `no terminal record on '${branch}' names ${submit.sha} as its integration commit, but ${proof}`,
+        )
       }
       continue
     }
@@ -726,6 +743,29 @@ export function landedSubmitBranches(scan: LandedSubmitScan): ReadonlySet<string
     ...scan.landed.map((row) => row.branch),
     ...scan.unresolved.filter((row) => row.reason === "degenerate").map((row) => row.branch),
   ])
+}
+
+/**
+ * The branches whose STANDING fact the queue has retired — matched by sha, not
+ * by name.
+ *
+ * The sha match is the whole design. A retirement is a verdict about one
+ * immutable commit ("this content's candidate conflicts against this base"),
+ * and it stays true of that commit forever. The moment the author pushes a
+ * rebased head the fact re-projects at a new sha, the match fails, and the
+ * branch is derivable again — so the cure needs no clearing verb, no expiry,
+ * and no operator remembering to unstick anything. A name-keyed retirement
+ * would have needed all three, and would have silently swallowed the fix.
+ */
+export function retiredSubmitBranches(
+  bays: DeepReadonly<BaysState>,
+  queues: DeepReadonly<QueuesState>,
+): ReadonlySet<string> {
+  const retired = new Set<string>()
+  for (const [branch, row] of Object.entries(queues.retiredSubmits)) {
+    if (bays.submits[branch]?.sha === row.sha) retired.add(branch)
+  }
+  return retired
 }
 
 /** One fact's landing answer, read at the moment the question is asked. */

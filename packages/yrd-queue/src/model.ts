@@ -287,6 +287,14 @@ export type Candidate = Readonly<{
   componentModelChanges?: readonly SubmoduleModelChangeAuthorization[]
   /** answers: Did preparation find this immutable Candidate mergeable? tense: historical. */
   mergeability: "unknown" | "mergeable" | "conflicting"
+  /** The paths preparation found conflicting, when it names them. A FACT about
+   * this immutable Candidate, not a forecast: these paths conflicted against
+   * this base, and no retry changes that. Carried so a refusal can name what
+   * conflicted instead of only that something did — the live specimen
+   * (2026-08-29/30) conflicted on exactly one path, a `vendor/yrd` gitlink on a
+   * sibling lineage of main's, and nothing in the refusal said so. Absent when
+   * the preparer does not enumerate them. */
+  conflicts?: readonly string[]
   createdAt: string
 }>
 
@@ -375,6 +383,7 @@ export const CandidateSchema = z
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
     componentModelChanges: z.array(SubmoduleModelChangeAuthorizationSchema).min(1).optional(),
     mergeability: z.enum(["unknown", "mergeable", "conflicting"]),
+    conflicts: z.array(z.string().trim().min(1)).min(1).optional(),
     createdAt: z.iso.datetime({ offset: true }),
   })
   .strict()
@@ -760,7 +769,49 @@ export type QueuesState = Readonly<{
   index: QueueProjectionIndex
   authority: QueueAuthorityState
   admissionRefusals: Readonly<Record<PRId, QueueAdmissionRefusal>>
+  /** Standing submit facts the queue has retired because the change they derive
+   * cannot progress, keyed by branch. See {@link QueueRetiredSubmit}. */
+  retiredSubmits: Readonly<Record<string, QueueRetiredSubmit>>
   retention: Readonly<{ terminalOrder: Readonly<Record<RunId, number>> }>
+}>
+
+/**
+ * One standing submit fact the queue retired: the change derived from it at
+ * exactly `sha` cannot progress, so the derived lane must stop deriving it.
+ *
+ * Keyed by branch and PINNED TO A SHA, which is what makes the cure work
+ * without a second verb: the author pushes new content, the fact re-projects at
+ * a new sha, this retirement no longer matches it, and the branch is derivable
+ * again. Nothing has to remember to clear a flag — the retirement is a fact
+ * about one immutable sha, and it simply stops applying.
+ *
+ * Why this exists at all: a derived member refused at the checks-before-queueing
+ * gate leaves no run record and no `admissionRefusals` row (its identity's only
+ * durable home is a run snapshot, and the refusal path resolves through one).
+ * Measured 2026-08-30 at
+ * yrd bc313acb — after a conflicting compose pass the whole journal held
+ * nothing: no run, no refusal, only the fact still standing. So the next pass
+ * derived it afresh, and the one after that, minting 79 phantom changes
+ * (PR2605…PR2692) across two facts in ~17 h with nothing anywhere saying why
+ * (@i/10-yrd/absent-branch-is-terminal). This row is the durable trace that was
+ * missing, and the reason `queue audit` can now name the branch that is not
+ * draining.
+ */
+export type QueueRetiredSubmit = Readonly<{
+  branch: string
+  /** The exact fact sha this retirement is about. A fact at any other sha is
+   * newer consent and is NOT retired. */
+  sha: string
+  base: string
+  /** The refusal code that retired it, e.g. `candidate-conflicting`. */
+  code: string
+  /** The change id derived from this fact before it was retired — the number
+   * the mint spent, which without this row escaped nowhere and was untraceable. */
+  pr: string
+  reason: string
+  /** The conflicting paths, when the candidate named them. */
+  paths?: readonly string[]
+  at: string
 }>
 
 export type ChangeEligibilityReason = Readonly<{
@@ -1230,6 +1281,15 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
    * dead-store. Re-materializing the checkout anchors the durable
    * `modules/<name>` line and disarms it. */
   "submodule-alternates-worktree-only",
+  /** A standing submit fact whose candidate conflicts before its required
+   * checks, so the change derived from it can never merge as it stands and the
+   * derived lane has stopped deriving it ({@link QueueRetiredSubmit}). Reported
+   * on the FIRST pass, not after a streak: a conflict against a fixed base is a
+   * verdict on the content, and only the author pushing new content cures it.
+   * Before this code the same condition was silent and unbounded — 79 phantom
+   * changes across two facts in ~17 h, invisible to `pr list` and to this audit
+   * (@i/10-yrd/absent-branch-is-terminal). */
+  "submit-fact-conflicting",
 ] as const
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]
@@ -1490,6 +1550,7 @@ export const Queues = Object.freeze({
       },
       authority: { current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
       admissionRefusals: {},
+      retiredSubmits: {},
       retention: { terminalOrder: {} },
     }
   },

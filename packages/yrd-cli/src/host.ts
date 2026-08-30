@@ -356,6 +356,16 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // every stored record verbatim and the forward callback's drops are all
   // no-ops on a checkpoint this recent.
   "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
+  // The composition immediately before the queue began retiring standing
+  // submit facts (@i/10-yrd/absent-branch-is-terminal, 2026-08-30) moved the
+  // identity. Not a harness value (the PR1305 / R2732 lesson above): it is
+  // the ledger's own superseded last entry in `checkpoint-bump-gate.ts` —
+  // what this project has ASKED every deployment to store since 2026-08-28.
+  // The edge needs no transformation of its own: a checkpoint this recent
+  // simply lacks `queues.retiredSubmits`, which the shared callback's
+  // `fillMissingStateFromInitial` supplies as the empty record, and the
+  // forward callback's drops are all no-ops on it.
+  "74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.

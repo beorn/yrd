@@ -130,7 +130,7 @@ import {
   type YrdContext,
 } from "./invocation.ts"
 import { requireUnqualifiedRunSelector, resolveCanonicalRunSelector } from "./qualified-run-ref.ts"
-import { observeLiveBranch } from "./remote-branch.ts"
+import { observeLiveBranch, requireObservedBranchHead } from "./remote-branch.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
   type ChangeCheckViewRecord,
@@ -6665,46 +6665,44 @@ async function viewPr(
 ): Promise<void> {
   const pr = requiredPr(app, selector)
   const json = jsonEnabled(options)
-  let liveSource: Readonly<{ head: string }> | undefined
-  if (!json) {
-    const cwd = io.cwd ?? globalThis.process.cwd()
-    const git = io.pruneGit?.(cwd)
-    const observed = await observeLiveBranch(services.process, cwd, pr.branch, git?.resolveCommit)
-    if (!observed.ok && observed.phase === "observer") {
-      raiseFailure(
-        "configuration",
-        "pr-view-branch-observer-missing",
-        `yrd: cannot observe live branch '${pr.branch}' while viewing change '${pr.id}'; ${observed.detail}`,
-      )
-    }
-    if (!observed.ok && observed.phase === "absent") {
+  // Observed for EVERY output shape. This ran only when `!json`, so the
+  // machine-readable path — the one everything scripts against — skipped the
+  // observation entirely and answered for a change whose source branch was gone
+  // as if it were ordinary (@i/10-yrd/absent-branch-is-terminal). A refusal that
+  // fires for humans and not for robots is not a refusal, it is a display
+  // choice; and the robots are what act on a stuck head.
+  const cwd = io.cwd ?? globalThis.process.cwd()
+  const git = io.pruneGit?.(cwd)
+  const observed = await observeLiveBranch(services.process, cwd, pr.branch, git?.resolveCommit)
+  const unobserved = observed.ok ? "" : observed.detail
+  const liveSource: Readonly<{ head: string }> = {
+    head: requireObservedBranchHead(observed, {
+      observer: () => ({
+        code: "pr-view-branch-observer-missing",
+        message: `yrd: cannot observe live branch '${pr.branch}' while viewing change '${pr.id}'; ${unobserved}`,
+      }),
       // `pr view` is the surface an operator reaches for while diagnosing a
       // stuck head, so it must name the branch's absence and the verb that
       // disposes of it — not send them to a `git rev-parse` that fails too.
-      raiseFailure(
-        "refusal",
-        "pr-view-branch-absent",
-        `yrd: change '${pr.id}' has no source: its branch '${pr.branch}' is gone from origin (${observed.detail})\n` +
+      absent: () => ({
+        code: "pr-view-branch-absent",
+        message:
+          `yrd: change '${pr.id}' has no source: its branch '${pr.branch}' is gone from origin (${unobserved})\n` +
           unobservableBranchRemedy("absent", pr, changeDeliveryState(pr), currentChangeRev(pr), "").text,
-      )
-    }
-    if (!observed.ok && observed.phase === "fetch") {
-      raiseFailure(
-        "configuration",
-        "pr-view-branch-refresh-failed",
-        `yrd: could not refresh live branch '${pr.branch}' from origin while viewing change '${pr.id}': ${observed.detail}\n` +
+      }),
+      fetch: () => ({
+        code: "pr-view-branch-refresh-failed",
+        message:
+          `yrd: could not refresh live branch '${pr.branch}' from origin while viewing change '${pr.id}': ${unobserved}\n` +
           `retry: yrd pr view ${pr.id}`,
-      )
-    }
-    if (!observed.ok) {
-      raiseFailure(
-        "configuration",
-        "pr-view-branch-head-missing",
-        `yrd: cannot resolve live branch '${pr.branch}' while viewing change '${pr.id}': ${observed.detail}\n` +
+      }),
+      resolve: () => ({
+        code: "pr-view-branch-head-missing",
+        message:
+          `yrd: cannot resolve live branch '${pr.branch}' while viewing change '${pr.id}': ${unobserved}\n` +
           `inspect: git rev-parse --verify origin/${pr.branch}^{commit}`,
-      )
-    }
-    liveSource = { head: observed.head }
+      }),
+    }),
   }
   const state = stateOf(app)
   const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
@@ -10542,6 +10540,7 @@ export async function refreshTrackedQueueRevisions(
             : {}),
         },
         io,
+        services,
       )
       await applyPreflightVerdict(app, services, classified, io, { track: true })
       const current = currentChangeRev(requiredPr(app, candidate.id))
@@ -11074,7 +11073,7 @@ async function applyRefusalRemedy(
       await applyRedeliveryStep(app, services, step, io)
       continue
     }
-    const preflight = await preflightRemerge(app, plan.pr, { queue: true }, io)
+    const preflight = await preflightRemerge(app, plan.pr, { queue: true }, io, services)
     commands.push(preflight.next)
     await applyPreflightVerdict(app, services, preflight, io)
     verdict = preflight.verdict

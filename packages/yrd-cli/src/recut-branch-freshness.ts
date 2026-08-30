@@ -2,7 +2,7 @@ import { changeDeliveryState, changeRevisionLineage, isTracked, type Change, typ
 import { raiseFailure } from "@yrd/core"
 import { adaptProcessGit, gitFailure, type Process } from "@yrd/process"
 import { unobservableBranchRemedy, type UnobservableBranchReason } from "./remedy-admissibility.ts"
-import { observeLiveBranch, type LiveBranchObservation } from "./remote-branch.ts"
+import { observeLiveBranch, requireObservedBranchHead, type LiveBranchObservation } from "./remote-branch.ts"
 import type { YrdCliIO, YrdCliServices } from "./types.ts"
 
 const GIT_TIMEOUT_MS = 30_000
@@ -22,42 +22,34 @@ function requireObservedBranch(
   remedy: (reason: UnobservableBranchReason) => string,
   injected: boolean,
 ): string {
-  if (!observed.ok && observed.phase === "observer") {
-    raiseFailure(
-      "configuration",
-      "recut-branch-observer-missing",
-      `yrd: cannot refresh live branch '${pr.branch}' before re-merging change '${pr.id}'; ${observed.detail}`,
-    )
-  }
-  if (!observed.ok && observed.phase === "absent") {
-    // A REFUSAL, not a configuration fault: origin answered authoritatively, so
-    // this is a settled fact about the change rather than weather that a later
-    // cycle could clear. The queue reads the kind to decide between retrying and
-    // evicting (@yrd/core/deleted-branch-head-wedges-queue).
-    raiseFailure(
-      "refusal",
-      "recut-branch-absent",
-      `yrd: change '${pr.id}' cannot be re-merged: its source branch '${pr.branch}' is gone from origin ` +
-        `(${observed.detail})\n${remedy("absent")}`,
-    )
-  }
-  if (!observed.ok && observed.phase === "fetch") {
-    raiseFailure(
-      "configuration",
-      "recut-branch-refresh-failed",
-      `yrd: could not refresh live branch '${pr.branch}' from origin: ${observed.detail}\n${remedy("unreachable")}`,
-    )
-  }
-  if (!observed.ok) {
-    raiseFailure(
-      "configuration",
-      "recut-branch-head-missing",
-      injected
-        ? `yrd: cannot verify change '${pr.id}' because ${observed.detail}`
-        : `yrd: refreshed live branch '${pr.branch}' but '${observed.target}' did not resolve to a commit: ${observed.detail}`,
-    )
-  }
-  return observed.head
+  // One ladder, shared with `pr view` and the re-merge preflight
+  // (`requireObservedBranchHead`): the phase→kind split lives there, so these
+  // three surfaces can attach different remedies but cannot disagree about
+  // which phase is a settled fact and which is weather. The `absent` case cites
+  // this class of bug: the queue reads the kind to decide between retrying and
+  // evicting (@yrd/core/deleted-branch-head-wedges-queue).
+  return requireObservedBranchHead(observed, {
+    observer: () => ({
+      code: "recut-branch-observer-missing",
+      message: `yrd: cannot refresh live branch '${pr.branch}' before re-merging change '${pr.id}'; ${observed.ok ? "" : observed.detail}`,
+    }),
+    absent: () => ({
+      code: "recut-branch-absent",
+      message:
+        `yrd: change '${pr.id}' cannot be re-merged: its source branch '${pr.branch}' is gone from origin ` +
+        `(${observed.ok ? "" : observed.detail})\n${remedy("absent")}`,
+    }),
+    fetch: () => ({
+      code: "recut-branch-refresh-failed",
+      message: `yrd: could not refresh live branch '${pr.branch}' from origin: ${observed.ok ? "" : observed.detail}\n${remedy("unreachable")}`,
+    }),
+    resolve: () => ({
+      code: "recut-branch-head-missing",
+      message: injected
+        ? `yrd: cannot verify change '${pr.id}' because ${observed.ok ? "" : observed.detail}`
+        : `yrd: refreshed live branch '${pr.branch}' but '${observed.target}' did not resolve to a commit: ${observed.ok ? "" : observed.detail}`,
+    }),
+  })
 }
 
 async function liveBranchHead(

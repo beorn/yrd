@@ -81,6 +81,21 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // individually and only two identities exist across the whole range, so no
   // intermediate value exists for a deployment to be stranded on. Current.
   "74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1",
+  // 2026-08-30 — @i/10-yrd/absent-branch-is-terminal: the queue retires a
+  // standing submit fact whose candidate cannot merge, so the derived lane
+  // stops re-deriving it. THREE identity inputs move together and none of
+  // them rewrites a stored record: `queues.retiredSubmits` joins
+  // initialState, `queue/submit/retired` joins the registered events, and
+  // `Candidate.conflicts` is a new optional key in an accepted input shape
+  // — the same trap the entry above records. A checkpoint written before
+  // this simply has no `retiredSubmits`; `fillMissingStateFromInitial`
+  // supplies the empty record on the way in, exactly as it does for
+  // `bays.submits` at 61773b43, and replay resumes after the stored cursor.
+  // The predecessor retained below is this ledger's own superseded last
+  // entry — what the project has ASKED every deployment to store since
+  // 2026-08-28 — not a harness value (the PR1305 / R2732 lesson above).
+  // Current.
+  "1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

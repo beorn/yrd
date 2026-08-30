@@ -142,6 +142,7 @@ import {
   isDerivedRunMember,
   materializeDerivedRunMembers,
   landedSubmitBranches,
+  retiredSubmitBranches,
   NO_LANDED_SUBMIT_SCAN,
   submitLandingReader,
   type DerivedAuthorityLookup,
@@ -835,6 +836,21 @@ const SettleAdmissionRefusalSchema = z
   })
   .strict()
 export type SettleAdmissionRefusalArgs = Readonly<z.infer<typeof SettleAdmissionRefusalSchema>>
+/** One standing submit fact retired because the change derived from it cannot
+ * progress. Pinned to `sha`: a later push re-projects the fact at a new sha and
+ * this row stops applying, which IS the cure — see {@link QueueRetiredSubmit}. */
+const RetireSubmitFactSchema = z
+  .object({
+    branch: GitRefSchema,
+    sha: GitShaSchema,
+    base: z.string().trim().min(1),
+    pr: z.string().trim().min(1),
+    code: z.string().trim().min(1),
+    reason: z.string().trim().min(1),
+    paths: z.array(z.string().trim().min(1)).min(1).optional(),
+  })
+  .strict()
+export type RetireSubmitFactArgs = Readonly<z.infer<typeof RetireSubmitFactSchema>>
 /** Consecutive refusals before `queue audit` calls a change wedged. One skip is a
  * normal losable race in a selectorless drain; a third identical cycle is not.
  *
@@ -1282,6 +1298,7 @@ export type QueueCommands = Readonly<{
     settleOrphanedRun: CommandHandler<SettleOrphanedRunArgs, RuntimeState>
     admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
+    retireSubmitFact: CommandHandler<RetireSubmitFactArgs, RuntimeState>
     reconcileMerge: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
   }>
 }>
@@ -1482,6 +1499,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/batch/isolated": journalEvent(1, BatchIsolatedSchema),
         "queue/admission/refused": journalEvent(1, AdmissionRefusedFactSchema),
         "queue/admission/settled": journalEvent(1, SettleAdmissionRefusalSchema),
+        "queue/submit/retired": journalEvent(1, RetireSubmitFactSchema),
       },
       replayEvents: {
         "queue/paused": ReplayPauseQueueArgsSchema,
@@ -1537,6 +1555,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               settleOrphanedRun: (args) => yrd.dispatch(commands.queue.settleOrphanedRun, args),
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
+              retireSubmitFact: (args) => yrd.dispatch(commands.queue.retireSubmitFact, args),
               reconcileMerge: (args) => yrd.dispatch(commands.queue.reconcileMerge, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
@@ -1594,6 +1613,7 @@ type QueueActions = Readonly<{
   settleOrphanedRun(args: SettleOrphanedRunArgs): Promise<CommandResult>
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
+  retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
   reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<CommandResult>
@@ -1898,7 +1918,32 @@ function createQueue<Shape extends ChangeShape>(
         },
       )
     }
-    const lane = derivedLaneBranches(snapshot.bays, landedSubmitBranches(landedScan))
+    // Facts the queue retired, matched to the sha they were retired AT. A fact
+    // standing at any other sha is a re-push — content this retirement never
+    // judged — and is deliberately absent from this set, which is what makes a
+    // rebase the cure with no clearing verb to remember.
+    const retired = retiredSubmitBranches(snapshot.bays, snapshot.queues)
+    for (const branch of retired) {
+      if (skip.has(branch)) continue
+      const row = snapshot.queues.retiredSubmits[branch]
+      if (row === undefined) continue
+      log.warn?.(
+        "queue compose will not derive a change for a submit fact it retired: change '" +
+          row.pr +
+          "' could not progress (" +
+          row.code +
+          ") and no further change derives for this sha — push a rebased head to submit again",
+        {
+          action: "compose-derived-fact-retired",
+          branch,
+          sha: row.sha,
+          pr: row.pr,
+          code: row.code,
+          ...(row.paths === undefined ? {} : { paths: [...row.paths] }),
+        },
+      )
+    }
+    const lane = derivedLaneBranches(snapshot.bays, landedSubmitBranches(landedScan), retired)
     const offered = lane.filter((branch) => !skip.has(branch))
     const branches: string[] = []
     let supersededCount = 0
@@ -2543,11 +2588,27 @@ function createQueue<Shape extends ChangeShape>(
       },
     )
     if (candidate.mergeability === "conflicting") {
+      const conflictingPaths = candidate.conflicts
       const result = {
         code: "candidate-conflicting",
-        message: `Candidate '${candidate.id}' conflicts before required checks`,
+        message:
+          `Candidate '${candidate.id}' conflicts before required checks` +
+          (conflictingPaths === undefined ? "" : ` on ${conflictingPaths.join(", ")}`),
       }
       const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", result, { candidate: candidate.id })
+      // A conflict against a fixed base is a VERDICT ON THE CONTENT: no retry
+      // clears it, only the author pushing a rebased head. For a RECORD change
+      // the refusal above is enough — the record is the durable row an operator
+      // and `queue audit` both reach. A DERIVED change has no record, and this
+      // refusal path leaves nothing behind either: refused before its checks are
+      // queued, no run record is ever created, so `noteCandidateRefusal` cannot
+      // resolve the id
+      // and journals nothing. The whole journal held nothing but the standing
+      // fact — so the next compose derived it afresh, forever. Retire the fact
+      // itself, at exactly this sha, and the loop has a floor: one fact, one
+      // change, one finding. A rebased push moves the sha and the retirement
+      // stops applying, which is the cure.
+      await retireDerivedSubmitFact(pr, snapshot.headSha, result, conflictingPaths)
       return { processed: true, refusal }
     }
     const admissionRunner =
@@ -2765,6 +2826,73 @@ function createQueue<Shape extends ChangeShape>(
         })
       }
     }
+  }
+
+  /**
+   * Retire the standing submit fact behind a DERIVED change whose content
+   * cannot progress, so the derived lane stops re-deriving it.
+   *
+   * Scoped to derived members on purpose. A RECORD change already has the
+   * durable row this writes — its record carries the refusal, and
+   * `derivedLaneBranches` excludes a branch a live record owns — so retiring
+   * the fact there would add a second answer to a question that already has
+   * one. The derived lane is the one with no answer at all.
+   *
+   * Guarded on the fact still standing at exactly `headSha`: a fact that moved
+   * while the candidate was being prepared is a re-push, consent for content
+   * this verdict never examined, and it must stay derivable. The command
+   * re-checks the same thing against committed state, so a race between the
+   * read here and the write there resolves to no-op rather than to dropping
+   * live work.
+   */
+  const retireDerivedSubmitFact = async (
+    pr: DeepReadonly<Change>,
+    headSha: string,
+    result: Readonly<{ code: string; message: string }>,
+    paths: readonly string[] | undefined,
+  ): Promise<void> => {
+    const snapshot = runtime()
+    if (hasChangeRecord(snapshot.bays, pr.id)) return
+    const submit = snapshot.bays.submits[pr.branch]
+    if (submit === undefined || submit.sha !== headSha) return
+    try {
+      await actions.retireSubmitFact({
+        branch: pr.branch,
+        sha: headSha,
+        base: submit.base,
+        pr: pr.id,
+        code: result.code,
+        reason: result.message,
+        ...(paths === undefined || paths.length === 0 ? {} : { paths: [...paths] }),
+      })
+    } catch (error) {
+      // Bookkeeping must never convert a survivable refusal into a habitant
+      // kill — but an unrecorded retirement is the phantom loop coming back, so
+      // it can never be quiet either. Loud, and the fact stays derivable: a
+      // re-mint that is REPORTED is strictly better than one that is not.
+      log.error?.("queue could not retire a submit fact whose candidate cannot merge; it will be derived again", {
+        action: "submit-fact-retirement-unrecorded",
+        branch: pr.branch,
+        sha: headSha,
+        pr: pr.id,
+        code: result.code,
+        reason: error instanceof Error ? error.message : String(error),
+      })
+      return
+    }
+    log.warn?.(
+      "queue retired a standing submit fact: its candidate conflicts before required checks, so the change it " +
+        "derives can never merge as it stands. No further change will be derived for this sha — push a rebased " +
+        "head to submit again",
+      {
+        action: "submit-fact-retired",
+        branch: pr.branch,
+        sha: headSha,
+        pr: pr.id,
+        code: result.code,
+        ...(paths === undefined || paths.length === 0 ? {} : { paths: [...paths] }),
+      },
+    )
   }
 
   const noteRevisionAdmissionRefusal = async (
@@ -4840,6 +4968,22 @@ function createQueueCommands(
     },
   })
 
+  const retireSubmitFact = command({
+    title: "Retire one standing submit fact whose derived change cannot progress",
+    params: RetireSubmitFactSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: RetireSubmitFactArgs) {
+      // Only the fact that is actually standing at this sha can be retired. A
+      // fact that moved under us is newer consent for different content and
+      // must stay derivable — retiring it would drop live work on the strength
+      // of a verdict about a sha the author has already replaced.
+      const submit = state.bays.submits[args.branch]
+      if (submit === undefined || submit.sha !== args.sha) return { events: [] }
+      const held = state.queues.retiredSubmits[args.branch]
+      if (held?.sha === args.sha && held.code === args.code) return { events: [] }
+      return { events: [event("queue/submit/retired", args)] }
+    },
+  })
+
   const settleAdmissionRefusal = command({
     title: "Settle one exact required-check refusal as needing a person",
     params: SettleAdmissionRefusalSchema,
@@ -4952,6 +5096,7 @@ function createQueueCommands(
       settleOrphanedRun,
       admissionRefused,
       settleAdmissionRefusal,
+      retireSubmitFact,
       reconcileMerge,
     },
   }
@@ -5813,6 +5958,32 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             sameCodeFirstAt: sameCode ? (prior?.sameCodeFirstAt ?? prior?.firstAt ?? applied.ts) : applied.ts,
             lastAt: applied.ts,
             ...(prior?.settlement === undefined ? {} : { settlement: prior.settlement }),
+          },
+        },
+      },
+    }
+  }
+  if (applied.name === "queue/submit/retired") {
+    const retired = RetireSubmitFactSchema.parse(applied.data)
+    // Last write wins, per branch. A second retirement at the SAME sha is the
+    // same verdict restated (a replay, or a second pass that raced the first)
+    // and converges; one at a DIFFERENT sha is a verdict about newer content
+    // and correctly replaces the older row, because only the newest fact can
+    // still be standing.
+    return {
+      queues: {
+        ...state.queues,
+        retiredSubmits: {
+          ...state.queues.retiredSubmits,
+          [retired.branch]: {
+            branch: retired.branch,
+            sha: retired.sha,
+            base: retired.base,
+            pr: retired.pr,
+            code: retired.code,
+            reason: retired.reason,
+            ...(retired.paths === undefined ? {} : { paths: [...retired.paths] }),
+            at: applied.ts,
           },
         },
       },
@@ -7481,6 +7652,13 @@ function auditQueues(
   // here: `queue audit` reported `findings: []` through a 5h46m block while each
   // cycle logged a loggily-only `compose-candidate-skip`. The refusal ledger is
   // the durable trace of exactly that, so read it (22395).
+  // Retired facts, on the FIRST pass. The refusal ledger below cannot carry
+  // these: a derived change refused before its checks are queued never reaches a run, so it
+  // never resolves an id, so nothing is ledgered against it — measured at
+  // bc313acb, the journal held only the standing fact. This is the durable
+  // trace, and this is where an operator finally reads the branch that is not
+  // draining, along with what to do about it.
+  findings.push(...retiredSubmitAuditFindings(state))
   const queued = admissionQueue(state, steps)
   const refusalFindings = admissionRefusalAuditFindings(state, queued, progress, needsPersonOwner)
   findings.push(...refusalFindings)
@@ -7488,6 +7666,49 @@ function auditQueues(
     ...queueProgressAuditFindings(state, queueProgressQueue(state, steps), refusalFindings, progress, options),
   )
   return { findings }
+}
+
+/**
+ * One finding per standing submit fact the queue retired.
+ *
+ * Reported on the first pass with no streak threshold: a candidate conflicting
+ * against a fixed base is a verdict on the CONTENT, and the only thing that
+ * clears it is the author pushing new content. Waiting three cycles to say so
+ * would only measure how long we waited.
+ *
+ * Sha-matched, like every other reader of these rows — a retirement whose fact
+ * has already moved describes content that no longer exists, and reporting it
+ * would page someone about a branch they have already fixed.
+ */
+function retiredSubmitAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditFindingEmission[] {
+  const findings: QueueAuditFindingEmission[] = []
+  for (const branch of [...retiredSubmitBranches(state.bays, state.queues)].toSorted()) {
+    const row = state.queues.retiredSubmits[branch]
+    if (row === undefined) continue
+    const where = row.paths === undefined ? "" : ` on ${row.paths.join(", ")}`
+    findings.push({
+      code: "submit-fact-conflicting",
+      message:
+        `branch '${branch}' is submitted at ${row.sha.slice(0, 12)} but its candidate conflicts with '${row.base}'` +
+        `${where}, so change '${row.pr}' could never enter required checks (${row.code}: ${row.reason}). ` +
+        "The queue has retired this fact and derives nothing further for this sha; only new content clears it.",
+      pr: row.pr,
+      specimen: `submit:${branch}:${row.sha}`,
+      refusal: row.code,
+      since: row.at,
+      resolution: [
+        `git -C <your checkout> rebase origin/${row.base}`,
+        ...(row.paths === undefined
+          ? []
+          : [
+              `resolve ${row.paths.join(", ")} — for a gitlink, set it to a commit that is a DESCENDANT of the one ` +
+                `'${row.base}' records, never a sibling lineage`,
+            ]),
+        `git push bay HEAD:refs/for/${row.base}/<issue>`,
+      ],
+    })
+  }
+  return findings
 }
 
 function admissionRefusalAuditFindings(
@@ -8997,6 +9218,17 @@ export const YRD_REFUSAL_CODES = [
   "pin-ref-mismatch",
   "pin-resolution-failed",
   "pr-not-checkable",
+  // `pr view`'s four branch-observation outcomes. Emitted since the surface
+  // existed; invisible to this census until the three copies of the
+  // observation ladder collapsed onto `requireObservedBranchHead`, which
+  // turned positional `raiseFailure(kind, code, …)` arguments into `code:`
+  // literals the scanner reads (@i/10-yrd/absent-branch-is-terminal) — the
+  // same way `proposed-commit-missing` below surfaced. `pr-view-branch-absent`
+  // now fires under `--json` too, where the observation used to be skipped.
+  "pr-view-branch-absent",
+  "pr-view-branch-head-missing",
+  "pr-view-branch-observer-missing",
+  "pr-view-branch-refresh-failed",
   // Re-merge Phase 1 turned recordProposedHead's codeCarrierRefusal
   // indirection into a direct `code:` literal (command.ts), so the census
   // sees the producer it previously missed.
@@ -9020,11 +9252,25 @@ export const YRD_REFUSAL_CODES = [
   "record-mint-retired",
   "recut-base-missing",
   "recut-branch-absent",
+  // The re-merge path's other three observation outcomes, alongside the
+  // `absent` one above; same census-visibility note as the `pr-view-branch-*`
+  // block.
+  "recut-branch-head-missing",
+  "recut-branch-observer-missing",
+  "recut-branch-refresh-failed",
   // A pre-identity change reaching the rebuild seam: it cannot be rebuilt,
   // because the candidate would carry no Change-Id (command.ts,
   // remergeDirectChangeByMerge). Migration is the author-side cure.
   "recut-change-id-missing",
   "recut-current-changed",
+  // NEW: the withdraw/subsumption preflight now observes the source branch for
+  // EVERY change before computing any verdict. `recut-preflight-branch-absent`
+  // is the refusal that stands where PR2599 got a `--burn-payload` instruction
+  // computed from a recorded head nobody had checked the branch for
+  // (@i/10-yrd/absent-branch-is-terminal).
+  "recut-preflight-branch-absent",
+  "recut-preflight-branch-observer-missing",
+  "recut-preflight-branch-refresh-failed",
   "recut-publish",
   "refusal-remedy-needs-withdraw",
   "refused-path",
@@ -9072,6 +9318,12 @@ export const YRD_REFUSAL_CODES = [
   // other YRD_QUEUE_AUDIT_FINDING_CODES member above, registered so a
   // finding code surfacing through a presentation path classifies instead
   // of throwing.
+  // A standing submit fact retired because its candidate conflicts before
+  // required checks: the derived change can never merge as it stands, and
+  // only the author pushing rebased content clears it. Emitted as a
+  // `queue audit` finding, never as a run failure — registered here because
+  // this list is the closed vocabulary EVERY emitted code resolves against.
+  "submit-fact-conflicting",
   "submodule-alternates-dead-store",
   "submodule-alternates-worktree-only",
   "submodule-composition-conflict",
