@@ -3706,6 +3706,48 @@ describe("runYrd", () => {
     expect(app.bays.get("B2")).toMatchObject({ branch: "task/reusable", status: "opening" })
   })
 
+  it("force-closes an already-closed (closed-degenerate) bay instead of refusing — the B280/B286 shape", async () => {
+    // REGRESSION @i/10-yrd/bay-prune-without-data-loss. Provision failure already
+    // auto-transitions a pathless Bay to closed-degenerate (status: "closed") at
+    // failure time — the sibling test above proves that. But an operator who runs
+    // `bay close --force` on that SAME bay (not knowing it already auto-closed —
+    // exactly the B280/B286 incident) hit a hard, unconditional "already closed"
+    // refusal regardless of --force: the escape hatch refused the one case it
+    // exists to override. The branch-reuse guard already keys off `status ===
+    // "closed"`, so the branch was never actually locked once closed-degenerate
+    // fired — the operator only ever SAW a refusal and had no way to confirm
+    // that from the CLI, so the incident routed around it with a fresh bay.
+    const app = await createApp({ failingBay: "B1" })
+    const failedOpen = await app.bays.open({ name: "pathless", branch: "task/already-closed", by: "test" })
+    await app.jobs.runMany(app.jobs.requested(failedOpen), { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.bays.get("B1")).toMatchObject({
+      status: "closed",
+      closure: { kind: "closed-degenerate" },
+    })
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io), close.stderr()).toBe(0)
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed", closure: { kind: "closed-degenerate" } })
+
+    // Releases the lock: a fresh bay can reuse the same branch afterward.
+    await app.bays.open({ name: "replacement", branch: "task/already-closed", by: "test" })
+    expect(app.bays.get("B2")).toMatchObject({ branch: "task/already-closed", status: "opening" })
+  })
+
+  it("still refuses a bare (non-force) close on an already-closed bay", async () => {
+    // The --force override is deliberate and announced; a bare close on an
+    // already-closed bay keeps refusing with the same informative message so a
+    // caller who did not ask for the override still learns the bay is done.
+    const app = await createApp({ failingBay: "B1" })
+    const failedOpen = await app.bays.open({ name: "pathless", branch: "task/no-force", by: "test" })
+    await app.jobs.runMany(app.jobs.requested(failedOpen), { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed" })
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("bay", "close", "B1"), close.io)).not.toBe(0)
+    expect(close.stderr()).toContain("already closed")
+  })
+
   it("classifies a closed-degenerate bay as all-PASS through the status CLI, not just in the store", async () => {
     // REGRESSION @yrd/22609-bayprune. The sibling test above proves the PERSISTED state is
     // right and stops there. The consumer read it back off `status === "failed"`, a literal

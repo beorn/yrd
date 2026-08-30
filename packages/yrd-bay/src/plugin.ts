@@ -261,7 +261,9 @@ export type SubmitSelectionOptions = Readonly<{
   warnings?: string[]
 }>
 
-const CloseBayArgsSchema = z.object({ bay: TextSchema, withdraw: z.boolean().optional() }).strict()
+const CloseBayArgsSchema = z
+  .object({ bay: TextSchema, withdraw: z.boolean().optional(), force: z.boolean().optional() })
+  .strict()
 export type CloseBayArgs = z.infer<typeof CloseBayArgsSchema>
 
 const ChangeCloseArgsSchema = z.object({ pr: TextSchema, reason: TextSchema.optional() }).strict()
@@ -2627,11 +2629,7 @@ function reviewFact(
       // handler and takes down the runner's whole cycle. Measured 2026-08-29 —
       // one change's conflicting preflight comment aborted every cycle for
       // three hours and starved every other change in the queue.
-      raiseFailure(
-        "refusal",
-        "review-ref-conflict",
-        `yrd: review ref '${fact.ref}' already records a different fact`,
-      )
+      raiseFailure("refusal", "review-ref-conflict", `yrd: review ref '${fact.ref}' already records a different fact`)
     }
   }
   return { events: [event(kind === "review" ? "pr/reviewed" : "pr/commented", fact)] }
@@ -2683,7 +2681,18 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   if (bay.status === "opening" || bay.status === "closing") {
     throw new Error(`yrd: bay '${bay.id}' is ${bay.status}; wait for its workspace job`)
   }
-  if (bay.status === "closed") throw new Error(`yrd: bay '${bay.id}' is already closed`)
+  if (bay.status === "closed") {
+    // --force is the explicit, announced override (@i/10-yrd/bay-prune-without-data-loss,
+    // the B280/B286 shape): a bay that already auto-closed (e.g. closed-degenerate on
+    // provision failure) still refused `close --force`, unconditionally, even though the
+    // branch-reuse guard above already keys off `status === "closed"` and had nothing
+    // left to release. The bare (non-force) refusal stays — it is useful information for
+    // a caller who did not ask for the override — but --force makes an already-closed
+    // bay an idempotent success instead of a hard error, matching --force's contract of
+    // bypassing bay status rather than compounding it.
+    if (args.force === true) return { events: [] }
+    throw new Error(`yrd: bay '${bay.id}' is already closed`)
+  }
   const pr = changeForBay(current, bay.id) ?? resolveChange(current, bay.branch)
   if (pr !== undefined && changeDeliveryState(pr) !== "pushed" && isLiveChange(pr) && args.withdraw !== true) {
     throw new Error(

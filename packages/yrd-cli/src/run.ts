@@ -4108,7 +4108,7 @@ async function closeBayWithProcessReap(
   app: YrdCliApp,
   services: YrdCliServices,
   bay: Bay,
-  options: Readonly<{ withdraw?: boolean }>,
+  options: Readonly<{ withdraw?: boolean; force?: boolean }>,
   io: YrdCliIO,
   jobContext: string,
 ): Promise<Bay> {
@@ -4121,6 +4121,7 @@ async function closeBayWithProcessReap(
   const closing = await app.bays.close({
     bay: bay.id,
     ...(options.withdraw === true ? { withdraw: true } : {}),
+    ...(options.force === true ? { force: true } : {}),
   })
   await certifyBayProcessesStopped(services.process, bay, path)
   assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), jobContext)
@@ -4169,7 +4170,7 @@ async function closeBays(
         app,
         services,
         bay,
-        { withdraw: options.withdraw },
+        { withdraw: options.withdraw, force: options.force },
         io,
         `bay '${bay.id}' close`,
       )
