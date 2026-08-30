@@ -2503,8 +2503,21 @@ function createQueue<Shape extends ChangeShape>(
         message: fact?.message ?? (error instanceof Error ? error.message : String(error)),
       }
       const kind = admissionFailureKind(result, fact?.kind === "infrastructure")
+      // Every OTHER kind this catch can compute ("refusal", "failure" — a
+      // usage/configuration-kind throw from `prepareCandidate` collapses to
+      // one of those too, since `admissionFailureKind` only ever names
+      // "infrastructure" when the source fact already did) already returns
+      // here without rethrowing; "infrastructure" was the one exception,
+      // and it turned a single environment fault (an unreachable submodule
+      // origin, a network blip) into an uncaught throw that escaped
+      // `dispatchAdmissions`'s enclosing pass loop, leaving every selector
+      // behind this one untouched — zero checking attempts, zero refusal-
+      // ledger rows, indistinguishable from never having been submitted
+      // (@i/10-yrd/checks-survive-one-raise). `refuseRevisionAdmission`
+      // above already recorded this as "infrastructure", never "refusal" —
+      // a durable fact distinguishable from a verdict on the change's
+      // content — so absorbing it here costs that distinction nothing.
       const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", result, { kind })
-      if (kind === "infrastructure") throw error
       return { processed: true, refusal }
     }
     const candidate = CandidateCreatedSchema.parse(
