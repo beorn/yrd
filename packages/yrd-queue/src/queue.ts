@@ -28,6 +28,7 @@ import {
   reviewState,
   hasChangeRecord,
   getChangeRecord,
+  isNonCheckableChangeState,
   type BaysState,
   type HasBays,
   type Change,
@@ -7459,6 +7460,19 @@ function admissionRefusalAuditFindings(
     // wedge, but it is still an unresolved judgment call nobody owns until a
     // person acts on it.
     if (refusal.settlement !== undefined) {
+      // The admission-refusal ledger is only CLEARED by fresh content or a
+      // passing admission (clearAdmissionRefusals) — never by withdraw,
+      // cancel, or integrate. A settled entry therefore outlives a change
+      // that left some OTHER way, and would otherwise keep reporting (and,
+      // once a delivery rail pages this code, keep RE-PAGING) a decision
+      // nobody can act on any more — the orphan-reaper specimen carried into
+      // this bead from @yrd/core/22346: settling a run days after its change
+      // already integrated must not page anyone about it.
+      // `compactQueueProjection` eventually drops these rows too, but only at
+      // its own compaction cadence; this is the READ-time check so no window
+      // between "change went terminal" and "next compaction" is exposed.
+      const pr = getChangeRecord(state.bays, refusal.pr)
+      if (pr !== undefined && isNonCheckableChangeState(changeDeliveryState(pr))) continue
       findings.push({
         code: "admission-refusal-needs-person",
         message:
