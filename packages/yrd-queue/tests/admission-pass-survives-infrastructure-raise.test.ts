@@ -181,4 +181,20 @@ describe("a checks-before-queueing pass survives one infrastructure raise", () =
 
     log.end()
   })
+
+  it("keeps the same candidate-preparation raise loud when the caller explicitly targets that one change", async () => {
+    let blocked = ""
+    const app = await createApp(raiseInfrastructureForever(() => blocked))
+    const poisoned = await submitAndRequestChecks(app, "issue/explicit-target")
+    blocked = poisoned.id
+
+    // Only the PASS-LEVEL blast radius was the bug (@i/10-yrd/checks-survive-
+    // one-raise's own non-goal, kept from the bead it supersedes): a caller
+    // that named this ONE change explicitly still sees the raw fact,
+    // unabsorbed — the per-member rethrow for a genuine infrastructure
+    // failure is unchanged.
+    await expect(app.queue.run({ prs: [poisoned.id] }, runtime)).rejects.toMatchObject({
+      failure: { kind: "infrastructure", code: "unreachable-submodule-origin" },
+    })
+  })
 })

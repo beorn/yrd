@@ -2474,6 +2474,14 @@ function createQueue<Shape extends ChangeShape>(
     pr: DeepReadonly<Change>,
     baseSha: string,
     runOptions?: RunJobOptions,
+    // Mirrors `dispatchAdmissions`'s own selectorless/explicit split: an
+    // implicit (selectorless) pass survives one member's candidate-
+    // preparation raise and moves on; a caller that named this ONE change
+    // explicitly still sees the raw infrastructure fact, unabsorbed. Defaults
+    // to `false` (fail-loud) so the OTHER call site — a targeted waiting-Job
+    // completion for exactly one change — keeps its existing behavior
+    // untouched without having to say so at every call.
+    selectorless = false,
   ): Promise<RevisionAdmissionOutcome> => {
     const selected = admissionSteps(steps)
     const prior = changeAdmission(pr)
@@ -2507,17 +2515,21 @@ function createQueue<Shape extends ChangeShape>(
       // usage/configuration-kind throw from `prepareCandidate` collapses to
       // one of those too, since `admissionFailureKind` only ever names
       // "infrastructure" when the source fact already did) already returns
-      // here without rethrowing; "infrastructure" was the one exception,
-      // and it turned a single environment fault (an unreachable submodule
-      // origin, a network blip) into an uncaught throw that escaped
-      // `dispatchAdmissions`'s enclosing pass loop, leaving every selector
-      // behind this one untouched — zero checking attempts, zero refusal-
-      // ledger rows, indistinguishable from never having been submitted
-      // (@i/10-yrd/checks-survive-one-raise). `refuseRevisionAdmission`
-      // above already recorded this as "infrastructure", never "refusal" —
-      // a durable fact distinguishable from a verdict on the change's
-      // content — so absorbing it here costs that distinction nothing.
+      // here without rethrowing regardless of `selectorless`; "infrastructure"
+      // was the one exception, and unconditionally rethrowing it turned a
+      // single environment fault (an unreachable submodule origin, a network
+      // blip) into an uncaught throw that escaped `dispatchAdmissions`'s
+      // enclosing pass loop, leaving every selector behind this one untouched
+      // — zero checking attempts, zero refusal-ledger rows, indistinguishable
+      // from never having been submitted (@i/10-yrd/checks-survive-one-raise).
+      // `refuseRevisionAdmission` above already recorded this as
+      // "infrastructure", never "refusal" — a durable fact distinguishable
+      // from a verdict on the change's content — so absorbing it here, in the
+      // selectorless case, costs that distinction nothing. An explicit
+      // one-shot target still sees the raw fact: that per-member rethrow is
+      // deliberately unchanged, only the pass-level blast radius was the bug.
       const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", result, { kind })
+      if (kind === "infrastructure" && !selectorless) throw error
       return { processed: true, refusal }
     }
     const candidate = CandidateCreatedSchema.parse(
@@ -2806,7 +2818,7 @@ function createQueue<Shape extends ChangeShape>(
           continue
         }
         const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
-        const outcome = await admitChangeRevision(pr, baseSha, runOptions)
+        const outcome = await admitChangeRevision(pr, baseSha, runOptions, selectorless)
         if (outcome.processed) admitted.push(pr.id)
         if (outcome.refusal !== undefined) {
           await noteRevisionAdmissionRefusal(pr.id, outcome.refusal)
