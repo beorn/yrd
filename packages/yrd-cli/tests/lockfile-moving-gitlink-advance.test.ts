@@ -29,7 +29,7 @@
  * so the positive assertion is not vacuously true.
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -236,6 +236,27 @@ describe("a lockfile-moving gitlink advance — checks-before-queueing end to en
     expect(changed.stdout.split("\n").toSorted()).toEqual(["bun.lock", "dep"])
     const gitlinkEntry = await sh(repo, ["ls-tree", result.output.commit, "--", "dep"])
     expect(gitlinkEntry.stdout).toContain(`160000 commit ${next}`)
+
+    // BEAD ACCEPTANCE ROW 3: the lockfile delta is disclosed as a run artifact naming the
+    // manifests, the authorizing refusal, and the before/after lockfile identity.
+    const disclosureDir = join(artifactRoot, "lockfile-regeneration")
+    const disclosureFiles = await readdir(disclosureDir)
+    expect(disclosureFiles).toHaveLength(1)
+    const disclosureFile = disclosureFiles[0]
+    if (disclosureFile === undefined) throw new Error("unreachable")
+    const disclosure = JSON.parse(await readFile(join(disclosureDir, disclosureFile), "utf8")) as {
+      lockfile: string
+      changedSubmoduleManifests: readonly string[]
+      frozenRefusal: string
+      lockfileChanged: boolean
+      before: { sha256: string }
+      after: { sha256: string }
+    }
+    expect(disclosure.lockfile).toBe("bun.lock")
+    expect(disclosure.changedSubmoduleManifests).toEqual(["dep/package.json"])
+    expect(disclosure.frozenRefusal).toContain("lockfile had changes, but lockfile is frozen")
+    expect(disclosure.lockfileChanged).toBe(true)
+    expect(disclosure.before.sha256).not.toBe(disclosure.after.sha256)
 
     // Does the INDEPENDENT gate's oracle agree with what the wrapper just produced?
     const candidateLock = await sh(repo, ["show", `${result.output.commit}:bun.lock`])
