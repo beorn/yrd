@@ -5,8 +5,9 @@
  * @bead @i/10-yrd/bay-prune-without-data-loss
  */
 import { afterEach, describe, expect, it } from "vitest"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
+import { safeRemoveSync } from "removely"
 import { join } from "node:path"
 import {
   classifyRecordedPid,
@@ -22,7 +23,7 @@ const USER_HZ = 100
 const roots: string[] = []
 
 afterEach(() => {
-  while (roots.length > 0) rmSync(roots.pop() as string, { recursive: true, force: true })
+  while (roots.length > 0) safeRemoveSync(roots.pop() as string, { within: tmpdir(), allowMissing: true })
 })
 
 /** A synthetic `/proc` holding one process that started `startedAfterBootMs` after boot. */

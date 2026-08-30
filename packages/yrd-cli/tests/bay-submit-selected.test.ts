@@ -18,8 +18,9 @@
  * one-shot queue run — and asserts the change is SELECTED, that the run names
  * it, and that base actually advanced to the submitted head.
  */
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, realpath, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { safeRemove } from "removely"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/host.ts"
@@ -31,7 +32,7 @@ const BAY = "delivery"
 const BRANCH = "task/delivery"
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  await Promise.all(roots.splice(0).map((root) => safeRemove(root, { within: tmpdir(), allowMissing: true })))
 })
 
 describe("a change submitted from a Bay", { timeout: 60_000 }, () => {

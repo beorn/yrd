@@ -11,5 +11,8 @@
     "@yrd/core": "workspace:*",
     "git-super": "^0.1.0",
     "loggily": "^0.10.2"
+  },
+  "devDependencies": {
+    "removely": "^0.1.0"
   }
 }

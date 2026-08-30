@@ -24,8 +24,9 @@
  * reader's refusal and the drain's repair are two readings of one fact.
  */
 import { createHash } from "node:crypto"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { safeRemove } from "removely"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import { Command, classifyJournalHistory, event, type Journal, type JournalHistoryCoverage } from "@yrd/core"
@@ -49,7 +50,7 @@ const PROP_KEY = "host-request"
 const roots: string[] = []
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  await Promise.all(roots.splice(0).map((root) => safeRemove(root, { within: tmpdir(), allowMissing: true })))
 })
 
 async function directory(): Promise<string> {

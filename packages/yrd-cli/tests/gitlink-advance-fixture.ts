@@ -7,8 +7,9 @@
  * to keep true.
  */
 
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { safeRemove } from "removely"
 import { join } from "node:path"
 import { createLogger } from "loggily"
 import { createDefaultYrdApp, type YrdCliApp, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
@@ -160,7 +161,7 @@ export type Fixture = Readonly<{
  */
 export async function superprojectWithThreeCommitSubmodule(): Promise<Fixture> {
   const parent = await mkdtemp(join(tmpdir(), "yrd-gitlink-advance-"))
-  cleanups.push(() => rm(parent, { recursive: true, force: true }))
+  cleanups.push(() => safeRemove(parent, { within: tmpdir(), allowMissing: true }))
   const submodule = join(parent, "submodule")
   const submoduleRemote = join(parent, "submodule.git")
   const root = join(parent, "root")

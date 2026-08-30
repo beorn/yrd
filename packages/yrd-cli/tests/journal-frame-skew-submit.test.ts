@@ -16,8 +16,9 @@
  * raised to match — then met by today's reader, unchanged.
  */
 import { createHash } from "node:crypto"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { safeRemove } from "removely"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
@@ -56,7 +57,7 @@ const AHEAD = JOURNAL_READER_VERSION + 1
 const roots: string[] = []
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  await Promise.all(roots.splice(0).map((root) => safeRemove(root, { within: tmpdir(), allowMissing: true })))
 })
 
 function ids(initial = 0): () => string {
