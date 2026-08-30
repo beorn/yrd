@@ -287,6 +287,7 @@ import { backwardGitlinkRefusal, gitlinkDirections, resolveBaseTip } from "./git
 import {
   formatGitlinkAdvancePlan,
   gitlinkAdvanceName,
+  materializeGitlinkTarget,
   planGitlinkAdvance,
   publishMinCommit,
   pushGitlinkAdvanceBranch,
@@ -6955,7 +6956,20 @@ async function advanceSubmoduleGitlink(
   if (prepared === undefined) return 1
   const worktree = prepared.bay.path
   if (worktree === undefined) throw new Error(`yrd: bay '${prepared.bay.id}' opened without a worktree path`)
-  await writeGitlinkAdvanceCommit(services.process, worktree, plan)
+
+  // Fetch, check out, install, stage, commit — and the order is the whole lesson, measured
+  // twice on 2026-08-30 against two different repositories' pre-commit hooks.
+  //
+  // The submodule reaches the target FIRST because the hook interrogates the bay's own
+  // submodule about the staged gitlink, and a store that does not hold the target cannot
+  // answer. The install follows the checkout for the same reason one step further out: a bay
+  // provisioned while the submodule still sat on the old commit had no `node_modules` entry
+  // for the target's workspace members, and the hook's root typecheck reported ~60 phantom
+  // "cannot find module" errors against a tree that was in fact correct. Installed after,
+  // every one of them was gone.
+  await materializeGitlinkTarget(services.process, worktree, plan)
+  await ensureBayDependencies(services.process, prepared.bay, worktree, io, undefined)
+  await writeGitlinkAdvanceCommit(services.process, worktree, plan, prepared.bay.id)
   await pushGitlinkAdvanceBranch(services.process, worktree, prepared.identity.branch)
 
   const exit = await applyChangeSelectionVerb(app, services, [prepared.identity.branch], options, io, "pr.submit")

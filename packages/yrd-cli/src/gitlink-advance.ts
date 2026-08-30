@@ -2,7 +2,7 @@ import { basename, resolve } from "node:path"
 import { changeIdForDerivedSubmit, type ChangeId } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import { adaptProcessGit, type Process } from "@yrd/process"
-import { resolveSubmoduleMain } from "@yrd/queue"
+import { resolveSubmoduleMain, SUBMODULE_MAIN_REF } from "@yrd/queue"
 import { readCommitGitlinks } from "git-super/commit-graph"
 import {
   gitlinkDirections,
@@ -32,6 +32,9 @@ import { GIT_TIMEOUT_MS, processGit } from "./pr-submodule-publication.ts"
  */
 
 const SUBMODULE_ORIGIN = "origin"
+
+/** The submodule's own main as this checkout tracks it — derived from the one ref constant. */
+const SUBMODULE_MAIN_TRACKING_REF = SUBMODULE_MAIN_REF.replace("refs/heads/", `refs/remotes/${SUBMODULE_ORIGIN}/`)
 
 /** Where the target sits relative to the submodule's own main, and what that costs. */
 export type MinCommitPublication =
@@ -369,16 +372,83 @@ export async function publishMinCommit(
 }
 
 /**
+ * Bring the bay's own submodule to the target before the gitlink is staged.
+ *
+ * The index write below can name a commit the bay has never heard of — `update-index
+ * --cacheinfo` asks no questions — and that used to be sold as a feature: a fresh bay needed
+ * no submodule sync. It is the opposite. A repository's own `pre-commit` hook reads the
+ * staged gitlink and asks the bay's submodule whether the move is a fast-forward, and a
+ * store that does not hold the target cannot answer. Measured 2026-08-30 on the verb's first
+ * real use: `git merge-base --is-ancestor` replied "Not a valid commit name", the hook read
+ * that as work being dropped, and refused a move that was in fact a clean fast-forward.
+ *
+ * The bay is also left honest by this. Staging a gitlink whose submodule stays parked on the
+ * old commit leaves the work tree permanently disagreeing with the commit it just made —
+ * `M <path>` in every `git status`, and the submit path warning about uncommitted work it
+ * cannot include.
+ *
+ * The fetch is `resolveSubmoduleMain` rather than a fetch of the bare sha: the plan has
+ * already proved the target is on the submodule's main (or `publishMinCommit` has just moved
+ * main to it), so fetching main is guaranteed to carry the object, and asks nothing of the
+ * server that a plain clone does not.
+ */
+export async function materializeGitlinkTarget(
+  process: Pick<Process, "run">,
+  worktree: string,
+  plan: GitlinkAdvancePlan,
+): Promise<void> {
+  const git = processGit(process)
+  const repository = resolve(worktree, plan.path)
+  const main = await resolveSubmoduleMain(git, repository, SUBMODULE_ORIGIN)
+  if (main.status === "unavailable") {
+    raiseFailure(
+      "refusal",
+      "gitlink-target-unmaterialized",
+      `yrd: could not fetch submodule '${plan.path}' into '${repository}', so the advance cannot bring it to ` +
+        `'${plan.to}': ${main.message}`,
+    )
+  }
+  const checkedOut = await git.run(repository, ["checkout", "--quiet", "--detach", plan.to], true)
+  if (checkedOut.code !== 0) {
+    raiseFailure(
+      "refusal",
+      "gitlink-target-unmaterialized",
+      `yrd: fetched submodule '${plan.path}' into '${repository}' but could not check out '${plan.to}' there, so a ` +
+        `pre-commit hook cannot prove the gitlink moves forward: ` +
+        `${checkedOut.stderr.trim() || checkedOut.stdout.trim() || "git checkout failed"}`,
+    )
+  }
+  // The tracking ref last, and it is not bookkeeping. `resolveSubmoduleMain` fetches into a
+  // probe ref, so a bay left here would carry a submodule sitting on a commit its own
+  // `origin/main` does not appear to contain — and readers ask exactly that question. The
+  // guard this verb exists to satisfy asks it (`merge-base --is-ancestor <sha>
+  // refs/remotes/origin/main`), and so does git itself: under `submodule.recurse`, pushing
+  // the advance branch treats an apparently-unpublished submodule commit as one it must push
+  // for you, from a detached HEAD, and fails with "HEAD does not match the named branch in
+  // the superproject". Main carries the target by now — the plan proved it or
+  // `publishMinCommit` just moved main to it — so this records what is already true.
+  const tracked = await git.run(repository, ["update-ref", SUBMODULE_MAIN_TRACKING_REF, main.sha], true)
+  if (tracked.code !== 0) {
+    raiseFailure(
+      "refusal",
+      "gitlink-target-unmaterialized",
+      `yrd: could not record submodule '${plan.path}' main '${main.sha}' as ${SUBMODULE_MAIN_TRACKING_REF} in ` +
+        `'${repository}': ${tracked.stderr.trim() || tracked.stdout.trim() || "git update-ref failed"}`,
+    )
+  }
+}
+
+/**
  * Stage the gitlink and write the generated commit in a prepared work tree.
  *
- * `update-index --cacheinfo` writes the gitlink without the submodule being checked out
- * there at all, which is what makes a fresh bay usable for this: the advance is a
- * one-entry index write, not a submodule sync.
+ * `materializeGitlinkTarget` must have run first: the index entry written here names a
+ * commit the repository's own `pre-commit` hook will interrogate the bay's submodule about.
  */
 export async function writeGitlinkAdvanceCommit(
   process: Pick<Process, "run">,
   worktree: string,
   plan: GitlinkAdvancePlan,
+  bay: string,
 ): Promise<string> {
   const git = processGit(process)
   const staged = await git.run(worktree, ["update-index", "--cacheinfo", `160000,${plan.to},${plan.path}`], true)
@@ -386,7 +456,7 @@ export async function writeGitlinkAdvanceCommit(
     raiseFailure(
       "refusal",
       "gitlink-stage-failed",
-      `yrd: could not stage gitlink '${plan.path}' at '${plan.to}' in '${worktree}': ` +
+      `yrd: could not stage gitlink '${plan.path}' at '${plan.to}' in bay '${bay}' ('${worktree}'): ` +
         `${staged.stderr.trim() || "git update-index failed"}`,
     )
   }
@@ -394,23 +464,60 @@ export async function writeGitlinkAdvanceCommit(
   // and a repository that installs its own `commit-msg` hook is entitled to see this commit.
   const committed = await git.run(worktree, ["commit", "--quiet", "-m", plan.message], true)
   if (committed.code !== 0) {
+    // BOTH streams, always. A refusing hook writes its diagnosis to whichever it likes, and
+    // the cure — the one line the reader actually needs — is usually the last of it. Picking
+    // one stream and falling back to the other drops the half that was not chosen.
     raiseFailure(
       "refusal",
       "gitlink-commit-failed",
-      `yrd: could not commit the gitlink advance in '${worktree}': ` +
-        `${committed.stderr.trim() || committed.stdout.trim() || "git commit failed"}`,
+      refusedCommitMessage(plan, bay, worktree, commandOutput(committed)),
     )
   }
   const head = await git.run(worktree, ["rev-parse", "HEAD"], true)
   if (head.code !== 0) {
-    raiseFailure("refusal", "gitlink-commit-failed", `yrd: could not read the advance commit in '${worktree}'`)
+    raiseFailure(
+      "refusal",
+      "gitlink-commit-failed",
+      refusedCommitMessage(plan, bay, worktree, commandOutput(head) || "git rev-parse HEAD failed"),
+    )
   }
   return head.stdout.trim()
+}
+
+function commandOutput(result: Readonly<{ stdout: string; stderr: string }>): string {
+  return [result.stderr.trim(), result.stdout.trim()].filter((stream) => stream !== "").join("\n")
+}
+
+/**
+ * What a refused advance commit leaves the reader holding.
+ *
+ * The bay is still there with the gitlink staged, and until this said so it was invisible:
+ * the verb reported a git failure and exited, and the half-written bay was found later by
+ * whoever tripped over it. Three things, in the order they are needed — what refused, where
+ * it refused, and how to get back to it — and all three ride the raised MESSAGE, because
+ * that is the single artifact that reaches human stderr and the `--json` failure document
+ * alike.
+ *
+ * `'yrd in <bay>'` is quoted deliberately: the failure envelope lifts a QUOTED yrd command
+ * out of the message into its machine-readable `resolution`, and an unquoted one is left
+ * behind — so the same sentence has to read well to a person and be liftable by that reader.
+ */
+function refusedCommitMessage(plan: GitlinkAdvancePlan, bay: string, worktree: string, output: string): string {
+  return [
+    `yrd: the gitlink advance commit was refused in bay '${bay}' at '${worktree}':`,
+    output === "" ? "git commit failed without saying why" : output,
+    `the bay is preserved with '${plan.path}' staged at '${plan.to}' and checked out there; apply the cure above, ` +
+      `then finish or discard it with 'yrd in ${bay}'`,
+  ].join("\n")
 }
 
 /**
  * Publish the advance branch on the superproject's origin, so `pr submit` has a ref to
  * record. Plain fast-forward push of a fresh branch — never a force, never a lease.
+ *
+ * `--no-recurse-submodules` because writing to a submodule's remote is `publishMinCommit`'s
+ * job, done deliberately and reported. `submodule.recurse=true` in a reader's own git config
+ * would otherwise turn this line into a second, silent publisher of submodule commits.
  */
 export async function pushGitlinkAdvanceBranch(
   process: Pick<Process, "run">,
@@ -418,7 +525,11 @@ export async function pushGitlinkAdvanceBranch(
   branch: string,
 ): Promise<void> {
   const git = processGit(process)
-  const pushed = await git.run(worktree, ["push", "--quiet", "origin", `HEAD:refs/heads/${branch}`], true)
+  const pushed = await git.run(
+    worktree,
+    ["push", "--quiet", "--no-recurse-submodules", "origin", `HEAD:refs/heads/${branch}`],
+    true,
+  )
   if (pushed.code !== 0) {
     raiseFailure(
       "refusal",
