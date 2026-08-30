@@ -9820,7 +9820,14 @@ function ChangeEligibility(
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return verdict({
         code: "required-check-failed",
-        message: `change '${pr.id}' required check failed${run}; fix the branch and push, or request fresh checks`,
+        // "or request fresh checks" named an operation NO verb performs: a check
+        // run is minted BY a revision, so the only thing that produces a fresh
+        // one is new content. Naming the push spelling keeps the cure
+        // executable — the cure census answers this code wherever it renders,
+        // but a producer that lies is a second copy of the wrong answer.
+        message:
+          `change '${pr.id}' required check failed${run}; checks re-run on new content only — amend or rebase ` +
+          `the branch and push it again (git push origin HEAD:refs/for/${baseIdentity(pr.base)}/<issue>)`,
       })
     }
     if (required && !reviewed.approved) {

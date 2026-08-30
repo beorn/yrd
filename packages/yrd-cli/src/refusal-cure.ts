@@ -119,10 +119,12 @@ const CURE_CENSUS: Readonly<Partial<Record<RefusalCode, CureEntry>>> = {
     evidence: [`yrd pr runs ${refusedChange(message)}`],
     resolution: [],
   }),
-  // The queue's own admission text says "or request fresh checks", and no verb
-  // requests checks — the exact class this bead exists for. A certificate is
-  // minted BY a check run, so the cure is a check run, and a check run comes
-  // from a revision.
+  // The queue's own admission text USED to offer "or request fresh checks",
+  // and no verb requests checks — the exact class this bead exists for. That
+  // producer now names new content instead (queue.ts, required-check-failed);
+  // this entry answers the same lie on the merge path, where it was never a
+  // producer's to fix. A certificate is minted BY a check run, so the cure is
+  // a check run, and a check run comes from a revision.
   "checkpoint-migration-certificate-missing": (message) => ({
     blocked:
       `A checkpoint-migration certificate is minted by a CHECK run and never by a merge, so nothing on the merge ` +
