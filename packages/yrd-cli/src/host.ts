@@ -2523,6 +2523,28 @@ export type ReceiverBayIndex = Readonly<{
 }>
 
 export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "run">, repo: string) {
+  // Derive at read, never store at write (w24-bases): a base is read live off
+  // the main repository on EVERY call, for a bay-tracked branch exactly as for
+  // a bay-less submit below, rather than trusting a value pinned once and
+  // reused. `bay.baseSha` names what the bay opened against — a fact that
+  // stays true forever — not what the branch must gate against on push N; a
+  // bay can sit active for weeks while main moves and its author rebases
+  // without ever re-opening it, and a pin frozen at open time silently
+  // answers every later push, and every reader downstream of it (validatePin,
+  // the recorded revision, audits comparing declared base to actual), with a
+  // base the change may no longer have. Never `return null` on a vanished
+  // base: null renders INTAKE_POLICY, which would answer a race about a base
+  // branch with instructions to open a bay — the caller already proved this
+  // base existed a moment ago (the bay's own open, or the push's entry
+  // check), so its disappearance is a race worth naming, not an
+  // authorization verdict.
+  const baseTip = async (base: string, subject: string): Promise<string> => {
+    const baseSha = await resolveCommit(process, repo, `refs/heads/${base}`)
+    if (baseSha === undefined) {
+      throw new Error(`yrd: base branch '${base}' disappeared between ${subject} and resolution`)
+    }
+    return baseSha
+  }
   return async (
     branch: string,
     _update: Readonly<ReceiverRefUpdate>,
@@ -2538,28 +2560,25 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
         (candidate.branch === carrier || (intent !== undefined && candidate.issue === intent.name)),
     )
     if (bay !== undefined) {
-      if (bay.baseSha === undefined) return null
       return {
         bay: bay.id,
         name: bay.name,
         ...(bay.issue === undefined ? {} : { issue: bay.issue }),
         base: bay.base,
-        baseSha: bay.baseSha,
+        baseSha: await baseTip(bay.base, "its bay's entry check"),
         // A branch push names its branch in the ref and the receiver reads it
         // there; only a submit push needs to be told.
         ...(intent === undefined ? {} : { branch: bay.branch }),
       }
     }
     if (intent === undefined) return null
-    const baseSha = await resolveCommit(process, repo, `refs/heads/${intent.base}`)
-    // Never `return null` here: null renders INTAKE_POLICY, which would answer a
-    // vanished base branch with instructions to open a bay. The push already
-    // proved this base existed a moment ago, so its disappearance is a race
-    // worth naming, not an authorization verdict.
-    if (baseSha === undefined) {
-      throw new Error(`yrd: base branch '${intent.base}' disappeared between its entry check and resolution`)
+    return {
+      name: intent.name,
+      issue: intent.name,
+      base: intent.base,
+      baseSha: await baseTip(intent.base, "its entry check"),
+      branch: carrier,
     }
-    return { name: intent.name, issue: intent.name, base: intent.base, baseSha, branch: carrier }
   }
 }
 

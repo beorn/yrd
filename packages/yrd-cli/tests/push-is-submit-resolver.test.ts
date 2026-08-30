@@ -81,19 +81,24 @@ describe("push-is-submit target resolution", () => {
   })
 
   it("attaches a submit to an active bay that already carries the same issue", async () => {
-    const { repo } = await repository()
+    const { repo, mainSha } = await repository()
     const existing = bay({ id: "B7", name: "seven", issue: "@yrd/core/my-change", branch: "cto/hand-picked" })
     const resolve = receiverTarget(bays(existing), process, repo)
 
     // Same issue, deliberately NOT the derived carrier name. Minting a second
     // carrier here would split one change across two PRs, which is the failure
     // a bay-less path makes newly possible.
+    //
+    // `baseSha` is `mainSha` (read live), not the fixture's zeroed open-time
+    // pin (w24-bases) — a bay match still means "attach to this bay," never
+    // "trust this bay's stale base," and a submit landing on an existing bay
+    // gates on exactly the same live tip a bay-less submit does above.
     await expect(resolve("unused", update, intent)).resolves.toEqual({
       bay: "B7",
       name: "seven",
       issue: "@yrd/core/my-change",
       base: "main",
-      baseSha: zero,
+      baseSha: mainSha,
       branch: "cto/hand-picked",
     })
   })
@@ -128,9 +133,13 @@ describe("push-is-submit target resolution", () => {
     )
   })
 
-  it("leaves the branch-push rule exactly as it was", async () => {
-    const { repo } = await repository()
-    const tracked = bay({ branch: "task/one", baseSha: "b".repeat(40) })
+  it("reads the base tip fresh on every branch push, never the bay's open-time pin (w24-bases)", async () => {
+    const { repo, mainSha, releaseSha } = await repository()
+    // The bay's own pin is deliberately stale — main advanced past `releaseSha`
+    // before this repository object was even returned. A resolver that trusted
+    // `bay.baseSha` would gate this push against a base the branch (and main)
+    // have long since moved past.
+    const tracked = bay({ branch: "task/one", baseSha: releaseSha })
     const resolve = receiverTarget(bays(tracked), process, repo)
     const branchUpdate: ReceiverRefUpdate = { oldSha: zero, newSha: "a".repeat(40), ref: "refs/heads/task/one" }
 
@@ -141,9 +150,38 @@ describe("push-is-submit target resolution", () => {
       bay: "B1",
       name: "bay-one",
       base: "main",
-      baseSha: "b".repeat(40),
+      baseSha: mainSha,
     })
     await expect(resolve("task/untracked", branchUpdate)).resolves.toBeNull()
+
+    // Regression: main moves AGAIN after that first read (the author rebases
+    // and pushes a fresh revision) — the very next resolve reports THAT new
+    // tip too, proving this derives fresh at read time rather than caching
+    // the first live answer either.
+    await writeFile(join(repo, "again.txt"), "again\n")
+    await git(repo, "add", "-A")
+    await git(repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "again")
+    const advancedSha = await git(repo, "rev-parse", "refs/heads/main")
+    expect(advancedSha).not.toBe(mainSha)
+    await expect(resolve("task/one", branchUpdate)).resolves.toMatchObject({ baseSha: advancedSha })
+  })
+
+  it("resolves a branch push even when the bay recorded no open-time pin at all", async () => {
+    const { repo, mainSha } = await repository()
+    const tracked = bay({ branch: "task/one", baseSha: undefined })
+    const resolve = receiverTarget(bays(tracked), process, repo)
+    const branchUpdate: ReceiverRefUpdate = { oldSha: zero, newSha: "a".repeat(40), ref: "refs/heads/task/one" }
+
+    // Previously a missing pin returned null (refused, rendering the
+    // "open a bay" intake policy) even though the bay is active and its base
+    // branch resolves fine — the old guard was protecting a value this
+    // resolver no longer needs.
+    await expect(resolve("task/one", branchUpdate)).resolves.toEqual({
+      bay: "B1",
+      name: "bay-one",
+      base: "main",
+      baseSha: mainSha,
+    })
   })
 })
 
