@@ -9288,6 +9288,10 @@ export const YRD_REFUSAL_CODES = [
   "gate-script-missing-at-base",
   "gate-script-overlay-failed",
   "gitlink-inspection",
+  // `yrd gitlink advance` could not bring its bay's submodule to the target, so nothing
+  // downstream — the repository's own pre-commit hook first among them — can prove the
+  // gitlink it is about to stage moves forward.
+  "gitlink-target-unmaterialized",
   "heartbeat-failed",
   "installed-plan-stale",
   "intent-base-moved",

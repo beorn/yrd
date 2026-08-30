@@ -8,214 +8,23 @@
  * Thirteen gitlink-only bumps reached hh main on 2026-08-29/30 and all thirteen were written
  * by hand. The end-to-end case below is the contract that replaces them: ONE invocation, and
  * the message, the Change-Id and the queue position all come back from it.
+ *
+ * The fixture lives in `gitlink-advance-fixture.ts`; `gitlink-advance-bay.test.ts` asserts
+ * the bay this verb hands to the commit is ready for the repository's own hooks.
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createLogger } from "loggily"
-import { createDefaultYrdApp, type YrdCliApp, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { failureFact } from "@yrd/core"
-import { createJournal } from "@yrd/persistence"
-import { createProcess } from "@yrd/process"
 import { afterEach, describe, expect, it } from "vitest"
-import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { gitlinkAdvanceMessage, gitlinkAdvanceName, resolveSubmoduleOperand } from "../src/gitlink-advance.ts"
-import { runYrd as runYrdRaw } from "../src/run.ts"
-import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
+import {
+  cleanupGitlinkFixtures,
+  fixtureAdvance as runAdvance,
+  gitProbe as git,
+  superprojectWithThreeCommitSubmodule,
+} from "./gitlink-advance-fixture.ts"
 
-const cleanups: Array<() => Promise<void>> = []
-afterEach(async () => {
-  await Promise.all(cleanups.splice(0).map((fn) => fn()))
-})
-
-async function git(repo: string, ...args: string[]): Promise<string> {
-  const child = Bun.spawn(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
-  if (exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${stderr || stdout}`)
-  return stdout.trim()
-}
-
-async function repository(path: string): Promise<void> {
-  await mkdir(path, { recursive: true })
-  await git(path, "init", "-q", "-b", "main")
-  await git(path, "config", "user.name", "Yrd Test")
-  await git(path, "config", "user.email", "yrd@example.invalid")
-}
-
-const config: ResolvedYrdProjectConfig = {
-  base: "main",
-  batch: 1,
-  steps: ["check", "merge"],
-  requires: [],
-  definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
-  contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
-}
-
-type Fixture = Readonly<{
-  root: string
-  submodule: string
-  /** The submodule's three main commits, oldest first. */
-  main: readonly [string, string, string]
-  /** A commit pushed to the submodule's origin but never merged on its main. */
-  offMain: string
-  /** A commit that exists only locally in the submodule and descends from its main. */
-  descendant: string
-}>
-
-/**
- * A superproject with its own origin, recording a submodule whose main carries three
- * commits, with the gitlink parked on the first. Everything an advance touches is real: two
- * bare remotes, a working submodule checkout, and a `.yrd.yml`-shaped config.
- */
-async function superprojectWithThreeCommitSubmodule(): Promise<Fixture> {
-  const parent = await mkdtemp(join(tmpdir(), "yrd-gitlink-advance-"))
-  cleanups.push(() => rm(parent, { recursive: true, force: true }))
-  const submodule = join(parent, "submodule")
-  const submoduleRemote = join(parent, "submodule.git")
-  const root = join(parent, "root")
-  const rootRemote = join(parent, "root.git")
-
-  await repository(submodule)
-  const commit = async (text: string, message: string): Promise<string> => {
-    await writeFile(join(submodule, "submodule.txt"), `${text}\n`)
-    await git(submodule, "add", "submodule.txt")
-    await git(submodule, "commit", "-qm", message)
-    return git(submodule, "rev-parse", "HEAD")
-  }
-  const one = await commit("one", "submodule: the first thing")
-  const two = await commit("two", "submodule: the second thing")
-  const three = await commit("three", "submodule: the third thing")
-  await git(parent, "init", "-q", "--bare", "-b", "main", submoduleRemote)
-  await git(submodule, "remote", "add", "origin", submoduleRemote)
-  await git(submodule, "push", "-q", "-u", "origin", "main")
-
-  // Published on the submodule's origin, never merged on its main — a real, pushed commit
-  // that is nevertheless not a min commit.
-  await git(submodule, "checkout", "-q", "-b", "someones-wip", one)
-  await writeFile(join(submodule, "wip.txt"), "wip\n")
-  await git(submodule, "add", "wip.txt")
-  await git(submodule, "commit", "-qm", "submodule: somebody's unmerged work")
-  const offMain = await git(submodule, "rev-parse", "HEAD")
-  await git(submodule, "push", "-q", "origin", `${offMain}:refs/heads/someones-wip`)
-
-  // A local-only descendant of main — the case the verb is allowed to publish itself.
-  await git(submodule, "checkout", "-q", "-b", "ahead", three)
-  await writeFile(join(submodule, "submodule.txt"), "four\n")
-  await git(submodule, "commit", "-qam", "submodule: the fourth thing")
-  const descendant = await git(submodule, "rev-parse", "HEAD")
-  await git(submodule, "checkout", "-q", "main")
-
-  await repository(root)
-  await writeFile(join(root, ".yrd.yml"), 'base: main\nbatch: 1\nchecks:\n  - {check: {run: "true"}}\n')
-  await git(root, "add", ".yrd.yml")
-  await git(root, "commit", "-qm", "yrd config")
-  await git(root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule, "dep")
-  await git(join(root, "dep"), "remote", "set-url", "origin", submoduleRemote)
-  await git(join(root, "dep"), "fetch", "-q", "origin")
-  await git(join(root, "dep"), "checkout", "-q", one)
-  await git(root, "add", "dep")
-  await git(root, "commit", "-qm", "record dep at its first commit")
-  await git(parent, "init", "-q", "--bare", "-b", "main", rootRemote)
-  await git(root, "remote", "add", "origin", rootRemote)
-  await git(root, "push", "-q", "-u", "origin", "main")
-
-  return { root, submodule, main: [one, two, three], offMain, descendant }
-}
-
-async function appFor(repo: string): Promise<{
-  app: YrdCliApp
-  process: ReturnType<typeof createProcess>
-  journal: NonNullable<YrdCliServices["journal"]>
-}> {
-  const stateDir = join(repo, ".git", "yrd")
-  const log = createLogger("yrd", [{ level: "silent" }])
-  const runtimeProcess = createProcess({ cwd: repo })
-  const journal = createJournal({ dir: stateDir, inject: { log } })
-  const app = await createDefaultYrdApp({
-    repo,
-    stateDir,
-    baysRoot: join(repo, ".bays"),
-    journal,
-    process: runtimeProcess,
-    config,
-    log,
-  })
-  cleanups.push(async () => {
-    await app.close()
-    await runtimeProcess.close()
-  })
-  // The mutable journal exposes its floor raise as a non-enumerable `administration`
-  // capability; the CLI takes it as a service. `importOrphan` is required by that service
-  // type and is not part of this suite — it throws rather than pretending to work.
-  const { bump } = (journal as unknown as { administration: NonNullable<YrdCliServices["journal"]> }).administration
-  const administration: NonNullable<YrdCliServices["journal"]> = {
-    importOrphan: () => {
-      throw new Error("gitlink-advance fixture installs no orphan journal importer")
-    },
-    ...(bump === undefined ? {} : { bump }),
-  }
-  return { app, process: runtimeProcess, journal: administration }
-}
-
-function outputIO(repo: string): { io: YrdCliIO; stdout: () => string; stderr: () => string } {
-  let stdout = ""
-  let stderr = ""
-  return {
-    io: {
-      stdout: (text) => {
-        stdout += text
-      },
-      stderr: (text) => {
-        stderr += text
-      },
-      cwd: repo,
-      runner: "cli-test",
-      leaseMs: 60_000,
-    } as YrdCliIO,
-    stdout: () => stdout,
-    stderr: () => stderr,
-  }
-}
-
-/**
- * A fresh fixture journal starts at floor v0 and refuses every write until the floor is
- * raised to the schema the running code requires. The number is the runtime's own, and if it
- * ever moves this fails loudly with the exact `yrd admin journal bump <n>` to use — which is
- * the whole reason the raise is explicit rather than automatic.
- */
-const JOURNAL_FLOOR = 3
-
-async function runAdvance(
-  repo: string,
-  args: readonly string[],
-): Promise<{ exit: number; stdout: string; stderr: string; app: YrdCliApp }> {
-  const { app, process: runtimeProcess, journal } = await appFor(repo)
-  const services: YrdCliServices = {
-    process: runtimeProcess,
-    base: "main",
-    journal,
-    queueReadModel: testQueueReadModel(app),
-    // The advance's own delivery is what this suite is about; the repository's required
-    // checks are somebody else's contract, stubbed green so a check failure cannot be
-    // mistaken for the composition failing.
-    checks: {
-      names: [],
-      run: async () => ({ stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 0, timedOut: false }),
-      install: async (cwd: string) => join(cwd, ".git/yrd/hooks/pre-submit"),
-    },
-  }
-  const bump = outputIO(repo)
-  const bumped = await runYrdRaw(app, ["yrd", "admin", "journal", "bump", String(JOURNAL_FLOOR)], bump.io, services)
-  if (bumped !== 0) throw new Error(`journal floor raise failed: ${bump.stdout()}\n${bump.stderr()}`)
-  const out = outputIO(repo)
-  const exit = await runYrdRaw(app, ["yrd", ...args], out.io, services)
-  return { exit, stdout: out.stdout(), stderr: out.stderr(), app }
-}
+afterEach(cleanupGitlinkFixtures)
 
 /**
  * A refusal read from the JSON envelope, so the assertion names the typed CODE — the stable
