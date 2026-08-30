@@ -397,6 +397,54 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(finding?.message).not.toContain("undefined")
   })
 
+  it("suppresses a needs-person finding once its change is already terminal (@i/10-yrd/needs-person-reaches-a-person)", async () => {
+    // The specimen this guards: a settled admission-refusal ledger entry is
+    // never cleared by withdraw/cancel/integrate (clearAdmissionRefusals only
+    // fires on fresh content or a passing admission) — so a change an author
+    // withdrew, or the orphan reaper settled days later, would otherwise keep
+    // reporting — and, once a delivery rail pages this code, keep RE-PAGING —
+    // a decision nobody can act on any more. that trains the reader to ignore
+    // the very channel these findings need.
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+      createMemoryJournal(),
+      ids(),
+      undefined,
+      undefined,
+      "@ci",
+    )
+    const pr = await submitAndRequestChecks(app, "issue/terminal-needs-person")
+
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "authored-gitlink",
+      kind: "refusal",
+      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+    })
+    await app.queue.settleAdmissionRefusal({
+      pr: pr.id,
+      revision: 1,
+      headSha: currentChangeRev(pr).head,
+      disposition: "needs-person",
+      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+    })
+
+    // Confirm the finding fires while the change is still live — the negative
+    // assertion below is only proof of suppression if the positive case is
+    // proven first.
+    expect(app.queue.audit().findings).toContainEqual(
+      expect.objectContaining({ code: "admission-refusal-needs-person", pr: pr.id }),
+    )
+
+    await app.bays.closePr({ pr: pr.id })
+
+    expect(app.queue.audit().findings).not.toContainEqual(
+      expect.objectContaining({ code: "admission-refusal-needs-person", pr: pr.id }),
+    )
+  })
+
   it("keeps an I/O-flavored recut certificate refusal on the ordinary retry threshold", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createApp(
