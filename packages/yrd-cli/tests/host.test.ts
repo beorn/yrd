@@ -3533,6 +3533,9 @@ checks: [{check: {run: "true"}}]
       "sh",
       "run",
       "change|mr",
+      // `gitlink advance` — advancing a submodule's recorded commit is one verb, not the
+      // hand-built sequence all thirteen of them were on 2026-08-29/30.
+      "gitlink",
       "guard",
     ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
