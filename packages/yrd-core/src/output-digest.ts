@@ -99,3 +99,51 @@ export function outputStatusCode(output: string): string | undefined {
   }
   return earliest?.code
 }
+
+/**
+ * The shapes in which a check actually STATES a judgement, so a refusal can
+ * quote the line that decided the failure instead of only its exit status.
+ *
+ * Same never-fabricate discipline as {@link STATUS_PATTERNS}: a recognized
+ * marker only. A "first non-blank line" heuristic would answer for every
+ * check, and would answer with a banner, a version line, or a progress spinner
+ * — a sentence presented as the cause that is not one, which a reader acts on.
+ * When no pattern matches, the caller names the artifact to open instead; that
+ * is a weaker cure but a true one.
+ */
+const JUDGEMENT_PATTERNS: readonly RegExp[] = [
+  // vitest/jest verdict rows, with or without their leading glyph.
+  /^(?:[×✖✗❯]\s*)?FAIL\b.*$/u,
+  /^(?:[×✖✗])\s+\S.*$/u,
+  // TypeScript, `file(line,col): error TSxxxx: …`, and the tsc/eslint
+  // `file:line:col: error: …` spelling oxlint and friends share.
+  /^\S+\(\d+,\d+\):\s*error\b.*$/u,
+  /^\S+:\d+:\d+:\s*(?:error|fatal)\b.*$/u,
+  // A tool stating its own verdict in prose — the shape a repo-local guard
+  // uses when it refuses (`error: '<verb>' … has no row in YRD_VERB_ACCESS`).
+  /^(?:error|fatal|Error|FATAL|AssertionError|TypeError|ReferenceError|SyntaxError)\b\s*:.*$/u,
+  // TAP.
+  /^not ok\b.*$/u,
+]
+
+/** How much of one judged line a refusal message may carry. Past this the line
+ * stops being a headline and starts being the log the artifact already holds. */
+const JUDGED_LINE_LIMIT = 200
+
+/**
+ * The first line of captured output in which the check STATED a failure, or
+ * `undefined` when it stated none in a shape this recognizes.
+ *
+ * First in the TEXT, for {@link outputStatusCode}'s reason: the earliest
+ * judgement is the one that started the failure and the later ones are usually
+ * its consequences.
+ */
+export function firstJudgedFailureLine(output: string): string | undefined {
+  for (const raw of output.split("\n")) {
+    const line = raw.trim()
+    if (line === "") continue
+    if (!JUDGEMENT_PATTERNS.some((pattern) => pattern.test(line))) continue
+    return line.length <= JUDGED_LINE_LIMIT ? line : `${line.slice(0, JUDGED_LINE_LIMIT - 1)}…`
+  }
+  return undefined
+}

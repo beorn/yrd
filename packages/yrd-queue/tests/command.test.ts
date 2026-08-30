@@ -3754,7 +3754,13 @@ describe("Queue command adapters", () => {
         durationMs: 321,
         timedOut: false,
       } satisfies ProcessResult,
-      error: { code: "check-failed", message: "check command exited 17" },
+      // The headline now carries the line the check itself judged on and the
+      // artifact holding the rest (@i/10-yrd/refusals-name-their-cure): an
+      // exit status alone was the whole refusal PR2695/6/7 shipped. Still
+      // CONCISE, which is what this case fences — the bound below proves the
+      // 2,100-character tail did not follow it into the message.
+      error: { code: "check-failed" },
+      message: [/^check command exited 17: /u, /src\/index\.ts\(12,4\): error TS2322/u, /output\.log$/u],
       verdict: undefined,
     },
     {
@@ -3772,11 +3778,12 @@ describe("Queue command adapters", () => {
         lastProgressBytes: 42,
       } satisfies ProcessResult,
       error: { code: "check-stalled", message: "check stalled after 120000ms without progress" },
+      message: [],
       verdict: "STALLED",
     },
   ])(
     "keeps $name errors concise while retaining durable command evidence",
-    async ({ process: result, error, verdict }) => {
+    async ({ process: result, error, message, verdict }) => {
       const cwd = await mkdtemp(join(tmpdir(), "yrd-command-failure-"))
       roots.push(cwd)
       const step = configuredCommandStep<ChangeShape>({
@@ -3811,6 +3818,10 @@ describe("Queue command adapters", () => {
       if (outcome.status !== "completed" || outcome.conclusion !== "failure") {
         throw new Error(`configured command was ${outcome.status}`)
       }
+      for (const pattern of message) expect(outcome.error.message).toMatch(pattern)
+      // "Concise" is the contract, and it is a BOUND, not a fixed sentence: a
+      // headline plus a path, never the command's output.
+      expect(outcome.error.message.length).toBeLessThan(500)
       const evidence = CommandEvidenceSchema.parse(outcome.output)
       expect(evidence).toMatchObject({
         command: ["false"],
@@ -3833,7 +3844,14 @@ describe("Queue command adapters", () => {
       }
       expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
       expect(outcome.error.message).not.toContain(evidence.detail ?? "")
-      expect(outcome.error.message).not.toContain(cwd)
+      // The message names ONE path — the artifact holding the output — and no
+      // other. That pointer is the whole point of the refusal
+      // (@i/10-yrd/refusals-name-their-cure); what this line still fences is
+      // the original defect, a message that carries the workspace's own paths
+      // because it carried the command's transcript. So the pointer comes out
+      // first, and the rest must be path-free exactly as before.
+      const withoutArtifact = outcome.error.message.replace(/;\s*full output:\s*\S+$/u, "")
+      expect(withoutArtifact).not.toContain(cwd)
     },
   )
 

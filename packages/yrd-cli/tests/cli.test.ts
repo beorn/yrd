@@ -9741,7 +9741,12 @@ describe("runYrd", () => {
       Date.parse("2026-07-09T12:02:00.000Z"),
       { state: NO_BAYS },
     ).recent[0]?.failure
-    expect(failure?.evidence).toEqual({ text: causal, href: pathToFileURL(causal).href })
+    // `evidence` is a LIST since @i/10-yrd/refusals-name-their-cure — the
+    // causative step's artifact, then anything the refusal's registered cure
+    // names. This case's message names none, so the causative artifact is the
+    // whole list, and the passed step's log is absent exactly as before.
+    expect(failure?.evidence).toEqual([{ text: causal, href: pathToFileURL(causal).href }])
+    expect(JSON.stringify(failure?.evidence)).not.toContain(prior)
     safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
   })
 
