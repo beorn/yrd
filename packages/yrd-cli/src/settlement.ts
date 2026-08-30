@@ -4,7 +4,7 @@ import { createReadStream, existsSync, mkdirSync, opendirSync, readFileSync, ren
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { ChangePropsSchema, normalizeV1CorrelationToProps } from "@yrd/bay"
-import { parseJournalFrame, type Journal } from "@yrd/core"
+import { classifyJournalHistory, parseJournalFrame, type Journal } from "@yrd/core"
 import { createExclusive, createReadOnlyJournal } from "@yrd/persistence"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { formatDuration } from "./runner-timeline.ts"
@@ -342,7 +342,56 @@ export type SettlementDrainOptions = Readonly<{
   repositoryName?: string
   /** Seam for tests; production opens the repository's own read-only journal. */
   journal?: Journal<unknown>
+  /**
+   * Where a cursor repair is announced. Not a failure channel: the repair keeps
+   * the drain working, and what it costs — a range nobody can settle — must be
+   * said out loud all the same.
+   */
+  warn?: (text: string) => void
 }>
+
+/**
+ * Raise a cursor that retention has overtaken, so a permanent journal property
+ * cannot wedge this drain forever.
+ *
+ * A cursor below the retention floor is not a failure to retry — it is the one
+ * state from which every future drain fails IDENTICALLY. `journal.read` refuses
+ * the range before yielding a single batch, so the cursor never advances, so
+ * the next drain re-reads the same cursor and refuses again. That costs far
+ * more than the evicted range: every terminal fact ABOVE the floor is perfectly
+ * readable and goes unsettled too, for as long as the deployment lives.
+ *
+ * Holding position rescues nothing. Retention DELETED those frames, and this
+ * module already says so where it refuses a missing cursor — "the range below
+ * the floor cannot be settled by anyone". The floor is also exactly where
+ * {@link registerSettlementWorker} starts a NEW worker, so a resumed worker
+ * that has been overtaken is in the position the design already accepts as
+ * correct; the only question left is whether it says so.
+ *
+ * It says so. The skipped span is named, once, at the crossing — the repair is
+ * durable, so the next drain classifies as `covered` and stays quiet.
+ */
+async function alignCursorToFloor(
+  cursorPath: string,
+  owner: string | undefined,
+  stored: number,
+  evictedThrough: number,
+  warn: ((text: string) => void) | undefined,
+): Promise<number> {
+  const coverage = classifyJournalHistory(evictedThrough, stored)
+  if (coverage.kind === "covered") return stored
+  // Written BEFORE the drain: the range is gone whether or not this pass
+  // succeeds, and a repair that only survives a clean drain would replay this
+  // same warning on every failure that follows.
+  await writeSettlementCursor(cursorPath, owner, coverage.evictedThrough)
+  warn?.(
+    `warning: Yrd settlement for ${owner ?? "the ownerless observer"} resumed at cursor ` +
+      `${coverage.evictedThrough} instead of ${coverage.from}: the retention window evicted history through ` +
+      `${coverage.evictedThrough}, so terminal facts in (${coverage.from}, ${coverage.evictedThrough}] are gone ` +
+      "from the journal and can never be settled by anyone. Everything above the floor still settles normally.\n",
+  )
+  return coverage.evictedThrough
+}
 
 /**
  * Settle every terminal fact this hook owns, then advance its cursor.
@@ -358,11 +407,15 @@ export async function settleCommittedTerminals(options: SettlementDrainOptions):
   const cursorPath = settlementCursorPath(options.stateDir, hook.owner)
   const journal = options.journal ?? createReadOnlyJournal({ dir: repository.stateDir })
   const evictedThrough = journal.history?.diagnostics().evictedThrough
-  const cursor = await readSettlementCursor(
+  const stored = await readSettlementCursor(
     cursorPath,
     hook.owner,
     evictedThrough === undefined ? {} : { evictedThrough },
   )
+  const cursor =
+    evictedThrough === undefined
+      ? stored
+      : await alignCursorToFloor(cursorPath, hook.owner, stored, evictedThrough, options.warn)
   try {
     for await (const batch of journal.read(cursor)) {
       const { targets, integrated } = terminalSettlementTargets(batch.values, hook.key)
@@ -600,6 +653,7 @@ export async function runYrdSettlementWorker(
         ...named,
         retries,
         journal,
+        warn: io.stderr,
       })
     if (!habitant) {
       await report(await drain(BUSY_RETRIES), settler.owner)

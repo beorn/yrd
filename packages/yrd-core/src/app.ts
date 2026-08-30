@@ -39,7 +39,15 @@ import {
 import { systemClock } from "./clock.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
 import { stage } from "./stage-clock.ts"
-import type { Cursor, Journal, JournalCheckpoint, JournalHistory, JournalHistoryDiagnostics } from "./journal.ts"
+import { classifyJournalHistory } from "./journal.ts"
+import type {
+  Cursor,
+  Journal,
+  JournalCheckpoint,
+  JournalHistory,
+  JournalHistoryCoverage,
+  JournalHistoryDiagnostics,
+} from "./journal.ts"
 
 export type { DeepReadonly } from "./immutable.ts"
 
@@ -703,13 +711,30 @@ export async function createYrd<State extends object, Commands extends CommandTr
    * of letting the journal's replay refusal open the app with a bare
    * RangeError.
    */
+  /**
+   * Can this app still replay from the beginning?
+   *
+   * Four sites below need that answer and each once spelled it
+   * `evictedThrough > 0` by hand. They ask one question — whether cursor 0 is
+   * under the retention floor — so they ask it in one place, and a fifth site
+   * cannot invent a sixth spelling.
+   *
+   * Note what these sites do NOT decide: whether an eviction is fatal. Every
+   * refusal below is fatal on a COMPOUND fact — the checkpoint that authorized
+   * the eviction is missing, unmigratable, or of the wrong identity — and the
+   * eviction is what removes the fallback, never the failure itself. A caller
+   * holding a usable checkpoint never reaches any of them.
+   */
+  const replayFromStart = (): JournalHistoryCoverage =>
+    classifyJournalHistory(history?.diagnostics().evictedThrough ?? 0, 0)
+
   const foldFromEmpty = async (): Promise<Projection> => {
-    const evictedThrough = history?.diagnostics().evictedThrough ?? 0
-    if (evictedThrough > 0) {
+    const coverage = replayFromStart()
+    if (coverage.kind === "below-floor") {
       raiseFailure(
         "infrastructure",
         "saved-state-unrebuildable",
-        `yrd: Yrd's saved state must be rebuilt from the journal, but history below cursor ${evictedThrough + 1} ` +
+        `yrd: Yrd's saved state must be rebuilt from the journal, but history below cursor ${coverage.evictedThrough + 1} ` +
           `was evicted by the retention window, so it cannot be replayed from the beginning`,
       )
     }
@@ -875,8 +900,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
               checkpoint = migrateProjectionCheckpoint(definition, predecessor, checkpointIdentity)
             } catch (error) {
               if (failureFact(error)?.code === "checkpoint-migration-missing") {
-                const evictedThrough = history?.diagnostics().evictedThrough ?? 0
-                if (evictedThrough === 0) {
+                const coverage = replayFromStart()
+                if (coverage.kind === "covered") {
                   reportSavedStateRebuild("Saved state has no migration path; rebuilding it from complete history.")
                   return undefined
                 }
@@ -884,7 +909,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
                   "configuration",
                   "checkpoint-migration-missing",
                   `yrd: no checkpoint migration path exists from '${predecessor.identity}' to '${checkpointIdentity}'; ` +
-                    `rebuild from history is unavailable because history through cursor ${evictedThrough} was evicted. ` +
+                    `rebuild from history is unavailable because history through cursor ${coverage.evictedThrough} was evicted. ` +
                     checkpointMigrationRemedy(
                       definition[checkpointMigrations],
                       predecessor.identity,
@@ -895,13 +920,13 @@ export async function createYrd<State extends object, Commands extends CommandTr
               throw error
             }
           } else {
-            const evictedThrough = history?.diagnostics().evictedThrough ?? 0
-            if (evictedThrough > 0) {
+            const coverage = replayFromStart()
+            if (coverage.kind === "below-floor") {
               raiseFailure(
                 "configuration",
                 "checkpoint-identity-mismatch",
                 `yrd: stored checkpoint identity '${predecessor.identity}' does not match computed projection identity ` +
-                  `'${checkpointIdentity}'; history through cursor ${evictedThrough} was evicted under the stored ` +
+                  `'${checkpointIdentity}'; history through cursor ${coverage.evictedThrough} was evicted under the stored ` +
                   "checkpoint's authority",
               )
             }
@@ -1088,13 +1113,13 @@ export async function createYrd<State extends object, Commands extends CommandTr
     // above refuses. Say instead where coverage begins, in the product's own
     // failure vocabulary, rather than let the journal's replay refusal reach a
     // caller as an unclassified RangeError.
-    const evictedThrough = history.diagnostics().evictedThrough
-    if (evictedThrough > 0) {
+    const coverage = replayFromStart()
+    if (coverage.kind === "below-floor") {
       raiseFailure(
         "refusal",
         "history-evicted",
-        `yrd: history coverage begins at cursor ${evictedThrough + 1} ` +
-          `(${evictedThrough} frames evicted by the retention window), so the complete history is no longer replayable; ` +
+        `yrd: history coverage begins at cursor ${coverage.evictedThrough + 1} ` +
+          `(${coverage.evictedThrough} frames evicted by the retention window), so the complete history is no longer replayable; ` +
           `run 'yrd log' for the live state, which the checkpoint still holds in full`,
       )
     }

@@ -6,6 +6,7 @@ import { gunzipSync } from "node:zlib"
 import { constants, Database } from "bun:sqlite"
 import {
   JOURNAL_READER_VERSION,
+  classifyJournalHistory,
   createFailure,
   journalFrameCompatibility,
   observeYrdLifecycle,
@@ -804,10 +805,16 @@ async function readBatches(
     // Serving this range would mean handing back a history with a hole in it and
     // no way for the reader to tell. Refuse instead, and name the first cursor
     // that can still be replayed.
-    const evictedThrough = readEvictedThrough(database)
-    if (after < evictedThrough) {
+    //
+    // This refusal is the PRIMITIVE saying it cannot serve what was asked, not
+    // a verdict that the eviction is fatal — `classifyJournalHistory` is what
+    // callers ask before they get here, and a caller that can legitimately
+    // start at the floor (a settlement drain) moves its own cursor rather than
+    // ever reaching this line.
+    const coverage = classifyJournalHistory(readEvictedThrough(database), after)
+    if (coverage.kind === "below-floor") {
       throw new RangeError(
-        `yrd: journal history through cursor ${evictedThrough} was evicted by the retention window; replay from ${evictedThrough} or later, or use the checkpoint`,
+        `yrd: journal history through cursor ${coverage.evictedThrough} was evicted by the retention window; replay from ${coverage.evictedThrough} or later, or use the checkpoint`,
       )
     }
     if (after === end) return []
