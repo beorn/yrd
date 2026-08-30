@@ -3748,6 +3748,65 @@ describe("runYrd", () => {
     expect(close.stderr()).toContain("already closed")
   })
 
+  it("refuses --force on an already-closed bay whose freed branch a live change now owns", async () => {
+    // REGRESSION @i/10-yrd/bay-prune-without-data-loss (lead amendment, originally
+    // @yrd/submit-records-or-refuses box 3 / bead 23160: "a submitted change resolves
+    // through its bay's mutable path, so deleting the bay strands it"). This is the
+    // already-closed --force shortcut above COMBINED with branch reuse (the sibling
+    // "closes a failed provision... releases its branch" test): B1's provision fails
+    // pre-workspace and frees branch task/shared-live; B2 reuses that SAME branch and
+    // submits a live, unmerged change from it. B1 is a different, already-closed bay,
+    // but closeBay's own PR lookup falls back to a branch match (changeForBay(bay.id)
+    // ?? resolveChange(bay.branch)) — so `close --force B1` must still resolve PR1 as
+    // the live change on that branch and refuse, naming the change and both cures
+    // (withdraw, or run it through the merge queue). No prune path — --force here, or
+    // the timer-driven admin bay prune --apply that calls the same closeBay — may ever
+    // delete a bay a live, unwithdrawn change still depends on.
+    const app = await createApp({ failingBay: "B1" })
+    const failedOpen = await app.bays.open({ name: "pathless", branch: "task/shared-live", by: "test" })
+    await app.jobs.runMany(app.jobs.requested(failedOpen), { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed", closure: { kind: "closed-degenerate" } })
+
+    await openTestBay(app, { name: "replacement", branch: "task/shared-live" })
+    await submitBayFixture(app, "B2")
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io)).not.toBe(0)
+    expect(close.stderr()).toContain("PR1")
+    expect(close.stderr()).toContain("merge queue")
+    expect(close.stderr()).toContain("--withdraw")
+    // Neither B1 nor the live change moved.
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed" })
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+  })
+
+  it("refuses both prune and --force on a Bay whose change is submitted and unmerged", async () => {
+    // REGRESSION @i/10-yrd/bay-prune-without-data-loss (lead amendment; @yrd/submit-records-or-refuses
+    // box 3, originally bead 23160). The plain, single-bay shape: no prune path — the census a
+    // timer-driven `admin bay prune --apply` consults, or a direct `bay close --force` — may ever
+    // delete a bay a live, unwithdrawn change still resolves through.
+    const app = await createApp()
+    await openTestBay(app, { name: "live-change", branch: "task/live-change" })
+    await submitBayFixture(app, "B1")
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+
+    const prune = outputIO()
+    expect(await runYrd(app, yrd("admin", "bay", "prune", "--json"), prune.io), prune.stderr()).toBe(1)
+    expect(JSON.parse(prune.stdout())).toMatchObject({
+      dryRun: true,
+      outcomes: { prunable: [], kept: [{ bay: "B1", reasons: ["pr"] }], paged: [] },
+    })
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io)).not.toBe(0)
+    expect(close.stderr()).toContain("PR1")
+    expect(close.stderr()).toContain("merge queue")
+    expect(close.stderr()).toContain("--withdraw")
+    expect(app.bays.get("B1")).toMatchObject({ status: "active" })
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+  })
+
   it("classifies a closed-degenerate bay as all-PASS through the status CLI, not just in the store", async () => {
     // REGRESSION @yrd/22609-bayprune. The sibling test above proves the PERSISTED state is
     // right and stops there. The consumer read it back off `status === "failed"`, a literal
