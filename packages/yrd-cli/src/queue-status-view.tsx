@@ -4500,6 +4500,16 @@ export function queueNoRunnerBanner(
  * Inert when `!live` (the one-shot print path has no app scope and a static
  * print cannot tick) — returns `serverNowMs` unchanged, matching the file's
  * existing live/static split for the activity pulse.
+ *
+ * This is also the ONE interval that runs for the life of `yrd watch`
+ * (@yrd/cli/watch-rss-bounded, 2026-08-30): a 4h live soak measured RSS
+ * 1,775.8 MB -> 14,918.0 MB, 59 MB/min, root-caused to React 19's dev-build
+ * `performance.measure()`/`mark()` firing ~342/s and never cleared — 5.6 MB
+ * retained after 20k uncleared measures, 289 bytes after one
+ * `clearMeasures()` call. The tick already fires every `tickMs` (default
+ * 1s), far shorter than the growth horizon, so clearing the performance
+ * timeline here bounds its entry count regardless of which dev-build
+ * instrumentation is producing the entries.
  */
 function useCoarseNow(serverNowMs: number, live: boolean, tickMs = 1000): number {
   const capturedAtRef = useRef(Date.now())
@@ -4511,7 +4521,13 @@ function useCoarseNow(serverNowMs: number, live: boolean, tickMs = 1000): number
   const [, forceTick] = useState(0)
   useEffect(() => {
     if (!live) return
-    const id = setInterval(() => forceTick((tick) => (tick + 1) % 1_000_000), tickMs)
+    const id = setInterval(() => {
+      // Bound the dev-build performance timeline before it grows again this
+      // tick — see the doc comment above.
+      performance.clearMeasures()
+      performance.clearMarks()
+      forceTick((tick) => (tick + 1) % 1_000_000)
+    }, tickMs)
     return () => clearInterval(id)
   }, [live, tickMs])
   if (!live) return serverNowMs
