@@ -19,11 +19,44 @@
 
 /**
  * Commits behind the source checkout before a habitant considers itself stale.
- * Two, not one: a single commit is routinely the merge that the habitant
- * itself just produced, and recycling on it would restart the runner after
- * every merge. Two means the world moved on without us.
+ *
+ * **One, lowered from two 2026-08-30.** The value is not the interesting part;
+ * the premise that defended it was, and that premise had stopped being true.
+ *
+ * It read: "a single commit is routinely the merge that the habitant itself
+ * just produced, and recycling on it would restart the runner after every
+ * merge." That describes a comparison against the QUEUE repository — the one
+ * the habitant merges into. This check does not make that comparison and has
+ * not for some time: `readSourceAdvance` is called with `yrdSourceCheckout()`,
+ * the Yrd checkout `implementationSource` was captured from, after comparing
+ * against the `/hh` checkout was found returning 37576 for a habitant that was
+ * exactly current. A merge the habitant produces lands in the queue repository
+ * and cannot advance the observed head by one, or at all. The threshold was
+ * therefore paying a real cost against a risk it was no longer holding.
+ *
+ * That cost, measured over the last 60 gitlink advances to the Yrd submodule
+ * in its host superproject (2026-08-30): **35 of them carried exactly one Yrd
+ * commit.** At a threshold
+ * of two, the majority of Yrd changes could not deploy to a running habitant on
+ * their own — each waited for some later, unrelated advance to push the
+ * cumulative count over the line. That is the 2026-08-15 specimen exactly: a
+ * chief-ruled fail-safe merged and sat inert for hours, because "most urgent
+ * fixes are exactly one commit."
+ *
+ * The flapping risk the old comment named is real and is still held — by three
+ * mechanisms, none of which is this number:
+ *
+ * 1. {@link HABITANT_SOURCE_STALE_OBSERVATIONS} — two consecutive agreeing
+ *    observations, so a checkout caught mid-write cannot trigger a recycle.
+ * 2. The `checkout-behind` verdict in {@link decideHabitantSource} — one
+ *    attempt per (booted, head) pair, so a habitant that recycles and comes
+ *    back on the same sha stops and names the remedy instead of looping.
+ * 3. The supervisor's restart budget — the outer bound when the newly-checked-
+ *    out source cannot boot at all, a case this threshold never guarded, since
+ *    a process that dies at startup never reaches this check no matter what
+ *    number it holds.
  */
-export const HABITANT_SOURCE_STALE_BEHIND = 2
+export const HABITANT_SOURCE_STALE_BEHIND = 1
 
 /**
  * Consecutive observations that must agree before the habitant acts. One
