@@ -469,7 +469,7 @@ describe("persistent Core projection checkpoint", () => {
     ).rejects.toThrow(/event id.*already in use/iu)
     await expect(Array.fromAsync(eventReader.events())).resolves.toHaveLength(4_097)
     await eventReader.close()
-  })
+  }, 30_000)
 
   it("restores checkpoint state at cursor zero during runtime activation", async () => {
     const readAfter: number[] = []

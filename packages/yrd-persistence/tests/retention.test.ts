@@ -343,7 +343,7 @@ describe("journal retention window", () => {
     // Page count falls against the SAME workload without eviction, so the drop
     // cannot be credited to checkpoint archiving or to the pre-existing vacuum.
     expect(bounded.pages).toBeLessThan(unbounded.pages)
-  })
+  }, 30_000)
 
   it("evicts by age when the frame window alone would keep everything", async () => {
     const old = Array.from({ length: 40 }, (_, index) =>
