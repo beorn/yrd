@@ -48,7 +48,26 @@ describe("shared queue-state presentation", () => {
     ["authored-gitlink", "needs-author", "none", "author"],
     ["check-failed", "failed", "none", "author"],
     ["run-canceled", "canceled", "none", "queue"],
+    // The `plain-rejected` bucket, which failureDisposition did not read: its
+    // members silently took the author default, which is exactly the routing
+    // the bucket's own contract forbids ("no author-blame routing and no
+    // auto-retry; the operator re-evaluates").
+    ["intent-base-moved", "failed", "none", "queue"],
+    ["intent-batch-refused", "failed", "none", "queue"],
+    ["intent-component-unknown", "failed", "none", "queue"],
   ] as const)("classifies %s once for every watch/log consumer", (code, state, automation, owner) => {
     expect(failureDisposition(code)).toEqual({ state, automation, owner })
   })
+
+  // The measured defect this vocabulary exists for: a certificate is minted by
+  // a CHECK run and never by the author's branch, so billing the author is a
+  // refusal naming the wrong party. It sat in no composition bucket at all, so
+  // `failureDisposition` fell through to `{ failed, none, author }` and
+  // consumed a submit authority for an operator's certificate.
+  it.each(["checkpoint-migration-certificate-missing", "checkpoint-migration-certificate-stale"])(
+    "never bills the author for %s, an operator-owned certificate",
+    (code) => {
+      expect(failureDisposition(code)).toEqual({ state: "failed", automation: "none", owner: "queue" })
+    },
+  )
 })

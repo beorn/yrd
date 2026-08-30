@@ -9206,7 +9206,21 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "component-model-authorizer-unavailable",
     "component-model-identity-unavailable",
   ]),
-  "plain-rejected": new Set<string>(["intent-base-moved", "intent-batch-refused", "intent-component-unknown"]),
+  "plain-rejected": new Set<string>([
+    "intent-base-moved",
+    "intent-batch-refused",
+    "intent-component-unknown",
+    // A checkpoint-migration certificate is minted BY a check run and never by
+    // the author's branch, so neither re-authoring nor a merge retry reaches
+    // it. Unbucketed, both codes fell through `failureDisposition` to the
+    // author default — the measured cost this whole vocabulary was built
+    // around, an operator's certificate billed to an author and a submit
+    // authority consumed with it. Not `infra-retry`: retrying the MERGE
+    // refuses identically, so an auto-requeue disposition would be a second
+    // instrument that lies.
+    "checkpoint-migration-certificate-missing",
+    "checkpoint-migration-certificate-stale",
+  ]),
 } as const
 
 const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
