@@ -120,6 +120,10 @@ export function createDurablePrNumberMint(options: Readonly<{ dir: string }>): P
         } catch {
           // The temp file may never have been created; the original error is
           // the one that matters.
+          // silent-fallback-allow: this is best-effort cleanup of a candidate
+          // file whose own write already failed — the outer catch rethrows
+          // the real failure via mintError() right after, so a cleanup-phase
+          // error here would only mask or duplicate that already-loud report.
         }
         throw mintError({ path, action: "is unwritable" }, error)
       }
