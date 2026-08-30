@@ -335,6 +335,146 @@ describe("classifyBayStatus", () => {
 })
 
 /**
+ * @failure `yrd bay status B399` BLOCKed correctly on the root tip, but a
+ *          second unique object sat in the km submodule's bay-private gitdir
+ *          on no km branch anywhere — invisible, because the oracle was fed
+ *          root facts only. `classifyBayStatus` now walks `facts.submodules`
+ *          through the SAME commit-durability ladder as the root's own
+ *          "commits" line.
+ * @level l2
+ * @consumer @yrd/cli bay status · bay close · admin bay prune · bay list --check
+ * @bead @i/10-yrd/bay-prune-without-data-loss
+ */
+describe("the submodule commit-durability ladder (B399)", () => {
+  const submoduleSha = "deadbeefcafedeadbeefcafedeadbeefcafedead"
+
+  it("BLOCKs the whole Bay when the root is clean but a submodule holds an unpublished commit", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 9,
+      ownerAlive: false,
+      // The root stays exactly as clean as `base` already made it — the
+      // defect this proves fixed is a clean root no longer hiding a dirty
+      // submodule.
+      submodules: [
+        {
+          path: "deps/widgets",
+          sha: submoduleSha,
+          remoteTrackingFresh: true,
+          tipMerged: false,
+          aheadOfOrigin: 1,
+        },
+      ],
+    })
+
+    expect(report.exit).toBe(1)
+    expect(report.safe).toBe(false)
+    expect(report.lines.find((line) => line.class === "commits")).toMatchObject({ verdict: "PASS" })
+    const submodule = report.lines.find((line) => line.class === "submodule")
+    expect(submodule?.verdict).toBe("BLOCK")
+    expect(submodule?.evidence).toContain("deps/widgets@deadbeefcafe")
+    expect(submodule?.evidence).toMatch(/1 unique commit/)
+    // Never a local ref: the cure is a real push to the component's own
+    // origin — an unqualified branch name, never a `refs/heads/`-qualified
+    // one (that literal shape is what remedy-banned-actions-guard.test.ts
+    // scans this whole tool surface for as a hand-push to a submodule).
+    expect(submodule?.evidence).toContain("cure: git -C '/repo/.bays/B1/deps/widgets' push origin")
+    expect(submodule?.evidence).toContain(`${submoduleSha}:wip/orphan-example-deps-widgets`)
+    expect(submodule?.evidence).not.toContain("refs/heads/")
+  })
+
+  it("names every submodule that is not durable, not just the first", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 9,
+      ownerAlive: false,
+      submodules: [
+        { path: "deps/widgets", sha: submoduleSha, remoteTrackingFresh: true, tipMerged: true, aheadOfOrigin: 0 },
+        {
+          path: "deps/tools",
+          sha: "f".repeat(40),
+          remoteTrackingFresh: true,
+          tipMerged: false,
+          aheadOfOrigin: 2,
+        },
+      ],
+    })
+
+    expect(report.exit).toBe(1)
+    const rows = report.lines.filter((line) => line.class === "submodule")
+    expect(rows).toHaveLength(2)
+    expect(rows.find((line) => line.evidence.startsWith("deps/widgets@"))).toMatchObject({ verdict: "PASS" })
+    expect(rows.find((line) => line.evidence.startsWith("deps/tools@"))).toMatchObject({ verdict: "BLOCK" })
+  })
+
+  it("stays SAFE when the root and every submodule are durable on their own origin", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 9,
+      ownerAlive: false,
+      submodules: [
+        {
+          path: "deps/widgets",
+          sha: submoduleSha,
+          remoteTrackingFresh: true,
+          tipMerged: true,
+          aheadOfOrigin: 0,
+        },
+      ],
+    })
+
+    expect(report.exit).toBe(0)
+    expect(report.safe).toBe(true)
+    expect(report.lines.find((line) => line.class === "submodule")).toMatchObject({
+      verdict: "PASS",
+      evidence: expect.stringContaining("deps/widgets@deadbeefcafe"),
+    })
+  })
+
+  it("is unaffected when a Bay has no submodules at all", () => {
+    const report = classifyBayStatus({ ...base, ownerPid: 9, ownerAlive: false })
+    expect(report.lines.some((line) => line.class === "submodule")).toBe(false)
+  })
+
+  it("goes UNKNOWN, never silently safe, when the submodule walk itself could not be trusted", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 9,
+      ownerAlive: false,
+      submodulesUnknown: true,
+    })
+
+    expect(report.exit).toBe(2)
+    expect(report.safe).toBeNull()
+    expect(report.lines.find((line) => line.class === "submodule")).toMatchObject({
+      verdict: "UNKNOWN",
+      evidence: expect.stringMatching(/could not enumerate/u),
+    })
+  })
+
+  it("never appends a cure it cannot run when the Bay has no live worktree path", () => {
+    const report = classifyBayStatus({
+      ...base,
+      path: undefined,
+      bayId: "B280",
+      name: "pathless",
+      ownerPid: 9,
+      ownerAlive: false,
+      worktreeMissing: true,
+      tipMerged: false,
+      aheadOfOrigin: 1,
+      submodules: [
+        { path: "deps/widgets", sha: submoduleSha, remoteTrackingFresh: true, tipMerged: false, aheadOfOrigin: 1 },
+      ],
+    })
+
+    const submodule = report.lines.find((line) => line.class === "submodule")
+    expect(submodule?.verdict).toBe("BLOCK")
+    expect(submodule?.evidence).not.toContain("cure:")
+  })
+})
+
+/**
  * @failure A Hab launch claim with no receipt read as `provider unavailable`, so 69 Bays were refused
  *          with no claim named, no cure named, and no age that could ever settle it.
  * @level l2
