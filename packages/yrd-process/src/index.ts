@@ -1,7 +1,7 @@
 import { createScope, type Scope } from "@silvery/scope"
 import { createFailure } from "@yrd/core"
 import { createLogger, type ConditionalLogger } from "loggily"
-import { accessSync, constants, statSync } from "node:fs"
+import { accessSync, constants, statSync, writeSync } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
 import { pathReapFailure, reapOwnedPath, type PathReapResult } from "./path-reaper.ts"
 
@@ -223,6 +223,67 @@ export const DEFAULT_POST_EXIT_DRAIN_GRACE_MS = 2_000
  */
 export const DEFAULT_POST_KILL_REAP_GRACE_MS = 10_000
 
+/**
+ * Every process group this process currently leads a pipe-mode child into.
+ *
+ * WHY A REGISTRY AND NOT JUST `terminate()`. `terminate()` sends SIGTERM at
+ * once and escalates to SIGKILL on a TIMER — and a timer dies with the process
+ * that armed it. Every ordinary conclusion (park/abort, timeout, stall, close)
+ * awaits its own run, so the escalation always gets to fire. An ABANDONED run
+ * does not: `executeWithHeartbeat` detaches a run it has given up on
+ * (`void execution.catch(...)`) after aborting its scope, so a runner that
+ * exits inside the kill grace leaves a TERM-ignoring child alive with nobody
+ * left to escalate. It reparents to init and keeps whatever it was doing.
+ *
+ * That is the 2026-08-18 specimen: `bun tools/manifest-co-change.ts` at 99.5%
+ * of a core for 63 minutes under an `sh -c` wrapper owned by PPID 1, found by
+ * `/cpu` rather than by the queue, and needing a hand SIGTERM.
+ *
+ * This is the SAME reaper, not a second one — the group kill `signalTree`
+ * already performs — moved onto the one edge that outlives a timer.
+ * @see @i/10-yrd/parked-checks-are-reaped
+ */
+const liveProcessGroups = new Set<number>()
+let exitSweepInstalled = false
+
+/**
+ * SIGKILL every still-live group as this process leaves. Synchronous by
+ * necessity: an `exit` handler cannot await, and the alternative is the leak.
+ * A group that already settled answers ESRCH, which is the expected case and
+ * the reason the set is not pruned eagerly.
+ */
+function sweepLiveProcessGroups(): void {
+  for (const pgid of liveProcessGroups) {
+    try {
+      process.kill(-pgid, "SIGKILL")
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      if (code === "ESRCH") continue
+      // NO SILENT ERRORS. Nothing else can report at this point — the logger's
+      // transports may already be torn down — so write the survivor straight to
+      // fd 2, naming the pgid so whoever reads the terminal can finish the job.
+      writeSync(
+        2,
+        `yrd: process-group SIGKILL failed for pgid ${String(pgid)} (${code ?? String(error)}) on exit; ` +
+          `descendants may survive — inspect and kill manually\n`,
+      )
+    }
+  }
+  liveProcessGroups.clear()
+}
+
+/** Track one live group for the exit sweep; returns its deregistration. */
+function trackProcessGroup(pgid: number): () => void {
+  if (!exitSweepInstalled) {
+    exitSweepInstalled = true
+    // One listener for the whole module, so a long-lived host that runs
+    // thousands of commands does not accumulate thousands of handlers.
+    process.on("exit", sweepLiveProcessGroups)
+  }
+  liveProcessGroups.add(pgid)
+  return () => liveProcessGroups.delete(pgid)
+}
+
 export function createProcess(
   options: Readonly<{
     cwd?: string
@@ -335,6 +396,7 @@ export function createProcess(
       let cancelKill: (() => void) | undefined
       let cancelReap: (() => void) | undefined
       let cancelDrainGrace: (() => void) | undefined
+      let untrackGroup: (() => void) | undefined
       using span = log.span?.("run", { argv, cwd: request.cwd ?? cwd })
       try {
         const interactive = request.interactive === true
@@ -370,6 +432,13 @@ export function createProcess(
         // invoking foreground group for terminal job control, so their child
         // harness owns descendant settlement and Yrd signals the direct child.
         const groupSettlement = !interactive && options.inject?.spawn === undefined
+        // Registered the moment leadership exists, released in this run's
+        // `finally`: between those two points an exit of THIS process would
+        // otherwise strand the group. Interactive children are deliberately
+        // excluded here for the same reason they are excluded from
+        // `signalTree` — they sit in the invoking foreground group, and
+        // signalling that group would kill the operator's own shell.
+        if (groupSettlement) untrackGroup = trackProcessGroup(child.pid)
         let terminating = false
         let sweepFailure: string | undefined
         // 21012 S1 — settlement owns the FULL process tree. The default spawn
@@ -615,6 +684,7 @@ export function createProcess(
         cancelDrainGrace?.()
         cancelKill?.()
         cancelReap?.()
+        untrackGroup?.()
         await runScope[Symbol.asyncDispose]()
       }
     },
