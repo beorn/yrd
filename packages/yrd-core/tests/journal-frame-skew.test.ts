@@ -26,6 +26,7 @@ import {
   EventSchema,
   JOURNAL_READER_VERSION,
   journalFrameSkew,
+  parseCheckpointFrame,
   parseJournalFrame,
   type JournalFrameSkew,
 } from "@yrd/core"
@@ -169,6 +170,42 @@ describe("journal frame vocabulary skew", () => {
     try {
       parseJournalFrame(value)
       expect.unreachable("a malformed compatibility object must still fail")
+    } catch (error) {
+      expect(error).not.toMatchObject({ failure: { code: "journal-version-skew" } })
+    }
+  })
+
+  it("classifies a checkpoint receipt's compatibility shape growth as skew, not a raw ZodError, and names the unrecognized key", () => {
+    // Companion to the two cases above, for the checkpoint path 33b36ba1's own
+    // commit message named as one of `journalFrameCompatibility`'s callers still
+    // wanting a throwing parse — left alone at the time, but a checkpoint receipt
+    // owes the SAME refusal a journal frame does, per `parseCheckpointFrame`'s own
+    // doc comment ("owes the SAME refusal as a journal frame").
+    const value = { ...frame(), compatibility: { version: AHEAD, requires: ["some-capability"] } }
+
+    expect(() => parseCheckpointFrame(value, new Map())).toThrow(
+      new RegExp(`v${AHEAD}.*compiled capability v${JOURNAL_READER_VERSION}.*requires.*update this checkout`, "isu"),
+    )
+    try {
+      parseCheckpointFrame(value, new Map())
+      expect.unreachable(
+        "a checkpoint compatibility object this reader cannot read must refuse, not throw a raw ZodError",
+      )
+    } catch (error) {
+      expect(error).toMatchObject({ failure: { kind: "refusal", code: "journal-version-skew" } })
+    }
+  })
+
+  it("does not blame skew for an unrecognized compatibility key in a checkpoint receipt at this reader's own version", () => {
+    // Companion to the case above: the same shape defect at (or below) this
+    // reader's own compiled version is an ordinary corrupt checkpoint, not a
+    // fleet version spread, so it must not be sent through the skew refusal.
+    const value = { ...frame(), compatibility: { version: JOURNAL_READER_VERSION, requires: ["some-capability"] } }
+
+    expect(() => parseCheckpointFrame(value, new Map())).toThrow()
+    try {
+      parseCheckpointFrame(value, new Map())
+      expect.unreachable("a malformed checkpoint compatibility object must still fail")
     } catch (error) {
       expect(error).not.toMatchObject({ failure: { code: "journal-version-skew" } })
     }

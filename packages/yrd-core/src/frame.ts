@@ -93,23 +93,30 @@ export function journalFrameCompatibility(value: unknown): JournalCompatibility 
 }
 
 /**
- * A lenient read of a frame's declared compatibility version, used only to
- * CLASSIFY skew (see {@link journalFrameSkew}). It never throws: an object
- * whose `compatibility.version` is a positive integer reads that version;
- * everything else — an absent stamp, a non-object compatibility, a
- * non-integer or non-positive version, an unrecognized key sitting beside an
- * otherwise well-formed version — reads as undefined, exactly like an absent
- * stamp (`classifyJournalFrameVersion` folds that to declared version 0).
+ * A lenient read of a frame-shaped value's declared compatibility version. It
+ * never throws: an object whose `compatibility.version` is a positive integer
+ * reads that version; everything else — an absent stamp, a non-object
+ * compatibility, a non-integer or non-positive version, an unrecognized key
+ * sitting beside an otherwise well-formed version — reads as undefined,
+ * exactly like an absent stamp (`classifyJournalFrameVersion` folds that to
+ * declared version 0).
  *
  * This is deliberately looser than {@link JournalCompatibilitySchema}: the
  * declared version is only ever the EXPLANATION for a parse this reader
  * cannot satisfy, never itself a trigger for one — see the doc comment on
  * {@link parseJournalFrame}. Any other shape defect, including an
- * unrecognized key, is left for the strict frame schema to reject, so it is
- * classified by `parseJournalFrame` instead of raised here as a bare
- * `ZodError` ahead of that decision.
+ * unrecognized key, is left for each caller's own strict schema to reject, so
+ * it is classified there instead of raised here as a bare `ZodError` ahead of
+ * that decision.
+ *
+ * Exported so every site that needs a version out of a not-yet-validated
+ * compatibility object reads it through this one derive-at-read path, rather
+ * than each growing its own lenient reader. {@link journalFrameSkew} is the
+ * skew-classifying consumer; `initialJournalVersionFloor` (yrd-persistence)
+ * is a non-classifying one — a raw legacy row's floor contribution, never a
+ * reason by itself to refuse the row.
  */
-function declaredJournalFrameVersion(value: unknown): number | undefined {
+export function declaredJournalFrameVersion(value: unknown): number | undefined {
   if (typeof value !== "object" || value === null || !("compatibility" in value)) return undefined
   const compatibility = (value as { compatibility: unknown }).compatibility
   if (typeof compatibility !== "object" || compatibility === null) return undefined

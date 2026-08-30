@@ -32,7 +32,8 @@ import { asFailure, failureFact, raiseFailure } from "./failure.ts"
 import {
   classifyJournalFrameVersion,
   JOURNAL_READER_VERSION,
-  journalFrameCompatibility,
+  JournalCompatibilitySchema,
+  journalFrameSkew,
   parseJournalFrame,
   raiseJournalFrameSkew,
   type JournalCompatibility,
@@ -1768,23 +1769,52 @@ function assertCheckpointState(value: unknown, trail: (string | number)[] = []):
  * here without repeating replay's full Zod clone for every already-validated
  * result. Semantic checks still share the canonical command-hash and event
  * timestamp validators used by the authoritative journal path.
+ *
+ * Exported for direct testing of the classification below: `createYrd`'s own
+ * checkpoint boot path (`loadProjection`) deliberately swallows every error
+ * this function can raise — typed skew refusal and ordinary shape error
+ * alike — into one generic "rebuild from history" fallback
+ * (silent-fallback-allow, by design), so that path cannot tell the two
+ * outcomes apart. Only a direct call can.
  */
-function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>): JournalFrame {
+export function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>): JournalFrame {
   if (!plainRecord(value) || !plainRecord(value.command) || !plainRecord(value.cause) || !Array.isArray(value.events)) {
     throw new Error("checkpoint contains an invalid journal frame")
   }
-  const compatibility = journalFrameCompatibility(value)
   /**
    * A checkpoint written by a newer habitant is the fleet-spread case again, so
    * a checkpoint frame this reader cannot read owes the SAME refusal as a
    * journal frame it cannot read — named from one message, in `frame.ts`.
    * Anything this reader is not behind is an ordinary corrupt checkpoint.
+   *
+   * `journalFrameSkew` reads the declared version leniently and never throws
+   * (see `declaredJournalFrameVersion`, frame.ts), so this classification does
+   * not itself depend on the compatibility object's own shape being
+   * well-formed. The strict shape check happens just below, via
+   * `JournalCompatibilitySchema`'s own `.safeParse`, and a failure there is
+   * folded into `invalid()` like every other shape defect this function
+   * checks — matching how `parseJournalFrame` lets its frame schema's parse
+   * (which embeds this same strict compatibility schema) decide validity,
+   * instead of a raw ZodError escaping ahead of that decision. This is
+   * 33b36ba1's inversion fix, applied to the checkpoint path it deliberately
+   * left alone.
    */
-  const skew = classifyJournalFrameVersion(JOURNAL_READER_VERSION, compatibility?.version)
+  const skew = journalFrameSkew(value)
+  const compatibilityParse = Object.hasOwn(value, "compatibility")
+    ? JournalCompatibilitySchema.safeParse(value.compatibility)
+    : undefined
   const invalid = (what: "frame" | "event"): never => {
-    if (skew.kind === "reader-behind") raiseJournalFrameSkew(skew, `checkpoint journal ${what}`)
+    if (skew.kind === "reader-behind") {
+      raiseJournalFrameSkew(
+        skew,
+        compatibilityParse?.success === false
+          ? compatibilityParse.error.issues.map((issue) => issue.message).join("; ")
+          : `checkpoint journal ${what}`,
+      )
+    }
     throw new Error(`checkpoint contains an invalid journal ${what}`)
   }
+  if (compatibilityParse?.success === false) invalid("frame")
   const command = value.command
   const cause = value.cause
   const jsonPostorder: object[] = []
@@ -1834,7 +1864,7 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
   for (const node of jsonPostorder) Object.freeze(node)
   Object.freeze(command)
   Object.freeze(cause)
-  if (compatibility !== undefined && plainRecord(value.compatibility)) Object.freeze(value.compatibility)
+  if (compatibilityParse?.success === true && plainRecord(value.compatibility)) Object.freeze(value.compatibility)
   for (const applied of value.events) Object.freeze(applied)
   Object.freeze(value.events)
   return Object.freeze(value) as JournalFrame

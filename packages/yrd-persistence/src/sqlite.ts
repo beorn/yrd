@@ -9,6 +9,7 @@ import {
   JOURNAL_READER_VERSION,
   classifyJournalHistory,
   createFailure,
+  declaredJournalFrameVersion,
   journalFrameCompatibility,
   observeYrdLifecycle,
   parseJournalFrame,
@@ -1347,10 +1348,29 @@ function createSchema(
   createJournalViewRegistry(database, views)
 }
 
-function initialJournalVersionFloor(runtime: Context, rows: readonly LegacyRow[], fresh: boolean): number {
+/**
+ * Exported for direct testing: the "genuinely unreadable row" refusal this
+ * floor deliberately leaves to `parseJournalFrame` (see below) is exercised
+ * inside `publishCandidate`'s own per-row loop, not here, so a caller-level
+ * integration test cannot isolate this floor's own never-throws contract
+ * from that other refusal.
+ */
+export function initialJournalVersionFloor(runtime: Context, rows: readonly LegacyRow[], fresh: boolean): number {
   const observed = rows.reduce((floor, row) => {
     if (row.kind !== "live") return floor
-    return Math.max(floor, journalFrameCompatibility(row.value)?.version ?? 0)
+    // Lenient by design: this floor only needs A NUMBER to seed schema
+    // creation with, not a verdict on the row's validity. `journalFrameCompatibility`
+    // used here would throw on a row whose compatibility object has grown a key
+    // beside `version` — the shape a newer writer's frame carries — and abort this
+    // whole scan before the per-row loudspeaker that actually owns "is this row
+    // readable" ever runs: `publishCandidate` calls `parseJournalFrame` on every
+    // live row right after this floor is computed, and that call still refuses a
+    // genuinely unreadable row (or classifies a reader-behind one as skew) exactly
+    // as it always has. So a malformed row contributes its declared version here
+    // if `declaredJournalFrameVersion` can find one — a positive integer at
+    // `compatibility.version`, regardless of what else sits beside it — and
+    // contributes nothing otherwise, exactly like an absent stamp.
+    return Math.max(floor, declaredJournalFrameVersion(row.value) ?? 0)
   }, 0)
   return fresh ? runtime.writerVersion : observed
 }
