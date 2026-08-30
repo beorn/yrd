@@ -4433,11 +4433,8 @@ describe("Queue command adapters", () => {
       targetIdentity: "b".repeat(64),
       edges: [{ from: "a".repeat(64), to: "b".repeat(64) }],
     }
-    const trailer = `YRD-CHECKPOINT-MIGRATION ${JSON.stringify({
-      version: 1,
-      manifest,
-      hash: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
-    })}`
+    const hash = createHash("sha256").update(JSON.stringify(manifest)).digest("hex")
+    const trailer = `YRD-CHECKPOINT-MIGRATION ${JSON.stringify({ version: 1, manifest, hash })}`
     const input = {
       run: "R1",
       step: "check",
@@ -4483,6 +4480,19 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: { code: "checkpoint-migration-certificate-stale" },
     })
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") {
+      throw new Error(`checkpoint migration merge was ${outcome.status}`)
+    }
+    // The refusal is reproducible from its own text: it names what the stale
+    // certificate is bound to, what is actually being merged now, and the
+    // manifest content-hash the certificate carries (@i/10-yrd/checkpoint-refusal-names-its-input).
+    // `evidence.candidateSha` (not `featureSha`) is the checked Candidate's
+    // real sha: candidate preparation stamps its own commit even for one PR.
+    expect(outcome.error.message).toContain(`Candidate '${baseSha}'`)
+    expect(outcome.error.message).toContain(`Candidate '${evidence.candidateSha}'`)
+    expect(outcome.error.message).toContain(hash)
+    expect(outcome.error.message).toContain("compared:")
+    expect(outcome.error.message).toContain("remedy:")
   })
 
   it("binds the target-checkout checkpoint migration attestation to the Candidate certificate", async () => {
@@ -4553,13 +4563,15 @@ describe("Queue command adapters", () => {
 
   it("refuses merge when the Candidate omits checkpoint migration evidence", async () => {
     const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
+    const currentIdentity = "a".repeat(64)
     await using app = await checkedQueue(process, repo, shellCommand("true"), {
-      checkpointIdentity: "a".repeat(64),
+      checkpointIdentity: currentIdentity,
     })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -4567,33 +4579,58 @@ describe("Queue command adapters", () => {
       error: { code: "checkpoint-migration-certificate-missing" },
     })
     expect(await git(repo, ["rev-parse", "main"])).not.toBe(featureSha)
+    // Reproducible from its own text: names the Candidate/base that has no
+    // certificate and this queue's own stored identity, never a bare sha
+    // (@i/10-yrd/checkpoint-refusal-names-its-input). The check step still
+    // ran (and passed, minus certification) before the merge step refused,
+    // so its evidence carries the Candidate's real sha — candidate
+    // preparation stamps its own commit even for one clean PR.
+    const checkJob = run.steps[0]?.job
+    if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") {
+      throw new Error("check did not pass")
+    }
+    const checkedCandidateSha = GitCheckEvidenceSchema.parse(checkJob.output).candidateSha
+    const message = run.error?.message ?? ""
+    expect(message).toContain(`Candidate '${checkedCandidateSha}'`)
+    expect(message).toContain(`base '${baseSha}'`)
+    expect(message).toContain(`stored checkpoint identity '${currentIdentity}'`)
+    expect(message).toContain("compared:")
+    expect(message).toContain("remedy:")
   })
 
   it("refuses a certified checkpoint manifest without an exact path from the stored identity", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
+    const currentIdentity = "a".repeat(64)
+    const targetIdentity = "b".repeat(64)
     const manifest = {
       version: 1,
-      targetIdentity: "b".repeat(64),
-      edges: [{ from: "c".repeat(64), to: "b".repeat(64) }],
+      targetIdentity,
+      edges: [{ from: "c".repeat(64), to: targetIdentity }],
     }
-    const trailer = `YRD-CHECKPOINT-MIGRATION ${JSON.stringify({
-      version: 1,
-      manifest,
-      hash: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
-    })}`
+    const hash = createHash("sha256").update(JSON.stringify(manifest)).digest("hex")
+    const trailer = `YRD-CHECKPOINT-MIGRATION ${JSON.stringify({ version: 1, manifest, hash })}`
     await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\n' '${trailer}'`), {
-      checkpointIdentity: "a".repeat(64),
+      checkpointIdentity: currentIdentity,
     })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "failure",
       error: { code: "checkpoint-migration-path-missing" },
     })
+    // Names the stalled identity, the target it never reaches, and the exact
+    // certified manifest it was walking — reproducible from its own text
+    // (@i/10-yrd/checkpoint-refusal-names-its-input).
+    const message = run.error?.message ?? ""
+    expect(message).toContain(`from '${currentIdentity}'`)
+    expect(message).toContain(`target '${targetIdentity}'`)
+    expect(message).toContain(hash)
+    expect(message).toContain("compared:")
+    expect(message).toContain("remedy:")
   })
 
   it.each([
@@ -4604,6 +4641,11 @@ describe("Queue command adapters", () => {
         { from: "a".repeat(64), to: "c".repeat(64) },
       ],
       code: "checkpoint-migration-path-ambiguous",
+      expect: (message: string) => {
+        expect(message).toContain(`from identity '${"a".repeat(64)}'`)
+        expect(message).toContain(`'${"b".repeat(64)}'`)
+        expect(message).toContain(`'${"c".repeat(64)}'`)
+      },
     },
     {
       name: "cyclic",
@@ -4612,24 +4654,34 @@ describe("Queue command adapters", () => {
         { from: "c".repeat(64), to: "a".repeat(64) },
       ],
       code: "checkpoint-migration-path-cyclic",
+      expect: (message: string) => {
+        expect(message).toContain("cycles back to")
+        expect(message).toContain(`'${"c".repeat(64)}'`)
+      },
     },
-  ])("refuses a $name certified checkpoint migration path", async ({ edges, code }) => {
+  ])("refuses a $name certified checkpoint migration path", async ({ edges, code, expect: assertMessage }) => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     const manifest = { version: 1, targetIdentity: "b".repeat(64), edges }
-    const trailer = `YRD-CHECKPOINT-MIGRATION ${JSON.stringify({
-      version: 1,
-      manifest,
-      hash: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
-    })}`
+    const hash = createHash("sha256").update(JSON.stringify(manifest)).digest("hex")
+    const trailer = `YRD-CHECKPOINT-MIGRATION ${JSON.stringify({ version: 1, manifest, hash })}`
     await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\n' '${trailer}'`), {
       checkpointIdentity: "a".repeat(64),
     })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code } })
+    // Reproducible from its own text: names the manifest hash and the
+    // remedy-ordering (checkout sync before a code change), plus the
+    // per-shape detail asserted by the fixture above
+    // (@i/10-yrd/checkpoint-refusal-names-its-input).
+    const message = run.error?.message ?? ""
+    expect(message).toContain(hash)
+    expect(message).toContain("compared:")
+    expect(message).toContain("remedy: sync or restore this runner's own checkout")
+    assertMessage(message)
   })
 
   it("fails the check when a checkpoint migration manifest hash is malformed", async () => {
