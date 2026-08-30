@@ -2,7 +2,10 @@ import { dirname } from "node:path"
 import type { ChangeDeliveryState } from "@yrd/bay"
 import { canonicalRefusalCode, SUBMODULE_MODEL_CHANGE_PROP, type RefusalCode } from "@yrd/queue"
 import { failureSlug } from "./failure-slug.ts"
+import { heldQueueBase, quotedValue, refusalCure, refusedChange, type FailureEvidence } from "./refusal-cure.ts"
 import { retainedWorkspaceFromMessage, type RetainedWorkspace } from "./workspace-retention.ts"
+
+export type { FailureEvidence } from "./refusal-cure.ts"
 
 export type FailureLike = Readonly<{ code: string; message: string; resolution?: readonly string[] }>
 
@@ -17,6 +20,16 @@ export type FailureEscalation = Readonly<{ reason: string; steps: readonly strin
 export type ActionableFailure = Readonly<{
   code: string
   cause: string
+  /** Why the obvious move — retry, re-push, resubmit — does not clear this.
+   * Printed unfiltered, like {@link FailureEscalation.reason}: for a refusal
+   * the QUEUE recovers on its own the correct action is none, and a remedy
+   * list cannot say that. */
+  blocked?: string
+  /** Where a reader SEES this failure for themselves: the artifact the refusal
+   * is summarizing, or the command that prints the record. A refusal that
+   * summarizes evidence without naming it leaves the reader to guess which of
+   * several files it read (@i/10-yrd/refusals-name-their-cure). */
+  evidence?: readonly FailureEvidence[]
   resolution: readonly string[]
   reference?: string
   /** Present when no mechanical remedy exists because at least one step needs
@@ -86,10 +99,6 @@ function retainedWorkspaceFailure(
   })
 }
 
-function quotedValue(message: string, pattern: RegExp): string | undefined {
-  return pattern.exec(message)?.[1]
-}
-
 /** Mechanical redelivery refuses a terminal change outright: an
  * integrated/already-landed identity is frozen evidence, and reopening a
  * withdrawn/canceled delivery by resubmitting its branch is a human act the
@@ -116,18 +125,6 @@ function authoredGitlinkSubmodules(message: string): readonly string[] {
         .split(",")
         .map((path) => path.trim())
         .filter(Boolean)
-}
-
-/** The change a refusal is about, spelled the way every producer spells it
- * (`change 'PR7'`), so an escalation step names the exact selector a human
- * would type instead of a placeholder they have to resolve first. */
-function refusedChange(message: string): string {
-  return quotedValue(message, /change '([^']+)'/iu) ?? "<change>"
-}
-
-/** The queue base a hold was declared against (`queue 'main' is paused: …`). */
-function heldQueueBase(message: string): string {
-  return quotedValue(message, /queue '([^']+)'/iu) ?? "<base>"
 }
 
 /** The reviewer the producer already named in a rejection, so the escalation
@@ -351,6 +348,28 @@ export function actionableFailure(failure: FailureLike): ActionableFailure {
   const entry = escalationEntry(failure.code)
   if (entry !== undefined) return escalatedFailure(failure, cause, entry)
   const commands = [...new Set([...(failure.resolution ?? []), ...embeddedYrdCommands(failure.message)])]
+  // A registered cure, LAST before the generic tail: it exists precisely for
+  // the codes whose own message carries no executable remedy, so anything the
+  // message or a live audit already supplied wins over it (the census's
+  // membership rule — a second copy of a cure is how the wrong one outlives
+  // the fix to the first, fc6bd709).
+  const cure = refusalCure(failure.code, failure.message)
+  if (cure !== undefined) {
+    const resolution = commands.length > 0 ? commands : cure.resolution
+    return Object.freeze({
+      code: failure.code,
+      cause,
+      ...(cure.blocked === undefined ? {} : { blocked: cure.blocked }),
+      ...(cure.evidence.length === 0
+        ? {}
+        : { evidence: Object.freeze(cure.evidence.map((text) => Object.freeze({ text }))) }),
+      // An empty remedy is the ANSWER for a queue-recovered refusal, not a
+      // gap: `blocked` says so, and the census refuses an entry that has
+      // neither. Never fall back to the generic correct-and-retry line here —
+      // it is the false sentence this whole registry replaces.
+      resolution: Object.freeze(resolution),
+    })
+  }
   return Object.freeze({
     code: failure.code,
     cause,
@@ -371,10 +390,22 @@ function escalationLines(failure: ActionableFailure): readonly string[] {
   return [`escalate: ${failure.escalation.reason}`, ...failure.escalation.steps.map((step) => `manual: ${step}`)]
 }
 
+/** Cause → why the obvious move fails → where to see it → what to run. The
+ * order a stopped reader needs, and the reason `blocked` precedes `evidence`:
+ * a reader who learns the queue already owns the recovery stops reading, and
+ * has lost nothing. */
+function contextLines(failure: ActionableFailure): readonly string[] {
+  return [
+    ...(failure.blocked === undefined ? [] : [`blocked: ${failure.blocked}`]),
+    ...(failure.evidence ?? []).map(({ text }) => `evidence: ${text}`),
+  ]
+}
+
 export function formatActionableFailure(failure: ActionableFailure, prefix = ""): string {
   return [
     `${prefix}${errorCodeLabel(failure.code)}`,
     `cause: ${failure.cause}`,
+    ...contextLines(failure),
     ...failure.resolution.map((step) => `resolve: ${step}`),
     ...escalationLines(failure),
     ...(failure.reference === undefined ? [] : [`reference: ${failure.reference}`]),
@@ -393,6 +424,7 @@ export function formatHumanFailure(failure: ActionableFailure): string {
       : failure.resolution
   return [
     `error: ${failure.cause}`,
+    ...contextLines(failure),
     ...remedies.map((step) => `resolve: ${step}`),
     ...escalationLines(failure),
     ...(failure.reference === undefined ? [] : [`reference: ${failure.reference}`]),

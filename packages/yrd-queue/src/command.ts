@@ -10,6 +10,7 @@ import {
   createFailure,
   digestCommandOutput,
   failureFact,
+  firstJudgedFailureLine,
   type CherryDragged,
   type JsonValue,
   type YrdFailure,
@@ -605,9 +606,24 @@ function configuredCommand<Shape extends ChangeShape>(
       }
       if (result.exitCode !== 0) {
         const action = waiting ? "launcher" : "command"
+        // An exit status is a fact about the process, never about the work.
+        // `affected-tests command exited 1` was the WHOLE refusal PR2695/2696/
+        // 2697 carried on 2026-08-29, while the two failing test names sat in
+        // `output.log`; PR2699 buried a guard's own refusal sentence the same
+        // way. Both halves of the cure are already in hand here — the line the
+        // check itself judged on, and the file holding the rest.
+        //
+        // The judged line is quoted only when the output STATED one: a
+        // fabricated headline is worse than none, because a reader acts on it
+        // (the {@link firstJudgedFailureLine} contract). The artifact is named
+        // unconditionally, and is the cure in its own right for a check whose
+        // verdict this cannot recognize.
+        const judged = firstJudgedFailureLine(message)
         return failed(
           `${options.purpose}${waiting ? "-launcher" : ""}-failed`,
-          `${options.purpose} ${action} exited ${result.exitCode}`,
+          `${options.purpose} ${action} exited ${result.exitCode}` +
+            (judged === undefined ? "" : `: ${judged}`) +
+            `; full output: ${artifactSink.log}`,
           evidence,
         )
       }
@@ -1063,7 +1079,11 @@ async function createArtifactSink(root: string, input: StepExecution, attempt: n
     else if (!combined.seen || (!streamsMatch && truncated.size === 0)) await writeFile(combined.path, fallback)
     return artifacts
   }
-  return Object.freeze({ drain, finish, write })
+  // `log` is published so a refusal can NAME the file holding the output it is
+  // summarizing. `discloseStepFailure` guarantees this path exists for every
+  // failed step (it writes a rendered failure there when the command produced
+  // no output of its own), so naming it is never a promise the tree breaks.
+  return Object.freeze({ drain, finish, write, log: combined.path })
 }
 
 const COMMAND_OUTPUT_LOGS = ["output.log", "stdout.log", "stderr.log"] as const

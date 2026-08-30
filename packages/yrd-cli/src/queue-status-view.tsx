@@ -259,9 +259,11 @@ import {
   actionableFailureSummary,
   errorCodeLabel,
   type ActionableFailure,
+  type FailureEvidence,
   type FailureLike,
 } from "./actionable-error.ts"
 import { failureSlug } from "./failure-slug.ts"
+import { refusalCure } from "./refusal-cure.ts"
 import {
   checkTaskStatusOf,
   jobAttemptTaskStatusOf,
@@ -747,11 +749,12 @@ type Row = Readonly<{
   path?: string
 }>
 
-export type HumanFailureProjection = ActionableFailure &
-  Readonly<{
-    summary: string
-    evidence?: Readonly<{ text: string; href?: string }>
-  }>
+/** `evidence` is NOT redeclared here: it is {@link ActionableFailure}'s own
+ * field now. Two fields of that name — one the step's artifact location, one
+ * the refusal's own "where to see this" — is the duplicate-concept shape this
+ * bead removes, and the intersection could not have carried both anyway. The
+ * step location is merged into that one array by `projectFailure`. */
+export type HumanFailureProjection = ActionableFailure & Readonly<{ summary: string }>
 
 export type HumanChangeProjection = Row &
   Readonly<{
@@ -1271,12 +1274,16 @@ function QueueLogLocationLinks({ entries, compact }: { entries: readonly QueueLo
 // headless habitant runner shares this exact vocabulary.
 const statusGlyph = timelineStatusGlyph
 
-function projectFailure(fact: FailureLike, evidence?: HumanFailureProjection["evidence"]): HumanFailureProjection {
+function projectFailure(fact: FailureLike, evidence?: FailureEvidence): HumanFailureProjection {
   const failure = actionableFailure(fact)
+  // The step's artifact location leads: it is where THIS run's output is,
+  // while a registered cure names the read that explains the class. Both are
+  // evidence, and a reader wants the specific one first.
+  const merged = [...(evidence === undefined ? [] : [evidence]), ...(failure.evidence ?? [])]
   return {
     ...failure,
     summary: actionableFailureSummary(failure),
-    ...(evidence === undefined ? {} : { evidence }),
+    ...(merged.length === 0 ? {} : { evidence: Object.freeze(merged) }),
   }
 }
 
@@ -1991,7 +1998,7 @@ function reclockQueueTimelineProjection(
   return reclocked
 }
 
-function failureEvidence(step: QueueStep | undefined): HumanFailureProjection["evidence"] {
+function failureEvidence(step: QueueStep | undefined): FailureEvidence | undefined {
   const location = stepLocations(step)[0]?.location
   if (location === undefined) return undefined
   return "path" in location
@@ -2985,18 +2992,14 @@ function FailureQueues({ failure }: { failure: HumanFailureProjection }) {
       <Box height={1}>
         <Text wrap="truncate"> {failure.summary}</Text>
       </Box>
-      {failure.evidence === undefined ? null : (
-        <Box height={1}>
+      {(failure.evidence ?? []).map((evidence) => (
+        <Box height={1} key={evidence.text}>
           <Text wrap="truncate">
             {"    evidence: "}
-            {failure.evidence.href === undefined ? (
-              failure.evidence.text
-            ) : (
-              <CellLink href={failure.evidence.href}>{failure.evidence.text}</CellLink>
-            )}
+            {evidence.href === undefined ? evidence.text : <CellLink href={evidence.href}>{evidence.text}</CellLink>}
           </Text>
         </Box>
-      )}
+      ))}
     </Box>
   )
 }
@@ -4534,6 +4537,11 @@ function useCoarseNow(serverNowMs: number, live: boolean, tickMs = 1000): number
   return serverNowMs + Math.max(0, Date.now() - capturedAtRef.current)
 }
 
+/** How many rows the wrapped hold banner may take before the frame it lives in
+ * matters more than the tail of its sentence. See the rail itself for why this
+ * is a bound and not a truncation. */
+const PAUSE_BANNER_MAX_ROWS = 8
+
 /**
  * Habitant runner status is always visible in its own RUNNER frame. The
  * queue-pause STATUS line lives INSIDE this frame (user directive 2026-07-21,
@@ -4691,21 +4699,44 @@ function TimelineRunnerBox({
               </Text>
             }
           >
-            <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} wrap="truncate" minWidth={0}>
-              {pauseHealth?.blocksAll === true ? (
-                <>
-                  <Text bold>PAUSE BLOCKING EVERYTHING</Text> — {pause.reason} · allowed {pauseAllowed}
-                </>
-              ) : (
-                <>
-                  {/* Not `STATUS HOLD THE LINE`: STATUS names the row column
-                      two lines below, and one word cannot name two things on
-                      one screen (21479). The blocking branch above never had
-                      the label; this rail joins it. */}
-                  <Text bold>HOLD THE LINE</Text> — {pause.reason} · allowed {pauseAllowed}
-                </>
-              )}
-            </Text>
+            {/* WRAPS, never truncates — the one rail in this box where that
+                choice is load-bearing. Every other rail here states a fact
+                whose head IS the fact ("RUNNER STALE — last tick 4m ago"), so
+                clipping its tail costs a detail. A hold's `reason` is the
+                opposite shape: the condition, the predicate a reader checks,
+                and the release all sit at the END of the sentence, so
+                truncation removes precisely the part that would let someone
+                clear the hold, and removes MORE of it the narrower the pane.
+                Measured cost: four failed recovery attempts and ~90 minutes on
+                2026-08-01 (@yrd/stopline-truncates-its-predicate), and the
+                ellipsis in @yrd/hold-status-truncates-its-own-instruction.
+
+                The row bound is the one thing wrapping still needs: a rail
+                that grows without limit starves the pane it lives in, and a
+                12-column pane pushed the TIME header off screen entirely
+                (queue-timeline-chrome). Eight rows is ~440 characters at 60
+                columns — past any hold reason ever recorded — so at every
+                width a person reads at, the bound never binds and the whole
+                sentence renders. It exists for the pathological pane, where
+                keeping the frame is worth more than the tail of a sentence
+                nobody can read at that width anyway. */}
+            <Box maxHeight={PAUSE_BANNER_MAX_ROWS} minWidth={0}>
+              <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} wrap="wrap" minWidth={0}>
+                {pauseHealth?.blocksAll === true ? (
+                  <>
+                    <Text bold>PAUSE BLOCKING EVERYTHING</Text> — {pause.reason} · allowed {pauseAllowed}
+                  </>
+                ) : (
+                  <>
+                    {/* Not `STATUS HOLD THE LINE`: STATUS names the row column
+                        two lines below, and one word cannot name two things on
+                        one screen (21479). The blocking branch above never had
+                        the label; this rail joins it. */}
+                    <Text bold>HOLD THE LINE</Text> — {pause.reason} · allowed {pauseAllowed}
+                  </>
+                )}
+              </Text>
+            </Box>
           </MarkerRow>
         </>
       )}
@@ -5834,12 +5865,29 @@ function queueShowNextAction(data: QueueShowData): string {
   }
   const errorCode = presentFact(data.steps.findLast((step) => presentFact(step.errorCode) !== undefined)?.errorCode)
   const actionable = data.failure ?? data.steps.findLast((step) => step.failure !== undefined)?.failure
-  if (actionable !== undefined) return actionable.resolution.join("; then ")
+  if (actionable !== undefined) {
+    // A cured refusal the QUEUE recovers prints no step, on purpose — its
+    // `blocked` sentence IS the next action ("none; the queue requeues it").
+    // Joining an empty list rendered a blank NEXT ACTION, which reads as an
+    // unanswered question rather than an answered one.
+    if (actionable.resolution.length > 0) return actionable.resolution.join("; then ")
+    if (actionable.blocked !== undefined) return actionable.blocked
+  }
   if (errorCode === "queue-environment-refused") {
     return "repair the queue environment, then rerun the change"
   }
-  if (["stale-pr", "stale-check", "stale-base"].includes(errorCode ?? "")) {
-    return "refresh the current PR revision against queue authority, then rerun it"
+  // The registry before the hardcoded sentences: "refresh the current PR
+  // revision against queue authority, then rerun it" stood here for
+  // stale-check, and named an operation no Yrd verb performs — the exact
+  // defect @i/10-yrd/refusals-name-their-cure closes. Codes with no entry keep
+  // their existing text below.
+  const cure = errorCode === undefined ? undefined : refusalCure(errorCode, data.failure?.cause ?? "")
+  if (cure !== undefined) {
+    if (cure.resolution.length > 0) return cure.resolution.join("; then ")
+    if (cure.blocked !== undefined) return cure.blocked
+  }
+  if (["stale-pr", "stale-base"].includes(errorCode ?? "")) {
+    return "the queue re-merges and requeues this revision on its next pass"
   }
   if (errorCode === "job-lost") return "recover the lost run, then rerun the change"
   if (["canceled", "cancelled", "queue-canceled", "queue-cancelled"].includes(errorCode ?? "")) {
