@@ -1132,6 +1132,33 @@ export async function habitantRunnerLeaseHeld(cwd: string): Promise<boolean> {
   return (await habitantRunnerLeaseObservation(cwd)).held
 }
 
+/**
+ * Admission has no exclusivity of its own — only settlement does
+ * (`habitantOwnsSettlementDrain`, host.ts) — so a one-shot `queue run --once`
+ * used to start composing beside a live resident runner instead of refusing.
+ * Measured 2026-08-30 (@cto, PR2744): `@ci` ran a one-shot leg next to the
+ * resident runner; the second driver sat at zero CPU inside Vitest collection
+ * next to another leg's whole-suite run, and the CPU-work lease killed it — a
+ * false refusal that cost a real change. Called once, before `gate()` and
+ * before any compose/step work, so a held lease is caught before either
+ * driver can contend for git state.
+ */
+export async function refuseOneShotQueueRunUnderResidentLease(cwd: string): Promise<void> {
+  const lease = await habitantRunnerLeaseObservation(cwd)
+  if (!lease.held) return
+  const holder =
+    lease.driver === undefined
+      ? "an unidentified habitant"
+      : `queue=${lease.driver.queueId} epoch=${lease.driver.epoch}`
+  raiseFailure(
+    "refusal",
+    "queue-run-resident-owns-admission",
+    `yrd: the resident runner (${holder}) already owns admission for this queue; a one-shot 'queue run --once' ` +
+      "cannot run beside it. Submit with 'yrd pr submit <branch>' and let the resident runner drain it; if the " +
+      "resident is dead, 'hab --hab-dir <root> restart yrd-runner'.",
+  )
+}
+
 function gitDistance(cwd: string, baseSha: string, headSha: string): Omit<RunnerGitDistance, "base" | "baseSha"> {
   try {
     const counts = gitSync(cwd, ["rev-list", "--left-right", "--count", `${baseSha}...${headSha}`])
@@ -13229,6 +13256,7 @@ function buildProgram(
         setExit(await followQueueRuns(installed(), selectors, options, io, gate, installedServices()))
         return
       }
+      await refuseOneShotQueueRunUnderResidentLease(io.cwd ?? process.cwd())
       await gate()
       const app = installed()
       const publications = await preparePublicationQueueCycle(app, installedServices(), io)
