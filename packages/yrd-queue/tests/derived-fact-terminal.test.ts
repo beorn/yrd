@@ -1,22 +1,37 @@
 /**
- * @failure A standing submit fact whose candidate can never merge is derived
- * afresh on EVERY compose pass, minting a new change number each time. The
- * live specimen (2026-08-29/30, PR2605…PR2692) minted 79 phantom changes for
- * two facts over ~17 h: derive → `candidate-conflicting` before required
- * checks → the refusal returns BEFORE any run record exists → the
- * fact's authority is never consumed → the next pass derives it again. None
- * were checked, none merged, and none were visible to `yrd pr list` (derived
- * changes carry no record). This file pins the invariant the loop broke: one
- * standing fact derives at most ONE live change, and a candidate that
- * conflicts before its checks retires the fact to a terminal finding instead
- * of leaving it standing for the next pass.
+ * @failure A standing submit fact whose derived change cannot progress is
+ * derived afresh on EVERY compose pass, minting a new change number each time.
+ * The fact's authority is never consumed, so the next pass derives it again,
+ * and none of it is visible to `yrd pr list` (derived changes carry no record).
+ *
+ * TWO live shapes, 2026-08-29/30, and they are why the invariant here is
+ * outcome-agnostic:
+ *   - `candidate-conflicting` before required checks — PR2605…PR2692, 79
+ *     phantom changes across two facts in ~17 h. The refusal returns BEFORE any
+ *     run record exists, so the journal held nothing but the standing fact.
+ *   - `required-check-failed` — issue/sop-due-harness-r2 at 6e4952c0 derived
+ *     PR2695 (failed 01:14), PR2696 (01:25), PR2697 (01:32): one identical sha,
+ *     three changes, three FULL check runs burned. Nothing conflicted here.
+ *
+ * Keying the cure on either code would have fixed one shape and left the other
+ * bleeding. This file pins what the loop actually broke: a standing fact
+ * derives at most ONE live change, and once a candidate has been BUILT for it
+ * and judged, the fact is terminal with a finding — whatever the verdict was
+ * called.
+ *
+ * It also pins the boundary, which matters as much as the rule: a refusal
+ * raised while PREPARING the candidate never evaluated the content and is a
+ * PARK, not a verdict. `min-commit-unpublished` names an arrangement around the
+ * change; someone satisfies it and the same fact integrates with no resubmit.
+ * "Any refusal retires the fact" would have broken that contract, which is why
+ * the discriminator is a candidate in hand rather than a list of codes.
  * @level l2
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
+import { createMemoryJournal, createYrd, createYrdDef, pipe, raiseFailure } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
@@ -95,15 +110,24 @@ async function createApp(
     log?: ReturnType<typeof createLogger>
     queueMint?: PrNumberMint
     prepareCandidate?: CandidatePreparer
+    /** The OTHER non-progressing shape, measured live 2026-08-30 01:10-01:32:
+     * the candidate merges fine and its required check fails. */
+    failCheck?: boolean
   }> = {},
 ) {
   const check = withStep(
     "check",
-    (_input: StepExecution): JobResult<CheckResult> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { checked: true },
-    }),
+    (_input: StepExecution): JobResult<CheckResult> =>
+      options.failCheck === true
+        ? {
+            status: "completed",
+            conclusion: "failure",
+            // A VERDICT, not a runner-error: the check ran and said no. A
+            // verdictless failure is infrastructure and propagates instead,
+            // which is a different (and already-handled) path.
+            error: { code: "check-failed", message: "the required check failed on this content" },
+          }
+        : { status: "completed", conclusion: "success", output: { checked: true } },
     { revision: "check-v1", output: CheckResultSchema },
   )
   const merge = withMerge(
@@ -242,6 +266,70 @@ describe("a standing submit fact derives at most ONE live change", () => {
     expect(queueMint.highWater(), "the cure must be derivable again").toBe(2)
   })
 
+  it("a required check that fails retires the fact too — the invariant is outcome-agnostic", async () => {
+    // The SECOND live shape, measured 2026-08-30 01:10-01:32: fact
+    // issue/sop-due-harness-r2 at 6e4952c0 derived PR2695 (check failed 01:14),
+    // then PR2696 (failed 01:25), then PR2697 (failed 01:32) — one identical
+    // sha, three changes, three FULL check runs burned. Nothing conflicted
+    // here; the candidate merged fine and its required check failed. Keying
+    // the retirement on `candidate-conflicting` would have fixed one shape and
+    // left this one bleeding, so the invariant is about the fact having
+    // produced a change that reached an outcome, never about which outcome.
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const queueMint = volatilePrNumberMint()
+    await using app = await createApp({ log, queueMint, failCheck: true })
+    await app.bays.recordBranchSubmit({ branch: "issue/failing-check", sha: SHA, base: "main" })
+
+    await app.queue.run({}, runtime)
+    expect(queueMint.highWater(), "the first pass derives exactly one change").toBe(1)
+
+    await app.queue.run({}, runtime)
+    expect(queueMint.highWater(), "a failed check must not mint a second change").toBe(1)
+
+    const retired = app.state().queues.retiredSubmits["issue/failing-check"]
+    expect(retired, "the fact is retired on this shape too").toBeDefined()
+    expect(retired).toMatchObject({ branch: "issue/failing-check", sha: SHA, pr: "PR1" })
+    // The finding names the OUTCOME it reached, not a hardcoded conflict.
+    expect(retired?.code).not.toBe("candidate-conflicting")
+    expect(actionsLogged(events)).toContain("submit-fact-retired")
+  })
+
+  it("a refusal raised while PREPARING the candidate is a park, not a verdict: the same fact still integrates", async () => {
+    // THE BOUNDARY, and the reason the rule is not "any refusal retires the
+    // fact". A refusal raised before a candidate exists never evaluated this
+    // content — it names an arrangement AROUND the change, which someone can
+    // satisfy without the author touching the branch. `min-commit-unpublished`
+    // is the live one: push the submodule's own main and the SAME fact
+    // integrates on the next pass, no resubmit (contract-tested end-to-end in
+    // yrd-cli's host suite). Retiring on it would demand a re-push to recover
+    // from a condition a re-push does not address, so the discriminator is
+    // whether a candidate was BUILT and judged — never the refusal's code.
+    const queueMint = volatilePrNumberMint()
+    let arrangementMissing = true
+    const prepare: CandidatePreparer = (input) => {
+      if (arrangementMissing) {
+        raiseFailure(
+          "refusal",
+          "min-commit-unpublished",
+          "change cannot fill the shaset: push it to the submodule's own main first",
+        )
+      }
+      return mergeableCandidate(input)
+    }
+    await using app = await createApp({ queueMint, prepareCandidate: prepare })
+    await app.bays.recordBranchSubmit({ branch: "issue/parked", sha: SHA, base: "main" })
+
+    await app.queue.run({}, runtime)
+    expect(app.state().queues.retiredSubmits["issue/parked"], "a park must not retire the fact").toBeUndefined()
+
+    // The arrangement the refusal named now exists. The durable fact alone
+    // carries the next pass.
+    arrangementMissing = false
+    const runs = await app.queue.run({}, runtime)
+    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
+  })
+
   it("the retirement is a terminal finding naming the conflicting path and the cure", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
@@ -251,10 +339,10 @@ describe("a standing submit fact derives at most ONE live change", () => {
     await app.queue.run({}, runtime)
 
     const findings = (await app.queue.audit()).findings
-    const retired = findings.find((finding) => finding.code === "submit-fact-conflicting")
+    const retired = findings.find((finding) => finding.code === "submit-fact-terminal")
     expect(
       retired,
-      `expected a submit-fact-conflicting finding, got: ${findings.map((f) => f.code).join(", ")}`,
+      `expected a submit-fact-terminal finding, got: ${findings.map((f) => f.code).join(", ")}`,
     ).toBeDefined()
     // The finding must name WHAT conflicted, not only that something did.
     expect(retired?.message).toContain(GITLINK_PATH)

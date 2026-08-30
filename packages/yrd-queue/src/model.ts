@@ -777,7 +777,13 @@ export type QueuesState = Readonly<{
 
 /**
  * One standing submit fact the queue retired: the change derived from it at
- * exactly `sha` cannot progress, so the derived lane must stop deriving it.
+ * exactly `sha` could not progress, so the derived lane must stop deriving it.
+ *
+ * Written from `refuseRevisionAdmission`, the one funnel every revision refusal
+ * passes through, so it is OUTCOME-AGNOSTIC on purpose. Both live shapes reach
+ * it — a candidate that conflicted before its checks and a required check that
+ * ran and failed — and neither is named anywhere in the mechanism. `code`
+ * records which one happened; nothing branches on it.
  *
  * Keyed by branch and PINNED TO A SHA, which is what makes the cure work
  * without a second verb: the author pushes new content, the fact re-projects at
@@ -1286,15 +1292,18 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
    * dead-store. Re-materializing the checkout anchors the durable
    * `modules/<name>` line and disarms it. */
   "submodule-alternates-worktree-only",
-  /** A standing submit fact whose candidate conflicts before its required
-   * checks, so the change derived from it can never merge as it stands and the
-   * derived lane has stopped deriving it ({@link QueueRetiredSubmit}). Reported
-   * on the FIRST pass, not after a streak: a conflict against a fixed base is a
-   * verdict on the content, and only the author pushing new content cures it.
-   * Before this code the same condition was silent and unbounded — 79 phantom
-   * changes across two facts in ~17 h, invisible to `pr list` and to this audit
-   * (@i/10-yrd/absent-branch-is-terminal). */
-  "submit-fact-conflicting",
+  /** A standing submit fact whose derived change reached an outcome it cannot
+   * come back from, so the derived lane has stopped deriving it
+   * ({@link QueueRetiredSubmit}). Outcome-agnostic by design: a conflicting
+   * candidate and a failed required check both land here, and so should the
+   * next such code without this one being renamed. Reported on the FIRST pass,
+   * not after a streak — an outcome against a fixed base is a verdict on the
+   * content, and only the author pushing new content cures it. Before this the
+   * condition was silent and unbounded: 79 phantom changes across two facts in
+   * ~17 h from the conflict shape, plus three more (and three full check runs
+   * on one sha) from the check-failure shape, none of it visible to `pr list`
+   * or to this audit (@i/10-yrd/absent-branch-is-terminal). */
+  "submit-fact-terminal",
 ] as const
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]

@@ -2489,6 +2489,9 @@ function createQueue<Shape extends ChangeShape>(
       candidate?: string
       kind?: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
       steps?: readonly ChangeAdmissionStep[]
+      /** The paths a conflicting candidate named, when it named any. Carried so
+       * the retirement below can say WHAT conflicted. */
+      conflicts?: readonly string[]
     }> = {},
   ): Promise<
     Readonly<{ code: string; kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]; reason: string }>
@@ -2504,6 +2507,33 @@ function createQueue<Shape extends ChangeShape>(
       step,
       receipt: result,
     })
+    // THE ONE FUNNEL, and it names no refusal code. Every revision refusal
+    // passes through here, so one test covers a conflicting candidate, a failed
+    // required check, and every code added later. Keying on a code is what
+    // would fix one shape and leave the next bleeding: measured 2026-08-30, a
+    // conflicting candidate re-minted 79 changes across two facts, and a
+    // FAILING CHECK re-minted three more for a third (issue/sop-due-harness-r2
+    // at 6e4952c0 → PR2695, PR2696, PR2697 — three full check runs on one
+    // identical sha).
+    //
+    // A CANDIDATE IN HAND is what makes this a verdict rather than a park, and
+    // it is the whole discriminator. `options.candidate` is set exactly where
+    // one was BUILT and then judged — found conflicting, or carried through a
+    // required check that failed. A refusal raised while PREPARING the
+    // candidate carries none, because the content was never evaluated: it is a
+    // precondition the arrangement around the change can still satisfy.
+    // `min-commit-unpublished` is that case and it is contract-tested — the
+    // author pushes the submodule's own main and the SAME fact integrates on
+    // the next pass, with no resubmit. Retiring on it would demand a re-push to
+    // recover from a condition the re-push does not even address.
+    //
+    // Infrastructure is excluded on top: an infra fault says nothing about the
+    // content and clears on its own. Those already propagate rather than refuse
+    // on the derived path, so this is a belt on a brace — kept because the cost
+    // of being wrong is a healthy submission the queue never said it dropped.
+    if (options.candidate !== undefined && kind !== "infrastructure") {
+      await retireDerivedSubmitFact(pr, changeHead(pr as Change), result, options.conflicts)
+    }
     return { code: result.code, kind, reason: result.message }
   }
 
@@ -2595,20 +2625,17 @@ function createQueue<Shape extends ChangeShape>(
           `Candidate '${candidate.id}' conflicts before required checks` +
           (conflictingPaths === undefined ? "" : ` on ${conflictingPaths.join(", ")}`),
       }
-      const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", result, { candidate: candidate.id })
-      // A conflict against a fixed base is a VERDICT ON THE CONTENT: no retry
-      // clears it, only the author pushing a rebased head. For a RECORD change
-      // the refusal above is enough — the record is the durable row an operator
-      // and `queue audit` both reach. A DERIVED change has no record, and this
-      // refusal path leaves nothing behind either: refused before its checks are
-      // queued, no run record is ever created, so `noteCandidateRefusal` cannot
-      // resolve the id
-      // and journals nothing. The whole journal held nothing but the standing
-      // fact — so the next compose derived it afresh, forever. Retire the fact
-      // itself, at exactly this sha, and the loop has a floor: one fact, one
-      // change, one finding. A rebased push moves the sha and the retirement
-      // stops applying, which is the cure.
-      await retireDerivedSubmitFact(pr, snapshot.headSha, result, conflictingPaths)
+      // The fact's retirement rides `refuseRevisionAdmission`'s one funnel, so
+      // this site only has to hand over WHAT conflicted. A DERIVED change has
+      // no record and this path leaves nothing else behind either: refused
+      // before its checks are queued, no run record is ever created, so
+      // `noteCandidateRefusal` cannot resolve the id and journals nothing. The
+      // whole journal held only the standing fact — which is why the next
+      // compose derived it afresh, forever.
+      const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", result, {
+        candidate: candidate.id,
+        ...(conflictingPaths === undefined ? {} : { conflicts: conflictingPaths }),
+      })
       return { processed: true, refusal }
     }
     const admissionRunner =
@@ -2829,8 +2856,14 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   /**
-   * Retire the standing submit fact behind a DERIVED change whose content
-   * cannot progress, so the derived lane stops re-deriving it.
+   * Retire the standing submit fact behind a DERIVED change that could not
+   * progress, so the derived lane stops re-deriving it.
+   *
+   * Called from `refuseRevisionAdmission`, which every revision refusal passes
+   * through, so this covers every outcome without naming any: the conflicting
+   * candidate that minted 79 phantom changes, the failing required check that
+   * minted three more and burned three full check runs on one sha, and the next
+   * one nobody has met yet.
    *
    * Scoped to derived members on purpose. A RECORD change already has the
    * durable row this writes — its record carries the refusal, and
@@ -2881,9 +2914,8 @@ function createQueue<Shape extends ChangeShape>(
       return
     }
     log.warn?.(
-      "queue retired a standing submit fact: its candidate conflicts before required checks, so the change it " +
-        "derives can never merge as it stands. No further change will be derived for this sha — push a rebased " +
-        "head to submit again",
+      "queue retired a standing submit fact: the change it derived could not progress, so no further change " +
+        "will be derived for this sha — push new content to submit again",
       {
         action: "submit-fact-retired",
         branch: pr.branch,
@@ -7675,10 +7707,15 @@ function auditQueues(
 /**
  * One finding per standing submit fact the queue retired.
  *
- * Reported on the first pass with no streak threshold: a candidate conflicting
- * against a fixed base is a verdict on the CONTENT, and the only thing that
+ * Reported on the first pass with no streak threshold: the change this fact
+ * produced reached an outcome against a fixed base, and the only thing that
  * clears it is the author pushing new content. Waiting three cycles to say so
  * would only measure how long we waited.
+ *
+ * The message names the OUTCOME the row recorded rather than assuming one.
+ * Both live shapes land here — a candidate that conflicted before its checks
+ * and a required check that ran and failed — and the next code to do so should
+ * read correctly here without this function learning its name.
  *
  * Sha-matched, like every other reader of these rows — a retirement whose fact
  * has already moved describes content that no longer exists, and reporting it
@@ -7691,11 +7728,11 @@ function retiredSubmitAuditFindings(state: DeepReadonly<RuntimeState>): QueueAud
     if (row === undefined) continue
     const where = row.paths === undefined ? "" : ` on ${row.paths.join(", ")}`
     findings.push({
-      code: "submit-fact-conflicting",
+      code: "submit-fact-terminal",
       message:
-        `branch '${branch}' is submitted at ${row.sha.slice(0, 12)} but its candidate conflicts with '${row.base}'` +
-        `${where}, so change '${row.pr}' could never enter required checks (${row.code}: ${row.reason}). ` +
-        "The queue has retired this fact and derives nothing further for this sha; only new content clears it.",
+        `branch '${branch}' is submitted at ${row.sha.slice(0, 12)} against '${row.base}', and the change it ` +
+        `derived ('${row.pr}') could not progress${where}: ${row.code} — ${row.reason}. The queue has retired ` +
+        "this fact and derives nothing further for this sha; only new content clears it.",
       pr: row.pr,
       specimen: `submit:${branch}:${row.sha}`,
       refusal: row.code,
@@ -9410,7 +9447,7 @@ export const YRD_REFUSAL_CODES = [
   // only the author pushing rebased content clears it. Emitted as a
   // `queue audit` finding, never as a run failure — registered here because
   // this list is the closed vocabulary EVERY emitted code resolves against.
-  "submit-fact-conflicting",
+  "submit-fact-terminal",
   "submodule-alternates-dead-store",
   "submodule-alternates-worktree-only",
   "submodule-composition-conflict",
