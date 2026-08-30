@@ -4,7 +4,7 @@
  * @consumer @yrd/issue
  */
 import { expect, it } from "vitest"
-import { createMemoryJournal, createYrd, createYrdDef } from "@yrd/core"
+import { createMemoryJournal, createYrd, createYrdDef, failureFact } from "@yrd/core"
 import { createCommandIssueSource, createKmIssueSource, createIssues, withIssues, type Issue } from "../src/index.ts"
 
 async function resolveKmNode(node: Readonly<Record<string, unknown>>): Promise<Issue> {
@@ -71,10 +71,71 @@ it("resolves source-owned ids and composes without mutating its host", async () 
   })
   expect(environment).not.toHaveProperty("GIT_DIR")
   expect(environment).not.toHaveProperty("YRD_JOB")
-  expect(timeoutMs).toBe(30_000)
+  expect(timeoutMs).toBe(60_000)
   expect(() => createIssues({ sources: [source, source] })).toThrow("duplicate issue source 'issues'")
   await expect(issues.resolve({ source: "missing", id: "1" })).rejects.toThrow("no issue source")
   await app.close()
+})
+
+/**
+ * @i/10-yrd/tracker-timeout-is-not-source-unavailable — a source that merely
+ * ran past the bound must classify distinctly from one that hard-failed, so a
+ * caller (human or `--json` reader) can tell "slow tracker" from "tracker is
+ * dead" by CODE alone, never by parsing the message.
+ */
+it("classifies a timed-out read as 'issue-source-timeout', naming the measured elapsed time and the bound — never the generic 'issue-source-failed'", async () => {
+  const source = createKmIssueSource({
+    process: {
+      async run() {
+        // A source that was merely SLOW, not broken: the process was killed
+        // at the bound, but it was still alive and had produced no error of
+        // its own — Process.run's real timedOut branch never carries a zero
+        // exitCode or JSON stdout, so this models that shape rather than a
+        // clean success cut short.
+        return { exitCode: -1, signal: null, stdout: "", stderr: "", durationMs: 28_344, timedOut: true }
+      },
+    },
+  })
+  const failure = await createIssues({ sources: [source] })
+    .resolve({ source: "km", id: "@yrd/core/21012" })
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+  const fact = failureFact(failure)
+  expect(fact?.code).toBe("issue-source-timeout")
+  expect(fact?.code).not.toBe("issue-source-failed")
+  expect(fact?.kind).toBe("infrastructure")
+  expect(fact?.message).toContain("timed out after 28344ms")
+  expect(fact?.message).toContain("bound 60000ms")
+})
+
+it("still raises 'issue-source-failed' for a genuine hard failure — never misclassified as a timeout", async () => {
+  const source = createKmIssueSource({
+    process: {
+      async run() {
+        return {
+          exitCode: 1,
+          signal: null,
+          stdout: "",
+          stderr: "km: vault unreadable",
+          durationMs: 42,
+          timedOut: false,
+        }
+      },
+    },
+  })
+  const failure = await createIssues({ sources: [source] })
+    .resolve({ source: "km", id: "@yrd/core/21012" })
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+  const fact = failureFact(failure)
+  expect(fact?.code).toBe("issue-source-failed")
+  expect(fact?.code).not.toBe("issue-source-timeout")
+  expect(fact?.kind).toBe("infrastructure")
+  expect(fact?.message).toContain("vault unreadable")
 })
 
 it("projects km context while keeping a path-form id as one argument", async () => {
