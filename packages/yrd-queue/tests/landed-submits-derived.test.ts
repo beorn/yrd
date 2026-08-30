@@ -353,12 +353,7 @@ describe("landedSubmits asks about the CHANGE, not only the commit", () => {
   }
 
   /** A sibling revision of some change: authored off main, never merged. */
-  async function authorUnderIdentity(
-    repo: string,
-    branch: string,
-    file: string,
-    changeId: string,
-  ): Promise<string> {
+  async function authorUnderIdentity(repo: string, branch: string, file: string, changeId: string): Promise<string> {
     await git.text(repo, ["checkout", "-q", "-b", branch, "main"])
     await Bun.write(join(repo, file), `${file}\n`)
     await git.text(repo, ["add", "--", file])
@@ -433,5 +428,106 @@ describe("landedSubmits asks about the CHANGE, not only the commit", () => {
     const scan = await landedSubmits(git, indexFor(repo), state)
     expect(scan.landed).toEqual([])
     expect(scan.unresolved).toEqual([])
+  })
+})
+
+describe("landedSubmits' UNVERIFIED detail carries walk coverage", () => {
+  /** An unmerged commit carrying its own Change-Id trailer — the standing
+   * submit fact the lineage lookup is asked about. */
+  async function authorWithChangeId(repo: string, branch: string, file: string, changeId: string): Promise<string> {
+    await git.text(repo, ["checkout", "-q", "-b", branch, "main"])
+    await Bun.write(join(repo, file), `${file}\n`)
+    await git.text(repo, ["add", "--", file])
+    await git.text(repo, ["commit", "-m", `feat: ${file}`, "-m", `Change-Id: ${changeId}`])
+    const tip = await git.text(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["checkout", "-q", "main"])
+    return tip
+  }
+
+  /** A cleanly-landed, trailered sibling change — pads the walked window
+   * without adding a specimen, so two runs can hold the SAME unreadable count
+   * over DIFFERENT totals (the "ancient window dilutes a stale specimen"
+   * shape, reproduced structurally rather than by faking commit dates). */
+  async function landCleanly(
+    repo: string,
+    options: Readonly<{ branch: string; file: string; member: string; changeId: string }>,
+  ): Promise<void> {
+    await git.text(repo, ["checkout", "-q", "-b", options.branch, "main"])
+    await Bun.write(join(repo, options.file), `${options.file}\n`)
+    await git.text(repo, ["add", "--", options.file])
+    await git.text(repo, ["commit", "-m", `feat: ${options.file}`, "-m", `Change-Id: ${options.changeId}`])
+    await git.text(repo, ["checkout", "-q", "main"])
+    await git.text(repo, [
+      "merge",
+      "--no-ff",
+      "-m",
+      `yrd: merge ${options.member} revision 1`,
+      "-m",
+      `Change-Id: ${options.changeId}`,
+      options.branch,
+    ])
+  }
+
+  const UNKNOWN_ID = `I${"c3".repeat(20)}`
+
+  it("names the walk's coverage ratio, not just the raw unreadable count", async () => {
+    // @i/10-yrd/audit-unverified-conflates-two-causes, 2026-08-29 specimen,
+    // superseded by @i/10-yrd/queue-liveness-pair (acceptance 3): `queue
+    // audit` answered UNVERIFIED for task/ci-full-suite-process-truncation
+    // naming "6008 commit(s)... carry no readable identity" with no
+    // denominator, so a reader could not tell an ancient trailer-poor window
+    // (safe to ignore, ancestry answers alone) from this change genuinely
+    // having no identity (real, derived truth cannot see it) — "the cheap
+    // wrong guess... is the one that looks right for both." Fix is that
+    // bead's own preferred option: report coverage ALONGSIDE the verdict
+    // rather than bounding the walk, so both states stay reachable and now
+    // render differently.
+    const repo = await makeRepo()
+    // ONE trailerless queue-lane merge — the walk's one specimen, held fixed
+    // across both reads below.
+    await queueMerge(repo, { branch: "issue/ghost", file: "ghost.txt", member: "PR1" })
+    const unknown = await authorWithChangeId(repo, "issue/unknown", "unknown.txt", UNKNOWN_ID)
+    const state = bays([{ branch: "issue/unknown", sha: unknown }])
+
+    const concentrated = await landedSubmits(git, indexFor(repo), state)
+    expect(concentrated.unresolved).toMatchObject([{ branch: "issue/unknown", reason: "unreadable" }])
+    const concentratedDetail = concentrated.unresolved[0]?.detail ?? ""
+    expect(concentratedDetail).toContain("1 of 2 commit(s)")
+    expect(concentratedDetail).toMatch(/walk coverage 50%/u)
+
+    // Pad the SAME window with three cleanly-trailered merges. The specimen
+    // count does not change — still the one trailerless merge above — but the
+    // denominator does, so the coverage ratio must move even though the raw
+    // "N commit(s)" figure alone could not distinguish the two reads.
+    await landCleanly(repo, {
+      branch: "issue/clean-a",
+      file: "clean-a.txt",
+      member: "PR2",
+      changeId: `I${"a1".repeat(20)}`,
+    })
+    await landCleanly(repo, {
+      branch: "issue/clean-b",
+      file: "clean-b.txt",
+      member: "PR3",
+      changeId: `I${"a2".repeat(20)}`,
+    })
+    await landCleanly(repo, {
+      branch: "issue/clean-c",
+      file: "clean-c.txt",
+      member: "PR4",
+      changeId: `I${"a3".repeat(20)}`,
+    })
+
+    const diluted = await landedSubmits(git, indexFor(repo), state)
+    expect(diluted.unresolved).toMatchObject([{ branch: "issue/unknown", reason: "unreadable" }])
+    const dilutedDetail = diluted.unresolved[0]?.detail ?? ""
+    expect(dilutedDetail).toContain("1 of 5 commit(s)")
+    expect(dilutedDetail).toMatch(/walk coverage 80%/u)
+
+    // The whole acceptance: the SAME "1 commit(s)... carry no readable
+    // identity" count now renders two DIFFERENT messages, because the
+    // coverage figure travels with the verdict instead of the reader having
+    // to go measure it by hand the way the 2026-08-29 incident required.
+    expect(dilutedDetail).not.toBe(concentratedDetail)
   })
 })

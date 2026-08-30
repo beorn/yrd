@@ -670,7 +670,10 @@ export async function landedSubmits(
               : ` as ${answer.occurrences[0].commit} (${answer.occurrences[0].subject})`) +
             " — this fact is a superseded revision of a landed change"
       if (store === "not-landed") {
-        disagree("landed", `no terminal record on '${branch}' names ${submit.sha} as its integration commit, but ${proof}`)
+        disagree(
+          "landed",
+          `no terminal record on '${branch}' names ${submit.sha} as its integration commit, but ${proof}`,
+        )
       }
       continue
     }
@@ -682,11 +685,24 @@ export async function landedSubmits(
       // live submission on a failed read — the one outcome worse than composing
       // a stale one, which `landedSubmitBranches` states in the same words.
       if (answer.reason === "trailer-absent") {
+        // @i/10-yrd/queue-liveness-pair (acceptance 3, superseding
+        // @i/10-yrd/audit-unverified-conflates-two-causes): UNVERIFIED is one
+        // word for two states that need opposite responses — an ancient
+        // trailer-poor window poisoning a recent verdict, versus this change
+        // genuinely having no identity. The walk already counts both halves
+        // (`index.commitsWalked`, `answer.specimens.length`); this only
+        // surfaces the ratio it already paid for, so a reader can tell high
+        // coverage (probably ancient window, ancestry answers alone) from low
+        // coverage (probably this change, derived truth cannot see it)
+        // without leaving this message to go measure it by hand.
+        const walked = index.commitsWalked
+        const unreadableCount = answer.specimens.length
+        const coverage = walked === 0 ? undefined : Math.round(((walked - unreadableCount) / walked) * 1000) / 10
         const detail =
           `standing fact '${branch}' at ${submit.sha} declares change '${answer.changeId}', and the lineage ` +
           `index over ${index.tip} in ${index.repo} could not answer for it: ` +
-          `${String(answer.specimens.length)} commit(s) in the walked window carry no readable identity ` +
-          `(${answer.specimens
+          `${String(unreadableCount)} of ${String(walked)} commit(s) in the walked window carry no readable ` +
+          `identity (walk coverage ${coverage === undefined ? "unknown" : `${String(coverage)}%`}; ${answer.specimens
             .slice(0, 3)
             .map((specimen) => `${specimen.commit.slice(0, 12)} ${specimen.problem}`)
             .join(", ")}), so a not-found cannot be trusted`

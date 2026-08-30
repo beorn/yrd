@@ -1199,6 +1199,11 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "admission-refusal-needs-person",
   "queue-never-started",
   "queue-progress-stalled",
+  /** @i/10-yrd/queue-liveness-pair: the (eligible, advanced-since-last-tick)
+   * pair. Deliberately independent of `admission-refusal-loop` and never
+   * suppressed by it, unlike `queue-progress-stalled` above — see that
+   * finding's own doc comment for the gap this closes. */
+  "queue-liveness-wedged",
   /** A recorded Run's plan is not the plan git derives at that Run's own base
    * sha (23193 leg a): the journal and the repository disagree about what
    * judged it. Equal by construction, so any instance is a real finding. */
