@@ -26,6 +26,7 @@ import {
   createPinIntentProvisioner,
   createPostureQueueTargetResolver,
   createYrdHost as createYrdHostRaw,
+  habitantOwnsSettlementDrain,
   runYrdProcess,
 } from "../src/host.ts"
 import { checkpointBumpGateViolations, SHIPPED_CHECKPOINT_IDENTITIES } from "../src/checkpoint-bump-gate.ts"
@@ -35,6 +36,7 @@ import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
+import type { YrdSettlementLaunch } from "../src/settlement.ts"
 import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
 
 const roots: string[] = []
@@ -6386,5 +6388,64 @@ describe("targetImplementationEntrypoint", () => {
     expect(targetImplementationEntrypoint(repo, join(repo, "vendor", "yrd"), candidate, baysRoot, repo)).toBe(
       join(candidate, "vendor", "yrd", "bin", "yrd.ts"),
     )
+  })
+})
+
+describe("habitantOwnsSettlementDrain", () => {
+  // @i/10-yrd/settlement-drain-is-runner-owned: only a habitant invocation
+  // (`queue run`) may own the settlement drain. Every other command's
+  // settlement launch must return without ever calling
+  // spawnYrdSettlementWorker — a second worker there only contends with the
+  // habitant runner's own for the writer lock (measured 2026-08-29: a
+  // steady 0.9/min tax across ordinary CLI calls, 61% from one caller
+  // alone, none of it the runner itself).
+  const fakeLaunch = (
+    habitant: boolean,
+    spawn: (asHabitant: boolean) => void = () => undefined,
+  ): YrdSettlementLaunch => ({
+    habitant,
+    drainNotices: () => undefined,
+    spawn,
+  })
+
+  it("is false when no settlement launch exists at all (help/version answers with nothing to own)", () => {
+    expect(habitantOwnsSettlementDrain(undefined)).toBe(false)
+  })
+
+  it("is false for an ordinary, non-habitant command", () => {
+    expect(habitantOwnsSettlementDrain(fakeLaunch(false))).toBe(false)
+  })
+
+  it("is true only for a queue-run (habitant) command", () => {
+    expect(habitantOwnsSettlementDrain(fakeLaunch(true))).toBe(true)
+  })
+
+  it("is the sole gate spawnYrdSettlementWorker may fire behind: a non-habitant launch never spawns, a habitant launch spawns exactly once, as habitant", () => {
+    for (const habitant of [false, true]) {
+      const calls: boolean[] = []
+      const launch = fakeLaunch(habitant, (asHabitant) => calls.push(asHabitant))
+      if (habitantOwnsSettlementDrain(launch)) launch.spawn(true)
+      expect(calls).toEqual(habitant ? [true] : [])
+    }
+  })
+
+  it("regression: two concurrent non-habitant launches beside one habitant launch — only the habitant spawns", () => {
+    const calls: boolean[] = []
+    const nonHabitantA = fakeLaunch(false, (asHabitant) => calls.push(asHabitant))
+    const nonHabitantB = fakeLaunch(false, (asHabitant) => calls.push(asHabitant))
+    const habitant = fakeLaunch(true, (asHabitant) => calls.push(asHabitant))
+    for (const launch of [nonHabitantA, habitant, nonHabitantB]) {
+      if (habitantOwnsSettlementDrain(launch)) launch.spawn(true)
+    }
+    expect(calls).toEqual([true])
+  })
+
+  it("host.ts calls settlement.spawn from exactly one, habitant-gated call site — the regression this bead closes was a second, ungated call site", async () => {
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(new URL("../src/host.ts", import.meta.url), "utf8")
+    const spawnCalls = source.split("\n").filter((line) => /settlement\??\.spawn\(/.test(line))
+    expect(spawnCalls).toHaveLength(1)
+    expect(spawnCalls[0]).toContain("spawn(true)")
+    expect(spawnCalls[0]).not.toContain("spawn(false)")
   })
 })

@@ -4188,6 +4188,33 @@ async function runEveryComposedRepository(
 }
 
 /**
+ * Only a habitant invocation (`queue run`) owns the settlement drain.
+ *
+ * Its worker starts BEFORE the runner does and lives beside it, ticking on
+ * its own cycle until the runner exits. Every other command must return
+ * spawning nothing at all: the habitant is already draining on its own
+ * cycle, and a second worker there only contends with it for the writer
+ * lock. Measured 2026-08-29 — @chief's census of the runner's own log, 46
+ * minutes: 41 `writer lock is busy` warnings, a steady 0.9/min tax, 61% of
+ * it (`25/41`) from one ordinary caller (`@adhoc/1`) alone, none of it the
+ * runner itself.
+ *
+ * This is the ONLY gate {@link spawnYrdSettlementWorker} may be called
+ * behind. A second, ungated call site is exactly the regression this
+ * function exists to make impossible to reintroduce silently — see
+ * settlement-drain-is-runner-owned.
+ *
+ * `plan.kind === "all-repositories"` can never carry a habitant command:
+ * `queue run` always names one declared repository
+ * (normalizeYrdRepositoryAliasInvocation routes it to `repository-write`,
+ * never `all-repositories-read`), so a composed multi-repository read owns
+ * no drain either — it spawns nothing, same as any other non-habitant call.
+ */
+export function habitantOwnsSettlementDrain(settlement: YrdSettlementLaunch | undefined): boolean {
+  return settlement?.habitant === true
+}
+
+/**
  * Real executable boundary: fully close the host, then terminate even when a
  * file-backed logger would otherwise retain or fault Bun resources. Kept out of
  * the package index; only bin/yrd.ts owns process lifetime.
@@ -4260,20 +4287,21 @@ export async function runYrdExecutable(): Promise<never> {
   settlement?.drainNotices()
 
   if (plan?.kind === "all-repositories") {
+    // Never a habitant invocation (see habitantOwnsSettlementDrain) — this
+    // composed, multi-repository read owns no drain and spawns nothing.
     const exitCode = await runEveryComposedRepository(argv, io, options, plan)
-    settlement?.spawn(false)
     await flushProcessOutput()
     globalThis.process.exit(exitCode)
   }
 
-  // The runner's worker starts BEFORE the runner does and lives beside it; a
-  // one-shot command's worker starts after the command committed its facts.
-  const habitant = settlement?.habitant === true
+  // The habitant runner's worker starts BEFORE the runner does and lives
+  // beside it; every other command owns no drain (habitantOwnsSettlementDrain)
+  // and spawns nothing, neither before nor after — see that function's doc.
+  const habitant = habitantOwnsSettlementDrain(settlement)
   if (habitant) settlement?.spawn(true)
   const exitCode = await runYrdProcessHost(plan === undefined ? argv : composeYrdArgv(argv, plan.args), io, true, {
     ...options,
     ...(plan?.kind === "repository" ? { repositoryLabel: plan.repository.name } : {}),
-    ...(settlement === undefined || habitant ? {} : { afterCommand: () => settlement?.spawn(false) }),
   })
   await flushProcessOutput()
   globalThis.process.exit(exitCode)
