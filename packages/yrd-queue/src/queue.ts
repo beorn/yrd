@@ -3599,7 +3599,7 @@ function createQueue<Shape extends ChangeShape>(
               reportZeroEventRun(queueRunNoSubmittedPRs(snapshot.bays, authoritySteps, consumed))
             }
           }
-          for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
+          for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize, snapshot.queues)) {
             if (runOptions.continueAdmissions?.() === false) break
             // 22306 residual: wrap the FULL per-candidate admission (base resolve,
             // prepare, start, settle) so a recut-certificate / command-refused /
@@ -4137,7 +4137,9 @@ function createQueue<Shape extends ChangeShape>(
       const candidates = runnablePRs(snapshot, {}, steps, needsPersonOwner, new Set(), {
         explicitStepAuthority: true,
       }).filter((pr) => checksRequested(pr))
-      return partitionCandidates(candidates, snapshot.queues.batchSize).map((candidate) => candidate.map((pr) => pr.id))
+      return partitionCandidates(candidates, snapshot.queues.batchSize, snapshot.queues).map((candidate) =>
+        candidate.map((pr) => pr.id),
+      )
     },
     checks(selectors) {
       const snapshot = runtime()
@@ -9911,7 +9913,68 @@ function ChangeEligibility(
     : verdict()
 }
 
-function partitionCandidates(prs: readonly Change[], batchSize: number): Change[][] {
+/**
+ * The ordinal of the Candidate each change's CURRENT revision was admitted
+ * with, keyed by exact revision identity — the same (id, ordinal, head) triple
+ * `candidateFactsForSnapshots` writes into `revs`, so a Candidate built for a
+ * superseded revision never speaks for the current one.
+ *
+ * `C<n>` is minted by `allocateCandidateId` from the journal's own running
+ * maximum at the moment admission builds the Candidate, so ascending `n` IS the
+ * order the queue admitted this base's ready set — a journal ordinal, not a
+ * clock. That is the whole point: every timestamp a Change carries is restamped
+ * by a mechanical re-merge, and the merge pass used to rank by one of them.
+ *
+ * Read from `queues.candidates` rather than each change's own admission record
+ * because a DERIVED member has no record-side copy by design
+ * (`recordRevisionAdmission` skips it), and ranking the two lanes by different
+ * facts is the divergence this exists to remove. The LOWEST ordinal wins, so a
+ * change re-admitted onto a moved base keeps the place its first admission of
+ * this revision earned.
+ */
+function admittedCandidateOrdinals(queues: DeepReadonly<QueuesState>): ReadonlyMap<string, number> {
+  const ordinals = new Map<string, number>()
+  for (const candidate of Object.values(queues.candidates)) {
+    const match = /^C(\d+)$/u.exec(candidate.id)
+    if (match?.[1] === undefined) continue
+    const ordinal = Number(match[1])
+    for (const rev of candidate.revs) {
+      const key = `${rev.pr}\u0000${rev.n}\u0000${rev.head}`
+      const seen = ordinals.get(key)
+      if (seen === undefined || ordinal < seen) ordinals.set(key, ordinal)
+    }
+  }
+  return ordinals
+}
+
+/**
+ * The ready set cut into Candidates, IN THE ORDER THE MERGE PASS COMPOSES THEM:
+ * the Candidate whose members were admitted earliest goes first.
+ *
+ * Grouping and membership are untouched by that order — a partition still holds
+ * exactly the changes that share a base, a flow and an integration proof, in the
+ * submit-clock order `requestedPRs` handed over, so a batch composes the same
+ * tree it always did. Only which partition the pass reaches FIRST changes.
+ *
+ * It used to be first-appearance order over a list ranked by the current
+ * revision's submit clock, and that clock is restamped by every mechanical
+ * re-merge while the change's place in the admission order — its content-keyed
+ * check request, and the Candidate that request produced — stays put. So every
+ * re-merged carrier fell behind every newcomer that had never been re-merged.
+ * Measured 2026-08-30 on base 50c53cd7: four changes green on one base, admitted
+ * C5219, C5220, C5221, C5222, composed C5222, C5221, C5219, C5220. The first
+ * merge moved the base, the three Runs behind it settled unmerged, all three
+ * were re-derived and re-admitted from scratch, and the change that had been
+ * ready LONGEST (PR2710, admitted first at 05:26) reached a seventh revision
+ * without ever having failed a check.
+ *
+ * A partition holding no admitted Candidate ranks after every partition that
+ * does — it has not reached the door yet — and keeps its first-appearance order
+ * among its own kind, which is what leaves a candidate the preparer refuses
+ * unable to hold the line (`admissionLineHolder`'s release, seen from the merge
+ * side).
+ */
+function partitionCandidates(prs: readonly Change[], batchSize: number, queues: DeepReadonly<QueuesState>): Change[][] {
   const groups = new Map<string, Change[]>()
   for (const pr of prs) {
     const proof = pr.integration
@@ -9925,7 +9988,26 @@ function partitionCandidates(prs: readonly Change[], batchSize: number): Change[
   for (const group of groups.values()) {
     for (let index = 0; index < group.length; index += batchSize) candidates.push(group.slice(index, index + batchSize))
   }
-  return candidates
+  const ordinals = admittedCandidateOrdinals(queues)
+  const admittedAt = (candidate: readonly Change[]): number | undefined => {
+    let earliest: number | undefined
+    for (const pr of candidate) {
+      const revision = currentChangeRev(pr)
+      const ordinal = ordinals.get(`${pr.id}\u0000${revision.n}\u0000${revision.head}`)
+      if (ordinal !== undefined && (earliest === undefined || ordinal < earliest)) earliest = ordinal
+    }
+    return earliest
+  }
+  // `toSorted` is stable, so partitions the journal cannot rank keep the
+  // first-appearance order they were built in.
+  return candidates.toSorted((left, right) => {
+    const leftAdmitted = admittedAt(left)
+    const rightAdmitted = admittedAt(right)
+    if (leftAdmitted === undefined && rightAdmitted === undefined) return 0
+    if (leftAdmitted === undefined) return 1
+    if (rightAdmitted === undefined) return -1
+    return leftAdmitted - rightAdmitted
+  })
 }
 
 function ChangeShape(prs: readonly ChangeSnapshot[]): ChangeShape {
