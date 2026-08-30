@@ -693,8 +693,14 @@ describe("pre-spend disclosure on mr close", () => {
     ).toBe(0)
     expect(output.stderr()).toContain("PR1 r1")
     expect(output.stderr()).toContain(HEAD_SHA)
-    // The one door that stays open, named at the moment it is being shut.
-    expect(output.stderr()).toContain("yrd pr submit topic/one")
+    // There is no door that stays open, and the disclosure must not invent one:
+    // the D2 reopen retired with the legacy mint, so `yrd pr submit topic/one`
+    // — which this pin used to require — refuses `pr-not-pushed` on the change
+    // the same command just withdrew. What the operator gets named instead is
+    // where the work actually continues.
+    expect(output.stderr()).not.toContain("yrd pr submit topic/one")
+    expect(output.stderr()).toContain("nothing reopens it")
+    expect(output.stderr()).toContain("yrd bay open --bay <name>")
     expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(1)
   })
@@ -721,7 +727,11 @@ describe("pre-spend disclosure on mr close", () => {
     expect(await runYrd(app, yrd("mr", "close", "PR1", "--burn-payload", "--json"), output.io), output.stderr()).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "pr.close",
-      spent: [{ pr: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one", reopen: "yrd pr submit topic/one" }],
+      // `next`, not `reopen`: the D2 reopen door retired with the legacy mint,
+      // so `yrd pr submit topic/one` — what this envelope used to promise —
+      // refuses `pr-not-pushed` on a withdrawn change, and a new commit on the
+      // branch refuses `change is withdrawn; start a new bay`.
+      spent: [{ pr: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one", next: "yrd bay open --bay <name>" }],
     })
   })
 

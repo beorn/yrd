@@ -107,9 +107,18 @@ export async function withdrawOne(
 
 /** What closing this revision spends, in the operator's own terms: the exact
  * revision leaving delivery — so an operator acting on a STALE read sees the
- * mismatch here, before the spend, not after it (the PR78 specimen) — and the
- * one command that brings the payload back. */
-type PayloadSpend = Readonly<{ pr: string; revision: number; headSha: string; branch: string; reopen: string }>
+ * mismatch here, before the spend, not after it (the PR78 specimen) — and where
+ * the work goes afterwards.
+ *
+ * `next`, never `reopen`: NOTHING reopens a closed change. This field held
+ * `yrd pr submit <branch>` and the notice called it "the one command that
+ * brings the payload back", which stopped being true when the D2 reopen door
+ * retired with the legacy mint (72c0282e). Measured at that commit's
+ * descendants: resubmitting the same branch refuses `pr-not-pushed`, and a NEW
+ * commit on it refuses `change '<id>' is withdrawn; start a new bay`. A field
+ * named for a door that is gone is an instrument that lies, so the name went
+ * with the value. */
+type PayloadSpend = Readonly<{ pr: string; revision: number; headSha: string; branch: string; next: string }>
 
 function payloadSpend(pr: Change): PayloadSpend {
   const revision = currentChangeRev(pr)
@@ -118,7 +127,7 @@ function payloadSpend(pr: Change): PayloadSpend {
     revision: revision.n,
     headSha: revision.head,
     branch: pr.branch,
-    reopen: `yrd pr submit ${pr.branch}`,
+    next: "yrd bay open --bay <name>",
   }
 }
 
@@ -137,8 +146,9 @@ function refuseUnacknowledgedSpend(verb: string, spends: readonly PayloadSpend[]
     "refusal",
     "withdraw-unacknowledged",
     `yrd: ${verb} spends payload identity permanently — ${spends.map(spendLine).join("; ")}; ` +
-      "a closed commit can never be resubmitted as-is on any other branch, and only its own branch reopens it. " +
-      "Re-read each revision above, then pass --burn-payload to acknowledge the spend.",
+      "the change is retired and NOTHING reopens it: resubmitting this branch refuses 'pr-not-pushed', and a new " +
+      "commit on it refuses 'change is withdrawn; start a new bay'. Continue the work in a new bay — " +
+      "'yrd bay open --bay <name>'. Re-read each revision above, then pass --burn-payload to acknowledge the spend.",
   )
 }
 
@@ -180,7 +190,10 @@ export async function withdrawPrs(
   // Disclosed BEFORE the first event, so a spend that fails partway has still
   // told the operator exactly which revision it was about to burn.
   for (const spend of spends) {
-    io.stderr(`yrd: spending payload identity: ${spendLine(spend)} — reopen only with '${spend.reopen}'\n`)
+    io.stderr(
+      `yrd: spending payload identity: ${spendLine(spend)} — retired for good, nothing reopens it; ` +
+        `continue in a new bay: '${spend.next}'\n`,
+    )
   }
   const withdrawn: Change[] = []
   for (const target of targets) {
