@@ -100,6 +100,55 @@ const BANNED_PATTERNS: readonly Readonly<{ name: string; pattern: RegExp }>[] = 
   { name: "clean -f", pattern: /\bgit\s+clean\s+-f|"clean"\s*,\s*"-f/ },
 ]
 
+/**
+ * A SECOND ban, structurally distinct from the single-line scan above: not a
+ * banned git action, but a banned PAIRING inside one `resolution`/`remedy`
+ * array — offering irreversible `--burn-payload` disposal as a co-equal cure
+ * alongside reversible `submit`. That is the exact shape `1739d38a`
+ * ("fix(queue): remove destructive draft remedy") pulled out of the
+ * `draft-stranded` finding's `resolution` array
+ * (@i/10-yrd/drafts-strand-silently box (b), chief class ruling 2026-08-16:
+ * "a draft is its AUTHOR'S drain obligation… destruction is never a sibling
+ * remedy to submission"). That fix landed with exactly one runtime regression
+ * test, scoped to the one `queue audit` scenario that reaches it — nothing
+ * stopped a DIFFERENT finding, or a future edit to this one, from
+ * reintroducing the pairing. This is that fence: it reads the property
+ * value, not a single line, so a `resolution: [...]` array split across
+ * several lines (the shape every producer in this tree actually uses) is
+ * still caught.
+ *
+ * A single-line regex cannot express this — the two entries live on
+ * different lines of the same array literal — so it is checked separately
+ * from `BANNED_PATTERNS` rather than folded into it.
+ */
+const RESOLUTION_ARRAY_PATTERN = /\b(?:resolution|remedy)\s*:\s*\[([\s\S]*?)\]/g
+const SUBMIT_IN_RESOLUTION_PATTERN = /\bsubmit\b/
+const BURN_PAYLOAD_IN_RESOLUTION_PATTERN = /--burn-payload/
+
+/** Every `resolution:`/`remedy:` array literal in `content` that names both a
+ * `submit` step and `--burn-payload` — reversible delivery and irreversible
+ * disposal offered as siblings, the shape the ruling forbids. Returns one
+ * `file:line: …` string per offending array, `line` counted from the start
+ * of the array literal (matching how `BANNED_PATTERNS` reports offenders
+ * above) so a hit points a reader at the exact `resolution:`/`remedy:` line. */
+function findSiblingSubmitBurnPayloadOffenders(content: string, relativePath: string): readonly string[] {
+  const offenders: string[] = []
+  for (const match of content.matchAll(RESOLUTION_ARRAY_PATTERN)) {
+    // The single capturing group always matches when the whole pattern does
+    // — it is not inside an alternation or `?` quantifier — but TS types
+    // every numbered group as possibly `undefined`, so this is a type
+    // narrowing, not a real fallback: an empty body simply never contains
+    // both banned substrings below.
+    const body = match[1] ?? ""
+    if (!SUBMIT_IN_RESOLUTION_PATTERN.test(body) || !BURN_PAYLOAD_IN_RESOLUTION_PATTERN.test(body)) continue
+    const line = content.slice(0, match.index).split("\n").length
+    offenders.push(
+      `${relativePath}:${String(line)}: resolution/remedy array offers both submit and --burn-payload as sibling entries`,
+    )
+  }
+  return offenders
+}
+
 /** Repo-relative (from `packages/`) path, forward-slashed, for stable matching
  * regardless of platform separator. */
 function relativeToPackages(absolutePath: string): string {
@@ -176,5 +225,59 @@ describe("yrd tool surface: no remedy prescribes a banned git action", () => {
         `allowlisted file is missing: ${entry.file}`,
       ).not.toThrow()
     }
+  })
+
+  // Pinned red/green proof for `findSiblingSubmitBurnPayloadOffenders`
+  // itself, independent of what the live tree currently contains: a fixture
+  // detector test needs its own positive control, or a vacuous regex (one
+  // that matches nothing, ever) would report "0 offenders" for the same
+  // reason a real fix does. `BAD_FIXTURE` below is not invented — it is the
+  // exact `resolution` array `1739d38a` removed from the `draft-stranded`
+  // finding in `yrd-queue/src/queue.ts` (@i/10-yrd/drafts-strand-silently
+  // box (b)), reproduced here as a plain string so the guard's own test does
+  // not depend on git history to stay meaningful.
+  it("detector: fires on the exact array the 2026-08-19 fix removed, clears on its replacement", () => {
+    const BAD_FIXTURE = [
+      "      findings.push({",
+      '        code: "draft-stranded",',
+      "        resolution: [",
+      "          `yrd pr submit ${pr.branch} --issue <ref>`,",
+      "          `or withdraw it: yrd pr withdraw ${pr.id} --burn-payload`,",
+      "        ],",
+      "      })",
+    ].join("\n")
+    expect(findSiblingSubmitBurnPayloadOffenders(BAD_FIXTURE, "fixture.ts")).toEqual([
+      "fixture.ts:3: resolution/remedy array offers both submit and --burn-payload as sibling entries",
+    ])
+
+    // Negative control: the actual replacement text, submit alone, must not trip it.
+    const FIXED_FIXTURE = [
+      "      findings.push({",
+      '        code: "draft-stranded",',
+      "        resolution: [`yrd pr submit ${pr.branch} --issue <ref>`],",
+      "      })",
+    ].join("\n")
+    expect(findSiblingSubmitBurnPayloadOffenders(FIXED_FIXTURE, "fixture.ts")).toEqual([])
+
+    // A withdraw-only array (no submit alongside it) is a different, legal
+    // shape — e.g. `remedy-admissibility.ts`'s `disposalRemedy`, chosen
+    // exclusively for a branch already absent from origin with nothing left
+    // to submit. Only the SIBLING pairing is banned.
+    const WITHDRAW_ONLY_FIXTURE = 'resolution: [`yrd pr withdraw ${pr.id} --burn-payload --reason "..."`]'
+    expect(findSiblingSubmitBurnPayloadOffenders(WITHDRAW_ONLY_FIXTURE, "fixture.ts")).toEqual([])
+  })
+
+  it("no resolution/remedy array in the live surface offers --burn-payload as a sibling to submit", () => {
+    const offenders: string[] = []
+    for (const absolutePath of surfaceFiles()) {
+      const relative = relativeToPackages(absolutePath)
+      const content = readFileSync(absolutePath, "utf8")
+      offenders.push(...findSiblingSubmitBurnPayloadOffenders(content, relative))
+    }
+    expect(
+      offenders,
+      `a resolution/remedy array offers --burn-payload beside submit — destruction is never a sibling remedy to ` +
+        `submission (chief class ruling 2026-08-16, @i/10-yrd/drafts-strand-silently):\n${offenders.join("\n")}`,
+    ).toEqual([])
   })
 })
