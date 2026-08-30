@@ -16,7 +16,7 @@ import { Command, createFailure, createMemoryJournal, parseJournalFrame } from "
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
-import { createLogger, type ConditionalLogger } from "loggily"
+import { createLogger, type ConditionalLogger, type LogEvent } from "loggily"
 import * as z from "zod"
 import {
   CURRENT_JOURNAL_COMPATIBILITY,
@@ -3076,6 +3076,70 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       .map((value) => parseJournalFrame(value).events.map(({ name }) => name))
     expect(transactions).toContainEqual(["branch/submitted"])
     expect(transactions.flat().filter((name) => name.startsWith("pr/"))).toEqual([])
+  })
+
+  it("names the frozen change and the fresh-ref remedy when a push cannot append a revision", async () => {
+    // The push is ACCEPTED and the revision does not move: the record that owns
+    // this carrier is terminal, so the S6 door declines intake and the submit
+    // fact derives a NEW change instead of revision N+1. Nothing said so at the
+    // point of use, and the author only found out by looking afterwards.
+    //
+    // Asserted on the PUSH's stderr, not a reopened host's logger, because that
+    // is the whole claim: the receiver hook runs in the pushing process with
+    // stderr inherited, so this reaches the author's terminal as `remote:`
+    // output. Watching a later drain would pass while the author saw nothing —
+    // the first draft of this test did exactly that.
+    const { repo, featureSha } = await repository()
+    const change = "@yrd/core/frozen-ref"
+    const carrier = `issue/${change}`
+    const initialized = await createYrdHost({ cwd: repo, defaultSubmitter: "@dev/3" })
+    const receiverPath = initialized.receiver.receiverPath
+    const baseSha = await git(repo, "rev-parse", "refs/heads/main")
+    await initialized.app.bays.intake({ branch: carrier, headSha: featureSha, baseSha })
+    const minted = Object.keys(initialized.app.state().bays.prs)
+    expect(minted, "fixture: intake must mint exactly one record to close").toHaveLength(1)
+    const pr = minted[0] as string
+    await initialized.app.bays.closePr({ pr })
+    // Positive controls on the fixture: the record must EXIST and NOT be live.
+    // Without both, this is the ordinary recordless push that must stay quiet.
+    expect(initialized.app.state().bays.prs[pr]?.branch).toBe(carrier)
+    expect(recordLaneOwnsBranch(initialized.app.state().bays, carrier)).toBe(false)
+    await initialized.close()
+
+    const push = Bun.spawn(["git", "-C", repo, "push", receiverPath, `${featureSha}:refs/for/main/${change}`], {
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [pushErr, pushCode] = await Promise.all([new Response(push.stderr).text(), push.exited])
+
+    expect(pushCode, `the push must still succeed — this is a notice, not a refusal:\n${pushErr}`).toBe(0)
+    expect(pushErr, `the notice must reach the pusher:\n${pushErr}`).toContain("did not append a revision")
+    expect(pushErr, "the change the author thought they were revising").toContain(change)
+    expect(pushErr, "and the fresh ref that WOULD carry it").toContain(`refs/for/main/${change}-r2`)
+
+    // Nothing was lost: the submit fact stands and the queue derives from it.
+    await using reopened = await createYrdHost({ cwd: repo, defaultSubmitter: "@dev/3" })
+    expect(reopened.app.state().bays.submits[carrier]).toMatchObject({ sha: featureSha, base: "main" })
+  })
+
+  it("stays SILENT on the ordinary recordless push, which has no revision to miss", async () => {
+    // The control that makes the test above mean something: a notice printed
+    // unconditionally would pass that one and put a warning on every healthy
+    // derived-lane submission, which is the same defect pointed the other way.
+    const { repo, featureSha } = await repository()
+    const initialized = await createYrdHost({ cwd: repo, defaultSubmitter: "@dev/3" })
+    const receiverPath = initialized.receiver.receiverPath
+    expect(initialized.app.state().bays.prs, "fixture: no record may exist").toEqual({})
+    await initialized.close()
+
+    const push = Bun.spawn(
+      ["git", "-C", repo, "push", receiverPath, `${featureSha}:refs/for/main/@yrd/core/quiet-submit`],
+      { stdout: "pipe", stderr: "pipe" },
+    )
+    const [pushErr, pushCode] = await Promise.all([new Response(push.stderr).text(), push.exited])
+
+    expect(pushCode, pushErr).toBe(0)
+    expect(pushErr, `an ordinary submit must not warn:\n${pushErr}`).not.toContain("did not append a revision")
   })
 
   it("uses the Hab service identity at the shipping process host", async () => {

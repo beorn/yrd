@@ -33,6 +33,7 @@ import {
   changeIdTrailerCandidates,
   findChangeId,
   recordLaneOwnsBranch,
+  currentChangeRev,
 } from "@yrd/bay"
 import {
   createHeldOutCommandEvaluator,
@@ -102,6 +103,7 @@ import {
   landedSubmits,
   type DerivedSubmitEnrichment,
   type MergedTruthGit,
+  revisionOf,
 } from "@yrd/queue"
 import {
   installedPlanStale,
@@ -2807,11 +2809,71 @@ async function isAncestorCommit(
   return result.exitCode === 0
 }
 
+/**
+ * The ref that WOULD carry this content as its own change.
+ *
+ * `-rN` is the machine-parsed series convention (`revisionOf`), so the
+ * suggestion has to respect it rather than blindly append: a push already on
+ * `-r2` must be told `-r3`, not `-r2-r2`. Incremented as a BigInt because a ref
+ * name may carry an arbitrarily long digit run, and `Number` would silently tie
+ * two distinct revisions past 2^53 — the same reason `stranded.ts` compares
+ * these as digit strings.
+ */
+function freshSubmitRef(base: string, change: string): string {
+  const marker = revisionOf(change)
+  if (marker === undefined) return `refs/for/${base}/${change}-r2`
+  return `refs/for/${base}/${marker.stem}-r${(BigInt(marker.revision) + 1n).toString()}`
+}
+
+/**
+ * Say, at the push, that this push did not append a revision.
+ *
+ * The S6 door below declines intake for any branch a LIVE record does not own,
+ * and for a branch whose record is TERMINAL that decline is invisible: the push
+ * is accepted, the submit fact is written, and the queue derives a NEW change
+ * from it. An author who pushed expecting revision N+1 of their change gets a
+ * different change number and no message — the freeze is discovered by looking,
+ * afterwards, which is how it cost a cycle.
+ *
+ * Only the terminal-record case speaks. A branch with NO record is the ordinary
+ * derived-lane submission — the overwhelmingly common path, and the one this
+ * door exists to serve — and warning there would put a notice on every healthy
+ * push, which is the same defect pointed the other way.
+ *
+ * This runs inside the receiver hook process, whose stderr git inherits, so the
+ * line reaches the pusher's terminal as `remote:` output rather than only the
+ * runner's log.
+ */
+function reportFrozenRecord(log: ConditionalLogger, app: YrdCliApp, result: Readonly<ReceiverResult>, branch: string) {
+  const record = Object.values(app.state().bays.prs).find((pr) => pr.branch === branch)
+  if (record === undefined) return
+  const change = result.change ?? record.name ?? record.id
+  const base = result.intake.base
+  log.warn?.(
+    `yrd: this push did not append a revision to change '${change}': that change is ${record.state} and no longer ` +
+      `owns branch '${branch}'. The push was accepted — the submit fact stands at ${result.headSha} and the queue ` +
+      `derives a NEW change from it — so nothing is lost, but revision ${currentChangeRev(record).n + 1} of ` +
+      `'${change}' is not what this produced. To submit this content under a name that says so, push a fresh ref: ` +
+      `git push bay HEAD:${freshSubmitRef(base, change)}`,
+    {
+      action: "receiver-frozen-record-no-revision",
+      branch,
+      change,
+      pr: record.id,
+      state: record.state,
+      merged: record.merged,
+      sha: result.headSha,
+      freshRef: freshSubmitRef(base, change),
+    },
+  )
+}
+
 async function intakeResult(
   app: YrdCliApp,
   result: Readonly<ReceiverResult>,
   process: Pick<Process, "run">,
   repo: string,
+  log: ConditionalLogger,
 ): Promise<void> {
   // Before the dispatch, never after: a change that exists without its carrier is
   // exactly the undeliverable state this exists to prevent, and a failure here
@@ -2823,7 +2885,10 @@ async function intakeResult(
   // drain IS the submission, and dispatching intake would refuse
   // `record-mint-retired` and wedge the drain retrying the result forever.
   const branch = result.intake.branch ?? result.branch
-  if (branch !== undefined && !recordLaneOwnsBranch(app.state().bays, branch)) return
+  if (branch !== undefined && !recordLaneOwnsBranch(app.state().bays, branch)) {
+    reportFrozenRecord(log, app, result, branch)
+    return
+  }
   await app.dispatch(
     app.commands.bay.intake,
     { ...result.intake, receipt: result.id },
@@ -3651,7 +3716,7 @@ async function createYrdRuntimeHost(
       const result = await receiver.drain({
         resolveTarget,
         intakePolicy: INTAKE_POLICY,
-        intake: (result) => intakeResult(runtimeApp, result, process, repository.repo),
+        intake: (result) => intakeResult(runtimeApp, result, process, repository.repo, receiverLog),
         lockTimeoutMs: 30_000,
       })
       if (result.failed.length > 0 || result.ambiguous.length > 0) {
@@ -3832,7 +3897,7 @@ async function runReceiverHook(
       process: runtimeProcess,
       resolveTarget: receiverTarget(runtimeApp, runtimeProcess, repository.repo),
       intakePolicy: INTAKE_POLICY,
-      intake: (result) => intakeResult(runtimeApp, result, runtimeProcess, repository.repo),
+      intake: (result) => intakeResult(runtimeApp, result, runtimeProcess, repository.repo, log),
       // The queue's own admission gate: an invalid pushed `.yrd.yml` is refused
       // at the push itself, so it can never reach the base ref queue.audit /
       // loadYrdConfig reads. See validatePushedYrdConfig's doc for the PR1337
