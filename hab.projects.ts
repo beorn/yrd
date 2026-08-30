@@ -65,7 +65,10 @@ export default {
       serviceName,
       {
         command: `bun tools/yrd-runtime.mjs yrd queue run ${repository.name}`,
-        env: { TRIBE_NAME: "@yrd", YRD_REPOSITORY_ALIASES },
+        // The habitant stands down over this RSS (exit 12, memory-cap) instead of
+        // waiting for the kernel; @cto ruling 2026-08-30 on
+        // @i/10-yrd/runner-exits-and-respawns — 12 GiB, one habitant per host.
+        env: { TRIBE_NAME: "@yrd", YRD_REPOSITORY_ALIASES, YRD_HABITANT_RSS_CAP_MB: "12288" },
         health: { command: `bun tools/yrd-runtime.mjs yrd queue ${repository.name} --check --json` },
       },
     ]),
