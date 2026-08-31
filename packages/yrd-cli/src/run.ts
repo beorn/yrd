@@ -7869,7 +7869,12 @@ async function queueStatusSnapshots(
       waiting: runs.waiting.flatMap(scopeRun),
       finished: runs.finished.flatMap(scopeRun),
     }
-    const groupPrs = recordChanges(state.bays).filter((pr) => group.aliases.has(pr.base))
+    // C3b (@i/10-yrd, 2026-08-31): both lanes. The `runs` above already carry
+    // derived members — they exist only inside runs — so the record-lane read
+    // here made one projection disagree with itself: a run rendered a member
+    // that the `prs`, `admissionOrder`, `candidates` and `eligibilities` beside
+    // it all denied existed.
+    const groupPrs = queueChanges(state.bays, state.queues).filter((pr) => group.aliases.has(pr.base))
     const prs = groupPrs.filter((pr) => target.selected.size === 0 || target.selected.has(pr.id))
     const prIds = new Set(prs.map((pr) => pr.id))
     const groupChangeIds = new Set(groupPrs.map((pr) => pr.id))
@@ -9002,7 +9007,9 @@ async function logRuns(
       waiting: merged.waiting.filter(inScope),
       finished: merged.finished.filter(inScope),
     }
-    const groupPrs = recordChanges(state.bays).filter((pr) => group.aliases.has(pr.base))
+    // C3b: both lanes, same reason as `queueStatusSnapshots` — `yrd queue log`
+    // listed a run and omitted its own member from the `prs` beside it.
+    const groupPrs = queueChanges(state.bays, state.queues).filter((pr) => group.aliases.has(pr.base))
     const groupChangeIds = new Set(groupPrs.map((pr) => pr.id))
     summaries.push({
       base: group.base,

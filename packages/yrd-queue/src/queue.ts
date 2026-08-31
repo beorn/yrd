@@ -2772,8 +2772,9 @@ function createQueue<Shape extends ChangeShape>(
 
   const cancelAdmissionJobsForRevision = async (args: CancelAdmissionJobsArgs): Promise<readonly string[]> => {
     const pr = resolveChange(runtime().bays, args.pr)
-    if (pr === undefined)
+    if (pr === undefined) {
       raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(runtime().bays, runtime().queues, args.pr))
+    }
     if (!pr.revs.some((revision) => revision.n === args.revision)) {
       raiseFailure("refusal", "pr-revision-not-found", `yrd: change '${pr.id}' has no revision ${args.revision}`)
     }
@@ -2965,12 +2966,13 @@ function createQueue<Shape extends ChangeShape>(
     for (const selector of selectors) {
       try {
         const pr = resolveChange(runtime().bays, selector) ?? derived.find((member) => member.id === selector)
-        if (pr === undefined)
+        if (pr === undefined) {
           raiseFailure(
             "refusal",
             "pr-not-found",
             queueChangeNotFoundMessage(runtime().bays, runtime().queues, selector),
           )
+        }
         const snapshot = runtime()
         const delivery = changeDeliveryState(pr)
         if (delivery === "integrated" || delivery === "already-landed") {
@@ -3174,8 +3176,9 @@ function createQueue<Shape extends ChangeShape>(
       const base = queueBase(snapshot, args.base)
       const allowedPRs = args.allowedPRs.map((selector) => {
         const pr = resolveChange(snapshot.bays, selector)
-        if (pr === undefined)
+        if (pr === undefined) {
           raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(snapshot.bays, snapshot.queues, selector))
+        }
         return pr.id
       })
       await actions.pause({ ...args, base, allowedPRs })
@@ -3354,7 +3357,7 @@ function createQueue<Shape extends ChangeShape>(
                 // disappeared mid-cycle: the authoritative CAS refuses loudly
                 // at dispatch if anything still names the member.
                 const fact = failureFact(error)
-                if (fact === undefined || fact.kind !== "refusal") throw error
+                if (fact?.kind !== "refusal") throw error
                 // hub/yrd/2026-08-30-core-review.md: log parity with admitDerived's
                 // (~3325) identical mid-cycle-disappearance skip, which already warns.
                 log.warn?.("queue materialize skipped a derived member whose submit fact no longer admits it", {
@@ -4104,7 +4107,13 @@ function createQueue<Shape extends ChangeShape>(
     },
     eligibilities(projected) {
       const snapshot = projected ?? runtime()
-      return recordChanges(snapshot.bays).map((pr) => ChangeEligibility(snapshot, pr, steps, needsPersonOwner))
+      // Both lanes, matching the singular `eligibility(selector)` above: that
+      // one was cut over to the change population and this one was not, so the
+      // pair disagreed about a derived member — the exact congruence
+      // `eligibility-congruence.test.ts` exists to hold.
+      return queueChanges(snapshot.bays, snapshot.queues).map((pr) =>
+        ChangeEligibility(snapshot, pr, steps, needsPersonOwner),
+      )
     },
     async scanLanding(projected) {
       return takeLandingScan(projected ?? runtime())
@@ -5012,8 +5021,9 @@ function createQueueCommands(
       // DERIVED member (S6) is attributable through the id-seam — its identity
       // lives in retained run snapshots, never the record store.
       const member = resolveMemberById(state.bays, state.queues, args.pr)
-      if (member === undefined)
+      if (member === undefined) {
         raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state.bays, state.queues, args.pr))
+      }
       const revision =
         member.source === "record"
           ? { n: currentChangeRev(member.record).n, head: currentChangeRev(member.record).head }
@@ -5061,8 +5071,9 @@ function createQueueCommands(
     params: SettleAdmissionRefusalSchema,
     apply(state: DeepReadonly<RuntimeState>, args: SettleAdmissionRefusalArgs) {
       const pr = getChangeRecord(state.bays, args.pr)
-      if (pr === undefined)
+      if (pr === undefined) {
         raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state.bays, state.queues, args.pr))
+      }
       const current = currentChangeRev(pr)
       if (current.n !== args.revision || current.head !== args.headSha) {
         raiseFailure(
@@ -5103,8 +5114,9 @@ function createQueueCommands(
     params: ChangeIntegratedSchema,
     apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof ChangeIntegratedSchema>) {
       const pr = getChangeRecord(state.bays, args.pr)
-      if (pr === undefined)
+      if (pr === undefined) {
         raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state.bays, state.queues, args.pr))
+      }
       const revision = currentChangeRev(pr)
       const exact =
         changeDeliveryState(pr) === "integrated" &&
