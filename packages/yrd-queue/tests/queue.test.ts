@@ -6415,12 +6415,15 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ steps: [{ job: { status: "completed", conclusion: "cancelled" } }] })
 
-    // The skip is LOUD and typed — never a silent swallow.
+    // The skip is typed and still recorded — never a silent swallow. info,
+    // not warn (lowered 2026-08-31): a peer runtime settling a Job first is a
+    // documented, self-resolving race — the next projection refresh sees the
+    // terminal state and moves on — never a fault needing attention.
     expect(events).toContainEqual(
       expect.objectContaining({
         kind: "log",
         namespace: "yrd:queue",
-        level: "warn",
+        level: "info",
         props: expect.objectContaining({
           action: "canceled-skip",
           run: runs[0]!.id,

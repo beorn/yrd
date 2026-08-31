@@ -41,6 +41,7 @@ import {
 import {
   command,
   compareNatural,
+  createConditionReporter,
   event,
   failureFact,
   journalEvent,
@@ -1676,7 +1677,12 @@ function createQueue<Shape extends ChangeShape>(
   const reportZeroEventRun = (value: JsonValue | undefined): boolean => {
     const covered = QueueRunReuseCoveredSchema.safeParse(value)
     if (covered.success) {
-      log.warn?.("queue run emitted zero events because a reusable prefix covered every selected step", {
+      // info, not warn: consistent with the empty-FIFO case below (queue-run-
+      // no-submitted-prs) — a reusable prefix covering every selected step is
+      // the queue recognizing it already did this work, not a fault. The line
+      // still exists, with its population, so it stays distinguishable from a
+      // run that never looked.
+      log.info?.("queue run emitted zero events because a reusable prefix covered every selected step", {
         action: "queue-run-reuse-covered",
         ...covered.data,
       })
@@ -1807,6 +1813,16 @@ function createQueue<Shape extends ChangeShape>(
     return cleaned
   }
 
+  // ONE condition reporter for the whole queue instance — sibling to `composes`
+  // above, same "one memo, not one per scope" reasoning. `deriveRefOnlyMembers`
+  // and the derived-admission gap warns below share it: a fact that keeps
+  // re-deriving nothing new (an unresolved lane, a missing-authority PR) would
+  // otherwise re-log identically every compose pass forever — measured at 16
+  // identical rows over one wedged hour — burying whatever changed underneath
+  // the noise. Callers namespace their own keys (branch+sha, pr+code, …) so
+  // unrelated conditions never suppress each other.
+  const conditions = createConditionReporter(log)
+
   /**
    * S6 door — DERIVED admission of ref-only approvals, replacing the retired
    * 2b intake sweep (census #3): every live projected submit ref on a
@@ -1853,7 +1869,9 @@ function createQueue<Shape extends ChangeShape>(
     // rebuild, and a quiet fall-back to it is exactly how the double-merge
     // came back unannounced. No scan means no exclusion and one loud line.
     if (!landing.wired) {
-      log.warn?.(
+      conditions.report(
+        "compose-derived-landed-scan-unconfigured",
+        "warn",
         "queue compose cannot ask the repository which standing submit facts already landed: no " +
           "scanLandedSubmits reader is configured for the queue plugin. Landed content excludes NOTHING on " +
           "this pass — the record store is deliberately not consulted, because its answer was wrong for " +
@@ -1868,7 +1886,9 @@ function createQueue<Shape extends ChangeShape>(
     const landedScan = (await landing.scan(snapshot.bays)) ?? NO_LANDED_SUBMIT_SCAN
     for (const stale of landedScan.landed) {
       if (skip.has(stale.branch)) continue
-      log.warn?.(
+      conditions.report(
+        `compose-derived-fact-already-landed:${stale.branch}:${stale.sha}`,
+        "warn",
         "queue compose will not derive an admission for a submit fact pointing at already-landed content; " +
           "the fact is stale — retire it (git push bay :refs/yrd/submit/" +
           stale.branch +
@@ -1886,7 +1906,9 @@ function createQueue<Shape extends ChangeShape>(
     // read. `landedSubmitBranches` decides which reasons bar admission.
     for (const open of landedScan.unresolved) {
       if (skip.has(open.branch)) continue
-      log.warn?.(
+      conditions.report(
+        `compose-derived-fact-landing-unresolved:${open.branch}:${open.sha}`,
+        "warn",
         "queue compose could not determine from the repository whether a standing submit fact's content " +
           "already landed; " +
           (open.reason === "degenerate"
@@ -1909,7 +1931,13 @@ function createQueue<Shape extends ChangeShape>(
     // is a FINDING, not noise to reconcile: one line per fact, naming which
     // side said what. The repository's answer is the one that acts.
     for (const conflict of landedScan.disagreements) {
-      log.warn?.(
+      // error, not warn: two sources of truth (the retired record store and
+      // the repository) disagreeing about whether content landed is exactly
+      // the queue-INTEGRITY case the operator's rule calls out — knowable at
+      // this emission site, loud immediately, never gated on persistence.
+      conditions.report(
+        `compose-derived-landing-disagreement:${conflict.branch}:${conflict.sha}`,
+        "error",
         "the change-record store and the repository disagree about whether a standing submit fact's " +
           "content has landed; the repository decides and the record is being retired — record this",
         {
@@ -1932,7 +1960,9 @@ function createQueue<Shape extends ChangeShape>(
       if (skip.has(branch)) continue
       const row = snapshot.queues.retiredSubmits[branch]
       if (row === undefined) continue
-      log.warn?.(
+      conditions.report(
+        `compose-derived-fact-retired:${branch}:${row.sha}`,
+        "warn",
         "queue compose will not derive a change for a submit fact it retired: change '" +
           row.pr +
           "' could not progress (" +
@@ -1965,7 +1995,9 @@ function createQueue<Shape extends ChangeShape>(
         superseded =
           isSubmitSuperseded !== undefined && (await isSubmitSuperseded({ branch, sha: submit.sha, base: submit.base }))
       } catch (error) {
-        log.warn?.(
+        conditions.report(
+          `compose-derived-superseded-unknown:${branch}:${submit.sha}`,
+          "warn",
           "queue compose could not determine whether a submitted branch's content is already on its base; " +
             "composing it, so a stale fact stays visible rather than silently dropping live work",
           {
@@ -1978,7 +2010,9 @@ function createQueue<Shape extends ChangeShape>(
         )
       }
       if (superseded) {
-        log.warn?.(
+        conditions.report(
+          `compose-derived-fact-superseded:${branch}:${submit.sha}`,
+          "warn",
           "queue compose will not derive an admission for a submit fact whose content the base already " +
             "contains; the fact is stale — retire it (git push bay :refs/yrd/submit/" +
             branch +
@@ -2024,7 +2058,9 @@ function createQueue<Shape extends ChangeShape>(
         enrichmentReader: readSubmitEnrichment === undefined ? "unconfigured" : "configured",
       } as const
       if (derivedMint === undefined) {
-        log.warn?.(
+        conditions.report(
+          "compose-derived-lane-empty-mint-unconfigured",
+          "warn",
           "queue compose derived no admissions and derived admission is UNWIRED: no PR-number mint is " +
             "configured for the queue plugin (the durable pr-mint.json store the bays plugin shares). The " +
             "derived lane is empty on this pass, so nothing is standing on it yet — but the next submitted " +
@@ -2042,7 +2078,9 @@ function createQueue<Shape extends ChangeShape>(
       return []
     }
     if (derivedMint === undefined) {
-      log.warn?.(
+      conditions.report(
+        "compose-derived-mint-missing",
+        "warn",
         "queue compose cannot admit ref-only branches: no PR-number mint is configured for derived admission " +
           "— configure the queue plugin's prNumberMint (the durable pr-mint.json store the bays plugin shares); " +
           "the derived lane is the only submission path, so every row stands until the mint exists",
@@ -2087,15 +2125,20 @@ function createQueue<Shape extends ChangeShape>(
         // before logging it, so the two never disagree and neither has to
         // point at the other.
         composes.observe(branch, submit.sha, { outcome: "refused", code: fact.code, message: fact.message })
-        log.warn?.("queue compose could not derive an admission for a submitted branch; its row stands", {
-          action: "compose-derived-refused",
-          branch,
-          sha: submit.sha,
-          base: submit.base,
-          code: fact.code,
-          kind: fact.kind,
-          reason: fact.message,
-        })
+        conditions.report(
+          `compose-derived-refused:${branch}:${submit.sha}:${fact.code}`,
+          "warn",
+          "queue compose could not derive an admission for a submitted branch; its row stands",
+          {
+            action: "compose-derived-refused",
+            branch,
+            sha: submit.sha,
+            base: submit.base,
+            code: fact.code,
+            kind: fact.kind,
+            reason: fact.message,
+          },
+        )
         continue
       }
     }
@@ -2199,7 +2242,7 @@ function createQueue<Shape extends ChangeShape>(
             ...(materializesCandidate && candidate.ref !== undefined ? { candidateRef: candidate.ref } : {}),
           })
           if (submitted.status === "completed" && submitted.conclusion === "cancelled") {
-            log.warn?.("Another Yrd runner finished this job first; using its result.", {
+            log.info?.("Another Yrd runner finished this job first; using its result.", {
               action: "canceled-skip",
               run: id,
               job: submitted.id,
@@ -2221,7 +2264,7 @@ function createQueue<Shape extends ChangeShape>(
           await actions.refresh()
           const raced = runtime().jobs.byId[active.job.id]
           if (raced === undefined || !Job.terminal(raced)) throw cause
-          log.warn?.("Another Yrd runner finished this job first; using its result.", {
+          log.info?.("Another Yrd runner finished this job first; using its result.", {
             action: "canceled-skip",
             run: id,
             job: active.job.id,
@@ -3430,13 +3473,25 @@ function createQueue<Shape extends ChangeShape>(
                 gap.reason === "consumed"
                   ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
                   : `no ${gap.kind} authority fact exists`
-              log.warn?.("queue compose ejected a candidate without runnable authority", {
-                action: "compose-candidate-skip",
-                pr: gap.pr,
-                code: `queue-${gap.kind}-authority-${gap.reason}`,
-                reason: gapReason,
-                remedy: "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
-              })
+              // error, not warn: a `missing` gap leaves no durable trace (the
+              // comment below), so this line is the ONLY record that this PR
+              // cannot be composed — the system cannot verify something it
+              // needs, which is the operator's queue-INTEGRITY bar. Deduped
+              // below: unfixed, this is the exact site measured re-skipping
+              // the same PR every cycle for over an hour.
+              conditions.report(
+                `compose-candidate-skip-authority:${gap.pr}:${gap.kind}:${gap.reason}`,
+                "error",
+                "queue compose ejected a candidate without runnable authority",
+                {
+                  action: "compose-candidate-skip",
+                  pr: gap.pr,
+                  code: `queue-${gap.kind}-authority-${gap.reason}`,
+                  reason: gapReason,
+                  remedy:
+                    "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
+                },
+              )
               // A `consumed` gap ejects with a durable `pr/needs-author` result,
               // so it leaves a trace and stops repeating. A `missing` gap leaves
               // nothing and re-skips the same PR every cycle — ledger that one.
@@ -3728,14 +3783,22 @@ function createQueue<Shape extends ChangeShape>(
               if (ejected !== undefined) {
                 const refusal = ChangeNeedsAuthorFactSchema.parse(ejected.data)
                 if (!selectorless) raiseFailure("refusal", refusal.receipt.code, refusal.receipt.message)
-                log.warn?.("queue compose ejected a candidate without runnable authority", {
-                  action: "compose-candidate-skip",
-                  pr: refusal.pr,
-                  code: refusal.receipt.code,
-                  reason: refusal.receipt.message,
-                  remedy:
-                    "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
-                })
+                // error, not warn — same queue-INTEGRITY reasoning as the other
+                // no-runnable-authority site above, and the same measured
+                // every-cycle repeat this key's dedup guards against.
+                conditions.report(
+                  `compose-candidate-skip-authority:${refusal.pr}:${refusal.receipt.code}`,
+                  "error",
+                  "queue compose ejected a candidate without runnable authority",
+                  {
+                    action: "compose-candidate-skip",
+                    pr: refusal.pr,
+                    code: refusal.receipt.code,
+                    reason: refusal.receipt.message,
+                    remedy:
+                      "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
+                  },
+                )
                 continue
               }
               const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")

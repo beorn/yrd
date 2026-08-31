@@ -161,3 +161,101 @@ function emitLifecycle(
       break
   }
 }
+
+/** A condition worth logging every cycle it holds — but not every literal
+ * repeat, and not silence either. `report`'s first call for a KEY logs
+ * immediately at the caller's level. A repeat of the SAME key tallies without
+ * logging, until the tally crosses a doubling threshold — the identical
+ * `min(2 ** attempts, cap)` shape {@link ConditionReporter}'s own doc points
+ * at below — at which point the condition is still active and gets
+ * re-announced rather than staying quiet, carrying how many repeats were
+ * folded into the wait. That is the escalation: fewer lines than one per
+ * pass, but never a single loud line followed by permanent silence for a
+ * condition that never clears. */
+export type ConditionReporter = Readonly<{
+  /** Log (or tally) one occurrence of `key`. First call for a key always logs
+   * `message`/`props` at `level`. A call while the key is already active
+   * either tallies silently or re-announces, per the doubling schedule. */
+  report(key: string, level: "warn" | "error", message: string, props?: Readonly<Record<string, unknown>>): void
+  /** The caller observed `key`'s condition clear. Flushes a closing summary
+   * naming how many repeats were folded in since the last announcement —
+   * silent when there were none, so a condition that fired exactly once never
+   * grows a synthetic second line. */
+  resolve(key: string): void
+  /** Flush every still-active key's closing summary (if any repeats were
+   * folded in). Call at loop/process exit so a condition that never resolves
+   * explicitly — the process just stops — does not lose its trailing tally. */
+  flush(): void
+}>
+
+/** Repeats-per-announcement doubles (1, 2, 4, 8, …) and caps here — the same
+ * cap shape `refreshTrackedQueueRevisions`'s `MAX_OBSERVATION_SKIP` already
+ * uses for its own re-observation backoff, copied rather than re-derived. */
+const CONDITION_REPEAT_CAP = 32
+
+type ConditionEntry = Readonly<{
+  level: "warn" | "error"
+  message: string
+  props: Readonly<Record<string, unknown>>
+  /** How many times this key has been announced (>= 1: `report` always
+   * announces the first occurrence). Doubles the wait before the next one. */
+  announcements: number
+  /** Repeats folded silently into the wait since the last announcement. */
+  suppressed: number
+}>
+
+/** Build one {@link ConditionReporter} bound to `log`. Callers that track
+ * several independent conditions from one process share ONE reporter and
+ * namespace their own keys (e.g. `` `liveness:${base}` `` vs
+ * `` `track-deferred:${pr}` ``) — the reporter itself never assumes what a key
+ * means, only that the SAME string is the SAME condition. */
+export function createConditionReporter(log: ConditionalLogger): ConditionReporter {
+  const active = new Map<string, ConditionEntry>()
+  const emit = (level: "warn" | "error", message: string, props: Readonly<Record<string, unknown>>): void => {
+    if (level === "error") log.error?.(message, props)
+    else log.warn?.(message, props)
+  }
+  const repeatAction = (props: Readonly<Record<string, unknown>>): string =>
+    typeof props.action === "string" ? `${props.action}-repeat-summary` : "condition-repeat-summary"
+  const summarize = (key: string): void => {
+    const entry = active.get(key)
+    active.delete(key)
+    if (entry === undefined || entry.suppressed === 0) return
+    emit(entry.level, `${entry.message} (cleared after ${String(entry.suppressed)} more repeated occurrence(s))`, {
+      ...entry.props,
+      action: repeatAction(entry.props),
+      suppressed: entry.suppressed,
+    })
+  }
+  return Object.freeze({
+    report(key, level, message, props = {}) {
+      const entry = active.get(key)
+      if (entry === undefined) {
+        active.set(key, { level, message, props, announcements: 1, suppressed: 0 })
+        emit(level, message, props)
+        return
+      }
+      const suppressed = entry.suppressed + 1
+      if (suppressed < Math.min(2 ** entry.announcements, CONDITION_REPEAT_CAP)) {
+        active.set(key, { ...entry, suppressed })
+        return
+      }
+      const announcements = entry.announcements + 1
+      active.set(key, { level, message, props, announcements, suppressed: 0 })
+      emit(
+        level,
+        `${message} (still ongoing — ${String(suppressed)} repeated occurrence(s) suppressed since the last notice)`,
+        { ...props, action: repeatAction(props), suppressedSinceLastNotice: suppressed },
+      )
+    },
+    resolve(key) {
+      summarize(key)
+    },
+    flush() {
+      // Deleting the current key mid-iteration is well-defined for Map: the
+      // iterator never revisits a deleted entry and never skips a pending
+      // one, so this needs no snapshot copy of the key list.
+      for (const key of active.keys()) summarize(key)
+    },
+  })
+}

@@ -34,6 +34,7 @@ function harness(
   const calls: Call[] = []
   const infos: LogCall[] = []
   const warns: LogCall[] = []
+  const errors: LogCall[] = []
   const verdict = options.verdict ?? "RECUT"
   let head = HEAD
   let revision = 1
@@ -98,6 +99,7 @@ function harness(
     log: {
       info: (message: string, props: Record<string, unknown>) => infos.push({ message, props }),
       warn: (message: string, props: Record<string, unknown>) => warns.push({ message, props }),
+      error: (message: string, props: Record<string, unknown>) => errors.push({ message, props }),
     },
     bays: {
       pr: () => pr(),
@@ -158,7 +160,7 @@ function harness(
       },
     },
   } as unknown as YrdCliServices
-  return { app, io, services, calls, infos, warns, ops: () => calls.map((call) => call.op) }
+  return { app, io, services, calls, infos, warns, errors, ops: () => calls.map((call) => call.op) }
 }
 
 describe("habitant refusal remedies — only PR-local drills are self-applied", () => {
@@ -272,7 +274,9 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
       code: "composition-invalid",
       resolution: ["yrd pr submit <branch>"],
     })
-    expect(h.warns).toContainEqual(
+    // error, not warn (raised 2026-08-31): a remedy step refusing needs a
+    // person, no mechanical retry can help — queue-INTEGRITY, loud immediately.
+    expect(h.errors).toContainEqual(
       expect.objectContaining({ props: expect.objectContaining({ action: "queue-refusal-remedy-failed" }) }),
     )
     // The wedge is now a human's problem — but exactly once, not once per cycle.
@@ -303,7 +307,10 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
     // A restarted habitant has an empty process-local Set. The durable Queue
     // settlement remains authoritative and must still suppress re-selection.
     expect(await applyRefusalRemedies(h.app, h.services, h.io, new Set())).toEqual([])
-    expect(h.warns).toContainEqual(
+    // error, not warn (raised 2026-08-31): same queue-INTEGRITY reasoning —
+    // no mechanical remedy exists, so this line is the only record a person
+    // is needed.
+    expect(h.errors).toContainEqual(
       expect.objectContaining({ props: expect.objectContaining({ action: "queue-refusal-escalated" }) }),
     )
   })

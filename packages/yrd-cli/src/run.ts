@@ -55,10 +55,12 @@ import {
 import { CompetitorDefSchema, type CompetitorDef, type Contest } from "@yrd/contest"
 import {
   compareNatural,
+  createConditionReporter,
   createFailure,
   failureFact,
   raiseFailure,
   SUPPORTED_VERSIONS,
+  type ConditionReporter,
   type DeepReadonly,
   type JournalSnapshot,
 } from "@yrd/core"
@@ -9264,7 +9266,7 @@ function createStrandedSweeper(
   app: YrdCliApp,
   io: YrdCliIO,
   base: string,
-  log: Pick<YrdCliApp["log"], "warn">,
+  log: Pick<YrdCliApp["log"], "warn" | "error">,
 ): Readonly<{ observe: () => StrandedObservation | undefined }> {
   const cwd = io.repositoryRoot ?? io.cwd ?? globalThis.process.cwd()
   let latest: StrandedObservation | undefined
@@ -9309,7 +9311,7 @@ function createStrandedSweeper(
         inFlight = true
         void refresh(nowMs)
           .catch((error: unknown) => {
-            log.warn?.("stranded-refs sweep failed; the rail will show its previous observation aging", { error })
+            log.error?.("stranded-refs sweep failed; the rail will show its previous observation aging", { error })
           })
           .finally(() => {
             inFlight = false
@@ -10848,12 +10850,20 @@ function trackedObservationKey(pr: Change, revision: Pick<ChangeRev, "n" | "head
  * `observation` is the caller's re-observation backoff. The habitant owns one for
  * its lifetime; a one-shot or programmatic caller omits it and observes every
  * candidate exactly once, which is the whole of its cycle.
+ *
+ * `conditions` is the same optional, caller-owned log dedup `logQueueLivenessWedge`
+ * takes — omitted, every deferral below logs unconditionally as before; the
+ * habitant loop passes its one process-lifetime reporter so a candidate whose
+ * PREPARATION keeps failing the same way every cycle stops re-logging an
+ * identical line (distinct from `observation` above, which only backs off the
+ * OBSERVATION phase's git fetch and already logs every attempt it makes).
  */
 export async function refreshTrackedQueueRevisions(
   app: YrdCliApp,
   services: YrdCliServices,
   io: YrdCliIO,
   observation?: TrackedObservationBackoff,
+  conditions?: ConditionReporter,
 ): Promise<readonly HabitantTrackedRevisionTransition[]> {
   const candidates = recordChanges(stateOf(app).bays)
     .filter((pr) => {
@@ -11047,7 +11057,7 @@ export async function refreshTrackedQueueRevisions(
           message: failure.message,
         }
         outcomes.push(outcome)
-        app.log.warn?.(`Tracked PR ${currentPr.id} needs an operator decision before entry checks.`, {
+        app.log.error?.(`Tracked PR ${currentPr.id} needs an operator decision before entry checks.`, {
           action: "queue-track-needs-person",
           ...outcome,
         })
@@ -11065,10 +11075,18 @@ export async function refreshTrackedQueueRevisions(
         message: failure.message,
       }
       outcomes.push(outcome)
-      app.log.warn?.(`Could not prepare tracked change ${candidate.id}; it remains queued for another cycle.`, {
-        action: "queue-track-deferred",
-        ...outcome,
-      })
+      const deferredMessage = `Could not prepare tracked change ${candidate.id}; it remains queued for another cycle.`
+      const deferredProps = { action: "queue-track-deferred", ...outcome }
+      if (conditions === undefined) {
+        app.log.warn?.(deferredMessage, deferredProps)
+      } else {
+        conditions.report(
+          `track-deferred:${trackedObservationKey(candidate, deferredRevision)}`,
+          "warn",
+          deferredMessage,
+          deferredProps,
+        )
+      }
     }
   }
   return outcomes
@@ -11571,7 +11589,7 @@ export async function applyRefusalRemedies(
     if (plan.remedy.kind === "judgment") {
       await settleNeedsPerson(plan.remedy.reason)
       outcomes.push({ status: "escalated", ...identity, reason: plan.remedy.reason, resolution: projected.resolution })
-      app.log.warn?.(`PR ${plan.pr} needs a person: its result has no mechanical remedy.`, {
+      app.log.error?.(`PR ${plan.pr} needs a person: its result has no mechanical remedy.`, {
         action: "queue-refusal-escalated",
         ...identity,
         reason: plan.remedy.reason,
@@ -11594,7 +11612,7 @@ export async function applyRefusalRemedies(
       const failure = error instanceof Error ? error.message : String(error)
       await settleNeedsPerson(failure)
       outcomes.push({ status: "failed", ...identity, commands, failure, resolution: projected.resolution })
-      app.log.warn?.(`Could not apply PR ${plan.pr}'s printed remedy; it needs a person.`, {
+      app.log.error?.(`Could not apply PR ${plan.pr}'s printed remedy; it needs a person.`, {
         action: "queue-refusal-remedy-failed",
         ...identity,
         commands,
@@ -11989,18 +12007,43 @@ export async function habitantRecoverySweep(
  * second derivation, so this can never disagree with service health about
  * whether the queue is draining; loggily-only, matching every other habitant
  * log line.
+ *
+ * error, not warn: by the time `habitantQueueProgress` calls the queue
+ * "stalled" it has already applied its own persistence threshold, so this
+ * finding fires only once that bar is cleared — the queue cannot self-recover
+ * on its own, which is the operator's loud-immediately bar. A live outage
+ * (measured: 72 minutes, zero ERROR lines) must not read as healthy.
+ *
+ * `conditions` is optional and caller-owned — the same seam
+ * `refreshTrackedQueueRevisions`'s `observation` backoff below uses — so a
+ * one-shot or test caller that passes none gets the unconditional per-call
+ * behavior this function always had; the habitant loop owns one instance for
+ * its process lifetime and dedupes this tick's repeats across cycles (D1b
+ * ticks every 30-90s while stalled, and this same finding used to re-log
+ * identically on every one of them). Called every tick regardless of
+ * `progress.state`, so a `conditions` reporter also learns the moment the
+ * queue recovers and flushes any pending per-base tallies then.
  */
-export function logQueueLivenessWedge(app: YrdCliApp, now: string): void {
+export function logQueueLivenessWedge(app: YrdCliApp, now: string, conditions?: ConditionReporter): void {
   const progress = habitantQueueProgress(app, now)
-  if (progress.state !== "stalled") return
+  if (progress.state !== "stalled") {
+    conditions?.flush()
+    return
+  }
   for (const finding of progress.findings) {
     if (finding.code !== "queue-liveness-wedged") continue
-    app.log.warn?.(finding.message, {
+    const props = {
       action: "resident-queue-liveness-wedged",
       ...(finding.pr === undefined ? {} : { pr: finding.pr }),
       ...(finding.blockedMs === undefined ? {} : { blockedMs: finding.blockedMs }),
       ...(finding.since === undefined ? {} : { since: finding.since }),
-    })
+    }
+    if (conditions === undefined) {
+      app.log.error?.(finding.message, props)
+      continue
+    }
+    const key = `liveness:${finding.specimen ?? `${finding.pr ?? "unknown"}:${finding.since ?? "unknown"}`}`
+    conditions.report(key, "error", finding.message, props)
   }
 }
 
@@ -12025,13 +12068,14 @@ async function prepareHabitantQueueCycle(
   io: YrdCliIO,
   remedied: Set<string>,
   observation: TrackedObservationBackoff,
+  conditions?: ConditionReporter,
 ): Promise<boolean> {
   const beforePublication = stateOf(app)
   const publications = await preparePublicationQueueCycle(app, services, io)
   const publicationChanged = publications.length > 0 || preparationBaselineChanged(beforePublication, stateOf(app))
   if (services.recut === undefined) return publicationChanged
   const beforeTracking = stateOf(app)
-  const tracking = await refreshTrackedQueueRevisions(app, services, io, observation)
+  const tracking = await refreshTrackedQueueRevisions(app, services, io, observation, conditions)
   const trackingChanged = preparationBaselineChanged(beforeTracking, stateOf(app))
   const beforeFreshness = stateOf(app)
   const freshness = await refreshAdmittedQueueRevisions(app, services, io)
@@ -12114,6 +12158,13 @@ export async function followQueueRuns(
   // Re-observation backoff for tracked branches this process could not observe
   // (22584). Process-scoped like `remedied`: a claim about THIS runner's cycles.
   const observation: TrackedObservationBackoff = new Map()
+  // ONE condition reporter for the process lifetime, process-scoped like
+  // `observation` above. `logQueueLivenessWedge`'s dead-man tick and the
+  // tracked-preparation "remains queued" deferral both fire on every
+  // maintenance tick (30-90s) while their condition holds; without cross-cycle
+  // memory each tick re-logs the identical line — measured 16 identical rows
+  // over one wedged hour. Callers namespace their own keys.
+  const conditions = createConditionReporter(app.log)
   // Consecutive all-candidate-refusal cycles against an unchanged world (22474
   // specimen 3). Also process-scoped: it is a claim about THIS process.
   let stall: HabitantRefusalStall | undefined
@@ -12175,7 +12226,7 @@ export async function followQueueRuns(
         // "is the queue draining" — 22928's own distinction — computed from
         // the identical shared predicate `habitantQueueProgress` already
         // feeds service health with, never a second reader.
-        logQueueLivenessWedge(app, new Date(cycleNow).toISOString())
+        logQueueLivenessWedge(app, new Date(cycleNow).toISOString(), conditions)
         // Level trigger (@i/10-yrd/quiet-path-starves-standing-submit-facts,
         // shapes 1 and 5): the maintenance tick ALWAYS runs the queue. The
         // edge flags above only accelerate; whether actionable work exists is
@@ -12200,7 +12251,7 @@ export async function followQueueRuns(
       // A mechanical re-merge may itself take long enough for the declared plan
       // to move. Re-read it before admitting the fresh revision; never start a
       // Run under the pre-re-merge gate snapshot.
-      if (await prepareHabitantQueueCycle(app, services, io, remedied, observation)) {
+      if (await prepareHabitantQueueCycle(app, services, io, remedied, observation, conditions)) {
         runRequired = true
         const staleAfterPrepare = await habitantGate(gate, habitant, app, io)
         if (staleAfterPrepare !== undefined) return staleAfterPrepare
@@ -12346,6 +12397,7 @@ export async function followQueueRuns(
     throw error
   } finally {
     recoveryReporter.flush()
+    conditions.flush()
     await heartbeat?.close(cleanShutdown)
   }
 }

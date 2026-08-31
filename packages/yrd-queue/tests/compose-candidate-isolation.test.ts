@@ -224,10 +224,14 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
       ]),
     )
     expect(mergeCalls).toBe(2)
+    // error, not warn (raised 2026-08-31): a candidate ejected with no
+    // durable trace is exactly the queue-INTEGRITY case the operator's rule
+    // calls out — the system cannot verify something it needs, loud
+    // immediately.
     const skip = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" &&
-        event.level === "warn" &&
+        event.level === "error" &&
         event.namespace === "yrd:queue" &&
         event.props?.action === "compose-candidate-skip",
     )

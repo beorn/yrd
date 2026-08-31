@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { isAbsolute, join, resolve, sep } from "node:path"
+import { createLogger } from "loggily"
 import { authoredDeltaBase } from "@yrd/bay"
 import {
   CheckpointMigrationManifestSchema,
@@ -2435,6 +2436,22 @@ async function scratchIn(git: Git, repo: string, prefix: string, parent?: string
 const reapedScratchRoots = new Set<string>()
 
 /**
+ * No `ConditionalLogger` reaches `reapOnce`: it runs from step bodies
+ * (`JobHandler`s), and `JobContext` carries no logger — the job execution
+ * layer around them does all lifecycle logging via `observeYrdLifecycle`
+ * (@yrd/core), never handing it into the body. A successful reap is
+ * routine, not a step outcome, so it does not belong on that lifecycle
+ * line either way. This namespaced loggily logger — the same "yrd:queue"
+ * namespace the rest of this package's log lines carry — is the minimal
+ * fix for the one bug this site actually had: `console.warn` prints
+ * unconditionally and no `--log-level`/`--quiet`/`LOG_LEVEL` can silence
+ * it. A loggily logger honors all three; it does not yet inherit the
+ * CLI's OWN resolved pipeline object (that needs a logger threaded through
+ * `JobContext`, a larger change than one log line justifies).
+ */
+const scratchReapLog = createLogger("yrd:queue")
+
+/**
  * The scratch entries git still lists as live worktrees. A queue worktree lives
  * at `<entry>/worktree`, so a listed path under the scratch root names its
  * entry's first segment; that is what separates an abandoned tree from one a
@@ -2466,7 +2483,14 @@ async function reapOnce(git: Git, repo: string, root: string): Promise<void> {
   if (reapedScratchRoots.has(key)) return
   reapedScratchRoots.add(key)
   const report = await reapOrphanedScratch(key, { keep: await liveScratchEntries(git, repo, key) })
-  if (report.reaped > 0 || report.failures.length > 0) console.warn(describeScratchReap(report))
+  if (report.reaped > 0 || report.failures.length > 0) {
+    scratchReapLog.info?.(describeScratchReap(report), {
+      action: "queue-scratch-reap",
+      root: key,
+      reaped: report.reaped,
+      failures: report.failures.length,
+    })
+  }
 }
 
 /**
