@@ -10,6 +10,7 @@
  */
 import { readFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
+import * as core from "@yrd/core"
 import { resetStageClock, stageReport } from "@yrd/core"
 import { beforeEach, describe, expect, test } from "vitest"
 import { createYrdLogger, resolveYrdObservability } from "../src/observability.ts"
@@ -19,6 +20,29 @@ beforeEach(() => {
 })
 
 describe("stage accounting wiring", () => {
+  // FIRST, because every other test here is meaningless if this one fails, and
+  // because the raw symptom is unreadable. Two seats hit `withStageAccounting
+  // is not a function` thrown from observability.ts and reported it as a code
+  // defect. It is not one: their tree resolved `@yrd/core` to a DIFFERENT yrd
+  // checkout than the source under test — the shared-main projection at the
+  // superproject pin, which predates `stage-spans.ts` — so the barrel genuinely
+  // lacked the export while the caller genuinely called it. That is latent for
+  // ANY new export from `@yrd/core`; this one was merely the first.
+  //
+  // The tests below check that the SOURCE wraps its logger roots. None of them
+  // can see a barrel that resolves elsewhere, which is how a guarded feature
+  // stayed green while being undefined at runtime.
+  test("the wrapper resolves through the barrel, not just in the source text", () => {
+    expect(
+      typeof core.withStageAccounting,
+      "@yrd/core does not export withStageAccounting. That is a PROVISIONING mismatch, " +
+        "not a logic bug: this tree's @yrd/core resolves to another yrd checkout, older " +
+        "than the source being tested, so the barrel lacks an export the caller makes. " +
+        "Run 'bun install --frozen-lockfile' in the enclosing tree, then confirm " +
+        "'readlink -f node_modules/@yrd/core' names THIS checkout.",
+    ).toBe("function")
+  })
+
   test("a span on the host logger lands in the breakdown", async () => {
     // The operator's own invocation: DEBUG names one namespace, which is also
     // what turns spans on. Nothing else is enabled.
