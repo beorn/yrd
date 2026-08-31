@@ -46,7 +46,6 @@ describe("initial journal version floor", () => {
     // to classify or refuse the row properly.
     const rows = [liveRow({ compatibility: { version: 5, requires: ["some-capability"] } })]
 
-    expect(() => initialJournalVersionFloor(runtime, rows, false)).not.toThrow()
     expect(initialJournalVersionFloor(runtime, rows, false)).toBe(5)
   })
 
@@ -58,7 +57,6 @@ describe("initial journal version floor", () => {
       liveRow({ compatibility: { requires: ["x"] } }, 3),
     ]
 
-    expect(() => initialJournalVersionFloor(runtime, rows, false)).not.toThrow()
     expect(initialJournalVersionFloor(runtime, rows, false)).toBe(0)
   })
 })
