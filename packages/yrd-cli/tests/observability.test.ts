@@ -60,9 +60,9 @@ describe("Yrd observability controls", () => {
     // namespace filter and getting silence is the trap this repo cares about:
     // the knob is documented, and used exactly as documented it emitted zero
     // bytes, which is why a multi-second stage stayed invisible for weeks.
-    [{}, { DEBUG: "yrd:queue" }, { level: "debug", debug: "yrd:queue", spans: true, explicitLevel: false }],
+    [{}, { DEBUG: "yrd:queue" }, { level: "debug", debug: "yrd:queue", spans: false, explicitLevel: false }],
     // The control that proves silence was never a namespace typo.
-    [{}, { DEBUG: "*" }, { level: "debug", debug: "*", spans: true, explicitLevel: false }],
+    [{}, { DEBUG: "*" }, { level: "debug", debug: "*", spans: false, explicitLevel: false }],
     // ...but an EXPLICIT level always wins over the implication, from any of the
     // three sources that count as an operator choice.
     [

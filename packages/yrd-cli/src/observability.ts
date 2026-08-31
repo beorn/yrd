@@ -93,13 +93,24 @@ export function resolveYrdObservability(
     // keeps its level. DEBUG= just moves the DEFAULT.
     configured ??
     (namespaces === undefined ? "warn" : "debug")
+  // The same three sources named above, kept as one value so `spans` and the
+  // returned field can never drift apart.
+  const explicitLevel = explicit !== undefined || configured !== undefined || verbose > 0 || quiet > 0
 
   return Object.freeze({
     level: selected,
     ...(namespaces === undefined ? {} : { debug: namespaces }),
     ...(setting(env.LOGGILY_FILE) === undefined ? {} : { file: setting(env.LOGGILY_FILE) }),
-    spans: trace !== undefined || selected === "trace" || selected === "debug",
-    explicitLevel: explicit !== undefined || configured !== undefined || verbose > 0 || quiet > 0,
+    // DEBUG alone only ever selects a default SEVERITY (explicitLevel stays
+    // false below) — it must not ALSO turn spans on, or the namespace filter
+    // reintroduces exactly the instrumentation cost TRACE exists to gate:
+    // DEBUG='*' was paying full span/otel overhead on every run for a knob
+    // documented as a namespace filter (@i/10-yrd/24015). `-vv`,
+    // `--log-level debug`, and `LOG_LEVEL=debug` are still explicit operator
+    // requests for debug severity — gate on explicitLevel, not the resolved
+    // string alone, or `-vv`'s own "-vv enables spans" help text goes false.
+    spans: trace !== undefined || selected === "trace" || (selected === "debug" && explicitLevel),
+    explicitLevel,
   })
 }
 
