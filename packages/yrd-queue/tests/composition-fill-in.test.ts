@@ -21,10 +21,10 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { failureFact } from "@yrd/core"
 import { createProcess, shellCommand } from "@yrd/process"
+import { assertSubmoduleModelAuthorizationsAvailable } from "../src/queue.ts"
 import {
   GitCheckEvidenceSchema,
   Queues,
-  assertSubmoduleModelAuthorizationsAvailable,
   gitCandidatePreparer,
   gitCheckStep,
   type CandidatePreparationInput,
