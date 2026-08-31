@@ -9,6 +9,7 @@ import { DEFAULT_QUEUE_BATCH_SIZE, DEFAULT_QUEUE_PROGRESS_POLICY } from "@yrd/qu
 import {
   DEFAULT_DRAFT_PAGE_AFTER_HOURS,
   loadYrdConfig,
+  mergedTruthExceptions,
   parseYrdConfig,
   renderYrdConfigScaffold,
   stepGateMode,
@@ -268,5 +269,139 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
 
   it("generates the complete minimal config as one active line", () => {
     expect(renderYrdConfigScaffold()).toBe("checks: [typecheck]\n")
+  })
+})
+
+/**
+ * The declared rulings that clear unreadable history from the lineage index.
+ * They live in `.yrd.yml` rather than in a shipped package because the fact
+ * being declared is one repository's own history; see
+ * `MergedTruthExceptionSchema`.
+ */
+describe("mergedTruthExceptions config", () => {
+  const SHA_A = "c0eb0de0" + "0".repeat(32)
+  const SHA_B = "ba7a7568" + "1".repeat(32)
+  const ID_A = "I" + "a".repeat(40)
+  const ID_B = "I" + "b".repeat(40)
+
+  const load = async (yaml: string) =>
+    loadYrdConfig({ repo: "/repo", defaultBase: "main", read: async () => "checks: [typecheck]\n" + yaml })
+
+  it("parses both dispositions into the map the index takes, keyed by full sha", async () => {
+    const loaded = await load(
+      "mergedTruthExceptions:\n" +
+        "  - commit: " +
+        SHA_A +
+        "\n" +
+        "    disposition: carries-change\n" +
+        "    changeIds: [" +
+        ID_A +
+        ", " +
+        ID_B +
+        "]\n" +
+        "    note: back-merge rejoined two\n" +
+        "  - commit: " +
+        SHA_B +
+        "\n" +
+        "    disposition: carries-no-change\n" +
+        "    note: rejoined 1 commit carrying 0 Change-Ids\n",
+    )
+
+    const exceptions = mergedTruthExceptions(loaded.config)
+    expect(exceptions.size).toBe(2)
+    expect(exceptions.get(SHA_A)).toEqual({
+      disposition: "carries-change",
+      changeIds: [ID_A, ID_B],
+      note: "back-merge rejoined two",
+    })
+    expect(exceptions.get(SHA_B)).toMatchObject({ disposition: "carries-no-change" })
+  })
+
+  it("accepts the singular changeId spelling as a one-element list", async () => {
+    const loaded = await load(
+      "mergedTruthExceptions:\n" +
+        "  - commit: " +
+        SHA_A +
+        "\n" +
+        "    disposition: carries-change\n" +
+        "    changeId: " +
+        ID_A +
+        "\n",
+    )
+
+    expect(mergedTruthExceptions(loaded.config).get(SHA_A)).toEqual({
+      disposition: "carries-change",
+      changeIds: [ID_A],
+    })
+  })
+
+  it("refuses an abbreviated commit sha, naming what an abbreviation would do", async () => {
+    // The map is keyed by full sha and compared to walked commits by string
+    // equality, so a short sha matches nothing: the ruling reads as declared
+    // and clears no specimen. Refusing at parse time is what keeps that from
+    // being indistinguishable from a working ruling.
+    await expect(
+      load(
+        "mergedTruthExceptions:\n" +
+          "  - commit: " +
+          SHA_A.slice(0, 12) +
+          "\n" +
+          "    disposition: carries-no-change\n" +
+          "    note: abbreviated\n",
+      ),
+    ).rejects.toThrow(/full 40-character commit sha/u)
+  })
+
+  it("refuses a carries-no-change ruling with no note", async () => {
+    await expect(
+      load("mergedTruthExceptions:\n  - commit: " + SHA_A + "\n    disposition: carries-no-change\n"),
+    ).rejects.toThrow(/note/u)
+  })
+
+  it("refuses a carries-change ruling that names no change id", async () => {
+    await expect(
+      load("mergedTruthExceptions:\n  - commit: " + SHA_A + "\n    disposition: carries-change\n    note: x\n"),
+    ).rejects.toThrow(/names no change id/u)
+  })
+
+  it("refuses a carries-no-change ruling that also names a change id", async () => {
+    await expect(
+      load(
+        "mergedTruthExceptions:\n" +
+          "  - commit: " +
+          SHA_A +
+          "\n" +
+          "    disposition: carries-no-change\n" +
+          "    changeId: " +
+          ID_A +
+          "\n" +
+          "    note: contradictory\n",
+      ),
+    ).rejects.toThrow(/pick one/u)
+  })
+
+  it("refuses the same commit ruled twice — one of the two would silently lose", async () => {
+    await expect(
+      load(
+        "mergedTruthExceptions:\n" +
+          "  - commit: " +
+          SHA_A +
+          "\n    disposition: carries-no-change\n    note: first\n" +
+          "  - commit: " +
+          SHA_A +
+          "\n    disposition: carries-no-change\n    note: second\n",
+      ),
+    ).rejects.toThrow(/more than once/u)
+  })
+
+  it("reads an absent key as no rulings declared, never as a cleared window", async () => {
+    const loaded = await loadYrdConfig({
+      repo: "/repo",
+      defaultBase: "main",
+      read: async () => "checks: [typecheck]\n",
+    })
+
+    expect(loaded.config.mergedTruthExceptions).toEqual([])
+    expect(mergedTruthExceptions(loaded.config).size).toBe(0)
   })
 })

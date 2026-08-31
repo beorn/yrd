@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
   buildMergedTruthIndex,
   compareMergedTruth,
+  describeMergedTruthGaps,
   mergedByAncestry,
   mergedByChangeId,
   mergedTruth,
@@ -309,7 +310,7 @@ describe("buildMergedTruthIndex", () => {
   it("refuses an exception that contradicts a commit's own readable trailer", async () => {
     const fixture = await acceptanceFixture()
     const exceptions = new Map<string, TrailerAbsentException>([
-      [fixture.mergeA, { disposition: "carries-change", changeId: ID_B }],
+      [fixture.mergeA, { disposition: "carries-change", changeIds: [ID_B] }],
     ])
 
     await expect(buildMergedTruthIndex(git, fixture.repo, { tip: "main", exceptions })).rejects.toThrow(
@@ -320,7 +321,7 @@ describe("buildMergedTruthIndex", () => {
   it("applies carries-change and carries-no-change exceptions, clearing the specimens they rule on", async () => {
     const fixture = await acceptanceFixture()
     const exceptions = new Map<string, TrailerAbsentException>([
-      [fixture.mergeB, { disposition: "carries-change", changeId: ID_B, note: "recovered from the merge record" }],
+      [fixture.mergeB, { disposition: "carries-change", changeIds: [ID_B], note: "recovered from the merge record" }],
     ])
 
     const repaired = await buildMergedTruthIndex(git, fixture.repo, { tip: "main", exceptions })
@@ -344,6 +345,94 @@ describe("buildMergedTruthIndex", () => {
     ])
 
     await expect(buildMergedTruthIndex(git, fixture.repo, { tip: "main", exceptions })).rejects.toThrow()
+  })
+
+  it("indexes a back-merge under EVERY change id its ruling names", async () => {
+    // The hh shape, in miniature: one specimen commit that rejoined more than
+    // one identified change. Ruling it for a single id would clear the specimen
+    // — the window then trusts its not-founds — while leaving the remaining ids
+    // answering a confident `not-merged` for content that is merged. Measured
+    // on hh 2026-08-31: c0eb0de00707 rejoined 4 such ids, and ruling it
+    // `carries-no-change` made all four answer `not-merged`.
+    const fixture = await acceptanceFixture()
+    const exceptions = new Map<string, TrailerAbsentException>([
+      [fixture.mergeB, { disposition: "carries-change", changeIds: [ID_B, ID_C], note: "back-merge: rejoined two" }],
+    ])
+
+    const index = await buildMergedTruthIndex(git, fixture.repo, { tip: "main", exceptions })
+
+    expect(index.specimens).toEqual([])
+    expect(index.exceptionsApplied).toBe(1)
+    expect(mergedByChangeId(index, ID_B).kind).toBe("merged")
+    expect(mergedByChangeId(index, ID_C).kind).toBe("merged")
+    expect(index.byChangeId.get(ID_C)?.[0]).toMatchObject({ commit: fixture.mergeB, source: "exception" })
+
+    // DISCRIMINATING: name only the first id and the second is not merely
+    // unindexed, it is answered WRONG — the specimen is cleared either way.
+    const partial = await buildMergedTruthIndex(git, fixture.repo, {
+      tip: "main",
+      exceptions: new Map([[fixture.mergeB, { disposition: "carries-change", changeIds: [ID_B] }]]),
+    })
+    expect(partial.specimens).toEqual([])
+    expect(mergedByChangeId(partial, ID_C).kind).toBe("not-merged")
+  })
+
+  it("refuses a carries-change ruling that names no change id", async () => {
+    const fixture = await acceptanceFixture()
+    // Cast: the type makes an empty list unrepresentable, and the runtime guard
+    // is what catches YAML — which does not.
+    const exceptions = new Map<string, TrailerAbsentException>([
+      [fixture.mergeB, { disposition: "carries-change", changeIds: [] } as unknown as TrailerAbsentException],
+    ])
+
+    await expect(buildMergedTruthIndex(git, fixture.repo, { tip: "main", exceptions })).rejects.toThrow(
+      /names no change id/u,
+    )
+  })
+
+  it("carries out a declared exception the walk never reached instead of ignoring it silently", async () => {
+    const fixture = await acceptanceFixture()
+    // `tipC` is a real commit, authored and never merged, so it is nowhere on
+    // main's first-parent line — the same shape a typo'd sha wears.
+    const exceptions = new Map<string, TrailerAbsentException>([
+      [fixture.mergeB, { disposition: "carries-no-change", note: "ruled: sync merge" }],
+      [fixture.tipC, { disposition: "carries-no-change", note: "wrong sha" }],
+    ])
+
+    const index = await buildMergedTruthIndex(git, fixture.repo, { tip: "main", exceptions })
+
+    expect(index.specimens).toEqual([])
+    expect(index.unmatchedExceptions).toEqual([fixture.tipC])
+    const gaps = describeMergedTruthGaps(index)
+    expect(gaps).toHaveLength(1)
+    expect(gaps[0]).toContain(fixture.tipC)
+    expect(gaps[0]).toContain("rules on nothing")
+  })
+})
+
+describe("describeMergedTruthGaps", () => {
+  it("names every unruled specimen and the only cure available for it", async () => {
+    const fixture = await acceptanceFixture()
+
+    const gaps = describeMergedTruthGaps(fixture.index)
+
+    expect(gaps.length).toBeGreaterThan(0)
+    expect(gaps.join("\n")).toContain(fixture.mergeB)
+    // The denominator travels with the count, so a reader can tell an ancient
+    // trailer-poor window from a window this change broke.
+    expect(gaps[0]).toContain(String(fixture.index.commitsWalked))
+    expect(gaps.join("\n")).toContain("mergedTruthExceptions")
+  })
+
+  it("says nothing once every specimen is ruled — silence is the cleared state, not an unread one", async () => {
+    const fixture = await acceptanceFixture()
+    const index = await buildMergedTruthIndex(git, fixture.repo, {
+      tip: "main",
+      exceptions: new Map([[fixture.mergeB, { disposition: "carries-no-change", note: "ruled: sync merge" }]]),
+    })
+
+    expect(index.specimens).toEqual([])
+    expect(describeMergedTruthGaps(index)).toEqual([])
   })
 })
 
@@ -569,7 +658,7 @@ describe("compareMergedTruth — the store agreement harness", () => {
     const fixture = await acceptanceFixture()
     const repaired = await buildMergedTruthIndex(git, fixture.repo, {
       tip: "main",
-      exceptions: new Map([[fixture.mergeB, { disposition: "carries-change", changeId: ID_B }]]),
+      exceptions: new Map([[fixture.mergeB, { disposition: "carries-change", changeIds: [ID_B] }]]),
     })
 
     const comparisons = await compareMergedTruth(git, repaired, claims(fixture))

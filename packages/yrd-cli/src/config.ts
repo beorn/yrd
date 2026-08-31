@@ -10,6 +10,7 @@ import {
   GateModeSchema,
   type GateMode,
   type QueueProgressPolicy,
+  type TrailerAbsentException,
 } from "@yrd/queue"
 import * as z from "zod"
 
@@ -243,6 +244,89 @@ const NeedsPersonSchema = z
   .default({})
 
 /**
+ * A per-commit ruling on history the lineage index cannot read.
+ *
+ * Lives in `.yrd.yml` and NOT in the yrd packages because the fact being
+ * declared is a property of ONE repository's history: which of its own commits
+ * rejoined foreign history without a readable `Change-Id`. Hard-coding a sha
+ * list in a shipped package would make every other repository carry a ruling
+ * about commits it does not have.
+ *
+ * Every field is required rather than defaulted, because a ruling is a claim
+ * about permanent history that no later reader can re-derive cheaply. `note`
+ * is where the evidence goes.
+ */
+const MergedTruthCommitSchema = TextSchema.regex(/^[0-9a-f]{40}$/iu, {
+  message:
+    "must be a full 40-character commit sha. Rulings are keyed by full sha, so an abbreviation matches " +
+    "nothing and the ruling silently clears no specimen — resolve it with `git rev-parse <short-sha>`",
+})
+
+const MergedTruthChangeIdSchema = TextSchema.regex(/^I[0-9a-f]{40}$/u, {
+  message: "must be a change id: 'I' followed by 40 hex characters",
+})
+
+const MergedTruthExceptionSchema = z
+  .object({
+    commit: MergedTruthCommitSchema,
+    disposition: z.enum(["carries-change", "carries-no-change"]),
+    /** Singular spelling, for the common one-change ruling. */
+    changeId: MergedTruthChangeIdSchema.optional(),
+    /** Plural spelling. A back-merge rejoins as many changes as its branch
+     * carried, and ruling such a commit for only one of them leaves the rest
+     * answering a TRUSTED not-found — the queue then re-admits and re-runs work
+     * that already landed. */
+    changeIds: z.array(MergedTruthChangeIdSchema).optional(),
+    note: TextSchema.optional(),
+  })
+  .strict()
+  .superRefine((entry, context) => {
+    const declared = [...(entry.changeId === undefined ? [] : [entry.changeId]), ...(entry.changeIds ?? [])]
+    if (entry.disposition === "carries-change") {
+      if (declared.length === 0) {
+        context.addIssue({
+          code: "custom",
+          message:
+            `'${entry.commit}' is ruled 'carries-change' but names no change id — set 'changeId:' (or ` +
+            `'changeIds: [...]' when the commit rejoined several), or rule it 'carries-no-change'`,
+        })
+      }
+      if (new Set(declared).size !== declared.length) {
+        context.addIssue({ code: "custom", message: `'${entry.commit}' names the same change id twice` })
+      }
+      return
+    }
+    if (declared.length > 0) {
+      context.addIssue({
+        code: "custom",
+        message: `'${entry.commit}' is ruled 'carries-no-change' but also names a change id — pick one`,
+      })
+    }
+    if (entry.note === undefined) {
+      context.addIssue({
+        code: "custom",
+        message:
+          `'${entry.commit}' is ruled 'carries-no-change' and must carry a 'note:' recording why — a bare ` +
+          `ruling turns a loud unknown into a silent 'not merged' with nothing to audit it against`,
+      })
+    }
+  })
+
+const MergedTruthExceptionsSchema = z
+  .array(MergedTruthExceptionSchema)
+  .default([])
+  .superRefine((entries, context) => {
+    const seen = new Set<string>()
+    for (const entry of entries) {
+      const key = entry.commit.toLowerCase()
+      if (seen.has(key)) {
+        context.addIssue({ code: "custom", message: `'${entry.commit}' is ruled more than once` })
+      }
+      seen.add(key)
+    }
+  })
+
+/**
  * Whether anything in this repository is ever going to drain its queue.
  *
  * This cannot be inferred. A repository whose runner is about to be armed for
@@ -275,6 +359,7 @@ const ProjectFields = {
   progress: ProgressSchema,
   drafts: DraftsSchema,
   needsPerson: NeedsPersonSchema,
+  mergedTruthExceptions: MergedTruthExceptionsSchema,
 } as const
 
 const ProjectSchema = z.object(ProjectFields).strict()
@@ -293,6 +378,7 @@ export type YrdProjectConfig = Readonly<{
   progress: Readonly<z.infer<typeof ProgressSchema>>
   drafts: Readonly<z.infer<typeof DraftsSchema>>
   needsPerson: Readonly<z.infer<typeof NeedsPersonSchema>>
+  mergedTruthExceptions: readonly z.infer<typeof MergedTruthExceptionSchema>[]
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -326,7 +412,57 @@ export type ResolvedYrdProjectConfig = Readonly<{
    * built-in unowned default" — see {@link DEFAULT_NEEDS_PERSON_OWNER} —
    * never "no needs-person finding is ever owned". */
   needsPerson?: Readonly<{ owner: string }>
+  /** Per-commit rulings on history the lineage index cannot read. Optional
+   * for the same reason as `drafts` and `needsPerson` — hand-built fixtures
+   * construct this type directly. Absent means "no ruling has been declared",
+   * which leaves every specimen standing and every not-found lookup loudly
+   * unknown; it never means "trust a not-found". */
+  mergedTruthExceptions?: readonly MergedTruthExceptionConfig[]
 }>
+
+export type MergedTruthExceptionConfig = Readonly<z.infer<typeof MergedTruthExceptionSchema>>
+
+/**
+ * The config rulings in the shape {@link buildMergedTruthIndex} takes.
+ *
+ * Keyed by full sha, lowercased: git prints lowercase and the index compares
+ * the key to walked commit shas by string equality, so an upper-case
+ * declaration would match nothing — and would then be reported as an unmatched
+ * exception rather than silently doing nothing, which is the point of carrying
+ * the set out at all.
+ */
+export function mergedTruthExceptions(
+  config: Pick<ResolvedYrdProjectConfig, "mergedTruthExceptions">,
+): ReadonlyMap<string, TrailerAbsentException> {
+  const entries = new Map<string, TrailerAbsentException>()
+  for (const entry of config.mergedTruthExceptions ?? []) {
+    if (entry.disposition === "carries-no-change") {
+      // `note` is required by the schema for this disposition; the assertion
+      // states that here rather than defaulting it to a placeholder, which
+      // would put an unaudited ruling into the index under a made-up reason.
+      entries.set(entry.commit.toLowerCase(), { disposition: "carries-no-change", note: entry.note ?? "" })
+      continue
+    }
+    const declared = [...(entry.changeId === undefined ? [] : [entry.changeId]), ...(entry.changeIds ?? [])]
+    const [first, ...rest] = declared
+    if (first === undefined) {
+      // Unreachable through `parseYrdConfig` — the schema refuses this shape —
+      // and therefore raised rather than skipped: a hand-built config reaching
+      // here would otherwise have its ruling dropped and read as never declared.
+      throw createFailure({
+        kind: "configuration",
+        code: "invalid-config",
+        message: `yrd: mergedTruthExceptions entry '${entry.commit}' is 'carries-change' but names no change id`,
+      })
+    }
+    entries.set(entry.commit.toLowerCase(), {
+      disposition: "carries-change",
+      changeIds: [first, ...rest],
+      ...(entry.note === undefined ? {} : { note: entry.note }),
+    })
+  }
+  return entries
+}
 
 export function parseYrdConfig(value: unknown): YrdProjectConfig {
   const retiredWrapper = ["li", "ne"].join("")
@@ -346,8 +482,20 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, checks, guards, merge, landing, requires, contest, progress, drafts, needsPerson } =
-      parsed.data
+    const {
+      base,
+      batch,
+      checks,
+      guards,
+      merge,
+      landing,
+      requires,
+      contest,
+      progress,
+      drafts,
+      needsPerson,
+      mergedTruthExceptions,
+    } = parsed.data
     if (merge !== undefined && landing !== undefined && merge !== landing) {
       throw createFailure({
         kind: "configuration",
@@ -367,6 +515,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       progress,
       drafts,
       needsPerson,
+      mergedTruthExceptions,
     }
   }
   const issue = mostSpecificConfigIssue(parsed.error.issues[0])
@@ -547,6 +696,7 @@ export async function loadYrdConfig(options: {
       needsPerson: {
         owner: parsed.needsPerson.owner ?? DEFAULT_NEEDS_PERSON_OWNER,
       },
+      mergedTruthExceptions: parsed.mergedTruthExceptions,
     },
   }
 }

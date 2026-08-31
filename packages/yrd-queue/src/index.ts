@@ -100,6 +100,7 @@ export * from "./merge-record.ts"
 // can reach from `@yrd/queue`.
 export {
   buildMergedTruthIndex,
+  describeMergedTruthGaps,
   mergedTruth,
   type MergedTruth,
   stampingEpochStop,

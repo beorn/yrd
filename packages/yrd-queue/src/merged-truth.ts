@@ -101,13 +101,24 @@ export type MergedTruthSpecimen = Readonly<{
  * A named ruling for one specimen commit, keyed by its full sha — the
  * trailer-drop bead's "named derivation exceptions" for history that cannot
  * be rewritten. `carries-change` repairs the mapping (the commit is indexed
- * under the ruled id); `carries-no-change` records that the commit integrated
+ * under every ruled id); `carries-no-change` records that the commit integrated
  * no lineage-tracked change (a subject-shape false positive, or content ruled
  * out of scope) and clears it from the unknown set. Exceptions are caller
  * input — config or fixture — never persisted by this module.
+ *
+ * `carries-change` takes a LIST because the commits that need ruling are
+ * mostly back-merges, and one back-merge rejoins as many changes as the branch
+ * it merges. Ruling such a commit for one of its ids would leave the rest
+ * answering a TRUSTED not-found — the precise hazard the epoch bound's own
+ * contract names ("a bound above a landed change's merge commit turns its fact
+ * into a trusted not-found, and the queue re-admits and re-runs work that
+ * already landed"), reached here through a ruling instead of a bound. Measured
+ * on hh 2026-08-31: specimen c0eb0de00707 rejoined 9 commits carrying 4
+ * distinct Change-Ids, none of them reachable on the walked first-parent line
+ * by any other route.
  */
 export type TrailerAbsentException = Readonly<
-  | { disposition: "carries-change"; changeId: string; note?: string }
+  | { disposition: "carries-change"; changeIds: readonly [string, ...string[]]; note?: string }
   | { disposition: "carries-no-change"; note: string }
 >
 
@@ -132,6 +143,11 @@ export type MergedTruthIndex = Readonly<{
    * not-found lookup in this window answers unknown, not not-merged. */
   specimens: readonly MergedTruthSpecimen[]
   exceptionsApplied: number
+  /** Declared exception shas the walk never reached, in declaration order.
+   * Ignoring them is correct — the walk may be bounded above them — but a
+   * SILENT ignore makes a typo'd sha indistinguishable from a working ruling,
+   * so the set is carried out for the caller to say out loud. */
+  unmatchedExceptions: readonly string[]
 }>
 
 export type MergedTruthIndexOptions = Readonly<{
@@ -377,7 +393,19 @@ export async function buildMergedTruthIndex(
   const exceptions = options.exceptions ?? new Map<string, TrailerAbsentException>()
   for (const [sha, exception] of exceptions) {
     GitShaSchema.parse(sha)
-    if (exception.disposition === "carries-change") ChangeIdSchema.parse(exception.changeId)
+    if (exception.disposition !== "carries-change") continue
+    // Checked at runtime as well as in the type: exceptions are caller input,
+    // and the config path that carries most of them parses YAML, where an
+    // empty list is representable. A `carries-change` ruling naming no id
+    // clears its specimen while indexing nothing — it would read as a repair
+    // and behave as `carries-no-change`.
+    if (exception.changeIds.length === 0) {
+      throw new Error(
+        `yrd: merged-truth exception for '${sha}' is 'carries-change' but names no change id — ` +
+          `name the change id(s) the commit carries, or rule it 'carries-no-change'`,
+      )
+    }
+    for (const changeId of exception.changeIds) ChangeIdSchema.parse(changeId)
   }
   const tip = await git.text(repo, ["rev-parse", "--verify", `${options.tip}^{commit}`])
   const stop =
@@ -395,6 +423,7 @@ export async function buildMergedTruthIndex(
   const byChangeId = new Map<string, MergedTruthOccurrence[]>()
   const mergeBySecondParent = new Map<string, string>()
   const specimens: MergedTruthSpecimen[] = []
+  const walked = new Set<string>()
   let exceptionsApplied = 0
 
   const index = (changeId: string, occurrence: MergedTruthOccurrence): void => {
@@ -405,6 +434,7 @@ export async function buildMergedTruthIndex(
 
   rows.forEach((row, distanceFromTip) => {
     const parsed = parseWalkRow(row)
+    walked.add(parsed.commit)
     // Trailers first, subject as the pre-epoch fallback. A disagreement between
     // the two is carried into `unreadable` below rather than resolved here, so
     // a commit whose own facts contradict each other becomes a specimen — loud
@@ -458,13 +488,15 @@ export async function buildMergedTruthIndex(
       }
       exceptionsApplied += 1
       if (exception.disposition === "carries-change") {
-        index(exception.changeId, {
-          commit: parsed.commit,
-          subject: parsed.subject,
-          ...enrichment,
-          source: "exception",
-          distanceFromTip,
-        })
+        for (const changeId of exception.changeIds) {
+          index(changeId, {
+            commit: parsed.commit,
+            subject: parsed.subject,
+            ...enrichment,
+            source: "exception",
+            distanceFromTip,
+          })
+        }
       }
       return
     }
@@ -518,7 +550,57 @@ export async function buildMergedTruthIndex(
     mergeBySecondParent,
     specimens,
     exceptionsApplied,
+    unmatchedExceptions: [...exceptions.keys()].filter((sha) => !walked.has(sha)),
   }
+}
+
+/**
+ * What this index could NOT settle, in one reader's words — the loud half of
+ * the exception mechanism.
+ *
+ * Two gaps, and they fail in opposite directions. An UNRULED specimen makes
+ * every not-found lookup in the window answer the loud `unknown`, so it is
+ * self-announcing at the point of use but says nothing about the cure; the
+ * lines below name the cure, because the history that produces these commits
+ * cannot be rewritten and a ruling is therefore the ONLY way to clear one. An
+ * UNMATCHED exception is the silent one: a sha the walk never reached is
+ * ignored by design (the walk may be bounded above it), which is exactly what
+ * a typo'd or truncated-then-repadded sha also looks like — a declaration that
+ * reads as a working ruling and clears nothing.
+ *
+ * Returns lines rather than printing them: this module writes no output and
+ * holds no logger, and the two production callers surface them differently (a
+ * resident runner's log, a CLI's stderr). Empty means both gaps are closed —
+ * never "nothing was examined", since {@link MergedTruthIndex} always carries
+ * the denominator it was derived from.
+ */
+export function describeMergedTruthGaps(index: MergedTruthIndex): readonly string[] {
+  const lines: string[] = []
+  if (index.specimens.length > 0) {
+    lines.push(
+      `yrd: ${String(index.specimens.length)} commit(s) of ${String(index.commitsWalked)} walked on ` +
+        `${index.tip} in ${index.repo} carry no readable change identity, so every not-found lineage ` +
+        `lookup in this window answers 'unknown' rather than 'not merged':`,
+    )
+    for (const specimen of index.specimens) {
+      lines.push(`  ${specimen.commit} ${specimen.problem} :: ${specimen.subject}`)
+    }
+    lines.push(
+      `  These commits are permanent history and cannot be rewritten, so a declared ruling is the only ` +
+        `cure: add each to 'mergedTruthExceptions:' in .yrd.yml — 'carries-no-change' when the commit ` +
+        `integrated no lineage-tracked change, or 'carries-change' naming every change id it rejoined ` +
+        `(check with: git log --format=%B <sha>^2 ^<sha>^1 | grep '^Change-Id:').`,
+    )
+  }
+  for (const sha of index.unmatchedExceptions) {
+    lines.push(
+      `yrd: mergedTruthExceptions declares a ruling for '${sha}', but the walk over ${index.tip} in ` +
+        `${index.repo} (${String(index.commitsWalked)} commit(s)${index.stop === undefined ? "" : `, bounded at ${index.stop}`}) ` +
+        `never reached that commit — it rules on nothing. Either the sha is wrong, or the bound now sits ` +
+        `above it and the ruling is spent and can be deleted.`,
+    )
+  }
+  return lines
 }
 
 /** Optional lookup context that narrows which specimens can veto a not-found

@@ -107,6 +107,9 @@ import {
   stampingEpochStop,
   type DerivedSubmitEnrichment,
   type MergedTruthGit,
+  type MergedTruthIndex,
+  type TrailerAbsentException,
+  describeMergedTruthGaps,
   revisionOf,
   describeScratchReap,
   liveWorktreeEntries,
@@ -161,6 +164,7 @@ import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import {
   declaredStepNames,
   loadYrdConfig,
+  mergedTruthExceptions,
   parseYrdConfig,
   stepGateMode,
   validatePushedYrdConfig,
@@ -2198,7 +2202,12 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     requires: options.config.requires,
     prNumberMint,
     readSubmitEnrichment: ({ sha }) => readDerivedSubmitEnrichment(options.process, options.repo, sha),
-    scanLandedSubmits: landedSubmitScanner({ process: options.process, repo: options.repo }),
+    scanLandedSubmits: landedSubmitScanner({
+      process: options.process,
+      repo: options.repo,
+      exceptions: mergedTruthExceptions(options.config),
+      ...(options.log === undefined ? {} : { log: options.log }),
+    }),
     isSubmitSuperseded: ({ sha, base }) => isSubmitContentLanded(options.process, options.repo, sha, base),
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(options.config.needsPerson === undefined ? {} : { needsPersonOwner: options.config.needsPerson.owner }),
@@ -2798,7 +2807,17 @@ export function mergedTruthGit(process: Pick<Process, "run">): MergedTruthGit {
  * memoized for the scanner's life, since the oldest stamped commit does not
  * move as the tip advances.
  */
-function landedSubmitScanner(options: Readonly<{ process: Pick<Process, "run">; repo: string }>) {
+function landedSubmitScanner(
+  options: Readonly<{
+    process: Pick<Process, "run">
+    repo: string
+    /** Declared rulings on commits this repository's history cannot identify —
+     * the config half of the specimen mechanism. Absent leaves every specimen
+     * standing, which is loud, not silent. */
+    exceptions?: ReadonlyMap<string, TrailerAbsentException>
+    log?: ConditionalLogger
+  }>,
+) {
   const git = mergedTruthGit(options.process)
   const stops = new Map<string, Promise<string | undefined>>()
   const stopFor = (base: string, tip: string): Promise<string | undefined> => {
@@ -2807,6 +2826,21 @@ function landedSubmitScanner(options: Readonly<{ process: Pick<Process, "run">; 
     const derived = stampingEpochStop(git, options.repo, tip)
     stops.set(base, derived)
     return derived
+  }
+  // WHAT THE INDEX COULD NOT SETTLE, SAID ONCE PER (base, tip) RATHER THAN
+  // never or every tick. Never is how this cost 2.5 hours of dark queue: the
+  // specimens were only ever named inside a per-candidate refusal detail, so
+  // the condition was visible one ejected candidate at a time and never as
+  // itself. Every tick is the opposite failure — a resident runner scans on a
+  // loop, and three unchanging lines per tick is a log nobody reads. Keyed by
+  // tip too, so the same gap is restated when main moves and a reader looking
+  // at recent log lines is not told about a window that no longer exists.
+  const reported = new Set<string>()
+  const reportGaps = (index: MergedTruthIndex): void => {
+    const key = `${index.repo} ${index.tip}`
+    if (reported.has(key)) return
+    reported.add(key)
+    for (const line of describeMergedTruthGaps(index)) options.log?.warn?.(line)
   }
   return async (input: Readonly<{ bays: Parameters<typeof landedSubmits>[2] }>) =>
     landedSubmits(
@@ -2820,7 +2854,13 @@ function landedSubmitScanner(options: Readonly<{ process: Pick<Process, "run">; 
           })
         ).sha
         const stop = await stopFor(base, tip)
-        return buildMergedTruthIndex(git, options.repo, { tip, ...(stop === undefined ? {} : { stop }) })
+        const index = await buildMergedTruthIndex(git, options.repo, {
+          tip,
+          ...(stop === undefined ? {} : { stop }),
+          ...(options.exceptions === undefined ? {} : { exceptions: options.exceptions }),
+        })
+        reportGaps(index)
+        return index
       },
       input.bays,
     )

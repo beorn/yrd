@@ -15,6 +15,7 @@ import {
 import { raiseFailure, type DeepReadonly } from "@yrd/core"
 import {
   buildMergedTruthIndex,
+  describeMergedTruthGaps,
   derivedLaneBranches,
   queueChangeNotFoundMessage,
   resolveQueueChange,
@@ -26,6 +27,7 @@ import {
   type MergedTruthGit,
   type Run,
 } from "@yrd/queue"
+import { loadYrdConfig, mergedTruthExceptions } from "./config.ts"
 import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
 import { ChangeResultView } from "./queue-status-view.tsx"
@@ -993,6 +995,15 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
   // Which standing facts has the repository ALREADY delivered? Asked of git,
   // through the same reader the compose's door uses, so prune and admission
   // cannot disagree about landed content either.
+  // DECLARED RULINGS, FROM THE SAME `.yrd.yml` THE COMPOSE PATH READS. Prune
+  // has no config in scope — `prunePrs` receives `app` and `io`, and neither
+  // carries one — so it is loaded here from `cwd`, the idiom the draft-paging
+  // reads already use. Loading it rather than inventing a prune-local default
+  // is what keeps the claim above true: an exception set applied on one path
+  // and not the other would make prune and admission disagree about landed
+  // content in exactly the way the comment says they cannot.
+  const exceptions = mergedTruthExceptions((await loadYrdConfig({ repo: cwd, defaultBase: "main" })).config)
+  const gaps = new Set<string>()
   const landedScan = await landedSubmits(
     io.mergedTruthGit === undefined ? createMergedTruthGit(cwd) : io.mergedTruthGit(cwd),
     async (base) => {
@@ -1010,10 +1021,23 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
       // unreadable specimens over 26535 commits while the compose path, on the
       // same repository in the same minute, reported 3 over 1232.
       const stop = await stampingEpochStop(indexGit, cwd, tip)
-      return buildMergedTruthIndex(indexGit, cwd, { tip, ...(stop === undefined ? {} : { stop }) })
+      const index = await buildMergedTruthIndex(indexGit, cwd, {
+        tip,
+        ...(stop === undefined ? {} : { stop }),
+        exceptions,
+      })
+      for (const line of describeMergedTruthGaps(index)) gaps.add(line)
+      return index
     },
     bays,
   )
+  // Said BEFORE the verdicts, and on stderr so a `--json` consumer still gets
+  // a clean document. An unruled specimen makes every not-found lookup below
+  // answer `unknown`, and the rows print `unreadable` without ever naming why
+  // — which is how this condition stayed invisible while it held the queue
+  // dark. Deduplicated across bases: one repository's unreadable history is
+  // one fact however many bases were scanned.
+  for (const line of gaps) io.stderr(`${line}\n`)
   // The DERIVED population, enumerated by the same function the compose selects
   // from, so prune and admission never disagree about who is in the lane.
   const derivedBranches = derivedLaneBranches(bays, landedSubmitBranches(landedScan))
