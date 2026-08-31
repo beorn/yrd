@@ -17,6 +17,12 @@ function spin(ms: number): void {
   }
 }
 
+/** Yield the wall clock instead of holding it, so several stages can be open
+ * over the SAME milliseconds — which busy-spinning cannot reproduce. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 beforeEach(() => {
   resetStageClock()
 })
@@ -100,5 +106,32 @@ describe("stage clock", () => {
   test("reports crossedStages: 0 when every stage nested cleanly", () => {
     stage("outer", () => stage("inner", () => spin(5)))
     expect(stageReport().crossedStages).toBe(0)
+  })
+
+  // Concurrent stages are the norm now that every span opens one: the queue
+  // runs Git subprocesses in parallel. Wall clock cannot be given to all of
+  // them, and the model that charged each its full elapsed reported 402ms of a
+  // 101ms window — a table claiming four times the time that passed. Charging
+  // only the innermost stage keeps the rows disjoint; `crossedStages` is what
+  // tells the reader the split between the overlapping ones is approximate.
+  test("concurrent stages never sum past the window they measured", async () => {
+    const startedAt = performance.now()
+    await Promise.all([0, 1, 2, 3].map((i) => stageAsync(`parallel-${String(i)}`, () => sleep(60))))
+    const window = performance.now() - startedAt
+    const report = stageReport()
+    // The negative control: the previous model returned ~4x the window here.
+    expect(report.accountedMs).toBeLessThanOrEqual(window + 5)
+    expect(report.crossedStages).toBeGreaterThan(0)
+    // And nothing vanished — the window itself is still accounted for.
+    expect(report.accountedMs).toBeGreaterThan(window / 2)
+  })
+
+  test("accountedMs never exceeds totalMs, whatever the interleaving", async () => {
+    stage("plain", () => spin(10))
+    await Promise.all([stageAsync("a", () => sleep(30)), stageAsync("b", () => sleep(10))])
+    stage("after", () => spin(10))
+    const report = stageReport()
+    expect(report.accountedMs).toBeLessThanOrEqual(report.totalMs)
+    expect(report.unaccountedMs).toBeGreaterThanOrEqual(0)
   })
 })

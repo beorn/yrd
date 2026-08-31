@@ -1,4 +1,10 @@
-import { YRD_LIFECYCLE_LEVELS, observeYrdLifecycle, raiseFailure, type YrdDeliveryIdentity } from "@yrd/core"
+import {
+  YRD_LIFECYCLE_LEVELS,
+  observeYrdLifecycle,
+  raiseFailure,
+  withStageAccounting,
+  type YrdDeliveryIdentity,
+} from "@yrd/core"
 import { createLogger, type ConditionalLogger, type ConfigElement, type Event, type LogLevel } from "loggily"
 import { LOG_LEVEL_PRIORITY, resolveVerbosityLevel } from "loggily"
 import { enableContextPropagation } from "loggily/context"
@@ -206,7 +212,11 @@ export function createYrdLogger(
         : { file: config.file, format: "json" },
     )
   }
-  const created = createLogger("yrd", pipeline)
+  // Every span this tree creates opens a stage, so the command's stage
+  // breakdown is derived from the spans instead of a list maintained beside
+  // them. Applied at the root, once: children and nested spans inherit it, so
+  // no call site has to remember. See `withStageAccounting`.
+  const created = withStageAccounting(createLogger("yrd", pipeline))
   const logger = implicitHabitant && config.file === undefined ? gateImplicitHabitantLogger(created) : created
   let disposed = false
   const dispose = (): void => {
