@@ -6945,7 +6945,11 @@ describe("runYrd", () => {
       expect(JSON.parse(stalled.stdout())).toMatchObject({
         schema: "hab-service-health/1",
         state: "unhealthy",
-        running: true,
+        // QUEUE CONTENT, never ownership of the SERVICE: `hab start`/`hab
+        // restart` must be able to clear this exact stall, so it can never
+        // read as an admission refusal (pm/@i/10-yrd/plan.md C5's ruling;
+        // @hab/core service-admission's liveness/admission split).
+        running: false,
         error: { code: "resident-runner-no-progress" },
         facts: {
           lease: "held",
@@ -6957,6 +6961,43 @@ describe("runYrd", () => {
           },
         },
       })
+
+      // Sibling finding, same class: no merge in >3h with a non-empty ready
+      // set is ALSO queue content, computed independently of `queueProgress`
+      // (uptime + last-merged-time, not a `queue-progress-stalled` finding),
+      // so it must be proven separately never to gate a start either.
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T08:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run",
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:58.000Z" },
+          driver,
+        }),
+      )
+      const stalledNoMerge = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), stalledNoMerge.io, services)).toBe(2)
+      expect(JSON.parse(stalledNoMerge.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "unhealthy",
+        running: false,
+        error: { code: "resident-runner-stalled-no-merge" },
+        facts: { lease: "held", runnerStatus: "fresh" },
+      })
+
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run",
+          queueProgress: { state: "stalled", observedAt: "2026-07-09T12:00:58.000Z", findings: [refusalFinding] },
+          driver,
+        }),
+      )
 
       await app.bays.requestChecks({ pr: "PR1", baseSha })
       const stalledHuman = outputIO({ cwd: repo })

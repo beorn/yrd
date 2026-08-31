@@ -1452,6 +1452,54 @@ function runnerHealthError(code: string, cause: string, resolution: readonly str
   return Object.freeze({ code, cause, resolution: Object.freeze([...resolution]) })
 }
 
+/**
+ * An unhealthy `queue.list.check` verdict about QUEUE CONTENT -- whether
+ * merges are happening -- never about whether an instance owns the runner
+ * SERVICE. `running` is hab-core's one admission fact (`@hab/core`
+ * service-admission: "does an instance already own this service?"); pairing
+ * it with the finding HERE, once, makes it structurally impossible for a
+ * queue-content code to slip through as `running: true` again, the way
+ * `resident-runner-no-progress` and `resident-runner-stalled-no-merge` both
+ * used to. Both are downstream of this file's `habitantQueueProgress` and its
+ * own rule ("SERVICE health, not QUEUE CONTENT"): a finding admitted there
+ * must be a property the SERVICE can fix by starting, restarting, or
+ * continuing to run -- which means it can never be grounds to REFUSE that
+ * same start. Returning `running: true` from these two findings made the
+ * admission guard refuse the exact restart that would have cleared the stall
+ * it was reporting (pm/@i/10-yrd/plan.md, C5's ruling: "the liveness guard
+ * must never again refuse the restart that would clear the stall it
+ * reports").
+ *
+ * `running: false` is not a claim that no process exists -- a live, ticking
+ * habitant can absolutely be the one reporting a stalled queue. It answers
+ * hab-core's narrower admission question: does this CONDITION name an
+ * existing owner a start would conflict with? A stalled queue never does, so
+ * hab-core records and renders it, never refuses on it alone
+ * (service-admission.ts's liveness/admission split). A genuinely conflicting
+ * live instance is still caught downstream by hab's own session tracking
+ * (`startOrAttachHabd`), which this payload does not gate.
+ */
+function queueContentHealthError(
+  service: string,
+  facts: RunnerHealthFacts,
+  code: string,
+  cause: string,
+  resolution: readonly string[],
+): Readonly<{ payload: RunnerHealthPayload; exitCode: YrdCliExitCode }> {
+  return {
+    exitCode: 2,
+    payload: {
+      schema: "hab-service-health/1",
+      command: "queue.list.check",
+      service,
+      state: "unhealthy",
+      running: false,
+      error: runnerHealthError(code, cause, resolution),
+      facts,
+    },
+  }
+}
+
 function queuedDeliveryCount(app: YrdCliApp): number {
   return recordChanges(stateOf(app).bays).filter((pr) => {
     const delivery = changeDeliveryState(pr)
@@ -1887,22 +1935,13 @@ async function queueRunnerHealth(
       }
     }
     if (queueProgress.state === "stalled") {
-      return {
-        exitCode: 2,
-        payload: {
-          schema: "hab-service-health/1",
-          command: "queue.list.check",
-          service,
-          state: "unhealthy",
-          running: true,
-          error: runnerHealthError(
-            "resident-runner-no-progress",
-            queueProgress.findings.map((finding) => finding.message).join("\n"),
-            ["Inspect queue audit and the habitant log before restarting the runner."],
-          ),
-          facts,
-        },
-      }
+      return queueContentHealthError(
+        service,
+        facts,
+        "resident-runner-no-progress",
+        queueProgress.findings.map((finding) => finding.message).join("\n"),
+        ["Inspect queue audit and the habitant log before restarting the runner."],
+      )
     }
 
     const hasQueuedWork = app !== undefined && queuedDeliveryCount(app) > 0
@@ -1918,22 +1957,13 @@ async function queueRunnerHealth(
         if (noMergeMs >= 3 * 60 * 60_000) {
           const uptimeFormatted = Math.floor(runnerUptimeMs / 3600000)
           const noMergeFormatted = Math.floor(noMergeMs / 3600000)
-          return {
-            exitCode: 2,
-            payload: {
-              schema: "hab-service-health/1",
-              command: "queue.list.check",
-              service,
-              state: "unhealthy",
-              running: true,
-              error: runnerHealthError(
-                "resident-runner-stalled-no-merge",
-                `habitant runner has cycled for >${uptimeFormatted} hours with a non-empty ready set and no merge for >${noMergeFormatted} hours`,
-                ["Inspect the queue audit and restore delivery progress; process presence alone is not progress."],
-              ),
-              facts,
-            },
-          }
+          return queueContentHealthError(
+            service,
+            facts,
+            "resident-runner-stalled-no-merge",
+            `habitant runner has cycled for >${uptimeFormatted} hours with a non-empty ready set and no merge for >${noMergeFormatted} hours`,
+            ["Inspect the queue audit and restore delivery progress; process presence alone is not progress."],
+          )
         }
       }
     }
