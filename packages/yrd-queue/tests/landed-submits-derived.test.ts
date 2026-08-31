@@ -137,14 +137,23 @@ describe("landedSubmits derives landed content from the repository, not the chan
     expect(storeLandedSubmits(state), "the record store answers a bare, wrong zero").toEqual([])
 
     const scan = await landedSubmits(git, indexFor(repo), state)
-    expect(scan.landed).toEqual([{ branch: "issue/ghost", sha: merged.authoredTip, mergeCommit: merged.mergeCommit }])
+    expect(scan.landed).toEqual([
+      { branch: "issue/ghost", sha: merged.authoredTip, via: "ancestry", mergeCommit: merged.mergeCommit },
+    ])
     expect(scan.unresolved).toEqual([])
     expect(scan.facts, "the denominator the zero would have been a zero across").toBe(1)
 
-    // The disagreement is REPORTED, never reconciled away.
-    expect(scan.disagreements).toHaveLength(1)
-    expect(scan.disagreements[0]).toMatchObject({ branch: "issue/ghost", store: "not-landed", derived: "landed" })
-    expect(scan.disagreements[0]?.record, "no record produced the store's claim").toBeUndefined()
+    // The store is not asked, so there is no second answer to compare against.
+    // This cell — recordless branch, content landed — was 6,157 of 6,157
+    // observed disagreements, which is the blindness asserted two lines above
+    // restated once per compose pass, never a finding (ADR-0001).
+    //
+    // NEGATIVE CONTROL, run against the pre-cut code: `scan` carries
+    // `disagreements: [{branch: "issue/ghost", store: "not-landed",
+    // derived: "landed"}]`, so this assertion fails.
+    expect(scan, "the repository is the only oracle; nothing compares it to the store").not.toHaveProperty(
+      "disagreements",
+    )
 
     // The behaviour that changed: the branch leaves the derived lane.
     expect(derivedLaneBranches(state, new Set()), "without the repository's answer it composes").toEqual([
@@ -168,13 +177,18 @@ describe("landedSubmits derives landed content from the repository, not the chan
 
     const scan = await landedSubmits(git, indexFor(repo), state)
     expect(scan.landed.map((row) => row.branch)).toEqual(["task/rebuilt"])
-    expect(scan.disagreements[0]).toMatchObject({ branch: "task/rebuilt", store: "not-landed", derived: "landed" })
+    expect(scan.landed[0]?.via, "ancestry: the rebuilt merge carries the fact's own commit").toBe("ancestry")
   })
 
-  it("REFUSES a store row claiming a landing the repository does not carry", async () => {
-    // The direction that must never be silent: the record says merged, git
-    // says the commit is not on main. The repository decides, and the
-    // contradiction is named with the record that made the claim.
+  it("IGNORES a store row claiming a landing the repository does not carry", async () => {
+    // The direction the store could still be wrong in: the record says merged,
+    // git says the commit is not on main. The repository decides alone — the
+    // store's claim buys nothing, costs nothing, and is not read.
+    //
+    // This is also why the comparator was retired rather than routed to a read
+    // surface: it existed to name THIS cell, and in 6,157 observed
+    // disagreements this cell fired zero times. Every one was the recordless
+    // case above.
     const repo = await makeRepo()
     const unmerged = await authorOnly(repo, "task/phantom", "phantom.txt")
     const state = bays(
@@ -187,14 +201,6 @@ describe("landedSubmits derives landed content from the repository, not the chan
     const scan = await landedSubmits(git, indexFor(repo), state)
     expect(scan.landed, "git carries no such commit on main").toEqual([])
     expect(scan.unresolved).toEqual([])
-    expect(scan.disagreements).toHaveLength(1)
-    expect(scan.disagreements[0]).toMatchObject({
-      branch: "task/phantom",
-      store: "landed",
-      derived: "not-landed",
-      record: "PR9",
-    })
-    expect(scan.disagreements[0]?.detail).toContain("the repository does not carry")
     // Nothing proved a landing, so this reader bars nothing. (Whether the
     // branch then composes is arbitration's separate question — a terminal
     // record at the fact's own sha is its own exclusion cell.)
@@ -242,11 +248,10 @@ describe("landedSubmits derives landed content from the repository, not the chan
     )
   })
 
-  it("agrees with the store on an unmerged branch, and says what it walked", async () => {
+  it("reads a genuinely unmerged branch as not-landed, and says what it walked", async () => {
     // The positive control for every zero above: a genuinely unmerged fact
-    // reads not-landed from BOTH oracles, so the disagreements the other cases
-    // report are the readers differing, not this reader answering `landed` to
-    // everything.
+    // reads not-landed, so the `landed` rows the other cases report are this
+    // reader discriminating, not answering `landed` to everything.
     const repo = await makeRepo()
     await queueMerge(repo, { branch: "task/other", file: "other.txt", member: "PR5" })
     const live = await authorOnly(repo, "task/live", "live.txt")
@@ -254,7 +259,7 @@ describe("landedSubmits derives landed content from the repository, not the chan
 
     expect(storeLandedSubmits(state)).toEqual([])
     const scan = await landedSubmits(git, indexFor(repo), state)
-    expect(scan).toMatchObject({ landed: [], unresolved: [], disagreements: [], facts: 1 })
+    expect(scan).toMatchObject({ landed: [], unresolved: [], facts: 1 })
     expect(derivedLaneBranches(state, landedSubmitBranches(scan))).toEqual(["task/live"])
   })
 
@@ -389,11 +394,16 @@ describe("landedSubmits asks about the CHANGE, not only the commit", () => {
     const scan = await landedSubmits(git, indexFor(repo), state)
     expect(scan.landed.map((row) => row.branch)).toEqual(["issue/pin-r4"])
     expect(landedSubmitBranches(scan).has("issue/pin-r4")).toBe(true)
-    // The proof that concluded it is named, and it says the commit is absent —
-    // the one thing that tells a benign superseded revision apart from a fact
-    // carrying new work under an identity that already landed.
-    expect(scan.disagreements[0]?.detail).toContain("already landed there")
-    expect(scan.disagreements[0]?.detail).toContain("NOT contained")
+    // WHICH PROOF concluded it, on the landed row itself — the one thing that
+    // tells a benign superseded revision apart from a fact carrying new work
+    // under an identity that already landed. It rode the retired comparator's
+    // detail string until now, so the comparator could not be cut without
+    // moving it; folding both proofs into one bare `landed` would hide the
+    // second behind the first.
+    //
+    // NEGATIVE CONTROL, run against the pre-cut code: `LandedSubmit` has no
+    // `via`, the row reads `undefined`, and this assertion fails.
+    expect(scan.landed[0]?.via, "r4's own commit is absent; its CHANGE is what landed").toBe("change-id")
   })
 
   it("leaves a fact whose lineage was SEVERED standing, because nothing links it", async () => {

@@ -132,10 +132,9 @@ async function createApp(
           scanLandedSubmits: ({ bays }: Readonly<{ bays: DeepReadonly<BaysState> }>) =>
             Promise.resolve({
               landed: Object.entries(bays.submits).flatMap(([branch, fact]) =>
-                options.landed?.has(fact.sha) === true ? [{ branch, sha: fact.sha }] : [],
+                options.landed?.has(fact.sha) === true ? [{ branch, sha: fact.sha, via: "ancestry" as const }] : [],
               ),
               unresolved: [],
-              disagreements: [],
               facts: Object.keys(bays.submits).length,
             }),
         }),

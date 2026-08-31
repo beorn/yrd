@@ -484,11 +484,7 @@ function remergePreflightGit(overrides: Partial<RemergePreflightGitFacts> = {}):
 type PruneJson = {
   readonly checked: readonly { readonly pr?: string; readonly reason?: string }[]
   readonly excluded: readonly { readonly branch: string; readonly reason: string; readonly next?: string }[]
-  readonly landingDisagreements: readonly {
-    readonly branch: string
-    readonly store: string
-    readonly derived: string
-  }[]
+  readonly summary: Readonly<Record<string, number>>
 }
 
 describe("pr withdraw", () => {
@@ -954,8 +950,6 @@ describe("pr prune", () => {
       summary: { checked: 0, record: 0, derived: 0, excluded: 1 },
     })
     expect(result.excluded[0]!.reason).toContain("content is already on 'main'")
-    // Both oracles say landed here, so there is nothing to report as a split.
-    expect(result.landingDisagreements).toEqual([])
 
     const human = outputIO({ ...landedIO, columns: 400 })
     expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
@@ -964,11 +958,22 @@ describe("pr prune", () => {
     expect(humanText).toContain("1 standing submit fact neither lane scanned — topic/landed")
   })
 
-  it("excludes a RECORDLESS fact whose content git says landed, and reports the split with the record store", async () => {
-    // The cut's whole point, end to end through the command: no record exists
-    // for this branch, so the retired store-keyed reader answered a bare zero
-    // and prune offered the fact to the derived lane on every run. Git answers
-    // it directly, and the two answers differing is printed, not reconciled.
+  it("excludes a RECORDLESS fact whose content git says landed, and reports NO store comparison", async () => {
+    // The comparator's retirement, end to end through the command. No record
+    // exists for this branch — the derived lane's whole population — so the
+    // retired store-keyed reader answers a bare zero and the repository
+    // answers landed. That pair was printed as a RECORD/REPOSITORY
+    // DISAGREEMENT on every run: 6,157 of 6,157 emissions were this one cell,
+    // `store: not-landed` / `derived: landed`, which is the store's structural
+    // blindness restated, never a finding. ADR-0001 makes git the authority,
+    // so there is no second answer left to disagree with and the comparison
+    // is gone rather than routed.
+    //
+    // NEGATIVE CONTROL, run against the pre-cut code: this same test fails on
+    // three assertions — `landingDisagreements` is present in the JSON as
+    // `[{branch: "issue/ghost", store: "not-landed", derived: "landed"}]`,
+    // `summary.landingDisagreements` reads 1, and the human output carries
+    // "pr prune: RECORD/REPOSITORY DISAGREEMENT on issue/ghost".
     const app = await createCliApp()
     await app.bays.recordBranchSubmit({ branch: "issue/ghost", sha: HEAD_SHA, base: "main" })
     expect(app.state().bays.prs, "there is no record to key a landing off").toEqual({})
@@ -980,22 +985,29 @@ describe("pr prune", () => {
     expect(result).toMatchObject({
       scanned: { record: 0, derived: 0, standingFacts: 1 },
       checked: [],
-      summary: { checked: 0, derived: 0, excluded: 1, landed: 1, landingDisagreements: 1 },
+      summary: { checked: 0, derived: 0, excluded: 1, landed: 1 },
     })
+    // The ACTIONABLE half survives untouched: the fact is named, and so is the
+    // one command that retires it. Only the store comparison went.
     expect(result.excluded[0]).toMatchObject({
       branch: "issue/ghost",
       next: "git push bay :refs/yrd/submit/issue/ghost",
     })
     expect(result.excluded[0]!.reason).toContain("content is already on 'main'")
-    expect(result.landingDisagreements[0]).toMatchObject({
-      branch: "issue/ghost",
-      store: "not-landed",
-      derived: "landed",
-    })
+    expect(result, "the machine surface offers no store-vs-git comparison to read").not.toHaveProperty(
+      "landingDisagreements",
+    )
+    expect(result.summary, "nor a count of one").not.toHaveProperty("landingDisagreements")
 
     const human = outputIO({ ...io, columns: 400 })
     expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout().replace(/\s+/gu, " ")).toContain("RECORD/REPOSITORY DISAGREEMENT on issue/ghost")
+    const humanText = human.stdout().replace(/\s+/gu, " ")
+    expect(humanText, "the hourly prune timer's 134 cron rows had exactly one source").not.toContain(
+      "RECORD/REPOSITORY DISAGREEMENT",
+    )
+    expect(humanText, "and the row a reader can act on is still printed").toContain(
+      "1 standing submit fact neither lane scanned — issue/ghost",
+    )
   })
 
   it("does not trust --quiet when a sibling directory entry masks a content conflict", async () => {

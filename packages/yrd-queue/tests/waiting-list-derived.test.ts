@@ -153,10 +153,9 @@ function ancestryScan(landed: ReadonlySet<string>): (input: ScanInput) => Promis
   return ({ bays }) =>
     Promise.resolve({
       landed: Object.entries(bays.submits).flatMap(([branch, fact]) =>
-        landed.has(fact.sha) ? [{ branch, sha: fact.sha, mergeCommit: MERGED }] : [],
+        landed.has(fact.sha) ? [{ branch, sha: fact.sha, via: "ancestry" as const, mergeCommit: MERGED }] : [],
       ),
       unresolved: [],
-      disagreements: [],
       facts: Object.keys(bays.submits).length,
     })
 }
@@ -219,7 +218,6 @@ describe("the waiting list derives pendingness from the repository (2026-08-28: 
             { branch: "task/tip", sha: PENDING_SHA, reason: "degenerate" as const, detail: "fact IS the walked tip" },
             { branch: "task/gone", sha: MOVED_SHA, reason: "unreadable" as const, detail: "git: bad object" },
           ],
-          disagreements: [],
           facts: Object.keys(bays.submits).length,
         }),
     })

@@ -1898,6 +1898,11 @@ function createQueue<Shape extends ChangeShape>(
           action: "compose-derived-fact-already-landed",
           branch: stale.branch,
           sha: stale.sha,
+          // WHICH proof: `ancestry` is this fact's own commit on the base;
+          // `change-id` is a superseded revision of a change that landed under
+          // a different commit — benign when abandoned, an author error when
+          // the fact carries new work. One word, and they stop reading alike.
+          via: stale.via,
           ...(stale.mergeCommit === undefined ? {} : { mergeCommit: stale.mergeCommit }),
         },
       )
@@ -1925,30 +1930,6 @@ function createQueue<Shape extends ChangeShape>(
           sha: open.sha,
           reason: open.reason,
           detail: open.detail,
-        },
-      )
-    }
-    // The retired record store and the repository disagreeing about a landing
-    // is a FINDING, not noise to reconcile: one line per fact, naming which
-    // side said what. The repository's answer is the one that acts.
-    for (const conflict of landedScan.disagreements) {
-      // error, not warn: two sources of truth (the retired record store and
-      // the repository) disagreeing about whether content landed is exactly
-      // the queue-INTEGRITY case the operator's rule calls out — knowable at
-      // this emission site, loud immediately, never gated on persistence.
-      conditions.report(
-        `compose-derived-landing-disagreement:${conflict.branch}:${conflict.sha}`,
-        "error",
-        "the change-record store and the repository disagree about whether a standing submit fact's " +
-          "content has landed; the repository decides and the record is being retired — record this",
-        {
-          action: "compose-derived-landing-disagreement",
-          branch: conflict.branch,
-          sha: conflict.sha,
-          store: conflict.store,
-          derived: conflict.derived,
-          ...(conflict.record === undefined ? {} : { record: conflict.record }),
-          detail: conflict.detail,
         },
       )
     }
@@ -2052,7 +2033,6 @@ function createQueue<Shape extends ChangeShape>(
         excludedAlreadyAdmitted: skip.size,
         excludedAlreadyLanded: landedScan.landed.length,
         landingUnresolved: landedScan.unresolved.length,
-        landingDisagreements: landedScan.disagreements.length,
         landedScanFacts: landedScan.facts,
         excludedSuperseded: supersededCount,
         mint: derivedMint === undefined ? "unconfigured" : "configured",

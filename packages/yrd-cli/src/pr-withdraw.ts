@@ -1131,17 +1131,6 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
           dryRun ? " (dry run: no events emitted)" : ""
         }`
   const summary = [`pr prune: ${scanned} — ${disposition}`]
-  // A store-vs-repository disagreement is a FINDING of the store cutover, and
-  // it is printed per fact, never counted away. The repository's answer is the
-  // one prune acted on.
-  for (const conflict of landedScan.disagreements) {
-    summary.push(
-      `pr prune: RECORD/REPOSITORY DISAGREEMENT on ${conflict.branch} @ ${short(conflict.sha)} — ` +
-        `the change record says ${conflict.store}` +
-        (conflict.record === undefined ? "" : ` (via ${conflict.record})`) +
-        `, the repository says ${conflict.derived}: ${conflict.detail}`,
-    )
-  }
   if (excluded.length > 0) {
     summary.push(
       `pr prune: ${excluded.length} standing submit fact${excluded.length === 1 ? "" : "s"} neither lane scanned — ` +
@@ -1159,7 +1148,6 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
       scanned: { record: rows.length, derived: derivedRows.length, standingFacts: landedScan.facts },
       landed: landedScan.landed,
       landingUnresolved: landedScan.unresolved,
-      landingDisagreements: landedScan.disagreements,
       excluded,
       checked: checked.map(({ detail: _detail, ...row }) => row),
       summary: {
@@ -1174,7 +1162,6 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
         excluded: excluded.length,
         landed: landedScan.landed.length,
         landingUnresolved: landedScan.unresolved.length,
-        landingDisagreements: landedScan.disagreements.length,
       },
       withdrawn: withdrawn.map(projectChangeTaskStatus),
     },

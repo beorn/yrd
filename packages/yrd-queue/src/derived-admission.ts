@@ -499,6 +499,13 @@ export function derivedLaneBranches(
 export type LandedSubmit = Readonly<{
   branch: string
   sha: string
+  /** WHICH PROOF concluded it, and the two are not interchangeable: only
+   * `ancestry` means the fact's OWN commit is on the base. `change-id` says the
+   * CHANGE landed under a different commit — benign for an abandoned revision,
+   * an author error for a fact carrying new work under a landed identity.
+   * Carrying it here is what lets those be told apart downstream; folding both
+   * into one bare `landed` hides the second behind the first. */
+  via: "ancestry" | "change-id"
   /** The first-parent merge commit that carried the fact's sha, when the walked
    * window names one. Absent for a fact merged outside the walk. */
   mergeCommit?: string
@@ -527,23 +534,9 @@ export type UnresolvedSubmit = Readonly<{
   detail: string
 }>
 
-/** One standing fact where the retired record-store answer and the repository
- * answer differ. Reported per fact, never counted: a disagreement names which
- * side said what and which record produced the store's claim. */
-export type LandedSubmitDisagreement = Readonly<{
-  branch: string
-  sha: string
-  store: "landed" | "not-landed"
-  derived: "landed" | "not-landed" | UnresolvedSubmitReason
-  /** The terminal record whose integration commit the store matched. */
-  record?: string
-  detail: string
-}>
-
 export type LandedSubmitScan = Readonly<{
   landed: readonly LandedSubmit[]
   unresolved: readonly UnresolvedSubmit[]
-  disagreements: readonly LandedSubmitDisagreement[]
   /** Denominator for every count above: how many standing facts were asked
    * about. A zero landed over zero facts and a zero over forty are different
    * findings, and no caller may print one as the other. */
@@ -562,21 +555,7 @@ export type MergedTruthIndexFor = (base: string) => Promise<MergedTruthIndex>
 export const NO_LANDED_SUBMIT_SCAN: LandedSubmitScan = {
   landed: [],
   unresolved: [],
-  disagreements: [],
   facts: 0,
-}
-
-/** What the RETIRED record-store reader would have claimed for one branch: a
- * terminal record on that branch whose integration commit IS the fact's sha.
- *
- * Kept for exactly one purpose — naming the disagreement in
- * {@link landedSubmits} — and never consulted for the verdict. Delete it with
- * the record store; nothing else may call it.
- */
-function storeLandedClaim(bays: DeepReadonly<BaysState>, branch: string, sha: string): string | undefined {
-  return recordChanges(bays).find(
-    (pr) => pr.branch === branch && !isLiveChange(pr as Change) && pr.integration?.commit === sha,
-  )?.id
 }
 
 /**
@@ -622,8 +601,14 @@ async function readSubmitChangeId(git: MergedTruthGit, repo: string, sha: string
  * on main.
  *
  * `bays.submits` is still read, because that projection IS the standing-fact
- * population — a git ref set, not a change record. `bays.prs` is read for ONE
- * thing, the disagreement report, and never for the verdict.
+ * population — a git ref set, not a change record. `bays.prs` is NOT read at
+ * all: the repository is the only oracle (docs/@adr/0001), so there is no
+ * second answer to compare it against. The store-vs-git comparator this
+ * function once carried reported 6,157 disagreements over 53 branches, every
+ * one of them the same cell — `store: not-landed` / `derived: landed`, a
+ * recordless derived-lane branch the store cannot see BY DESIGN. It restated
+ * that blindness once per compose pass and never once found a store row the
+ * repository contradicted.
  *
  * NO SILENT ERRORS, per fact: an unresolvable sha is attributable to one
  * branch and is reported as {@link UnresolvedSubmit}, so one bad fact can
@@ -640,7 +625,6 @@ export async function landedSubmits(
   const branches = Object.keys(bays.submits).toSorted()
   const landed: LandedSubmit[] = []
   const unresolved: UnresolvedSubmit[] = []
-  const disagreements: LandedSubmitDisagreement[] = []
   const indexes = new Map<string, MergedTruthIndex | Error>()
   let facts = 0
 
@@ -648,21 +632,8 @@ export async function landedSubmits(
     const submit = bays.submits[branch]
     if (submit === undefined) continue
     facts += 1
-    const record = storeLandedClaim(bays, branch, submit.sha)
-    const store = record === undefined ? "not-landed" : "landed"
-    const disagree = (derived: LandedSubmitDisagreement["derived"], detail: string): void => {
-      disagreements.push({
-        branch,
-        sha: submit.sha,
-        store,
-        derived,
-        ...(record === undefined ? {} : { record }),
-        detail,
-      })
-    }
     const unreadable = (detail: string): void => {
       unresolved.push({ branch, sha: submit.sha, reason: "unreadable", detail })
-      if (store === "landed") disagree("unreadable", detail)
     }
 
     // One index per DISTINCT base, built once and reused — a fact declares the
@@ -724,34 +695,16 @@ export async function landedSubmits(
     }
 
     if (answer.kind === "merged") {
+      // WHICH PROOF CONCLUDED IT rides the row itself ({@link LandedSubmit.via})
+      // — the two are not interchangeable, and until the store comparator was
+      // retired this distinction reached the world only inside that
+      // comparator's prose. It outlived the thing that carried it.
       landed.push({
         branch,
         sha: submit.sha,
+        via: answer.via,
         ...(answer.mergeCommit === undefined ? {} : { mergeCommit: answer.mergeCommit }),
       })
-      // WHICH PROOF CONCLUDED IT, always — the two are not interchangeable and
-      // only one of them means the fact's own commit is on the base. A lineage
-      // landing says the CHANGE landed under a different commit, which is
-      // benign for an abandoned revision and is an author error for a fact
-      // carrying new work under a landed identity. Naming the proof is what
-      // lets those be told apart downstream; folding them into one "landed"
-      // would hide the second behind the first.
-      const proof =
-        answer.via === "ancestry"
-          ? `the repository carries that commit on ${index.tip}` +
-            (answer.mergeCommit === undefined ? "" : ` (merged by ${answer.mergeCommit})`)
-          : `${submit.sha} is NOT contained in ${index.tip}, but its change ` +
-            `'${String(answer.changeId)}' already landed there` +
-            (answer.occurrences?.[0] === undefined
-              ? ""
-              : ` as ${answer.occurrences[0].commit} (${answer.occurrences[0].subject})`) +
-            " — this fact is a superseded revision of a landed change"
-      if (store === "not-landed") {
-        disagree(
-          "landed",
-          `no terminal record on '${branch}' names ${submit.sha} as its integration commit, but ${proof}`,
-        )
-      }
       continue
     }
 
@@ -787,21 +740,11 @@ export async function landedSubmits(
         continue
       }
       unresolved.push({ branch, sha: submit.sha, reason: "degenerate", detail: answer.detail })
-      if (store === "landed") disagree("degenerate", answer.detail)
       continue
-    }
-
-    if (store === "landed") {
-      disagree(
-        "not-landed",
-        `terminal record '${String(record)}' names ${submit.sha} as its integration commit, but that commit ` +
-          `is NOT contained in ${index.tip} in ${index.repo} — the record claims a landing the repository ` +
-          `does not carry`,
-      )
     }
   }
 
-  return { landed, unresolved, disagreements, facts }
+  return { landed, unresolved, facts }
 }
 
 /**
