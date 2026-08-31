@@ -29,6 +29,7 @@ import {
   type JsonValue,
 } from "./domain.ts"
 import { asFailure, failureFact, raiseFailure } from "./failure.ts"
+import { APP_CHECKPOINT_UNWRITABLE } from "./log-actions.ts"
 import {
   classifyJournalFrameVersion,
   JOURNAL_READER_VERSION,
@@ -996,7 +997,10 @@ export async function createYrd<State extends object, Commands extends CommandTr
     } catch (error) {
       coreLog.warn?.(
         "Could not save Yrd's current state; the command succeeded, but the next command may start more slowly.",
-        { error: error instanceof Error ? error.message : String(error) },
+        {
+          action: APP_CHECKPOINT_UNWRITABLE.key,
+          error: error instanceof Error ? error.message : String(error),
+        },
       )
       return false
     }

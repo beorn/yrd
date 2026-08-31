@@ -26,6 +26,16 @@ import {
 import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { createExclusive, type Exclusive, type ExclusiveOptions } from "./lock.ts"
+import {
+  STORAGE_CHECKPOINT_HISTORY_MISSING,
+  STORAGE_CHECKPOINT_UNWRITABLE,
+  STORAGE_CLEANUP_UNFINISHED,
+  STORAGE_LEGACY_RECORD_INCOMPLETE,
+  STORAGE_RECLAIM_DEFERRED,
+  STORAGE_SCHEMA_AHEAD_OF_READER,
+  STORAGE_STATE_DAMAGED_REBUILD,
+  STORAGE_STATE_INCONSISTENT_REBUILD,
+} from "./log-actions.ts"
 
 const DARWIN_HOMEBREW_SQLITE = "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib"
 
@@ -639,12 +649,14 @@ async function inspectCheckpoint(runtime: Context, mode: JournalMode): Promise<J
         snapshot.checkpoint_sha256 === null ||
         sha256(Buffer.from(checkpointJson)) !== snapshot.checkpoint_sha256
       ) {
-        runtime.log.warn?.("Saved state is damaged; rebuilding it.")
+        runtime.log.warn?.("Saved state is damaged; rebuilding it.", { action: STORAGE_STATE_DAMAGED_REBUILD.key })
         return undefined
       }
       const checkpoint = JSON.parse(checkpointJson) as JournalCheckpoint
       if (checkpoint.identity !== snapshot.checkpoint_identity || checkpoint.cursor !== snapshot.cursor) {
-        runtime.log.warn?.("Saved state is inconsistent; rebuilding it.")
+        runtime.log.warn?.("Saved state is inconsistent; rebuilding it.", {
+          action: STORAGE_STATE_INCONSISTENT_REBUILD.key,
+        })
         return undefined
       }
       return checkpoint
@@ -739,7 +751,10 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
   } catch (error) {
     runtime.log.warn?.(
       "Could not save Yrd's current state; the command succeeded, but the next command may start more slowly.",
-      { error: error instanceof Error ? error.message : String(error) },
+      {
+        action: STORAGE_CHECKPOINT_UNWRITABLE.key,
+        error: error instanceof Error ? error.message : String(error),
+      },
     )
     return false
   }
@@ -767,6 +782,7 @@ function prepareCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Pre
         database.run("COMMIT")
         runtime.log.warn?.(
           "Could not save Yrd's current state because part of its history is missing; no work was lost.",
+          { action: STORAGE_CHECKPOINT_HISTORY_MISSING.key },
         )
         return null
       }
@@ -1582,6 +1598,7 @@ function assertComplete(
     log?.warn?.(
       `Journal schema v${schema.found} at ${path} is newer than this reader's v${schema.compiled}; ` +
         `reading the columns this version knows.`,
+      { action: STORAGE_SCHEMA_AHEAD_OF_READER.key },
     )
   }
   if (readMetadata(database, "migration_complete") !== "1") {
@@ -2187,6 +2204,7 @@ function incrementalVacuum(runtime: Context, database: Database): void {
     database.run("PRAGMA incremental_vacuum(256)")
   } catch (error) {
     runtime.log.warn?.("Saved state, but could not reclaim old storage yet; Yrd will retry later.", {
+      action: STORAGE_RECLAIM_DEFERRED.key,
       error: error instanceof Error ? error.message : String(error),
     })
   }
@@ -2233,6 +2251,7 @@ function checkpointWal(runtime: Context, database: Database): void {
     // A reader may pin the WAL. The acknowledged transaction remains durable;
     // a later writer close retries the maintenance checkpoint under the lock.
     runtime.log.warn?.("Could not finish storage cleanup; saved work is safe and Yrd will retry later.", {
+      action: STORAGE_CLEANUP_UNFINISHED.key,
       error: error instanceof Error ? error.message : String(error),
     })
   }
@@ -2282,7 +2301,9 @@ async function readLegacySource(runtime: Context): Promise<LegacySource | null> 
   const committedEnd = source.lastIndexOf(10) + 1
   const raw = source.subarray(0, committedEnd)
   if (committedEnd !== source.length) {
-    runtime.log.warn?.("Ignored an incomplete old state record while upgrading; saved work is unchanged.")
+    runtime.log.warn?.("Ignored an incomplete old state record while upgrading; saved work is unchanged.", {
+      action: STORAGE_LEGACY_RECORD_INCOMPLETE.key,
+    })
   }
   const rows = decodeLegacyBytes(raw, 0, v3Path)
   return {

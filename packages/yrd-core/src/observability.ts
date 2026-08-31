@@ -1,6 +1,7 @@
 import type { ConditionalLogger, LogLevel } from "loggily"
 import { systemClock } from "./clock.ts"
 import { failureFact } from "./failure.ts"
+import { LIFECYCLE_DURATION_UNMEASURABLE } from "./log-actions.ts"
 
 /** Default severity by lifecycle outcome. Delivery-step starts are the one
  * explicit identity-aware promotion; see observeYrdLifecycle. */
@@ -101,7 +102,10 @@ export async function observeYrdLifecycle<Result>(
     })
     if (span !== undefined) Object.assign(span.spanData as Record<string, unknown>, spanProps)
     if (invalidDuration) {
-      log.error?.(`Could not measure how long ${options.lifecycle} took; its result is unchanged.`, { ...spanProps })
+      log.error?.(`Could not measure how long ${options.lifecycle} took; its result is unchanged.`, {
+        ...spanProps,
+        action: LIFECYCLE_DURATION_UNMEASURABLE.key,
+      })
     }
     emitLifecycle(log, options.lifecycle, outcome, summary ?? outcome, { ...spanProps })
   }

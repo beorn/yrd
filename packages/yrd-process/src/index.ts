@@ -1,6 +1,7 @@
 import { createScope, type Scope } from "@silvery/scope"
 import { createFailure } from "@yrd/core"
 import { createLogger, type ConditionalLogger } from "loggily"
+import { PROCESS_KILL_UNCONFIRMED, PROCESS_OUTPUT_HELD_OPEN, PROCESS_OUTPUT_TRUNCATED } from "./log-actions.ts"
 import { accessSync, constants, statSync, writeSync } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
 import {
@@ -564,6 +565,7 @@ export function createProcess(
               // comparing two runs must not see the order flip between them.
               truncations[name] = read.truncation
               log.warn?.("The command produced more output than Yrd captures; the middle of the stream was dropped.", {
+                action: PROCESS_OUTPUT_TRUNCATED.key,
                 argv,
                 ...read.truncation,
               })
@@ -629,6 +631,7 @@ export function createProcess(
             log.warn?.(
               "The command exited, but a child process kept its output open; stopped waiting for more output.",
               {
+                action: PROCESS_OUTPUT_HELD_OPEN.key,
                 argv,
                 pid: child.pid,
                 postExitDrainGraceMs,
@@ -644,6 +647,7 @@ export function createProcess(
           // Forced settle: the child never reaped (sweepFailure already loud);
           // the pipe is held by the live tree, so release our read end.
           log.warn?.("The command did not finish after it was killed; stopped waiting for more output.", {
+            action: PROCESS_KILL_UNCONFIRMED.key,
             argv,
             pid: child.pid,
           })
