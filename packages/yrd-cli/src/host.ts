@@ -2652,33 +2652,97 @@ export function mergedTruthGit(process: Pick<Process, "run">): MergedTruthGit {
 }
 
 /**
+ * The exclusive `stop` bound for one base: the PARENT of the oldest
+ * first-parent commit carrying a Change-Id.
+ *
+ * The parent, not the commit itself, because `merged-truth` walks `stop..tip`
+ * and excludes `stop` — passing the oldest stamped commit would drop the one
+ * commit the bound exists to preserve, silently, since a dropped entry reads
+ * as "this change never landed".
+ *
+ * `undefined` means NO BOUND IS DERIVABLE, and yields the old unbounded walk:
+ * a base that has never stamped a trailer, or whose oldest stamped commit is a
+ * root with no parent. That is the only honest answer for such a repository —
+ * never a bound at zero, which would exclude everything and turn every landed
+ * fact into a trusted not-found.
+ *
+ * Module-exported for `host-lineage-walk-bounded.test.ts` (relative import),
+ * off the package surface.
+ */
+export async function stampingEpochStop(
+  git: ReturnType<typeof mergedTruthGit>,
+  repo: string,
+  tip: string,
+): Promise<string | undefined> {
+  const stamped = await git.text(repo, ["log", "--first-parent", "--format=%H", "--grep=Change-Id: I", tip, "--"])
+  if (stamped === "") return undefined
+  const lines = stamped.split("\n")
+  const oldest = lines[lines.length - 1]
+  return oldest === undefined || oldest === ""
+    ? undefined
+    :  git.optionalText(repo, ["rev-parse", "--verify", `${oldest}^`])
+}
+
+/**
  * The queue's `scanLandedSubmits` capability: which standing submit facts does
  * this repository already carry?
  *
  * One first-parent index per DISTINCT base, built on demand and cached inside
- * one scan. The walk is UNBOUNDED on purpose: this consumer asks only
- * `mergedByAncestry`, whose verdict is pure containment and never consults the
- * Change-Id lineage index or its specimens, so the trailer-stamping epoch that
- * a lineage consumer must pass as `stop` changes nothing here. The index's
- * only contribution is naming the merge commit that carried a landed fact,
- * which a bounded walk would silently drop — hence the full walk, and hence
- * the cost: one `git log --first-parent` over the base per compose pass.
+ * one scan, and BOUNDED at the trailer-stamping epoch — the contract
+ * `merged-truth.ts` states for its production callers, which this one used to
+ * decline.
+ *
+ * It declined on the grounds that "this consumer asks only `mergedByAncestry`,
+ * whose verdict is pure containment and never consults the Change-Id lineage
+ * index or its specimens". The runner refuted that in its own log: it emits
+ * `compose-derived-fact-landing-unresolved` with `reason: "unreadable"` and a
+ * detail naming the lineage index as the thing that could not answer. The
+ * lineage proof is reached exactly when containment does NOT settle it — a
+ * revision the queue rebuilt at merge — so the window is load-bearing.
+ * Measured 2026-08-31 on this base: 26533 commits walked, 6008 specimens,
+ * 77.4% coverage, every landed fact answering `unreadable` forever, and the
+ * stale-fact set that took the landing path down for 72 minutes.
+ *
+ * THE BOUND IS THE EPOCH AND MUST NOT BE TIGHTER. A bound above a landed
+ * change's merge commit turns its fact into a TRUSTED not-found, and the queue
+ * re-admits and re-runs work that already landed — silently, as a re-run
+ * rather than an error. Today nothing is trusted because 6008 specimens force
+ * `unknown`, so clearing specimens is what ARMS that hazard. Bounding at the
+ * epoch is lossless because every trailered commit is post-epoch by
+ * definition: the excluded range contributes no index entries at all, so the
+ * only verdicts that can change are `unknown` becoming answerable. Tightening
+ * it for speed is the one variant that loses data.
+ *
+ * The epoch is DERIVED rather than configured, so the safety property is
+ * structural instead of a number someone maintains and can silently get wrong.
+ * Costs one grep-filtered log per base — measured 0.12s over 26533 commits —
+ * memoized for the scanner's life, since the oldest stamped commit does not
+ * move as the tip advances.
  */
 function landedSubmitScanner(options: Readonly<{ process: Pick<Process, "run">; repo: string }>) {
   const git = mergedTruthGit(options.process)
+  const stops = new Map<string, Promise<string | undefined>>()
+  const stopFor = (base: string, tip: string): Promise<string | undefined> => {
+    const cached = stops.get(base)
+    if (cached !== undefined) return cached
+    const derived = stampingEpochStop(git, options.repo, tip)
+    stops.set(base, derived)
+    return derived
+  }
   return async (input: Readonly<{ bays: Parameters<typeof landedSubmits>[2] }>) =>
     landedSubmits(
       git,
-      async (base) =>
-        buildMergedTruthIndex(git, options.repo, {
-          tip: (
-            await resolveGitQueueTarget({
-              inject: { process: options.process },
-              repo: options.repo,
-              branch: baseIdentity(base),
-            })
-          ).sha,
-        }),
+      async (base) => {
+        const tip = (
+          await resolveGitQueueTarget({
+            inject: { process: options.process },
+            repo: options.repo,
+            branch: baseIdentity(base),
+          })
+        ).sha
+        const stop = await stopFor(base, tip)
+        return buildMergedTruthIndex(git, options.repo, { tip, ...(stop === undefined ? {} : { stop }) })
+      },
       input.bays,
     )
 }
