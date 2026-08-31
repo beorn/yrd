@@ -4281,7 +4281,10 @@ async function closeBayWithProcessReap(
 
 function parseToleratedUnreadablePids(value: string | undefined): ReadonlySet<number> | undefined {
   if (value === undefined) return undefined
-  const pids = value.split(",").map((part) => part.trim()).filter((part) => part !== "")
+  const pids = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "")
   if (pids.length === 0) usage("bay close --tolerate-unreadable requires at least one pid")
   const parsed = new Set<number>()
   for (const pid of pids) {
@@ -7239,14 +7242,34 @@ function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
   }
 }
 
+/**
+ * C3b (@i/10-yrd, 2026-08-31): the current change resolves over BOTH lanes —
+ * a derived member reached by bay or branch is a real change, and the
+ * record-only read refused it with "has no PR; submit it" while the queue was
+ * running its checks (specimen: PR2773, issue/advance-yrd-4f27b0a-take2,
+ * derived from admission to merge). Bay match wins over branch match, as it
+ * always has. Module-exported for current-change-both-lanes.test.ts (relative
+ * import), off the package surface.
+ */
+export function changeForBayOrBranch(
+  bays: DeepReadonly<BaysState>,
+  queues: DeepReadonly<QueuesState>,
+  bayId: string | undefined,
+  branch: string | undefined,
+): Change | undefined {
+  const population = queueChanges(bays, queues)
+  return (
+    (bayId === undefined ? undefined : population.find((candidate) => candidate.bay === bayId)) ??
+    population.find((candidate) => candidate.branch === branch)
+  )
+}
+
 function currentPr(app: YrdCliApp, io: YrdCliIO): Change {
   const state = stateOf(app)
   const cwd = invocationCwd(io)
   const bay = currentBay(state.bays, cwd)
   const branch = bay?.branch ?? currentGitBranch(cwd, io)
-  const pr =
-    (bay === undefined ? undefined : recordChanges(state.bays).find((candidate) => candidate.bay === bay.id)) ??
-    recordChanges(state.bays).find((candidate) => candidate.branch === branch)
+  const pr = changeForBayOrBranch(state.bays, state.queues, bay?.id, branch)
   if (pr === undefined) refusal("the current bay or branch has no PR; submit it with 'yrd pr submit'")
   return pr as Change
 }
@@ -7259,7 +7282,8 @@ async function queuedChangePosition(app: YrdCliApp, pr: Change, io: YrdCliIO): P
 
 async function queuedChangePositions(app: YrdCliApp, base: string, io: YrdCliIO): Promise<ReadonlyMap<string, number>> {
   const state = stateOf(app)
-  const prs = recordChanges(state.bays)
+  // C3b (@i/10-yrd, 2026-08-31): both lanes — derived members hold queue positions too.
+  const prs = queueChanges(state.bays, state.queues)
   const groups = await queueTargetGroups(new Set(prs.map((candidate) => candidate.base)), io)
   const group = groups.find((candidate) => candidate.aliases.has(base))
   if (group === undefined) throw new Error(`yrd: queue target group for base '${base}' disappeared`)
@@ -11654,18 +11678,15 @@ async function readHabitantSourceRecycle(
     // `decideHabitantSource`) rather than raising over an older, still-valid
     // record shape.
     if (reason !== undefined && reason !== "source-stale" && reason !== "installed-plan-stale") return undefined
-    if (
-      staleSteps !== undefined &&
-      (!Array.isArray(staleSteps) || staleSteps.some((step) => typeof step !== "string"))
-    ) {
-      return undefined
-    }
+    const stringArray = (value: unknown): value is readonly string[] =>
+      Array.isArray(value) && value.every((step) => typeof step === "string")
+    if (staleSteps !== undefined && !stringArray(staleSteps)) return undefined
     return Object.freeze({
       bootedSha,
       headSha,
       attemptedAt,
       ...(reason === undefined ? {} : { reason }),
-      ...(staleSteps === undefined ? {} : { staleSteps: Object.freeze([...staleSteps]) as readonly string[] }),
+      ...(staleSteps === undefined ? {} : { staleSteps: Object.freeze([...staleSteps]) }),
     })
   } catch {
     // silent-fallback-allow: a missing file is the overwhelmingly common case
@@ -11863,7 +11884,7 @@ export async function habitantGate(
       if (fact?.code === "installed-plan-stale") {
         const comparison =
           error instanceof Error ? (error.cause as QueueEnvironmentAuditComparison | undefined) : undefined
-        return await habitantPlanRecycle(app, io, fact, comparison)
+        return habitantPlanRecycle(app, io, fact, comparison)
       }
     }
     throw error
