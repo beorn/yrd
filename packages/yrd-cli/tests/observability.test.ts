@@ -54,36 +54,55 @@ afterEach(async () => {
 
 describe("Yrd observability controls", () => {
   it.each([
-    [{}, {}, { level: "warn", spans: false, explicitLevel: false }],
-    [{}, { LOG_LEVEL: "info" }, { level: "info", spans: false, explicitLevel: true }],
+    [{}, {}, { level: "warn", spans: false, spanRows: false, explicitLevel: false }],
+    [{}, { LOG_LEVEL: "info" }, { level: "info", spans: false, spanRows: false, explicitLevel: true }],
     // DEBUG= implies debug severity when the operator chose no level. Setting a
     // namespace filter and getting silence is the trap this repo cares about:
     // the knob is documented, and used exactly as documented it emitted zero
     // bytes, which is why a multi-second stage stayed invisible for weeks.
-    [{}, { DEBUG: "yrd:queue" }, { level: "debug", debug: "yrd:queue", spans: false, explicitLevel: false }],
+    [
+      {},
+      { DEBUG: "yrd:queue" },
+      { level: "debug", debug: "yrd:queue", spans: true, spanRows: false, explicitLevel: false },
+    ],
     // The control that proves silence was never a namespace typo.
-    [{}, { DEBUG: "*" }, { level: "debug", debug: "*", spans: false, explicitLevel: false }],
+    // DEBUG= reaches debug, so spans are CONSTRUCTED — the stage breakdown is
+    // derived from construction and `DEBUG=yrd:perf` is how it is read. It just
+    // prints none of them.
+    [{}, { DEBUG: "*" }, { level: "debug", debug: "*", spans: true, spanRows: false, explicitLevel: false }],
     // ...but an EXPLICIT level always wins over the implication, from any of the
     // three sources that count as an operator choice.
     [
       {},
       { DEBUG: "yrd:core", LOG_LEVEL: "warn" },
-      { level: "warn", debug: "yrd:core", spans: false, explicitLevel: true },
+      { level: "warn", debug: "yrd:core", spans: false, spanRows: false, explicitLevel: true },
     ],
-    [{}, { LOG_LEVEL: "warn", TRACE: "yrd:*" }, { level: "warn", spans: true, explicitLevel: true }],
+    [{}, { LOG_LEVEL: "warn", TRACE: "yrd:*" }, { level: "warn", spans: true, spanRows: true, explicitLevel: true }],
     [
       { logLevel: "error" },
       { DEBUG: "yrd:core" },
-      { level: "error", debug: "yrd:core", spans: false, explicitLevel: true },
+      { level: "error", debug: "yrd:core", spans: false, spanRows: false, explicitLevel: true },
     ],
-    [{ quiet: 1 }, { DEBUG: "yrd:core" }, { level: "error", debug: "yrd:core", spans: false, explicitLevel: true }],
-    [{ verbose: 1 }, { DEBUG: "yrd:core" }, { level: "info", debug: "yrd:core", spans: false, explicitLevel: true }],
-    [{ verbose: 1 }, { LOG_LEVEL: "error" }, { level: "info", spans: false, explicitLevel: true }],
-    [{ verbose: 2 }, { LOG_LEVEL: "error" }, { level: "debug", spans: true, explicitLevel: true }],
-    [{ verbose: 3 }, { LOG_LEVEL: "error" }, { level: "trace", spans: true, explicitLevel: true }],
-    [{ quiet: 1 }, { LOG_LEVEL: "trace" }, { level: "error", spans: false, explicitLevel: true }],
-    [{ quiet: 2 }, { LOG_LEVEL: "trace" }, { level: "silent", spans: false, explicitLevel: true }],
-    [{ logLevel: "debug" }, { LOG_LEVEL: "error" }, { level: "debug", spans: true, explicitLevel: true }],
+    [
+      { quiet: 1 },
+      { DEBUG: "yrd:core" },
+      { level: "error", debug: "yrd:core", spans: false, spanRows: false, explicitLevel: true },
+    ],
+    [
+      { verbose: 1 },
+      { DEBUG: "yrd:core" },
+      { level: "info", debug: "yrd:core", spans: false, spanRows: false, explicitLevel: true },
+    ],
+    [{ verbose: 1 }, { LOG_LEVEL: "error" }, { level: "info", spans: false, spanRows: false, explicitLevel: true }],
+    [{ verbose: 2 }, { LOG_LEVEL: "error" }, { level: "debug", spans: true, spanRows: true, explicitLevel: true }],
+    [{ verbose: 3 }, { LOG_LEVEL: "error" }, { level: "trace", spans: true, spanRows: true, explicitLevel: true }],
+    [{ quiet: 1 }, { LOG_LEVEL: "trace" }, { level: "error", spans: false, spanRows: false, explicitLevel: true }],
+    [{ quiet: 2 }, { LOG_LEVEL: "trace" }, { level: "silent", spans: false, spanRows: false, explicitLevel: true }],
+    [
+      { logLevel: "debug" },
+      { LOG_LEVEL: "error" },
+      { level: "debug", spans: true, spanRows: true, explicitLevel: true },
+    ],
   ] as const)(
     "resolves CLI controls before LOG_LEVEL, and DEBUG implies debug unless a level was chosen",
     (flags, env, expected) => {
@@ -126,7 +145,7 @@ describe("habitant runner observability", () => {
 
   it("leaves a non-default resolved level untouched even without an explicit flag", () => {
     // Defensive: only the exact default (warn + not-explicit) is bumped.
-    const trace = { level: "trace", spans: true, explicitLevel: false } as const
+    const trace = { level: "trace", spans: true, spanRows: true, explicitLevel: false } as const
     expect(habitantObservability(trace)).toEqual(trace)
   })
 

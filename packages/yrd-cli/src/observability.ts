@@ -21,7 +21,15 @@ export type YrdObservability = Readonly<{
   level: LogLevel
   debug?: string
   file?: string
+  /** Spans are CONSTRUCTED. loggily deletes `logger.span` when a pipeline says
+   * `spans: false`, so this also decides whether spans EXIST — and the
+   * command's stage breakdown is derived from their construction
+   * (`withStageAccounting`), not from the emitted stream. Turn this off at a
+   * level an operator reads the breakdown at and the breakdown is empty. */
   spans: boolean
+  /** SPAN rows are PRINTED to the human stream. The narrower question, and the
+   * one `DEBUG=` should answer no to. */
+  spanRows: boolean
   /** True when the operator chose the level (--log-level / LOG_LEVEL / -v / -q).
    * The habitant follow-runner only bumps its default level when this is false. */
   explicitLevel: boolean
@@ -101,15 +109,22 @@ export function resolveYrdObservability(
     level: selected,
     ...(namespaces === undefined ? {} : { debug: namespaces }),
     ...(setting(env.LOGGILY_FILE) === undefined ? {} : { file: setting(env.LOGGILY_FILE) }),
-    // DEBUG alone only ever selects a default SEVERITY (explicitLevel stays
-    // false below) — it must not ALSO turn spans on, or the namespace filter
-    // reintroduces exactly the instrumentation cost TRACE exists to gate:
-    // DEBUG='*' was paying full span/otel overhead on every run for a knob
-    // documented as a namespace filter (@i/10-yrd/24015). `-vv`,
-    // `--log-level debug`, and `LOG_LEVEL=debug` are still explicit operator
-    // requests for debug severity — gate on explicitLevel, not the resolved
-    // string alone, or `-vv`'s own "-vv enables spans" help text goes false.
-    spans: trace !== undefined || selected === "trace" || (selected === "debug" && explicitLevel),
+    // Construction follows the LEVEL, printing follows the operator's intent.
+    // Those had to split: gating construction on intent (the previous shape
+    // here) left `DEBUG=yrd:perf` — the exact invocation for reading the stage
+    // breakdown — creating no spans, and the breakdown is derived from them, so
+    // it printed an empty table with a confident `unaccountedMs`. Two
+    // independently-correct changes landed an hour apart and were incompatible;
+    // this is the seam they actually needed.
+    spans: trace !== undefined || selected === "trace" || selected === "debug",
+    // Unchanged in intent from the gate this replaces: DEBUG alone only ever
+    // selects a default SEVERITY (explicitLevel stays false), and must not
+    // bring a wall of span rows with it — a captured -vvv pass ran 28 SPAN
+    // rows against 25 DEBUG rows, each a near-duplicate of the row above it
+    // (@i/10-yrd/24015). `-vv`, `--log-level debug` and `LOG_LEVEL=debug` are
+    // explicit requests, so they still print — `-vv`'s own "-vv enables spans"
+    // help text stays true.
+    spanRows: trace !== undefined || selected === "trace" || (selected === "debug" && explicitLevel),
     explicitLevel,
   })
 }
@@ -212,7 +227,12 @@ export function createYrdLogger(
         [{ level: "warn", spans: false }, stderrSink],
         [{ level: "debug", ns: [...HABITANT_LIFECYCLE_NAMESPACES], spans: false }, lifecycleLevel, stderrSink],
       ]
-    : [scope, stderrSink]
+    : config.spanRows
+      ? [scope, stderrSink]
+      : // A branch inherits `scope` and overrides only `spans`: rows stop at
+        // the human stream while `logger.span` keeps working for stage
+        // accounting and the JSONL sink below still records them.
+        [scope, [{ spans: false }, stderrSink]]
   if (config.file !== undefined) {
     pipeline.push(
       implicitHabitant

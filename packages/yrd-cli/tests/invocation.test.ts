@@ -522,7 +522,7 @@ describe("resolveYrdContext", () => {
       context: {
         repo: resolve(ambient, "../cli-repo"),
         configPath: "delivery/yard.ts",
-        observability: { level: "warn", spans: false, explicitLevel: false },
+        observability: { level: "warn", spans: false, spanRows: false, explicitLevel: false },
       },
     },
     {
@@ -531,7 +531,7 @@ describe("resolveYrdContext", () => {
       env: { YRD_REPO: "../env-repo", HAB_NAME: "env-work", HAB_WIRE: "fd:3" },
       context: {
         repo: resolve(ambient, "../env-repo"),
-        observability: { level: "warn", spans: false, explicitLevel: false },
+        observability: { level: "warn", spans: false, spanRows: false, explicitLevel: false },
       },
     },
     {
@@ -540,14 +540,17 @@ describe("resolveYrdContext", () => {
       env: { TRIBE_NAME: "@agent/7" },
       context: {
         repo: resolve(ambient),
-        observability: { level: "warn", spans: false, explicitLevel: false },
+        observability: { level: "warn", spans: false, spanRows: false, explicitLevel: false },
       },
     },
     {
       name: "ambient discovery when selectors are absent",
       options: {},
       env: {},
-      context: { repo: resolve(ambient), observability: { level: "warn", spans: false, explicitLevel: false } },
+      context: {
+        repo: resolve(ambient),
+        observability: { level: "warn", spans: false, spanRows: false, explicitLevel: false },
+      },
     },
   ])("resolves $name against one captured ambient cwd", ({ options, env, context }) => {
     expect(resolveYrdContext(options, env, ambient)).toEqual(context)
