@@ -68,6 +68,8 @@ function stableToolchain(toolchain: ToolchainFingerprint): Pick<ToolchainFingerp
 }
 
 /** Internal identity seam for configured queue steps; intentionally not exported by the package root. */
+// Gate-script edits invalidate a prior revision: script shas are folded into
+// the hash below (`scripts`) and re-checked every cycle by plan-audit.ts.
 export function queueStepRevision(input: QueueStepRevisionInput): string {
   const nativeMerge = input.name === "merge" && input.resolvedCommand === undefined
   return createHash("sha256")
