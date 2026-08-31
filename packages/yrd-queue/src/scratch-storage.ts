@@ -1,5 +1,5 @@
 import { lstat, readdir, rm, statfs } from "node:fs/promises"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join, resolve, sep } from "node:path"
 import { systemClock } from "@yrd/core"
 import type { JobError } from "@yrd/job"
 import type { Git } from "git-super/worktree"
@@ -241,6 +241,48 @@ async function directorySize(path: string): Promise<number> {
   }
   await walk(path)
   return total
+}
+
+/**
+ * The entries under `root` git still lists as live worktrees, keyed by the
+ * scratch entry itself rather than the worktree path one level down.
+ *
+ * Every caller of `reapOrphanedScratch` that mkdtemps a `<root>/<name>/worktree`
+ * shape needs this same read to build `keep`: a queue merge scratch entry
+ * (`yrd-queue-*`) and a CLI pre-submit checkout (`check-*`) both put the actual
+ * `git worktree add` one level below the entry `reapOrphanedScratch` decides
+ * on, so `git worktree list`'s path has to be walked back up one segment
+ * before it names the same thing the reaper is comparing against. Extracted
+ * from the queue's own private copy (`command.ts`'s `liveScratchEntries`, the
+ * `withScratchRoot`/`scratchIn` caller) so a second caller with the identical
+ * shape — the CLI's `pre-submit-worktrees` — does not have to re-derive or
+ * fork this logic; the queue's own copy is untouched; nothing here changes its
+ * behavior.
+ *
+ * A failed `git worktree list` (repo gone, git missing) returns an empty set
+ * rather than raising: the caller's reap still has to run on whatever it can
+ * read, treating "could not ask git" as "assume nothing is protected" would
+ * make a git hiccup silently agree to delete a live worktree it just failed to
+ * see, and asking the reap to fail closed here would block ordinary scratch
+ * creation on a transient git error that has nothing to do with reaping.
+ */
+export async function liveWorktreeEntries(
+  git: Pick<Git, "run">,
+  repo: string,
+  root: string,
+): Promise<ReadonlySet<string>> {
+  const listed = await git.run(repo, ["worktree", "list", "--porcelain"], true)
+  if (listed.code !== 0) return new Set()
+  const live = new Set<string>()
+  const rootPrefix = `${resolve(root)}${sep}`
+  for (const line of listed.stdout.split("\n")) {
+    if (!line.startsWith("worktree ")) continue
+    const path = resolve(line.slice("worktree ".length).trim())
+    if (!path.startsWith(rootPrefix)) continue
+    const segment = path.slice(rootPrefix.length).split(sep)[0]
+    if (segment !== undefined && segment !== "") live.add(join(resolve(root), segment))
+  }
+  return live
 }
 
 /**

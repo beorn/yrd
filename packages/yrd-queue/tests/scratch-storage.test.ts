@@ -15,6 +15,7 @@ import {
   describeScratchReap,
   describeStorageState,
   isStorageExhaustion,
+  liveWorktreeEntries,
   ORPHANED_SCRATCH_MAX_AGE_MS,
   queueScratchParent,
   readStorageState,
@@ -112,6 +113,59 @@ describe("queueScratchParent — scratch follows the repository, not the temp di
     const empty = { run: async () => ({ code: 0, stdout: "", stderr: "" }) }
 
     await expect(queueScratchParent(empty, "/nowhere")).rejects.toThrow(/empty common directory/u)
+  })
+})
+
+describe("liveWorktreeEntries — the entries git still calls live worktrees, keyed one level up", () => {
+  it("maps a live 'worktree' checkout back to its containing scratch entry", async () => {
+    const repo = await initRepo("yrd-live-worktree-")
+    const root = join(repo, "..", "scratch")
+    const entry = join(root, "yrd-queue-abc123")
+    await git(repo, ["worktree", "add", "-q", "--detach", join(entry, "worktree")])
+
+    const live = await liveWorktreeEntries(runner, repo, root)
+
+    expect([...live]).toEqual([entry])
+  })
+
+  it("ignores a live worktree that sits outside root", async () => {
+    const repo = await initRepo("yrd-live-worktree-outside-")
+    const root = join(repo, "..", "scratch")
+    await git(repo, ["worktree", "add", "-q", "--detach", join(repo, "..", "elsewhere", "worktree")])
+
+    const live = await liveWorktreeEntries(runner, repo, root)
+
+    expect(live.size).toBe(0)
+  })
+
+  it("returns empty rather than raising when git cannot list worktrees", async () => {
+    const failing = { run: async () => ({ code: 128, stdout: "", stderr: "fatal: not a git repository" }) }
+
+    const live = await liveWorktreeEntries(failing, "/nowhere-a-repo-exists", "/nowhere-a-repo-exists/scratch")
+
+    expect(live.size).toBe(0)
+  })
+
+  it("composes with reapOrphanedScratch to protect a live entry sharing the pre-submit-worktrees shape", async () => {
+    const repo = await initRepo("yrd-live-worktree-reap-")
+    const root = join(repo, "..", "check-scratch")
+    const liveEntry = join(root, "check-abc123")
+    await git(repo, ["worktree", "add", "-q", "--detach", join(liveEntry, "worktree")])
+    // An abandoned sibling with the same 'check-' shape, old enough to reap —
+    // no live worktree registration, standing in for a checkout a killed
+    // process never got to `finally`-remove.
+    const abandonedEntry = join(root, "check-def456")
+    const stale = new Date(Date.now() - 48 * 60 * 60 * 1000)
+    await mkdir(join(abandonedEntry, "worktree"), { recursive: true })
+    await utimes(join(abandonedEntry, "worktree"), stale, stale)
+    await utimes(abandonedEntry, stale, stale)
+
+    const keep = await liveWorktreeEntries(runner, repo, root)
+    const report = await reapOrphanedScratch(root, { keep, namePrefix: "check-" })
+
+    expect(report).toMatchObject({ entries: 2, reaped: 1, kept: 1 })
+    expect(existsSync(liveEntry)).toBe(true)
+    expect(existsSync(abandonedEntry)).toBe(false)
   })
 })
 
