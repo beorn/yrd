@@ -645,17 +645,24 @@ export async function createYrd<State extends object, Commands extends CommandTr
   let checkpointWork: Promise<void> | undefined
   let checkpointWarning = false
 
-  const reportSavedStateRebuild = (message: string): void => {
+  // hub/yrd/2026-08-30-core-review.md: every checkpoint-restore failure collapsed
+  // into one fixed line with the caught error discarded; carry the real cause
+  // through the once-per-session latch instead of dropping it.
+  const reportSavedStateRebuild = (message: string, cause?: unknown): void => {
     if (checkpointWarning) return
     checkpointWarning = true
-    coreLog.info?.(message)
+    if (cause === undefined) {
+      coreLog.info?.(message)
+    } else {
+      coreLog.info?.(message, { error: cause instanceof Error ? cause.message : String(cause) })
+    }
   }
 
   if (checkpointStore !== undefined) {
     try {
       checkpointIdentity = projectionCheckpointIdentity(definition)
-    } catch {
-      reportSavedStateRebuild("Saved state cannot be reused with this configuration; rebuilding it.")
+    } catch (error) {
+      reportSavedStateRebuild("Saved state cannot be reused with this configuration; rebuilding it.", error)
     }
   }
 
@@ -905,7 +912,10 @@ export async function createYrd<State extends object, Commands extends CommandTr
               if (failureFact(error)?.code === "checkpoint-migration-missing") {
                 const coverage = replayFromStart()
                 if (coverage.kind === "covered") {
-                  reportSavedStateRebuild("Saved state has no migration path; rebuilding it from complete history.")
+                  reportSavedStateRebuild(
+                    "Saved state has no migration path; rebuilding it from complete history.",
+                    error,
+                  )
                   return undefined
                 }
                 raiseFailure(
@@ -954,7 +964,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
         )
       }
       // silent-fallback-allow: the report below surfaces corruption before the documented rebuild path.
-      reportSavedStateRebuild("Saved state is inconsistent; rebuilding it.")
+      reportSavedStateRebuild("Saved state is inconsistent; rebuilding it.", error)
       return undefined
     }
   }
@@ -1368,9 +1378,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
     } else {
       try {
         projection = await fold(restored)
-      } catch {
+      } catch (error) {
         checkpointCursor = undefined
-        reportSavedStateRebuild("Saved state is inconsistent; rebuilding it.")
+        reportSavedStateRebuild("Saved state could not be replayed forward; rebuilding it.", error)
         projection = await foldFromEmpty()
       }
     }
