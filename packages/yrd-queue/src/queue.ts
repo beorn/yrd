@@ -6759,83 +6759,7 @@ export function advanceQueue(
   const events: EventDraft[] = []
   if (planned.kind === "merge") {
     if (!isIntegrated(shape)) throw new Error(`yrd: merge step '${planned.name}' produced no integration proof`)
-    // A merged member's `.intent` field, when set, is a historical "carrier-free
-    // pin intent" — a shape the retired intent rail minted and this Run record
-    // stored verbatim. No live code produces one anymore, and the intent rail's
-    // own bookkeeping (`state.intents`) is gone, so there is nothing left to
-    // record it against; the merge merges exactly as it would for any other
-    // member, and only the ordinary PR-merge bookkeeping below applies to it.
-    const changeSnapshots = record.prs.filter((member) => member.intent === undefined)
-    // RE-SOURCE (S6 census #11): a derived member's terminal facts are NOT
-    // emitted here. The record loop below dedupes against store state, and a
-    // recordless member has none — an advance-side emission would re-emit on
-    // every advance and give `needsAdvance` no absorbed-signal to terminate
-    // on. Their single emission point is the `settled` command's apply, whose
-    // application retires the root from the active set (the state-visible
-    // once-marker). Records stay the first source below, byte-identical.
-    for (const current of samePayloadPRs(state.bays, changeSnapshots)) {
-      const alreadyMerged = shape.integration.alreadyLanded
-      if (alreadyMerged !== undefined) {
-        const existingEvidence = current.alreadyLanded
-        if (
-          changeDeliveryState(current) === "already-landed" &&
-          current.integration?.commit === shape.integration.commit &&
-          current.integration?.baseSha === shape.integration.baseSha &&
-          existingEvidence?.candidateSha === alreadyMerged.candidateSha &&
-          existingEvidence.candidateTreeSha === alreadyMerged.candidateTreeSha &&
-          existingEvidence.baseTreeSha === alreadyMerged.baseTreeSha
-        ) {
-          continue
-        }
-        const revision = currentChangeRev(current)
-        events.push(
-          event("pr/already-landed", {
-            pr: current.id,
-            revision: revision.n,
-            headSha: revision.head,
-            run: record.id,
-            ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-            baseSha: shape.integration.baseSha,
-            candidateSha: alreadyMerged.candidateSha,
-            candidateTreeSha: alreadyMerged.candidateTreeSha,
-            baseTreeSha: alreadyMerged.baseTreeSha,
-            ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
-            ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
-          }),
-          ...submitFactRetirement(state.bays, current.branch, submittedRevisionHead(current, revision.n)),
-        )
-        continue
-      }
-      if (
-        current.merged &&
-        current.integration?.commit === shape.integration.commit &&
-        current.integration?.baseSha === shape.integration.baseSha
-      ) {
-        continue
-      }
-      const revision = currentChangeRev(current)
-      if (revision.changeId === undefined) {
-        // A current merge record proves only the stable identity it names. Keep a
-        // pre-identity same-payload record readable, but never infer that it merged.
-        continue
-      }
-      events.push(
-        event("pr/integrated", {
-          pr: current.id,
-          revision: revision.n,
-          headSha: revision.head,
-          run: record.id,
-          ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-          commit: shape.integration.commit,
-          landingSha: shape.integration.commit,
-          baseSha: shape.integration.baseSha,
-          changeId: revision.changeId,
-          ...(revision.props === undefined ? {} : { props: revision.props }),
-          ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
-        }),
-        ...submitFactRetirement(state.bays, current.branch, submittedRevisionHead(current, revision.n)),
-      )
-    }
+    events.push(...mergeFactEvents(state.bays, record.prs, record.id, shape.integration))
   }
 
   const next = record.steps[index + 1]
@@ -6853,6 +6777,113 @@ export function advanceQueue(
     events.push(requestStep(requirePlannedStep(steps, next), record, candidate, index + 1, shape))
   }
   return { events }
+}
+
+/**
+ * The merge-step bookkeeping events `advanceQueue` still owes this run's
+ * merged members: `pr/integrated` (this run performed the merge) or
+ * `pr/already-landed` (ancestry proved it landed before this run touched
+ * it) — one attempt per live record sharing the run's merged payload.
+ *
+ * `needsAdvance` (below) calls this SAME function to decide whether a
+ * completed run still needs driving, instead of hand-maintaining a second
+ * guess at "has this converged yet". That used to drift: a member this loop
+ * gives up on for good — no stable Change-Id (routine today, not historical
+ * — see pm/@i/10-yrd/change-id-neither-minted-nor-stamped.md, ~23% of the
+ * live main lineage), or a retired intent-rail pin with no live record to
+ * write against — held the whole run open forever, re-driving it every
+ * selectorless pass for a write that would never come. An empty result here
+ * now means exactly "nothing left to do for this run's merge facts",
+ * because this is the one place that decides that.
+ *
+ * A member with `.intent` set is excluded before the loop starts (see the
+ * inline comment): there is no live record to write its terminal fact
+ * against, so it never appears in `samePayloadPRs`'s result and this
+ * returns nothing for it, by construction — same reasoning as the
+ * S6/derived exclusion immediately below.
+ */
+function mergeFactEvents(
+  bays: DeepReadonly<BaysState>,
+  prs: readonly DeepReadonly<ChangeSnapshot>[],
+  runId: RunId,
+  integration: IntegrationProof,
+): EventDraft[] {
+  // A merged member's `.intent` field, when set, is a historical "carrier-free
+  // pin intent" — a shape the retired intent rail minted and this Run record
+  // stored verbatim. No live code produces one anymore, and the intent rail's
+  // own bookkeeping (`state.intents`) is gone, so there is nothing left to
+  // record it against; the merge merges exactly as it would for any other
+  // member, and only the ordinary PR-merge bookkeeping below applies to it.
+  const changeSnapshots = prs.filter((member) => member.intent === undefined)
+  // RE-SOURCE (S6 census #11): a derived member's terminal facts are NOT
+  // emitted here. The record loop below dedupes against store state, and a
+  // recordless member has none — an emission here would re-emit on every
+  // advance and give the caller no absorbed-signal to terminate on. Their
+  // single emission point is the `settled` command's apply, whose
+  // application retires the root from the active set (the state-visible
+  // once-marker). Records stay the first source below, byte-identical.
+  return samePayloadPRs(bays, changeSnapshots).flatMap((current): EventDraft[] => {
+    const alreadyMerged = integration.alreadyLanded
+    if (alreadyMerged !== undefined) {
+      const existingEvidence = current.alreadyLanded
+      if (
+        changeDeliveryState(current) === "already-landed" &&
+        current.integration?.commit === integration.commit &&
+        current.integration?.baseSha === integration.baseSha &&
+        existingEvidence?.candidateSha === alreadyMerged.candidateSha &&
+        existingEvidence.candidateTreeSha === alreadyMerged.candidateTreeSha &&
+        existingEvidence.baseTreeSha === alreadyMerged.baseTreeSha
+      ) {
+        return []
+      }
+      const revision = currentChangeRev(current)
+      return [
+        event("pr/already-landed", {
+          pr: current.id,
+          revision: revision.n,
+          headSha: revision.head,
+          run: runId,
+          ...(current.issue === undefined ? {} : { issueRef: current.issue }),
+          baseSha: integration.baseSha,
+          candidateSha: alreadyMerged.candidateSha,
+          candidateTreeSha: alreadyMerged.candidateTreeSha,
+          baseTreeSha: alreadyMerged.baseTreeSha,
+          ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
+          ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
+        }),
+        ...submitFactRetirement(bays, current.branch, submittedRevisionHead(current, revision.n)),
+      ]
+    }
+    if (
+      current.merged &&
+      current.integration?.commit === integration.commit &&
+      current.integration?.baseSha === integration.baseSha
+    ) {
+      return []
+    }
+    const revision = currentChangeRev(current)
+    if (revision.changeId === undefined) {
+      // A current merge record proves only the stable identity it names. Keep a
+      // pre-identity same-payload record readable, but never infer that it merged.
+      return []
+    }
+    return [
+      event("pr/integrated", {
+        pr: current.id,
+        revision: revision.n,
+        headSha: revision.head,
+        run: runId,
+        ...(current.issue === undefined ? {} : { issueRef: current.issue }),
+        commit: integration.commit,
+        landingSha: integration.commit,
+        baseSha: integration.baseSha,
+        changeId: revision.changeId,
+        ...(revision.props === undefined ? {} : { props: revision.props }),
+        ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
+      }),
+      ...submitFactRetirement(bays, current.branch, submittedRevisionHead(current, revision.n)),
+    ]
+  })
 }
 
 function samePayloadPRs(
@@ -10325,29 +10356,18 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
   if (step?.job === undefined || !Job.terminal(step.job)) return false
   if (jobSucceeded(step.job)) {
     if (run.steps[index + 1]?.job === undefined && index + 1 < run.steps.length) return true
-    if (step.kind !== "merge" || run.integration === undefined) return false
-    return run.prs.some((pr) => {
-      const current = getChangeRecord(state.bays, pr.id)
-      // A DERIVED member (S6) has no record to absorb the integration — its
-      // terminal fact emits at settlement, not through an advance — so it can
-      // never hold an advance open. Without this the settle loop re-advances
-      // (and would re-emit) forever, waiting on a store write that is
-      // deliberately a no-op.
-      if (current === undefined && pr.intent === undefined) return false
-      const alreadyMerged = run.integration?.alreadyLanded
-      const currentAlreadyMerged = current?.alreadyLanded
-      return (
-        current?.merged !== true ||
-        current.integration?.commit !== run.integration?.commit ||
-        current.integration?.baseSha !== run.integration?.baseSha ||
-        (alreadyMerged === undefined) !== (currentAlreadyMerged === undefined) ||
-        (alreadyMerged !== undefined &&
-          (currentAlreadyMerged?.baseSha !== run.integration?.baseSha ||
-            currentAlreadyMerged?.candidateSha !== alreadyMerged.candidateSha ||
-            currentAlreadyMerged?.candidateTreeSha !== alreadyMerged.candidateTreeSha ||
-            currentAlreadyMerged?.baseTreeSha !== alreadyMerged.baseTreeSha))
-      )
-    })
+    const integration = run.integration
+    if (step.kind !== "merge" || integration === undefined) return false
+    // Ask the exact question `mergeFactEvents` (advanceQueue's own merge-fact
+    // writer, above) answers, rather than hand-mirroring a second guess at
+    // "has this converged yet". The two used to disagree: a member
+    // `mergeFactEvents` has permanently given up writing for (no stable
+    // Change-Id; a retired intent-rail pin with no live record) held this run
+    // open forever, re-driving it every selectorless pass for a write that
+    // would never come. Deriving from the same computation instead of
+    // hand-mirroring it means a future permanent no-op added there can't
+    // reopen this gap.
+    return mergeFactEvents(state.bays, run.prs, run.id, integration).length > 0
   }
   if (!jobFailed(step.job)) return false
   if (queueAuthorityReleaseReason(jobFailure(step.job)) !== undefined) return true
