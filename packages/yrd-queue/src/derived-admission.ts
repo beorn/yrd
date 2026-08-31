@@ -51,6 +51,7 @@ import {
   type CompositionV1,
   type PrNumberMint,
   type ProjectedBranchSubmit,
+  recordChanges,
 } from "@yrd/bay"
 import { raiseFailure, type DeepReadonly } from "@yrd/core"
 import * as z from "zod"
@@ -200,7 +201,7 @@ function materializeDerivedRunMember(
         `frozen store, so a colliding id means an identity escaped outside it; refusing to run`,
     )
   }
-  const records = Object.values(bays.prs).filter((pr) => pr.branch === member.branch)
+  const records = recordChanges(bays).filter((pr) => pr.branch === member.branch)
   const live = records.find(isLiveChange)
   if (live !== undefined) {
     raiseFailure(
@@ -210,7 +211,7 @@ function materializeDerivedRunMember(
         `member may not run beside it (never both lanes for one push)`,
     )
   }
-  const duplicate = Object.values(bays.prs).find(
+  const duplicate = recordChanges(bays).find(
     (pr) =>
       pr.branch !== member.branch &&
       pr.state === "open" &&
@@ -461,7 +462,7 @@ export function derivedLaneBranches(
 ): string[] {
   return Object.keys(bays.submits)
     .filter((branch) => {
-      const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
+      const records = recordChanges(bays).filter((pr) => pr.branch === branch)
       // One-lane-consumes, decided by LIVE ownership plus landed content:
       // - a LIVE record owns its branch, so its standing fact is that
       //   record's own pending signal, never a derived admission;
@@ -573,7 +574,7 @@ export const NO_LANDED_SUBMIT_SCAN: LandedSubmitScan = {
  * the record store; nothing else may call it.
  */
 function storeLandedClaim(bays: DeepReadonly<BaysState>, branch: string, sha: string): string | undefined {
-  return Object.values(bays.prs).find(
+  return recordChanges(bays).find(
     (pr) => pr.branch === branch && !isLiveChange(pr as Change) && pr.integration?.commit === sha,
   )?.id
 }
@@ -939,7 +940,7 @@ export function deriveRunMemberArgs(
   const { mint, branch, enrichment } = options
   const bays = options.bays as BaysState
   const queues = options.queues as QueuesState
-  const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
+  const records = recordChanges(bays).filter((pr) => pr.branch === branch)
   const submit = bays.submits[branch]
   const verdict = arbitrateDerivedChange(records, submit)
   if (verdict.lane !== "derived" || submit === undefined) {

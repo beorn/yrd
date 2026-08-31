@@ -1,3 +1,4 @@
+import { recordChanges } from "@yrd/bay"
 import { Queues } from "@yrd/queue"
 import type { YrdCliState } from "./types.ts"
 
@@ -6,7 +7,7 @@ export function queueReadBases(state: YrdCliState, configuredBase: string): read
   return [
     ...new Set([
       configuredBase,
-      ...Object.values(state.bays.prs).map((pr) => pr.base),
+      ...recordChanges(state.bays).map((pr) => pr.base),
       ...Queues.values(state.queues).map((run) => run.base),
       ...Object.values(state.queues.pauses).map((pause) => pause.base),
     ]),

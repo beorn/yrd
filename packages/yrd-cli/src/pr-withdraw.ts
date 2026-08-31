@@ -10,6 +10,7 @@ import {
   type BaysState,
   type Change,
   type ProjectedBranchSubmit,
+  recordChanges,
 } from "@yrd/bay"
 import { raiseFailure, type DeepReadonly } from "@yrd/core"
 import {
@@ -921,7 +922,7 @@ function unscannedSubmits(
   return Object.entries(bays.submits)
     .filter(([branch]) => !scanned.has(branch))
     .map(([branch, submit]) => {
-      const terminal = Object.values(bays.prs).findLast((pr) => pr.branch === branch && !isLiveChange(pr as Change))
+      const terminal = recordChanges(bays).findLast((pr) => pr.branch === branch && !isLiveChange(pr as Change))
       if (landed.has(branch)) {
         const mergeCommit = landed.get(branch)
         return {

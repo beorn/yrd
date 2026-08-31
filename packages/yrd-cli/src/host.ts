@@ -34,6 +34,9 @@ import {
   findChangeId,
   recordLaneOwnsBranch,
   currentChangeRev,
+  recordChanges,
+  recordChangeEntries,
+  getChangeRecord,
 } from "@yrd/bay"
 import {
   createHeldOutCommandEvaluator,
@@ -2234,7 +2237,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // this retired nested field was noticed. A real forward edge is the
         // only opportunity to remove it from runtime and durable state.
         const prsWithoutRegressions = Object.fromEntries(
-          Object.entries(state.bays.prs).map(([id, pr]) => {
+          recordChangeEntries(state.bays).map(([id, pr]) => {
             const { regressions: _retiredRegressions, ...withoutRegressions } = pr as typeof pr &
               Readonly<{ regressions?: unknown }>
             return [id, withoutRegressions]
@@ -2866,7 +2869,7 @@ function freshSubmitRef(base: string, change: string): string {
  * runner's log.
  */
 function reportFrozenRecord(log: ConditionalLogger, app: YrdCliApp, result: Readonly<ReceiverResult>, branch: string) {
-  const record = Object.values(app.state().bays.prs).find((pr) => pr.branch === branch)
+  const record = recordChanges(app.state().bays).find((pr) => pr.branch === branch)
   if (record === undefined) return
   const change = result.change ?? record.name ?? record.id
   const base = result.intake.base
@@ -3779,7 +3782,7 @@ async function createYrdRuntimeHost(
           // reading its executed steps alone as "what was checked" is the
           // false "did not run" this closes (item 0).
           admission: (member, baseSha) => {
-            const pr = runtimeApp.state().bays.prs[member.id]
+            const pr = getChangeRecord(runtimeApp.state().bays, member.id)
             const revision = pr?.revs.find((rev) => rev.n === member.revision)
             const admission = revision?.admission
             if (admission?.status !== "passed" || admission.baseSha !== baseSha) return undefined

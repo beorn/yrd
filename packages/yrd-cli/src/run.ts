@@ -49,6 +49,8 @@ import {
   type DerivedSubmission,
   type MaterializeDeploymentInput,
   type ReleaseDeploymentJobInput,
+  recordChanges,
+  recordChangeCount,
 } from "@yrd/bay"
 import { CompetitorDefSchema, type CompetitorDef, type Contest } from "@yrd/contest"
 import {
@@ -1448,7 +1450,7 @@ function runnerHealthError(code: string, cause: string, resolution: readonly str
 }
 
 function queuedDeliveryCount(app: YrdCliApp): number {
-  return Object.values(stateOf(app).bays.prs).filter((pr) => {
+  return recordChanges(stateOf(app).bays).filter((pr) => {
     const delivery = changeDeliveryState(pr)
     return delivery === "submitted" || delivery === "ready"
   }).length
@@ -1623,7 +1625,7 @@ export function needsPersonWarnings(findings: readonly QueueAuditFinding[]): str
  * habitant process with the same service name. */
 export function habitantDriverLastMerged(app: YrdCliApp, base: string): QueueDriverEpoch["lastMerged"] {
   return (
-    Object.values(stateOf(app).bays.prs)
+    recordChanges(stateOf(app).bays)
       .flatMap((pr) => {
         if (
           baseIdentity(pr.base) !== baseIdentity(base) ||
@@ -2868,7 +2870,7 @@ function trackerBridges(
   snapshot: JournalSnapshot<YrdCliState>,
   include: (delivery: TrackerDeliveryV2) => boolean,
 ): Readonly<{ trackerBridge: TrackerBridgeV1; trackerBridgeV2: TrackerBridgeV2 }> {
-  const recorded = Object.values(snapshot.state.bays.prs)
+  const recorded = recordChanges(snapshot.state.bays)
     .map((pr) => trackerDeliveryV2(pr, snapshot.state, app.queue.eligibility(pr.id, snapshot.state)))
     .filter((delivery): delivery is TrackerDeliveryV2 => delivery !== undefined && include(delivery))
     .toSorted((left, right) => compareNatural(left.pr, right.pr))
@@ -2999,7 +3001,7 @@ function knownBases(state: YrdCliState): string[] {
   return [
     "main",
     ...Object.values(state.bays.byId).map((bay) => bay.base),
-    ...Object.values(state.bays.prs).map((pr) => pr.base),
+    ...recordChanges(state.bays).map((pr) => pr.base),
     ...Queues.values(state.queues).map((run) => run.base),
     ...Object.values(state.queues.pauses).map((pause) => pause.base),
   ]
@@ -7242,8 +7244,8 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): Change {
   const bay = currentBay(state.bays, cwd)
   const branch = bay?.branch ?? currentGitBranch(cwd, io)
   const pr =
-    (bay === undefined ? undefined : Object.values(state.bays.prs).find((candidate) => candidate.bay === bay.id)) ??
-    Object.values(state.bays.prs).find((candidate) => candidate.branch === branch)
+    (bay === undefined ? undefined : recordChanges(state.bays).find((candidate) => candidate.bay === bay.id)) ??
+    recordChanges(state.bays).find((candidate) => candidate.branch === branch)
   if (pr === undefined) refusal("the current bay or branch has no PR; submit it with 'yrd pr submit'")
   return pr as Change
 }
@@ -7256,7 +7258,7 @@ async function queuedChangePosition(app: YrdCliApp, pr: Change, io: YrdCliIO): P
 
 async function queuedChangePositions(app: YrdCliApp, base: string, io: YrdCliIO): Promise<ReadonlyMap<string, number>> {
   const state = stateOf(app)
-  const prs = Object.values(state.bays.prs)
+  const prs = recordChanges(state.bays)
   const groups = await queueTargetGroups(new Set(prs.map((candidate) => candidate.base)), io)
   const group = groups.find((candidate) => candidate.aliases.has(base))
   if (group === undefined) throw new Error(`yrd: queue target group for base '${base}' disappeared`)
@@ -7440,7 +7442,7 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
   const contests = app.contests.list()
   const refs = new Set<string>()
   for (const bay of Object.values(state.bays.byId)) if (bay.issue !== undefined) refs.add(bay.issue)
-  for (const pr of Object.values(state.bays.prs)) if (pr.issue !== undefined) refs.add(pr.issue)
+  for (const pr of recordChanges(state.bays)) if (pr.issue !== undefined) refs.add(pr.issue)
   for (const contest of contests) refs.add(`${contest.issue.ref.source}:${contest.issue.ref.id}`)
   if (selected !== undefined && !refs.has(selected)) refusal(`no issue '${selected}' is in flight`)
   return [...refs]
@@ -7449,7 +7451,7 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
     .map((issue) => {
       const bays = Object.values(state.bays.byId).filter((bay) => bay.issue === issue)
       const bayIds = new Set(bays.map((bay) => bay.id))
-      const prs = Object.values(state.bays.prs).filter(
+      const prs = recordChanges(state.bays).filter(
         (pr) => pr.issue === issue || (pr.bay !== undefined && bayIds.has(pr.bay)),
       )
       const joinedContests = contests.filter(
@@ -7768,7 +7770,7 @@ function admissionBlockedChanges(
   app: YrdCliApp,
   selectedChangeIds?: ReadonlySet<string>,
 ): Array<Readonly<{ pr: Change; eligibility: ChangeEligibility }>> {
-  return Object.values(stateOf(app).bays.prs)
+  return recordChanges(stateOf(app).bays)
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
       return (
@@ -7822,7 +7824,7 @@ async function queueStatusSnapshots(
   io: YrdCliIO,
 ): Promise<{ results: readonly QueueStatusResult[] }> {
   if (target.selected.size === 0 && target.bases.size === 0) {
-    for (const pr of Object.values(state.bays.prs)) target.bases.add(pr.base)
+    for (const pr of recordChanges(state.bays)) target.bases.add(pr.base)
     for (const run of Queues.values(state.queues)) target.bases.add(run.base)
     if (target.bases.size === 0) target.bases.add("main")
   }
@@ -7842,7 +7844,7 @@ async function queueStatusSnapshots(
       waiting: runs.waiting.flatMap(scopeRun),
       finished: runs.finished.flatMap(scopeRun),
     }
-    const groupPrs = Object.values(state.bays.prs).filter((pr) => group.aliases.has(pr.base))
+    const groupPrs = recordChanges(state.bays).filter((pr) => group.aliases.has(pr.base))
     const prs = groupPrs.filter((pr) => target.selected.size === 0 || target.selected.has(pr.id))
     const prIds = new Set(prs.map((pr) => pr.id))
     const groupChangeIds = new Set(groupPrs.map((pr) => pr.id))
@@ -7865,7 +7867,7 @@ async function queueStatusSnapshots(
 function queueBases(state: YrdCliState): string[] {
   return [
     ...new Set([
-      ...Object.values(state.bays.prs).map((pr) => baseIdentity(pr.base)),
+      ...recordChanges(state.bays).map((pr) => baseIdentity(pr.base)),
       ...Queues.values(state.queues).map((run) => baseIdentity(run.base)),
     ]),
   ].toSorted()
@@ -8872,7 +8874,7 @@ function queueLogTargets(
 ): { bases: Set<string>; selected: Set<string>; changeFilter: string | undefined } {
   const target = resolveQueueTargets(state, selectors, base, pr)
   if (selectors.length === 0 && base === undefined && pr === undefined) {
-    for (const item of Object.values(state.bays.prs)) target.bases.add(item.base)
+    for (const item of recordChanges(state.bays)) target.bases.add(item.base)
     for (const run of Queues.values(state.queues)) target.bases.add(run.base)
     if (target.bases.size === 0) target.bases.add("main")
   }
@@ -8975,7 +8977,7 @@ async function logRuns(
       waiting: merged.waiting.filter(inScope),
       finished: merged.finished.filter(inScope),
     }
-    const groupPrs = Object.values(state.bays.prs).filter((pr) => group.aliases.has(pr.base))
+    const groupPrs = recordChanges(state.bays).filter((pr) => group.aliases.has(pr.base))
     const groupChangeIds = new Set(groupPrs.map((pr) => pr.id))
     summaries.push({
       base: group.base,
@@ -8993,7 +8995,7 @@ async function logRuns(
   )
   const attempts = (await queueAttempts(services)).filter((attempt) => runIds.has(attempt.run))
   const revisionReads = queueRunRevisionReads(
-    Object.values(state.bays.prs),
+    recordChanges(state.bays),
     summaries.flatMap((summary) => summary.finished),
   )
   const projectedRows = queueLogRows(
@@ -9244,7 +9246,7 @@ function createStrandedSweeper(
       base,
       namespace: "refs/remotes/origin",
       authoredOnly: true,
-      carriedBranches: new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch)),
+      carriedBranches: new Set(recordChanges(stateOf(app).bays).map((pr) => pr.branch)),
       // Declared empty, never omitted — the disposition store is host-evaluated
       // after this sweep (applyHostFindingFilter). retiredRefs cannot carry it.
       retiredRefs: new Set<string>(),
@@ -9296,7 +9298,7 @@ async function queueStranded(
   // A branch is carried if any change names it — including terminal
   // ones. A ref whose PR was withdrawn is not stranded work waiting to be
   // found; it is work someone already decided about.
-  const carriedBranches = new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch))
+  const carriedBranches = new Set(recordChanges(stateOf(app).bays).map((pr) => pr.branch))
   await using process = createProcess()
   const result = await sweepStrandedRefs(sweepGit(process), {
     repo: cwd,
@@ -9575,7 +9577,7 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
   // The journal's own count, read once, up front — independent of anything the repo scan below
   // finds. It is the fact that tells a `pr-unknown` skip apart from a wiped journal: one skip says
   // "this change", `knownPrs === 0` says "no PR at all, and every skip below is that same fact."
-  const knownPrs = Object.keys(stateOf(app).bays.prs).length
+  const knownPrs = recordChangeCount(stateOf(app).bays)
 
   // One PR can appear in several attempts; only its latest merged attempt describes the merge.
   const latest = new Map<string, Readonly<{ record: MergeRecordBody; change: MergeRecordBody["changes"][number] }>>()
@@ -10820,7 +10822,7 @@ export async function refreshTrackedQueueRevisions(
   io: YrdCliIO,
   observation?: TrackedObservationBackoff,
 ): Promise<readonly HabitantTrackedRevisionTransition[]> {
-  const candidates = Object.values(stateOf(app).bays.prs)
+  const candidates = recordChanges(stateOf(app).bays)
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
       return isTracked(pr) && isLiveChange(pr) && delivery !== "pushed"
@@ -11097,7 +11099,7 @@ export async function refreshAdmittedQueueRevisions(
 ): Promise<readonly HabitantQueueFreshnessTransition[]> {
   const snapshot = stateOf(app)
   const outcomes: HabitantQueueFreshnessTransition[] = []
-  const interrupted = Object.values(snapshot.bays.prs).filter(
+  const interrupted = recordChanges(snapshot.bays).filter(
     (pr) => currentChangeRev(pr).recut?.transition?.to === "refreshed",
   )
   const staleRunsByPr = new Map<string, Run[]>()
@@ -11155,7 +11157,7 @@ export async function refreshAdmittedQueueRevisions(
     })
   }
   const batches = app.queue.freshnessCandidateBatches()
-  const candidatesById = new Map(Object.values(snapshot.bays.prs).map((pr) => [pr.id, pr] as const))
+  const candidatesById = new Map(recordChanges(snapshot.bays).map((pr) => [pr.id, pr] as const))
   const candidates = batches.flatMap((batch, batchIndex) =>
     batch.flatMap((id, index) => {
       const candidate = candidatesById.get(id)

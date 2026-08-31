@@ -36,6 +36,7 @@ import {
   type ChangeAdmissionRecordedFact,
   type ChangeAdmissionStep,
   type PrNumberMint,
+  recordChanges,
 } from "@yrd/bay"
 import {
   command,
@@ -559,7 +560,7 @@ function unrecordedSubmits(
   wiring: DerivedAdmissionWiring,
   landing: SubmitLandingReader,
 ): UnrecordedSubmit[] {
-  const recorded = new Set(Object.values(bays.prs).map((pr) => pr.branch))
+  const recorded = new Set(recordChanges(bays).map((pr) => pr.branch))
   return (
     Object.entries(bays.submits)
       .filter(([branch]) => !recorded.has(branch))
@@ -740,7 +741,7 @@ function queueRunNoSubmittedPRs(
   excluded: ReadonlySet<string>,
 ): QueueRunNoSubmittedPRs {
   const population: Record<string, number> = {}
-  for (const pr of Object.values(bays.prs)) {
+  for (const pr of recordChanges(bays)) {
     const delivery = changeDeliveryState(pr)
     population[delivery] = (population[delivery] ?? 0) + 1
   }
@@ -1275,7 +1276,7 @@ function queueBase(state: DeepReadonly<RuntimeState>, selector: string): string 
   const known = [
     "main",
     ...Object.values(state.bays.byId).map((bay) => bay.base),
-    ...Object.values(state.bays.prs).map((pr) => pr.base),
+    ...recordChanges(state.bays).map((pr) => pr.base),
     ...Queues.values(state.queues).map((run) => run.base),
     ...Object.values(state.queues.pauses).map((pause) => pause.base),
   ]
@@ -4099,7 +4100,7 @@ function createQueue<Shape extends ChangeShape>(
     },
     eligibilities(projected) {
       const snapshot = projected ?? runtime()
-      return Object.values(snapshot.bays.prs).map((pr) => ChangeEligibility(snapshot, pr, steps, needsPersonOwner))
+      return recordChanges(snapshot.bays).map((pr) => ChangeEligibility(snapshot, pr, steps, needsPersonOwner))
     },
     async scanLanding(projected) {
       return takeLandingScan(projected ?? runtime())
@@ -4121,7 +4122,7 @@ function createQueue<Shape extends ChangeShape>(
     deriveChange(branch, projected) {
       const snapshot = projected ?? runtime()
       const branchLanding = landing.reader(snapshot.bays, "queue.deriveChange()")
-      const records = Object.values(snapshot.bays.prs).filter((pr) => pr.branch === branch)
+      const records = recordChanges(snapshot.bays).filter((pr) => pr.branch === branch)
       // Legacy first-match, deliberately NOT the arbitration's newest-truth
       // pick: every pre-S6 consumer keeps its exact answer while writes still
       // flow. The door cuts consumers over to `authority`, not the reverse.
@@ -4156,7 +4157,7 @@ function createQueue<Shape extends ChangeShape>(
       const snapshot = runtime()
       const prs =
         selectors === undefined
-          ? Object.values(snapshot.bays.prs)
+          ? recordChanges(snapshot.bays)
           : selectors.map((selector) => {
               const pr = resolveQueueChange(snapshot.bays, snapshot.queues, selector)
               if (pr === undefined) {
@@ -7470,7 +7471,7 @@ function auditQueues(
   // layer must CONSUME this finding, never re-derive draft state itself.
   // Clock-gated like the hold checks above: with no `now`, age is unjudgeable.
   if (auditNowMs !== undefined) {
-    for (const pr of Object.values(state.bays.prs)) {
+    for (const pr of recordChanges(state.bays)) {
       if (changeDeliveryState(pr) !== "pushed") continue
       // The SAME revision the certification is derived from: `reviewState` and
       // `changeDeliveryState` both read `currentChangeRev`, so re-picking the tip by
@@ -8032,7 +8033,7 @@ function queueLivenessAuditFindings(
 }
 
 function latestQueueMergeMs(state: DeepReadonly<RuntimeState>, base: string): number | undefined {
-  return Object.values(state.bays.prs)
+  return recordChanges(state.bays)
     .filter((pr) => baseIdentity(pr.base) === base)
     .flatMap((pr) => [pr.integratedAt, pr.alreadyLandedAt])
     .filter((at): at is string => at !== undefined)
@@ -8366,7 +8367,7 @@ function admissionQueue(
   // materialized value answers `submitted` with a standing check request for
   // exactly the submit sha, and their verdict evidence lives in the admission
   // Jobs rather than a stored admission record.
-  return [...Object.values(state.bays.prs), ...derived]
+  return [...recordChanges(state.bays), ...derived]
     .filter((pr) => targets === undefined || targets.has(pr.id))
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
@@ -8437,7 +8438,7 @@ function admissionQueue(
 function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): Change[] {
   const selected = declaredDefaultSteps(steps)
   if (!selected.some((step) => step.kind === "merge")) return []
-  return Object.values(state.bays.prs)
+  return recordChanges(state.bays)
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
       return delivery === "submitted" || delivery === "ready" || (delivery === "pushed" && checksRequested(pr))
@@ -8491,7 +8492,7 @@ function admissionPosition(
 }
 
 function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): Change[] {
-  return Object.values(state.bays.prs)
+  return recordChanges(state.bays)
     .filter((pr) => changeDeliveryState(pr) === "needs-author" && changeAdmission(pr)?.status === "refused")
     .toSorted(
       (left, right) =>

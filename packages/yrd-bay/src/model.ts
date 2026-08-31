@@ -1280,6 +1280,31 @@ export function recordChangeCount(bays: DeepReadonly<Pick<BaysState, "prs">>): n
 }
 
 /**
+ * Every Change the RECORD store holds — the record lane's own population,
+ * never the whole population a selector can name (that is
+ * `queueChanges(bays, queues)` in yrd-queue, which adds the derived lane).
+ * Named so a call site states which lane it read; C3a routed every raw
+ * `Object.values(bays.prs)` through here, so the raw index greps only to the
+ * seam (this file and change-population.ts).
+ */
+export function recordChanges(bays: Pick<BaysState, "prs">): Change[]
+export function recordChanges(bays: DeepReadonly<Pick<BaysState, "prs">>): DeepReadonly<Change>[]
+export function recordChanges(bays: DeepReadonly<Pick<BaysState, "prs">>): DeepReadonly<Change>[] {
+  return Object.values(bays.prs)
+}
+
+/**
+ * The record store's entries, id-keyed, for the one consumer that rebuilds
+ * the map key-preserving (host state serialization stripping retired fields).
+ * Everything else wants {@link recordChanges}.
+ */
+export function recordChangeEntries(bays: Pick<BaysState, "prs">): [string, Change][]
+export function recordChangeEntries(bays: DeepReadonly<Pick<BaysState, "prs">>): [string, DeepReadonly<Change>][]
+export function recordChangeEntries(bays: DeepReadonly<Pick<BaysState, "prs">>): [string, DeepReadonly<Change>][] {
+  return Object.entries(bays.prs)
+}
+
+/**
  * S6 receiver-dispatch rule: intake is the grandfathered RECORD lane's act,
  * and only a branch a LIVE record already owns takes a revision through it. A
  * recordless (or terminal-record) branch belongs to the DERIVED lane — the

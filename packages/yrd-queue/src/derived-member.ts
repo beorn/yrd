@@ -18,6 +18,7 @@ import {
   type BaysState,
   type Change,
   type PrNumberMint,
+  recordChanges,
 } from "@yrd/bay"
 import { latestChangeSnapshot, maxChangeSnapshotRevision, newestTruthRecord, type QueuesState } from "./model.ts"
 
@@ -64,7 +65,7 @@ export function mintDerivedMemberIdentity(
   }>,
 ): DerivedMemberIdentity {
   const { mint, bays, queues, branch } = options
-  const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
+  const records = recordChanges(bays).filter((pr) => pr.branch === branch)
   const live = records.find(isLiveChange)
   if (live !== undefined) {
     throw new Error(
