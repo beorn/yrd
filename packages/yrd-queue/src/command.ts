@@ -36,7 +36,6 @@ import type {
   SubmoduleMainResult,
   SubmoduleMainRefusal,
   CandidateChange,
-  IntegratedShape,
   IntegrationProof,
   ChangeShape,
   ChangeSnapshot,
@@ -7736,21 +7735,6 @@ export function configuredMergeStep<Shape extends ChangeShape>(
       context.attempt,
       await merge(input, context),
     )
-}
-
-export function deployCommandStep(
-  options: Omit<ConfiguredCommandOptions<IntegratedShape>, "purpose">,
-): StepRunner<IntegratedShape, CommandEvidence> {
-  return configuredCommandStep({
-    ...options,
-    purpose: "deploy",
-    variables(input) {
-      return {
-        YRD_INTEGRATED_SHA: input.shape.integration.commit,
-        ...options.variables?.(input),
-      }
-    },
-  })
 }
 
 function primaryPR(input: StepExecution): StepExecution["prs"][number] {
