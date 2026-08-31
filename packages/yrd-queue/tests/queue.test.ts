@@ -2341,7 +2341,7 @@ describe("Queue", () => {
     )
     expect(compose).toMatchObject({
       level: "info",
-      message: "compose settled: 1 failed, 1 passed",
+      message: "settled: 1 failed, 1 passed",
       props: expect.objectContaining({ outcome: "settled", summary: "settled: 1 failed, 1 passed" }),
     })
     log.end()

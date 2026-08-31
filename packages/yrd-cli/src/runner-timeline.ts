@@ -2,6 +2,7 @@ import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { hyperlink } from "@silvery/ansi"
 import { formatChangeRevisionSelector } from "@yrd/bay"
+import { formatLifecycleDuration } from "@yrd/core"
 import type { Event } from "loggily"
 import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
 import { failureSlug } from "./failure-slug.ts"
@@ -37,33 +38,11 @@ export function timelineStatusGlyph(status: string): string {
   return statusPresentation(status).glyph
 }
 
-/** Coarse human duration (largest unit): the watch timeline's formatDuration. */
-export function formatDuration(milliseconds: number): string {
-  const ms = Math.max(0, milliseconds)
-  if (ms < 1_000) return `${Math.round(ms)}ms`
-  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`
-  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h`
-  return `${Math.floor(ms / 86_400_000)}d`
-}
-
-/** Lifecycle durations preserve subordinate units because a named completion
- * row is durable operator evidence, not a compact watch-table cell. */
-function formatLifecycleDuration(milliseconds: number): string {
-  const ms = Math.max(0, milliseconds)
-  if (ms < 60_000) return formatDuration(ms)
-  const totalSeconds = Math.floor(ms / 1_000)
-  const days = Math.floor(totalSeconds / 86_400)
-  const hours = Math.floor((totalSeconds % 86_400) / 3_600)
-  const minutes = Math.floor((totalSeconds % 3_600) / 60)
-  const seconds = totalSeconds % 60
-  return [
-    days > 0 ? `${days}d` : "",
-    hours > 0 ? `${hours}h` : "",
-    minutes > 0 ? `${minutes}m` : "",
-    seconds > 0 ? `${seconds}s` : "",
-  ].join("")
-}
+/** Both duration formats now live in `@yrd/core` so lifecycle log messages can
+ * use the same ones (core cannot import upward). Re-exported here because this
+ * module was their only home, and queue-status-view, status-view and settlement
+ * all import `formatDuration` from it. */
+export { formatDuration, formatLifecycleDuration } from "@yrd/core"
 
 /** Canonical structured scope for run lifecycle events. Human lifecycle rows
  * omit the repeated scope prefix; their bracketed run/step identity carries the

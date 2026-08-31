@@ -320,7 +320,7 @@ describe("Yrd lifecycle records", () => {
     expect(settled).toMatchObject({
       namespace: "yrd:compose",
       level: "info",
-      message: "compose settled: 1 failed, 1 passed",
+      message: "settled: 1 failed, 1 passed",
       props: expect.objectContaining({ outcome: "settled", summary: "settled: 1 failed, 1 passed" }),
     })
     log.end()
@@ -355,7 +355,7 @@ describe("Yrd lifecycle records", () => {
     const settled = events.find(
       (event): event is Extract<Event, { kind: "log" }> => event.kind === "log" && event.props?.outcome === "settled",
     )
-    expect(settled).toMatchObject({ level: "info", message: "run settled" })
+    expect(settled).toMatchObject({ level: "info", message: "settled" })
     expect(settled?.props).not.toHaveProperty("summary")
     log.end()
   })
@@ -394,17 +394,71 @@ describe("Yrd lifecycle records", () => {
           event.kind === "log" && event.namespace === namespace && event.props?.outcome === "succeeded",
       )
 
-    expect(settledEvent("yrd:storage:append")?.message).toBe("append succeeded queue.advance")
-    expect(settledEvent("yrd:storage:lock")?.message).toBe("lock succeeded checkpoint-save")
+    // `actor verb object`, with the lifecycle word dropped because the
+    // namespace already carries it — `yrd:storage:lock lock succeeded` said
+    // `lock` twice and named neither the holder nor the file.
+    expect(settledEvent("yrd:storage:append")?.message).toBe("appended queue.advance")
+    expect(settledEvent("yrd:storage:lock")?.message).toBe("checkpoint-save locked /x/writer.lock")
     // A journal frame's `command`/`cause` are UUIDs — they identify nothing a
     // reader can act on, so they are never the promoted subject.
     expect(settledEvent("yrd:storage:append")?.message).not.toContain("uuid")
     // Nothing scalar to name: a selectorless compose keeps the bare outcome
     // word rather than inventing a subject for it.
-    expect(settledEvent("yrd:queue:compose")?.message).toBe("compose succeeded")
+    expect(settledEvent("yrd:queue:compose")?.message).toBe("succeeded")
 
     expect(settledEvent("yrd:storage:append")?.props).toEqual(
       expect.objectContaining({ op: "queue.advance", command: "0f0f-frame-uuid", events: 0, cursor: 114_557 }),
+    )
+    log.end()
+  })
+
+  it("names the change, the verdict and the elapsed time when a job lifecycle fails", async () => {
+    // Negative control: this row read `affected-tests failed` on namespace
+    // `yrd:jobs:affected-tests` — the message repeated the namespace verbatim
+    // and then added the weakest available verb, so a reader watching eight
+    // runs could not tell which change it was about without opening the JSON.
+    // `toBe` below fails against that rendering.
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+    const clock = [0, 339_032]
+
+    await observeYrdLifecycle(
+      log.child("jobs"),
+      {
+        lifecycle: "affected-tests",
+        identity: { step: "affected-tests", attempt: 1 },
+        attributes: {
+          prs: [{ pr: "PR2831", revision: 1, headSha: "907d422c", branch: "task/embed-location-km-pin" }],
+        },
+        outcome: () => "failed",
+        resultAttributes: (result: { status: string; conclusion: string }) => result,
+        now: () => clock.shift() ?? 339_032,
+      },
+      // `resultAttributes` is only consulted for a non-undefined result, which
+      // is how the real job path reports its verdict.
+      async () => ({ status: "completed", conclusion: "timed_out" }),
+    )
+
+    const failed = events.find(
+      (event): event is Extract<Event, { kind: "log" }> => event.kind === "log" && event.props?.outcome === "failed",
+    )
+    // `step` is the lifecycle here, so the namespace already says
+    // "affected-tests" and the message spends its width on the change, the
+    // verdict and how long it burned. 339032ms reads 5m39s, which is what says
+    // this died nowhere near a two-hour ceiling.
+    expect(failed?.namespace).toBe("yrd:jobs:affected-tests")
+    expect(failed?.message).toBe("failed PR2831 [timed_out] 5m39s")
+    // Every promoted value is still in the payload, and so is everything that
+    // was never promoted.
+    expect(failed?.props).toEqual(
+      expect.objectContaining({
+        step: "affected-tests",
+        attempt: 1,
+        status: "completed",
+        conclusion: "timed_out",
+        durationMs: 339_032,
+        prs: [{ pr: "PR2831", revision: 1, headSha: "907d422c", branch: "task/embed-location-km-pin" }],
+      }),
     )
     log.end()
   })
@@ -456,7 +510,7 @@ describe("Yrd lifecycle records", () => {
     // `PR7` is the promoted subject: the most specific identity this
     // lifecycle carries. It is a headline for the payload below, never a
     // replacement for it.
-    expect(events.find((event) => event.kind === "log" && event.message === "check started PR7")).toMatchObject({
+    expect(events.find((event) => event.kind === "log" && event.message === "started PR7")).toMatchObject({
       kind: "log",
       namespace: "yrd:check",
       level: "info",
@@ -470,11 +524,11 @@ describe("Yrd lifecycle records", () => {
         step: "check",
       },
     })
-    expect(events.find((event) => event.kind === "log" && event.message === "check succeeded PR7")).toMatchObject({
+    expect(events.find((event) => event.kind === "log" && event.message === "succeeded PR7")).toMatchObject({
       kind: "log",
       namespace: "yrd:check",
       level: "info",
-      message: "check succeeded PR7",
+      message: "succeeded PR7",
       props: {
         lifecycle: "check",
         outcome: "succeeded",
@@ -713,7 +767,7 @@ describe("observable CLI exemplar", () => {
 
     expect(exitCode).toBe(0)
     expect(JSON.parse(stdout.join(""))).toEqual({ repo: join(root, "selected") })
-    expect(stderr.join("")).toContain("resolve succeeded")
+    expect(stderr.join("")).toContain("yrd:resolve succeeded")
     const records = (await readFile(logFile, "utf8"))
       .trim()
       .split("\n")
@@ -723,7 +777,7 @@ describe("observable CLI exemplar", () => {
         expect.objectContaining({
           level: "info",
           name: "yrd:resolve",
-          msg: "resolve succeeded",
+          msg: "succeeded",
           repo: join(root, "selected"),
         }),
       ]),

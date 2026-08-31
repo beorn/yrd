@@ -166,7 +166,7 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" &&
         event.level === "warn" &&
-        event.namespace === "yrd:queue" &&
+        event.namespace === "yrd:queue:compose" &&
         event.props?.action === "compose-candidate-skip" &&
         event.props?.pr === poisoned.id,
     )
@@ -232,7 +232,7 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" &&
         event.level === "error" &&
-        event.namespace === "yrd:queue" &&
+        event.namespace === "yrd:queue:compose" &&
         event.props?.action === "compose-candidate-skip",
     )
     expect(skip?.props).toMatchObject({
@@ -274,7 +274,7 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
 
     const skips = events.filter(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
-        event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue",
+        event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue:compose",
     )
     const skip = skips.find((event) => event.props?.action === "compose-candidate-skip")
     expect(skip, "expected a compose-candidate-skip warn").toBeDefined()
@@ -369,7 +369,7 @@ describe("compose member isolation — one refusing member never zeroes its whol
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" &&
         event.level === "warn" &&
-        event.namespace === "yrd:queue" &&
+        event.namespace === "yrd:queue:compose" &&
         event.props?.action === "compose-candidate-skip",
     )
     expect(ejection?.props).toMatchObject({

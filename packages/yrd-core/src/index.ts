@@ -1,5 +1,6 @@
 export * from "./app.ts"
 export * from "./clock.ts"
+export * from "./duration.ts"
 export * from "./domain.ts"
 export * from "./failure.ts"
 export * from "./frame.ts"

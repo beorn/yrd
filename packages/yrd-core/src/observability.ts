@@ -1,5 +1,6 @@
 import type { ConditionalLogger, LogLevel } from "loggily"
 import { systemClock } from "./clock.ts"
+import { formatLifecycleDuration } from "./duration.ts"
 import { failureFact } from "./failure.ts"
 
 /** Default severity by lifecycle outcome. Delivery-step starts are the one
@@ -131,31 +132,98 @@ export async function observeYrdLifecycle<Result>(
   }
 }
 
-/** Identity keys promoted into a lifecycle message, most specific first. A row
- * that reads `append succeeded` a thousand times over names no object, so a
- * reader has to parse the payload to learn WHICH one it is about; one subject
- * in the text answers that at a glance. Exactly one is promoted — the message
- * is a headline, not a second copy of `props`, and every key stays in `props`
- * either way.
+/** Identity keys promoted into a lifecycle message as its OBJECT, most
+ * specific first. Exactly one is promoted — the message is a headline, not a
+ * second copy of `props`, and every key stays in `props` either way.
  *
  * `command` and `cause` are deliberately absent: they carry journal frame
  * UUIDs, which identify nothing a reader can act on. */
-const LIFECYCLE_SUBJECT_KEYS = ["pr", "run", "step", "job", "op", "holder", "branch", "issue", "ref"] as const
+const LIFECYCLE_OBJECT_KEYS = ["pr", "run", "branch", "issue", "op", "job", "step", "ref", "path"] as const
 
-/** The first present subject as a leading-space suffix, or `""` when the
- * lifecycle carries no scalar identity (a selectorless compose names nothing,
- * and inventing a subject for it would be worse than saying nothing). One
- * line, bounded, so a pathological identity cannot push the payload off
- * screen — `props` still holds it whole. */
-function lifecycleSubject(props: Readonly<Record<string, unknown>>): string {
-  for (const key of LIFECYCLE_SUBJECT_KEYS) {
-    const value = props[key]
-    if (typeof value !== "string" && typeof value !== "number") continue
-    const text = String(value).replace(/\s+/gu, " ").trim()
-    if (text === "") continue
-    return ` ${text.length <= 80 ? text : `${text.slice(0, 79)}…`}`
+/** The one key that reads as an ACTOR rather than a thing acted on. A lock is
+ * the case that needs it: `journal-read locked <path>` says who holds it, which
+ * is the whole question a reader has when a lock line appears. */
+const LIFECYCLE_ACTOR_KEY = "holder"
+
+/** Past-tense verbs for the lifecycles where the outcome word alone reads
+ * badly. Everything else falls back to the outcome word (or a supplied summary
+ * label), which is always correct if less fluent — a new lifecycle gets a
+ * sensible line without an entry here, and nothing silently degrades. */
+const LIFECYCLE_VERBS: Readonly<Record<string, Readonly<Record<string, string>>>> = Object.freeze({
+  lock: Object.freeze({ started: "locking", succeeded: "locked", failed: "could not lock" }),
+  append: Object.freeze({ started: "appending", succeeded: "appended", failed: "could not append" }),
+})
+
+function scalar(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined
+  const text = String(value).replace(/\s+/gu, " ").trim()
+  if (text === "") return undefined
+  return text.length <= 80 ? text : `${text.slice(0, 79)}…`
+}
+
+/** The first change id inside a `prs` array. A batch lifecycle names its
+ * members that way rather than through a scalar `pr`, and `PR2831` is the
+ * handle a human uses for it — the branch and headSha beside it are not. */
+function firstChangeId(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue
+    const id = scalar((entry as Record<string, unknown>).pr)
+    if (id !== undefined) return id
   }
-  return ""
+  return undefined
+}
+
+function lifecycleObject(props: Readonly<Record<string, unknown>>): string | undefined {
+  // The change identity outranks everything, including `step` — a job
+  // lifecycle IS its step, so the namespace already ends with that word and
+  // promoting it wrote `yrd:jobs:affected-tests affected-tests failed`.
+  const change = scalar(props.pr) ?? firstChangeId(props.prs)
+  if (change !== undefined) return change
+  for (const key of LIFECYCLE_OBJECT_KEYS) {
+    const text = scalar(props[key])
+    if (text !== undefined) return text
+  }
+  return undefined
+}
+
+/** Build one lifecycle message: `actor verb object [code] duration`.
+ *
+ * The lifecycle word itself is NOT in the message, and that is the rule rather
+ * than an omission — `observeYrdLifecycle` logs on `root.child(lifecycle)`, so
+ * the namespace ALWAYS ends with it. Keeping both produced
+ * `yrd:storage:lock lock succeeded`, which spends its width saying the same
+ * word twice. Every promotion here is paid for with a deletion.
+ *
+ * The code and the duration are outcome evidence, so they appear only on a
+ * FAILURE. That asymmetry is deliberate twice over. A successful line's
+ * duration is noise a reader does not act on, and it lives in
+ * `props.durationMs` either way; a failed line's duration is the first thing
+ * they need — `failed 5m39s` against a two-hour ceiling says the run died of
+ * something else. And it keeps every successful line's text a pure function of
+ * its identity, so an exact-message assertion stays deterministic instead of
+ * carrying a wall-clock reading. */
+function lifecycleMessage(
+  lifecycle: string,
+  outcome: YrdLifecycleOutcome,
+  descriptor: string,
+  props: Readonly<Record<string, unknown>>,
+): string {
+  const verb = LIFECYCLE_VERBS[lifecycle]?.[outcome] ?? descriptor
+  const actor = scalar(props[LIFECYCLE_ACTOR_KEY])
+  const object = lifecycleObject(props)
+  const failure = props.failure
+  const conclusion = scalar(props.conclusion)
+  const code =
+    (typeof failure === "object" && failure !== null ? scalar((failure as Record<string, unknown>).code) : undefined) ??
+    (conclusion === undefined || conclusion === "success" ? undefined : conclusion)
+  const durationMs = props.durationMs
+  const failing = outcome === "failed" || outcome === "recovered"
+  const duration =
+    failing && typeof durationMs === "number" && durationMs > 0 ? formatLifecycleDuration(durationMs) : undefined
+  return [actor, verb, object, code === undefined ? undefined : `[${code}]`, duration]
+    .filter((part): part is string => part !== undefined)
+    .join(" ")
 }
 
 function emitLifecycle(
@@ -166,7 +234,7 @@ function emitLifecycle(
   props: Record<string, unknown>,
   levelOverride?: Exclude<LogLevel, "silent">,
 ): void {
-  const message = `${lifecycle} ${descriptor}${lifecycleSubject(props)}`
+  const message = lifecycleMessage(lifecycle, outcome, descriptor, props)
   const level =
     levelOverride ??
     (outcome === "succeeded" && DEBUG_SUCCESS_LIFECYCLES.has(lifecycle) ? "debug" : YRD_LIFECYCLE_LEVELS[outcome])
@@ -213,6 +281,13 @@ export type ConditionReporter = Readonly<{
    * folded in). Call at loop/process exit so a condition that never resolves
    * explicitly — the process just stops — does not lose its trailing tally. */
   flush(): void
+  /** A view that emits on `log.child(name)` while SHARING this reporter's
+   * active-key map. One component reported some conditions on `yrd:queue` and
+   * others on `yrd:queue:compose` purely by which logger the call site had, so
+   * `DEBUG='-yrd:queue:compose*'` silenced half of it. A second reporter would
+   * have fixed the namespace and split the dedup state; this keeps the one
+   * memo the doc above insists on and moves only where the row is emitted. */
+  child(name: string): ConditionReporter
 }>
 
 /** Repeats-per-announcement doubles (1, 2, 4, 8, …) and caps here — the same
@@ -236,8 +311,12 @@ type ConditionEntry = Readonly<{
  * namespace their own keys (e.g. `` `liveness:${base}` `` vs
  * `` `track-deferred:${pr}` ``) — the reporter itself never assumes what a key
  * means, only that the SAME string is the SAME condition. */
-export function createConditionReporter(log: ConditionalLogger): ConditionReporter {
+export function createConditionReporter(root: ConditionalLogger): ConditionReporter {
   const active = new Map<string, ConditionEntry>()
+  return reporterOn(root, active)
+}
+
+function reporterOn(log: ConditionalLogger, active: Map<string, ConditionEntry>): ConditionReporter {
   const emit = (level: "warn" | "error", message: string, props: Readonly<Record<string, unknown>>): void => {
     if (level === "error") log.error?.(message, props)
     else log.warn?.(message, props)
@@ -283,6 +362,9 @@ export function createConditionReporter(log: ConditionalLogger): ConditionReport
       // iterator never revisits a deleted entry and never skips a pending
       // one, so this needs no snapshot copy of the key list.
       for (const key of active.keys()) summarize(key)
+    },
+    child(name) {
+      return reporterOn(log.child(name), active)
     },
   })
 }

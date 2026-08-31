@@ -204,7 +204,9 @@ checks:
             (r) => r.name === "yrd:queue:compose" && r.outcome === "succeeded" && r.level === "debug",
           )
           expect(composeDone, "no DEBUG yrd:queue:compose succeeded settlement").toBeDefined()
-          expect(composeDone).toMatchObject({ msg: "compose succeeded", durationMs: expect.any(Number) })
+          // The namespace is `yrd:queue:compose`, so the message no longer
+          // repeats "compose" back at the reader.
+          expect(composeDone).toMatchObject({ msg: "succeeded", durationMs: expect.any(Number) })
           expect(
             records.some((r) => r.name === "yrd:queue:compose" && r.outcome === "succeeded" && r.level === "info"),
           ).toBe(false)

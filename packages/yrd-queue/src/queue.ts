@@ -1823,6 +1823,13 @@ function createQueue<Shape extends ChangeShape>(
   // the noise. Callers namespace their own keys (branch+sha, pr+code, …) so
   // unrelated conditions never suppress each other.
   const conditions = createConditionReporter(log)
+  // Compose rows belong on the namespace the compose lifecycle already uses
+  // (`observeYrdLifecycle` logs on `log.child("compose")`). Reporting them on
+  // the bare `yrd:queue` logger meant one component answered to two
+  // namespaces by call site, so a `-yrd:queue:compose*` filter silenced only
+  // some of it. The reporter view shares the dedup memo above.
+  const composeConditions = conditions.child("compose")
+  const composeLog = log.child("compose")
 
   /**
    * S6 door — DERIVED admission of ref-only approvals, replacing the retired
@@ -3316,7 +3323,7 @@ function createQueue<Shape extends ChangeShape>(
               // Not ledgered: this skip is run-scoped, and a run record already
               // exists — the record walk in `auditQueues` can see it. The ledger
               // covers only the skips that never mint a record.
-              log.warn?.(`Skipped a change that changed while batch ${candidateId} was being prepared.`, {
+              composeLog.warn?.(`skipped a change that moved while batch ${candidateId} was being prepared`, {
                 action: "compose-candidate-skip",
                 run: candidateId,
                 code: fact.code,
@@ -3357,14 +3364,17 @@ function createQueue<Shape extends ChangeShape>(
               } catch (error) {
                 const fact = failureFact(error)
                 if (fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) throw error
-                log.warn?.(`queue compose skipped derived member ${member.id}, whose submit fact no longer admits it`, {
-                  action: "compose-candidate-skip",
-                  pr: member.id,
-                  branch: member.branch,
-                  code: fact.code,
-                  kind: fact.kind,
-                  reason: fact.message,
-                })
+                composeLog.warn?.(
+                  `skipped derived member ${member.id} [${fact.code}], whose submit fact no longer admits it`,
+                  {
+                    action: "compose-candidate-skip",
+                    pr: member.id,
+                    branch: member.branch,
+                    code: fact.code,
+                    kind: fact.kind,
+                    reason: fact.message,
+                  },
+                )
                 await noteCandidateRefusal([member.id], { code: fact.code, kind: fact.kind, reason: fact.message })
               }
             }
@@ -3473,10 +3483,10 @@ function createQueue<Shape extends ChangeShape>(
               // needs, which is the operator's queue-INTEGRITY bar. Deduped
               // below: unfixed, this is the exact site measured re-skipping
               // the same PR every cycle for over an hour.
-              conditions.report(
+              composeConditions.report(
                 `compose-candidate-skip-authority:${gap.pr}:${gap.kind}:${gap.reason}`,
                 "error",
-                `queue compose ejected ${gap.pr} without runnable authority`,
+                `ejected ${gap.pr} [queue-${gap.kind}-authority-${gap.reason}] no runnable authority`,
                 {
                   action: "compose-candidate-skip",
                   pr: gap.pr,
@@ -3504,7 +3514,7 @@ function createQueue<Shape extends ChangeShape>(
               if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
                 throw error
               }
-              log.warn?.(`queue compose skipped authority-gap change ${gap.pr}, lost to a losable failure`, {
+              composeLog.warn?.(`skipped authority-gap change ${gap.pr} [${fact.code}], lost to a losable failure`, {
                 action: "compose-candidate-skip",
                 pr: gap.pr,
                 code: fact.code,
@@ -3588,13 +3598,17 @@ function createQueue<Shape extends ChangeShape>(
             if (!selectorless || fact?.kind !== "refusal") {
               throw error
             }
-            log.warn?.("queue compose skipped required-check work lost to a losable failure", {
-              action: "compose-candidate-skip",
-              code: fact.code,
-              kind: fact.kind,
-              reason: fact.message,
-              prs: checked.map((pr) => pr.id),
-            })
+            composeLog.warn?.(
+              `skipped required-check work for ${checked.map((pr) => pr.id).join(",")} [${fact.code}], ` +
+                "lost to a losable failure",
+              {
+                action: "compose-candidate-skip",
+                code: fact.code,
+                kind: fact.kind,
+                reason: fact.message,
+                prs: checked.map((pr) => pr.id),
+              },
+            )
             await noteCandidateRefusal(
               checked.map((pr) => pr.id),
               { code: fact.code, kind: fact.kind, reason: fact.message },
@@ -3661,10 +3675,10 @@ function createQueue<Shape extends ChangeShape>(
               const base = baseIdentity(pr.base)
               const holder = activeBaseRuns.get(base)
               if (holder === undefined) continue
-              conditions.report(
+              composeConditions.report(
                 `compose-implicit-skip-active-base:${pr.id}:${base}:${holder}`,
                 "warn",
-                `queue compose will not select change '${pr.id}' this pass: its base '${base}' is already ` +
+                `will not select change '${pr.id}' this pass: its base '${base}' is already ` +
                   `held by non-terminal run '${holder}' — batchSize serializes one candidate per base, so ` +
                   "this change is reconsidered once that run settles or is abandoned",
                 {
@@ -3752,13 +3766,16 @@ function createQueue<Shape extends ChangeShape>(
                   if (guilty === undefined || members.length === 1) {
                     // Unattributable, or nothing left to isolate: the refusal is
                     // the partition's, exactly as it was before isolation.
-                    log.warn?.("queue compose skipped a Candidate that could not be prepared", {
-                      action: "compose-candidate-skip",
-                      ...(members.length === 1 ? { pr: members[0]?.id } : { prs: members.map((pr) => pr.id) }),
-                      code: fact.code,
-                      kind: fact.kind,
-                      reason: fact.message,
-                    })
+                    composeLog.warn?.(
+                      `skipped Candidate ${members.map((pr) => pr.id).join(",")} [${fact.code}]: could not be prepared`,
+                      {
+                        action: "compose-candidate-skip",
+                        ...(members.length === 1 ? { pr: members[0]?.id } : { prs: members.map((pr) => pr.id) }),
+                        code: fact.code,
+                        kind: fact.kind,
+                        reason: fact.message,
+                      },
+                    )
                     await noteCandidateRefusal(
                       members.map((pr) => pr.id),
                       { code: fact.code, kind: fact.kind, reason: fact.message },
@@ -3766,7 +3783,7 @@ function createQueue<Shape extends ChangeShape>(
                     abandoned = true
                     break
                   }
-                  log.warn?.(`queue compose ejected ${guilty}, the member that refused Candidate preparation`, {
+                  composeLog.warn?.(`ejected ${guilty} [${fact.code}], the member that refused Candidate preparation`, {
                     action: "compose-candidate-skip",
                     pr: guilty,
                     code: fact.code,
@@ -3819,10 +3836,10 @@ function createQueue<Shape extends ChangeShape>(
                 // error, not warn — same queue-INTEGRITY reasoning as the other
                 // no-runnable-authority site above, and the same measured
                 // every-cycle repeat this key's dedup guards against.
-                conditions.report(
+                composeConditions.report(
                   `compose-candidate-skip-authority:${refusal.pr}:${refusal.receipt.code}`,
                   "error",
-                  `queue compose ejected ${refusal.pr} without runnable authority`,
+                  `ejected ${refusal.pr} [${refusal.receipt.code}] no runnable authority`,
                   {
                     action: "compose-candidate-skip",
                     pr: refusal.pr,
@@ -3869,7 +3886,7 @@ function createQueue<Shape extends ChangeShape>(
               // member already ejected above is not stained a second time.
               const guilty = attributableMember(fact, members)
               const blamed = guilty === undefined ? members.map((pr) => pr.id) : [guilty]
-              log.warn?.("queue compose skipped a candidate lost to a losable failure", {
+              composeLog.warn?.(`skipped ${blamed.join(",")} [${fact.code}], lost to a losable failure`, {
                 action: "compose-candidate-skip",
                 ...(blamed.length === 1 ? { pr: blamed[0] } : { prs: blamed }),
                 code: fact.code,

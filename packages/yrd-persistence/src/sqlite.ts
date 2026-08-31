@@ -726,7 +726,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
         rollback(database)
         throw error
       }
-      runtime.log.debug?.("Saved current state.", {
+      runtime.log.debug?.(`checkpointed at cursor ${String(checkpoint.cursor)} in ${runtime.path}`, {
         action: "checkpoint-written",
         path: runtime.path,
         cursor: checkpoint.cursor,
@@ -2217,16 +2217,25 @@ function checkpointWal(runtime: Context, database: Database): void {
       checkpointedFrames: result.checkpointed,
     }
     if (result.busy > 0 || result.checkpointed < result.log) {
-      runtime.log.debug?.("Another Yrd command is still reading; storage cleanup will retry later.", details)
+      runtime.log.debug?.(
+        `another Yrd command is still reading ${runtime.path}; storage cleanup will retry later`,
+        details,
+      )
     } else {
       const truncated = database
         .query<{ busy: number; log: number; checkpointed: number }, []>("PRAGMA wal_checkpoint(TRUNCATE)")
         .get()
       if (truncated === null) throw new Error("SQLite returned no WAL truncation result")
       if (truncated.busy > 0 || truncated.log !== 0 || truncated.checkpointed !== 0) {
-        runtime.log.debug?.("Another Yrd command is still reading; storage cleanup will retry later.")
+        runtime.log.debug?.(
+          `another Yrd command is still reading ${runtime.path}; storage cleanup will retry later`,
+          details,
+        )
       } else {
-        runtime.log.debug?.("Finished storage cleanup.", { action: "checkpointed", ...details })
+        runtime.log.debug?.(
+          `storage cleanup checkpointed ${String(details.checkpointedFrames)} WAL frames in ${runtime.path}`,
+          { action: "checkpointed", ...details },
+        )
       }
     }
   } catch (error) {
