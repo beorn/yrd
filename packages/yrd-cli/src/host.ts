@@ -5,7 +5,7 @@ import { hostname } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
 import { createScope, type Scope } from "@silvery/scope"
-import { createGitWorktreeStore } from "git-super/worktree"
+import { createGit, createGitWorktreeStore, type Git } from "git-super/worktree"
 import {
   createBayJobDefs,
   createDeploymentJobDefs,
@@ -108,6 +108,9 @@ import {
   type DerivedSubmitEnrichment,
   type MergedTruthGit,
   revisionOf,
+  describeScratchReap,
+  liveWorktreeEntries,
+  reapOrphanedScratch,
 } from "@yrd/queue"
 import {
   installedPlanStale,
@@ -142,7 +145,7 @@ import {
   type PathHolder,
 } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
-import type { ConditionalLogger } from "loggily"
+import { createLogger, type ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { guardScopedPaths } from "./pre-submit-guard-scope.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
@@ -530,6 +533,89 @@ function annotateRetainedWorkspace(cause: unknown, workspace: RetainedWorkspace)
   return new Error(`${String(cause)}; ${note}`, { cause })
 }
 
+/**
+ * The `mkdtemp` prefix EVERY entry under `pre-submit-worktrees` carries. Both
+ * shapes created there begin with it — the composed checkout (`check-<rand>/`,
+ * holding `worktree/` and `tmp/`) and the in-place run's private TMPDIR
+ * (`check-tmp-<rand>/`) — so this one prefix names the whole population the
+ * backstop below is permitted to delete, and names nothing else.
+ *
+ * Bound to the `mkdtemp` calls rather than spelled at each site: a reaper whose
+ * prefix has drifted from what is actually created reaps NOTHING, and reports a
+ * clean sweep while it does. The directory it sweeps grew to 25 GB across 95
+ * entries with no such reaper at all; a silently-inert one is the same outage
+ * wearing a green light.
+ */
+const PRE_SUBMIT_SCRATCH_PREFIX = "check-"
+
+/** Roots already swept in this process — the memo behind `reapAbandonedPreSubmitCheckouts`. */
+const reapedPreSubmitRoots = new Set<string>()
+
+/**
+ * A namespaced loggily logger rather than `console.warn`, for the reason the
+ * queue's own reap site records: `console.warn` prints unconditionally and no
+ * `--log-level`/`--quiet`/`LOG_LEVEL` can silence it, while a loggily logger
+ * honors all three. A reap is routine housekeeping, not a check verdict, so it
+ * must never land on the check's own output.
+ */
+const preSubmitReapLog = createLogger("yrd:cli")
+
+/**
+ * Reclaim pre-submit checkouts abandoned by a process that died before its
+ * `finally`.
+ *
+ * Every ordinary path through `runInCheckout` — success, check failure,
+ * composition conflict, materialization failure — removes its own entry. A
+ * SIGKILL, an OOM kill or a host crash has no `finally`, and this scratch lives
+ * on the repository's own disk (the queue state dir's `pre-submit-worktrees`),
+ * so nothing clears it at reboot either. Each abandoned entry is a materialized
+ * tree with its submodules populated: measured at 25 GB across 95 entries, ~90
+ * of them stale for more than a day and the oldest 11.8 days.
+ *
+ * The queue solved the identical problem for its own scratch and this is a
+ * mirror of that shape, down to the once-per-root-per-process memo: placed at
+ * CREATION rather than at startup so every entry point pays for the cleanup it
+ * might itself leave behind, and paid once so an invocation running many checks
+ * does not re-walk the root per check.
+ *
+ * Conservative by construction — an entry is removed only when its name carries
+ * {@link PRE_SUBMIT_SCRATCH_PREFIX}, it has not been written for
+ * `ORPHANED_SCRATCH_MAX_AGE_MS` (24h, ~96x `DEFAULT_STEP_TIMEOUT_MS`), and git
+ * does not still list it as a live worktree. Those two protections cover
+ * different populations and both are load-bearing: age alone protects every
+ * running check, while the git-live keep set is what protects a `keepOnFailure`
+ * workspace deliberately retained as evidence past the age floor, since that
+ * path skips `worktrees.remove` and so leaves the worktree registered.
+ *
+ * A failed `git worktree list` yields an EMPTY keep set (`liveWorktreeEntries`
+ * cannot raise without blocking ordinary checkout creation on a transient git
+ * error), which leaves the age floor as the only protection. That is safe for
+ * every running check and for every entry an ordinary run leaves behind, and it
+ * is knowingly NOT safe for a retained failure workspace older than a day — see
+ * the note on that trade at the call site.
+ */
+async function reapAbandonedPreSubmitCheckouts(git: Pick<Git, "run">, repo: string, root: string): Promise<void> {
+  const key = resolve(root)
+  if (reapedPreSubmitRoots.has(key)) return
+  reapedPreSubmitRoots.add(key)
+  const report = await reapOrphanedScratch(key, {
+    keep: await liveWorktreeEntries(git, repo, key),
+    namePrefix: PRE_SUBMIT_SCRATCH_PREFIX,
+  })
+  // Silence only for the one uninteresting outcome: nothing was abandoned and
+  // nothing resisted removal. A partial sweep is a disk that keeps filling, so
+  // it is reported at a level an operator sees by default rather than folded
+  // into the same routine line as a clean sweep.
+  const record =
+    report.failures.length > 0 ? preSubmitReapLog.warn : report.reaped > 0 ? preSubmitReapLog.info : undefined
+  record?.(describeScratchReap(report), {
+    action: "pre-submit-scratch-reap",
+    root: key,
+    reaped: report.reaped,
+    failures: report.failures.length,
+  })
+}
+
 export function configuredChecks(
   process: Pick<Process, "run">,
   stateDir: string,
@@ -668,8 +754,22 @@ export function configuredChecks(
     const pinnedScripts = definition.scripts ?? []
     const parent = join(stateDir, "pre-submit-worktrees")
     mkdirSync(parent, { recursive: true })
+    // The backstop for entries no `finally` ever reached, run before this
+    // invocation adds one of its own. `GIT_TIMEOUT_MS` because the only git
+    // call behind it is one `worktree list --porcelain` plumbing read, not the
+    // checkout work `checkoutTimeoutMs` bounds.
+    //
+    // The accepted residual: when that read fails, the keep set is empty and a
+    // `keepOnFailure` workspace older than 24h loses its only protection. It is
+    // accepted rather than papered over because failing closed here would
+    // silently restore the unbounded growth this exists to stop — a worse
+    // silent error than the one it avoids — and because what is lost is
+    // re-derivable check evidence, not authored work. Telling "git said nothing
+    // is live" apart from "git could not answer" needs `liveWorktreeEntries` to
+    // report whether git answered at all; today both are an empty set.
+    await reapAbandonedPreSubmitCheckouts(createGit(adaptProcessGit(process), inherited, GIT_TIMEOUT_MS), repo, parent)
     if (ref === undefined && !composes && pinnedScripts.length === 0) {
-      const inPlaceTmp = await mkdtemp(join(parent, "check-tmp-"))
+      const inPlaceTmp = await mkdtemp(join(parent, `${PRE_SUBMIT_SCRATCH_PREFIX}tmp-`))
       try {
         return await run(cwd, candidateSha, inPlaceTmp)
       } finally {
@@ -678,7 +778,7 @@ export function configuredChecks(
     }
 
     const checkoutSha = composes ? baseSha : candidateSha
-    const checkoutRoot = await mkdtemp(join(parent, "check-"))
+    const checkoutRoot = await mkdtemp(join(parent, PRE_SUBMIT_SCRATCH_PREFIX))
     const checkout = join(checkoutRoot, "worktree")
     // Lives and dies with checkoutRoot; retained alongside a kept failure
     // workspace, where leftover fixture temp is evidence rather than litter.

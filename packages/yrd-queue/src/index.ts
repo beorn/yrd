@@ -71,6 +71,16 @@ export * from "./queue-status-projection.ts"
 export * from "./candidate-pool.ts"
 export * from "./candidate-refs.ts"
 export * from "./command.ts"
+// Not `export *` either — scratch storage is overwhelmingly this package's own
+// business (the storage-exhaustion classifier, the scratch parent resolver, the
+// `yrd-` name prefix), and none of that belongs on `@yrd/queue`'s surface.
+//
+// These three cross it because a SECOND caller has the identical abandoned-tree
+// problem: the CLI's `pre-submit-worktrees` root, whose entries a killed process
+// leaves behind exactly as a killed queue run leaves merge scratch. It reaps
+// them with these primitives rather than a fork, which is what
+// `liveWorktreeEntries` was extracted for.
+export { describeScratchReap, liveWorktreeEntries, reapOrphanedScratch } from "./scratch-storage.ts"
 export * from "./merge-record.ts"
 // Not `export *` either — see the queue.ts block above for the first.
 //
