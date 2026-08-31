@@ -587,19 +587,31 @@ const preSubmitReapLog = createLogger("yrd:cli")
  * workspace deliberately retained as evidence past the age floor, since that
  * path skips `worktrees.remove` and so leaves the worktree registered.
  *
- * A failed `git worktree list` yields an EMPTY keep set (`liveWorktreeEntries`
- * cannot raise without blocking ordinary checkout creation on a transient git
- * error), which leaves the age floor as the only protection. That is safe for
- * every running check and for every entry an ordinary run leaves behind, and it
- * is knowingly NOT safe for a retained failure workspace older than a day — see
- * the note on that trade at the call site.
+ * When `git worktree list` cannot answer, the keep set is UNKNOWN rather than
+ * empty, and this skips the sweep entirely and says so. Reaping on an unknown
+ * keep set would leave the age floor as the only protection, which is safe for
+ * every running check but knowingly unsafe for a `keepOnFailure` workspace
+ * retained past a day — and it would delete it on the strength of a git fault,
+ * silently. Skipping costs a sweep; the next process sweeps again. A git fault
+ * that persists prints this line every time, which is the correct amount of
+ * noise for a repository whose worktree listing does not work.
  */
 async function reapAbandonedPreSubmitCheckouts(git: Pick<Git, "run">, repo: string, root: string): Promise<void> {
   const key = resolve(root)
   if (reapedPreSubmitRoots.has(key)) return
   reapedPreSubmitRoots.add(key)
+  const worktrees = await liveWorktreeEntries(git, repo, key)
+  if (!worktrees.listed) {
+    preSubmitReapLog.warn?.(
+      "yrd skipped the abandoned pre-submit checkout sweep: 'git worktree list' could not answer, so which " +
+        "checkouts are still live is unknown and none can be safely removed. Abandoned checkouts accumulate " +
+        "until this repository's worktree listing works again",
+      { action: "pre-submit-scratch-reap-skipped", root: key, cause: "worktree-list-unreadable" },
+    )
+    return
+  }
   const report = await reapOrphanedScratch(key, {
-    keep: await liveWorktreeEntries(git, repo, key),
+    keep: worktrees.live,
     namePrefix: PRE_SUBMIT_SCRATCH_PREFIX,
   })
   // Silence only for the one uninteresting outcome: nothing was abandoned and
@@ -759,14 +771,12 @@ export function configuredChecks(
     // call behind it is one `worktree list --porcelain` plumbing read, not the
     // checkout work `checkoutTimeoutMs` bounds.
     //
-    // The accepted residual: when that read fails, the keep set is empty and a
-    // `keepOnFailure` workspace older than 24h loses its only protection. It is
-    // accepted rather than papered over because failing closed here would
-    // silently restore the unbounded growth this exists to stop — a worse
-    // silent error than the one it avoids — and because what is lost is
-    // re-derivable check evidence, not authored work. Telling "git said nothing
-    // is live" apart from "git could not answer" needs `liveWorktreeEntries` to
-    // report whether git answered at all; today both are an empty set.
+    // When that read fails the keep set is UNKNOWN, not empty, and the sweep
+    // is skipped with a line naming why. The alternative — reaping against an
+    // empty keep set — would delete a retained `keepOnFailure` workspace on the
+    // strength of a git fault, silently, which is a worse failure than a sweep
+    // that did not happen: the next process sweeps again, and a persistent
+    // fault says so every time.
     await reapAbandonedPreSubmitCheckouts(createGit(adaptProcessGit(process), inherited, GIT_TIMEOUT_MS), repo, parent)
     if (ref === undefined && !composes && pinnedScripts.length === 0) {
       const inPlaceTmp = await mkdtemp(join(parent, `${PRE_SUBMIT_SCRATCH_PREFIX}tmp-`))

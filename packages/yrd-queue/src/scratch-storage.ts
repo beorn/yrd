@@ -259,20 +259,22 @@ async function directorySize(path: string): Promise<number> {
  * fork this logic; the queue's own copy is untouched; nothing here changes its
  * behavior.
  *
- * A failed `git worktree list` (repo gone, git missing) returns an empty set
- * rather than raising: the caller's reap still has to run on whatever it can
- * read, treating "could not ask git" as "assume nothing is protected" would
- * make a git hiccup silently agree to delete a live worktree it just failed to
- * see, and asking the reap to fail closed here would block ordinary scratch
- * creation on a transient git error that has nothing to do with reaping.
+ * `listed` is the whole point of the return shape. A bare set cannot tell
+ * "git answered, and nothing here is live" from "git could not answer", and
+ * those two demand OPPOSITE actions from a caller that is about to DELETE:
+ * the first says every entry is fair game, the second says the keep set is
+ * unknown and nothing may be reaped on it. Collapsing them into an empty set
+ * is a silent error with teeth — one transient `git worktree list` failure
+ * and the reaper deletes a live worktree it merely failed to see. Callers
+ * must branch on `listed` and skip the sweep, loudly, when it is false.
  */
 export async function liveWorktreeEntries(
   git: Pick<Git, "run">,
   repo: string,
   root: string,
-): Promise<ReadonlySet<string>> {
+): Promise<Readonly<{ listed: boolean; live: ReadonlySet<string> }>> {
   const listed = await git.run(repo, ["worktree", "list", "--porcelain"], true)
-  if (listed.code !== 0) return new Set()
+  if (listed.code !== 0) return { listed: false, live: new Set() }
   const live = new Set<string>()
   const rootPrefix = `${resolve(root)}${sep}`
   for (const line of listed.stdout.split("\n")) {
@@ -282,7 +284,7 @@ export async function liveWorktreeEntries(
     const segment = path.slice(rootPrefix.length).split(sep)[0]
     if (segment !== undefined && segment !== "") live.add(join(resolve(root), segment))
   }
-  return live
+  return { listed: true, live }
 }
 
 /**

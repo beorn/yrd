@@ -59,6 +59,7 @@ import { submoduleMainScratchCleanupFailure } from "./submodule-main-outcome.ts"
 import {
   describeScratchReap,
   isStorageExhaustion,
+  liveWorktreeEntries,
   queueScratchParent,
   reapOrphanedScratch,
   storageExhaustionError,
@@ -2447,21 +2448,6 @@ const scratchReapLog = createLogger("yrd:queue")
  * entry's first segment; that is what separates an abandoned tree from one a
  * concurrent run is still using.
  */
-async function liveScratchEntries(git: Git, repo: string, root: string): Promise<Set<string>> {
-  const listed = await git.run(repo, ["worktree", "list", "--porcelain"], true)
-  if (listed.code !== 0) return new Set()
-  const live = new Set<string>()
-  for (const line of listed.stdout.split("\n")) {
-    if (!line.startsWith("worktree ")) continue
-    const path = resolve(line.slice("worktree ".length).trim())
-    const prefix = `${resolve(root)}${sep}`
-    if (!path.startsWith(prefix)) continue
-    const segment = path.slice(prefix.length).split(sep)[0]
-    if (segment !== undefined && segment !== "") live.add(join(resolve(root), segment))
-  }
-  return live
-}
-
 /**
  * Sweep scratch abandoned by an earlier process, once per root per process.
  * Placed at creation rather than at queue-run startup so every entry point —
@@ -2472,7 +2458,19 @@ async function reapOnce(git: Git, repo: string, root: string): Promise<void> {
   const key = resolve(root)
   if (reapedScratchRoots.has(key)) return
   reapedScratchRoots.add(key)
-  const report = await reapOrphanedScratch(key, { keep: await liveScratchEntries(git, repo, key) })
+  const worktrees = await liveWorktreeEntries(git, repo, key)
+  if (!worktrees.listed) {
+    // The keep set is UNKNOWN, not empty. Reaping on it would delete a live
+    // merge worktree on the strength of a git fault; skipping costs one sweep
+    // and the next process sweeps again.
+    scratchReapLog.warn?.(
+      "queue skipped the abandoned-scratch sweep: 'git worktree list' could not answer, so which scratch " +
+        "entries are still live is unknown and none can be safely removed",
+      { action: "queue-scratch-reap-skipped", root: key, cause: "worktree-list-unreadable" },
+    )
+    return
+  }
+  const report = await reapOrphanedScratch(key, { keep: worktrees.live })
   if (report.reaped > 0 || report.failures.length > 0) {
     scratchReapLog.info?.(describeScratchReap(report), {
       action: "queue-scratch-reap",

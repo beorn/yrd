@@ -125,7 +125,8 @@ describe("liveWorktreeEntries — the entries git still calls live worktrees, ke
 
     const live = await liveWorktreeEntries(runner, repo, root)
 
-    expect([...live]).toEqual([entry])
+    expect(live.listed).toBe(true)
+    expect([...live.live]).toEqual([entry])
   })
 
   it("ignores a live worktree that sits outside root", async () => {
@@ -135,15 +136,20 @@ describe("liveWorktreeEntries — the entries git still calls live worktrees, ke
 
     const live = await liveWorktreeEntries(runner, repo, root)
 
-    expect(live.size).toBe(0)
+    expect(live.listed).toBe(true)
+    expect(live.live.size).toBe(0)
   })
 
-  it("returns empty rather than raising when git cannot list worktrees", async () => {
+  it("reports that git could NOT answer, so a caller never mistakes it for an empty keep set", async () => {
     const failing = { run: async () => ({ code: 128, stdout: "", stderr: "fatal: not a git repository" }) }
 
     const live = await liveWorktreeEntries(failing, "/nowhere-a-repo-exists", "/nowhere-a-repo-exists/scratch")
 
-    expect(live.size).toBe(0)
+    // Both arms are an empty set; only `listed` separates "nothing is live"
+    // from "the keep set is unknown", and a caller about to DELETE must act
+    // oppositely on the two.
+    expect(live.listed).toBe(false)
+    expect(live.live.size).toBe(0)
   })
 
   it("composes with reapOrphanedScratch to protect a live entry sharing the pre-submit-worktrees shape", async () => {
@@ -161,7 +167,8 @@ describe("liveWorktreeEntries — the entries git still calls live worktrees, ke
     await utimes(abandonedEntry, stale, stale)
 
     const keep = await liveWorktreeEntries(runner, repo, root)
-    const report = await reapOrphanedScratch(root, { keep, namePrefix: "check-" })
+    expect(keep.listed).toBe(true)
+    const report = await reapOrphanedScratch(root, { keep: keep.live, namePrefix: "check-" })
 
     expect(report).toMatchObject({ entries: 2, reaped: 1, kept: 1 })
     expect(existsSync(liveEntry)).toBe(true)
