@@ -273,6 +273,61 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     expect(replayed.state().bays.submits["task/retired"]).toBeUndefined()
   })
 
+  it("retires the branch's submit fact after a RECUT changed the revision's head — keyed on the pushed head, not the rebuilt one", async () => {
+    // The bug this fences: `submitFactRetirement` used to compare
+    // `bays.submits[branch].sha` against the CURRENT revision's `.head`
+    // directly. `bays.submits[branch].sha` is written by exactly one event,
+    // `branch/submitted` (the receiver observing a real `git push`) — a recut
+    // never touches it. But `remergeDirectChangeByMerge` (command.ts) rebuilds
+    // a fresh --no-ff merge commit onto the moved base whenever the branch is
+    // not already a fast-forward of it, "a new commit that can never equal"
+    // the author's pushed sha by that function's own comment — so the
+    // revision's `.head` after a genuine recut is that REBUILT commit, never
+    // what `bays.submits` can hold. The pre-fix equality therefore never held
+    // on this (extremely common — the base moves constantly in a busy queue)
+    // path, and the standing submit fact outlived every such merge.
+    const journal = createMemoryJournal()
+    const id = ids()
+    const queueMint = volatilePrNumberMint()
+    await using app = await createApp({ journal, id, queueMint })
+    const pr = await submitBranch(app, "task/rebuilt")
+    const pushedRevision = pr.revs[0]?.n
+    const pushedHead = pr.revs[0]?.head
+    if (pushedRevision === undefined || pushedHead === undefined) throw new Error("record has no revision")
+    await app.bays.recordBranchSubmit({ branch: "task/rebuilt", sha: pushedHead, base: "main" })
+    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
+
+    // Simulate a genuine (non-fast-forward) recut exactly as command.ts's own
+    // recorder reports one: a headSha that differs from what the author
+    // pushed. `bays.submits["task/rebuilt"]` stays at `pushedHead` — nothing
+    // re-pushed the branch, the system rebuilt it. `transition` carries the
+    // refreshed revision straight back to submitted+checks-requested (proven
+    // shape: bay.test.ts "atomically records admitted-to-refreshed recuts"),
+    // so the explicit run below needs no separate admission cycle.
+    const REBUILT = "f".repeat(40)
+    await app.bays.recut({
+      pr: pr.id,
+      fromRevision: pushedRevision,
+      headSha: REBUILT,
+      baseSha: BASE,
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+      expectedCurrent: { revision: pushedRevision, headSha: pushedHead },
+      transition: { from: "admitted", to: "refreshed" },
+    } as unknown as Parameters<typeof app.bays.recut>[0])
+    expect(app.state().bays.submits["task/rebuilt"]).toMatchObject({ sha: pushedHead })
+
+    const runs = await app.queue.run({ prs: [pr.id] }, runtime)
+    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
+
+    // The live fact never moved off the author's original push, so THIS is
+    // the sha retirement must key on — not REBUILT, revision 2's own `.head`.
+    expect(app.state().bays.submits["task/rebuilt"]).toBeUndefined()
+    const retired = await journalEvents(journal, "branch/unsubmitted")
+    expect(retired.map((event) => event.data)).toEqual([{ branch: "task/rebuilt", reason: "superseded" }])
+  })
+
   it("a mid-run re-push survives the merge and COMPOSES as the branch's derived re-entry (Q1)", async () => {
     await using app = await createApp({})
     const pr = await submitBranch(app, "task/repushed")

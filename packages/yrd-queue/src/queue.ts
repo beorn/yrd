@@ -20,6 +20,7 @@ import {
   changeDeliveryState,
   changeHead,
   changeNeedsAuthor,
+  changeRevisionLineage,
   changeRevisionNumber,
   changeSourceReadyAt,
   resolveBase,
@@ -3427,12 +3428,19 @@ function createQueue<Shape extends ChangeShape>(
           for (const run of resumable) await settleCandidate(run.id)
 
           snapshot = runtime()
-          const activeBases = new Set(
-            resumable
-              .map((run) => materializeRun(Queues.record(snapshot.queues, run.id), snapshot.jobs))
-              .filter((run) => !Queues.terminal(run))
-              .map((run) => run.base),
+          // Base identity AND the specific non-terminal run holding it: the
+          // Set alone (below) answers "is this base blocked", but the C5(1)
+          // report a few dozen lines down needs to NAME the run too — "held
+          // by non-terminal run 'R3685'", not just "base is active" — so a
+          // reader can go look at the run that will not settle instead of
+          // guessing.
+          const activeBaseRuns = new Map<string, RunId>(
+            resumable.flatMap((run) => {
+              const materialized = materializeRun(Queues.record(snapshot.queues, run.id), snapshot.jobs)
+              return Queues.terminal(materialized) ? [] : [[materialized.base, run.id] as const]
+            }),
           )
+          const activeBases = new Set(activeBaseRuns.keys())
           const consumed = new Set(
             resumable.flatMap((run) =>
               run.prs.filter((pr) => pinnedChangeError(snapshot, [pr], run.id) === undefined).map((pr) => pr.id),
@@ -3644,6 +3652,45 @@ function createQueue<Shape extends ChangeShape>(
             ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
           })
           const prs = runnable.prs.filter((pr) => !activeBases.has(baseIdentity(pr.base)))
+          // C5(1) — the 2026-08-31 incident's centerpiece
+          // (hub/yrd/2026-08-31-queue-incident.md): two green head changes
+          // starved 56 minutes while the resident composed every ~66s,
+          // because this filter excluded them and NOTHING downstream named
+          // it — not this pass, and not the empty-run diagnostic below,
+          // which re-derives eligibility with a SMALLER exclusion set (it
+          // never learns about `activeBases`) and sees the very same changes
+          // "runnable", so neither of its two report branches fires either.
+          // A change that is silently skipped and a change that is loudly
+          // refused looked identical from outside.
+          //
+          // Name every eligible candidate this filter drops, every pass —
+          // independent of whether the pass ends at zero — with the specific
+          // non-terminal run holding its base, so "blocked by active base
+          // X" and "non-terminal run R#### holds this base" are the same
+          // row instead of two guesses. `conditions` folds repeats on the
+          // (pr, base, run) key, so an hour-long hold announces once, not
+          // once per ~66s pass.
+          if (selectorless) {
+            for (const pr of runnable.prs) {
+              const base = baseIdentity(pr.base)
+              const holder = activeBaseRuns.get(base)
+              if (holder === undefined) continue
+              conditions.report(
+                `compose-implicit-skip-active-base:${pr.id}:${base}:${holder}`,
+                "warn",
+                `queue compose will not select change '${pr.id}' this pass: its base '${base}' is already ` +
+                  `held by non-terminal run '${holder}' — batchSize serializes one candidate per base, so ` +
+                  "this change is reconsidered once that run settles or is abandoned",
+                {
+                  action: "compose-implicit-skip-active-base",
+                  pr: pr.id,
+                  base,
+                  code: "queue-base-active",
+                  run: holder,
+                },
+              )
+            }
+          }
           if (selectorless && prs.length === 0) {
             // Re-evaluate the whole FIFO-visible set for diagnostics, before the
             // admission phase's temporary exclusions hide the reason it emitted
@@ -5223,7 +5270,7 @@ function createQueueCommands(
           }),
           // A repository-proven merge consumed the branch approval exactly as
           // a live one does — reconcile the fact with the terminal.
-          ...submitFactRetirement(state.bays, pr.branch, revision.head),
+          ...submitFactRetirement(state.bays, pr.branch, submittedRevisionHead(pr, revision.n)),
         ],
       }
     },
@@ -6755,7 +6802,7 @@ export function advanceQueue(
             ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
             ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
           }),
-          ...submitFactRetirement(state.bays, current.branch, revision.head),
+          ...submitFactRetirement(state.bays, current.branch, submittedRevisionHead(current, revision.n)),
         )
         continue
       }
@@ -6786,7 +6833,7 @@ export function advanceQueue(
           ...(revision.props === undefined ? {} : { props: revision.props }),
           ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
         }),
-        ...submitFactRetirement(state.bays, current.branch, revision.head),
+        ...submitFactRetirement(state.bays, current.branch, submittedRevisionHead(current, revision.n)),
       )
     }
   }
@@ -6829,6 +6876,31 @@ function payloadIdentity(pr: DeepReadonly<Change> | DeepReadonly<ChangeSnapshot>
 }
 
 /**
+ * The one sha `bays.submits[branch]` can ever legitimately equal for a given
+ * revision: the AUTHOR-PUSHED head at the root of its re-merge lineage, never
+ * the revision's own `.head`. `bays.submits[branch].sha` is written by
+ * exactly one event, `branch/submitted` (the receiver observing a real `git
+ * push`) — a recut never touches it. But `revision.head` is NOT stably the
+ * pushed sha: `remergeDirectChangeByMerge` (command.ts) rebuilds a fresh
+ * `--no-ff` merge commit onto the moved base whenever the branch is not
+ * already a fast-forward of it, "a new commit that can never equal"
+ * `input.headSha` by that function's own comment, and stamps `built.sha` as
+ * the successor revision's `head`. A chain of recuts can bury the original
+ * push arbitrarily deep, so only walking {@link changeRevisionLineage} all
+ * the way to its root recovers it — reading `revision.head` straight (the
+ * pre-fix code) compares the live submit fact against a REBUILT commit that
+ * cannot match it on essentially any real merge, so retirement silently never
+ * fires and the stale fact accumulates by construction.
+ */
+function submittedRevisionHead(pr: DeepReadonly<Change>, revision: number): string {
+  const root = changeRevisionLineage(pr, revision)[0]
+  if (root === undefined) {
+    throw new Error(`yrd: change '${pr.id}' revision ${String(revision)} resolved an empty re-merge lineage`)
+  }
+  return root.head
+}
+
+/**
  * The record lane's takeover of a branch approval, at the one moment it is
  * unambiguous: the merge that lands `mergedHead` consumes the standing submit
  * fact for exactly that sha, and the retirement rides the SAME journal batch
@@ -6844,6 +6916,10 @@ function payloadIdentity(pr: DeepReadonly<Change> | DeepReadonly<ChangeSnapshot>
  * run history; a re-push renews authority), and this helper is only reachable
  * for RECORD terminals. The projection's application is idempotent (a missing
  * fact no-ops), so a replayed batch cannot double-retire.
+ *
+ * Callers MUST pass {@link submittedRevisionHead}, never a bare
+ * `revision.head` — see that helper for why the two diverge on essentially
+ * every real merge.
  */
 function submitFactRetirement(bays: DeepReadonly<BaysState>, branch: string, mergedHead: string): EventDraft[] {
   return bays.submits[branch]?.sha === mergedHead ? [event("branch/unsubmitted", { branch, reason: "superseded" })] : []
@@ -9548,6 +9624,13 @@ export const YRD_REFUSAL_CODES = [
   "publication-failed",
   "publication-unavailable",
   "pushed-not-submitted",
+  // C5(1): the implicit selector's per-pass active-base report
+  // (compose-implicit-skip-active-base) — a queue-diagnostic condition
+  // logged through `conditions.report`, never a per-run failure code, so
+  // like `admission-refusal-loop` above and `queue-liveness-wedged` below it
+  // has no dedicated failureDisposition branch and falls through to the
+  // generic default.
+  "queue-base-active",
   // No current producer — see "canceled" above; "queue-cancelled" registers
   // as its alias below.
   "queue-canceled",
