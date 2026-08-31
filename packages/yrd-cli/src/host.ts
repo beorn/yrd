@@ -1616,6 +1616,26 @@ async function resolveGateScriptShas(
   return Object.fromEntries(entries)
 }
 
+/** The one refusal for "this exact base sha carries no queue config" — shared
+ * by {@link declaredPlanAt} (the audit's reader, legs a/c) and
+ * {@link readDeclaredPlanAtBase} (the per-Run admission reader) so the two
+ * questions, which are the same question, cannot answer it differently again.
+ * They used to: `declaredPlanAt` swallowed a missing blob and let
+ * `loadYrdConfig` invent an empty plan, while `readDeclaredPlanAtBase`
+ * refused — so `queue audit` could report false plan drift, or mask a
+ * missing config as clean, for the exact base an admitted Run had already
+ * been refused against. Refusing (never inventing an empty plan) is the
+ * tested contract — declared-plan-at-base.test.ts's "refuses a base that
+ * carries no queue config instead of inventing an empty plan". */
+function raiseQueueConfigMissingAtBase(sha: string, authority: string): never {
+  raiseFailure(
+    "refusal",
+    "queue-config-missing-at-base",
+    `yrd: base ${sha.slice(0, 8)} has no queue config at '${authority}', so it declares no step plan. ` +
+      "A Run's checks come from the config at the commit it merges onto; commit one to that base before queuing.",
+  )
+}
+
 /** The plan git declares at ONE EXACT commit, as full step descriptors.
  *
  * The same recipe this process uses for its own installed set
@@ -1623,8 +1643,9 @@ async function resolveGateScriptShas(
  * the base tip, so revisions on both sides of a comparison are comparable:
  * the derived audit reads git HERE for the tip (leg c) and for each recorded
  * Run's own base sha (leg a), with no written baseline in between (23193).
- * Fails loud on an invalid config so the audit never certifies a broken
- * selection. */
+ * Fails loud on an invalid OR missing config so the audit never certifies a
+ * broken selection, nor compares a real admitted plan against an invented
+ * default. */
 async function declaredPlanAt(
   repository: YrdRepository,
   process: Pick<Process, "run">,
@@ -1658,7 +1679,7 @@ async function declaredPlanAt(
         cwd: repository.repo,
         env,
       })
-      if (blob.exitCode !== 0) return undefined
+      if (blob.exitCode !== 0) raiseQueueConfigMissingAtBase(sha, path)
       const shown = await process.run({
         argv: ["git", "-C", repository.repo, "show", object],
         cwd: repository.repo,
@@ -1972,14 +1993,7 @@ export async function readDeclaredPlanAtBase(
   const object = `${baseSha}:${authority}`
   const env = cleanGitEnvironment(globalThis.process.env)
   const blob = await process.run({ argv: ["git", "-C", repo, "rev-parse", object], cwd: repo, env })
-  if (blob.exitCode !== 0) {
-    raiseFailure(
-      "refusal",
-      "queue-config-missing-at-base",
-      `yrd: base ${baseSha.slice(0, 8)} has no queue config at '${authority}', so it declares no step plan. ` +
-        "A Run's checks come from the config at the commit it merges onto; commit one to that base before queuing.",
-    )
-  }
+  if (blob.exitCode !== 0) raiseQueueConfigMissingAtBase(baseSha, authority)
   const shown = await process.run({ argv: ["git", "-C", repo, "show", object], cwd: repo, env })
   if (shown.exitCode !== 0) {
     raiseFailure(
