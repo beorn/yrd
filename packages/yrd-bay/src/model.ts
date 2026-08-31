@@ -1148,10 +1148,17 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
         openedAt: bay.openedAt,
       }
       const mergedAt = pr?.alreadyLandedAt ?? pr?.integratedAt
+      // "Is this merged" is `changeDeliveryState`'s question (the same
+      // predicate the handoff-ready branch below already asks), not a second
+      // hand-rolled read of `pr.merged` — the two appliers that ever set
+      // `merged: true` (`pr/integrated`, `pr/already-landed`) always pair it
+      // with `state: "closed"` and a defined `integration`, so this is the
+      // same fact, asked once.
       if (
         bay.headSha !== undefined &&
         current?.head === bay.headSha &&
-        pr?.merged === true &&
+        pr !== undefined &&
+        (changeDeliveryState(pr) === "integrated" || changeDeliveryState(pr) === "already-landed") &&
         mergedAt !== undefined &&
         pr.integration !== undefined
       ) {

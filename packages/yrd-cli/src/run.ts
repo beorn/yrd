@@ -19,6 +19,7 @@ import {
   changeHead,
   isLiveChange,
   isTracked,
+  isNonCheckableChangeState,
   changeNeedsAuthor,
   changeRevisionNumber,
   changeRevisionLineage,
@@ -3302,7 +3303,7 @@ function historicalQueueRuns(
   return {
     running: scoped.filter((run) => run.status === "queued" || run.status === "in_progress"),
     waiting: scoped.filter((run) => run.status === "waiting"),
-    finished: scoped.filter((run) => run.status === "completed"),
+    finished: scoped.filter(Queues.terminal),
   }
 }
 
@@ -5663,12 +5664,7 @@ async function executeRemergeChange(
         `to ${currentRevision.n}@${currentRevision.head} before the re-merge was computed`,
     )
   }
-  if (
-    delivery === "integrated" ||
-    delivery === "already-landed" ||
-    delivery === "withdrawn" ||
-    delivery === "canceled"
-  ) {
+  if (isNonCheckableChangeState(delivery)) {
     raiseFailure(
       "refusal",
       "terminal-target",
@@ -12800,7 +12796,7 @@ function changeMergeRefusalDetail(
 }> {
   const delivery = changeDeliveryState(pr)
   const projectedStatus = projectedChangeStatus(pr)
-  if (latestRun?.status === "completed" && latestRun.conclusion === "failure") {
+  if (latestRun !== undefined && Queues.failed(latestRun)) {
     const inspect = `yrd pr runs ${pr.id}`
     const resubmit = "fix the branch and run yrd pr submit again"
     return {
