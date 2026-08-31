@@ -325,6 +325,50 @@ function parseWalkRow(row: string): WalkRow {
  * index it; a merge-lane commit with no readable identity becomes a specimen;
  * everything else is plain history, counted in `commitsWalked` only.
  */
+/**
+ * The exclusive `stop` bound for one base: the PARENT of the oldest
+ * first-parent commit carrying a Change-Id.
+ *
+ * The parent, not the commit itself, because the walk below is `stop..tip` and
+ * excludes `stop` — passing the oldest stamped commit would drop the one entry
+ * the bound exists to preserve, silently, since a dropped entry reads as "this
+ * change never landed".
+ *
+ * `undefined` means NO BOUND IS DERIVABLE, and yields the unbounded walk: a
+ * base that has never stamped a trailer, or whose oldest stamped commit is a
+ * root with no parent. That is the only honest answer for such a repository —
+ * never a bound at zero, which would exclude everything and turn every landed
+ * fact into a trusted not-found.
+ *
+ * IT LIVES HERE, BESIDE THE INDEX, BECAUSE EVERY PRODUCTION CALLER NEEDS IT
+ * AND ONE OF THEM WAS MISSED. It was first written privately inside the CLI
+ * host, bounding only the compose path. `prunePrs` builds its own index for
+ * the same question and kept the unbounded walk, so the two answered
+ * differently about landed content — while `prunePrs`' own comment claimed it
+ * used "the same reader the compose's door uses, so prune and admission cannot
+ * disagree". A bound that each caller must remember to pass is a bound that
+ * one of them will not.
+ *
+ * Costs one grep-filtered log per base — measured 0.12s over 26533 commits —
+ * and is worth memoizing per scan, since the oldest stamped commit does not
+ * move as the tip advances.
+ *
+ * THE BOUND MUST NOT BE TIGHTER THAN THE EPOCH. See {@link buildMergedTruthIndex}
+ * for why: a bound above a landed change's merge commit turns its fact into a
+ * TRUSTED not-found and the queue re-runs work that already merged. Bounding at
+ * the epoch is lossless because every trailered commit is post-epoch by
+ * definition, so the excluded range contributes no index entries at all.
+ */
+export async function stampingEpochStop(git: MergedTruthGit, repo: string, tip: string): Promise<string | undefined> {
+  const stamped = await git.text(repo, ["log", "--first-parent", "--format=%H", "--grep=Change-Id: I", tip, "--"])
+  if (stamped === "") return undefined
+  const lines = stamped.split("\n")
+  const oldest = lines[lines.length - 1]
+  return oldest === undefined || oldest === ""
+    ? undefined
+    : git.optionalText(repo, ["rev-parse", "--verify", `${oldest}^`])
+}
+
 export async function buildMergedTruthIndex(
   git: MergedTruthGit,
   repo: string,

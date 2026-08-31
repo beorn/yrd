@@ -104,6 +104,7 @@ import {
   Queues,
   buildMergedTruthIndex,
   landedSubmits,
+  stampingEpochStop,
   type DerivedSubmitEnrichment,
   type MergedTruthGit,
   revisionOf,
@@ -2652,38 +2653,6 @@ export function mergedTruthGit(process: Pick<Process, "run">): MergedTruthGit {
 }
 
 /**
- * The exclusive `stop` bound for one base: the PARENT of the oldest
- * first-parent commit carrying a Change-Id.
- *
- * The parent, not the commit itself, because `merged-truth` walks `stop..tip`
- * and excludes `stop` — passing the oldest stamped commit would drop the one
- * commit the bound exists to preserve, silently, since a dropped entry reads
- * as "this change never landed".
- *
- * `undefined` means NO BOUND IS DERIVABLE, and yields the old unbounded walk:
- * a base that has never stamped a trailer, or whose oldest stamped commit is a
- * root with no parent. That is the only honest answer for such a repository —
- * never a bound at zero, which would exclude everything and turn every landed
- * fact into a trusted not-found.
- *
- * Module-exported for `host-lineage-walk-bounded.test.ts` (relative import),
- * off the package surface.
- */
-export async function stampingEpochStop(
-  git: ReturnType<typeof mergedTruthGit>,
-  repo: string,
-  tip: string,
-): Promise<string | undefined> {
-  const stamped = await git.text(repo, ["log", "--first-parent", "--format=%H", "--grep=Change-Id: I", tip, "--"])
-  if (stamped === "") return undefined
-  const lines = stamped.split("\n")
-  const oldest = lines[lines.length - 1]
-  return oldest === undefined || oldest === ""
-    ? undefined
-    :  git.optionalText(repo, ["rev-parse", "--verify", `${oldest}^`])
-}
-
-/**
  * The queue's `scanLandedSubmits` capability: which standing submit facts does
  * this repository already carry?
  *
@@ -3290,7 +3259,11 @@ async function acquireHabitantRunner(
       const ownerPid = habitantRunnerLockOwnerPid(stateDir)
       const ownerDead = ownerPid !== undefined && !processAlive(ownerPid)
       if (!ownerDead || attempt === attempts - 1) break
-      runnerLog.warn?.("resident-runner lock busy with dead owner pid; retrying reclaim", {
+      // info, not warn: a dead owner pid is a confirmed-safe reclaim, and this
+      // line reports its OWN retry succeeding (the loop is about to re-acquire
+      // now that the stale holder is gone) — a documented, self-resolving race,
+      // never a fault needing an operator's attention.
+      runnerLog.info?.("resident-runner lock busy with dead owner pid; retrying reclaim", {
         action: "resident-runner-lock-reap-retry",
         ownerPid,
         attempt: attempt + 1,

@@ -92,6 +92,7 @@ export {
   buildMergedTruthIndex,
   mergedTruth,
   type MergedTruth,
+  stampingEpochStop,
   type MergedTruthGit,
   type MergedTruthIndex,
   type MergedTruthIndexOptions,

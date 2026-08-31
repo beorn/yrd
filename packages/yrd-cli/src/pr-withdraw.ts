@@ -21,6 +21,7 @@ import {
   landedSubmitBranches,
   landedSubmits,
   Queues,
+  stampingEpochStop,
   type LandedSubmitScan,
   type MergedTruthGit,
   type Run,
@@ -995,17 +996,21 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
   const landedScan = await landedSubmits(
     io.mergedTruthGit === undefined ? createMergedTruthGit(cwd) : io.mergedTruthGit(cwd),
     async (base) => {
+      const indexGit = io.mergedTruthGit === undefined ? createMergedTruthGit(cwd) : io.mergedTruthGit(cwd)
       const tip = (await git.resolveCommit(`origin/${base}`)) ?? (await git.resolveCommit(base))
       if (tip === undefined) {
         throw new Error(
           `target base '${base}' did not resolve: neither 'origin/${base}' nor '${base}' is a commit here`,
         )
       }
-      return buildMergedTruthIndex(
-        io.mergedTruthGit === undefined ? createMergedTruthGit(cwd) : io.mergedTruthGit(cwd),
-        cwd,
-        { tip },
-      )
+      // BOUNDED AT THE SAME EPOCH AS THE COMPOSE PATH. The comment above claims
+      // prune and admission "cannot disagree about landed content"; that held
+      // only while both walked unbounded. Bounding one and not the other made
+      // the claim false — measured 2026-08-31, prune still reported 6008
+      // unreadable specimens over 26535 commits while the compose path, on the
+      // same repository in the same minute, reported 3 over 1232.
+      const stop = await stampingEpochStop(indexGit, cwd, tip)
+      return buildMergedTruthIndex(indexGit, cwd, { tip, ...(stop === undefined ? {} : { stop }) })
     },
     bays,
   )

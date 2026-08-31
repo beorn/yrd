@@ -24,7 +24,7 @@
  * @consumer @yrd/cli host · the queue's scanLandedSubmits capability
  */
 import { describe, expect, it } from "vitest"
-import { stampingEpochStop } from "../src/host.ts"
+import { stampingEpochStop } from "@yrd/queue"
 
 const OLDEST_STAMPED = "f".repeat(40)
 const ITS_PARENT = "9".repeat(40)
