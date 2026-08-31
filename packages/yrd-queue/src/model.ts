@@ -591,6 +591,7 @@ export type RunAuthority = Readonly<{
       | "component-main-promotion-failed"
       | "component-main-inspection-failed"
       | "carrier-inspection"
+      | "merge-gitlink-regression"
       | "merge-unauthored-deletion"
       | "source-publish"
       | "scratch-cleanup-failed"

@@ -9188,6 +9188,12 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // a fetch/probe blip, cured by retrying, exactly as the same code is
     // treated on the merge path's release ladder.
     "component-main-inspection-failed",
+    // The gitlink floor caught a candidate whose submodule pin predates the
+    // pin already on the base — the same blameless-author shape as its
+    // deletion sibling below; a fresh composition against the current base
+    // writes the submodule's current main and is the whole remedy
+    // (@i/10-yrd/superseded-carrier-with-pin-is-a-queued-revert).
+    "merge-gitlink-regression",
     // The merge floor caught a candidate whose tree predates work already on
     // the base. The submitted branches are blameless — nothing they authored
     // deletes those paths — so this must never present as needs-author; a fresh
@@ -9383,6 +9389,7 @@ export const YRD_REFUSAL_CODES = [
   "merge-command-waited",
   "merge-conflict",
   "merge-failed",
+  "merge-gitlink-regression",
   "merge-push-failed",
   "merge-record-estate-unreadable",
   "merge-record-retraction-refused",
@@ -9608,6 +9615,7 @@ function admissionFailureKind(
 type InfraRetryCompositionFailure =
   | "carrier-inspection"
   | "component-main-inspection-failed"
+  | "merge-gitlink-regression"
   | "merge-unauthored-deletion"
   | "source-publish"
   | "scratch-cleanup-failed"

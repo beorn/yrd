@@ -6832,6 +6832,8 @@ async function mergeCandidate(
   // both of them merge, and `base.sha` is what they merge it onto.
   const erased = await mergeDeletionFloor(git, repo, input, base.sha, checked)
   if (erased !== undefined) return { status: "completed", conclusion: "failure", error: erased.error }
+  const regressed = await mergeGitlinkFloor(git, repo, input, base.sha, checked)
+  if (regressed !== undefined) return { status: "completed", conclusion: "failure", error: regressed.error }
   return { status: "completed", conclusion: "success", base, checked }
 }
 
@@ -6889,6 +6891,146 @@ async function mergeDeletionFloor(
       `remedy: recompose the Candidate against '${baseSha}'; the submitted branches are unaffected and need no rework`,
     ".",
     unauthored,
+  )
+}
+
+type ChangedGitlinkPin = Readonly<{ path: string; basePin: string; candidatePin: string }>
+
+/** Every submodule gitlink the candidate MOVES relative to the base: the
+ * `--raw -z` record stream filtered to 160000→160000 modifications. Added and
+ * deleted gitlinks stay with the authored-gitlink machinery, which already
+ * refuses them; the floor below rules only on pins that move. */
+async function changedGitlinkPins(
+  git: Git,
+  repo: string,
+  baseSha: string,
+  candidateSha: string,
+): Promise<ChangedGitlinkPin[]> {
+  const raw = (
+    await git.run(repo, [
+      "diff",
+      ...CERTIFICATE_DIFF_OPTIONS,
+      "--raw",
+      "--no-abbrev",
+      "-z",
+      baseSha,
+      candidateSha,
+      "--",
+    ])
+  ).stdout
+  const records = raw.split("\0").filter((entry) => entry !== "")
+  const changed: ChangedGitlinkPin[] = []
+  for (let at = 0; at + 1 < records.length; at += 2) {
+    const meta = records[at]
+    const path = records[at + 1]
+    if (meta === undefined || path === undefined || !meta.startsWith(":")) continue
+    const [oldMode, newMode, oldSha, newSha, status] = meta.slice(1).split(" ")
+    if (oldMode !== "160000" || newMode !== "160000" || status !== "M") continue
+    if (oldSha === undefined || newSha === undefined || oldSha === newSha) continue
+    changed.push({ path, basePin: oldSha, candidatePin: newSha })
+  }
+  return changed
+}
+
+type GitlinkRelation =
+  | Readonly<{ kind: "forward" | "backward" | "diverged" }>
+  | Readonly<{ kind: "unreadable"; detail: string }>
+
+/** Ancestry between two pins, answered inside the submodule's own repository,
+ * with ONE origin fetch retry when the objects are not local yet. */
+async function gitlinkRelation(git: Git, submoduleRepo: string, pin: ChangedGitlinkPin): Promise<GitlinkRelation> {
+  let detail = "git merge-base failed"
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const forward = await git.run(submoduleRepo, ["merge-base", "--is-ancestor", pin.basePin, pin.candidatePin], true)
+    if (forward.code === 0) return { kind: "forward" }
+    if (forward.code === 1) {
+      const backward = await git.run(
+        submoduleRepo,
+        ["merge-base", "--is-ancestor", pin.candidatePin, pin.basePin],
+        true,
+      )
+      if (backward.code === 0) return { kind: "backward" }
+      if (backward.code === 1) return { kind: "diverged" }
+      detail = backward.stderr.trim() || backward.stdout.trim() || detail
+    } else {
+      detail = forward.stderr.trim() || forward.stdout.trim() || detail
+    }
+    if (attempt === 0) await git.run(submoduleRepo, ["fetch", "--no-recurse-submodules", "--quiet", "origin"], true)
+  }
+  return { kind: "unreadable", detail }
+}
+
+/** The gitlink sibling of `mergeDeletionFloor`, from the same four-routes
+ * family: of every submodule pin this candidate MOVES relative to the base
+ * branch, is each new value a descendant of the value already on the base?
+ *
+ * Admission validated the pins against ITS base; the base has since moved, and
+ * a candidate reused from that earlier step carries pins from before the
+ * advance — which the promotion planner marks "verified" precisely because an
+ * old pin IS on the component's history. Merging one silently reverts landed
+ * submodule commits, rendered by plain git as the smallest possible diff
+ * (PR2751.5, 2026-08-30). Ruling, verbatim, from
+ * @i/10-yrd/superseded-carrier-with-pin-is-a-queued-revert: "admission checks
+ * validate against the base at admission time; the merge run must
+ * independently refuse any submodule gitlink that is not a descendant of the
+ * same gitlink at the CURRENT base." */
+async function mergeGitlinkFloor(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  baseSha: string,
+  checked: PinnedCandidate,
+): Promise<CandidateFailure | undefined> {
+  const changed = await changedGitlinkPins(git, repo, baseSha, checked.candidateSha)
+  if (changed.length === 0) return undefined
+  const regressions: string[] = []
+  const paths: string[] = []
+  for (const pin of changed) {
+    const submoduleRepo = join(repo, pin.path)
+    // Prove the path before spawning git in it: an absent working directory
+    // fails inside posix_spawn, which no allowFailure can contain.
+    try {
+      await realpath(submoduleRepo)
+    } catch {
+      return candidateFailure(
+        "carrier-inspection",
+        `submodule '${pin.path}' is not initialized at '${submoduleRepo}', so the merge cannot prove the pin ` +
+          `direction between base '${pin.basePin}' and candidate '${pin.candidatePin}'; a Candidate whose pin ` +
+          "direction cannot be read cannot be cleared to merge — initialize the submodule, then retry",
+      )
+    }
+    const relation = await gitlinkRelation(git, submoduleRepo, pin)
+    if (relation.kind === "unreadable") {
+      return candidateFailure(
+        "carrier-inspection",
+        `could not prove the pin direction for submodule '${pin.path}' between base '${pin.basePin}' and ` +
+          `candidate '${pin.candidatePin}': ${relation.detail}; fetch the submodule's history, then retry`,
+      )
+    }
+    if (relation.kind === "forward") continue
+    paths.push(pin.path)
+    regressions.push(
+      relation.kind === "backward"
+        ? `'${pin.path}': BACKWARD from base '${pin.basePin}' to candidate '${pin.candidatePin}' — the candidate ` +
+            "pin is an ancestor of the base pin, so merging reverts landed submodule commits"
+        : `'${pin.path}': DIVERGED — base '${pin.basePin}' and candidate '${pin.candidatePin}' contain neither ` +
+            "each other; compose the divergent submodule histories before retrying",
+    )
+  }
+  if (regressions.length === 0) return undefined
+  const branch = primaryPR(input).base
+  return candidateFailure(
+    "merge-gitlink-regression",
+    `merge Candidate '${checked.candidateSha}' on '${branch}' at '${baseSha}' would move ${String(regressions.length)} ` +
+      `submodule pin(s) against history:\n${regressions.join("\n")}\n` +
+      `compared every submodule gitlink the Candidate changes against the same gitlink at '${baseSha}'; admission ` +
+      "validated at its own base, and this floor revalidates at the merge's base\n" +
+      "cause: the Candidate predates submodule work already on the base — an artifact of how this Candidate was " +
+      "composed or reused, not a change any author made\n" +
+      `remedy: recompose the Candidate against '${baseSha}' (a fresh composition writes the submodule's current ` +
+      "main); the submitted branches are unaffected and need no rework",
+    ".",
+    paths,
   )
 }
 
