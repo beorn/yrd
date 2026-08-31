@@ -12,7 +12,11 @@ import { YRD_QUEUE_AUDIT_FINDING_CODES, type QueueAuditEmission } from "@yrd/que
  * walk in this package, the derived plan audit (git vs journal vs process) in
  * the CLI, and the submodule-alternates census in this package. */
 const PRODUCERS = [
-  { module: "packages/yrd-queue/src/queue.ts", from: "function auditQueues(", to: "\nfunction latestQueueMergeMs(" },
+  {
+    module: "packages/yrd-queue/src/queue.ts",
+    from: "function auditQueues(",
+    to: "\nexport function latestQueueMergeMs(",
+  },
   { module: "packages/yrd-cli/src/plan-audit.ts", from: "export function installedPlanStale(", to: null },
   {
     module: "packages/yrd-queue/src/alternates-audit.ts",

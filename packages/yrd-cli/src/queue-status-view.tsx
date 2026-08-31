@@ -4279,29 +4279,44 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
   return newest
 }
 
-/** Newest proven merge from authoritative Bays state, falling back to the
- * retained fact horizon when state is unavailable. Unlike the last-drained
- * clock, this ignores refusals/rejections and display filters. */
-function timelineLastMergeMs(projection: QueueTimelineProjection, state: BaysState | undefined): number | null {
-  if (state !== undefined) {
-    return Object.values(state.prs).reduce<number | null>((latest, pr) => {
-      if (baseIdentity(pr.base) !== baseIdentity(projection.base)) return latest
-      const terminal = currentChangeRev(pr).terminal
-      if (terminal?.kind !== "integrated") return latest
-      const at = Date.parse(terminal.at)
-      if (!Number.isFinite(at)) return latest
-      return latest === null ? at : Math.max(latest, at)
-    }, null)
-  }
-  return projection.timeStatsFacts.reduce<number | null>(
-    (latest, fact) =>
-      fact.outcome !== "integrated"
-        ? latest
-        : latest === null
-          ? fact.terminalAtMs
-          : Math.max(latest, fact.terminalAtMs),
+/** Newest proven merge, from BOTH sources rather than one preferring the other.
+ * Unlike the last-drained clock, this ignores refusals/rejections and display
+ * filters.
+ *
+ * The record store is not the population, and preferring it here is what made
+ * this line lie. `state.prs` holds RECORD-lane changes only — a derived-lane
+ * merge leaves no row there by design — so whenever Bays state was available
+ * this returned the last record-lane merge and the retained facts, which cover
+ * both lanes, were never consulted. Nearly all traffic is derived now, so the
+ * clock froze: measured 2026-08-31, the panel read "no merge for 3:02:42" eight
+ * minutes after PR2823 merged, and read "no merge for 2:11:32" twelve minutes
+ * after PR2816. Two seats read that line as an outage on the same afternoon.
+ *
+ * This is the FOURTH reader found with the same defect, after the whole-queue
+ * eligibility read, the tracker bridges, and the runner's published merge
+ * position. Taking the max of both sources rather than plumbing a second state
+ * argument through the view is deliberate and safe in the direction that
+ * matters: neither source can invent a merge, so a union can only ever move the
+ * answer forward to one that some source can prove. */
+export function timelineLastMergeMs(projection: QueueTimelineProjection, state: BaysState | undefined): number | null {
+  const newer = (latest: number | null, at: number): number => (latest === null ? at : Math.max(latest, at))
+  const recorded =
+    state === undefined
+      ? null
+      : Object.values(state.prs).reduce<number | null>((latest, pr) => {
+          if (baseIdentity(pr.base) !== baseIdentity(projection.base)) return latest
+          const terminal = currentChangeRev(pr).terminal
+          if (terminal?.kind !== "integrated") return latest
+          const at = Date.parse(terminal.at)
+          if (!Number.isFinite(at)) return latest
+          return newer(latest, at)
+        }, null)
+  const retained = projection.timeStatsFacts.reduce<number | null>(
+    (latest, fact) => (fact.outcome !== "integrated" ? latest : newer(latest, fact.terminalAtMs)),
     null,
   )
+  if (recorded === null) return retained
+  return retained === null ? recorded : Math.max(recorded, retained)
 }
 
 function queueHeadBlockDetails(

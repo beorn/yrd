@@ -830,6 +830,72 @@ export type QueueRetiredSubmit = Readonly<{
   at: string
 }>
 
+/**
+ * What one admission pass DID about the head of its queue — the fact that made
+ * queue inaction explainable at all.
+ *
+ * Every non-selection branch used to reach a bare `continue` with no durable or
+ * observable trace, so "skipped for a reason" and "never considered" were the
+ * same absence, and a change could sit first in line, proven, with a composed
+ * candidate, while every surface reported nothing. Measured 2026-08-31: PR2804
+ * held position 1 for two and a half hours, checks passed, candidate mergeable,
+ * and the queue audit's four findings named it nowhere. Not a refusal, not a
+ * stall — silence.
+ *
+ * `disposition` IS THE POINT AND IT IS TOTAL. Every path a pass can take maps
+ * to a member, and a pass emits one unconditionally. That is what makes
+ * unexplained inaction unrepresentable rather than merely detectable: a reader
+ * never has to infer "a pass must have happened", and there is no branch left
+ * that runs and says nothing. Adding a non-selection branch without a member
+ * here reopens exactly the gap this closes, which is why the union is exhaustive
+ * rather than a convenience.
+ *
+ * Per-PROCESS, published through the runner heartbeat rather than the journal.
+ * A pass runs every maintenance interval whether or not anything happens, so a
+ * durable append per pass would make journal size a function of idle time — a
+ * permanent cost to answer a question only ever asked about the present. The
+ * heartbeat is rewritten in place, so this stays bounded at exactly one record.
+ * The consequence is deliberate: it does not survive a restart, which is why
+ * `pass` carries the runner's generation as well as its counter. Two records
+ * from different generations are not comparable, and a reader that compares
+ * them anyway reads a fresh runner's first pass as progress.
+ */
+export type QueuePassDisposition = Readonly<{
+  at: string
+  /** Runner generation plus its own pass counter. Never compare across
+   * generations — a new generation means a new runner, not a new pass. */
+  pass: Readonly<{ generation: string; n: number }>
+  base: string
+  /** The head of the admission queue this pass saw, or null when it was empty.
+   * Null is a HEALTHY explaining state and must never read as a missing
+   * record — "the queue was empty" is an answer, "no pass ran" is not. */
+  head: string | null
+  revision?: number
+  disposition: QueuePassDispositionCode
+  /** Base sha the head's admission proof was taken at, when it has a passed
+   * proof. Compared against `tipSha` by the reader: unequal means re-admission
+   * is legitimately pending, and nothing is wrong. */
+  proofBaseSha?: string
+  /** The base tip this pass actually resolved. A fact about the pass, not a
+   * projection of landing — landing is read from Git. */
+  tipSha?: string
+  queueDepth: number
+}>
+
+/** Total: every path an admission pass can take. The four `skipped-*` members
+ * that share an `||` chain report the FIRST that held, in evaluation order — a
+ * reader needs one true reason, not the set of true ones. */
+export type QueuePassDispositionCode =
+  | "admitted"
+  | "refused"
+  | "skipped-queue-paused"
+  | "skipped-no-admission-steps"
+  | "skipped-run-active"
+  | "skipped-line-holder"
+  | "skipped-terminal-delivery"
+  | "not-reached-active-run"
+  | "queue-empty"
+
 export type ChangeEligibilityReason = Readonly<{
   /** answers: Why can the current PR revision not run now? tense: current. */
   code:

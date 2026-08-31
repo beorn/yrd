@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import {
   GitRefSchema,
   GitShaSchema,
@@ -112,6 +113,8 @@ import {
   type QueueAuthorityState,
   type QueueAuthorityToken,
   type QueueFailure,
+  type QueuePassDisposition,
+  type QueuePassDispositionCode,
   type QueuePause,
   type QueueRecord,
   type QueueRequirement,
@@ -420,6 +423,28 @@ type ComposeObservations = Readonly<{
   observe(branch: string, sha: string, observation: ComposeObservation): void
   read(branch: string, sha: string): ComposeObservation | undefined
 }>
+
+/** The latest {@link QueuePassDisposition}, and the counter that makes two
+ * passes distinguishable when their content is identical. Same lifetime as
+ * `ComposeObservations` and for the same reason — only the runner composes — but
+ * unlike that one this IS a gate's input, so its emission is unconditional
+ * rather than diagnostic. */
+type PassDispositions = Readonly<{
+  record(fact: Omit<QueuePassDisposition, "pass"> & { pass?: never }): void
+  read(): QueuePassDisposition | undefined
+}>
+
+function createPassDispositions(generation: string): PassDispositions {
+  let n = 0
+  let latest: QueuePassDisposition | undefined
+  return {
+    record: (fact) => {
+      n += 1
+      latest = { ...fact, pass: { generation, n } }
+    },
+    read: () => latest,
+  }
+}
 
 function createComposeObservations(): ComposeObservations {
   const seen = new Map<string, Readonly<{ sha: string; observation: ComposeObservation }>>()
@@ -1374,6 +1399,10 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<void>
   /** Live PR ids in the exact admission order used by a selectorless drain. */
   admissionOrder(): readonly string[]
+  /** What the most recent admission pass in THIS process did about its head, or
+   * undefined when no pass has run here. See {@link QueuePassDisposition} — the
+   * undefined is "this process has not composed", never "nothing happened". */
+  lastPass(): QueuePassDisposition | undefined
   checks(selectors?: readonly string[]): readonly ChangeCheckRecord[]
   quiesceLegacyRoots(options: QuiesceLegacyRootsOptions): Promise<QuiesceLegacyRootsResult>
   /** Journal a preparation refusal that happened outside Queue's own admission
@@ -1479,6 +1508,11 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
   // per-scope memo would let the two halves of one process disagree about
   // whether anything ever tried to derive a branch.
   const composes = createComposeObservations()
+  // ONE pass ledger per plugin, same lifetime and same reason as `composes`.
+  // The generation is minted here rather than taken from the runner so the
+  // record is self-describing: a reader comparing two passes never has to ask
+  // a second surface whether the same process produced both.
+  const passes = createPassDispositions(randomUUID())
   const commands = createQueueCommands(
     steps,
     byName,
@@ -1578,6 +1612,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.readSubmitEnrichment,
             landing,
             composes,
+            passes,
             options.isSubmitSuperseded,
             configuredRunner,
             progress,
@@ -1641,6 +1676,7 @@ function createQueue<Shape extends ChangeShape>(
   readSubmitEnrichment: QueueOptions<readonly AnyStepDef[]>["readSubmitEnrichment"],
   landing: SubmitLandingMemo,
   composes: ComposeObservations,
+  passes: PassDispositions,
   isSubmitSuperseded: QueueOptions<readonly AnyStepDef[]>["isSubmitSuperseded"],
   configuredRunner: Runner | undefined,
   progress: QueueProgressPolicy,
@@ -2993,7 +3029,16 @@ function createQueue<Shape extends ChangeShape>(
   /** One admission turn's outcome. `refused` names the selectors this turn
    * skipped with a typed per-PR refusal, so the drain can release the line
    * instead of re-picking the same refused head forever (22474). */
-  type AdmissionDispatch = Readonly<{ admitted: string[]; refused: readonly string[] }>
+  type AdmissionDispatch = Readonly<{
+    admitted: string[]
+    refused: readonly string[]
+    /** Why each selector this turn considered was not admitted and not
+     * refused. Reported so `drainAdmissions` can state a TOTAL disposition
+     * for the head: these branches used to reach a bare `continue`, which
+     * is what made "skipped for a reason" and "never considered" the same
+     * absence to every reader. */
+    skipped: readonly Readonly<{ pr: string; disposition: QueuePassDispositionCode }>[]
+  }>
 
   const dispatchAdmissions = async (
     selectors: readonly string[],
@@ -3004,6 +3049,7 @@ function createQueue<Shape extends ChangeShape>(
   ): Promise<AdmissionDispatch> => {
     const admitted: string[] = []
     const refused: string[] = []
+    const skipped: { pr: string; disposition: QueuePassDispositionCode }[] = []
     // Implicit (selectorless) drains absorb per-PR terminal races; explicit
     // targeting stays fail-loud so a one-shot caller sees the real outcome.
     const selectorless = selection !== "explicit"
@@ -3021,18 +3067,30 @@ function createQueue<Shape extends ChangeShape>(
         const delivery = changeDeliveryState(pr)
         if (delivery === "integrated" || delivery === "already-landed") {
           await cancelRevisionAdmissionJobs(pr, `PR became ${delivery}`)
+          skipped.push({ pr: pr.id, disposition: "skipped-terminal-delivery" })
           continue
         }
         if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
           await cancelRevisionAdmissionJobs(pr, `PR became ${delivery}`)
           throw new ChangeCheckabilityConflict(pr.id, delivery)
         }
-        if (
-          blockingQueuePause(snapshot, pr) !== undefined ||
-          admissionSteps(steps).length === 0 ||
-          runningQueue(snapshot.queues, snapshot.jobs, pr.base) !== undefined ||
-          (selection !== "explicit" && admissionLineHolder(snapshot, steps, pr) !== undefined)
-        ) {
+        // FIRST reason that holds, in evaluation order — a reader needs one
+        // true cause, not the set of true ones, and the chain's own order is
+        // the only non-arbitrary way to pick. Every arm must name a member:
+        // a branch added here without one restores the silent `continue`
+        // this replaced.
+        const nonSelection: QueuePassDispositionCode | undefined =
+          blockingQueuePause(snapshot, pr) !== undefined
+            ? "skipped-queue-paused"
+            : admissionSteps(steps).length === 0
+              ? "skipped-no-admission-steps"
+              : runningQueue(snapshot.queues, snapshot.jobs, pr.base) !== undefined
+                ? "skipped-run-active"
+                : selection !== "explicit" && admissionLineHolder(snapshot, steps, pr) !== undefined
+                  ? "skipped-line-holder"
+                  : undefined
+        if (nonSelection !== undefined) {
+          skipped.push({ pr: pr.id, disposition: nonSelection })
           continue
         }
         const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
@@ -3062,7 +3120,7 @@ function createQueue<Shape extends ChangeShape>(
         refused.push(selector)
       }
     }
-    return { admitted, refused }
+    return { admitted, refused, skipped }
   }
 
   const drainAdmissions = async (
@@ -3090,6 +3148,34 @@ function createQueue<Shape extends ChangeShape>(
     // set only releases the LINE; the refusal itself is still ledgered exactly
     // once per cycle by dispatchAdmissions.
     const released = new Set<string>()
+    // ONE record per drain, describing the HEAD the first turn saw. The loop can
+    // turn several times, but every turn after the first is downstream of the
+    // head's disposition, and a reader asking why nothing is landing is asking
+    // about the head. Recorded exactly once so a long drain cannot overwrite its
+    // own answer with the tail of its progress.
+    let passRecorded = false
+    const recordPass = (fact: {
+      base: string
+      head: DeepReadonly<Change> | undefined
+      disposition: QueuePassDispositionCode
+      queueDepth: number
+      tipSha?: string
+    }): void => {
+      if (passRecorded) return
+      passRecorded = true
+      const admission = fact.head === undefined ? undefined : changeAdmission(fact.head)
+      const revision = fact.head?.revs.length
+      passes.record({
+        at: new Date().toISOString(),
+        base: fact.base,
+        head: fact.head?.id ?? null,
+        ...(revision === undefined || revision === 0 ? {} : { revision }),
+        disposition: fact.disposition,
+        ...(admission?.status === "passed" ? { proofBaseSha: admission.baseSha } : {}),
+        ...(fact.tipSha === undefined ? {} : { tipSha: fact.tipSha }),
+        queueDepth: fact.queueDepth,
+      })
+    }
     const remember = (candidate: Run): void => {
       for (const pr of candidate.prs) {
         if (targets.has(pr.id)) admitted.add(pr.id)
@@ -3116,13 +3202,28 @@ function createQueue<Shape extends ChangeShape>(
       if (active !== undefined) {
         const settled = await settle(active.id, options)
         remember(settled)
-        if (settled.status === "in_progress") break
+        if (settled.status === "in_progress") {
+          recordPass({ base: active.base, head: undefined, disposition: "not-reached-active-run", queueDepth: 0 })
+          break
+        }
         continue
       }
 
       const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined, derived).filter(
         (pr) => !released.has(pr.id),
       )
+      const head = queued[0]
+      if (head === undefined) {
+        // An EMPTY queue is an answer, not a missing record. Absent this call a
+        // reader could not tell "the queue had nothing to admit" from "no pass
+        // ran", and those want opposite responses.
+        recordPass({
+          base: baseIdentity(defaultBase ?? "main"),
+          head: undefined,
+          disposition: "queue-empty",
+          queueDepth: 0,
+        })
+      }
       // A habitant (`continueAdmissions` installed) admits one change per turn so a
       // drain signal can interrupt between admissions; a one-shot dispatches the
       // whole queue in a single turn and needs no release.
@@ -3134,6 +3235,25 @@ function createQueue<Shape extends ChangeShape>(
         options,
         derived,
       )
+      if (head !== undefined) {
+        // The head's disposition, taken from the turn that just ran. The order
+        // matches what actually happened to it: admitted wins over refused wins
+        // over the typed non-selection, and `skipped-line-holder` is the
+        // fallback only when the head was not in the turn at all — which can
+        // only mean something ahead of it holds the line.
+        const skipped = dispatched.skipped.find((entry) => entry.pr === head.id)
+        recordPass({
+          base: baseIdentity(head.base),
+          head,
+          disposition: dispatched.admitted.includes(head.id)
+            ? "admitted"
+            : dispatched.refused.includes(head.id)
+              ? "refused"
+              : (skipped?.disposition ?? "skipped-line-holder"),
+          queueDepth: queued.length,
+          ...(resolveCycleBase === undefined ? {} : { tipSha: await resolveCycleBase(baseIdentity(head.base)) }),
+        })
+      }
       for (const pr of dispatched.admitted) admitted.add(pr)
       for (const pr of dispatched.refused) released.add(pr)
       // Head-of-line release: the turn admitted nothing because it was refused,
@@ -3161,6 +3281,7 @@ function createQueue<Shape extends ChangeShape>(
     state,
     steps: () => steps.map(descriptor),
     admissionOrder: () => admissionOrderChanges(runtime()).map((pr) => pr.id),
+    lastPass: () => passes.read(),
     async reconcileMerge(args) {
       await actions.reconcileMerge(args)
     },
