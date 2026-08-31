@@ -496,7 +496,6 @@ describe("withBays", () => {
     const revised = record(
       await app.bays.submitSelection("B1", {
         resolveRevision: async () => undefined,
-        resolveParents: async () => ["0".repeat(40)],
         run: runtime,
       }),
     )
@@ -2344,7 +2343,6 @@ describe("withBays", () => {
     const bayPR = record(
       await app.bays.submitSelection("B1", {
         resolveRevision,
-        resolveParents: async () => ["0".repeat(40)],
         run: runtime,
       }),
     )
@@ -2683,7 +2681,6 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     const pr = record(
       await app.bays.submitSelection("B1", {
         resolveRevision: async () => undefined,
-        resolveParents: async () => ["0".repeat(40)],
         run: runtime,
         warnings,
       }),
@@ -2845,7 +2842,6 @@ describe("bay-base authority vs live queue", () => {
     const created = record(
       await app.bays.submitSelection("B1", {
         resolveRevision: async () => HEAD_1,
-        resolveParents: async () => ["0".repeat(40)],
         run: runtime,
         draft: true,
       }),
@@ -2867,7 +2863,6 @@ describe("bay-base authority vs live queue", () => {
     const created = record(
       await app.bays.submitSelection("B1", {
         resolveRevision: async () => HEAD_1,
-        resolveParents: async () => ["0".repeat(40)],
         run: runtime,
         base: "main",
         draft: true,
@@ -2901,7 +2896,6 @@ describe("bay-base authority vs live queue", () => {
     const created = record(
       await app.bays.submitSelection("B1", {
         resolveRevision: async () => HEAD_1,
-        resolveParents: async () => ["0".repeat(40)],
         run: runtime,
         draft: true,
       }),

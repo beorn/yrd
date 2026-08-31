@@ -32,11 +32,11 @@ import {
 import { localRunner, withJobs, type JobResult, type Jobs, type Runner, type RunnerSubmission } from "@yrd/job"
 import * as z from "zod"
 import * as queueApi from "../src/index.ts"
+import { projectQueueStarted } from "../src/queue.ts"
 import {
   DEFAULT_QUEUE_BATCH_SIZE,
   candidateRefFor,
   withQueue,
-  projectQueueStarted,
   withMerge,
   withStep,
   Queues,

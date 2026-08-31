@@ -3,13 +3,76 @@ export * from "./change-population.ts"
 export * from "./derived-admission.ts"
 export * from "./derived-member.ts"
 export * from "./model.ts"
-export * from "./queue.ts"
+// Not `export *`, and deliberately the only other line here that is not (see
+// the merged-truth.ts block below for the first).
+//
+// checkRunStatus, checkStatus, projectQueueStarted and
+// assertSubmoduleModelAuthorizationsAvailable have no caller outside this
+// package — every use is internal to queue.ts or its own dedicated test
+// file (check-status-ladder.test.ts, queue.test.ts,
+// composition-fill-in.test.ts), which import them by relative path. They
+// stay module-exported in queue.ts for those tests, but this explicit list
+// leaves them off `@yrd/queue`'s surface rather than reaching them
+// through a blanket `export *`.
+export {
+  QueueRunningConflict,
+  isQueueRunningConflict,
+  type QueueRunArgs,
+  type AdmitSelection,
+  type PauseQueueArgs,
+  type RecoverQueueOptions,
+  type RecordAdmissionRefusalArgs,
+  type SettleAdmissionRefusalArgs,
+  type RetireSubmitFactArgs,
+  ADMISSION_REFUSAL_LOOP_THRESHOLD,
+  type CancelRunArgs,
+  type QuiesceLegacyRunArgs,
+  type SettleOrphanedRunArgs,
+  type StepExecution,
+  type StepRunner,
+  type StepDef,
+  type StepOptions,
+  withStep,
+  withMerge,
+  type QueueOptions,
+  DEFAULT_QUEUE_BATCH_SIZE,
+  type QueueProgressPolicy,
+  DEFAULT_QUEUE_PROGRESS_POLICY,
+  DEFAULT_NEEDS_PERSON_OWNER,
+  type QueueAuditOptions,
+  type CandidatePreparationInput,
+  type PreparedCandidate,
+  type CandidatePreparer,
+  type QueueRuntimeState,
+  type QueueCommands,
+  type Queue,
+  type QuiesceLegacyRootsOptions,
+  type QuiesceLegacyRootsResult,
+  type QueueRunOptions,
+  type WaitingQueueStep,
+  type WaitingAdmissionStep,
+  type FinishQueueArgs,
+  type CancelQueueArgs,
+  type CancelAdmissionJobsArgs,
+  type HasQueue,
+  type QueuePlugin,
+  withQueue,
+  advanceQueue,
+  type UnreadableQueueRun,
+  COMPOSITION_FAILURE_BUCKETS,
+  YRD_REFUSAL_CODES,
+  type RefusalCode,
+  YRD_REFUSAL_CODE_ALIASES,
+  type CanonicalRefusalCodeOptions,
+  canonicalRefusalCode,
+  authorAttributionResult,
+} from "./queue.ts"
 export * from "./queue-status-projection.ts"
 export * from "./candidate-pool.ts"
 export * from "./candidate-refs.ts"
 export * from "./command.ts"
 export * from "./merge-record.ts"
-// Not `export *`, and deliberately the only line here that is not.
+// Not `export *` either — see the queue.ts block above for the first.
 //
 // merged-truth answers one question — did this change land — and it answers it
 // at one strength: ancestry first, then Change-Id lineage, then a loud unknown.

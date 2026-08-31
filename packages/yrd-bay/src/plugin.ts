@@ -248,10 +248,6 @@ export type SubmitSelectionOptions = Readonly<{
   stage?: boolean
   props?: ChangeProps
   resolveRevision(ref: string): Promise<string | undefined>
-  /** Parent SHAs of one commit in the submission repository. The active-Bay
-   * path proves the checked-out head is linear BEFORE the ledger write — the
-   * one submit entrance the branch resolver's check never covers. */
-  resolveParents?(sha: string): Promise<readonly string[]> | readonly string[]
   run: RunJobOptions
   /** Caller-owned advisory-warning sink for a submission that SUCCEEDS with a
    * caveat (same `readonly string[]` shape the queue list/status envelope uses).
