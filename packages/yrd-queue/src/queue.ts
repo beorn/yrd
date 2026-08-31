@@ -2497,7 +2497,7 @@ function createQueue<Shape extends ChangeShape>(
       return recordedRequestCount(tally)
     }
     if (tally.status === "unresolved") {
-      log.warn?.("queue checks before queueing could not resolve the base of every check request for this tree", {
+      log.warn?.(`queue checks before queueing could not resolve the base of every check request for ${pr.id}`, {
         action: "admission-request-count-unresolved",
         pr: pr.id,
         revision: changeRevisionNumber(pr),
@@ -2876,7 +2876,7 @@ function createQueue<Shape extends ChangeShape>(
         // Bookkeeping must never convert a survivable skip into a habitant kill,
         // but it must never fail quietly either — an unrecorded cycle is exactly
         // the blindness this ledger exists to remove.
-        log.error?.("queue could not journal a required-check failure; the wedge oracle will under-count", {
+        log.error?.(`queue could not journal ${pr.id}'s required-check failure; the wedge oracle will under-count`, {
           action: "admission-refusal-unrecorded",
           pr: pr.id,
           code: refusal.code,
@@ -2934,14 +2934,17 @@ function createQueue<Shape extends ChangeShape>(
       // kill — but an unrecorded retirement is the phantom loop coming back, so
       // it can never be quiet either. Loud, and the fact stays derivable: a
       // re-mint that is REPORTED is strictly better than one that is not.
-      log.error?.("queue could not retire a submit fact whose candidate cannot merge; it will be derived again", {
-        action: "submit-fact-retirement-unrecorded",
-        branch: pr.branch,
-        sha: headSha,
-        pr: pr.id,
-        code: result.code,
-        reason: error instanceof Error ? error.message : String(error),
-      })
+      log.error?.(
+        `queue could not retire the submit fact for ${pr.id}, whose candidate cannot merge; it will be derived again`,
+        {
+          action: "submit-fact-retirement-unrecorded",
+          branch: pr.branch,
+          sha: headSha,
+          pr: pr.id,
+          code: result.code,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      )
       return
     }
     log.warn?.(
@@ -2962,7 +2965,7 @@ function createQueue<Shape extends ChangeShape>(
     pr: string,
     refusal: NonNullable<RevisionAdmissionOutcome["refusal"]>,
   ): Promise<void> => {
-    log.warn?.("queue admit skipped a change that failed its required checks", {
+    log.warn?.(`queue admit skipped ${pr}, which failed its required checks`, {
       action: "compose-candidate-skip",
       pr,
       ...refusal,
@@ -3033,7 +3036,7 @@ function createQueue<Shape extends ChangeShape>(
           ...(checkability ? { kind: "refusal" } : fact?.kind === undefined ? {} : { kind: fact.kind }),
           reason: error instanceof Error ? error.message : String(error),
         }
-        log.warn?.("queue admit skipped a change that is no longer eligible", {
+        log.warn?.(`queue admit skipped ${selector}, which is no longer eligible`, {
           action: "compose-candidate-skip",
           pr: selector,
           ...refusal,
@@ -3302,7 +3305,7 @@ function createQueue<Shape extends ChangeShape>(
               // Retire it once so it cannot poison every future habitant cycle.
               if (fact.code === "stale-plan") {
                 await actions.retireStalePlan(candidateId)
-                log.warn?.("Skipped an outdated batch because its PRs can no longer be tested together.", {
+                log.warn?.(`Skipped outdated batch ${candidateId} because its PRs can no longer be tested together.`, {
                   action: "compose-stale-plan-retire",
                   run: candidateId,
                   code: fact.code,
@@ -3313,7 +3316,7 @@ function createQueue<Shape extends ChangeShape>(
               // Not ledgered: this skip is run-scoped, and a run record already
               // exists — the record walk in `auditQueues` can see it. The ledger
               // covers only the skips that never mint a record.
-              log.warn?.("Skipped a change that changed while its batch was being prepared.", {
+              log.warn?.(`Skipped a change that changed while batch ${candidateId} was being prepared.`, {
                 action: "compose-candidate-skip",
                 run: candidateId,
                 code: fact.code,
@@ -3354,7 +3357,7 @@ function createQueue<Shape extends ChangeShape>(
               } catch (error) {
                 const fact = failureFact(error)
                 if (fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) throw error
-                log.warn?.("queue compose skipped a derived member whose submit fact no longer admits it", {
+                log.warn?.(`queue compose skipped derived member ${member.id}, whose submit fact no longer admits it`, {
                   action: "compose-candidate-skip",
                   pr: member.id,
                   branch: member.branch,
@@ -3384,14 +3387,17 @@ function createQueue<Shape extends ChangeShape>(
                 if (fact?.kind !== "refusal") throw error
                 // hub/yrd/2026-08-30-core-review.md: log parity with admitDerived's
                 // (~3325) identical mid-cycle-disappearance skip, which already warns.
-                log.warn?.("queue materialize skipped a derived member whose submit fact no longer admits it", {
-                  action: "compose-candidate-skip",
-                  pr: member.id,
-                  branch: member.branch,
-                  code: fact.code,
-                  kind: fact.kind,
-                  reason: fact.message,
-                })
+                log.warn?.(
+                  `queue materialize skipped derived member ${member.id}, whose submit fact no longer admits it`,
+                  {
+                    action: "compose-candidate-skip",
+                    pr: member.id,
+                    branch: member.branch,
+                    code: fact.code,
+                    kind: fact.kind,
+                    reason: fact.message,
+                  },
+                )
                 return []
               }
             })
@@ -3470,7 +3476,7 @@ function createQueue<Shape extends ChangeShape>(
               conditions.report(
                 `compose-candidate-skip-authority:${gap.pr}:${gap.kind}:${gap.reason}`,
                 "error",
-                "queue compose ejected a candidate without runnable authority",
+                `queue compose ejected ${gap.pr} without runnable authority`,
                 {
                   action: "compose-candidate-skip",
                   pr: gap.pr,
@@ -3498,7 +3504,7 @@ function createQueue<Shape extends ChangeShape>(
               if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
                 throw error
               }
-              log.warn?.("queue compose skipped an authority-gap change lost to a losable failure", {
+              log.warn?.(`queue compose skipped authority-gap change ${gap.pr}, lost to a losable failure`, {
                 action: "compose-candidate-skip",
                 pr: gap.pr,
                 code: fact.code,
@@ -3760,7 +3766,7 @@ function createQueue<Shape extends ChangeShape>(
                     abandoned = true
                     break
                   }
-                  log.warn?.("queue compose ejected the member that refused Candidate preparation", {
+                  log.warn?.(`queue compose ejected ${guilty}, the member that refused Candidate preparation`, {
                     action: "compose-candidate-skip",
                     pr: guilty,
                     code: fact.code,
@@ -3816,7 +3822,7 @@ function createQueue<Shape extends ChangeShape>(
                 conditions.report(
                   `compose-candidate-skip-authority:${refusal.pr}:${refusal.receipt.code}`,
                   "error",
-                  "queue compose ejected a candidate without runnable authority",
+                  `queue compose ejected ${refusal.pr} without runnable authority`,
                   {
                     action: "compose-candidate-skip",
                     pr: refusal.pr,

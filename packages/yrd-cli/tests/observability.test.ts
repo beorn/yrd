@@ -341,6 +341,55 @@ describe("Yrd lifecycle records", () => {
     log.end()
   })
 
+  it("names the subject in the lifecycle message while leaving every field in the payload", async () => {
+    // Negative control: this rendered exactly `${lifecycle} ${descriptor}`, so
+    // every journal append was the identical string "append succeeded" and a
+    // reader had to parse the payload to learn WHICH op the row was about. The
+    // message assertions below fail against that rendering; the payload
+    // assertion holds under both, because promoting a field into the headline
+    // must never move it out of `props`.
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+
+    await observeYrdLifecycle(
+      log.child("storage"),
+      {
+        lifecycle: "append",
+        identity: { command: "0f0f-frame-uuid", cause: "beef-frame-uuid", op: "queue.advance" },
+        attributes: { expectedCursor: 114_556, events: 0 },
+        resultAttributes: (result: { cursor: number }) => result,
+        now: () => 0,
+      },
+      async () => ({ cursor: 114_557 }),
+    )
+    await observeYrdLifecycle(
+      log.child("storage"),
+      { lifecycle: "lock", attributes: { holder: "checkpoint-save", path: "/x/writer.lock" }, now: () => 0 },
+      async () => undefined,
+    )
+    await observeYrdLifecycle(log.child("queue"), { lifecycle: "compose", now: () => 0 }, async () => [])
+
+    const settledEvent = (namespace: string) =>
+      events.find(
+        (event): event is Extract<Event, { kind: "log" }> =>
+          event.kind === "log" && event.namespace === namespace && event.props?.outcome === "succeeded",
+      )
+
+    expect(settledEvent("yrd:storage:append")?.message).toBe("append succeeded queue.advance")
+    expect(settledEvent("yrd:storage:lock")?.message).toBe("lock succeeded checkpoint-save")
+    // A journal frame's `command`/`cause` are UUIDs — they identify nothing a
+    // reader can act on, so they are never the promoted subject.
+    expect(settledEvent("yrd:storage:append")?.message).not.toContain("uuid")
+    // Nothing scalar to name: a selectorless compose keeps the bare outcome
+    // word rather than inventing a subject for it.
+    expect(settledEvent("yrd:queue:compose")?.message).toBe("compose succeeded")
+
+    expect(settledEvent("yrd:storage:append")?.props).toEqual(
+      expect.objectContaining({ op: "queue.advance", command: "0f0f-frame-uuid", events: 0, cursor: 114_557 }),
+    )
+    log.end()
+  })
+
   it("demotes routine lock and compose successes to DEBUG while keeping run success at INFO", async () => {
     const events: Event[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
@@ -385,7 +434,10 @@ describe("Yrd lifecycle records", () => {
       ),
     ).resolves.toBe("passed")
 
-    expect(events.find((event) => event.kind === "log" && event.message === "check started")).toMatchObject({
+    // `PR7` is the promoted subject: the most specific identity this
+    // lifecycle carries. It is a headline for the payload below, never a
+    // replacement for it.
+    expect(events.find((event) => event.kind === "log" && event.message === "check started PR7")).toMatchObject({
       kind: "log",
       namespace: "yrd:check",
       level: "info",
@@ -399,11 +451,11 @@ describe("Yrd lifecycle records", () => {
         step: "check",
       },
     })
-    expect(events.find((event) => event.kind === "log" && event.message === "check succeeded")).toMatchObject({
+    expect(events.find((event) => event.kind === "log" && event.message === "check succeeded PR7")).toMatchObject({
       kind: "log",
       namespace: "yrd:check",
       level: "info",
-      message: "check succeeded",
+      message: "check succeeded PR7",
       props: {
         lifecycle: "check",
         outcome: "succeeded",

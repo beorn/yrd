@@ -131,6 +131,33 @@ export async function observeYrdLifecycle<Result>(
   }
 }
 
+/** Identity keys promoted into a lifecycle message, most specific first. A row
+ * that reads `append succeeded` a thousand times over names no object, so a
+ * reader has to parse the payload to learn WHICH one it is about; one subject
+ * in the text answers that at a glance. Exactly one is promoted — the message
+ * is a headline, not a second copy of `props`, and every key stays in `props`
+ * either way.
+ *
+ * `command` and `cause` are deliberately absent: they carry journal frame
+ * UUIDs, which identify nothing a reader can act on. */
+const LIFECYCLE_SUBJECT_KEYS = ["pr", "run", "step", "job", "op", "holder", "branch", "issue", "ref"] as const
+
+/** The first present subject as a leading-space suffix, or `""` when the
+ * lifecycle carries no scalar identity (a selectorless compose names nothing,
+ * and inventing a subject for it would be worse than saying nothing). One
+ * line, bounded, so a pathological identity cannot push the payload off
+ * screen — `props` still holds it whole. */
+function lifecycleSubject(props: Readonly<Record<string, unknown>>): string {
+  for (const key of LIFECYCLE_SUBJECT_KEYS) {
+    const value = props[key]
+    if (typeof value !== "string" && typeof value !== "number") continue
+    const text = String(value).replace(/\s+/gu, " ").trim()
+    if (text === "") continue
+    return ` ${text.length <= 80 ? text : `${text.slice(0, 79)}…`}`
+  }
+  return ""
+}
+
 function emitLifecycle(
   log: ConditionalLogger,
   lifecycle: string,
@@ -139,7 +166,7 @@ function emitLifecycle(
   props: Record<string, unknown>,
   levelOverride?: Exclude<LogLevel, "silent">,
 ): void {
-  const message = `${lifecycle} ${descriptor}`
+  const message = `${lifecycle} ${descriptor}${lifecycleSubject(props)}`
   const level =
     levelOverride ??
     (outcome === "succeeded" && DEBUG_SUCCESS_LIFECYCLES.has(lifecycle) ? "debug" : YRD_LIFECYCLE_LEVELS[outcome])

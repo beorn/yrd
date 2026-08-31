@@ -11407,12 +11407,15 @@ export async function refreshAdmittedQueueRevisions(
           reason: failure.message,
         })
       } catch (ledgerError) {
-        app.log.error?.("Could not journal a queued PR freshness refusal; the wedge oracle will under-count.", {
-          action: "queue-freshness-refusal-unrecorded",
-          pr: candidate.id,
-          code: failure.code,
-          reason: ledgerError instanceof Error ? ledgerError.message : String(ledgerError),
-        })
+        app.log.error?.(
+          `Could not journal ${candidate.id}'s queued freshness refusal; the wedge oracle will under-count.`,
+          {
+            action: "queue-freshness-refusal-unrecorded",
+            pr: candidate.id,
+            code: failure.code,
+            reason: ledgerError instanceof Error ? ledgerError.message : String(ledgerError),
+          },
+        )
       }
       outcomes.push({
         status: "refused",

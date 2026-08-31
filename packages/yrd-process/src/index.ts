@@ -161,6 +161,16 @@ export type ProcessResult = ProcessResultBase &
       }>
   )
 
+/** The command as an operator would retype it, for the message line. `argv`
+ * stays whole in the structured payload; this exists so a reader scanning a
+ * thousand otherwise-identical process rows can see WHICH command each one is
+ * about without parsing JSON. Bounded here and only here — the payload keeps
+ * every word. */
+function commandText(argv: readonly string[]): string {
+  const text = argv.map((word) => (word === "" || /[\s"'`$\\]/u.test(word) ? JSON.stringify(word) : word)).join(" ")
+  return text.length <= 160 ? text : `${text.slice(0, 159)}…`
+}
+
 export type Process = Readonly<{
   run(request: ProcessRequest): Promise<ProcessResult>
   /** Reap and verify every process still holding an exclusive filesystem sandbox. */
@@ -563,10 +573,13 @@ export function createProcess(
               // two captures race inside Promise.all, and a verdict reader
               // comparing two runs must not see the order flip between them.
               truncations[name] = read.truncation
-              log.warn?.("The command produced more output than Yrd captures; the middle of the stream was dropped.", {
-                argv,
-                ...read.truncation,
-              })
+              log.warn?.(
+                `${commandText(argv)} produced more output than Yrd captures; the middle of the stream was dropped.`,
+                {
+                  argv,
+                  ...read.truncation,
+                },
+              )
             }
             return read.text
           } catch (error) {
@@ -627,7 +640,7 @@ export function createProcess(
             escapedDescendant = true
             stalled = true
             log.warn?.(
-              "The command exited, but a child process kept its output open; stopped waiting for more output.",
+              `${commandText(argv)} exited, but a child process kept its output open; stopped waiting for more output.`,
               {
                 argv,
                 pid: child.pid,
@@ -643,7 +656,7 @@ export function createProcess(
         } else {
           // Forced settle: the child never reaped (sweepFailure already loud);
           // the pipe is held by the live tree, so release our read end.
-          log.warn?.("The command did not finish after it was killed; stopped waiting for more output.", {
+          log.warn?.(`${commandText(argv)} did not finish after it was killed; stopped waiting for more output.`, {
             argv,
             pid: child.pid,
           })
@@ -675,13 +688,17 @@ export function createProcess(
           ...(escapedDescendant ? { escapedDescendant: true } : {}),
           ...(outputTruncation.length === 0 ? {} : { outputTruncation: Object.freeze(outputTruncation) }),
         } as ProcessResult
-        log.debug?.("Command finished.", {
-          argv,
-          exitCode: result.exitCode,
-          signal: result.signal,
-          durationMs: result.durationMs,
-          timedOut,
-        })
+        log.debug?.(
+          `Command finished ${String(Math.round(result.durationMs))}ms ` +
+            `[${result.signal ?? String(result.exitCode)}] ${commandText(argv)}`,
+          {
+            argv,
+            exitCode: result.exitCode,
+            signal: result.signal,
+            durationMs: result.durationMs,
+            timedOut,
+          },
+        )
         if (span !== undefined) {
           Object.assign(span.spanData, {
             // A non-zero exit is command evidence for the caller to classify

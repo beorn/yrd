@@ -54,6 +54,31 @@ describe("Process", () => {
     log.end()
   })
 
+  it("names the command, its exit code and its duration in the finished message", async () => {
+    // Negative control: this line read exactly "Command finished." for every
+    // process Yrd ran — a thousand identical rows whose subject, outcome and
+    // cost lived only in the JSON payload. The message assertion below fails
+    // against that rendering; the payload assertion holds under both, because
+    // promoting a field into the headline must never move it out of `props`.
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using process = createProcess({ env: { PATH: Bun.env.PATH }, inject: { log } })
+
+    await expect(process.run({ argv: ["printf", "%s", "one two"] })).resolves.toMatchObject({ exitCode: 0 })
+
+    const finished = events.find(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" && event.namespace === "yrd:process" && event.message.startsWith("Command finished"),
+    )
+    // `<duration>ms [<exit>] <command>`, with the word that needs quoting
+    // quoted, so the row can be read back as the command that ran.
+    expect(finished?.message).toMatch(/^Command finished \d+ms \[0\] printf %s "one two"$/u)
+    expect(finished?.props).toEqual(
+      expect.objectContaining({ argv: ["printf", "%s", "one two"], exitCode: 0, durationMs: expect.any(Number) }),
+    )
+    log.end()
+  })
+
   it("runs argv directly and makes shell parsing explicit", async () => {
     await using process = createProcess({ env: { PATH: Bun.env.PATH, GIT_DIR: "leak", YRD_JOB: "leak" } })
     const direct = await process.run({ argv: ["printf", "%s", "$GIT_DIR;$(not-expanded)"] })
