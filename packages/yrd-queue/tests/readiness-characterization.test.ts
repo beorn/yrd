@@ -77,7 +77,7 @@ function workspace(): BayWorkspace {
 
 /** One "check" admission step, optionally classified `base` — the exact
  * dimension D2 splits the two lanes on. */
-async function createEligibilityApp(classification?: "base" | "carrier") {
+async function createReadinessApp(classification?: "base" | "carrier") {
   const checkStep = withStep(
     "check",
     (): JobResult<CheckResult> => ({ status: "completed", conclusion: "success", output: { checked: true } }),
@@ -100,15 +100,15 @@ async function createEligibilityApp(classification?: "base" | "carrier") {
   })
 }
 
-type EligibilityApp = Awaited<ReturnType<typeof createEligibilityApp>>
+type ReadinessApp = Awaited<ReturnType<typeof createReadinessApp>>
 
-function recorded(app: EligibilityApp, branch: string): string {
+function recorded(app: ReadinessApp, branch: string): string {
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
   if (pr === undefined) throw new Error(`PR for '${branch}' was not recorded`)
   return pr.id
 }
 
-async function submitAndRequestChecks(app: EligibilityApp, branch: string): Promise<string> {
+async function submitAndRequestChecks(app: ReadinessApp, branch: string): Promise<string> {
   await app.bays.submit({ branch, headSha: HEAD, base: "main", baseSha: BASE })
   const pr = recorded(app, branch)
   await app.bays.requestChecks({ pr })
@@ -118,7 +118,7 @@ async function submitAndRequestChecks(app: EligibilityApp, branch: string): Prom
 /** A change with a passed, complete, matching admission record — but no job
  * or run in state to re-derive that answer from. Both lanes read the SAME
  * cached record; D2 is about whether each one trusts it. */
-async function submitWithCachedPass(app: EligibilityApp, branch: string): Promise<string> {
+async function submitWithCachedPass(app: ReadinessApp, branch: string): Promise<string> {
   const pr = await submitAndRequestChecks(app, branch)
   await app.bays.recordAdmission({
     pr,
@@ -133,10 +133,10 @@ async function submitWithCachedPass(app: EligibilityApp, branch: string): Promis
   return pr
 }
 
-describe("admission lane vs run lane eligibility — today's two divergences", () => {
+describe("admission lane vs run lane readiness — today's two divergences", () => {
   describe("D1 — a change with no live check request for its current head", () => {
     it("is excluded by the admission lane but reported runnable by the run lane", async () => {
-      await using app = await createEligibilityApp()
+      await using app = await createReadinessApp()
       await app.bays.submit({ branch: "topic/no-checks-yet", headSha: HEAD, base: "main", baseSha: BASE })
       const pr = recorded(app, "topic/no-checks-yet")
 
@@ -165,7 +165,7 @@ describe("admission lane vs run lane eligibility — today's two divergences", (
 
   describe("D2 — a cached passed admission record for a base-classified step", () => {
     it("control: a non-base step's cached pass is trusted by the run lane (not a divergence)", async () => {
-      await using app = await createEligibilityApp(undefined)
+      await using app = await createReadinessApp(undefined)
       const pr = await submitWithCachedPass(app, "topic/cached-pass-non-base")
 
       const current = app.state().bays.prs[pr]
@@ -182,7 +182,7 @@ describe("admission lane vs run lane eligibility — today's two divergences", (
     })
 
     it("the run lane reports the change still queued while the admission lane has already retired it forever", async () => {
-      await using app = await createEligibilityApp("base")
+      await using app = await createReadinessApp("base")
       const pr = await submitWithCachedPass(app, "topic/cached-pass-base")
 
       // Run lane's view: `checkEligibility`'s cache-trust branch requires
