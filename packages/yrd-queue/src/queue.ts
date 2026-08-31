@@ -134,7 +134,7 @@ import {
   type SubmitLanding,
   type UnrecordedSubmit,
 } from "./model.ts"
-import { queueChangeNotFoundMessage, resolveQueueChange } from "./change-population.ts"
+import { queueChangeNotFoundMessage, queueChanges, resolveQueueChange } from "./change-population.ts"
 import {
   DerivedRunMemberSchema,
   deriveRunMemberArgs,
@@ -737,11 +737,15 @@ function unrecordedRow(
 
 function queueRunNoSubmittedPRs(
   bays: DeepReadonly<BaysState>,
+  queues: DeepReadonly<QueuesState>,
   selected: readonly RuntimeStep[],
   excluded: ReadonlySet<string>,
 ): QueueRunNoSubmittedPRs {
   const population: Record<string, number> = {}
-  for (const pr of recordChanges(bays)) {
+  // BOTH lanes (@i/10-yrd C3b): this diagnostic explains an empty selection,
+  // and a population count that cannot see derived members under-reports the
+  // very queue it claims nothing is visible in.
+  for (const pr of queueChanges(bays, queues)) {
     const delivery = changeDeliveryState(pr)
     population[delivery] = (population[delivery] ?? 0) + 1
   }
@@ -3608,7 +3612,7 @@ function createQueue<Shape extends ChangeShape>(
             } else if (diagnostic.decisions.length === 0) {
               // Nothing to consider at all (as opposed to runnable members held
               // back by an active base, which the admission loop reports itself).
-              reportZeroEventRun(queueRunNoSubmittedPRs(snapshot.bays, authoritySteps, consumed))
+              reportZeroEventRun(queueRunNoSubmittedPRs(snapshot.bays, snapshot.queues, authoritySteps, consumed))
             }
           }
           for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize, snapshot.queues)) {
@@ -4630,7 +4634,7 @@ function createQueueCommands(
           events: [],
           value:
             rejected.length === 0 && unrecorded.length === 0
-              ? queueRunNoSubmittedPRs(state.bays, selected, new Set())
+              ? queueRunNoSubmittedPRs(state.bays, state.queues, selected, new Set())
               : queueRunNoRunnablePRs(rejected, selected, unrecorded),
         }
       }
@@ -8032,8 +8036,26 @@ function queueLivenessAuditFindings(
   return findings
 }
 
-function latestQueueMergeMs(state: DeepReadonly<RuntimeState>, base: string): number | undefined {
-  return recordChanges(state.bays)
+/**
+ * The queue's own last-merge clock, BOTH lanes (@i/10-yrd C3b).
+ *
+ * Record-lane-only reads froze this clock whenever the queue merged derived
+ * members: on 2026-08-31 the dead-man reported "no merge for 51m" while
+ * PR2769 and PR2770 merged inside that window, because both landed through
+ * the derived lane and left no record row. A derived member's merge time is
+ * the run lane's own stamp (`derivedIntegration` → `passedAt`), which is the
+ * trustworthy source the record fields only mirror.
+ *
+ * Module-exported for progress-both-lanes.test.ts (relative import), off the
+ * package surface per index.ts's explicit-list rule: the false "no merge for
+ * N" alarm is pinned against a derived merged run advancing exactly this
+ * number.
+ */
+export function latestQueueMergeMs(
+  state: DeepReadonly<Pick<RuntimeState, "bays" | "queues">>,
+  base: string,
+): number | undefined {
+  return queueChanges(state.bays, state.queues)
     .filter((pr) => baseIdentity(pr.base) === base)
     .flatMap((pr) => [pr.integratedAt, pr.alreadyLandedAt])
     .filter((at): at is string => at !== undefined)
@@ -8438,7 +8460,11 @@ function admissionQueue(
 function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): Change[] {
   const selected = declaredDefaultSteps(steps)
   if (!selected.some((step) => step.kind === "merge")) return []
-  return recordChanges(state.bays)
+  // BOTH lanes (@i/10-yrd C3b): the progress watchdog's population must see
+  // derived members, or a queue of only derived work reads as empty and its
+  // stall never fires — while a record-lane read beside a derived merge is
+  // what froze the last-merge clock above.
+  return queueChanges(state.bays, state.queues)
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
       return delivery === "submitted" || delivery === "ready" || (delivery === "pushed" && checksRequested(pr))
