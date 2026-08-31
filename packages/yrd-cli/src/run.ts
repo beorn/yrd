@@ -5945,22 +5945,6 @@ async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | und
   return io.resolveRevision?.(ref, cwd)
 }
 
-/** Parent SHAs for the linear-root gate. Unlike `optionalRevision`, absence is
- * loud: a host that cannot produce parent evidence would otherwise skip the
- * gate silently and re-open the merge-tip hole. */
-async function requiredParents(sha: string, io: YrdCliIO): Promise<readonly string[]> {
-  const cwd = io.cwd ?? process.cwd()
-  const parents = io.parents
-  if (parents === undefined) {
-    raiseFailure(
-      "configuration",
-      "commit-lineage-unavailable",
-      `yrd: this host provides no commit-parent evidence for '${sha}'; the linear-root gate cannot run`,
-    )
-  }
-  return parents(sha, cwd)
-}
-
 async function optionalCommitMeta(
   ref: string,
   io: YrdCliIO,
@@ -6189,7 +6173,6 @@ async function applyChangeSelection(
       ...(props === undefined ? {} : { props }),
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
-      resolveParents: (sha) => requiredParents(sha, io),
       run: runtimeOptions(io),
       warnings,
     })
@@ -11382,7 +11365,6 @@ async function applyRedeliveryStep(
   const submitted = await app.bays.submitSelection(step.branch, {
     ...(step.verb === "create" ? { draft: true } : {}),
     resolveRevision: (ref) => optionalRevision(ref, io),
-    resolveParents: (sha) => requiredParents(sha, io),
     run: runtimeOptions(io),
     warnings,
   })

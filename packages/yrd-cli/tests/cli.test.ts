@@ -726,7 +726,6 @@ async function submitBayFixture(app: TestApp, bay: string): Promise<void> {
   // by its focused regression instead of silently changing these fixtures.
   const bayResult = await app.bays.submitSelection(bay, {
     resolveRevision: async () => undefined,
-    resolveParents: async () => ["0".repeat(40)],
     run: { runner: "cli-test", leaseMs: 60_000 },
   })
   if ("lane" in bayResult) throw new Error("expected a record-lane Change from a bay submit")
