@@ -153,6 +153,25 @@ export function pendingSubmitBranches(bays: DeepReadonly<BaysState>, queues: Dee
 }
 
 /**
+ * Every branch some change already names — the carried set the stranded-ref
+ * sweep judges refs against.
+ *
+ * BOTH lanes plus the door: a record (any state — a withdrawn change is work
+ * someone already decided about), a derived member (a post-door change living
+ * only as a retained snapshot), or a standing submit fact awaiting its first
+ * admission. The record store alone is the lane the sweep used to read, and
+ * that lane flagged LIVE branches: a derived change's branch — or a
+ * submission sitting at the door — read as uncarried, so the one rail built
+ * to find lost work reported work the queue was actively holding
+ * (@i/10-yrd C3b).
+ */
+export function carriedBranches(bays: DeepReadonly<BaysState>, queues: DeepReadonly<QueuesState>): Set<string> {
+  const carried = new Set(queueChanges(bays, queues).map((change) => change.branch))
+  for (const branch of pendingSubmitBranches(bays, queues)) carried.add(branch)
+  return carried
+}
+
+/**
  * Resolve a selector against BOTH lanes — the one entry point every `change`
  * verb calls instead of indexing `bays.prs`.
  *

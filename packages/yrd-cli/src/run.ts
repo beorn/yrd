@@ -107,6 +107,7 @@ import {
   type QueueAuditFinding,
   type QueueSummary,
   type Run,
+  carriedBranches,
   queueChangeNotFoundMessage,
   queueChanges,
   resolveQueueChange,
@@ -9246,7 +9247,7 @@ function createStrandedSweeper(
       base,
       namespace: "refs/remotes/origin",
       authoredOnly: true,
-      carriedBranches: new Set(recordChanges(stateOf(app).bays).map((pr) => pr.branch)),
+      carriedBranches: carriedBranches(stateOf(app).bays, stateOf(app).queues),
       // Declared empty, never omitted — the disposition store is host-evaluated
       // after this sweep (applyHostFindingFilter). retiredRefs cannot carry it.
       retiredRefs: new Set<string>(),
@@ -9295,17 +9296,18 @@ async function queueStranded(
 ): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? globalThis.process.cwd()
   const base = options.base ?? "main"
-  // A branch is carried if any change names it — including terminal
-  // ones. A ref whose PR was withdrawn is not stranded work waiting to be
-  // found; it is work someone already decided about.
-  const carriedBranches = new Set(recordChanges(stateOf(app).bays).map((pr) => pr.branch))
+  // A branch is carried if any change names it — either lane, including
+  // terminal records, plus a submission standing at the door: a withdrawn
+  // change is work someone already decided about, and a derived-lane change
+  // or an unadmitted submit is work the queue is actively holding.
+  const carried = carriedBranches(stateOf(app).bays, stateOf(app).queues)
   await using process = createProcess()
   const result = await sweepStrandedRefs(sweepGit(process), {
     repo: cwd,
     base,
     namespace: options.namespace ?? "refs/remotes/origin",
     authoredOnly: options.namespace === undefined,
-    carriedBranches,
+    carriedBranches: carried,
     // retiredRefs stays empty: the disposition store is host-evaluated after
     // this sweep. Feeding it through retiredRefs would print "retired" for a
     // ref held to a date by a named verdict (@i/10-merge-queue/23150).
