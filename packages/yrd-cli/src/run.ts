@@ -12162,6 +12162,20 @@ export async function followQueueRuns(
         // the identical shared predicate `habitantQueueProgress` already
         // feeds service health with, never a second reader.
         logQueueLivenessWedge(app, new Date(cycleNow).toISOString())
+        // Level trigger (@i/10-yrd/quiet-path-starves-standing-submit-facts,
+        // shapes 1 and 5): the maintenance tick ALWAYS runs the queue. The
+        // edge flags above only accelerate; whether actionable work exists is
+        // answered by `runQueues`' own selection — the single honest evaluator
+        // — never by a second cli-side derivation of readiness. A submit fact
+        // recorded mid-run (shape 1), or this runner's own admission
+        // completing inside the previous cycle (shape 5), is invisible to
+        // every edge flag, and the wedge line above used to fire while the
+        // cycle went back to sleep — the alarm and the scheduler disagreeing
+        // about the one question they share. Forcing the run at this cadence
+        // makes that state impossible: an idle queue answers with a
+        // zero-event run (info-logged, no journal writes), inside the same
+        // 60s budget the sweep and audit above already spend.
+        runRequired = true
       }
       // The optional default preserves the narrow followQueueRuns test/programmatic
       // seam. The installed CLI always supplies the recutter; a caller that does
