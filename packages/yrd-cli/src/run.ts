@@ -1673,10 +1673,23 @@ export function needsPersonWarnings(findings: readonly QueueAuditFinding[]): str
 
 /** Exact latest merge driven for one queue. The epoch heartbeat publishes
  * this content so a probe can distinguish the right driver from an unrelated
- * habitant process with the same service name. */
+ * habitant process with the same service name.
+ *
+ * BOTH LANES, via `queueChanges`. Reading the record store alone (`recordChanges`)
+ * froze this answer at the last RECORD-lane merge, because a derived-lane merge
+ * leaves no row in `bays.prs`. Measured 2026-08-31: main advanced to 07218650a6
+ * at 19:09:42Z (reflog) while the heartbeat still published dd3f0f3cb3 at
+ * 17:09:57Z, so the dashboard read "no merge for 2:11:32" over a queue that had
+ * merged twelve minutes earlier. Nearly all traffic now arrives through the
+ * derived lane, so the frozen position also made the dead-man unconditional:
+ * `resident-runner-stalled-no-merge` tests uptime and no-merge age against the
+ * same 3h threshold, and a position that never advances makes the second test
+ * pass whenever the first does. Same shape as the population-vs-store count
+ * `queueChanges` was introduced to fix. */
 export function habitantDriverLastMerged(app: YrdCliApp, base: string): QueueDriverEpoch["lastMerged"] {
+  const state = stateOf(app)
   return (
-    recordChanges(stateOf(app).bays)
+    queueChanges(state.bays, state.queues)
       .flatMap((pr) => {
         if (
           baseIdentity(pr.base) !== baseIdentity(base) ||
