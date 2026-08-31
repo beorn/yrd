@@ -219,6 +219,43 @@ describe("planYrdComposition", () => {
     const plan = planYrdComposition(["queue", "run", "code"], single, { env: {} })
     expect(plan).toMatchObject({ kind: "repository", repository: { name: "code", path: repo } })
   })
+
+  it("defaults an omitted write to the sole declared repository instead of demanding ceremony", () => {
+    // A required argument that names the only legal value carries no
+    // information — `yrd queue run` has exactly one repository it could mean
+    // while exactly one is declared. This reads live off the declared set
+    // (never a hardcoded name), so it stops applying the moment a second
+    // repository is declared: `requiredRepository`'s `byName.size === 1`
+    // check goes false and the explicit name becomes required again with no
+    // further change here.
+    const repo = initRepository("yrd-composition-default-")
+    const single = requireComposition(declaration([{ name: "code", path: ".", base: "main" }], repo))
+    const plan = planYrdComposition(["queue", "run"], single, { env: {} })
+    expect(plan).toMatchObject({ kind: "repository", repository: { name: "code", path: repo } })
+  })
+
+  it("still requires an explicit repository for a write once a second is declared, and the refusal names the fix", () => {
+    // The counterpart to the default above: two declared repositories means
+    // the omission is genuinely ambiguous, so it must still refuse — but the
+    // refusal now says a value was never typed (not "" as if it were) and
+    // names the exact command, using the verb the operator actually typed.
+    expect(() => planYrdComposition(["queue", "run"], composition, { env: {}, authority: identityAuthority })).toThrow(
+      "unknown Yrd repository ''; expected code or pm; none was given — run 'yrd queue run code' to name one",
+    )
+  })
+
+  it("distinguishes an omitted repository from a typo in the same refusal shape", () => {
+    // A typo'd repository name is a different condition from an omitted one
+    // and keeps the plain "unknown ... expected ..." message with no
+    // appended remedy clause — the operator already typed a concrete (wrong)
+    // value, so there is nothing to clarify about intent, only spelling.
+    expect(() =>
+      planYrdComposition(["queue", "run", "nope"], composition, { env: {}, authority: identityAuthority }),
+    ).toThrow("unknown Yrd repository 'nope'; expected code or pm")
+    expect(() =>
+      planYrdComposition(["queue", "run", "nope"], composition, { env: {}, authority: identityAuthority }),
+    ).not.toThrow(/none was given/)
+  })
 })
 
 describe("composeYrdArgv", () => {
