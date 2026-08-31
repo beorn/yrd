@@ -3348,8 +3348,19 @@ function createQueue<Shape extends ChangeShape>(
                 // Mirrors the record path's tolerance for changes that
                 // disappeared mid-cycle: the authoritative CAS refuses loudly
                 // at dispatch if anything still names the member.
-                if (failureFact(error)?.kind === "refusal") return []
-                throw error
+                const fact = failureFact(error)
+                if (fact === undefined || fact.kind !== "refusal") throw error
+                // hub/yrd/2026-08-30-core-review.md: log parity with admitDerived's
+                // (~3325) identical mid-cycle-disappearance skip, which already warns.
+                log.warn?.("queue materialize skipped a derived member whose submit fact no longer admits it", {
+                  action: "compose-candidate-skip",
+                  pr: member.id,
+                  branch: member.branch,
+                  code: fact.code,
+                  kind: fact.kind,
+                  reason: fact.message,
+                })
+                return []
               }
             })
           // The intent lane that used to interleave here with a head-of-line
