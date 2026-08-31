@@ -1500,8 +1500,16 @@ function queueContentHealthError(
   }
 }
 
+/** Work waiting on this queue, BOTH LANES. The record-lane read this replaced
+ * was the same population-vs-store defect as `habitantDriverLastMerged` above,
+ * pointing the other way: it gates two findings, so a queue whose waiting work
+ * is entirely derived-lane counted zero and BOTH went silent — a dead runner
+ * with a full queue reported `resident-runner-missing` never, and the dead-man
+ * was skipped outright. One lane read, two directions of error: the merge
+ * position freezes and fires falsely, the ready set empties and never fires. */
 function queuedDeliveryCount(app: YrdCliApp): number {
-  return recordChanges(stateOf(app).bays).filter((pr) => {
+  const state = stateOf(app)
+  return queueChanges(state.bays, state.queues).filter((pr) => {
     const delivery = changeDeliveryState(pr)
     return delivery === "submitted" || delivery === "ready"
   }).length
@@ -1965,9 +1973,25 @@ async function queueRunnerHealth(
       const runnerUptimeMs = now - Date.parse(runner.observedStartedAt ?? runner.startedAt)
       if (runnerUptimeMs >= 3 * 60 * 60_000) {
         const expectedLastMerged = app === undefined ? undefined : habitantDriverLastMerged(app, base)
-        const lastMergedMs = expectedLastMerged ? Date.parse(expectedLastMerged.at) : 0
-        const noMergeMs = now - lastMergedMs
-        if (noMergeMs >= 3 * 60 * 60_000) {
+        // NO POSITION IS NOT-MEASURED, and it used to read as 1970. The old
+        // `: 0` fallback made `noMergeMs` about fifty-six years whenever no
+        // qualifying merge was found, so this test could not fail and the
+        // dead-man collapsed onto its first conjunct: it stopped claiming that
+        // merging had stopped and started claiming only that the runner had
+        // been up three hours. Absence rendered as a value, which is the
+        // failure this repository refuses by name.
+        //
+        // Suppressing is the honest answer for THIS finding: it asserts that a
+        // merge cadence stopped, and that assertion needs a last merge to
+        // measure from. A queue that has never merged at all may well deserve
+        // an alarm, but it is a different claim and wants its own finding
+        // rather than this one firing by arithmetic accident. Every other
+        // driver check still runs, so nothing is hidden by abstaining here.
+        const noMergeMs =
+          expectedLastMerged === undefined || expectedLastMerged === null
+            ? undefined
+            : now - Date.parse(expectedLastMerged.at)
+        if (noMergeMs !== undefined && noMergeMs >= 3 * 60 * 60_000) {
           const uptimeFormatted = Math.floor(runnerUptimeMs / 3600000)
           const noMergeFormatted = Math.floor(noMergeMs / 3600000)
           return queueContentHealthError(

@@ -6977,7 +6977,44 @@ describe("runYrd", () => {
           driver,
         }),
       )
-      const stalledNoMerge = outputIO({ cwd: repo })
+      // NO MERGE POSITION IS NOT-MEASURED, AND THIS CASE USED TO ASSERT THE
+      // OPPOSITE. This fixture has never merged anything, and the finding
+      // fired anyway: `lastMergedMs` fell back to `0`, so the age was measured
+      // from the Unix epoch and the `>= 3h` test could not fail. The assertion
+      // below therefore proved only that the finding fires on an empty
+      // fixture — it would have passed with the uptime conjunct alone. A
+      // finding that claims merging STOPPED needs a merge to measure from.
+      const noPosition = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), noPosition.io, services)).toBe(0)
+      expect(JSON.parse(noPosition.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "healthy",
+        running: true,
+      })
+
+      // The finding's REAL condition, which nothing proved until now: a known
+      // merge position older than the window, with a non-empty ready set that
+      // survives the merge. PR2 is opened solely to be merged, so PR1 stays
+      // submitted and the ready-set conjunct is not retired along with it —
+      // otherwise the finding would go quiet for the wrong reason and the case
+      // would prove nothing.
+      await openTestBay(app, { name: "two" })
+      await submitBayFixture(app, "B2")
+      expect(await app.queue.run({ prs: ["PR2"] }, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
+        { status: "completed", conclusion: "success" },
+      ])
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T16:04:58.000Z",
+          command: "yrd queue run",
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T16:04:58.000Z" },
+          driver,
+        }),
+      )
+      const stalledNoMerge = outputIO({ cwd: repo, now: () => Date.parse("2026-07-09T16:05:00.000Z") })
       expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), stalledNoMerge.io, services)).toBe(2)
       expect(JSON.parse(stalledNoMerge.stdout())).toMatchObject({
         schema: "hab-service-health/1",
