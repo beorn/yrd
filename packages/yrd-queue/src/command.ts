@@ -1250,7 +1250,6 @@ function createGit(
     args: readonly string[],
     allowFailure: boolean,
     trim: boolean,
-    stdoutChunks?: Uint8Array[],
     preserveProcessFailure = false,
     timeoutMs = GIT_TIMEOUT_MS,
   ): Promise<GitResult> => {
@@ -1262,13 +1261,6 @@ function createGit(
         cwd: repo,
         env,
         timeoutMs,
-        ...(stdoutChunks === undefined
-          ? {}
-          : {
-              onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => {
-                if (output.stream === "stdout") stdoutChunks.push(output.chunk.slice())
-              },
-            }),
       })
     } catch (cause) {
       // Failing to START git is not the same event as git failing, and until now only the second
@@ -1317,13 +1309,11 @@ function createGit(
     return completed
   }
   const run = (repo: string, args: readonly string[], allowFailure = false, timeoutMs?: number): Promise<GitResult> =>
-    execute(repo, args, allowFailure, true, undefined, false, timeoutMs)
+    execute(repo, args, allowFailure, true, false, timeoutMs)
   const raw = (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> =>
     execute(repo, args, allowFailure, false)
-  const probe = (repo: string, args: readonly string[]): Promise<GitResult> =>
-    execute(repo, args, true, true, undefined, true)
-  const rawProbe = (repo: string, args: readonly string[]): Promise<GitResult> =>
-    execute(repo, args, true, false, undefined, true)
+  const probe = (repo: string, args: readonly string[]): Promise<GitResult> => execute(repo, args, true, true, true)
+  const rawProbe = (repo: string, args: readonly string[]): Promise<GitResult> => execute(repo, args, true, false, true)
   const input = async (
     repo: string,
     args: readonly string[],
