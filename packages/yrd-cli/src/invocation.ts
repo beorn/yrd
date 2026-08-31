@@ -333,11 +333,31 @@ export function normalizeYrdRepositoryAliasInvocation(
   canonicalizeYrdCommandSpellings(args, queueIndex)
   if (args[queueIndex] !== "queue") return { kind: "bypass", args }
   const byName = new Map(declarations.map((declaration) => [declaration.repository.name, declaration] as const))
-  const requiredRepository = (name: string | undefined): YrdRepositoryAlias => {
+  const requiredRepository = (name: string | undefined, verb?: string): YrdRepositoryAlias => {
     const declaration = name === undefined ? undefined : byName.get(name)
     if (declaration !== undefined) return declaration
-    const expected = namedAlternatives([...byName.keys()])
-    usage(`unknown Yrd repository '${name ?? ""}'; expected ${expected}`)
+    const names = [...byName.keys()]
+    // Omitting the repository is unambiguous while exactly one is declared —
+    // the composition already answered "which one", so making the operator
+    // repeat it is ceremony. The moment a second repository is declared,
+    // `names.length` grows past 1 and this stops matching: the name becomes
+    // required again with no further code change here.
+    if (name === undefined && names.length === 1) {
+      const sole = byName.get(names[0] ?? "")
+      if (sole !== undefined) return sole
+    }
+    const expected = namedAlternatives(names)
+    // `name === undefined` means the operand was never typed — a different
+    // condition from typing a value that matches nothing in `names`, and it
+    // earns a different message: say so, and name the exact command, rather
+    // than showing '' next to the legal set as if that were what was typed.
+    const remedy =
+      name === undefined
+        ? names[0] === undefined
+          ? "; none was given"
+          : `; none was given — run 'yrd queue ${verb ?? "run"} ${names[0]}' to name one`
+        : ""
+    usage(`unknown Yrd repository '${name ?? ""}'; expected ${expected}${remedy}`)
   }
   const prefix = args.slice(0, queueIndex)
   const readOnly = (command: string): boolean => READ_ONLY_SUBCOMMANDS.queue?.has(command) === true
@@ -421,7 +441,7 @@ function resolveQueueOperands(
   args: readonly string[],
   queueIndex: number,
   byName: ReadonlyMap<string, YrdRepositoryAlias>,
-  requiredRepository: (name: string | undefined) => YrdRepositoryAlias,
+  requiredRepository: (name: string | undefined, verb?: string) => YrdRepositoryAlias,
   readOnly: (command: string) => boolean,
 ): ResolvedQueueOperands {
   const first = args[queueIndex + 1]
@@ -439,7 +459,7 @@ function resolveQueueOperands(
   if (!readOnly(spelling[0] ?? "list")) {
     return {
       command: spelling,
-      declaration: requiredRepository(args[queueIndex + 2]),
+      declaration: requiredRepository(args[queueIndex + 2], first),
       tail: args.slice(queueIndex + 3),
       typed: first,
     }
