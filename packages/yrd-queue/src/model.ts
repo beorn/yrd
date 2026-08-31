@@ -48,8 +48,17 @@ export type StepName = string
 export type BatchConfig = false | number
 export type QueueRequirement = "review"
 
-/** Stored fact from the retired flow rail (5e cut 3): journal rows written
- * before the cut carry it; nothing consumes it. */
+/** Identifies which named-flow revision built a change's queue partition.
+ * No current caller mints a new value — there is no `--flow` CLI flag and
+ * nothing else constructs `{flow: ...}` args, so yrd-bay's writers
+ * (pr/submitted at plugin.ts:2034, 2126; carried forward at plugin.ts:3128)
+ * only ever see `undefined` today. But existing values, replayed from
+ * pre-cut journal rows, are NOT inert: yrd-queue still keys queue/candidate
+ * identity on this field for as long as such a change stays in the queue —
+ * `queueIdentity` (queue.ts:6378), `sameFlow`/`candidateFlow` (queue.ts:
+ * 6365-6376, checked at queue.ts:5685), and the candidate-batching group
+ * key (queue.ts:9989-9992). Do not delete this field or its consumers
+ * while a queued change can still carry a value from before the cut. */
 const FlowPinSchema = z
   .object({
     name: z.string().trim().min(1),
