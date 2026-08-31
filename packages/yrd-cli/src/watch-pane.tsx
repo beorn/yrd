@@ -330,6 +330,17 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
           if (nextAtEnd) setUnseenRows(0)
         }}
         scrollbarVisibility="always"
+        // Artifact rows are EXPENSIVE items in ListView's sense: each one is a
+        // Box wrapping a Text, so mounting all of them costs an AgNode, a
+        // layout node and a prepared-text cache entry per LOG LINE while the
+        // viewport shows a few dozen rows. ListView's default threshold is
+        // 10,000 items (raised from 100 to keep chat resume snappy), which
+        // leaves a build log of a few thousand lines mounting in full: measured
+        // 8,000 rows cost 632-712 MB of live post-GC RSS, and the same list at
+        // 12,000 rows — past the default and therefore virtualized — cost 63-69
+        // MB for identical visible output. Lower the bar here rather than
+        // globally; the prop exists for exactly this consumer shape.
+        virtualizationThreshold={200}
         renderItem={(row) => (
           // ListView suppresses selection on its navigation wrapper. Restore a
           // text-selectable island for every output row so drag-select reaches
