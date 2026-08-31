@@ -375,7 +375,18 @@ export function createProcess(
       : reapOwnedPathWithCensus(path, killGraceMs, postKillReapGraceMs, pathHolderCensus)
   return {
     async run(request) {
-      if (closing || scope.disposed) throw new Error("yrd: Process is closed")
+      // Typed like requireSpawnDirectory's spawn-cwd-missing below, for the
+      // same reason: a bare Error here is indistinguishable from any other
+      // spawn fault, so no caller — least of all the habitant's own
+      // mid-cycle recovery classifier — can recognize "the pool is already
+      // draining" and stop cleanly instead of crashing uncaught. Close()
+      // itself already drains its OWN active set before resolving; this
+      // guard exists for whoever calls run() again after that has started,
+      // which a shutdown-aware caller must be able to tell apart from a
+      // genuine infrastructure fault (2026-08-31 SIGINT teardown race, operator terminal).
+      if (closing || scope.disposed) {
+        throw createFailure({ kind: "infrastructure", code: "process-closed", message: "yrd: Process is closed" })
+      }
       const settled = Promise.withResolvers<void>()
       active.add(settled.promise)
       using _activeRun = {

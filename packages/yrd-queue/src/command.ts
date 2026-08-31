@@ -1273,7 +1273,17 @@ function createGit(
       // for the rest.
       const detail = cause instanceof Error ? cause.message : String(cause)
       const message = `yrd: git ${args.join(" ")} could not be started in '${repo}': ${detail}`
-      if (!allowFailure) throw new Error(message, { cause })
+      if (!allowFailure) {
+        // Preserve an underlying classification (e.g. yrd-process's
+        // process-closed, thrown when a shutdown-in-progress pool refuses new
+        // work) through this wrap. The contextual "could not be started in"
+        // message is strictly more useful than the bare original, but a
+        // caller further up the chain — the habitant's own mid-cycle recovery
+        // classifier chief among them — must still be able to recognize WHAT
+        // kind of failure this was without parsing prose (2026-08-31 SIGINT teardown race).
+        const fact = failureFact(cause)
+        throw fact === undefined ? new Error(message, { cause }) : createFailure({ ...fact, message }, cause)
+      }
       return {
         code: GIT_UNSTARTABLE_CODE,
         stdout: "",

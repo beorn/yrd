@@ -12416,6 +12416,26 @@ export async function followQueueRuns(
       heartbeat?.check()
       return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null
     } catch (error) {
+      // The shared process pool refuses new work once ITS OWN close() has
+      // started (yrd-process's typed process-closed) — expected the instant
+      // this runner's own drain is already under way, since app.queue.run's
+      // git calls share that one pool with everything else the habitant does.
+      // Recognized ahead of the skip-and-retry classifier below: retrying
+      // would just re-hit a pool that never reopens, spinning the interval
+      // sleep forever instead of exiting. Gated on drainRequested() so a
+      // process-closed OUTSIDE a requested drain — which would mean the pool
+      // closed for some other reason entirely — still fails loud below; gated
+      // on the selectorless loop the same way habitantCycleRecovery is below,
+      // since a targeted one-shot has no next cycle to stop instead of retry
+      // (2026-08-31 SIGINT teardown race, operator terminal).
+      if (selectors.length === 0 && failureFact(error)?.code === "process-closed" && drainRequested()) {
+        app.log.warn?.("habitant runner stopped after its own shared process pool closed mid-drain", {
+          action: "resident-drain-pool-closed",
+          reason: error instanceof Error ? error.message : String(error),
+        })
+        heartbeat?.check()
+        return HABITANT_INTERRUPTED_EXIT
+      }
       // One typed recovery boundary owns the complete selectorless cycle. A
       // journal lock can surface while refreshing, preparing, or committing
       // the run. Multi-tenant races can surface at the same boundaries. All

@@ -8,6 +8,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createLogger, type Event as LogEvent } from "loggily"
+import { failureFact } from "@yrd/core"
 import { createProcess, shellCommand, type Spawn } from "@yrd/process"
 
 const silentLog = createLogger("test", [{ level: "silent" }])
@@ -261,6 +262,24 @@ describe("Process", () => {
     await close
     expect(closed).toBe(true)
     await expect(running).resolves.toMatchObject({ exitCode: 137 })
+  })
+
+  it("refuses new work with a typed, classifiable failure once closed", async () => {
+    const process = createProcess({ env: { PATH: Bun.env.PATH } })
+    await process.close()
+
+    const error = await process.run({ argv: ["printf", "ok"] }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+
+    // Typed, not a bare Error: a caller racing this pool's own shutdown — the
+    // habitant runner's mid-cycle recovery classifier chief among them — must
+    // be able to recognize "the pool already closed" and stop cleanly instead
+    // of treating an expected refusal as an unclassified, fatal fault
+    // (2026-08-31 SIGINT teardown race, operator terminal).
+    expect(failureFact(error)).toMatchObject({ kind: "infrastructure", code: "process-closed" })
+    expect((error as Error).message).toBe("yrd: Process is closed")
   })
 
   // Output VOLUME is not a correctness signal. This cap used to THROW, which
