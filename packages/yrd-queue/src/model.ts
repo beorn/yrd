@@ -605,6 +605,7 @@ export type RunAuthority = Readonly<{
       | "source-publish"
       | "scratch-cleanup-failed"
       | "wrapper-generation"
+      | "run-settled"
     ref: string
   }>
 }>

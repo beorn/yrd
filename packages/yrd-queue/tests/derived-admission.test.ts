@@ -414,7 +414,7 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(standing.events.some((event) => event.name === "pr/needs-author")).toBe(true)
   })
 
-  it("derived submit authority is one-per-fact: consumed by the merge run, standing again after a re-push (design §2)", async () => {
+  it("derived submit authority returns once its consuming run settles, independently of a re-push (design §2; live 2026-09-01)", async () => {
     await using app = await createApp()
     await strandDerivedBranch(app, "issue/derived")
     // One durable mint across derivations, as production has: the re-derive
@@ -424,14 +424,24 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     await app.queue.run({ derived: [entry] }, runtime)
     const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR2"))
     if (record === undefined) throw new Error("expected the derived merge run")
+    expect(record.passedAt).toBeDefined()
 
+    // The consuming run has already SETTLED (passed) by the time `queue.run`
+    // resolves, so its authority release already fired — no re-push needed.
+    // Before the fix this stayed `{ standing: false, consumedBy: record.id }`
+    // forever: `queue/run/settled` released only `authority.claims`, not the
+    // `submits`/`checks` token `queue/run/failed` and `queue/run/canceled`
+    // both release. Live incident: PR2749 and PR2909 refused
+    // `queue-submit-authority-consumed` on a ~90s cadence for 19+ hours
+    // against runs that had settled "passed" long before.
     const lookup = derivedAuthorityLookup(app.state())
     const snapshot = record.prs[0]
     if (snapshot === undefined) throw new Error("run lost its member")
-    expect(lookup(snapshot)).toEqual({ standing: false, consumedBy: record.id })
+    expect(lookup(snapshot)).toEqual({ standing: true })
 
-    // Re-push = per-push consent: the fact re-projects with a newer clock and
-    // the SAME sha still renews authority (git CAS is the actuator).
+    // A re-push is still an independent way to renew authority early, while a
+    // consuming run is still active — per-push consent, the SAME sha included
+    // (git CAS is the actuator).
     const repushed = {
       ...app.state(),
       bays: {
@@ -441,14 +451,12 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     }
     expect(derivedAuthorityLookup(repushed)(snapshot)).toEqual({ standing: true })
 
-    // And the compose acts on consumption: the same member again is skipped
-    // (consumed authority — the cure is a re-push), with the durable ledger
-    // row and no phantom needs-author on a record that does not exist.
+    // And the compose acts on the freed fact correctly: re-deriving the same
+    // (already fully admitted) member reuses the settled admission instead of
+    // running it again — a clean no-op, never a phantom
+    // `queue-submit-authority-consumed` refusal.
     await expect(app.queue.run({ derived: [doorEntry(app, "issue/derived", { mint })] }, runtime)).resolves.toEqual([])
-    expect(app.state().queues.admissionRefusals.PR2).toMatchObject({
-      pr: "PR2",
-      code: "queue-submit-authority-consumed",
-    })
+    expect(app.state().queues.admissionRefusals.PR2).toBeUndefined()
   })
 
   it("a member with a live record for its branch never enters the derived lane (A4 — never both lanes)", async () => {
