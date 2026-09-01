@@ -816,6 +816,59 @@ export function currentChangeRev(pr: Pick<Change, "id" | "revs">): ChangeRev {
 export const changeAdmission = (pr: Pick<Change, "id" | "revs">): ChangeAdmission | undefined =>
   currentChangeRev(pr).admission
 
+/**
+ * The finish belonging to the CURRENT admission — or `undefined` when the only
+ * finish on record belongs to a previous one.
+ *
+ * A revision's submit fact is MUTABLE. Re-submitting the same sha (the
+ * documented remedy when a run consumes a change's submit authority) rewrites
+ * `submittedAt` forward, and `branch/submitted` clears `terminal` as it does.
+ * A settle from a run that has since died can still land AFTER that, stamped
+ * with its own older time — and then the revision carries a finish that
+ * describes an admission which is over.
+ *
+ * Read forward: a finish preceding its own start is not corruption and not a
+ * clock fault. It is a resubmitted sha whose results are stale, and the current
+ * admission has no finish yet.
+ *
+ * This lives here, in the shared model, because both halves of the rule need
+ * it — {@link changeDeliveryState} decides what the QUEUE ADMITS, and the read
+ * projections in `@yrd/queue` decide what an operator is shown. One home, so
+ * the two can never disagree about which admission a clock belongs to.
+ */
+export function currentAdmissionFinish(
+  startedAt: string | undefined,
+  finishedAt: string | undefined,
+): string | undefined {
+  if (startedAt === undefined || finishedAt === undefined) return finishedAt
+  const start = Date.parse(startedAt)
+  const finish = Date.parse(finishedAt)
+  // An unparseable clock is a different defect; leave it to the reader that
+  // knows how to name it rather than swallowing it here.
+  if (!Number.isFinite(start) || !Number.isFinite(finish)) return finishedAt
+  return finish < start ? undefined : finishedAt
+}
+
+/**
+ * A revision's terminal fact, but only while it belongs to that revision's
+ * CURRENT admission — the {@link currentAdmissionFinish} rule applied to the
+ * one pair that decides delivery.
+ *
+ * Without this, a late REJECTED settle made a re-submitted change report
+ * `rejected` forever: `changeDeliveryState` read the stale terminal straight
+ * off the record while `branch/submitted` had already cleared `rejectedAt`.
+ * The change was then silently held out of the queue — `requestedPRs` admits
+ * only `submitted`/`ready` — while every reader told the author they had
+ * re-pushed and were waiting. Silence on one side, a contradiction on the
+ * other, and nothing named the disagreement.
+ */
+export function currentRevisionTerminal(revision: ChangeRevClock): ChangeRevTerminal | undefined {
+  if (revision.terminal === undefined) return undefined
+  return currentAdmissionFinish(revision.submittedAt, revision.terminal.at) === undefined
+    ? undefined
+    : revision.terminal
+}
+
 export function changeNeedsAuthor(pr: Change): Change["needsAuthor"] | undefined {
   if (pr.needsAuthor !== undefined) return pr.needsAuthor
   const admission = changeAdmission(pr)
@@ -846,7 +899,11 @@ export function changeDeliveryState(pr: Change): ChangeDeliveryState {
   }
   const revision = currentChangeRev(pr)
   if (changeNeedsAuthor(pr) !== undefined) return "needs-author"
-  if (revision.terminal?.kind === "rejected") return "rejected"
+  // Only a terminal fact from THIS admission decides delivery — see
+  // {@link currentRevisionTerminal}. A settle that predates the revision's own
+  // submit fact is a previous admission's and must not hold a re-submitted
+  // change out of the queue.
+  if (currentRevisionTerminal(revision)?.kind === "rejected") return "rejected"
   if (revision.submittedAt === undefined) return "pushed"
   return revision.admission?.status === "passed" ? "ready" : "submitted"
 }

@@ -171,17 +171,22 @@ describe("reader resubmitted-stale-results gate — one rule, every listing", ()
   })
 
   /**
-   * The variant the scoping rule deliberately does NOT resolve. A late
-   * REJECTED settle is read by `changeDeliveryState` (yrd-bay model.ts, the
-   * `revision.terminal?.kind === "rejected"` branch) straight off the raw
-   * record, so the change reports `rejected` while the re-submission has
-   * already cleared `pr.rejectedAt` — and `currentTerminalFact` then refuses
-   * for want of the timestamp. Teaching the delivery state to ignore a
-   * superseded terminal would change what the QUEUE admits, not just what a
-   * reader prints, so it is left for a ruling. What must hold either way is
-   * that it costs one row and not the listing.
+   * The variant that used to escape the reader rule, now closed at its source.
+   * `changeDeliveryState` read `revision.terminal?.kind === "rejected"` straight
+   * off the raw record, so a late REJECTED settle made the change report
+   * `rejected` while the re-submission had already cleared `pr.rejectedAt`, and
+   * `currentTerminalFact` then refused for want of the timestamp. That was a
+   * defect in what the QUEUE ADMITS, not only in what a reader prints — the
+   * change was silently held out of the queue — and it is fixed in the shared
+   * model by {@link currentRevisionTerminal}
+   * ({@link ../../yrd-bay/tests/late-settle-admission.test.ts}).
+   *
+   * So this row is no longer CONTAINED; it is RESOLVED, and reads pending like
+   * every other resubmitted change. The containment behind it stays for
+   * anything the rule cannot resolve, pinned in
+   * {@link ./reader-watch-source-ready-age-gate.test.ts}.
    */
-  it("a late REJECTED settle costs its own row, never the whole listing", () => {
+  it("a late REJECTED settle reads pending too — resolved at the source, not contained", () => {
     const lateRejected: Change = {
       ...resubmitted(),
       revs: [{ ...resubmitted().revs[0]!, terminal: { kind: "rejected", at: TERMINAL_AT, run: "R3675" } }],
@@ -202,13 +207,13 @@ describe("reader resubmitted-stale-results gate — one rule, every listing", ()
     }).not.toThrow()
 
     expect(rows).toHaveLength(2)
-    const marked = rows?.find((row) => row.pr === CHANGE)
-    expect(marked?.state).toBe("unreadable")
-    expect(marked?.why).toBe("clock-unreadable")
-    expect(marked?.whyMessage).toContain("has no rejected timestamp")
-    expect(marked?.whyMessage).toContain(`yrd log --pr ${CHANGE}`)
-    // Its neighbour is untouched — this is the containment, not a blanket.
-    expect(rows?.find((row) => row.pr === "PR2750")?.state).not.toBe("unreadable")
+    const row = rows?.find((candidate) => candidate.pr === CHANGE)
+    expect(row?.state).toBe("submitted")
+    expect(row?.why).not.toBe("clock-unreadable")
+    expect(row?.age).not.toBe("-")
+    // The stale fact is still on the record; it simply decides nothing.
+    expect(lateRejected.revs[0]?.terminal?.kind).toBe("rejected")
+    expect(rows?.find((candidate) => candidate.pr === "PR2750")?.state).not.toBe("unreadable")
   })
 
   it("a settle that is genuinely this admission's still measures to it", () => {
