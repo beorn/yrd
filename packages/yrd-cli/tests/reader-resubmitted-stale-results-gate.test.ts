@@ -45,6 +45,8 @@ import {
   type QueueStatusResult,
 } from "../src/queue-status-view.tsx"
 
+type Run = QueueStatusResult["finished"][number]
+
 const CHANGE = "PR2749"
 const HEAD = `b3e5141d${"0".repeat(32)}`
 const BASE_SHA = "a".repeat(40)
@@ -214,6 +216,106 @@ describe("reader resubmitted-stale-results gate — one rule, every listing", ()
     // The stale fact is still on the record; it simply decides nothing.
     expect(lateRejected.revs[0]?.terminal?.kind).toBe("rejected")
     expect(rows?.find((candidate) => candidate.pr === "PR2750")?.state).not.toBe("unreadable")
+  })
+
+  /**
+   * The THIRD live shape, and the one that was still blocking the fleet's
+   * canonical read after the row projections were fixed. Measured by @ci on
+   * 2026-09-01 against the live journal, byte-identical on the pinned CLI
+   * (764c7ac8) and on d083dce6:
+   *
+   *   yrd queue list --json
+   *   error: change 'PR2909' total duration
+   *          finish '2026-09-01T11:20:30.531Z'
+   *          precedes start '2026-09-01T18:41:34.096Z'
+   *
+   * It is NOT the `runRevisionClockRead` closure — those two call sites go
+   * through the guarded validator already. `terminalMemberFact` is a FLOW
+   * metric, folded per completed Run by `foldTerminalFacts`, and it never
+   * touches the revision clock at all: it pairs the lineage's own
+   * `registeredAt ?? sourceReadyAt` START with the Run's finish. For a member
+   * whose pinned revision is not retained on the record, `timelineRevisionLineage`
+   * supplies no `registeredAt` and falls back to the change-level submit fact —
+   * which the re-submission had moved to 18:41Z, hours after the dead run
+   * finished at 11:20Z. One unguarded pairing, three surfaces down.
+   */
+  it("`yrd queue list --json` folds the FLOW metric without aborting on a resubmitted member", () => {
+    const RUN_FINISHED_AT = "2026-09-01T11:20:30.531Z"
+    const RESUBMITTED = "2026-09-01T18:41:34.096Z"
+    // Built from the ERROR'S OWN ARITHMETIC rather than a guess at which
+    // journal event produced it: the projection reported a start of
+    // 18:41:34.096Z against a finish of 11:20:30.531Z, and `terminalMemberFact`
+    // takes its start from the lineage's `registeredAt` — the lineage root's
+    // `pushedAt` — falling back to its `sourceReadyAt`. So the pairing the live
+    // read performed is a member whose lineage clock sits AFTER the run that
+    // pinned it finished. That is representable directly, and the fix has to
+    // hold for it however the journal got there.
+    const member = { id: "PR2909", branch: "task/w28-flow", base: "main", revision: 1, headSha: HEAD, baseSha: BASE_SHA }
+    const notRetained: Change = {
+      ...resubmitted(),
+      id: "PR2909",
+      branch: "task/w28-flow",
+      revs: [
+        {
+          ...resubmitted().revs[0]!,
+          pushedAt: RESUBMITTED,
+          submittedAt: RESUBMITTED,
+          terminal: undefined,
+        },
+      ],
+      submittedAt: RESUBMITTED,
+    }
+    const deadRun = {
+      id: "R3699",
+      queueId: "Q:main",
+      candidateId: "C:R3699",
+      base: "main",
+      prs: [member],
+      jobs: [],
+      steps: [],
+      startedAt: "2026-09-01T11:00:00.000Z",
+      finishedAt: RUN_FINISHED_AT,
+      cursor: 0,
+      shape: { results: {} },
+      status: "completed",
+      conclusion: "failure",
+    } as unknown as Run
+
+    let projection: ReturnType<typeof queueTimelineProjection> | undefined
+    expect(() => {
+      projection = queueTimelineProjection(
+        [
+          {
+            base: "main",
+            prs: [notRetained],
+            admissionOrder: ["PR2909"],
+            running: [],
+            waiting: [],
+            finished: [deadRun],
+          },
+        ],
+        {
+          now: NOW,
+          windowMs: 100 * 365 * 24 * 60 * 60 * 1_000,
+          statuses: ["pending", "running", "rejected", "integrated", "other"],
+          terms: [],
+          latest: false,
+          rowLimit: 50,
+          submissionTimes: new Map(),
+        },
+      )
+    }).not.toThrow()
+
+    // The FLOW fact still exists — the metric is not dropped, it is honest.
+    const fact = projection?.timeStatsFacts.find((candidate) => candidate.run === "R3699")
+    expect(fact).toBeDefined()
+    const flowMember = fact?.members.find((candidate) => candidate.pr === "PR2909")
+    expect(flowMember).toBeDefined()
+    // No finish belongs to this admission, so there is no total duration to
+    // report. Null, never a negative number and never an abort.
+    expect(flowMember?.totalMs).toBeNull()
+    // And the row itself still renders.
+    expect(projection?.rows.some((candidate) => candidate.pr === "PR2909")).toBe(true)
   })
 
   it("a settle that is genuinely this admission's still measures to it", () => {

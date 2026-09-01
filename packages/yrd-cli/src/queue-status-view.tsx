@@ -1773,8 +1773,27 @@ function terminalMemberFact(
 ): QueueTerminalMemberFact {
   const lineage = row.revisionLineage.find((candidate) => candidate.pr === row.pr)
   const totalStart = lineage?.registeredAt ?? lineage?.sourceReadyAt
+  // The FLOW metric takes the same scoping rule as every other age here, and it
+  // needs it for its own reason: this is the only pairing that reaches neither
+  // `runRevisionClockRead` nor `validateRevisionClock`, so nothing upstream had
+  // already scoped it. A Run finish that precedes this member's own lineage
+  // clock belongs to a previous admission, so this admission has no total
+  // duration yet — null, not a negative number and not an abort.
+  //
+  // Live 2026-09-01, and the last of the three shapes to fall: `yrd queue list
+  // --json` exited 3 with "change 'PR2909' total duration finish
+  // '2026-09-01T11:20:30.531Z' precedes start '2026-09-01T18:41:34.096Z'" on
+  // both the pinned CLI and on d083dce6, after the row projections were
+  // already fixed. Fixing three row surfaces left the metric fold behind them
+  // still aborting the whole read.
   const totalMs =
-    totalStart === undefined ? null : (elapsedMs(totalStart, terminalAt, `change '${row.pr}' total duration`) ?? null)
+    totalStart === undefined
+      ? null
+      : (elapsedMs(
+          totalStart,
+          currentAdmissionFinish(totalStart, terminalAt),
+          `change '${row.pr}' total duration`,
+        ) ?? null)
   return {
     pr: row.pr,
     revision: row.revision,
