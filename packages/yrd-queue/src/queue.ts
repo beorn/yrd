@@ -143,6 +143,7 @@ import {
   derivedAuthorityLookup,
   derivedIntegration,
   derivedLaneBranches,
+  derivedSubmitRetirements,
   isDerivedRunMember,
   materializeDerivedRunMembers,
   landedSubmitBranches,
@@ -925,6 +926,17 @@ const RetireSubmitFactSchema = z
   })
   .strict()
 export type RetireSubmitFactArgs = Readonly<z.infer<typeof RetireSubmitFactSchema>>
+/** One standing derived-lane submit fact retired because its OWN commit is an
+ * ancestor of its base: the content it approved has landed, so the approval is
+ * spent. Pinned to `sha` like every other reader of a standing fact — a fact
+ * that moved is newer consent about content this proof never examined. */
+const RetireLandedSubmitFactSchema = z
+  .object({
+    branch: GitRefSchema,
+    sha: GitShaSchema,
+  })
+  .strict()
+export type RetireLandedSubmitFactArgs = Readonly<z.infer<typeof RetireLandedSubmitFactSchema>>
 /** Consecutive refusals before `queue audit` calls a change wedged. One skip is a
  * normal losable race in a selectorless drain; a third identical cycle is not.
  *
@@ -1477,6 +1489,7 @@ export type QueueCommands = Readonly<{
     admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     retireSubmitFact: CommandHandler<RetireSubmitFactArgs, RuntimeState>
+    retireLandedSubmitFact: CommandHandler<RetireLandedSubmitFactArgs, RuntimeState>
     reconcileMerge: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
   }>
 }>
@@ -1744,6 +1757,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               retireSubmitFact: (args) => yrd.dispatch(commands.queue.retireSubmitFact, args),
+              retireLandedSubmitFact: (args) => yrd.dispatch(commands.queue.retireLandedSubmitFact, args),
               bindDerivedIdentity: (args) => yrd.dispatch(commands.queue.bindDerivedIdentity, args),
               reconcileMerge: (args) => yrd.dispatch(commands.queue.reconcileMerge, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
@@ -1803,6 +1817,7 @@ type QueueActions = Readonly<{
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
+  retireLandedSubmitFact(args: RetireLandedSubmitFactArgs): Promise<CommandResult>
   bindDerivedIdentity(args: DerivedIdentityBound): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
@@ -2116,13 +2131,84 @@ function createQueue<Shape extends ChangeShape>(
       )
     }
     const landedScan = (await landing.scan(snapshot.bays)) ?? NO_LANDED_SUBMIT_SCAN
+    // The compose RETIRES what it can prove spent, and only that. Before this,
+    // every pass re-reported the same stale facts and printed a cure for a
+    // person to run — measured 2026-09-01, 21 rows in one pass, all 21 applied
+    // by hand. A warn that repeats forever is not a report, it is a chore the
+    // queue is charging someone else for.
+    //
+    // WHICH facts is not this function's judgement: `derivedSubmitRetirements`
+    // owns it (@yrd/core/22991, built and never wired until now) and splits the
+    // three proofs `landedSubmitBranches` folds together — retiring only
+    // `via: "ancestry"` (the fact's own commit is on the base, an exact proof),
+    // never `via: "change-id"` (the CHANGE landed under a different commit,
+    // which is benign for an abandoned revision and an AUTHOR ERROR for a fact
+    // carrying new work — nothing here can tell those apart, so a person
+    // does), and never a degenerate-unresolved fact, whose own row already
+    // words retirement as the operator's call.
+    //
+    // Record-lane facts are excluded there too: that lane retires at merge
+    // (`submitFactRetirement`) against the double-merge hazard, and a second
+    // retirer would be a second answer to a question that has one.
+    const sweep = derivedSubmitRetirements(snapshot.bays, landedScan)
+    const swept = new Set<string>()
+    for (const retirement of sweep.retirements) {
+      if (skip.has(retirement.branch)) continue
+      try {
+        await actions.retireLandedSubmitFact({ branch: retirement.branch, sha: retirement.sha })
+      } catch (error) {
+        // Same policy as `retireDerivedSubmitFact`: bookkeeping never converts
+        // a survivable pass into a kill, and an unrecorded retirement is never
+        // quiet. The fact stays standing and warns below on this pass and the
+        // next, which is strictly better than a retirement nobody can see.
+        composeLog.error?.(
+          `queue could not retire the landed submit fact for '${retirement.branch}'; it will be reported again`,
+          {
+            action: "compose-derived-fact-retirement-unrecorded",
+            branch: retirement.branch,
+            sha: retirement.sha,
+            base: retirement.base,
+            reason: error instanceof Error ? error.message : String(error),
+          },
+        )
+        continue
+      }
+      swept.add(retirement.branch)
+      // Loud, and ONCE: the fact is gone from `bays.submits`, so the next
+      // pass's scan cannot see it and this row cannot repeat. No condition
+      // memo is doing that work — the state it reported on no longer exists.
+      const mergeCommit = landedScan.landed.find((row) => row.branch === retirement.branch)?.mergeCommit
+      composeLog.warn?.(
+        `queue compose retired a standing submit fact for '${retirement.branch}': its commit ` +
+          `${retirement.sha.slice(0, 12)} is already an ancestor of '${retirement.base}', so the approval is ` +
+          "spent and no change derives from it. The receiver's ref is untouched and needs no cure; a re-push " +
+          "renews the fact",
+        {
+          action: "compose-derived-fact-retired-landed",
+          branch: retirement.branch,
+          sha: retirement.sha,
+          base: retirement.base,
+          ref: retirement.ref,
+          ...(mergeCommit === undefined ? {} : { mergeCommit }),
+        },
+      )
+    }
+    // What is LEFT after the sweep: `change-id` landings, and record-lane facts
+    // the sweep never looks at. Both still need a person, so both keep the row
+    // — but a `change-id` fact gets the suspect's own remedy rather than the
+    // bare cure, because deleting THAT ref is the one act that destroys the
+    // only pointer to work which may never have landed.
+    const suspected = new Map(sweep.authorErrorSuspects.map((row) => [row.branch, row] as const))
     for (const stale of landedScan.landed) {
-      if (skip.has(stale.branch)) continue
+      if (skip.has(stale.branch) || swept.has(stale.branch)) continue
+      const suspect = suspected.get(stale.branch)
       conditions.report(
         `compose-derived-fact-already-landed:${stale.branch}:${stale.sha}`,
         "warn",
         "queue compose will not derive an admission for a submit fact pointing at already-landed content; " +
-          `the fact is stale — retire it (${submitRefRetirementCommand(stale.branch)})`,
+          (suspect === undefined
+            ? `the fact is stale — retire it (${submitRefRetirementCommand(stale.branch)})`
+            : suspect.remedy),
         {
           action: "compose-derived-fact-already-landed",
           branch: stale.branch,
@@ -5701,6 +5787,44 @@ function createQueueCommands(
     },
   })
 
+  /**
+   * Retire one derived-lane fact whose own content the base already carries.
+   *
+   * Emits the SAME event the record lane's merge bookkeeping emits
+   * ({@link submitFactRetirement}) — `branch/unsubmitted` — because the act is
+   * the same act: a standing approval whose content is on the base is spent,
+   * and the projection that answers "is there a fact here?" is the one that
+   * has to stop saying yes. `reason: "landed"` rather than `superseded`
+   * because no record took it over; the derived lane spent it itself.
+   *
+   * `retireSubmitFact` (above) is deliberately NOT reused. That row records a
+   * VERDICT about a change that could not progress — `queue audit` turns it
+   * into `submit-fact-terminal`, whose whole resolution is "rebase and push
+   * again" — and a landed fact has no such change and nothing to rebase; it
+   * would page an author about work they already merged. It also leaves the
+   * fact standing, so the compose would keep re-deciding it every pass under a
+   * different warn row. Removing the fact is what makes the repeat impossible.
+   *
+   * Sha-guarded twice, here and at the call site, so a re-push that races the
+   * compose resolves to a no-op rather than to dropping live consent. Nothing
+   * touches git: `bays.submits` is a journal projection of receiver events, so
+   * the receiver's `refs/yrd/submit/<branch>` needs no deletion for the fact to
+   * stop being seen — the ref is then an orphan that the receiver's own
+   * archival sweep collects, or nobody does, with no correctness resting on
+   * either (`unrecordedSubmits`). That also keeps this recoverable where the
+   * ref delete is not: the consent triple survives in git and in the journal's
+   * own `branch/submitted`, and a re-push restores the fact.
+   */
+  const retireLandedSubmitFact = command({
+    title: "Retire one standing submit fact whose own content already landed on its base",
+    params: RetireLandedSubmitFactSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: RetireLandedSubmitFactArgs) {
+      const submit = state.bays.submits[args.branch]
+      if (submit === undefined || submit.sha !== args.sha) return { events: [] }
+      return { events: [event("branch/unsubmitted", { branch: args.branch, reason: "landed" })] }
+    },
+  })
+
   const settleAdmissionRefusal = command({
     title: "Settle one exact required-check refusal as needing a person",
     params: SettleAdmissionRefusalSchema,
@@ -5819,6 +5943,7 @@ function createQueueCommands(
       admissionRefused,
       settleAdmissionRefusal,
       retireSubmitFact,
+      retireLandedSubmitFact,
       reconcileMerge,
     },
   }

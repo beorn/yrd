@@ -234,9 +234,20 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     )
     expect(doubled, "no derived run may exist beside the record lane's merge").toEqual([])
 
-    // NO SILENT ERRORS: the exclusion says so, names the branch, and names the
-    // cure — the fact is stale landed content, retire it.
-    expect(actionsLogged(events)).toContain("compose-derived-fact-already-landed")
+    // NO SILENT ERRORS: the exclusion says so and names the branch. The proof
+    // here is `ancestry` — the fact's own commit is on the base — so the
+    // compose RETIRES the fact rather than printing a cure for a person: this
+    // cell (terminal record × different-sha) is the derived lane by
+    // `arbitrateDerivedChange`, and this fact is the incident's own survivor.
+    expect(actionsLogged(events)).toContain("compose-derived-fact-retired-landed")
+    expect(app.state().bays.submits["task/fence"], "the stale fact is gone, not annotated").toBeUndefined()
+
+    // And it does not repeat: the next pass has no fact to see, so neither row
+    // is logged again.
+    const before = events.length
+    await app.queue.run({}, runtime)
+    expect(actionsLogged(events.slice(before))).not.toContain("compose-derived-fact-retired-landed")
+    expect(actionsLogged(events.slice(before))).not.toContain("compose-derived-fact-already-landed")
   })
 
   it("the record lane's merge retires the branch's submit fact in the same journal write (reason: superseded)", async () => {

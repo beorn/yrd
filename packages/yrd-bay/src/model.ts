@@ -1039,8 +1039,17 @@ export type BranchSubmit = z.infer<typeof BranchSubmitSchema>
  */
 export type DerivedSubmission = Readonly<{ lane: "derived"; branch: string; sha: string; base: string }>
 
-/** CLOSED: a new reason is a schema change, never a string (@cto efd1fa9a, constraint 1). */
-export const BranchUnsubmitReasonSchema = z.enum(["deleted", "archived", "superseded"])
+/**
+ * CLOSED: a new reason is a schema change, never a string (@cto efd1fa9a, constraint 1).
+ *
+ * `landed` is the derived lane's own spend, and it is NOT `superseded`: no
+ * record took the approval over — the fact's OWN commit is an ancestor of its
+ * base, so the content it approved is already there and the approval bought
+ * what it was for. Only an `ancestry` proof reaches this reason
+ * (@yrd/queue `derivedSubmitRetirements`); a `change-id` landing stays
+ * standing and reported, because the two are not interchangeable.
+ */
+export const BranchUnsubmitReasonSchema = z.enum(["deleted", "archived", "superseded", "landed"])
 export type BranchUnsubmitReason = z.infer<typeof BranchUnsubmitReasonSchema>
 export const BranchUnsubmitSchema = z
   .object({

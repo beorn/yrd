@@ -20,6 +20,16 @@
  * never — and the list stays right, because pendingness is answered from the
  * repository at the moment the question is asked.
  *
+ * That argument is about the LIST, and it still holds: pendingness is derived,
+ * never stored. It is not an argument against retiring a fact the queue has
+ * PROVEN spent, and one narrow retirement now exists beside it — the compose
+ * retires a fact whose own commit is an ancestor of its base
+ * (`compose-retires-landed-facts.test.ts`). Read the two together: the false
+ * positive feared here is the `via: "change-id"` arm, which that pass
+ * deliberately never retires, and the retirement it does perform is a journal
+ * event over a ref that still exists, so a re-push restores the consent this
+ * file is protecting.
+ *
  * What the submit ref still owns, and why it is narrowed rather than deleted:
  * the consent triple `{sha, base, at}`. Ancestry is relative to a base, so
  * `base` is needed to even form the query; `at` is consent time and ancestry
