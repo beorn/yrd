@@ -5471,8 +5471,37 @@ export function queueLogRows(
         const durations = runDurations(run, runAttempts)
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
-        const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr, recordIds, readFaults)
-        const unreadable = readFaults?.get(queueRunRevisionKey(run, pr))
+        const revisionKey = queueRunRevisionKey(run, pr)
+        let unreadable = readFaults?.get(revisionKey)
+        let submittedAt: string | undefined
+        try {
+          submittedAt = queueLogSubmissionTime(revisionClocks, run, pr, recordIds, readFaults)
+        } catch (error) {
+          // No fault accounting at all (readFaults undefined) keeps the
+          // historical loud refusal — a caller with no accounting cannot
+          // itself tell corruption from a legitimate gap, so it must not
+          // guess (reader-unreadable-member-gate.test.ts "still fails LOUD").
+          // A caller that DID pass accounting asked for containment over the
+          // WHOLE population it could account for, not only the members
+          // queueRunRevisionReads happened to flag: recordIds above is built
+          // from this result's OWN `prs` (record lane plus the derived lane
+          // in production, queueChanges), a wider set than the record-only
+          // population queueRunRevisionReads joined against — so a still-live
+          // derived member can read as a RECORD here and defeat the
+          // isDerivedMemberId tolerance above, throwing instead of being
+          // skipped (measured live 2026-09-01: run 'R3578' change 'PR2131').
+          // That throw must not blind every other row either.
+          if (readFaults === undefined) throw error
+          unreadable ??= {
+            run: run.id,
+            change: pr.id,
+            revision: pr.revision,
+            headSha: pr.headSha,
+            reason: "no-causal-clock",
+            message: error instanceof Error ? error.message : String(error),
+          }
+          submittedAt = undefined
+        }
         const ageMs = elapsedMs(submittedAt, finishedAt, `change '${pr.id}' submitted-to-terminal age`)
         const showLocation = changeStatus?.get(pr.id) === "withdrawn" ? undefined : location
         const taskStatus = runTaskStatusOf(run)
