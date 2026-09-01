@@ -152,7 +152,7 @@ describe("createProcess — a check that ends by park or timeout is reaped (@i/1
       // dies with the process that armed it. A runner that exits inside the
       // grace therefore leaves a TERM-ignoring check child alive, owned by
       // init, spinning a core with nobody left to bound it. That is why the
-      // specimen was found by `/cpu` and not by the queue.
+      // specimen was found by `/host-health` and not by the queue.
       const moduleUrl = new URL("../src/index.ts", import.meta.url).href
       const runner = [
         `const { createProcess, shellCommand } = await import(${JSON.stringify(moduleUrl)})`,
