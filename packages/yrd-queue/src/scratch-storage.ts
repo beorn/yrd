@@ -1,7 +1,8 @@
-import { lstat, readdir, rm, statfs } from "node:fs/promises"
+import { lstat, readdir, readFile, rm, statfs, writeFile } from "node:fs/promises"
 import { dirname, join, resolve, sep } from "node:path"
 import { systemClock } from "@yrd/core"
 import type { JobError } from "@yrd/job"
+import { recordedPidIsRunning, recordedPidLiveness } from "@yrd/process"
 import type { Git } from "git-super/worktree"
 
 /**
@@ -221,6 +222,17 @@ export type ScratchReapReport = Readonly<{
   reaped: number
   /** Entries left alone because they are younger than the threshold or still live. */
   kept: number
+  /**
+   * Why each kept entry was kept, because the totals answer opposite questions.
+   * A sweep that keeps everything as live is a reaper that has gone inert —
+   * which is exactly what 27 GB of abandoned pre-submit checkouts looked like
+   * from the outside — while one that keeps everything as young is a sweep
+   * running too often. Folded into a single `kept`, the two are the same number.
+   */
+  keptLive: number
+  keptYoung: number
+  /** Entries under a shared parent that were never ours to delete. */
+  keptForeign: number
   bytes: number
   /** Removals that failed, kept loud rather than folded into `kept`. */
   failures: readonly string[]
@@ -288,6 +300,147 @@ export async function liveWorktreeEntries(
 }
 
 /**
+ * The file a pre-submit checkout writes into its own scratch entry, naming the
+ * process that owns it and whether the entry was deliberately retained.
+ *
+ * It exists because the fact it records has no other honest source. Liveness
+ * was previously inferred from `git worktree list`: an entry git still listed
+ * was treated as live. Measured on the live queue state dir 2026-09-01, all 94
+ * abandoned entries under `pre-submit-worktrees` were still registered — the
+ * `.git` file named an admin directory that existed, and that directory's
+ * `gitdir` named the entry back — because the process that died between
+ * `worktree add` and its `finally` left the registration behind exactly the way
+ * it left the directory behind. Registration and abandonment are the same
+ * on-disk state, so no reading of the worktree list can separate them, and the
+ * reaper freed nothing while 27 GB accumulated over 13 days.
+ *
+ * A recorded owner separates them, because it records the two facts the reaper
+ * actually needs and the filesystem cannot infer: which process is using this
+ * entry, and whether a human asked for it to be kept.
+ */
+export const SCRATCH_OWNER_FILE = "owner.json"
+
+export type ScratchOwner = Readonly<{
+  /** The process that created the entry and is using it. */
+  pid: number
+  /** When the record was written — the moment the recorded owner precedes. */
+  startedAtMs: number
+  /**
+   * Set when the entry's creator ran under `--keep-on-failure`, so an entry
+   * that survives its run survived deliberately. Written at creation rather
+   * than at each failure site: every ordinary path removes the whole entry, so
+   * a flag set upfront can only be read on an entry that was kept on purpose.
+   */
+  retained?: boolean
+}>
+
+/** Record the owner of a freshly created scratch entry. */
+export async function writeScratchOwner(entry: string, owner: ScratchOwner): Promise<void> {
+  await writeFile(join(entry, SCRATCH_OWNER_FILE), `${JSON.stringify(owner)}\n`, "utf8")
+}
+
+/**
+ * The owner an entry recorded, or `undefined` when it recorded none.
+ *
+ * A malformed record reads as absent rather than raising: the sweep must not be
+ * held hostage by one unparseable file, and absence is already the conservative
+ * arm for everything except age.
+ */
+export async function readScratchOwner(entry: string): Promise<ScratchOwner | undefined> {
+  let text: string
+  try {
+    text = await readFile(join(entry, SCRATCH_OWNER_FILE), "utf8")
+  } catch {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(text) as Partial<ScratchOwner>
+    if (typeof parsed.pid !== "number" || typeof parsed.startedAtMs !== "number") return undefined
+    return Object.freeze({
+      pid: parsed.pid,
+      startedAtMs: parsed.startedAtMs,
+      ...(parsed.retained === true ? { retained: true } : {}),
+    })
+  } catch {
+    return undefined
+  }
+}
+
+export type ScratchOwnerCensus = Readonly<{
+  /** Entries no sweep may remove, whatever their age. */
+  live: ReadonlySet<string>
+  /** Kept because `--keep-on-failure` asked for them. */
+  retained: number
+  /** Kept because the process that recorded them is still running. */
+  running: number
+  /** Released: the recorded owner has provably exited. */
+  exited: number
+  /** Released: nothing recorded an owner (an entry from before this record, or one abandoned mid-creation). */
+  unowned: number
+}>
+
+/**
+ * Which entries under `root` are still owned, derived per entry from what each
+ * one recorded.
+ *
+ * No global listing, and no git call at all — which is the second half of the
+ * fix. The keep set was previously built from one `git worktree list` over a
+ * repository with 448 registered worktrees, and when that read failed or timed
+ * out the whole sweep was skipped: the keep set was unknown, reaping against an
+ * unknown keep set is unsafe, and skipping was the only safe move left. A
+ * per-entry record has no such failure mode, so there is no longer a state in
+ * which the sweep declines to run.
+ *
+ * Conservative in the one direction that matters: `unknown` liveness counts as
+ * running (`recordedPidIsRunning`), so an unprovable identity keeps the entry.
+ * Only proof — no such process, or a start time that refutes the record —
+ * releases one.
+ */
+export async function liveScratchOwners(
+  root: string,
+  options: Readonly<{ procRoot?: string }> = {},
+): Promise<ScratchOwnerCensus> {
+  let names: string[]
+  try {
+    names = await readdir(root)
+  } catch (cause) {
+    if ((cause as Readonly<{ code?: unknown }>).code === "ENOENT") {
+      return { live: new Set(), retained: 0, running: 0, exited: 0, unowned: 0 }
+    }
+    throw cause
+  }
+  const live = new Set<string>()
+  let retained = 0
+  let running = 0
+  let exited = 0
+  let unowned = 0
+  for (const name of names) {
+    const entry = join(root, name)
+    const owner = await readScratchOwner(entry)
+    if (owner === undefined) {
+      unowned += 1
+      continue
+    }
+    if (owner.retained === true) {
+      retained += 1
+      live.add(entry)
+      continue
+    }
+    const liveness = await recordedPidLiveness(
+      { pid: owner.pid, runningSinceMs: owner.startedAtMs },
+      options.procRoot === undefined ? {} : { procRoot: options.procRoot },
+    )
+    if (recordedPidIsRunning(liveness)) {
+      running += 1
+      live.add(entry)
+      continue
+    }
+    exited += 1
+  }
+  return { live, retained, running, exited, unowned }
+}
+
+/**
  * Remove scratch left behind by a queue process that died between creating a
  * worktree and its `finally`. `withScratchRoot` cleans up on every ordinary
  * path, including failures, but a SIGKILL or a host crash has no `finally` — and
@@ -320,20 +473,30 @@ export async function reapOrphanedScratch(
     entries = await readdir(root)
   } catch (cause) {
     if ((cause as Readonly<{ code?: unknown }>).code === "ENOENT") {
-      return { root, entries: 0, reaped: 0, kept: 0, bytes: 0, failures: [] }
+      return { root, entries: 0, reaped: 0, kept: 0, keptLive: 0, keptYoung: 0, keptForeign: 0, bytes: 0, failures: [] }
     }
     throw cause
   }
   let reaped = 0
-  let kept = 0
+  let keptLive = 0
+  let keptYoung = 0
+  let keptForeign = 0
   let bytes = 0
   const failures: string[] = []
   for (const name of entries) {
     const path = join(root, name)
     try {
       const stats = await lstat(path)
-      if (!name.startsWith(namePrefix) || keep.has(path) || now - stats.mtimeMs <= olderThanMs) {
-        kept += 1
+      if (!name.startsWith(namePrefix)) {
+        keptForeign += 1
+        continue
+      }
+      if (keep.has(path)) {
+        keptLive += 1
+        continue
+      }
+      if (now - stats.mtimeMs <= olderThanMs) {
+        keptYoung += 1
         continue
       }
       const size = await directorySize(path)
@@ -344,14 +507,33 @@ export async function reapOrphanedScratch(
       failures.push(`${path}: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
   }
-  return { root, entries: entries.length, reaped, kept, bytes, failures }
+  return {
+    root,
+    entries: entries.length,
+    reaped,
+    kept: keptLive + keptYoung + keptForeign,
+    keptLive,
+    keptYoung,
+    keptForeign,
+    bytes,
+    failures,
+  }
 }
 
-/** One line naming what was reaped against the denominator it was chosen from. */
+/**
+ * One line naming every outcome of one sweep, against the denominator they were
+ * drawn from.
+ *
+ * Every count is spelled even when it is zero, so the line reads the same shape
+ * every time and an inert sweep is legible as inert: `reaped 0 ... 94 kept live`
+ * says the keep rule is swallowing the whole population, which is the failure
+ * that hid 27 GB behind a reaper that ran on schedule and did nothing.
+ */
 export function describeScratchReap(report: ScratchReapReport): string {
   return (
-    `yrd: reaped ${report.reaped} of ${report.entries} scratch entr${report.entries === 1 ? "y" : "ies"} ` +
-    `under '${report.root}' (${formatBytes(report.bytes)} freed, ${report.kept} kept as live or younger than the ` +
-    `threshold)${report.failures.length === 0 ? "" : `; ${report.failures.length} could not be removed: ${report.failures.join("; ")}`}`
+    `yrd: swept '${report.root}': reaped ${report.reaped} of ${report.entries} scanned ` +
+    `(${formatBytes(report.bytes)} freed), ${report.keptLive} kept live, ${report.keptYoung} kept young, ` +
+    `${report.keptForeign} kept foreign, ${report.failures.length} failed` +
+    `${report.failures.length === 0 ? "" : `: ${report.failures.join("; ")}`}`
   )
 }

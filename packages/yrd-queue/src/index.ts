@@ -81,7 +81,17 @@ export * from "./command.ts"
 // leaves behind exactly as a killed queue run leaves merge scratch. It reaps
 // them with these primitives rather than a fork, which is what
 // `liveWorktreeEntries` was extracted for.
-export { describeScratchReap, liveWorktreeEntries, reapOrphanedScratch } from "./scratch-storage.ts"
+export {
+  describeScratchReap,
+  liveScratchOwners,
+  liveWorktreeEntries,
+  reapOrphanedScratch,
+  SCRATCH_OWNER_FILE,
+  type ScratchOwner,
+  type ScratchOwnerCensus,
+  type ScratchReapReport,
+  writeScratchOwner,
+} from "./scratch-storage.ts"
 export * from "./merge-record.ts"
 // Not `export *` either — see the queue.ts block above for the first.
 //

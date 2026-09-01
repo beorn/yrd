@@ -15,6 +15,7 @@ import {
   describeScratchReap,
   describeStorageState,
   isStorageExhaustion,
+  liveScratchOwners,
   liveWorktreeEntries,
   ORPHANED_SCRATCH_MAX_AGE_MS,
   queueScratchParent,
@@ -22,6 +23,7 @@ import {
   reapOrphanedScratch,
   storageExhaustionError,
   WORKTREE_STORAGE_EXHAUSTED,
+  writeScratchOwner,
 } from "../src/scratch-storage.ts"
 
 const roots: string[] = []
@@ -344,5 +346,142 @@ describe("reapOrphanedScratch — scratch a killed process could not clean up", 
 
   it("defaults to a full day, so a job running under its own timeout is never swept", () => {
     expect(ORPHANED_SCRATCH_MAX_AGE_MS).toBe(24 * 60 * 60 * 1000)
+  })
+})
+
+describe("liveScratchOwners — liveness a pre-submit checkout RECORDS, not one git infers", () => {
+  /** A pid that has provably exited: spawned, awaited, and never reused in the same tick. */
+  async function deadPid(): Promise<number> {
+    const child = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" })
+    await child.exited
+    return child.pid
+  }
+
+  /**
+   * Measured on the live queue state dir 2026-09-01: all 94 abandoned
+   * `check-*` entries under `pre-submit-worktrees` were STILL registered
+   * worktrees, bidirectionally — `.git` named an admin dir that existed, and
+   * that admin dir's `gitdir` named the entry back. `git worktree list` prints
+   * every one of them, so a keep set built from that listing protects all 94
+   * and the reaper frees nothing even on its happy path. Registration outlives
+   * the process exactly the way the directory does, which is why it cannot
+   * separate the two.
+   */
+  it("does not keep an abandoned entry that is still a registered worktree", async () => {
+    const repo = await initRepo("yrd-owner-registered-")
+    const root = join(repo, "..", "check-scratch")
+    const entry = join(root, "check-abandoned")
+    await git(repo, ["worktree", "add", "-q", "--detach", join(entry, "worktree")])
+
+    // git still lists it — the old keep set would protect it.
+    const byGit = await liveWorktreeEntries(runner, repo, root)
+    expect([...byGit.live]).toEqual([entry])
+    // Nothing recorded an owner, so nothing claims it.
+    const owned = await liveScratchOwners(root)
+
+    expect(owned.live.size).toBe(0)
+    expect(owned.unowned).toBe(1)
+  })
+
+  it("keeps an entry whose recorded owner is still running, however old", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-owner-live-"))
+    roots.push(root)
+    const entry = join(root, "check-running")
+    await mkdir(entry, { recursive: true })
+    await writeScratchOwner(entry, { pid: process.pid, startedAtMs: Date.now() })
+
+    const owned = await liveScratchOwners(root)
+
+    expect([...owned.live]).toEqual([entry])
+    expect(owned.running).toBe(1)
+  })
+
+  it("keeps a retained entry after its process is gone — the evidence --keep-on-failure was asked for", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-owner-retained-"))
+    roots.push(root)
+    const entry = join(root, "check-retained")
+    await mkdir(entry, { recursive: true })
+    await writeScratchOwner(entry, { pid: await deadPid(), startedAtMs: Date.now(), retained: true })
+
+    const owned = await liveScratchOwners(root)
+
+    expect([...owned.live]).toEqual([entry])
+    expect(owned.retained).toBe(1)
+    expect(owned.running).toBe(0)
+  })
+
+  it("releases an entry whose recorded owner has exited", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-owner-dead-"))
+    roots.push(root)
+    const entry = join(root, "check-dead")
+    await mkdir(entry, { recursive: true })
+    await writeScratchOwner(entry, { pid: await deadPid(), startedAtMs: Date.now() })
+
+    const owned = await liveScratchOwners(root)
+
+    expect(owned.live.size).toBe(0)
+    expect(owned.exited).toBe(1)
+  })
+
+  it("reaps the abandoned entry and keeps the running, retained and young ones, with the counts split", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-owner-sweep-"))
+    roots.push(root)
+    const gone = await deadPid()
+    const stale = new Date(Date.now() - 48 * 60 * 60 * 1000)
+    const age = async (path: string) => utimes(path, stale, stale)
+
+    const abandoned = join(root, "check-abandoned")
+    await mkdir(join(abandoned, "worktree"), { recursive: true })
+    await writeFile(join(abandoned, "worktree", "big"), "x".repeat(1024))
+    await writeScratchOwner(abandoned, { pid: gone, startedAtMs: stale.getTime() })
+    await age(abandoned)
+
+    const running = join(root, "check-running")
+    await mkdir(running, { recursive: true })
+    // The record is written when the entry is created and the owner necessarily
+    // precedes it; only the directory mtime is aged, which is the reading the
+    // age floor makes and the one a long check cannot refresh.
+    await writeScratchOwner(running, { pid: process.pid, startedAtMs: Date.now() })
+    await age(running)
+
+    const retained = join(root, "check-retained")
+    await mkdir(retained, { recursive: true })
+    await writeScratchOwner(retained, { pid: gone, startedAtMs: stale.getTime(), retained: true })
+    await age(retained)
+
+    // Owned by nobody living, but too young to touch: the age floor is the
+    // protection that survives every liveness question.
+    const young = join(root, "check-young")
+    await mkdir(young, { recursive: true })
+    await writeScratchOwner(young, { pid: gone, startedAtMs: Date.now() })
+
+    const owned = await liveScratchOwners(root)
+    const report = await reapOrphanedScratch(root, { keep: owned.live, namePrefix: "check-" })
+
+    expect(report).toMatchObject({ entries: 4, reaped: 1, keptLive: 2, keptYoung: 1, keptForeign: 0, failures: [] })
+    expect(report.bytes).toBeGreaterThanOrEqual(1024)
+    expect(existsSync(abandoned)).toBe(false)
+    expect(existsSync(running)).toBe(true)
+    expect(existsSync(retained)).toBe(true)
+    expect(existsSync(young)).toBe(true)
+  })
+
+  it("names every count in the one sweep line, so a clean sweep and an inert one read differently", () => {
+    const line = describeScratchReap({
+      root: "/state/pre-submit-worktrees",
+      entries: 4,
+      reaped: 1,
+      kept: 3,
+      keptLive: 2,
+      keptYoung: 1,
+      keptForeign: 0,
+      bytes: 1024,
+      failures: [],
+    })
+
+    expect(line).toContain("reaped 1 of 4 scanned")
+    expect(line).toContain("2 kept live")
+    expect(line).toContain("1 kept young")
+    expect(line).toContain("0 failed")
   })
 })

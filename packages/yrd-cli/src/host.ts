@@ -116,8 +116,9 @@ import {
   describeMergedTruthGaps,
   revisionOf,
   describeScratchReap,
-  liveWorktreeEntries,
+  liveScratchOwners,
   reapOrphanedScratch,
+  writeScratchOwner,
 } from "@yrd/queue"
 import {
   installedPlanStale,
@@ -594,63 +595,102 @@ const preSubmitReapLog = createLogger("yrd:cli")
  * SIGKILL, an OOM kill or a host crash has no `finally`, and this scratch lives
  * on the repository's own disk (the queue state dir's `pre-submit-worktrees`),
  * so nothing clears it at reboot either. Each abandoned entry is a materialized
- * tree with its submodules populated: measured at 25 GB across 95 entries, ~90
- * of them stale for more than a day and the oldest 11.8 days.
+ * tree with its submodules populated: measured at 27 GB across 95 entries on
+ * 2026-09-01, the oldest stale for 13 days.
  *
- * The queue solved the identical problem for its own scratch and this is a
- * mirror of that shape, down to the once-per-root-per-process memo: placed at
- * CREATION rather than at startup so every entry point pays for the cleanup it
- * might itself leave behind, and paid once so an invocation running many checks
- * does not re-walk the root per check.
+ * Placed at CREATION rather than at startup so every entry point pays for the
+ * cleanup it might itself leave behind, and memoized per root so an invocation
+ * running many checks does not re-walk the root per check.
  *
- * Conservative by construction — an entry is removed only when its name carries
+ * An entry is removed only when its name carries
  * {@link PRE_SUBMIT_SCRATCH_PREFIX}, it has not been written for
- * `ORPHANED_SCRATCH_MAX_AGE_MS` (24h, ~96x `DEFAULT_STEP_TIMEOUT_MS`), and git
- * does not still list it as a live worktree. Those two protections cover
- * different populations and both are load-bearing: age alone protects every
- * running check, while the git-live keep set is what protects a `keepOnFailure`
- * workspace deliberately retained as evidence past the age floor, since that
- * path skips `worktrees.remove` and so leaves the worktree registered.
+ * `ORPHANED_SCRATCH_MAX_AGE_MS` (24h, ~96x `DEFAULT_STEP_TIMEOUT_MS`), and its
+ * own {@link writeScratchOwner} record does not claim it — the owning process
+ * is still running, or `--keep-on-failure` retained it as evidence.
  *
- * When `git worktree list` cannot answer, the keep set is UNKNOWN rather than
- * empty, and this skips the sweep entirely and says so. Reaping on an unknown
- * keep set would leave the age floor as the only protection, which is safe for
- * every running check but knowingly unsafe for a `keepOnFailure` workspace
- * retained past a day — and it would delete it on the strength of a git fault,
- * silently. Skipping costs a sweep; the next process sweeps again. A git fault
- * that persists prints this line every time, which is the correct amount of
- * noise for a repository whose worktree listing does not work.
+ * The keep set was previously `git worktree list`, and that is the whole reason
+ * this ran for weeks while the directory grew. Measured 2026-09-01 on the live
+ * state dir: all 94 abandoned entries were STILL registered worktrees,
+ * bidirectionally — each `.git` file named an admin directory that existed, and
+ * each of those named the entry back — because a process killed between
+ * `worktree add` and its `finally` leaves the registration behind exactly the
+ * way it leaves the directory behind. Registration and abandonment are the same
+ * on-disk state. Every one of those entries landed in the keep set, the sweep
+ * reported a clean run, and nothing was ever freed. A reaper that cannot
+ * distinguish what it protects from what it must delete is inert, and it is
+ * inert quietly.
+ *
+ * Dropping that read also removes the other failure this had: when
+ * `git worktree list` could not answer, the keep set was unknown, reaping
+ * against an unknown keep set was unsafe, and the sweep was skipped entirely.
+ * A per-entry record cannot be unavailable, so there is no longer any state in
+ * which this declines to run.
+ *
+ * One sweep line is emitted every time, whatever the outcome, because the
+ * failure above was invisible precisely as a silence: a sweep that keeps its
+ * whole population reads identically to one with nothing to do unless the
+ * counts are spelled out.
+ *
+ * Entries created before the owner record existed carry none, so they are
+ * unowned and fall to the 24h age floor — which is the intended one-time
+ * migration: it is what frees the measured 27 GB. A `--keep-on-failure`
+ * workspace retained by an older binary is swept with them, and a retained
+ * workspace is for immediate inspection, not for storage past a day.
  */
-async function reapAbandonedPreSubmitCheckouts(git: Pick<Git, "run">, repo: string, root: string): Promise<void> {
+export async function reapAbandonedPreSubmitCheckouts(
+  root: string,
+  options: Readonly<{ log?: ConditionalLogger; git?: Pick<Git, "run">; repo?: string }> = {},
+): Promise<void> {
   const key = resolve(root)
   if (reapedPreSubmitRoots.has(key)) return
   reapedPreSubmitRoots.add(key)
-  const worktrees = await liveWorktreeEntries(git, repo, key)
-  if (!worktrees.listed) {
-    preSubmitReapLog.warn?.(
-      "yrd skipped the abandoned pre-submit checkout sweep: 'git worktree list' could not answer, so which " +
-        "checkouts are still live is unknown and none can be safely removed. Abandoned checkouts accumulate " +
-        "until this repository's worktree listing works again",
-      { action: "pre-submit-scratch-reap-skipped", root: key, cause: "worktree-list-unreadable" },
-    )
-    return
-  }
+  const log = options.log ?? preSubmitReapLog
+  const owners = await liveScratchOwners(key)
   const report = await reapOrphanedScratch(key, {
-    keep: worktrees.live,
+    keep: owners.live,
     namePrefix: PRE_SUBMIT_SCRATCH_PREFIX,
   })
-  // Silence only for the one uninteresting outcome: nothing was abandoned and
-  // nothing resisted removal. A partial sweep is a disk that keeps filling, so
-  // it is reported at a level an operator sees by default rather than folded
-  // into the same routine line as a clean sweep.
-  const record =
-    report.failures.length > 0 ? preSubmitReapLog.warn : report.reaped > 0 ? preSubmitReapLog.info : undefined
-  record?.(describeScratchReap(report), {
-    action: "pre-submit-scratch-reap",
-    root: key,
-    reaped: report.reaped,
-    failures: report.failures.length,
-  })
+  // Warn when anything resisted removal — a partial sweep is a disk that keeps
+  // filling — and when the sweep freed something, since that is a real state
+  // change on shared storage. Everything else is routine housekeeping.
+  const record = report.failures.length > 0 ? log.warn : report.reaped > 0 ? log.info : log.debug
+  record?.(
+    `${describeScratchReap(report)} (${owners.running} owned by a running process, ` +
+      `${owners.retained} retained by --keep-on-failure, ${owners.exited} released by an exited owner, ` +
+      `${owners.unowned} claimed by nobody)`,
+    {
+      action: "pre-submit-scratch-reap",
+      root: key,
+      scanned: report.entries,
+      reaped: report.reaped,
+      keptLive: report.keptLive,
+      keptYoung: report.keptYoung,
+      keptForeign: report.keptForeign,
+      failed: report.failures.length,
+      bytes: report.bytes,
+      running: owners.running,
+      retained: owners.retained,
+      exited: owners.exited,
+      unowned: owners.unowned,
+    },
+  )
+  // Reaping the directory leaves git's own registration behind, and those
+  // accumulate on the same schedule the directories did — 448 registered
+  // worktrees on the measured repository, 94 of them naming entries this sweep
+  // is deleting. `prune` drops exactly the ones whose worktree is now gone.
+  // Best-effort and never blocking: the disk is already reclaimed, and a git
+  // that cannot prune is a smaller problem than one that cannot sweep.
+  if (report.reaped > 0 && options.git !== undefined && options.repo !== undefined) {
+    const pruned = await options.git.run(options.repo, ["worktree", "prune"], true)
+    if (pruned.code !== 0) {
+      log.warn?.(
+        `yrd: reaped ${report.reaped} abandoned pre-submit checkouts but 'git worktree prune' failed, so their ` +
+          `worktree registrations remain: ` +
+          `${pruned.stderr.trim() || pruned.stdout.trim() || `git exited ${String(pruned.code)}`}`,
+        { action: "pre-submit-scratch-prune-failed", root: key, code: pruned.code },
+      )
+    }
+  }
 }
 
 export function configuredChecks(
@@ -802,7 +842,10 @@ export function configuredChecks(
     // strength of a git fault, silently, which is a worse failure than a sweep
     // that did not happen: the next process sweeps again, and a persistent
     // fault says so every time.
-    await reapAbandonedPreSubmitCheckouts(createGit(adaptProcessGit(process), inherited, GIT_TIMEOUT_MS), repo, parent)
+    await reapAbandonedPreSubmitCheckouts(parent, {
+      git: createGit(adaptProcessGit(process), inherited, GIT_TIMEOUT_MS),
+      repo,
+    })
     if (ref === undefined && !composes && pinnedScripts.length === 0) {
       const inPlaceTmp = await mkdtemp(join(parent, `${PRE_SUBMIT_SCRATCH_PREFIX}tmp-`))
       try {
@@ -814,6 +857,17 @@ export function configuredChecks(
 
     const checkoutSha = composes ? baseSha : candidateSha
     const checkoutRoot = await mkdtemp(join(parent, PRE_SUBMIT_SCRATCH_PREFIX))
+    // Claim the entry before anything expensive goes into it, so a process
+    // killed mid-materialization leaves a record naming a pid that is provably
+    // gone rather than an entry nothing can classify. `retained` is decided
+    // here because it can only ever be READ on an entry that survived: every
+    // path below removes the whole entry unless `keepOnFailure` held and the
+    // run failed.
+    await writeScratchOwner(checkoutRoot, {
+      pid: globalThis.process.pid,
+      startedAtMs: Date.now(),
+      ...(keepOnFailure ? { retained: true } : {}),
+    })
     const checkout = join(checkoutRoot, "worktree")
     // Lives and dies with checkoutRoot; retained alongside a kept failure
     // workspace, where leftover fixture temp is evidence rather than litter.
