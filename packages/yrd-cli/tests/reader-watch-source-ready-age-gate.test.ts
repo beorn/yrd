@@ -229,9 +229,15 @@ describe("reader watch source-ready-age gate — a refreshed submit fact never b
     expect(row?.detail).toContain("unreadable: no-causal-clock")
 
     const message = row?.unreadable?.message ?? ""
-    // The verbatim cause, not a paraphrase…
+    // The verbatim cause, not a paraphrase. The AGE is scoped away by
+    // `currentAdmissionFinish` — a finish belonging to an earlier admission is
+    // a known, legal state. The QUEUE WAIT is deliberately NOT scoped: it
+    // measures how long this member waited before this run STARTED, so a
+    // submit clock after that start means the run record and the submission
+    // times disagree about what admitted this member. That is not a legal
+    // state with an honest reading, so it is marked rather than nulled.
     expect(message).toContain(
-      `change '${DERIVED_CHANGE}' source-ready age finish '${RUN_FINISHED_AT}' precedes start '${RESUBMITTED_AT}'`,
+      `change '${DERIVED_CHANGE}' queue wait finish '${RUN_STARTED_AT}' precedes start '${RESUBMITTED_AT}'`,
     )
     // …plus the remedy that would have saved the reader.
     expect(message).toContain(`no admission of run '${DERIVED_RUN_ID}' can date this member`)
@@ -244,8 +250,14 @@ describe("reader watch source-ready-age gate — a refreshed submit fact never b
 
   it("`--strict` still fails LOUD on that residual inversion", () => {
     expect(() => projectDerived(true)).toThrow(
-      `change '${DERIVED_CHANGE}' source-ready age finish '${RUN_FINISHED_AT}' precedes start '${RESUBMITTED_AT}'`,
+      `change '${DERIVED_CHANGE}' queue wait finish '${RUN_STARTED_AT}' precedes start '${RESUBMITTED_AT}'`,
     )
+  })
+
+  it("the member's AGE is scoped to pending rather than marked — the two rules do different jobs", () => {
+    const row = projectDerived().rows.find((candidate) => candidate.run === DERIVED_RUN_ID)
+    expect(row?.ageMs).toBeNull()
+    expect(row?.queueWaitMs).toBeNull()
   })
 
   it("a record whose clocks are causal for the run is untouched — age, anchor and no mark", () => {
