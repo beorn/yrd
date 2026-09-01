@@ -10967,7 +10967,7 @@ export async function refreshTrackedQueueRevisions(
     // THIS process, identical for every candidate: report it once per cycle and
     // leave the recorded revisions authoritative, instead of crashing the queue
     // runner or parking candidates one by one as if it were per-branch weather.
-    app.log.info?.(
+    app.log.warn?.(
       `Skipped tracked-branch observation for ${String(candidates.length)} candidate(s): no Git process is installed.`,
       {
         action: "queue-track-observation-unavailable",
