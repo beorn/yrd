@@ -448,18 +448,89 @@ describe("Yrd lifecycle records", () => {
     const finished = events
       .filter((event): event is Extract<Event, { kind: "log" }> => event.kind === "log")
       .filter((event) => event.props?.outcome !== "started")
-    expect(finished.map((event) => [event.namespace, event.level, event.props?.outcome])).toEqual([
-      ["yrd:admit", "info", "failed"],
-      ["yrd:remote", "info", "failed"],
-    ])
     // The "refused" outcome retired: a typed domain refusal and an untyped
     // thrown error now share the one "failed" outcome, so the distinction
-    // between them has to live somewhere else -- the attached failure
-    // record's `kind` when there is one (a plain, non-YrdFailure Error, like
-    // the "network down" throw above, carries none at all).
+    // between them lives in the attached failure record's `kind` -- AND, since
+    // the three-way failure model (normal/recoverable/not-auto-fixable), in the
+    // level itself: a known, caller-attributable refusal settles at the
+    // abnormal-recoverable WARN, while a thrown error this module cannot
+    // classify at all (not a YrdFailure -- "network down" carries no `kind`) is
+    // presumptively the worse class and stays loud at ERROR.
+    expect(finished.map((event) => [event.namespace, event.level, event.props?.outcome])).toEqual([
+      ["yrd:admit", "warn", "failed"],
+      ["yrd:remote", "error", "failed"],
+    ])
     expect(finished.map((event) => (event.props?.failure as { kind?: string } | undefined)?.kind)).toEqual([
       "refusal",
       undefined,
+    ])
+    log.end()
+  })
+
+  it("settles usage/configuration failures at WARN like refusal, but keeps infrastructure loud at ERROR", async () => {
+    // The doc'd three-way split for a THROWN failure: refusal/usage/configuration
+    // are known, caller-attributable rejections (WARN, abnormal-recoverable --
+    // the operation's own caller already has what it needs to act), while
+    // infrastructure is the abnormal-not-auto-fixable class that stays loud.
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+
+    await expect(
+      observeYrdLifecycle(log, { lifecycle: "usage", now: () => 10 }, async () => {
+        throw createFailure({ kind: "usage", code: "bad-flag", message: "unknown flag --nope" })
+      }),
+    ).rejects.toThrow("unknown flag --nope")
+    await expect(
+      observeYrdLifecycle(log, { lifecycle: "config", now: () => 15 }, async () => {
+        throw createFailure({ kind: "configuration", code: "bad-yaml", message: ".yrd.yml is malformed" })
+      }),
+    ).rejects.toThrow(".yrd.yml is malformed")
+    await expect(
+      observeYrdLifecycle(log, { lifecycle: "infra", now: () => 20 }, async () => {
+        throw createFailure({ kind: "infrastructure", code: "disk-full", message: "no space left on device" })
+      }),
+    ).rejects.toThrow("no space left on device")
+
+    const finished = events
+      .filter((event): event is Extract<Event, { kind: "log" }> => event.kind === "log")
+      .filter((event) => event.props?.outcome !== "started")
+    expect(finished.map((event) => [event.namespace, event.level])).toEqual([
+      ["yrd:usage", "warn"],
+      ["yrd:config", "warn"],
+      ["yrd:infra", "error"],
+    ])
+    log.end()
+  })
+
+  it("keeps a thrown failure at the quiet default when reportedAtBoundary says someone else already reports it", async () => {
+    // A one-shot command's own top-level lifecycle (e.g. yrd-bay's intake/submit)
+    // is already reported by the CLI boundary, which always prints a final
+    // structured error regardless of level. Promoting the SAME thrown failure to
+    // WARN/ERROR here would print a second line onto the same default stderr
+    // stream -- for `--json`, one that breaks single-blob JSON parsing (measured:
+    // `yrd pr create --json` against an unfetchable origin, 2026-08-31). This is
+    // the thrown-branch counterpart of why `settled` stays quiet when a deeper
+    // step already owns the one loud report.
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+
+    await expect(
+      observeYrdLifecycle(log, { lifecycle: "submit", reportedAtBoundary: true, now: () => 10 }, async () => {
+        throw createFailure({ kind: "configuration", code: "submit-branch-refresh-failed", message: "no origin" })
+      }),
+    ).rejects.toThrow("no origin")
+    await expect(
+      observeYrdLifecycle(log, { lifecycle: "infra", reportedAtBoundary: true, now: () => 15 }, async () => {
+        throw createFailure({ kind: "infrastructure", code: "disk-full", message: "no space left on device" })
+      }),
+    ).rejects.toThrow("no space left on device")
+
+    const finished = events
+      .filter((event): event is Extract<Event, { kind: "log" }> => event.kind === "log")
+      .filter((event) => event.props?.outcome !== "started")
+    expect(finished.map((event) => [event.namespace, event.level, event.props?.outcome])).toEqual([
+      ["yrd:submit", "info", "failed"],
+      ["yrd:infra", "info", "failed"],
     ])
     log.end()
   })

@@ -840,7 +840,18 @@ export function createBays(
   const observe = async <Result>(
     lifecycle: YrdLifecycleOptions<Result>,
     operation: () => Result | Promise<Result>,
-  ): Promise<Result> => (log === undefined ? operation() : observeYrdLifecycle(log, lifecycle, operation))
+  ): Promise<Result> =>
+    log === undefined
+      ? operation()
+      : // Every lifecycle this wraps (intake, submit) is a one-shot command's own
+        // top-level operation: its caller is the CLI boundary, which always
+        // prints a final structured error regardless of level (yrd-cli's
+        // `classifyFailure`). A thrown failure here promoted to WARN/ERROR would
+        // print a second, redundant line on the SAME default stderr stream --
+        // for `--json`, a line that breaks single-blob JSON parsing outright
+        // (measured: `yrd pr create --json` against an unfetchable origin,
+        // 2026-08-31). See `reportedAtBoundary`'s own doc in @yrd/core.
+        observeYrdLifecycle(log, { ...lifecycle, reportedAtBoundary: true }, operation)
   const execute = async (result: CommandResult, options: RunJobOptions, action: string): Promise<void> => {
     const results = await jobs.runMany(jobs.requested(result), options)
     const failed = results.find((job) => job.status !== "completed" || job.conclusion !== "success")
