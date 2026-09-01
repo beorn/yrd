@@ -82,6 +82,13 @@ function derivedSnapshots(
  * the fallback rather than leaving the field absent: an absent `submittedAt`
  * renders as an unsubmitted draft, which is the opposite of what a merged
  * change is.
+ *
+ * `factStands` answers a DIFFERENT question than the clock above, on purpose:
+ * whether the branch has a submit fact at all, at any sha. The clock wants an
+ * exact-head match (a moved fact is not this revision's submission time); the
+ * liveness question does not (a moved fact still means the branch is submitted
+ * and the next compose will re-derive it). Reading one off the other is how a
+ * re-push would read as a withdrawal — see {@link derivedChange}.
  */
 function changeOfSnapshot(
   bays: DeepReadonly<BaysState>,
@@ -98,6 +105,7 @@ function changeOfSnapshot(
     revision: snapshot.revision,
     headSha: snapshot.headSha,
     submittedAt,
+    factStands: submit !== undefined,
     ...(snapshot.changeId === undefined ? {} : { changeId: snapshot.changeId }),
     ...(snapshot.props === undefined ? {} : { props: snapshot.props }),
     ...(snapshot.issue === undefined ? {} : { issue: snapshot.issue }),
