@@ -20,6 +20,15 @@
  * The sibling gate {@link ./reader-lane-gate.test.ts} pins the other half of
  * the same join — a member with no RECORD AT ALL, which post-S6 is a legal
  * derived member rather than a fault.
+ *
+ * A third gate, {@link ./reader-log-lister-lane-fault-gate.test.ts}, pins a
+ * mechanism this file's and reader-lane-gate's fixtures both miss: the SAME
+ * R3578/PR2131 incident recurred live 2026-09-01 through `queueLogRows`'s OWN
+ * `recordIds` (derived from `results[i].prs`, the record+derived union in
+ * production) disagreeing with `queueRunRevisionReads`'s record-only join —
+ * a live derived member reads as a record inside `queueLogRows` and defeats
+ * its derived-member tolerance there, even though this file's read-level
+ * containment is intact.
  */
 import { describe, expect, it } from "vitest"
 import type { ChangeDeliveryState } from "@yrd/bay"

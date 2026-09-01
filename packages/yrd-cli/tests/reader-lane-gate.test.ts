@@ -10,6 +10,15 @@
  * instead of live, serially.
  * @level l2
  * @consumer @yrd/cli every status/log/timeline operator; the 22991 S5 cutover
+ *
+ * {@link ./reader-log-lister-lane-fault-gate.test.ts} pins a variant this
+ * file's `mixedLaneResults()` fixture does not reach: it never adds the
+ * derived/intent synthetic members to `first.prs` (only to a run's own
+ * `prs`), so `queueLogRows`'s internal `recordIds` — sourced from
+ * `results[i].prs`, `queueChanges`'s record+derived union in production —
+ * never actually widens in this fixture the way it does live. That gate's
+ * fixture does, and reproduces the live 2026-09-01 recurrence of the
+ * R3578/PR2131 incident this file also documents.
  */
 import { describe, expect, it } from "vitest"
 

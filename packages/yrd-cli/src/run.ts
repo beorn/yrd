@@ -9007,6 +9007,10 @@ type QueueLogOptions = Readonly<{
   limit?: number
   pr?: string
   since?: string
+  /** Restore the pre-containment refusal: abort the whole read (exit 3) on
+   * the first run member `queueLogRows` cannot resolve a causal clock for,
+   * instead of marking its row `unreadable` and rendering the rest. */
+  strict?: boolean
 }>
 
 type QueueLogFilterRow = Readonly<{
@@ -9126,7 +9130,10 @@ async function logRuns(
     attempts,
     new Map(),
     revisionReads.clocks,
-    revisionReads.faults,
+    // --strict drops fault accounting entirely, which restores the historical
+    // loud abort in queueLogRows for every member it cannot resolve — the
+    // same "no accounting" path reader-unreadable-member-gate.test.ts pins.
+    options.strict === true ? undefined : revisionReads.faults,
   )
   const filteredRows = filterQueueLogRows(projectedRows, options, io.now?.() ?? Date.now())
   const revisionSubjects = await resolveQueueLogSubjects(filteredRows, io)
@@ -9137,8 +9144,21 @@ async function logRuns(
   const coverage = await queueLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   // From the whole read, not from `rows`: --since/--limit/--pr can filter the
   // unreadable member out of the display, and a caller who is not told believes
-  // the history is whole (@i/10-yrd/23228).
-  const readFaults = [...revisionReads.faults.values()]
+  // the history is whole (@i/10-yrd/23228). Unioned with projectedRows' own
+  // marks: queueLogRows can contain a member queueRunRevisionReads itself
+  // never flagged — its recordIds is this result's whole `prs` population
+  // (record lane plus derived in production), wider than the record-only join
+  // queueRunRevisionReads did, so a still-live derived member can defeat its
+  // derived-member tolerance and only surface as a fault inside queueLogRows'
+  // own per-row derivation (measured live 2026-09-01: run 'R3578' change
+  // 'PR2131'). That fault exists only on the row queueLogRows built for it.
+  const knownFaults = new Set(revisionReads.faults.values())
+  const readFaults = [
+    ...revisionReads.faults.values(),
+    ...projectedRows.flatMap((row) =>
+      row.unreadable === undefined || knownFaults.has(row.unreadable) ? [] : [row.unreadable],
+    ),
+  ]
   await printResult(
     io,
     jsonEnabled(options),
@@ -13413,6 +13433,7 @@ function buildProgram(
     .option("-L, --limit <count>", "limit history rows", int, 20)
     .option("--all", "show all rows; include lossless queue and run records in JSON")
     .option("--json", "emit stable JSON")
+    .option("--strict", "fail loud (exit 3) on the first unreadable run member instead of marking its row")
     .action(async (options) => logRuns(installed(), [], options, io, installedServices()))
 
   program
