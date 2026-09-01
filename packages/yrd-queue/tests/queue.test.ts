@@ -904,11 +904,17 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
       "conflicts in Candidate 'C1'",
     )
+    // A conflicting Candidate rejects before any step Job runs, so no step
+    // owns the ERROR (queueRunFailureLevel's "no step to own it" branch): the
+    // run must own it, or the failure is silent -- a run-scoped ERROR, not the
+    // quiet INFO a step-owned failure settles at (see the negative control in
+    // "surfaces a failed REQUIRED check at ERROR while run/compose settle
+    // quietly at INFO").
     const runFailures = events.filter(
       (event) =>
         event.kind === "log" &&
         event.namespace === "yrd:queue:run" &&
-        event.level === "info" &&
+        event.level === "error" &&
         event.props?.run === "R1",
     )
     expect(runFailures).toHaveLength(1)

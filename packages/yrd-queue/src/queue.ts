@@ -84,7 +84,7 @@ import {
 } from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { StepKind } from "@yrd/config"
-import type { ConditionalLogger } from "loggily"
+import type { ConditionalLogger, LogLevel } from "loggily"
 import * as z from "zod"
 import { CandidateFailureResultEvidenceSchema, candidateFailureResultEvidence } from "./check-attribution.ts"
 import {
@@ -1947,6 +1947,7 @@ function createQueue<Shape extends ChangeShape>(
           ...(options.continuation === true ? { continuation: true } : {}),
         },
         outcome: queueRunOutcome,
+        failureLevel: queueRunFailureLevel,
         resultAttributes: (result) => ({
           status: result.status,
           // A run-owned failure (no step owns the ERROR) carries its JobError so
@@ -4126,6 +4127,7 @@ function createQueue<Shape extends ChangeShape>(
           identity: { job: completion.job, attempt: completion.attempt, runner: completion.runner },
           attributes: { selector, step: completion.step },
           outcome: queueRunOutcome,
+          failureLevel: queueRunFailureLevel,
           resultAttributes: runEvidence,
         },
         async () => {
@@ -4690,6 +4692,15 @@ function runEvidence(run: DeepReadonly<Run>): Record<string, unknown> {
   }
 }
 
+// Shared by queueRunOutcome (which OUTCOME) and queueRunFailureLevel (how LOUD
+// a "failed" outcome is): a run failed with a step Job that already owns the
+// single ERROR (yrd:jobs:<step>). Keeping one function under both questions
+// means they cannot drift apart the way the outcome routing and the (missing)
+// level classification already had.
+function runFailureStepOwned(run: DeepReadonly<Run>): boolean {
+  return run.steps.some((step) => step.job !== undefined && jobFailed(step.job))
+}
+
 function queueRunOutcome(run: DeepReadonly<Run>): YrdLifecycleOutcome {
   if (Queues.succeeded(run)) return "succeeded"
   if (Queues.failed(run)) {
@@ -4698,12 +4709,22 @@ function queueRunOutcome(run: DeepReadonly<Run>): YrdLifecycleOutcome {
     // as a duplicate ERROR one level up. But a run that failed with NO step to
     // own it — a pinned/stale-base refusal rejected before the step's Job ran
     // (record.failure) — has no deeper ERROR. The run must own it, or the
-    // failure is silent: fail loud with a run-scoped ERROR.
-    const stepOwned = run.steps.some((step) => step.job !== undefined && jobFailed(step.job))
-    return stepOwned ? "settled" : "failed"
+    // failure is silent: fail loud with a run-scoped ERROR (queueRunFailureLevel).
+    return runFailureStepOwned(run) ? "settled" : "failed"
   }
   if (Queues.terminal(run)) return "settled"
   return "progress"
+}
+
+/** failureLevel for queueRunOutcome's "failed" branch. That branch is reached
+ * ONLY when no step Job owns the ERROR (an admission-level refusal rejected
+ * before any step ran, e.g. a Candidate that conflicts before Job execution) —
+ * a step-owned failure settles at "settled" instead and never reaches here.
+ * Checking runFailureStepOwned explicitly, rather than relying on that
+ * routing implicitly, keeps a future third path to "failed" from silently
+ * inheriting the wrong level. */
+function queueRunFailureLevel(run: DeepReadonly<Run>): Exclude<LogLevel, "silent"> {
+  return runFailureStepOwned(run) ? "info" : "error"
 }
 
 function queueRunsOutcome(runs: readonly DeepReadonly<Run>[]): YrdLifecycleOutcome {
