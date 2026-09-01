@@ -73,7 +73,7 @@ export default {
         // Andon policy (operator ruling 2026-09-01): a crashed runner stays
         // exited and pages once; every restart is a deliberate operator/CTO
         // act, never supervision. hab-config validates the value.
-        restart: "never",
+        restart: "never" as const,
       },
     ]),
   ),
