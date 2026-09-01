@@ -279,9 +279,12 @@ describe("habitant memory observation row", () => {
       heapTotalBytes: 400 * MB,
       externalBytes: 100 * MB,
       arrayBuffersBytes: 20 * MB,
-      // 900 - 400 - 100: the share no reported pool claims, which is where a
+      // 900 - 300 - 100: the share no reported pool claims, which is where a
       // SQLite page cache or allocator fragmentation would show up alone.
-      unattributedBytes: 400 * MB,
+      // Subtracts heapUsed, never heapTotal -- under Bun the reserve reads
+      // SMALLER than the live bytes in it, so subtracting it would leave the
+      // whole JS heap sitting in this field.
+      unattributedBytes: 500 * MB,
       capBytes: CAP,
     })
   })
@@ -297,11 +300,21 @@ describe("habitant memory observation row", () => {
     expect(row.rssBytes).toBe(900 * MB)
   })
 
+  it("still attributes the split when heapTotal is missing — it is not an input", () => {
+    // The regression this pins: an earlier formula subtracted heapTotal, which
+    // Bun reports SMALLER than heapUsed. Reaching for it again would both break
+    // here and silently reclassify the whole JS heap as native memory.
+    const row = habitantMemoryObservation({ ...sample, heapTotalBytes: undefined }, undefined)
+
+    expect(row).not.toHaveProperty("heapTotalBytes")
+    expect(row.unattributedBytes).toBe(900 * MB - 300 * MB - 100 * MB)
+  })
+
   it("reports a negative unattributed share instead of clamping it away", () => {
     const row = habitantMemoryObservation({ ...sample, rssBytes: 100 * MB }, undefined)
 
     // Overlapping pools are a fact about the runtime's accounting. Clamping at
     // zero would make a double-counting runtime read exactly like a tidy one.
-    expect(row.unattributedBytes).toBe(100 * MB - 400 * MB - 100 * MB)
+    expect(row.unattributedBytes).toBe(100 * MB - 300 * MB - 100 * MB)
   })
 })

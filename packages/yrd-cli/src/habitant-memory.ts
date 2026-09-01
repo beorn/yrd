@@ -162,20 +162,29 @@ export type HabitantMemoryObservationRow = Readonly<{
   externalBytes?: number
   arrayBuffersBytes?: number
   /**
-   * Resident bytes the runtime attributes to NEITHER the JS heap nor its
-   * external buffers: `rss - heapTotal - external`.
+   * Resident bytes the runtime attributes to NEITHER live JS objects nor its
+   * external buffers: `rss - heapUsed - external`.
    *
-   * This is the field the row exists for. Retained JS objects grow `heapUsed`
-   * and `heapTotal` together; native buffers grow `external`; allocator
-   * fragmentation and native mappings the runtime does not account for (a
-   * SQLite page cache among them) grow only resident size, and show up here
-   * and nowhere else. Which of those three is climbing decides where a fix
-   * belongs, and no single reported number distinguishes them.
+   * This is the field the row exists for. Retained JS objects grow `heapUsed`;
+   * native buffers grow `external`; allocator fragmentation and native
+   * mappings the runtime does not account for (a SQLite page cache among them)
+   * grow only resident size, and show up here and nowhere else. Which of those
+   * three is climbing decides where a fix belongs, and no single reported
+   * number distinguishes them.
+   *
+   * `heapUsed` rather than the `heapTotal` this first reached for: under Bun
+   * `heapTotal` does not track the heap at all. Measured 2026-09-01 on Bun
+   * 1.3.14, a process holding 40 large arrays reported `heapUsed` 32.2 MB
+   * against `heapTotal` 0.6 MB — the reserve reading SMALLER than the live
+   * bytes inside it. Subtracting it would have left the entire JS heap sitting
+   * in this field and pointed every investigation at native memory.
    *
    * Present only when all three inputs are measured, and deliberately NOT
    * clamped at zero: a negative value means the runtime's own pools overlap or
    * double-count, which is a fact about the measurement worth seeing rather
-   * than one worth rounding away.
+   * than one worth rounding away. Bun does overlap them — the same session
+   * measured `external` counting bytes that resident size also carried — so
+   * this is an expected reading, not a defect to hide.
    */
   unattributedBytes?: number
   capBytes?: number
@@ -188,9 +197,9 @@ export function habitantMemoryObservation(
 ): HabitantMemoryObservationRow {
   const { rssBytes, heapUsedBytes, heapTotalBytes, externalBytes, arrayBuffersBytes } = sample
   const unattributed =
-    rssBytes === undefined || heapTotalBytes === undefined || externalBytes === undefined
+    rssBytes === undefined || heapUsedBytes === undefined || externalBytes === undefined
       ? undefined
-      : rssBytes - heapTotalBytes - externalBytes
+      : rssBytes - heapUsedBytes - externalBytes
   return Object.freeze({
     ...(rssBytes === undefined ? {} : { rssBytes }),
     ...(heapUsedBytes === undefined ? {} : { heapUsedBytes }),
