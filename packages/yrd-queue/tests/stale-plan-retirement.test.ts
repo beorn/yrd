@@ -133,7 +133,7 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
 
     const retire = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
-        event.kind === "log" && event.level === "info" && event.props?.action === "compose-stale-plan-retire",
+        event.kind === "log" && event.level === "warn" && event.props?.action === "compose-stale-plan-retire",
     )
     expect(retire, "expected a compose-stale-plan-retire result").toBeDefined()
     expect(retire?.props).toMatchObject({ run: "R1", code: "stale-plan" })
@@ -168,7 +168,7 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
 
     const result = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
-        event.kind === "log" && event.level === "info" && event.props?.action === "recover-stale-plan-retire",
+        event.kind === "log" && event.level === "warn" && event.props?.action === "recover-stale-plan-retire",
     )
     expect(result, "expected a recover-stale-plan-retire result").toBeDefined()
     expect(result?.props).toMatchObject({ reason: "stale-plan", runs: ["R1"] })
