@@ -29,16 +29,17 @@ describe("habitant exit taxonomy — one code per condition", () => {
   it("gives every condition a DISTINCT code", () => {
     const codes = CONDITIONS.map((condition) => HABITANT_EXIT[condition])
     expect(new Set(codes).size).toBe(codes.length)
-    expect(codes.length).toBe(6)
+    expect(codes.length).toBe(7)
   })
 
-  it("names the six conditions the supervisor has to tell apart", () => {
+  it("names the seven conditions the supervisor has to tell apart", () => {
     expect(CONDITIONS.toSorted()).toEqual([
       "installed-plan-stale",
       "interrupted",
       "memory-cap",
       "poisoned",
       "queue-wedged",
+      "refusal-loop",
       "source-stale",
     ])
   })
@@ -75,12 +76,14 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
     expect(HABITANT_EXIT_DISPOSITION.interrupted).toBe("restart-immediately")
   })
 
-  it("refuses to restart the one condition a successor cannot change at all", () => {
-    // Every other condition lives in THIS process: a successor is not
+  it("refuses to restart the conditions a successor cannot change at all", () => {
+    // Every restartable condition lives in THIS process: a successor is not
     // poisoned, boots moved source, installs the current plan, starts small.
-    // A wedged queue lives outside the process, so the successor re-reads the
-    // same wedge — pacing it only sets how often we rediscover that.
+    // These two live OUTSIDE it, in the queue and the journal the runner reads,
+    // so the successor re-reads the same wedge and re-derives the same refused
+    // member — pacing them only sets how often we rediscover that.
     expect(HABITANT_EXIT_DISPOSITION["queue-wedged"]).toBe("stand-down")
+    expect(HABITANT_EXIT_DISPOSITION["refusal-loop"]).toBe("stand-down")
   })
 
   it("derives the backoff code list from the table rather than restating it", () => {
@@ -88,7 +91,7 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
   })
 
   it("derives the stand-down code list the same way, and keeps the two disjoint", () => {
-    expect(HABITANT_STAND_DOWN_EXIT_CODES).toEqual([HABITANT_EXIT["queue-wedged"]])
+    expect(HABITANT_STAND_DOWN_EXIT_CODES).toEqual([HABITANT_EXIT["queue-wedged"], HABITANT_EXIT["refusal-loop"]])
     const overlap = HABITANT_STAND_DOWN_EXIT_CODES.filter((code) => HABITANT_BACKOFF_EXIT_CODES.includes(code))
     expect(overlap).toEqual([])
   })
