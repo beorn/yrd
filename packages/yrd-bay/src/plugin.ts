@@ -58,6 +58,7 @@ import {
   baseIdentity,
   defaultBayBranch,
   checksRequested,
+  currentAdmissionFinish,
   currentChangeRev,
   emptyBaysState,
   isLiveChange,
@@ -100,6 +101,7 @@ import {
   type ChangeReviewState,
   type ChangeRev,
   type ChangeRevClock,
+  type ChangeRevTerminal,
   type ProvisionBayInput,
   type ProvisionedBay,
   type RefreshBayInput,
@@ -1454,6 +1456,23 @@ export function withBays(options: WithBaysOptions) {
         ),
         "pr/admission-recorded": ChangeAdmissionRecordedFactSchema,
       },
+      // DELIBERATELY NOT BUMPED for the superseded-settle guard, and the
+      // reasoning is worth keeping. A bump would be the tidy instinct: a
+      // checkpoint stored before this guard holds a projected state with the
+      // stale terminal already stamped, and only a rebuild clears it. But
+      // bumping incurs the migration obligation the ledger in
+      // `@yrd/cli/checkpoint-bump-gate.ts` enforces — a new shipped identity
+      // plus a retained edge out of the one it supersedes — and that file says
+      // in as many words that retaining a predecessor is its own change with
+      // its own proof, not something smuggled in beside another fix. Its gate
+      // caught exactly that here.
+      //
+      // Nothing is lost by waiting, because the READ rule already covers the
+      // stored case: `currentRevisionTerminal` ignores a superseded terminal
+      // wherever it finds one, so a restored checkpoint carrying a stamped
+      // stale terminal still reads pending and is still admitted. This guard
+      // stops NEW ones being written; the reader handles every old one. Rebuild
+      // the projections when someone lands the bump with its migration.
       projectionVersion: "bays-v15-retired-regressions",
       project: projectBays,
       create(yrd) {
@@ -2271,6 +2290,38 @@ function assertTerminalApplies(
   if (terminal.props !== undefined && (currentProps === undefined || !propsEqual(currentProps, terminal.props))) {
     throw new Error(`yrd: terminal props does not match change '${pr.id}'`)
   }
+}
+
+/**
+ * Is this settle a PREVIOUS admission's, arriving late?
+ *
+ * A run that has died can still emit its settle after the change was
+ * re-submitted, stamped with its own older time. `branch/submitted` has by then
+ * moved `submittedAt` forward and cleared the terminal, so stamping this one
+ * puts a finish on the revision that describes an admission which is over — and
+ * that is what held a re-submitted change out of the queue and threw a negative
+ * age at every reader (2026-09-01, change 'PR2749' over the dead run 'R3675').
+ *
+ * Three deliberate narrowings, because refusing too much is worse than
+ * refusing too little here:
+ *
+ *  - Only a settle that NAMES A RUN. An operator's own `withdraw`/`cancel`
+ *    carries no run and is a decision being made now, not a stale echo; it
+ *    always applies.
+ *  - Only NON-LANDING kinds. `integrated` and `already-landed` are claims about
+ *    the repository, and a merged change is merged whatever its submit clock
+ *    says afterwards. Refusing one would hide a real merge.
+ *  - Only when the settle predates the revision's OWN submit fact, which is the
+ *    same {@link currentAdmissionFinish} rule the readers apply.
+ *
+ * This REFUSES rather than throws on purpose. The reducer runs on every replay,
+ * not only on live append, and the live journal already contains such a row —
+ * a throw here would make that journal unreplayable.
+ */
+function supersededSettle(pr: DeepReadonly<Change>, terminal: ChangeRevTerminal): boolean {
+  if (terminal.run === undefined) return false
+  if (terminal.kind !== "rejected" && terminal.kind !== "canceled") return false
+  return currentAdmissionFinish(currentChangeRev(pr).submittedAt, terminal.at) === undefined
 }
 
 function associateRejectedTerminalRun(
@@ -3208,6 +3259,17 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
+      const rejectedTerminal: ChangeRevTerminal = {
+        kind: "rejected",
+        at: applied.ts,
+        ...("run" in changed && changed.run !== undefined ? { run: changed.run } : {}),
+      }
+      // A late settle from a dead run is recorded, not stamped: the change
+      // keeps its re-submitted state and stays admissible, and the refused
+      // fact is written down where `pr view` and the JSON projection show it.
+      if (supersededSettle(pr, rejectedTerminal)) {
+        return patchPR(pr, { revs: patchRevisionClock(pr, { supersededTerminal: rejectedTerminal }) })
+      }
       const rejected: Change = {
         ...pr,
         state: "open",
@@ -3293,6 +3355,17 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const run = parsed.success ? parsed.data.run : undefined
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
+      const canceledTerminal: ChangeRevTerminal = {
+        kind: "canceled",
+        at: applied.ts,
+        ...(run === undefined ? {} : { run }),
+      }
+      // Same rule as `pr/rejected` above: a run-attributed cancel that predates
+      // the revision's own submit fact is the dead run's, not a decision about
+      // the change as it now stands, and must not close it.
+      if (supersededSettle(pr, canceledTerminal)) {
+        return patchPR(pr, { revs: patchRevisionClock(pr, { supersededTerminal: canceledTerminal }) })
+      }
       return patchPR(pr, {
         state: "closed",
         merged: false,
@@ -3300,9 +3373,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         canceledBy: changed.by,
         cancelReason: changed.reason,
         terminalRun: run,
-        revs: patchRevisionClock(pr, {
-          terminal: { kind: "canceled", at: applied.ts, ...(run === undefined ? {} : { run }) },
-        }),
+        revs: patchRevisionClock(pr, { terminal: canceledTerminal }),
       })
     }
     case "pr/edited": {

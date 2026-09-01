@@ -405,6 +405,17 @@ export type ChangeRevClock = Readonly<{
   pushedAt: string
   submittedAt?: string
   terminal?: ChangeRevTerminal
+  /**
+   * A NON-LANDING settle this revision refused because it predates the
+   * revision's own submit fact — recorded here instead of being stamped on
+   * `terminal`, and never dropped.
+   *
+   * This is what the writer guard writes. A landing settle (`integrated`,
+   * `already-landed`) is never refused and never appears here: those are claims
+   * about the repository, and a merged change is merged no matter what its
+   * submit clock says afterwards.
+   */
+  supersededTerminal?: ChangeRevTerminal
 }>
 
 export type ChangeAdmissionStep = Readonly<{

@@ -615,14 +615,11 @@ export type ChangeRevisionHistoryClock = Readonly<{
   pr: string
   revision: number
   headSha: string
-  /**
-   * A terminal fact this revision still carries that belongs to a PREVIOUS
-   * admission of the same sha — moved off `terminal` by
-   * {@link currentAdmissionFinish} so no age is measured to it, and kept here
-   * so nothing is silently discarded and a row can say why it reads pending.
-   */
-  supersededTerminal?: ChangeRevTerminal
 }> &
+  // `supersededTerminal` rides in from `ChangeRevClock`: the writer records a
+  // refused settle there, and this projection puts one it finds at READ time in
+  // the same field, so a reader cannot tell — and does not need to tell — which
+  // of the two put it there.
   ChangeRevClock
 
 /**
