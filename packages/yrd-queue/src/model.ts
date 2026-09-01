@@ -750,6 +750,11 @@ export type QueueAdmissionRefusal = Readonly<{
   kind?: string
   /** The refusal message of the most recent skip. */
   reason: string
+  /** The most recent skip was a check red the check itself JUDGED: it ran to
+   * its own exit and stated what failed. The reject class reads this boolean
+   * rather than parsing `reason`; absent for a watchdog kill, an infra fault,
+   * an unreadable red, and every row written before it shipped. */
+  judgedFailure?: true
   /** Consecutive refusals since the last admission / push / re-merge. */
   count: number
   /** Consecutive refusals carrying the current exact `code`. Unlike `count`,

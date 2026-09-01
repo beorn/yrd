@@ -216,6 +216,12 @@ export const CommandEvidenceSchema = z
      * indistinguishable from durationMs alone, which only bounds the STALLED case
      * from below. */
     stageBoundMs: z.number().nonnegative().optional(),
+    /** True when the check ran to its own exit AND stated a judged failure line
+     * — the two halves that together make a red a verdict on the CONTENT rather
+     * than a report about the run. Absent for a watchdog kill, an unreadable
+     * red, and every pre-existing record. Consumers read this boolean; they must
+     * never re-derive it by parsing the failure message back apart. */
+    judgedFailure: z.literal(true).optional(),
     lastProgressAtMs: z.number().nonnegative().optional(),
     lastProgressBytes: z.number().int().nonnegative().optional(),
     sweepFailure: z.string().min(1).optional(),
@@ -254,6 +260,12 @@ export const CommandTerminalSchema = z
     timedOut: z.boolean(),
     stageVerdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
     stageBoundMs: z.number().nonnegative().optional(),
+    /** True when the check ran to its own exit AND stated a judged failure line
+     * — the two halves that together make a red a verdict on the CONTENT rather
+     * than a report about the run. Absent for a watchdog kill, an unreadable
+     * red, and every pre-existing record. Consumers read this boolean; they must
+     * never re-derive it by parsing the failure message back apart. */
+    judgedFailure: z.literal(true).optional(),
     startedAt: z.string(),
     endedAt: z.string(),
     durationMs: z.number().nonnegative(),
@@ -556,6 +568,29 @@ function configuredCommand<Shape extends ChangeShape>(
         : progress.verdict === "TIMED_OUT"
           ? options.timeoutMs
           : undefined
+    // The one fact the reject class turns on, decided HERE because this is the
+    // only place both halves are in hand: the check itself STATED a judged
+    // failure line, and no watchdog killed the process.
+    //
+    // Both halves are load-bearing. A red with no judged line is a check whose
+    // verdict we cannot read — an infra fault, a crash, a harness that never
+    // reported — and rejecting on it would dead-letter someone else's outage.
+    // A watchdog kill (STALLED/TIMED_OUT) is definitionally not a verdict on
+    // the content: the process never got to state one. Only a process that ran
+    // to its own exit AND said what failed has judged the author's change.
+    //
+    // It is computed once, structurally, and read as a boolean. The read site
+    // must never re-derive it by parsing this message back out of the record —
+    // that string-parse-back is the anti-pattern `refusal-cure.ts` already is.
+    // `timedOut` is checked as well as the verdict, not instead of it: a
+    // process implementation that predates `verdict` still reports the
+    // wall-clock kill, and `ProcessResult` only ties `stalled: true` to the
+    // STALLED verdict, so that one needs no separate check here.
+    const judgedFailure =
+      firstJudgedFailureLine(message) !== undefined &&
+      progress.verdict !== "STALLED" &&
+      progress.verdict !== "TIMED_OUT" &&
+      result.timedOut !== true
     const evidence = CommandEvidenceSchema.parse({
       command: argv,
       exitCode: result.exitCode,
@@ -573,6 +608,7 @@ function configuredCommand<Shape extends ChangeShape>(
       ...(result.timedOut ? { timedOut: true } : {}),
       ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
       ...(stageBoundMs === undefined ? {} : { stageBoundMs }),
+      ...(judgedFailure ? { judgedFailure: true as const } : {}),
       ...(progress.lastProgressAtMs === undefined ? {} : { lastProgressAtMs: progress.lastProgressAtMs }),
       ...(progress.lastProgressBytes === undefined ? {} : { lastProgressBytes: progress.lastProgressBytes }),
       ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
@@ -679,6 +715,7 @@ function configuredCommand<Shape extends ChangeShape>(
       timedOut: result.timedOut,
       ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
       ...(stageBoundMs === undefined ? {} : { stageBoundMs }),
+      ...(judgedFailure ? { judgedFailure: true as const } : {}),
       startedAt,
       endedAt,
       durationMs: result.durationMs,

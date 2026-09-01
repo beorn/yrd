@@ -8625,3 +8625,121 @@ describe("configuredCommandStep — the watchdog verdict distinguishes STALLED f
     )
   })
 })
+
+describe("configuredCommandStep — judgedFailure separates a verdict on the CONTENT from a report about the run", () => {
+  // The reject class (no-parking ruling) ends a revision's queue life on the
+  // first refusal, so what it keys on has to be exact. `check-failed` is a
+  // funnel: a judged content red, a watchdog kill and an infra fault like a
+  // `bun install` race all canonicalize onto it, and infra faults are 29% of
+  // all-time failed rows. `judgedFailure` is decided HERE, where both halves
+  // are in hand, and read downstream as a boolean — never re-derived by parsing
+  // the message back apart.
+  const execution = {
+    run: "run-1",
+    step: "check",
+    index: 0,
+    prs: [{ id: "pr-1", base: "main", headSha: "a".repeat(40) }],
+    shape: { results: {} },
+  } as unknown as StepExecution<ChangeShape>
+
+  async function runCheck(result: ProcessResult, cwd: string) {
+    const runner = configuredCommandStep<ChangeShape>({
+      inject: { process: { run: () => Promise.resolve(result) } },
+      command: ["bun", "run", "check"],
+      cwd,
+      purpose: "check",
+      artifactRoot: join(cwd, "artifacts"),
+      timeoutMs: 600_000,
+      noProgressTimeoutMs: 30_000,
+    })
+    return runner(execution, { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal })
+  }
+
+  const exited = (stdout: string): ProcessResult => ({
+    exitCode: 1,
+    signal: null,
+    stdout,
+    stderr: "",
+    durationMs: 1_200,
+    timedOut: false,
+    stalled: false,
+    verdict: "EXITED",
+  })
+
+  it("records the judgment when the check ran to its own exit and STATED what failed", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-cmd-judged-"))
+    roots.push(cwd)
+    const outcome = await runCheck(exited("FAIL packages/km/tests/board.test.ts > moves a card\n"), cwd)
+    expect(outcome.status).toBe("completed")
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
+    const evidence = CommandEvidenceSchema.parse(outcome.output)
+    expect(evidence).toMatchObject({ judgedFailure: true, stageVerdict: "EXITED" })
+    // Durable too: the record a later reader consults carries the same fact.
+    const dir = join(cwd, "artifacts", "run-1", "0-check", "attempt-1")
+    const terminal = CommandTerminalSchema.parse(JSON.parse(await readFile(join(dir, "terminal.json"), "utf8")))
+    expect(terminal.judgedFailure).toBe(true)
+  })
+
+  it("records NO judgment when the check exited red without stating a verdict", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-cmd-unjudged-"))
+    roots.push(cwd)
+    // The infra shape: a red whose output says nothing a reader could act on.
+    // Rejecting on this would dead-letter the victim of someone else's outage.
+    const outcome = await runCheck(exited("bun install failed: could not resolve host\n"), cwd)
+    expect(outcome.status).toBe("completed")
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
+    const evidence = CommandEvidenceSchema.parse(outcome.output)
+    expect(evidence.judgedFailure).toBeUndefined()
+    expect(evidence.stageVerdict).toBe("EXITED")
+  })
+
+  it("records NO judgment for a watchdog kill, even when the output already stated a failure", async () => {
+    // The trap this exists to close: a long check can print a real FAIL line and
+    // THEN be killed by the no-progress watchdog. The process never reached its
+    // own verdict, so the run is unjudged however its partial output reads —
+    // and both watchdogs must answer the same way.
+    const killed = {
+      exitCode: 137,
+      signal: "SIGKILL" as const,
+      stdout: "FAIL packages/km/tests/board.test.ts > moves a card\n",
+      stderr: "",
+      durationMs: 45_000,
+    }
+    const cases: readonly (readonly [string, ProcessResult])[] = [
+      [
+        "stalled",
+        {
+          ...killed,
+          timedOut: false,
+          stalled: true,
+          verdict: "STALLED",
+          lastProgressAtMs: 12_000,
+          lastProgressBytes: 4,
+        },
+      ],
+      ["timeout", { ...killed, timedOut: true, stalled: false, verdict: "TIMED_OUT" }],
+    ]
+    for (const [name, result] of cases) {
+      const cwd = await mkdtemp(join(tmpdir(), `yrd-cmd-${name}-judged-`))
+      roots.push(cwd)
+      const outcome = await runCheck(result, cwd)
+      expect(outcome.status).toBe("completed")
+      if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
+      const evidence = CommandEvidenceSchema.parse(outcome.output)
+      expect(evidence.judgedFailure, `${name} must never read as judged`).toBeUndefined()
+      expect(evidence.stageVerdict).toBe(result.verdict)
+    }
+  })
+
+  it("parses a record written before the field existed", async () => {
+    expect(
+      CommandEvidenceSchema.parse({
+        command: ["bun", "run", "check"],
+        exitCode: 1,
+        durationMs: 10,
+        configHash: "0".repeat(64),
+        artifacts: [],
+      }).judgedFailure,
+    ).toBeUndefined()
+  })
+})
