@@ -86,11 +86,7 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import type { StepKind } from "@yrd/config"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
-import {
-  CandidateFailureResultEvidenceSchema,
-  candidateFailureResultEvidence,
-  type CandidateFailureResultEvidence,
-} from "./check-attribution.ts"
+import { CandidateFailureResultEvidenceSchema, candidateFailureResultEvidence } from "./check-attribution.ts"
 import {
   CandidateSchema,
   IntegrationProofSchema,
@@ -874,6 +870,12 @@ const AdmissionRefusedSchema = z
     code: z.string().trim().min(1),
     kind: z.string().trim().min(1).optional(),
     reason: z.string().trim().min(1),
+    /** The check judged this red on the CONTENT: it ran to its own exit and
+     * stated what failed (`CommandEvidence.judgedFailure`, decided once at the
+     * failure). Carried on the refusal so the reject class can read a boolean
+     * instead of parsing `reason` back apart. Absent for every refusal that is
+     * not a judged check red, and for every fact written before this shipped. */
+    judgedFailure: z.literal(true).optional(),
   })
   .strict()
 type AdmissionRefusedArgs = Readonly<z.infer<typeof AdmissionRefusedSchema>>
@@ -973,46 +975,34 @@ function attributableMember(
 }
 
 /**
- * The certified content fault a change carries, when it carries one.
- *
- * A required-check red is the AUTHOR's fault only when the check's own
- * evidence certifies it: net-new diagnostics measured against the exact base
- * ({@link candidateFailureResultEvidence}). Without that certificate the red is
- * unattributed — a base-health step describing its own environment, an opaque
- * red, an inherited failure, or a flake that reddened this run and not the next
- * — and it must RETRY, never reject a revision.
- *
- * This reads the SAME line the check tooling already draws for `needs-author`
- * attribution rather than inventing a second one. A partition that disagreed
- * with the one the author is shown would reject changes for failures the
- * message says are not theirs.
- */
-function attributedContentFault(record: DeepReadonly<Change> | undefined): CandidateFailureResultEvidence | undefined {
-  if (record === undefined) return undefined
-  const receipt = changeNeedsAuthor(record)?.receipt
-  if (receipt === undefined) return undefined
-  const attributed = CandidateFailureResultEvidenceSchema.safeParse(receipt.evidence)
-  return attributed.success ? attributed.data : undefined
-}
-
-/**
  * Whether this refusal ends the revision's queue life instead of being retried.
  *
- * Three ways in, and the middle one is where the operator's no-parking ruling
+ * Three ways in, and the last one is where the operator's no-parking ruling
  * landed: the legacy structural set above; a composition failure in the
  * `needs-author` bucket, which already means only a new revision cures this;
- * and a required-check failure the check's own evidence CERTIFIES as the
- * change's (see {@link attributedContentFault}) — never an uncertified red.
+ * and a required-check failure the check itself JUDGED — it ran to its own exit
+ * and stated what failed.
  *
- * `record` is required rather than optional on purpose: the check-failed arm is
- * a judgment about a specific change, and a caller that could omit the record
- * would silently get the retry answer for a change that deserves rejection.
+ * `judgedFailure` is the whole discrimination, and it is a fact recorded at the
+ * failure, never re-derived here (see `configuredCommandStep` in ./command.ts).
+ * `check-failed` is a funnel: a judged content red, a watchdog kill
+ * (STALLED/TIMED_OUT), and an infra fault like a `bun install` race all
+ * canonicalize onto it, and infra faults are 29% of all-time failed rows. So
+ * membership by CODE would dead-letter the victims of someone else's outage.
+ * Without the judgment the refusal keeps the ordinary retry threshold, which is
+ * the right answer for every one of those.
+ *
+ * What this deliberately does NOT do is partition flakes. The check tool's own
+ * FLAKE/inherited/new partition is computed hh-side and flattened to an exit
+ * code before it reaches yrd, so a flake that reddens one run and not the next
+ * still reads as judged. Carrying that partition across the tool boundary as a
+ * typed verdict is the named follow-on; until it lands, a flake can reject.
  */
-function structurallyPermanentAdmissionRefusal(code: string, record: DeepReadonly<Change> | undefined): boolean {
+function structurallyPermanentAdmissionRefusal(code: string, refusal: Readonly<{ judgedFailure?: true }>): boolean {
   if (STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(code)) return true
   const canonical = canonicalRefusalCode(code) ?? code
   if (NEEDS_AUTHOR_CODES.has(canonical)) return true
-  return canonical === "check-failed" && attributedContentFault(record) !== undefined
+  return canonical === "check-failed" && refusal.judgedFailure === true
 }
 
 /**
@@ -1024,23 +1014,15 @@ function structurallyPermanentAdmissionRefusal(code: string, record: DeepReadonl
  * that can change a verdict about content. Saying that in the settlement is the
  * difference between a dead letter and a park: a reader who is told the remedy
  * acts on it, and a reader who is told nothing waits.
+ *
+ * The evidence is the refusal's own reason, which for a judged check failure
+ * already carries the line the check judged on and the artifact holding the
+ * rest — assembled once, at the failure.
  */
-function permanentRefusalReason(
-  pr: string,
-  code: string,
-  reason: string,
-  attributed: CandidateFailureResultEvidence | undefined,
-): string {
-  const unchanged = attributed?.unchangedBaselineCount
-  const evidence =
-    attributed === undefined
-      ? ""
-      : ` Failing: ${renderAttributedFailures(attributed)}${
-          unchanged === undefined ? "" : `; ${unchanged} baseline error${unchanged === 1 ? "" : "s"} unchanged`
-        }.`
+function permanentRefusalReason(pr: string, code: string, reason: string): string {
   // No trailing period: every caller embeds this in a sentence of its own.
   return (
-    `change '${pr}' is refused by '${code}' and no retry can change that fact: ${reason}.${evidence}` +
+    `change '${pr}' is refused by '${code}' and no retry can change that fact: ${reason}.` +
     " This revision's turn in the queue ends here; push a new revision to re-enter"
   )
 }
@@ -5385,11 +5367,7 @@ function createQueueCommands(
         revision: revision.n,
         headSha: revision.head,
       })
-      // A DERIVED member has no record to read a content verdict from, so it
-      // can only ever reach the legacy structural set — never the check-failed
-      // arm, which needs the change's own certified evidence.
-      const record = member.source === "record" ? member.record : undefined
-      if (!structurallyPermanentAdmissionRefusal(args.code, record)) return { events: [refused] }
+      if (!structurallyPermanentAdmissionRefusal(args.code, args)) return { events: [refused] }
       return {
         events: [
           refused,
@@ -5398,7 +5376,7 @@ function createQueueCommands(
             revision: revision.n,
             headSha: revision.head,
             disposition: "needs-person",
-            reason: permanentRefusalReason(args.pr, args.code, args.reason, attributedContentFault(record)),
+            reason: permanentRefusalReason(args.pr, args.code, args.reason),
           }),
         ],
       }
@@ -6390,6 +6368,10 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             code: refusal.code,
             ...(refusal.kind === undefined ? {} : { kind: refusal.kind }),
             reason: refusal.reason,
+            // Latest-wins beside `code`/`reason`: the judgment is a fact about
+            // the refusal that produced it, so a later unjudged red must not
+            // inherit an earlier judged one's permanence.
+            ...(refusal.judgedFailure === undefined ? {} : { judgedFailure: refusal.judgedFailure }),
             // The streak counts cycles, not codes: a wedge that flaps between
             // refusal codes is still one change that never got in. The latest code
             // is what an operator needs to act on.
@@ -8251,8 +8233,7 @@ function admissionRefusalAuditFindings(
     const sameCodeFirstAt = refusal.sameCodeFirstAt ?? refusal.firstAt
     if (head?.id !== refusal.pr) continue
     const threshold =
-      structurallyPermanentAdmissionRefusal(refusal.code, getChangeRecord(state.bays, refusal.pr)) ||
-      contentVerdictAdmissionRefusal(refusal.code)
+      structurallyPermanentAdmissionRefusal(refusal.code, refusal) || contentVerdictAdmissionRefusal(refusal.code)
         ? 1
         : progress.refusalCount
     if (sameCodeCount < threshold) continue
@@ -10345,22 +10326,15 @@ function needsAuthorResult(
   return undefined
 }
 
-/** The certified failures a content fault names, as `file:line[:col] message`.
- * Shared so the author-facing message and the rejection settlement can never
- * disagree about which tests failed. */
-function renderAttributedFailures(attributed: CandidateFailureResultEvidence): string {
-  return attributed.failures
+function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string {
+  const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
+  if (!attributed.success) return `change '${pr.id}' cannot be composed as submitted: ${result.message}`
+  const failures = attributed.data.failures
     .map(
       (failure) =>
         `${failure.file}:${failure.line}${failure.column === undefined ? "" : `:${failure.column}`} ${failure.message}`,
     )
     .join("; ")
-}
-
-function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string {
-  const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
-  if (!attributed.success) return `change '${pr.id}' cannot be composed as submitted: ${result.message}`
-  const failures = renderAttributedFailures(attributed.data)
   const unchanged = attributed.data.unchangedBaselineCount
   const footer = unchanged === undefined ? "" : `; ${unchanged} baseline error${unchanged === 1 ? "" : "s"} unchanged`
   return `change '${pr.id}' introduced ${attributed.data.failures.length} check failure(s): ${failures}${footer}`

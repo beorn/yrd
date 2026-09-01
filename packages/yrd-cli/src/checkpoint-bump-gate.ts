@@ -95,20 +95,25 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // entry — what the project has ASKED every deployment to store since
   // 2026-08-28 — not a harness value (the PR1305 / R2732 lesson above).
   "1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4",
-  // 2026-08-31 — the no-parking ruling: lease recovery reclaims a WAITING job
-  // whose runner is dead, so an external wait can no longer park its run
-  // forever. The `lose` Job transition gains an optional `token` (a waiting
-  // job's fence, the way `leaseExpiresAt` fences a running one) and
-  // `leaseExpiresAt` becomes optional beside it — two new optional keys in an
-  // accepted input shape, the same identity input `Candidate.conflicts` and
-  // `CandidateChange.containedInBase` moved before it. Nothing rewrites a
-  // stored record: every `lose` transition ever journaled carries
-  // `leaseExpiresAt` and no `token`, which is exactly what the widened schema
-  // still accepts, and replay resumes after the stored cursor. The predecessor
-  // retained below is this ledger's own superseded last entry — what the
-  // project has ASKED every deployment to store since 2026-08-30.
+  // 2026-08-31 — the no-parking ruling, TWO schema widenings landing together.
+  // Lease recovery reclaims a WAITING job whose runner is dead, so the `lose`
+  // Job transition gains an optional `token` (a waiting job's fence, the way
+  // `leaseExpiresAt` fences a running one) with `leaseExpiresAt` optional
+  // beside it; and the reject class needs the check's own judgment, so
+  // `queue/admission/refused` gains an optional `judgedFailure`. All three are
+  // new optional keys in accepted input shapes — the same identity input
+  // `Candidate.conflicts` and `CandidateChange.containedInBase` moved before
+  // them. Nothing rewrites a stored record: every `lose` ever journaled carries
+  // `leaseExpiresAt` and no `token`, no refusal fact carries `judgedFailure`,
+  // and both are exactly what the widened schemas still accept; replay resumes
+  // after the stored cursor. The predecessor retained below is this ledger's
+  // own superseded last entry — what the project has ASKED every deployment to
+  // store since 2026-08-30. The interim identity a9b486dc, computed while the
+  // first of these two widenings stood alone on an unmerged branch, was never
+  // stored by any deployment, so it is deliberately NOT retained (the fe430448
+  // precedent above).
   // Current.
-  "a9b486dc1a74eed9d9b53921562b6b3531406b79e725546124df2dfcab0c9bbe",
+  "fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

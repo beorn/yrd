@@ -25,7 +25,6 @@ const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
-const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 
 /** The wedge's wall clock: the test moves it, so `firstAt`/`lastAt`/`blockedMs`
@@ -1291,114 +1290,115 @@ describe("a submitted PR with no check request and a ledgered refusal never wedg
   })
 })
 
-/** The delta-comparison evidence a check step emits when it can certify that a
- * red is the CHANGE's, not the base's: net-new diagnostics measured against
- * the exact base sha, with a certificate naming both shas. */
-function certifiedDelta(candidateSha: string, unchanged?: number) {
-  return {
-    mode: "delta" as const,
-    classification: "carrier" as const,
-    baseSha: BASE,
-    candidateSha,
-    comparison: {
-      netNewDiagnostics: [
-        { file: "packages/km/tests/board.test.ts", [sourceRowKey]: 42, message: "expected 3, got 4" },
-      ],
-      ...(unchanged === undefined ? {} : { unchangedDiagnosticCount: unchanged }),
-    },
-    certificate: { mode: "delta" as const, baseSha: BASE, candidateSha },
-  }
-}
-
-/** A check-only plan whose check FAILS. `output` decides whether the red is
- * certified against the base or opaque — the one difference the reject class
- * turns on. */
-function failingCheckApp(clock: () => string, output: () => unknown, code = "check-failed") {
-  const bayJobs = createBayJobDefs(workspace())
-  const check = withStep(
-    "check",
-    (input: StepExecution): JobResult => ({
-      status: "completed",
-      conclusion: "failure",
-      error: { code, message: `'affected-tests' exited 1 for ${input.run}` },
-      output: output() as never,
-    }),
-    { revision: "check-v1" },
-  )
-  const queue = withQueue({
-    steps: [check] as const,
-    batch: false,
-    defaultSteps: ["check"],
-    progress: { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
-  })
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
-  )
-  return createYrd(queue(base), {
-    inject: { journal: createMemoryJournal(), id: ids(), clock, log: createLogger("test", [{ level: "silent" }]) },
-  })
-}
-
 describe("the reject class — a content fault ends THIS revision's queue life on the first refusal", () => {
   // The operator's no-parking ruling: a change the queue cannot merge is either
   // fixed and continued, or REJECTED loudly with reason, evidence and remedy.
   // What it must never do is park. `STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS`
   // was emptied when its last two codes lost their producers, leaving a live
-  // settle-on-first-refusal path with nothing to settle; the ruling supplies
-  // the next such codes — user-level content faults.
-  it("settles a CERTIFIED check failure needs-person on the FIRST refusal, naming the failing tests", async () => {
+  // settle-on-first-refusal path with nothing to settle — and, until these
+  // tests, with no coverage at all. The ruling supplies the next such codes.
+  //
+  // `check-failed` is a FUNNEL, which is why membership cannot go by code: a
+  // judged content red, a watchdog kill and a `bun install` race all land on
+  // it. The discrimination is `judgedFailure`, recorded at the failure itself.
+  it("settles a JUDGED check failure needs-person on the FIRST refusal, naming what failed", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await failingCheckApp(clock.read, () => certifiedDelta("2".repeat(40), 7))
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+    )
     const pr = await submitAndRequestChecks(app, "issue/genuinely-red")
-    await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
-    // The check's own evidence certifies the red against the exact base, so the
-    // change carries an attributed content fault.
-    expect(app.state().bays.prs[pr.id]?.needsAuthor?.receipt).toMatchObject({
-      code: "check-failed",
-      evidence: { kind: "candidate-attributed-check-failure" },
-    })
 
     await app.queue.recordAdmissionRefusal({
       pr: pr.id,
       code: "check-failed",
       kind: "refusal",
-      reason: "required checks failed",
+      reason:
+        "affected-tests command exited 1: packages/km/tests/board.test.ts > expected 3, got 4; full output: output.log",
+      judgedFailure: true,
     })
 
     // ONE refusal, not three: no retry can change a verdict about content.
     const refusal = app.state().queues.admissionRefusals[pr.id]
     expect(refusal?.count).toBe(1)
+    expect(refusal?.judgedFailure).toBe(true)
     expect(refusal?.settlement?.disposition).toBe("needs-person")
-    // reason - evidence - remedy, with the failing test named.
+    // reason - evidence - remedy: the judged line the check stated rides
+    // through verbatim, and the remedy is named.
     const reason = refusal?.settlement?.reason ?? ""
-    expect(reason).toContain("packages/km/tests/board.test.ts:42")
-    expect(reason).toContain("expected 3, got 4")
-    expect(reason).toContain("new revision")
+    expect(reason).toContain("packages/km/tests/board.test.ts > expected 3, got 4")
+    expect(reason).toContain("output.log")
+    expect(reason).toContain("push a new revision to re-enter")
   })
 
-  it("never settles an UNCERTIFIED check failure — an unattributed red retries", async () => {
+  it("never settles an UNJUDGED check failure — a watchdog kill or infra fault retries", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
-    // The negative control, and the whole discrimination: the check failed, but
-    // it produced no candidate-vs-base certificate. A base-health red, an
-    // opaque red and a flake all land here, and none of them is the author's
-    // fault — so this refusal keeps retrying instead of rejecting a revision.
-    await using app = await failingCheckApp(clock.read, () => ({ exitCode: 1, note: "no comparison ran" }))
-    const pr = await submitAndRequestChecks(app, "issue/unattributed-red")
-    await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
-    expect(app.state().bays.prs[pr.id]?.needsAuthor?.receipt.evidence).toBeUndefined()
+    // The negative control, and the whole point of the discrimination. This is
+    // the shape a watchdog STALLED/TIMED_OUT kill and a `bun install` race both
+    // take: the same `check-failed` code, no judgment, because no process ever
+    // stated a verdict on the content. Rejecting here would dead-letter the
+    // victim of someone else's outage.
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/unjudged-red")
 
     await app.queue.recordAdmissionRefusal({
       pr: pr.id,
       code: "check-failed",
       kind: "refusal",
-      reason: "required checks failed",
+      reason: "affected-tests command exited 143; full output: output.log",
     })
 
     const refusal = app.state().queues.admissionRefusals[pr.id]
     expect(refusal?.count).toBe(1)
-    expect(refusal?.settlement, "an unattributed red is not a content fault").toBeUndefined()
+    expect(refusal?.judgedFailure).toBeUndefined()
+    expect(refusal?.settlement, "an unjudged red is not a content fault").toBeUndefined()
+
+    // And it keeps retrying: a second and third refusal accumulate the streak
+    // the ordinary threshold is measured on.
+    for (const at of ["2026-01-01T00:05:00.000Z", "2026-01-01T00:10:00.000Z"]) {
+      clock.set(at)
+      await app.queue.recordAdmissionRefusal({
+        pr: pr.id,
+        code: "check-failed",
+        kind: "refusal",
+        reason: "affected-tests command exited 143; full output: output.log",
+      })
+    }
+    expect(app.state().queues.admissionRefusals[pr.id]?.count).toBe(3)
+    expect(app.state().queues.admissionRefusals[pr.id]?.settlement).toBeUndefined()
+  })
+
+  it("does not let an earlier judged red make a later unjudged one permanent", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/judgment-does-not-stick")
+
+    // An unjudged red first, so nothing settles...
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "check-failed",
+      kind: "refusal",
+      reason: "affected-tests command exited 143; full output: output.log",
+    })
+    expect(app.state().queues.admissionRefusals[pr.id]?.settlement).toBeUndefined()
+
+    // ...then a judged one, which settles and carries the judgment...
+    clock.set("2026-01-01T00:05:00.000Z")
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "check-failed",
+      kind: "refusal",
+      reason: "affected-tests command exited 1: one.test.ts > red; full output: output.log",
+      judgedFailure: true,
+    })
+    expect(app.state().queues.admissionRefusals[pr.id]?.judgedFailure).toBe(true)
+    expect(app.state().queues.admissionRefusals[pr.id]?.settlement?.disposition).toBe("needs-person")
   })
 
   it("settles a needs-author COMPOSITION failure on the first refusal — the bucket is already the judgment", async () => {
@@ -1410,7 +1410,7 @@ describe("the reject class — a content fault ends THIS revision's queue life o
     const pr = await submitAndRequestChecks(app, "issue/composition-fault")
 
     // `authored-gitlink` is in COMPOSITION_FAILURE_BUCKETS["needs-author"],
-    // which already means only a new revision cures this — no evidence needed.
+    // which already means only a new revision cures this — no judgment needed.
     await app.queue.recordAdmissionRefusal({
       pr: pr.id,
       code: "authored-gitlink",
@@ -1421,6 +1421,6 @@ describe("the reject class — a content fault ends THIS revision's queue life o
     const refusal = app.state().queues.admissionRefusals[pr.id]
     expect(refusal?.count).toBe(1)
     expect(refusal?.settlement?.disposition).toBe("needs-person")
-    expect(refusal?.settlement?.reason).toContain("new revision")
+    expect(refusal?.settlement?.reason).toContain("push a new revision to re-enter")
   })
 })
