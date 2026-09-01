@@ -35,6 +35,7 @@ import {
   type JobContext,
   type JobDef,
   type JobHandler,
+  type JobObservation,
   type JobResult,
   type RunnerContexts,
   type JobTransition,
@@ -82,6 +83,7 @@ function delivery(
   }),
   revision = "transport-v1",
   observeResult?: (result: JobResult<Result>) => Readonly<Record<string, unknown>>,
+  observe?: (input: Delivery) => JobObservation,
 ) {
   return createJobDef({
     name: "message.deliver",
@@ -102,6 +104,7 @@ function delivery(
         .optional(),
     }),
     ...(observeResult === undefined ? {} : { observeResult }),
+    ...(observe === undefined ? {} : { observe }),
     execute,
   })
 }
@@ -787,6 +790,129 @@ describe("Jobs", () => {
       })
     } finally {
       await app.close()
+    }
+  })
+
+  it("emits a locally-run REQUIRED job's failed completion at ERROR", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const app = await jobsApp(
+      delivery(
+        async () => ({
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "check-failed", message: "check command exited 1" },
+        }),
+        "transport-v1",
+        undefined,
+        () => ({ required: true }),
+      ),
+      { id: ids("send", "C-send", JOB_ID), log },
+    )
+    try {
+      const requested = await app.dispatch(app.commands.sender.send, { message: "required" })
+      await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })
+
+      const terminal = events.find(
+        (event) => event.kind === "log" && event.props?.outcome === "failed" && event.namespace.startsWith("yrd:jobs:"),
+      )
+      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "error" })
+    } finally {
+      await app.close()
+      log.end()
+    }
+  })
+
+  it("emits a locally-run OPTIONAL job's failed completion at WARN, not ERROR", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const app = await jobsApp(
+      delivery(
+        async () => ({
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "notify-failed", message: "notify command exited 1" },
+        }),
+        "transport-v1",
+        undefined,
+        () => ({ required: false }),
+      ),
+      { id: ids("send", "C-send", JOB_ID), log },
+    )
+    try {
+      const requested = await app.dispatch(app.commands.sender.send, { message: "optional" })
+      await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })
+
+      const terminal = events.find(
+        (event) => event.kind === "log" && event.props?.outcome === "failed" && event.namespace.startsWith("yrd:jobs:"),
+      )
+      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "warn" })
+    } finally {
+      await app.close()
+      log.end()
+    }
+  })
+
+  it("emits an externally-finished REQUIRED job's failed completion at ERROR", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const app = await jobsApp(
+      delivery(
+        async () => ({ status: "waiting", token: "remote-1" }),
+        "transport-v1",
+        undefined,
+        () => ({ required: true }),
+      ),
+      { id: ids("send", "C-send", JOB_ID), log },
+    )
+    try {
+      const requested = await app.dispatch(app.commands.sender.send, { message: "external-required" })
+      const id = app.jobs.requested(requested)[0]!
+      await app.jobs.run(id, { runner: "worker", leaseMs: 60_000 })
+
+      await app.jobs.finish(id, {
+        attempt: 1,
+        runner: "worker",
+        token: "remote-1",
+        result: {
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "check-failed", message: "remote check failed" },
+        },
+      })
+
+      const terminal = events.findLast(
+        (event) => event.kind === "log" && event.props?.outcome === "failed" && event.namespace.startsWith("yrd:jobs:"),
+      )
+      // The completion Job's own "run" lifecycle owns this namespace even when
+      // reported through `finish` (a waiting Job has no second lifecycle name
+      // of its own); `completion: true` is finish's own distinguishing marker.
+      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "error", props: { completion: true } })
+    } finally {
+      await app.close()
+      log.end()
+    }
+  })
+
+  it("keeps a REQUIRED job's succeeded completion at INFO", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const app = await jobsApp(delivery(undefined, "transport-v1", undefined, () => ({ required: true })), {
+      id: ids("send", "C-send", JOB_ID),
+      log,
+    })
+    try {
+      const requested = await app.dispatch(app.commands.sender.send, { message: "still-ok" })
+      await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })
+
+      const terminal = events.find(
+        (event) =>
+          event.kind === "log" && event.props?.outcome === "succeeded" && event.namespace.startsWith("yrd:jobs:"),
+      )
+      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "info" })
+    } finally {
+      await app.close()
+      log.end()
     }
   })
 

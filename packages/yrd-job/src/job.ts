@@ -92,6 +92,11 @@ export type JobObservation = Readonly<{
   lifecycle?: string
   identity?: YrdDeliveryIdentity
   attributes?: Readonly<Record<string, unknown>>
+  /** Does a FAILED completion of this job carry a required, gating verdict
+   * against the work under test (the change dies, not the process) or an
+   * optional/advisory one? Undefined leaves the shared completion path at its
+   * own conservative default; see `failureLevel` in yrd-job's `createJobs`. */
+  required?: boolean
 }>
 
 export const JobRequestSchema = z

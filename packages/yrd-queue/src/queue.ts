@@ -1076,13 +1076,14 @@ export function withStep<const Name extends string, Shape extends ChangeShape, O
 ): StepDef<Shape, AddStepResult<Shape, Name, Output>> {
   const stepName = StepNameSchema.parse(name)
   const output = options.output ?? (JsonSchema as z.ZodType<Output>)
+  const kind = options.kind ?? "check"
   const job = createJobDef({
     name: `queue.step.${stepName}`,
     title: options.title ?? stepName,
     revision: options.revision,
     input: StepExecutionSchema,
     output,
-    observe: stepObservation,
+    observe: (input) => stepObservation(input, kind),
     observeResult: stepResultObservation,
     execute: (input, context) => runner(input as StepExecution<Shape>, context),
   }) as JobDef<StepExecution, JsonValue>
@@ -1090,7 +1091,7 @@ export function withStep<const Name extends string, Shape extends ChangeShape, O
     name: stepName,
     title: job.title,
     revision: job.revision,
-    kind: options.kind ?? "check",
+    kind,
     ...(options.classification === undefined ? {} : { classification: options.classification }),
     job,
   }) as StepDef<Shape, AddStepResult<Shape, Name, Output>>
@@ -1106,7 +1107,7 @@ export function withMerge<Shape extends ChangeShape>(
     revision: options.revision,
     input: StepExecutionSchema,
     output: IntegrationProofSchema,
-    observe: stepObservation,
+    observe: (input) => stepObservation(input, "merge"),
     observeResult: stepResultObservation,
     execute: (input, context) => runner(input as StepExecution<Shape>, context),
   }) as JobDef<StepExecution, JsonValue>
@@ -4382,10 +4383,15 @@ function deliveryIdentity(pr: DeepReadonly<ChangeSnapshot>): YrdDeliveryIdentity
   }
 }
 
-function stepObservation(input: StepExecution): JobObservation {
+function stepObservation(input: StepExecution, kind: StepKind): JobObservation {
   return {
     lifecycle: input.step,
     identity: { run: input.run, step: input.step },
+    // An "action" step is a post-merge side effect, never a verdict on the
+    // revision under test; every other kind (check, merge) gates it, so a
+    // failure there is a required, gating outcome — see the shared
+    // `failureLevel` doctrine at packages/yrd-core/src/observability.ts.
+    required: kind !== "action",
     attributes: {
       index: input.index,
       // The run's base, carried so the habitant timeline can name a step row
