@@ -14,7 +14,10 @@
  */
 export const DEFAULT_VITEST_MAX_WORKERS = 6
 
-export type VitestWorkersEnv = Readonly<{ VITEST_MAX_WORKERS?: string }>
+// A string map, not a one-key weak type: the root superproject typechecks this
+// file too, under a stricter config where `process.env` (an index signature)
+// is not assignable to a type whose only property is optional (TS2559).
+export type VitestWorkersEnv = Readonly<Record<string, string | undefined>>
 
 export function resolveVitestMaxWorkers(env: VitestWorkersEnv, hostCores: number): number {
   const explicit = Number.parseInt(env.VITEST_MAX_WORKERS ?? "", 10)
