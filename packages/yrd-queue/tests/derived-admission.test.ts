@@ -1294,4 +1294,100 @@ describe("S6 derived lane — a member unsubmitted mid-pass RETIRES, it never ki
     expect(retired?.props?.pr).toBe(readmitted.id)
     expect(String(retired?.props?.remedy)).toMatch(/nothing to do/u)
   })
+
+  it("retires a member whose author re-pushed mid-pass, naming both shas (the PR3111 specimen)", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    let push: (() => Promise<void>) | undefined
+    await using app = await createApp({
+      steps: [
+        withdrawingCheck(
+          () => push,
+          () => {
+            push = undefined
+          },
+        ),
+        passingMerge(),
+      ],
+      log,
+    })
+    await strandDerivedBranch(app, "issue/derived")
+    const holderHead = "5".repeat(40)
+    await app.bays.submit({ branch: "issue/holder", headSha: holderHead, base: "main", baseSha: BASE })
+    const entry = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(50) })
+    await seedSettlingRun(app, "PR2", holderHead)
+
+    // The second specimen: not a withdraw, an ordinary re-push. The fact still
+    // STANDS — it just stands at a sha this admitted identity was not minted
+    // against, so the git-CAS refuses `derived-submit-moved`.
+    push = async () => {
+      await app.bays.recordBranchSubmit({ branch: "issue/derived", sha: RESUBMIT_SHA, base: "main" })
+    }
+    events.length = 0
+
+    await expect(app.queue.run({ derived: [entry] }, runtime)).resolves.toBeDefined()
+    expect(push, "the re-push must have landed inside the settle loop").toBeUndefined()
+    expect(app.state().bays.submits["issue/derived"]?.sha, "the fact stands at the NEW sha").toBe(RESUBMIT_SHA)
+
+    // BOTH shas on the row: the one the retired identity was minted against and
+    // the one standing now. Without the pair a reader cannot tell a re-push from
+    // a withdrawal, and those have opposite remedies.
+    const retired = composeEvent(events, "compose-derived-retire")
+    expect(retired?.props).toMatchObject({
+      pr: entry.id,
+      branch: "issue/derived",
+      headSha: SHA,
+      liveSha: RESUBMIT_SHA,
+      code: "derived-submit-moved",
+      kind: "refusal",
+    })
+    // Nothing for a human to do: the standing fact is re-derived next pass.
+    expect(String(retired?.props?.remedy)).toMatch(/nothing to do/u)
+    expect(String(retired?.props?.remedy)).toContain(RESUBMIT_SHA)
+
+    const ran = Queues.values(app.state().queues).find((record) => record.prs.some((member) => member.id === entry.id))
+    expect(ran, "a retired member must not be selected").toBeUndefined()
+  })
+
+  /**
+   * The rule the two specimens share, stated as a rule rather than as two
+   * cases: this seam is keyed on the failure KIND, so a sibling nobody has met
+   * yet is survivable the day it is written. `derived-record-lane` is the third
+   * member of the family that already exists — the record lane claiming a
+   * branch mid-pass — and it retires without anyone naming it here.
+   */
+  it("retires on the failure KIND, so a sibling code needs no new handler", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    let reopen: (() => Promise<void>) | undefined
+    await using app = await createApp({
+      steps: [
+        withdrawingCheck(
+          () => reopen,
+          () => {
+            reopen = undefined
+          },
+        ),
+        passingMerge(),
+      ],
+      log,
+    })
+    await strandDerivedBranch(app, "issue/derived")
+    const holderHead = "5".repeat(40)
+    await app.bays.submit({ branch: "issue/holder", headSha: holderHead, base: "main", baseSha: BASE })
+    const entry = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(50) })
+    await seedSettlingRun(app, "PR2", holderHead)
+
+    // A record appears for the branch mid-pass: the author's D2 reopen. A4 says
+    // never both lanes for one push, so the derived entry must go.
+    reopen = async () => {
+      await app.bays.submit({ branch: "issue/derived", headSha: SHA, base: "main", baseSha: BASE })
+    }
+    events.length = 0
+
+    await expect(app.queue.run({ derived: [entry] }, runtime)).resolves.toBeDefined()
+    const retired = composeEvent(events, "compose-derived-retire")
+    expect(retired?.props).toMatchObject({ pr: entry.id, branch: "issue/derived", code: "derived-record-lane" })
+    expect(String(retired?.props?.remedy)).toMatch(/record lane owns/u)
+  })
 })
