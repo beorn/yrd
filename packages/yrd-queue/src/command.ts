@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { loadavg } from "node:os"
 import { isAbsolute, join, resolve, sep } from "node:path"
 import { createLogger } from "loggily"
 import { authoredDeltaBase } from "@yrd/bay"
@@ -229,6 +230,14 @@ export const CommandEvidenceSchema = z
      * the post-exit drain grace (a process-group escapee); run() abandoned the
      * drain rather than wedge. Distinct from a plain output-progress stall. */
     escapedDescendant: z.boolean().optional(),
+    /** The host's 1/5/15-minute load average, sampled when a verdictless
+     * outcome was classified. Recorded ONLY for those: it is the first thing a
+     * reader wants when a check is killed without judging anything, and the
+     * specimen that named this field stalled under a load of 40-61 on a host
+     * running parallel full suites — where the answer was the host, not the
+     * change. Sampled once the process has settled, so it is the load the drain
+     * saw rather than the peak. */
+    loadAverage: z.array(z.number()).length(3).optional(),
   })
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
@@ -586,11 +595,22 @@ function configuredCommand<Shape extends ChangeShape>(
     // process implementation that predates `verdict` still reports the
     // wall-clock kill, and `ProcessResult` only ties `stalled: true` to the
     // STALLED verdict, so that one needs no separate check here.
-    const judgedFailure =
-      firstJudgedFailureLine(message) !== undefined &&
-      progress.verdict !== "STALLED" &&
-      progress.verdict !== "TIMED_OUT" &&
-      result.timedOut !== true
+    //
+    // The two halves are ONE decision with two names, so they are computed
+    // together and can never disagree: a process that was killed before it
+    // could speak is `verdictless`, and `judgedFailure` is defined as its
+    // complement plus a stated line. Two independently-derived booleans could
+    // both read true for the same outcome — an escaped descendant, or a
+    // SIGKILL after the check had already printed a failing name — and a reader
+    // holding both would have to guess which one wins.
+    const verdictless =
+      progress.escapedDescendant === true ||
+      progress.stalled === true ||
+      progress.verdict === "TIMED_OUT" ||
+      result.timedOut === true ||
+      result.signal === "SIGKILL" ||
+      (result.signal === null && result.exitCode === 137)
+    const judgedFailure = !verdictless && firstJudgedFailureLine(message) !== undefined
     const evidence = CommandEvidenceSchema.parse({
       command: argv,
       exitCode: result.exitCode,
@@ -613,6 +633,7 @@ function configuredCommand<Shape extends ChangeShape>(
       ...(progress.lastProgressBytes === undefined ? {} : { lastProgressBytes: progress.lastProgressBytes }),
       ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
       ...(progress.escapedDescendant === true ? { escapedDescendant: true } : {}),
+      ...(verdictless ? { loadAverage: loadavg() } : {}),
     })
     // Classification is decided once, here, and the terminal record is written
     // from its OUTCOME — never re-derived from the raw process facts a second
@@ -708,8 +729,23 @@ function configuredCommand<Shape extends ChangeShape>(
         return failed(`${options.purpose}-launcher-invalid`, messageOf(cause), evidence)
       }
     })()
+    // ONE stamp, on the outcome the branches above already agreed on. Marking
+    // the four watchdog/signal branches individually would work today and rot
+    // tomorrow: the next branch added ahead of them inherits the kill without
+    // inheriting the mark, and a verdictless failure that forgets to say so is
+    // indistinguishable from a verdict about the author's change. Reading the
+    // one boolean here means a branch cannot opt out by being written later.
+    //
+    // Only a failure carries it. A watchdog kill always lands on one of those
+    // branches, so this narrows nothing in practice; it is written as a
+    // condition rather than an assumption because a success stamped
+    // "verdictless" would be a contradiction no reader could resolve.
+    const classified: JobResult<CommandEvidence> =
+      verdictless && outcome.status === "completed" && outcome.conclusion === "failure"
+        ? { ...outcome, error: { ...outcome.error, verdictless: true } }
+        : outcome
     await writeTerminalRecord(artifactRoot, input, context.attempt, {
-      status: outcome.status === "waiting" ? "waiting" : outcome.conclusion,
+      status: classified.status === "waiting" ? "waiting" : classified.conclusion,
       exitCode: result.exitCode,
       signal: result.signal,
       timedOut: result.timedOut,
@@ -720,7 +756,7 @@ function configuredCommand<Shape extends ChangeShape>(
       endedAt,
       durationMs: result.durationMs,
     })
-    return outcome
+    return classified
   }
 }
 

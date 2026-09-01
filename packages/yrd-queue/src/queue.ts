@@ -938,6 +938,16 @@ export type RetireSubmitFactArgs = Readonly<z.infer<typeof RetireSubmitFactSchem
  * waits out this streak. The property that matters is unchanged and now has
  * slack — the remedy can still never fire earlier than the finding. */
 export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
+
+/** How many times one required check may be run for the same change at the same
+ * base when every attempt so far was killed before it could judge the content.
+ *
+ * Bounded on both sides deliberately. Zero re-runs strands a change behind a
+ * fault that is not its own until something else advances the base; unbounded
+ * re-runs burn a full check run per compose pass against a host that is already
+ * why the check could not finish. Three is the smallest count that survives a
+ * transient stall and a retry that lands in the same bad minute. */
+const VERDICTLESS_CHECK_ATTEMPTS = 3
 /**
  * Refusals a retry cannot change, because the fact they report is fixed for the
  * revision that carries it. Such a refusal needs a NEW revision, so the queue
@@ -2958,13 +2968,52 @@ function createQueue<Shape extends ChangeShape>(
         requestedJob ?? jobs.getByKey(key)?.id ?? jobs.getByKey(admissionJobKey(snapshot, baseSha, index))?.id
       if (jobId === undefined) throw new Error(`yrd: required check '${step.name}' did not request a Job`)
       let beforeRun = jobs.get(jobId)
+      // A verdictless red is the ONE failure worth re-running unasked, and it
+      // is the only one this grants: nothing about the change produced it, so
+      // running the same check again is the whole cure and it usually works —
+      // the host quietens, the stall does not recur.
+      //
+      // Without this the re-run count at an unchanged base is ZERO, not one.
+      // The Job is keyed by (change, revision, base), so a later pass finds the
+      // completed failure by key and re-reads it instead of running anything.
+      // That is invisible and it is a deadlock whenever the base is not moving:
+      // the only thing that would advance the base is the change this stall is
+      // holding, and the only thing that would clear the stall is a base
+      // advance.
+      //
+      // `attempt` is the bound because the Job already counts its own
+      // executions durably — a replay, a restart and a fresh projection all
+      // agree on it, and a second counter would be a second thing to keep true.
+      const priorError =
+        beforeRun?.status === "completed" && beforeRun.conclusion === "failure" ? beforeRun.error : undefined
+      const verdictlessRetry = beforeRun !== undefined && verdictlessRetryable(beforeRun)
       if (
-        freshRetry &&
         beforeRun?.status === "completed" &&
-        (beforeRun.conclusion === "failure" || beforeRun.conclusion === "timed_out")
+        (verdictlessRetry ||
+          (freshRetry && (beforeRun.conclusion === "failure" || beforeRun.conclusion === "timed_out")))
       ) {
+        if (verdictlessRetry) {
+          log.warn?.(
+            `queue is re-running required check '${step.name}' for ${pr.id}: the previous attempt was killed ` +
+              "before it could judge the content, so nothing about the change produced that red",
+            {
+              action: "admission-verdictless-retry",
+              pr: pr.id,
+              step: step.name,
+              job: jobId,
+              attempt: beforeRun.attempt,
+              limit: VERDICTLESS_CHECK_ATTEMPTS,
+              code: priorError?.code,
+            },
+          )
+        }
         beforeRun = await jobs.retry(jobId)
       }
+      // Nothing is logged when the bound is SPENT, and that is deliberate: this
+      // path is unreachable then. `checkEligibility` reads the same predicate
+      // and drops the member from the admission queue, so the exhausted state
+      // is named where it is actually observable — `queue audit`'s
+      // `admission-verdictless-exhausted` finding.
       const job =
         admissionRunner === undefined
           ? jobs.get(jobId)
@@ -8490,6 +8539,11 @@ function auditQueues(
   // computed once here, independent of refusalFindings by construction, so it
   // can never inherit queueProgressAuditFindings' per-base suppression.
   findings.push(...queueLivenessAuditFindings(state, steps, progress, options))
+  // Independent of every suppression above, for the same reason
+  // `queue-liveness-wedged` is: a change whose checks never judged anything is
+  // not in a refusal streak and holds no run, so nothing else here speaks for
+  // it.
+  findings.push(...verdictlessAdmissionAuditFindings(state, steps))
   return { findings }
 }
 
@@ -8539,6 +8593,103 @@ function retiredSubmitAuditFindings(state: DeepReadonly<RuntimeState>): QueueAud
     })
   }
   return findings
+}
+
+/**
+ * One finding per change whose required check was killed on every attempt.
+ *
+ * This is the OTHER half of not blaming the author. Refusing to retire their
+ * submit fact keeps them out of a re-push they never earned, but it also means
+ * nothing terminal is written — and a change with no terminal row and no
+ * waiting-list row (`unrecordedSubmits` suppresses a branch that has a retained
+ * snapshot) is invisible to every surface at once. Silence would be the wrong
+ * half of the cure.
+ *
+ * Reported on the first exhausted attempt, with no streak threshold: the bound
+ * has already been spent by then, so waiting further would only measure the
+ * wait. The remedy is a host remedy, and the message says so — the resolution
+ * steps deliberately name nothing the author can do to their branch, because
+ * there is nothing.
+ *
+ * Self-clearing, which is why it needs no expiry and no clearing verb. The Job
+ * consulted is the member's NEWEST for that step, so the moment a base advance
+ * gives the check a fresh Job and that Job reaches any verdict, this stops
+ * reporting. Until then the finding stands, which is the honest answer: nothing
+ * has judged the change yet.
+ */
+function verdictlessAdmissionAuditFindings(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+): QueueAuditFindingEmission[] {
+  const selected = admissionSteps(steps)
+  if (selected.length === 0) return []
+  const findings: QueueAuditFindingEmission[] = []
+  // The population is the DERIVED IDENTITY BINDING, not the change population.
+  // A member refused at admission never mints a run record, so `queueChanges`
+  // cannot see it — which is exactly the blindness this finding exists to cure,
+  // and sourcing it from there would have rebuilt the blindness inside the
+  // cure. The binding is journaled at every derive (`bindDerivedIdentity`) and
+  // is keyed by the pair that matters: branch, then the sha the fact stands at.
+  // A fact that has since moved is a different key and goes unreported, for the
+  // same reason every other reader of these rows sha-matches.
+  const recorded = new Set(recordChanges(state.bays).map((pr) => pr.branch))
+  for (const [branch, submit] of Object.entries(state.bays.submits).toSorted(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    if (recorded.has(branch)) continue
+    const identity = state.queues.derivedIdentities[branch]?.[submit.sha]
+    if (identity === undefined) continue
+    const prefix = admissionRevisionKeyPrefix(identity.id, identity.revision)
+    for (const [index, step] of selected.entries()) {
+      const job = newestAdmissionJob(state, prefix, index, step.revision)
+      if (job === undefined || job.status !== "completed" || job.conclusion !== "failure") continue
+      if (job.error.verdictless !== true || verdictlessRetryable(job)) continue
+      findings.push({
+        code: "admission-verdictless-exhausted",
+        message:
+          `branch '${branch}' is submitted at ${submit.sha.slice(0, 12)} against '${submit.base}', and change ` +
+          `'${identity.id}' spent all ${VERDICTLESS_CHECK_ATTEMPTS} attempts at required check '${step.name}' ` +
+          `without one of them reaching a verdict on the content (${job.error.code}): ${job.error.message} — ` +
+          "this is a host or harness fault, not the change. The submit fact still stands and the check runs " +
+          "again when the base advances; nothing the author pushes changes this outcome.",
+        pr: identity.id,
+        specimen: `admission:${branch}:${submit.sha}:${step.name}`,
+        refusal: job.error.code,
+        step: step.name,
+        count: job.attempt,
+        ...(job.finishedAt === undefined ? {} : { since: job.finishedAt }),
+        resolution: [
+          "read the attempt's terminal.json for stageVerdict, stageBoundMs and loadAverage — a load far above " +
+            "the core count means the host was oversubscribed, not that the check is broken",
+          "reduce what else is running on this host, or raise the step's noProgressMs where the check is " +
+            "legitimately quiet for that long",
+          "no re-push is needed or useful: the submit fact still stands at this sha",
+        ],
+      })
+    }
+  }
+  return findings
+}
+
+/** The admission Job for one step of one member revision, at whichever base it
+ * most recently ran against. Same newest-wins rule as
+ * {@link derivedAdmissionBaseSha}, and for the same reason: a member's base
+ * moves between dispatches, and the current answer is the last one. */
+function newestAdmissionJob(
+  state: DeepReadonly<RuntimeState>,
+  prefix: string,
+  index: number,
+  stepRevision: string,
+): DeepReadonly<Job> | undefined {
+  let newest: string | undefined
+  for (const [key, job] of Object.entries(state.jobs.byKey)) {
+    if (!key.startsWith(prefix)) continue
+    const tail = key.slice(prefix.length).split(":")
+    if (tail[1] !== String(index)) continue
+    if (tail[2] !== undefined && tail[2] !== stepRevision) continue
+    if (newest === undefined || compareNatural(job, newest) > 0) newest = job
+  }
+  return newest === undefined ? undefined : state.jobs.byId[newest]
 }
 
 function admissionRefusalAuditFindings(
@@ -9564,7 +9715,16 @@ function checkEligibility(
     if (admissionJobs.some((job) => job?.status === "in_progress" || job?.status === "waiting")) {
       return { status: "checking", ...timing }
     }
-    if (admissionJobs.some((job) => job !== undefined && jobFailed(job))) return { status: "failed", ...timing }
+    // A red that judged nothing is not a verdict, so it must not retire the
+    // member from the admission queue. Without this exception a stalled check
+    // reads `failed` here, `admissionQueue` drops the member, and the retry the
+    // admission path is willing to run is never reached — the change then sits
+    // through every later compose pass producing nothing but a derive line.
+    // Bounded by the Job's own attempts, so a check that keeps being killed
+    // still settles instead of cycling.
+    if (admissionJobs.some((job) => job !== undefined && jobFailed(job) && !verdictlessRetryable(job))) {
+      return { status: "failed", ...timing }
+    }
     if (
       admissionJobs.length === selected.length &&
       admissionJobs.every((job) => job !== undefined && jobSucceeded(job))
@@ -10326,6 +10486,13 @@ export const YRD_REFUSAL_CODES = [
   "admission-refusal-loop",
   "admission-refusal-needs-person",
   "admission-refused",
+  // The verdictless-admission audit finding, registered for the same reason as
+  // every other audit finding code here: it classifies through
+  // `failureDisposition` rather than throwing on an unrecognised code. The
+  // fall-through disposition is right — the finding reports a host fault that
+  // clears on its own when the base advances, and no automation should act on
+  // the finding itself.
+  "admission-verdictless-exhausted",
   // The gitlink-advance verb's own `-failed` refusals (yrd 9e6af249 /
   // 2fd122a9). Registered NOT because they become a persisted Run/Job failure
   // — they are `raiseFailure` CLI refusals — but because every one of them
@@ -10671,11 +10838,29 @@ export function canonicalRefusalCode(code: string, options: CanonicalRefusalCode
   return DYNAMIC_STEP_FAILURE_CODE.test(code) ? "check-failed" : undefined
 }
 
+/**
+ * Which of the three things a failed admission was: an infrastructure fault, a
+ * refusal the author must cure, or an ordinary failure.
+ *
+ * `infrastructure` is the CALLER's answer, for the two sites holding an OUTER
+ * fact the result itself cannot see — a Job that was lost or cancelled, or a
+ * candidate-preparation failure already typed by its producer.
+ *
+ * `verdictless` is the RESULT's own answer, and it is why this is not a code
+ * list. A check that was killed before it could judge anything reports the
+ * machinery, never the content, so it is infrastructure no matter which step
+ * name its code was built from. Deciding that here by code would need one
+ * entry per configured step name per fault, which is a list that is wrong the
+ * day someone adds a step: PR3141 was consumed on 2026-09-01 because
+ * `affected-tests-stalled` was in no list, so a 15m45s stall under a host load
+ * of 40-61 read as a verdict on the author's change and retired their standing
+ * submit fact. The producer already knew; it just had nowhere to say so.
+ */
 function admissionFailureKind(
   result: DeepReadonly<JobError>,
   infrastructure: boolean,
 ): Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"] {
-  if (infrastructure) return "infrastructure"
+  if (infrastructure || result.verdictless === true) return "infrastructure"
   return NEEDS_AUTHOR_CODES.has(result.code) ? "refusal" : "failure"
 }
 
@@ -11272,4 +11457,24 @@ function jobSucceeded(job: Job): job is SuccessfulJob {
 
 function jobFailed(job: Job): job is UnsuccessfulJob {
   return job.status === "completed" && job.conclusion !== "success"
+}
+
+/**
+ * Whether this failed check is one the queue should simply run again.
+ *
+ * TRUE only for a red that judged nothing — a watchdog kill or a signal, marked
+ * at the failure by the producer that held the process facts — and only while
+ * the Job's own attempt count is under the bound. Both halves are read from
+ * durable state, so a replay, a restart and a fresh projection all agree.
+ *
+ * ONE predicate, TWO readers, and they must never disagree. `checkEligibility`
+ * decides whether the member is still in the admission queue at all; the
+ * admission itself decides whether to re-run the Job. If eligibility said "done"
+ * while admission said "retry", the retry would be unreachable and the change
+ * would sit forever with no journal row of its own — which is exactly the shape
+ * of the 6h07m silent strand this codebase already paid for once.
+ */
+function verdictlessRetryable(job: DeepReadonly<Job>): boolean {
+  if (job.status !== "completed" || job.conclusion !== "failure") return false
+  return job.error.verdictless === true && job.attempt < VERDICTLESS_CHECK_ATTEMPTS
 }

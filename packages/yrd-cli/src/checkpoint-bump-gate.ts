@@ -121,8 +121,23 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // derived-member identity binding before a Candidate or run exists. The
   // queue gains an empty `derivedIdentities` projection, one registered event,
   // and queues-v12; the retained predecessor above supplies the empty record
-  // to stored checkpoints before replay. Current.
+  // to stored checkpoints before replay.
+  // Retained predecessor.
   "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa",
+  // 2026-09-01 — a check that was KILLED before it could judge the content now
+  // says so: `JobError` gains an optional `verdictless`, set once by the
+  // producer holding the process facts, so the queue stops reading a watchdog
+  // kill as a verdict and retiring the author's submit fact for it. ONE new
+  // optional key in an accepted input shape — the same trap
+  // `CandidateChange.containedInBase` and `judgedFailure` record above, and the
+  // reason this entry exists at all: an additive, migration-free widening reads
+  // like it cannot move the identity, and it does. Nothing rewrites a stored
+  // record: no error ever journaled carries `verdictless`, which is exactly
+  // what the widened schema still accepts, and replay resumes after the stored
+  // cursor. The predecessor retained above is this ledger's own superseded last
+  // entry — what the project has ASKED every deployment to store since
+  // 2026-09-01 — never a harness value (the PR1305 / R2732 lesson). Current.
+  "f0ea21d0d2610d724aed6b89c87720361833d6394372cdb54b5c99b10e9c9fe5",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

@@ -1344,6 +1344,14 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
    * post-receive stall on 2026-08-31 left exactly this state and `queue audit`
    * reported clean. Emitted by `receiverInboxFindings`; read-only. */
   "receiver-intake-stranded",
+  /** Every attempt at one required check was killed before it could judge the
+   * content, and the bounded automatic re-runs are spent. Nothing here is the
+   * author's to fix — the change stays submitted and runs again the moment its
+   * base advances — so this pages the HOST, not the branch. Without it the
+   * state is silent: the member keeps its standing submit fact (correctly, it
+   * was never judged) while `unrecordedSubmits` suppresses its waiting-list row
+   * for having a retained snapshot, which is the 6h07m dark-strand shape. */
+  "admission-verdictless-exhausted",
 ] as const
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]

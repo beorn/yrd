@@ -113,21 +113,44 @@ async function createApp(
     /** The OTHER non-progressing shape, measured live 2026-08-30 01:10-01:32:
      * the candidate merges fine and its required check fails. */
     failCheck?: boolean
+    /** The check is KILLED rather than judging anything — the PR3141 shape,
+     * 2026-09-01: a no-progress watchdog ended `3-affected-tests` after 15m45s
+     * on a host carrying a load of 40-61. `verdictless` is the fact the process
+     * layer records at the kill; here it is asserted directly, because what is
+     * under test is what the QUEUE does with it. */
+    verdictlessCheck?: boolean
+    /** Counts executions of the check step, so a re-run is measured rather than
+     * inferred from a log line. */
+    checkRuns?: () => void
   }> = {},
 ) {
   const check = withStep(
     "check",
-    (_input: StepExecution): JobResult<CheckResult> =>
-      options.failCheck === true
+    (_input: StepExecution): JobResult<CheckResult> => {
+      options.checkRuns?.()
+      if (options.verdictlessCheck === true) {
+        return {
+          status: "completed",
+          conclusion: "failure",
+          error: {
+            code: "affected-tests-stalled",
+            message: "affected-tests stalled after 120000ms without progress",
+            verdictless: true,
+          },
+        }
+      }
+      return options.failCheck === true
         ? {
             status: "completed",
             conclusion: "failure",
-            // A VERDICT, not a runner-error: the check ran and said no. A
-            // verdictless failure is infrastructure and propagates instead,
-            // which is a different (and already-handled) path.
+            // A VERDICT, not a runner-error: the check ran and said no. The
+            // verdictless case above is the contrast, and it is deliberately in
+            // this same file: the two differ ONLY in whether a verdict was
+            // reached, and the fact's fate must differ with them.
             error: { code: "check-failed", message: "the required check failed on this content" },
           }
-        : { status: "completed", conclusion: "success", output: { checked: true } },
+        : { status: "completed", conclusion: "success", output: { checked: true } }
+    },
     { revision: "check-v1", output: CheckResultSchema },
   )
   const merge = withMerge(
@@ -328,6 +351,89 @@ describe("a standing submit fact derives at most ONE live change", () => {
     arrangementMissing = false
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
+  })
+
+  it("a check KILLED before it could judge the content does not retire the fact", async () => {
+    // THE SECOND BOUNDARY, and the one PR3141 paid for on 2026-09-01. The rule
+    // this file pins is "a candidate was BUILT and JUDGED", and the judging half
+    // was never checked: a candidate merged fine, its required check was killed
+    // by a no-progress watchdog after 15m45s under a host load of 40-61, and the
+    // queue retired the author's standing fact and told them to push a fresh
+    // sha. Nothing had judged their change.
+    //
+    // The discriminator is a fact the process layer records at the kill, not a
+    // code list. A list cannot work here: these codes are built from CONFIGURED
+    // step names, so `affected-tests-stalled` was in no list and could not have
+    // been — which is exactly how it passed for a verdict.
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const queueMint = volatilePrNumberMint()
+    await using app = await createApp({ log, queueMint, verdictlessCheck: true })
+    await app.bays.recordBranchSubmit({ branch: "issue/stalling-check", sha: SHA, base: "main" })
+
+    await app.queue.run({}, runtime)
+
+    expect(
+      app.state().queues.retiredSubmits["issue/stalling-check"],
+      "a check that judged nothing must not consume the author's submission",
+    ).toBeUndefined()
+    // The fact still stands at the sha the author pushed, which is what makes
+    // the re-run below possible without them doing anything.
+    expect(app.state().bays.submits["issue/stalling-check"]).toMatchObject({ sha: SHA, base: "main" })
+    expect(actionsLogged(events)).not.toContain("submit-fact-retired")
+    // The refusal is recorded as what it is. `kind` is the field the funnel
+    // reads, so this is the assertion that keeps the two in step.
+    const skip = events.find(
+      (event) => event.kind === "log" && event.props?.action === "compose-candidate-skip",
+    )?.props
+    expect(skip?.kind, "a killed check is infrastructure, never a verdict on the content").toBe("infrastructure")
+    expect(skip?.code).toBe("affected-tests-stalled")
+  })
+
+  it("re-runs the killed check a bounded number of times, then reports it instead of looping", async () => {
+    // Both bounds matter and they fail in opposite directions. ZERO re-runs
+    // strands the change until something else advances the base — and on a
+    // queue this change is holding, nothing will. UNBOUNDED re-runs burn a full
+    // check run per compose pass against the host that is already why the check
+    // could not finish.
+    //
+    // The count is the Job's own durable attempt number, so a restart cannot
+    // reset it and a second counter cannot disagree with it.
+    let runs = 0
+    const queueMint = volatilePrNumberMint()
+    await using app = await createApp({ queueMint, verdictlessCheck: true, checkRuns: () => (runs += 1) })
+    await app.bays.recordBranchSubmit({ branch: "issue/stalling-check", sha: SHA, base: "main" })
+
+    await app.queue.run({}, runtime)
+    expect(runs, "the first pass runs the check once").toBe(1)
+    await app.queue.run({}, runtime)
+    await app.queue.run({}, runtime)
+    expect(runs, "two further passes each re-run it").toBe(3)
+
+    // Spent. Further passes must cost nothing.
+    await app.queue.run({}, runtime)
+    await app.queue.run({}, runtime)
+    expect(runs, "the bound holds").toBe(3)
+    // And no phantom changes were minted along the way: the identity is bound
+    // to the branch and sha, so re-deriving finds the same member.
+    expect(queueMint.highWater(), "one fact, one change, however many attempts").toBe(1)
+
+    // NOT silent. The fact is deliberately still standing, so no terminal row
+    // exists, and `unrecordedSubmits` suppresses the waiting-list row for a
+    // branch with a retained snapshot — leaving `queue audit` as the only place
+    // this state can be seen at all.
+    const findings = (await app.queue.audit()).findings
+    const exhausted = findings.find((finding) => finding.code === "admission-verdictless-exhausted")
+    expect(
+      exhausted,
+      `expected an admission-verdictless-exhausted finding, got: ${findings.map((f) => f.code).join(", ")}`,
+    ).toBeDefined()
+    expect(exhausted?.pr).toBe("PR1")
+    expect(exhausted?.refusal).toBe("affected-tests-stalled")
+    // The remedy is the host's, and the message must not send the author to
+    // their branch for a fault that is not there.
+    expect(exhausted?.message).toContain("not the change")
+    expect((exhausted?.resolution ?? []).join("\n")).toContain("no re-push is needed")
   })
 
   it("the retirement is a terminal finding naming the conflicting path and the cure", async () => {

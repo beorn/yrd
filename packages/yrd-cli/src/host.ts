@@ -405,6 +405,13 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // `queues.derivedIdentities`; `fillMissingStateFromInitial` supplies the
   // empty record before replay resumes after the stored cursor.
   "fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c",
+  // The composition immediately before a Job error could say it reached no
+  // verdict (2026-09-01). This is the ledger's own superseded last entry in
+  // `checkpoint-bump-gate.ts`, hence the value a deployment was asked to store.
+  // The edge needs no transformation: `JobError` gains one OPTIONAL key, so
+  // every error a checkpoint this recent already stores still parses unchanged,
+  // and the forward callback's drops are all no-ops on it.
+  "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
