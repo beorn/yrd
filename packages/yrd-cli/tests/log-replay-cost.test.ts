@@ -19,7 +19,12 @@
  * both counts equalled their journal's whole size, so growing the journal grew
  * the read; that is exactly the shape this refuses.
  */
-import { describe, expect, it } from "vitest"
+import { execFileSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it } from "vitest"
+import { queueLegacyCoverage } from "../src/run.ts"
 import { createMemoryJournal, type Journal } from "@yrd/core"
 import { appendHistory, createCliApp, outputIO, stubReadModel, yrd } from "./support/log-app.ts"
 import { runYrd as runYrdRaw } from "@yrd/cli"
@@ -84,5 +89,67 @@ describe.each([
 
     expect(grownFrames).toBe(smallFrames)
     expect(smallFrames).toBeLessThan(smallCursor)
+  })
+})
+
+/**
+ * The other half of `yrd log`'s cost, and the one frames-decoded cannot see.
+ *
+ * The coverage probe's timestamp came from `app.retentionDiagnostics()`, which
+ * eagerly runs the journal's full-frame fact audit through direct SQLite reads
+ * — never through `journal.read()`, so the counting journal above is blind to
+ * it. Measured 2026-09-01 on the live 92,616-frame hh journal: 1.70 GB resident
+ * and 6.5-7.7 s with the event loop blocked, per call.
+ *
+ * And every repository past the legacy migration discarded the result: with no
+ * `events.jsonl` and no `bay/journal.jsonl` the probe returns `undefined` and
+ * never reads the string it was handed. `yrd log -L 200 --json` measured 10.8 s
+ * and 3.52 GB peak before this, 4.2 s and 1.21 GB after, printing byte-identical
+ * output — so the assertion below is not about speed, it is that the expensive
+ * value is never ASKED FOR on the path that throws it away.
+ */
+describe("yrd log coverage probe", () => {
+  const roots: string[] = []
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  })
+
+  function repo(): string {
+    const root = mkdtempSync(join(tmpdir(), "yrd-log-coverage-"))
+    execFileSync("git", ["init", "-q", "-b", "main", root])
+    roots.push(root)
+    return root
+  }
+
+  it("never asks for the timestamp when no legacy journal exists", async () => {
+    const root = repo()
+    let asked = 0
+    const coverage = await queueLegacyCoverage(root, async () => {
+      asked += 1
+      return "2026-09-01T00:00:00.000Z"
+    })
+
+    expect(coverage).toBeUndefined()
+    // The whole fix: not "it was fast" but "it was never called". A thunk that
+    // runs and is discarded reads identically in the output and costs 1.7 GB.
+    expect(asked).toBe(0)
+  })
+
+  it("still asks, exactly once, when a legacy journal is really there", async () => {
+    const root = repo()
+    const gitDir = join(root, ".git", "yrd")
+    mkdirSync(gitDir, { recursive: true })
+    writeFileSync(join(gitDir, "events.jsonl"), '{"a":1}\n{"a":2}\n')
+    let asked = 0
+    const coverage = await queueLegacyCoverage(root, async () => {
+      asked += 1
+      return "2026-09-01T00:00:00.000Z"
+    })
+
+    // The negative control that makes the zero above evidence rather than a
+    // thunk nothing would ever have called.
+    expect(asked).toBe(1)
+    expect(coverage?.since).toBe("2026-09-01T00:00:00.000Z")
+    expect(coverage?.legacy[0]?.frames).toBe(2)
   })
 })

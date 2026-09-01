@@ -2428,7 +2428,30 @@ async function firstEventTimestamp(app: YrdCliApp): Promise<string> {
   return "-"
 }
 
-async function queueLegacyCoverage(cwd: string, since: string): Promise<QueueLogCoverage | undefined> {
+/**
+ * `since` is a THUNK, and that is the whole point of this signature.
+ *
+ * The only caller's argument is {@link firstEventTimestamp}, which reads the
+ * retention floor through `app.retentionDiagnostics()` — and that eagerly runs
+ * the journal's full-frame fact audit. Measured 2026-09-01 against the live
+ * 92,616-frame hh journal: 1.70 GB of resident set and 6.5-7.7 SECONDS with
+ * the event loop blocked, for one string.
+ *
+ * Every repository past the legacy migration then throws that string away: with
+ * no `events.jsonl` and no `bay/journal.jsonl` this returns `undefined` and
+ * `since` is never read. `yrd log -L 200 --json` was paying the full audit on
+ * every invocation to compute a value it discarded — 10.8 s and 3.52 GB peak to
+ * print 898 KB, and seats run it routinely.
+ *
+ * Passing a thunk keeps the reported coverage byte-identical wherever a legacy
+ * file really exists, and costs nothing where one does not. A flag was the
+ * other option and is strictly worse: it would make the common path cheap only
+ * for callers who knew to ask.
+ */
+export async function queueLegacyCoverage(
+  cwd: string,
+  since: () => Promise<string>,
+): Promise<QueueLogCoverage | undefined> {
   const gitDir = queueGitDir(cwd)
   if (gitDir === undefined) return undefined
   const paths = [join(gitDir, "yrd", "events.jsonl"), join(gitDir, "bay", "journal.jsonl")]
@@ -2447,7 +2470,9 @@ async function queueLegacyCoverage(cwd: string, since: string): Promise<QueueLog
       }),
     )
   ).filter((coverage): coverage is { path: string; frames: number } => coverage !== undefined)
-  return legacy.length === 0 ? undefined : { since, completeness: "queue-only", legacy }
+  // The audit runs HERE or not at all: only a repository that really carries a
+  // legacy file pays for the timestamp that describes it.
+  return legacy.length === 0 ? undefined : { since: await since(), completeness: "queue-only", legacy }
 }
 
 type RuntimeOptions = {
@@ -9152,7 +9177,7 @@ async function logRuns(
     const subject = revisionSubjects.get(row.headSha)
     return subject === undefined ? row : { ...row, subject }
   })
-  const coverage = await queueLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
+  const coverage = await queueLegacyCoverage(io.cwd ?? process.cwd(), () => firstEventTimestamp(app))
   // From the whole read, not from `rows`: --since/--limit/--pr can filter the
   // unreadable member out of the display, and a caller who is not told believes
   // the history is whole (@i/10-yrd/23228). Unioned with projectedRows' own
