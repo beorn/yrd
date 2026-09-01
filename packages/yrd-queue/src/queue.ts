@@ -309,6 +309,26 @@ type QueueRunNoRunnablePRs = Readonly<z.infer<typeof QueueRunNoRunnablePRsSchema
  * what the caller excluded, so an empty FIFO and a FIFO whose members are all
  * claimed elsewhere read differently.
  */
+/**
+ * C5(1) — the THIRD zero, and the one the 2026-08-31 incident fell through.
+ * Changes were considered, every one was eligible on its own merits, and the
+ * pass still selected none: its OWN exclusions (a base an unsettled run holds,
+ * a change a run already consumed, checks the admission phase left pending, an
+ * ejected authority) held all of them. `no-runnable-prs` cannot say this — it
+ * asserts every considered PR was ineligible — and `no-submitted-prs` cannot
+ * either, because plenty was submitted. So neither fired, and an hour of "no
+ * merge for 56m" produced no row at all.
+ */
+const QueueRunNoSelectedPRsSchema = z
+  .object({
+    kind: z.literal("no-selected-prs"),
+    considered: z.array(ConsideredRecordRowSchema).min(1),
+    selectedSteps: z.array(StepNameSchema).min(1),
+    reason: z.literal("every considered PR was held back by this pass's own exclusions"),
+  })
+  .strict()
+type QueueRunNoSelectedPRs = Readonly<z.infer<typeof QueueRunNoSelectedPRsSchema>>
+
 const QueueRunNoSubmittedPRsSchema = z
   .object({
     kind: z.literal("no-submitted-prs"),
@@ -368,6 +388,36 @@ function queueRunNoRunnablePRs(
     ],
     selectedSteps: selected.map((step) => step.name),
     reason: "every considered PR was ineligible for the selected plan",
+  })
+}
+
+/**
+ * The rows of a pass that selected nothing while every change it saw was
+ * eligible: each carries the exclusion that actually dropped it, so "no merge
+ * for 56 minutes" resolves to named causes instead of to silence. Every row is
+ * held by construction — a row with no hold IS a selected change, and the
+ * caller only reaches this shape once `prs` came back empty.
+ */
+function queueRunNoSelectedPRs(
+  rows: readonly ImplicitSelectionRow[],
+  selected: readonly RuntimeStep[],
+): QueueRunNoSelectedPRs {
+  return QueueRunNoSelectedPRsSchema.parse({
+    kind: "no-selected-prs",
+    considered: rows.map(({ pr, holds }) => {
+      const primary = holds[0]
+      if (primary === undefined) {
+        throw new Error(`yrd: change '${pr.id}' reached the held-back diagnostic without a hold`)
+      }
+      return {
+        pr: pr.id,
+        revision: changeRevisionNumber(pr),
+        code: primary.code,
+        reason: holds.map((hold) => `${hold.reason} (${hold.code}) — ${hold.remedy}`).join("; also: "),
+      }
+    }),
+    selectedSteps: selected.map((step) => step.name),
+    reason: "every considered PR was held back by this pass's own exclusions",
   })
 }
 
@@ -1706,6 +1756,17 @@ function createQueue<Shape extends ChangeShape>(
       log.info?.("queue run emitted zero events because nothing is submitted", {
         action: "queue-run-no-submitted-prs",
         ...empty.data,
+      })
+      return true
+    }
+    const held = QueueRunNoSelectedPRsSchema.safeParse(value)
+    if (held.success) {
+      // warn, unlike the empty FIFO above: eligible work exists and this pass
+      // ran it nowhere. That is the state the incident spent 56 minutes in with
+      // nothing to read, so it is the one zero that must never look routine.
+      log.warn?.("queue run emitted zero events because every eligible change was held back", {
+        action: "queue-run-no-selected-prs",
+        ...held.data,
       })
       return true
     }
@@ -3436,12 +3497,18 @@ function createQueue<Shape extends ChangeShape>(
               return Queues.terminal(materialized) ? [] : [[materialized.base, run.id] as const]
             }),
           )
-          const activeBases = new Set(activeBaseRuns.keys())
-          const consumed = new Set(
+          // The consuming RUN, not just the fact of consumption: C5(1)'s row for
+          // a change a settling run already holds has to name the run a reader
+          // should go look at. `consumed` below stays the key set, so every
+          // existing caller reads exactly what it always did.
+          const consumedBy = new Map<string, RunId>(
             resumable.flatMap((run) =>
-              run.prs.filter((pr) => pinnedChangeError(snapshot, [pr], run.id) === undefined).map((pr) => pr.id),
+              run.prs
+                .filter((pr) => pinnedChangeError(snapshot, [pr], run.id) === undefined)
+                .map((pr) => [pr.id, run.id] as const),
             ),
           )
+          const consumed = new Set(consumedBy.keys())
           const requested = requestedPRs(snapshot, cycleArgs, consumed, intentCutoff)
           const authoritySteps = requestedOrDeclaredSteps(steps, args.steps, args.declaredPlan)
           const cycleAuthority = derivedAuthorityLookup(snapshot)
@@ -3659,60 +3726,86 @@ function createQueue<Shape extends ChangeShape>(
             settledDerived.some((materialized) => materialized.id === member.id),
           )
           cycleArgs = cycleDerived.length === 0 ? { ...args, derived: undefined } : { ...args, derived: cycleDerived }
-          const runnable = runnableChangeSelection(snapshot, cycleArgs, steps, needsPersonOwner, unavailable, {
+          const selectionOptions = {
             explicitStepAuthority,
             ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
-          })
-          const prs = runnable.prs.filter((pr) => !activeBases.has(baseIdentity(pr.base)))
+          }
           // C5(1) — the 2026-08-31 incident's centerpiece
           // (hub/yrd/2026-08-31-queue-incident.md): two green head changes
-          // starved 56 minutes while the resident composed every ~66s,
-          // because this filter excluded them and NOTHING downstream named
-          // it — not this pass, and not the empty-run diagnostic below,
-          // which re-derives eligibility with a SMALLER exclusion set (it
-          // never learns about `activeBases`) and sees the very same changes
-          // "runnable", so neither of its two report branches fires either.
-          // A change that is silently skipped and a change that is loudly
-          // refused looked identical from outside.
+          // starved 56 minutes while the resident composed every ~66s, because
+          // the exclusions below dropped them and NOTHING named it — not this
+          // pass, and not the empty-run diagnostic, which re-derived
+          // eligibility with a SMALLER exclusion set (`consumed` only, never
+          // `pendingChecks`/`authorityGaps`/`activeBases`), saw the very same
+          // changes "runnable", and so skipped BOTH of its report branches. An
+          // hour of "no merge" produced zero rows naming a cause; a change
+          // silently skipped and a change loudly refused were the same bytes.
           //
-          // Name every eligible candidate this filter drops, every pass —
-          // independent of whether the pass ends at zero — with the specific
-          // non-terminal run holding its base, so "blocked by active base
-          // X" and "non-terminal run R#### holds this base" are the same
-          // row instead of two guesses. `conditions` folds repeats on the
-          // (pr, base, run) key, so an hour-long hold announces once, not
+          // ONE evaluator now answers both questions — {@link
+          // implicitSelectionAccounting} — so the set that decides what runs
+          // and the set that explains what did not are the same set by
+          // construction, and every held change is named with the exclusion
+          // that dropped it plus its remedy. `conditions` folds repeats on the
+          // (pr, codes, holder) key, so an hour-long hold announces once, not
           // once per ~66s pass.
-          if (selectorless) {
-            for (const pr of runnable.prs) {
-              const base = baseIdentity(pr.base)
-              const holder = activeBaseRuns.get(base)
-              if (holder === undefined) continue
-              composeConditions.report(
-                `compose-implicit-skip-active-base:${pr.id}:${base}:${holder}`,
-                "warn",
-                `will not select change '${pr.id}' this pass: its base '${base}' is already ` +
-                  `held by non-terminal run '${holder}' — batchSize serializes one candidate per base, so ` +
-                  "this change is reconsidered once that run settles or is abandoned",
+          const accounting = selectorless
+            ? implicitSelectionAccounting(
+                snapshot,
+                cycleArgs,
+                steps,
+                needsPersonOwner,
                 {
-                  action: "compose-implicit-skip-active-base",
-                  pr: pr.id,
-                  base,
-                  code: "queue-base-active",
-                  run: holder,
+                  consumedBy,
+                  pendingChecks: pendingIds,
+                  authorityGaps: new Map(
+                    authorityGaps.map((gap) => [gap.pr, `queue-${gap.kind}-authority-${gap.reason}`] as const),
+                  ),
+                  activeBaseRuns,
+                },
+                selectionOptions,
+              )
+            : undefined
+          // The EXPLICIT path is untouched: it keeps the pre-filtered call,
+          // whose `raiseFailure` on an ineligible named target is the contract
+          // a one-shot `--pr` caller depends on. Widening its population would
+          // turn a target a settling run holds from a quiet empty result into a
+          // refusal — a real improvement, but not this carrier's.
+          const prs =
+            accounting?.prs ??
+            runnableChangeSelection(
+              snapshot,
+              cycleArgs,
+              steps,
+              needsPersonOwner,
+              unavailable,
+              selectionOptions,
+            ).prs.filter((pr) => !activeBaseRuns.has(baseIdentity(pr.base)))
+          if (accounting !== undefined) {
+            for (const row of accounting.rows) {
+              if (row.holds.length === 0) continue
+              const primary = row.holds[0]
+              if (primary === undefined) throw new Error(`yrd: held change '${row.pr.id}' produced no hold to report`)
+              const codes = row.holds.map((hold) => hold.code)
+              composeConditions.report(
+                `compose-implicit-not-selected:${row.pr.id}:${codes.join("+")}:${primary.run ?? "-"}`,
+                "warn",
+                `did not select change '${row.pr.id}' on this implicit pass: ${row.holds
+                  .map((hold) => `${hold.reason} (${hold.code}) — ${hold.remedy}`)
+                  .join("; also: ")}`,
+                {
+                  action: "compose-implicit-not-selected",
+                  pr: row.pr.id,
+                  code: primary.code,
+                  codes,
+                  remedy: primary.remedy,
+                  ...(primary.base === undefined ? {} : { base: primary.base }),
+                  ...(primary.run === undefined ? {} : { run: primary.run }),
                 },
               )
             }
           }
-          if (selectorless && prs.length === 0) {
-            // Re-evaluate the whole FIFO-visible set for diagnostics, before the
-            // admission phase's temporary exclusions hide the reason it emitted
-            // no candidate. This uses the SAME eligibility helper as selection;
-            // it broadens evidence only, never what may run.
-            const diagnostic = runnableChangeSelection(snapshot, cycleArgs, steps, needsPersonOwner, consumed, {
-              explicitStepAuthority,
-              ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
-            })
-            const rejected = diagnostic.decisions.filter(({ eligibility }) => !eligibility.runnable)
+          if (accounting !== undefined && prs.length === 0) {
+            const rejected = accounting.decisions.filter(({ eligibility }) => !eligibility.runnable)
             // Reuses the scan this compose already took (same tick, same facts,
             // so the memo answers without a second walk); takes one if the pass
             // never reached the derive step. A landed fact is not a considered
@@ -3724,12 +3817,18 @@ function createQueue<Shape extends ChangeShape>(
               wiring,
               landing.reader(snapshot.bays, "the selectorless compose's empty-run diagnostic"),
             )
-            if (rejected.length > 0 || (diagnostic.decisions.length === 0 && unrecorded.length > 0)) {
+            if (rejected.length > 0 || (accounting.decisions.length === 0 && unrecorded.length > 0)) {
               reportZeroEventRun(queueRunNoRunnablePRs(rejected, authoritySteps, unrecorded))
-            } else if (diagnostic.decisions.length === 0) {
-              // Nothing to consider at all (as opposed to runnable members held
-              // back by an active base, which the admission loop reports itself).
+            } else if (accounting.decisions.length === 0) {
+              // Nothing to consider at all.
               reportZeroEventRun(queueRunNoSubmittedPRs(snapshot.bays, snapshot.queues, authoritySteps, consumed))
+            } else {
+              // The incident's own shape, and the branch that did not exist:
+              // changes WERE considered, every one of them was eligible on its
+              // own merits, and this pass still selected none — because its own
+              // exclusions held them all. Both branches above skipped here, and
+              // the run reported nothing at all.
+              reportZeroEventRun(queueRunNoSelectedPRs(accounting.rows, authoritySteps))
             }
           }
           for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize, snapshot.queues)) {
@@ -9386,6 +9485,135 @@ function runnablePRs(
 }
 
 /**
+ * ONE reason an implicit compose pass declined to select a change it could
+ * otherwise see, carrying the remedy with it so a row is actionable without a
+ * second lookup. `code` is always an already-registered refusal code
+ * ({@link YRD_REFUSAL_CODES}) — this surface names existing states, it does not
+ * mint new ones.
+ */
+type ImplicitSelectionHold = Readonly<{
+  code: string
+  reason: string
+  remedy: string
+  base?: string
+  run?: RunId
+}>
+
+/** One change's verdict for one implicit pass: selected, or held by ≥1 named reason. */
+type ImplicitSelectionRow = Readonly<{
+  pr: Change
+  eligibility: ChangeEligibility
+  holds: readonly ImplicitSelectionHold[]
+}>
+
+/**
+ * Every exclusion an implicit compose pass applies AFTER eligibility, gathered
+ * where the pass computes them so one evaluator can attribute each drop.
+ */
+type ImplicitSelectionHolds = Readonly<{
+  /** Changes a still-settling queue run already holds, and the run holding each. */
+  consumedBy: ReadonlyMap<string, RunId>
+  /** Changes whose admission checks this pass left unsettled and non-failed. */
+  pendingChecks: ReadonlySet<string>
+  /** Changes ejected this pass for a missing/consumed authority, and the code that ejected them. */
+  authorityGaps: ReadonlyMap<string, string>
+  /** Base identity -> the non-terminal run holding it; batchSize serializes one candidate per base. */
+  activeBaseRuns: ReadonlyMap<string, RunId>
+}>
+
+/**
+ * C5(1) — the ONE implicit-selection evaluator, replacing the two differently-
+ * parameterized `runnableChangeSelection` calls the compose used to make.
+ *
+ * The skew that made the 2026-08-31 incident unreadable: selection excluded
+ * `consumed ∪ pendingChecks ∪ authorityGaps` and then post-filtered on
+ * `activeBases`, while the empty-run diagnostic re-derived eligibility passing
+ * only `consumed` — so it never learned about the other three, saw the very
+ * changes selection had just dropped as "runnable", and BOTH of its report
+ * branches skipped. Two green head changes starved 56 minutes and the queue
+ * produced zero rows naming a cause; a change silently skipped and a change
+ * loudly refused were the same bytes from outside.
+ *
+ * The population here is therefore the WIDEST one — `runnableChangeSelection`
+ * with NO exclusion set — and the exclusions are re-applied as attributed
+ * `holds` rather than as a filter that erases its own evidence. `excluded` is a
+ * pure post-filter over an order-stable list inside `requestedPRs`, and
+ * `ChangeEligibility` never reads it, so widening changes neither the order nor
+ * any per-change verdict: `prs` here is exactly what the old
+ * `runnable.prs.filter(...activeBases)` returned.
+ *
+ * The one widening that is not inert: `requestedPRs` fails loud on a DERIVED
+ * member whose delivery state cannot enter a queue, and a member the old
+ * `consumed` argument filtered out never reached that check. That refusal is
+ * correct — a derived member in a terminal delivery state is a real fault — and
+ * it was only ever hidden for members a settling run happened to hold.
+ */
+function implicitSelectionAccounting(
+  state: DeepReadonly<RuntimeState>,
+  args: QueueRunArgs,
+  steps: readonly RuntimeStep[],
+  needsPersonOwner: string,
+  holds: ImplicitSelectionHolds,
+  options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition }> = {},
+): Readonly<{ prs: Change[]; rows: readonly ImplicitSelectionRow[]; decisions: readonly RunnableChangeDecision[] }> {
+  const evaluated = runnableChangeSelection(state, args, steps, needsPersonOwner, new Set(), options)
+  const rows = evaluated.decisions.map(({ pr, eligibility }): ImplicitSelectionRow => {
+    const held: ImplicitSelectionHold[] = []
+    const base = baseIdentity(pr.base)
+    const baseHolder = holds.activeBaseRuns.get(base)
+    if (baseHolder !== undefined) {
+      held.push({
+        code: "queue-base-active",
+        reason:
+          `its base '${base}' is already held by non-terminal run '${baseHolder}' — batchSize serializes one ` +
+          "candidate per base",
+        remedy: `this change is reconsidered once run '${baseHolder}' settles or is abandoned`,
+        base,
+        run: baseHolder,
+      })
+    }
+    const consumer = holds.consumedBy.get(pr.id)
+    if (consumer !== undefined) {
+      held.push({
+        code: "claimed",
+        reason: `queue run '${consumer}' already holds this change and has not settled`,
+        remedy: `this change is reconsidered once run '${consumer}' settles; inspect it with 'yrd queue show ${consumer}'`,
+        run: consumer,
+      })
+    }
+    if (holds.pendingChecks.has(pr.id)) {
+      held.push({
+        code: "checks-pending",
+        reason: "this pass's admission phase left its required checks unsettled, so it owns the change for this tick",
+        remedy: "no action: the next pass reconsiders it once its checks settle",
+      })
+    }
+    const gap = holds.authorityGaps.get(pr.id)
+    if (gap !== undefined) {
+      held.push({
+        code: gap,
+        reason: "this pass ejected the change for a missing or already-consumed queue authority",
+        remedy: "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
+      })
+    }
+    if (!eligibility.runnable) {
+      // Same bar as queueRunNoRunnablePRs: a not-runnable verdict without a
+      // reason is a hole in the derivation, never a row to paper over.
+      if (eligibility.reason === undefined) {
+        throw new Error(`yrd: change '${pr.id}' is not runnable and carries no eligibility reason`)
+      }
+      held.push({
+        code: eligibility.reason.code,
+        reason: eligibility.reason.message,
+        remedy: "read the reason: eligibility is the author's to clear, not the queue's",
+      })
+    }
+    return { pr, eligibility, holds: held }
+  })
+  return { prs: rows.flatMap((row) => (row.holds.length === 0 ? [row.pr] : [])), rows, decisions: evaluated.decisions }
+}
+
+/**
  * How every `candidateFailure(...)` code produced by command.ts is handled.
  * Each such code must fall in EXACTLY ONE bucket — the partition is asserted by
  * composition-failure-buckets.test.ts, which grep-derives the candidateFailure
@@ -9710,12 +9938,14 @@ export const YRD_REFUSAL_CODES = [
   "publication-failed",
   "publication-unavailable",
   "pushed-not-submitted",
-  // C5(1): the implicit selector's per-pass active-base report
-  // (compose-implicit-skip-active-base) — a queue-diagnostic condition
-  // logged through `conditions.report`, never a per-run failure code, so
-  // like `admission-refusal-loop` above and `queue-liveness-wedged` below it
-  // has no dedicated failureDisposition branch and falls through to the
-  // generic default.
+  // C5(1): one of the exclusion codes the implicit selector's per-pass
+  // accounting names (`compose-implicit-not-selected`, and the `no-selected-prs`
+  // zero-event shape) — a queue-diagnostic condition logged through
+  // `conditions.report`, never a per-run failure code, so like
+  // `admission-refusal-loop` above and `queue-liveness-wedged` below it has no
+  // dedicated failureDisposition branch and falls through to the generic
+  // default. Its siblings there — `claimed`, `checks-pending` — are eligibility
+  // codes already registered on their own account.
   "queue-base-active",
   // No current producer — see "canceled" above; "queue-cancelled" registers
   // as its alias below.

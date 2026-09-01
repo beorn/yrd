@@ -1961,7 +1961,19 @@ async function queueRunnerHealth(
         facts,
         "resident-runner-no-progress",
         queueProgress.findings.map((finding) => finding.message).join("\n"),
-        ["Inspect queue audit and the habitant log before restarting the runner."],
+        // The old text — "inspect queue audit and the habitant log BEFORE
+        // restarting the runner" — was circular in the one state it is written
+        // for: a stalled queue is exactly when a restart is prescribed, and a
+        // reader who took the instruction literally waited on an inspection
+        // that names no next step. It also read as a gate while naming no
+        // override. It is not a gate: this finding reports `running: false` and
+        // hab-core never refuses a start on it (see queueContentHealthError).
+        // Say so, then give the two reads that actually name a cause.
+        [
+          "This is QUEUE CONTENT, not service health: it does not gate the runner, and a restart is NOT refused by it — no override is needed.",
+          "Evidence: the cause above is the queue's own progress findings. `yrd queue audit` names the per-change reason, and the selectorless compose logs one `compose-implicit-not-selected` row per change it declined, with the exclusion that dropped it and its remedy.",
+          "Remedy: clear the named cause if it is author-side; otherwise restart the habitant queue runner with the installed Yrd source.",
+        ],
       )
     }
 
@@ -1999,7 +2011,14 @@ async function queueRunnerHealth(
             facts,
             "resident-runner-stalled-no-merge",
             `habitant runner has cycled for >${uptimeFormatted} hours with a non-empty ready set and no merge for >${noMergeFormatted} hours`,
-            ["Inspect the queue audit and restore delivery progress; process presence alone is not progress."],
+            // Same correction as `resident-runner-no-progress` above, same
+            // reason: this is queue content, it refuses no restart, and its old
+            // text named an inspection with no next step after it.
+            [
+              "This is QUEUE CONTENT, not service health: it does not gate the runner, and a restart is NOT refused by it — no override is needed.",
+              "Evidence: process presence alone is not progress. `yrd queue audit` names what holds the head change, and the selectorless compose logs one `compose-implicit-not-selected` row per change it declined, with the exclusion that dropped it and its remedy.",
+              "Remedy: clear the named cause if it is author-side; otherwise restart the habitant queue runner with the installed Yrd source.",
+            ],
           )
         }
       }

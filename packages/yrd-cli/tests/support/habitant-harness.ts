@@ -3,9 +3,17 @@ import type { YrdCliApp, YrdCliIO } from "../../src/types.ts"
 export type HabitantWarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
 type HabitantState = Readonly<{
-  bays: Readonly<{ prs: Readonly<Record<string, unknown>> }>
-  jobs?: Readonly<{ byId: Readonly<Record<string, unknown>> }>
-  queues: Readonly<{ admissionRefusals: Readonly<Record<string, unknown>> }>
+  bays: Readonly<{ prs: Readonly<Record<string, unknown>>; submits?: Readonly<Record<string, unknown>> }>
+  jobs?: Readonly<{ byId: Readonly<Record<string, unknown>>; byKey?: Readonly<Record<string, unknown>> }>
+  queues: Readonly<{
+    admissionRefusals: Readonly<Record<string, unknown>>
+    /** The projection lookups the runner's own heartbeat walks. Optional to a
+     * TEST AUTHOR, never to the loop -- completeState fills them. */
+    records?: Readonly<Record<string, unknown>>
+    index?: Readonly<Record<string, unknown>>
+    candidates?: Readonly<Record<string, unknown>>
+    retiredSubmits?: Readonly<Record<string, unknown>>
+  }>
 }>
 
 type HabitantRunContext = Readonly<{
@@ -25,8 +33,25 @@ const emptyState = (): HabitantState => ({
   queues: { admissionRefusals: {} },
 })
 
+/**
+ * Fill every state slice the habitant loop READS but a test author has no
+ * reason to think about. The gap this closes: the runner's own heartbeat calls
+ * `habitantDriverLastMerged` -> `queueChanges`, which walks
+ * `queues.records` / `queues.index` -- projection lookups `Queues.empty()`
+ * always provides in production. A hand-rolled stub omitting them threw INSIDE
+ * the heartbeat and the follow loop died before its next cycle. Four habitant
+ * suites (level-run, plan-gate, memory, source-recycle) were red at once for
+ * that one reason, each reading like the loop regression it exists to catch --
+ * so this file's "structurally complete" promise is kept HERE, never
+ * re-derived in every fixture.
+ */
 function completeState(state: HabitantState) {
-  return { ...state, jobs: state.jobs ?? { byId: {} } }
+  return {
+    ...state,
+    bays: { submits: {}, ...state.bays },
+    jobs: { byKey: {}, ...(state.jobs ?? { byId: {} }) },
+    queues: { records: {}, index: {}, candidates: {}, retiredSubmits: {}, ...state.queues },
+  }
 }
 
 /**
