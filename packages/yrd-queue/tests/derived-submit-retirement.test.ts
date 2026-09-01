@@ -108,7 +108,10 @@ describe("derivedSubmitRetirements — pure decision over a supplied landing sca
         sha: "a".repeat(40),
         base: "main",
         ref: "refs/yrd/submit/issue/ghost",
-        command: "git push bay :refs/yrd/submit/issue/ghost",
+        command:
+          "(git ls-remote --exit-code bay refs/yrd/submit/issue/ghost >/dev/null || " +
+          "{ echo \"no submit ref found for 'issue/ghost'; nothing to retire\" >&2; exit 1; }) && " +
+          "git push bay :refs/yrd/submit/issue/ghost",
       },
     ])
   })
@@ -149,7 +152,10 @@ describe("derivedSubmitRetirements — pure decision over a supplied landing sca
         sha: resubmitted,
         base: "main",
         ref: "refs/yrd/submit/task/again",
-        command: "git push bay :refs/yrd/submit/task/again",
+        command:
+          "(git ls-remote --exit-code bay refs/yrd/submit/task/again >/dev/null || " +
+          "{ echo \"no submit ref found for 'task/again'; nothing to retire\" >&2; exit 1; }) && " +
+          "git push bay :refs/yrd/submit/task/again",
       },
     ])
   })
@@ -221,7 +227,9 @@ describe("derivedSubmitRetirements — pure decision over a supplied landing sca
         remedy:
           "the CHANGE landed under a different commit, so this fact's own content is unproven: if it carries " +
           "new work, resubmit it under a fresh Change-Id; if it is an abandoned revision, retire it explicitly " +
-          "(git push bay :refs/yrd/submit/issue/renamed)",
+          "((git ls-remote --exit-code bay refs/yrd/submit/issue/renamed >/dev/null || " +
+          "{ echo \"no submit ref found for 'issue/renamed'; nothing to retire\" >&2; exit 1; }) && " +
+          "git push bay :refs/yrd/submit/issue/renamed)",
       },
     ])
   })
@@ -313,7 +321,10 @@ describe("derivedSubmitRetirements — over a REAL landing scan (proof pipeline,
         sha: authoredTip,
         base: "main",
         ref: "refs/yrd/submit/issue/real-landing",
-        command: "git push bay :refs/yrd/submit/issue/real-landing",
+        command:
+          "(git ls-remote --exit-code bay refs/yrd/submit/issue/real-landing >/dev/null || " +
+          "{ echo \"no submit ref found for 'issue/real-landing'; nothing to retire\" >&2; exit 1; }) && " +
+          "git push bay :refs/yrd/submit/issue/real-landing",
       },
     ])
   })

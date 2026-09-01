@@ -944,7 +944,10 @@ describe("pr prune", () => {
         {
           branch: "topic/landed",
           sha: MERGED_SHA,
-          next: "git push bay :refs/yrd/submit/topic/landed",
+          next:
+            "(git ls-remote --exit-code bay refs/yrd/submit/topic/landed >/dev/null || " +
+            "{ echo \"no submit ref found for 'topic/landed'; nothing to retire\" >&2; exit 1; }) && " +
+            "git push bay :refs/yrd/submit/topic/landed",
         },
       ],
       summary: { checked: 0, record: 0, derived: 0, excluded: 1 },
@@ -991,7 +994,10 @@ describe("pr prune", () => {
     // one command that retires it. Only the store comparison went.
     expect(result.excluded[0]).toMatchObject({
       branch: "issue/ghost",
-      next: "git push bay :refs/yrd/submit/issue/ghost",
+      next:
+        "(git ls-remote --exit-code bay refs/yrd/submit/issue/ghost >/dev/null || " +
+        "{ echo \"no submit ref found for 'issue/ghost'; nothing to retire\" >&2; exit 1; }) && " +
+        "git push bay :refs/yrd/submit/issue/ghost",
     })
     expect(result.excluded[0]!.reason).toContain("content is already on 'main'")
     expect(result, "the machine surface offers no store-vs-git comparison to read").not.toHaveProperty(

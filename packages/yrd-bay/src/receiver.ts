@@ -27,8 +27,14 @@ const SUBMIT_PREFIX = "refs/for/"
  * submission. Distinct from `SUBMIT_PREFIX` above: that namespace names a
  * CHANGE that predates its branch; this one approves a commit on a branch
  * that already exists.
+ *
+ * Exported so a retirement-command generator (`@yrd/queue`'s
+ * `submitRefRetirementCommand`) names the ref this receiver actually mints,
+ * from this one constant, rather than an independently hardcoded literal that
+ * can drift out of sync with the receiver's own naming
+ * (@i/10-yrd/a-cure-string-names-a-ref-that-does-not-exist).
  */
-const SUBMIT_REF_PREFIX = "refs/yrd/submit/"
+export const SUBMIT_REF_PREFIX = "refs/yrd/submit/"
 /**
  * The branch-is-change model's shelf: a deleted branch is never gone, it is
  * moved here (`<branch>-<old-tip-shortsha>`). Permanent — the receiver

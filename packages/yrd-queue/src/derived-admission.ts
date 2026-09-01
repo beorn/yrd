@@ -45,6 +45,7 @@ import {
   GitShaSchema,
   PRIdSchema,
   RECEIVER_REMOTE_NAME,
+  SUBMIT_REF_PREFIX,
   hasChangeRecord,
   type BaysState,
   type Change,
@@ -498,6 +499,20 @@ export function derivedLaneBranches(
 /**
  * The exact command an operator runs to retire one submit ref by hand.
  *
+ * Self-verifying by construction
+ * (@i/10-yrd/a-cure-string-names-a-ref-that-does-not-exist). Git's own
+ * `push :<ref>` treats deleting a ref that does not exist as SUCCESS — no
+ * error, exit 0 — so a bare `git push bay :refs/yrd/submit/<branch>` can
+ * never tell its reader whether it just retired the fact or changed nothing
+ * at all; measured live, it named a ref under this namespace/key for a
+ * branch whose real standing fact lived elsewhere, and the "cure" silently
+ * no-opped. This command checks existence FIRST and only pushes the delete
+ * once it has proof the ref is actually there; otherwise it prints exactly
+ * why and fails loudly, so a no-op can never read as a fix. The existence
+ * check and the delete both run inside a subshell `( … )` so the failure
+ * branch's own `exit` cannot kill an operator's interactive shell — only the
+ * subshell — leaving `&&` to refuse the push behind it.
+ *
  * Shared by every surface that tells a reader a standing fact is stale — the
  * compose warn rows (`queue.ts`'s `compose-derived-fact-already-landed` and
  * `compose-derived-fact-superseded` conditions), the audit's
@@ -507,7 +522,12 @@ export function derivedLaneBranches(
  * strings for the same fix.
  */
 export function submitRefRetirementCommand(branch: string): string {
-  return `git push ${RECEIVER_REMOTE_NAME} :refs/yrd/submit/${branch}`
+  const ref = `${SUBMIT_REF_PREFIX}${branch}`
+  return (
+    `(git ls-remote --exit-code ${RECEIVER_REMOTE_NAME} ${ref} >/dev/null || ` +
+    `{ echo "no submit ref found for '${branch}'; nothing to retire" >&2; exit 1; }) && ` +
+    `git push ${RECEIVER_REMOTE_NAME} :${ref}`
+  )
 }
 
 /** One derived-lane submit ref this sweep has proven safe to physically
@@ -623,7 +643,7 @@ export function derivedSubmitRetirements(bays: DeepReadonly<BaysState>, scan: La
         branch: row.branch,
         sha: submit.sha,
         base: submit.base,
-        ref: `refs/yrd/submit/${row.branch}`,
+        ref: `${SUBMIT_REF_PREFIX}${row.branch}`,
         command: submitRefRetirementCommand(row.branch),
       }
     })
