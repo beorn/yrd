@@ -2270,7 +2270,14 @@ describe("Queue", () => {
     ).toEqual({ artifacts: [remote] })
   })
 
-  it("keeps internal failure lifecycles at INFO so the CLI owns the user-facing error", async () => {
+  it("surfaces a failed REQUIRED check at ERROR while run/compose settle quietly at INFO", async () => {
+    // A required check's failure is a content verdict against the revision —
+    // the change dies, not the process — so the deepest failing step owns the
+    // one loud ERROR (packages/yrd-core/src/observability.ts's
+    // `failureLevel`). The enclosing run/compose lifecycles stay at INFO
+    // regardless, so that single failure is never re-raised as a duplicate
+    // ERROR up the tree; the CLI boundary still owns turning it into
+    // user-facing text, just not the severity of this internal record.
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createQueueApp(
@@ -2294,7 +2301,7 @@ describe("Queue", () => {
         (event): event is Extract<LogEvent, { kind: "log" }> =>
           event.kind === "log" && event.namespace === "yrd:jobs:check" && event.props?.outcome === "failed",
       ),
-    ).toMatchObject({ level: "info" })
+    ).toMatchObject({ level: "error" })
 
     const run = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>

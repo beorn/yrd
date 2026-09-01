@@ -922,6 +922,12 @@ export function createJobs(options: CreateJobsOptions): Jobs {
             : result.status === "in_progress" || result.status === "waiting" || result.status === "queued"
               ? "progress"
               : "failed",
+        // A failure this job's own definition marked required is a gating
+        // verdict against the revision under test — the change dies, not the
+        // process — and stays loud at ERROR; everything else (undeclared or
+        // explicitly optional/advisory) settles at the abnormal-recoverable
+        // WARN rather than the prior silent INFO.
+        failureLevel: () => (observation.required === true ? "error" : "warn"),
         resultAttributes: (result) => jobResultAttributes(installed, result, observedResult),
       },
       async () => {
@@ -1079,6 +1085,11 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           },
           outcome: (finished) =>
             finished.status === "completed" && finished.conclusion === "success" ? "succeeded" : "failed",
+          // Same required/advisory split as the in-process `run` completion
+          // above — a required job's failure is a content verdict against the
+          // revision (ERROR), everything else is abnormal-recoverable (WARN),
+          // and success is untouched at INFO.
+          failureLevel: () => (observation.required === true ? "error" : "warn"),
           resultAttributes: (finished) => jobResultAttributes(installedDef, finished, result),
         },
         async () => {

@@ -53,6 +53,14 @@ export type YrdLifecycleOptions<Result> = Readonly<{
   identity?: YrdDeliveryIdentity
   attributes?: Readonly<Record<string, unknown>>
   outcome?: YrdLifecycleOutcome | ((result: Result) => YrdLifecycleOutcome)
+  /** Override the shared "failed" level for one non-throwing domain result,
+   * letting a caller that knows more about the failure — e.g. whether it is a
+   * required, gating verdict against the work under test versus an
+   * optional/advisory one — sharpen the default `YRD_LIFECYCLE_LEVELS.failed`.
+   * Consulted only when `outcome` resolves to "failed" from a Result the
+   * operation returned; the thrown-error branch has no Result and always
+   * keeps the shared default. */
+  failureLevel?(result: Result): Exclude<LogLevel, "silent">
   resultAttributes?: (result: Result) => Readonly<Record<string, unknown>>
   /** Replace the flat outcome word in the completion message with a computed
    * summary label (e.g. a mixed-outcome tally: `settled: 1 failed, 1 passed`).
@@ -104,7 +112,8 @@ export async function observeYrdLifecycle<Result>(
     if (invalidDuration) {
       log.error?.(`Could not measure how long ${options.lifecycle} took; its result is unchanged.`, { ...spanProps })
     }
-    emitLifecycle(log, options.lifecycle, outcome, summary ?? outcome, { ...spanProps })
+    const levelOverride = outcome === "failed" && result !== undefined ? options.failureLevel?.(result) : undefined
+    emitLifecycle(log, options.lifecycle, outcome, summary ?? outcome, { ...spanProps }, levelOverride)
   }
 
   try {
