@@ -21,7 +21,7 @@ import {
   type Change,
 } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, failureFact, pipe } from "@yrd/core"
-import { withJobs } from "@yrd/job"
+import { withJobs, type JobError } from "@yrd/job"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import * as z from "zod"
@@ -44,6 +44,7 @@ import {
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
+  renderStepFailure,
   gitMergeRecorder,
   inspectGitQueueTarget,
   ChangeSnapshotSchema,
@@ -3832,7 +3833,7 @@ describe("Queue command adapters", () => {
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         artifacts: [{ name: "stdout" }, { name: "stderr" }],
-        ...(verdict === undefined ? {} : { stageVerdict: verdict }),
+        ...(verdict === undefined ? {} : { stageVerdict: verdict, stageBoundMs: 120_000 }),
       })
       if (verdict === undefined) {
         expect(evidence.detail).toContain("[yrd-base-health]")
@@ -8481,7 +8482,146 @@ describe("configuredCommandStep — a timed-out command is a NAMED timeout failu
     expect(outcome.error.code).toBe("check-timeout")
     expect(outcome.error.message).toContain("500ms wall-clock bound")
     const evidence = CommandEvidenceSchema.parse(outcome.output)
-    expect(evidence).toMatchObject({ timedOut: true, stageVerdict: "TIMED_OUT", durationMs: expect.any(Number) })
+    expect(evidence).toMatchObject({
+      timedOut: true,
+      stageVerdict: "TIMED_OUT",
+      stageBoundMs: 500,
+      durationMs: expect.any(Number),
+    })
     expect(outcome.error.message).not.toContain(cwd)
+    // 22896 + the watchdog-verdict gap: terminal.json is the narrower,
+    // journal-independent record an operator or external tool reads from the
+    // attempt directory alone — it must carry the same distinguishing verdict
+    // CommandEvidence does, not just the coarse timedOut boolean that collapses
+    // a ceiling timeout and a no-progress stall into the same value.
+    const runDir = join(cwd, "artifacts", "run-1")
+    const [stepDir] = await readdir(runDir)
+    const terminal = CommandTerminalSchema.parse(
+      JSON.parse(await readFile(join(runDir, stepDir!, "attempt-1", "terminal.json"), "utf8")),
+    )
+    expect(terminal).toMatchObject({ stageVerdict: "TIMED_OUT", stageBoundMs: 500, timedOut: true })
   }, 15_000)
+})
+
+describe("configuredCommandStep — the watchdog verdict distinguishes STALLED from TIMED_OUT in the durable record", () => {
+  it("writes STALLED with its no-progress bound, never the ceiling timeout's", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-cmd-stalled-"))
+    roots.push(cwd)
+    const result: ProcessResult = {
+      exitCode: 137,
+      signal: "SIGKILL",
+      stdout: "",
+      stderr: "",
+      durationMs: 45_000,
+      timedOut: false,
+      stalled: true,
+      verdict: "STALLED",
+      lastProgressAtMs: 12_000,
+      lastProgressBytes: 4,
+    }
+    const runner = configuredCommandStep<ChangeShape>({
+      inject: { process: { run: () => Promise.resolve(result) } },
+      command: ["bun", "run", "check"],
+      cwd,
+      purpose: "check",
+      artifactRoot: join(cwd, "artifacts"),
+      timeoutMs: 600_000,
+      noProgressTimeoutMs: 30_000,
+    })
+    const outcome = await runner(
+      {
+        run: "run-1",
+        step: "check",
+        index: 0,
+        prs: [{ id: "pr-1", base: "main", headSha: "a".repeat(40) }],
+        shape: { results: {} },
+      } as unknown as StepExecution<ChangeShape>,
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+    expect(outcome.status).toBe("completed")
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
+    // The bound recorded must be the watchdog that actually fired
+    // (noProgressTimeoutMs), never the other configured bound (timeoutMs) —
+    // the two are both present here specifically to prove that.
+    const evidence = CommandEvidenceSchema.parse(outcome.output)
+    expect(evidence).toMatchObject({ stageVerdict: "STALLED", stageBoundMs: 30_000 })
+    const dir = join(cwd, "artifacts", "run-1", "0-check", "attempt-1")
+    const terminal = CommandTerminalSchema.parse(JSON.parse(await readFile(join(dir, "terminal.json"), "utf8")))
+    expect(terminal).toMatchObject({ stageVerdict: "STALLED", stageBoundMs: 30_000 })
+    // Same shape, opposite verdict, from the sibling test above — a reader
+    // diffing the two terminal.json records tells them apart by field, never
+    // by re-deriving intent from durationMs or the exit signal.
+    expect(terminal.stageVerdict).not.toBe("TIMED_OUT")
+  })
+
+  it("parses a record written before this field existed — additive, so a reader behind this schema is not broken", () => {
+    const legacyEvidence = {
+      command: ["bun", "test"],
+      exitCode: 137,
+      durationMs: 45_000,
+      configHash: "a".repeat(64),
+      artifacts: [],
+      timedOut: false,
+    }
+    expect(() => CommandEvidenceSchema.parse(legacyEvidence)).not.toThrow()
+    expect(CommandEvidenceSchema.parse(legacyEvidence).stageVerdict).toBeUndefined()
+    expect(CommandEvidenceSchema.parse(legacyEvidence).stageBoundMs).toBeUndefined()
+
+    const legacyTerminal = {
+      status: "failure" as const,
+      exitCode: 137,
+      signal: "SIGKILL",
+      timedOut: false,
+      startedAt: new Date(0).toISOString(),
+      endedAt: new Date(0).toISOString(),
+      durationMs: 45_000,
+    }
+    expect(() => CommandTerminalSchema.parse(legacyTerminal)).not.toThrow()
+    expect(CommandTerminalSchema.parse(legacyTerminal).stageVerdict).toBeUndefined()
+    expect(CommandTerminalSchema.parse(legacyTerminal).stageBoundMs).toBeUndefined()
+  })
+
+  it("names the watchdog on the operator-facing disclosure, STALLED and TIMED_OUT distinctly", () => {
+    const error: JobError = { code: "check-stalled", message: "check stalled after 30000ms without progress" }
+    const stalledEvidence = CommandEvidenceSchema.parse({
+      command: ["bun", "test"],
+      exitCode: 137,
+      durationMs: 45_000,
+      configHash: "a".repeat(64),
+      artifacts: [],
+      stageVerdict: "STALLED",
+      stageBoundMs: 30_000,
+    })
+    expect(renderStepFailure(error, stalledEvidence)).toContain("watchdog verdict: STALLED (bound 30000ms)")
+
+    const timedOutEvidence = CommandEvidenceSchema.parse({
+      command: ["bun", "test"],
+      exitCode: 0,
+      durationMs: 500,
+      configHash: "a".repeat(64),
+      artifacts: [],
+      timedOut: true,
+      stageVerdict: "TIMED_OUT",
+      stageBoundMs: 500,
+    })
+    const timeoutError: JobError = { code: "check-timeout", message: "check exceeded its 500ms wall-clock bound" }
+    const rendered = renderStepFailure(timeoutError, timedOutEvidence)
+    expect(rendered).toContain("watchdog verdict: TIMED_OUT (bound 500ms)")
+    // The two renderings differ where it counts — this is the distinguishing
+    // field the durable record exists to carry, not just distinct message text.
+    expect(rendered).not.toContain("STALLED")
+
+    // An ordinary exit-red failure has no verdict at all: no line is invented,
+    // preserving the disclosure's shape for every failure this change did not touch.
+    const plainEvidence = CommandEvidenceSchema.parse({
+      command: ["bun", "test"],
+      exitCode: 1,
+      durationMs: 200,
+      configHash: "a".repeat(64),
+      artifacts: [],
+    })
+    expect(renderStepFailure({ code: "check-failed", message: "check exited 1" }, plainEvidence)).not.toContain(
+      "watchdog verdict",
+    )
+  })
 })
