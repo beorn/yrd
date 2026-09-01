@@ -5835,6 +5835,14 @@ function releaseRunAuthority(
   }
 }
 
+/** Unconditional, status-agnostic claim release for the generic `settled`
+ * bookkeeping event: an explicit-settlement run's `claims` entry exists only
+ * to block concurrent interference while that one-shot run is active, so it
+ * clears on ANY terminal disposition. Never touches `submits`/`checks` — a
+ * failed run's actual authority release (or lack of it) is decided
+ * elsewhere: `queue/run/failed`'s blameless-error branch, `queue/run/canceled`,
+ * or (for a passed settlement) `projectSettledQueueRun`'s own
+ * `releaseRunAuthority` call. */
 function settleRunClaim(authority: DeepReadonly<QueueAuthorityState>, run: RunId): QueueAuthorityState {
   const root = resolveQueueAuthorityRoot(authority, run)
   const claims: Record<string, QueueAuthorityToken> = { ...authority.claims }
@@ -5949,7 +5957,31 @@ function projectSettledQueueRun(state: DeepReadonly<QueueState>, applied: Event)
     queues: markQueueTerminalRoot(
       {
         ...state.queues,
-        authority: settleRunClaim(state.queues.authority, record.id),
+        // This event is generic settlement bookkeeping — it also fires for a
+        // FAILED or canceled explicit-settlement run purely to release its
+        // `claims` entry (`settleRunClaim`), which stays unconditional: an
+        // author-fault failure (e.g. a merge conflict) must keep its
+        // submit/checks token consumed regardless. Only a `passed` status is
+        // exactly as terminal as `queue/run/failed`'s blameless-error branch
+        // and `queue/run/canceled` — both of which already release the run's
+        // submit/checks tokens via `releaseRunAuthority`, not merely `claims`.
+        // Without this, a run that settles via the already-landed shortcut (a
+        // real, successful disposition — no merge commit needed because the
+        // content already matches base) leaves its member's submit-authority
+        // token permanently `consumedBy` a run that no longer exists: nothing
+        // but a re-push ever cleared it, so a derived (recordless) member
+        // whose branch fact is re-examined later — landed by content but not
+        // by git ancestry, so `landedSubmits` cannot exclude it — was refused
+        // `queue-submit-authority-consumed` forever. Measured live: PR2749 and
+        // PR2909 stuck in that exact loop for 19+ hours, ~90s cadence, against
+        // runs that had settled "passed" long before. Releasing here is safe
+        // for a genuine merge too: `landedSubmits` already excludes an
+        // ancestor sha from re-admission, so this path is inert for it and
+        // only matters for the tree-equal, non-ancestor case it cannot see.
+        authority:
+          settled.status === "passed"
+            ? releaseRunAuthority(state.queues.authority, record, { reason: "run-settled", ref: applied.id })
+            : settleRunClaim(state.queues.authority, record.id),
         ...(settledRecord === record ? {} : { records: Queues.set(state.queues.records, settledRecord) }),
       },
       record.id,
