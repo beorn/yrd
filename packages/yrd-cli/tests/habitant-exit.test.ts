@@ -18,6 +18,7 @@ import {
   HABITANT_BACKOFF_EXIT_CODES,
   HABITANT_EXIT,
   HABITANT_EXIT_DISPOSITION,
+  HABITANT_STAND_DOWN_EXIT_CODES,
   habitantExitCondition,
   type HabitantExitCondition,
 } from "../src/habitant-exit.ts"
@@ -28,15 +29,16 @@ describe("habitant exit taxonomy — one code per condition", () => {
   it("gives every condition a DISTINCT code", () => {
     const codes = CONDITIONS.map((condition) => HABITANT_EXIT[condition])
     expect(new Set(codes).size).toBe(codes.length)
-    expect(codes.length).toBe(5)
+    expect(codes.length).toBe(6)
   })
 
-  it("names the five conditions the supervisor has to tell apart", () => {
+  it("names the six conditions the supervisor has to tell apart", () => {
     expect(CONDITIONS.toSorted()).toEqual([
       "installed-plan-stale",
       "interrupted",
       "memory-cap",
       "poisoned",
+      "queue-wedged",
       "source-stale",
     ])
   })
@@ -56,7 +58,7 @@ describe("habitant exit taxonomy — one code per condition", () => {
 describe("habitant exit taxonomy — what the supervisor does about each", () => {
   it("dispositions every condition, so none reaches a policy undeclared", () => {
     for (const condition of CONDITIONS) {
-      expect(HABITANT_EXIT_DISPOSITION[condition]).toMatch(/^restart-(immediately|with-backoff)$/u)
+      expect(HABITANT_EXIT_DISPOSITION[condition]).toMatch(/^(restart-(immediately|with-backoff)|stand-down)$/u)
     }
   })
 
@@ -73,8 +75,22 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
     expect(HABITANT_EXIT_DISPOSITION.interrupted).toBe("restart-immediately")
   })
 
+  it("refuses to restart the one condition a successor cannot change at all", () => {
+    // Every other condition lives in THIS process: a successor is not
+    // poisoned, boots moved source, installs the current plan, starts small.
+    // A wedged queue lives outside the process, so the successor re-reads the
+    // same wedge — pacing it only sets how often we rediscover that.
+    expect(HABITANT_EXIT_DISPOSITION["queue-wedged"]).toBe("stand-down")
+  })
+
   it("derives the backoff code list from the table rather than restating it", () => {
     expect(HABITANT_BACKOFF_EXIT_CODES).toEqual([HABITANT_EXIT["memory-cap"]])
+  })
+
+  it("derives the stand-down code list the same way, and keeps the two disjoint", () => {
+    expect(HABITANT_STAND_DOWN_EXIT_CODES).toEqual([HABITANT_EXIT["queue-wedged"]])
+    const overlap = HABITANT_STAND_DOWN_EXIT_CODES.filter((code) => HABITANT_BACKOFF_EXIT_CODES.includes(code))
+    expect(overlap).toEqual([])
   })
 })
 

@@ -48,6 +48,14 @@ export const HABITANT_EXIT = {
    * all by design — and all seven read as failures because this exit shared
    * `refusal`'s generic code 1 with every genuine one. */
   "installed-plan-stale": 13,
+  /** The queue stayed liveness-wedged past its declared stand-down bound, so
+   * the habitant stopped rather than keep logging an ERROR it cannot act on
+   * (@i/10-yrd, andon ruling 2026-09-01). Unlike every condition above it, a
+   * successor process does not change the answer: the wedge lives in the queue
+   * this runner reads, not in the runner, so a fresh one re-reads the same
+   * wedge and stands down again. That is why it is the first condition
+   * dispositioned `stand-down`. */
+  "queue-wedged": 14,
 } as const
 
 export type HabitantExitCondition = keyof typeof HABITANT_EXIT
@@ -62,8 +70,15 @@ export type HabitantExitCode = (typeof HABITANT_EXIT)[HabitantExitCondition]
  * pointless if delayed. `restart-with-backoff` is for a condition the restart
  * does not cure: a runner that ballooned past its cap will balloon again, and
  * restarting it hot converts a memory problem into a spawn storm.
+ *
+ * `stand-down` is for a condition no number of restarts can reach, because the
+ * fault is not in this process at all. Pacing such a condition only sets how
+ * often we rediscover it; the andon ruling (2026-09-01) says the runner stays
+ * exited until a person corrects the cause and starts it deliberately. A
+ * disposition that said "restart, but slowly" would describe a supervisor
+ * still trying, which is exactly the posture the ruling removes.
  */
-export type HabitantRestartDisposition = "restart-immediately" | "restart-with-backoff"
+export type HabitantRestartDisposition = "restart-immediately" | "restart-with-backoff" | "stand-down"
 
 export const HABITANT_EXIT_DISPOSITION: Readonly<Record<HabitantExitCondition, HabitantRestartDisposition>> =
   Object.freeze({
@@ -74,6 +89,7 @@ export const HABITANT_EXIT_DISPOSITION: Readonly<Record<HabitantExitCondition, H
     // A fresh process installs whatever the base tip declares at boot, which
     // is exactly the cure — same reasoning as `source-stale`.
     "installed-plan-stale": "restart-immediately",
+    "queue-wedged": "stand-down",
   })
 
 /**
@@ -99,5 +115,21 @@ export function habitantExitCondition(code: number): HabitantExitCondition | und
 export const HABITANT_BACKOFF_EXIT_CODES: readonly HabitantExitCode[] = Object.freeze(
   (Object.keys(HABITANT_EXIT) as HabitantExitCondition[])
     .filter((condition) => HABITANT_EXIT_DISPOSITION[condition] === "restart-with-backoff")
+    .map((condition) => HABITANT_EXIT[condition]),
+)
+
+/**
+ * The codes that must never be restarted automatically, derived the same way.
+ *
+ * A service declared `restart: never` already stays down whatever it exits
+ * with, so this list is not what keeps a wedged runner stopped. It exists so a
+ * supervisor that DOES pace this process — a differently-declared host, or a
+ * future policy keyed on the code rather than the service — cannot reach
+ * "restart" for a condition whose whole meaning is that restarting is futile.
+ * Derived rather than restated, for the same reason as the backoff list.
+ */
+export const HABITANT_STAND_DOWN_EXIT_CODES: readonly HabitantExitCode[] = Object.freeze(
+  (Object.keys(HABITANT_EXIT) as HabitantExitCondition[])
+    .filter((condition) => HABITANT_EXIT_DISPOSITION[condition] === "stand-down")
     .map((condition) => HABITANT_EXIT[condition]),
 )
