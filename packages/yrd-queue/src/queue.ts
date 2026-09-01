@@ -3368,7 +3368,7 @@ function createQueue<Shape extends ChangeShape>(
               // Retire it once so it cannot poison every future habitant cycle.
               if (fact.code === "stale-plan") {
                 await actions.retireStalePlan(candidateId)
-                log.info?.(`Skipped outdated batch ${candidateId} because its PRs can no longer be tested together.`, {
+                log.warn?.(`Skipped outdated batch ${candidateId} because its PRs can no longer be tested together.`, {
                   action: "compose-stale-plan-retire",
                   run: candidateId,
                   code: fact.code,
@@ -4252,7 +4252,7 @@ function createQueue<Shape extends ChangeShape>(
             affected.add(planned.run)
           }
           if (retiredBatches.length > 0) {
-            log.info?.("Removed outdated batches that can no longer be tested.", {
+            log.warn?.("Removed outdated batches that can no longer be tested.", {
               action: "recover-stale-plan-retire",
               reason: "stale-plan",
               runs: retiredBatches.map((batch) => batch.run),
