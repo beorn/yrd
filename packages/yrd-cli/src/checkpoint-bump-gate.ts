@@ -115,8 +115,14 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // never-deployed rationale — distinct from the five shipped-but-unlisted
   // identities (fe430448 et al.), whose exclusion has acknowledged startup
   // cost.
-  // Current.
+  // Retained predecessor.
   "fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c",
+  // 2026-09-01 — the selectorless compose journals one exact branch+sha to
+  // derived-member identity binding before a Candidate or run exists. The
+  // queue gains an empty `derivedIdentities` projection, one registered event,
+  // and queues-v12; the retained predecessor above supplies the empty record
+  // to stored checkpoints before replay. Current.
+  "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

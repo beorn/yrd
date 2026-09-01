@@ -171,10 +171,10 @@ describe("a derived member's revision ordinal moves only for new content", () =>
     // after the first compose, so nothing re-admits and nothing re-executes.
     expect(observed).toEqual([
       "cycle 0: revision=1 records=0 submitFact=7777 lane=derivable",
-      "cycle 1: revision=2 records=1 check=1 merge=1 submitFact=7777 lane=derivable",
-      "cycle 2: revision=2 records=1 check=1 merge=1 submitFact=7777 lane=derivable",
-      "cycle 3: revision=2 records=1 check=1 merge=1 submitFact=7777 lane=derivable",
-      "cycle 4: revision=2 records=1 check=1 merge=1 submitFact=7777 lane=derivable",
+      "cycle 1: revision=1 records=1 check=1 merge=1 submitFact=7777 lane=derivable",
+      "cycle 2: revision=1 records=1 check=1 merge=1 submitFact=7777 lane=derivable",
+      "cycle 3: revision=1 records=1 check=1 merge=1 submitFact=7777 lane=derivable",
+      "cycle 4: revision=1 records=1 check=1 merge=1 submitFact=7777 lane=derivable",
     ])
 
     // POSITIVE CONTROL: "frozen" proves nothing unless this instrument can
@@ -184,6 +184,6 @@ describe("a derived member's revision ordinal moves only for new content", () =>
     await app.queue.run({}, runtime)
     expect(
       `revision=${mintedRevision(app, "issue/probe")} check=${calls.get("check") ?? 0} merge=${calls.get("merge") ?? 0}`,
-    ).toBe("revision=3 check=2 merge=2")
+    ).toBe("revision=2 check=2 merge=2")
   })
 })

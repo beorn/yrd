@@ -26,7 +26,6 @@ import {
   pipe,
   type Journal,
   type JournalCheckpoint,
-  type JournalEntityKind,
   type JournalFrame,
 } from "@yrd/core"
 import { localRunner, withJobs, type JobResult, type Jobs, type Runner, type RunnerSubmission } from "@yrd/job"
@@ -68,6 +67,7 @@ import {
   releasedAdmissionFailures,
 } from "../src/projection-index.ts"
 import { compactQueuesState } from "../src/retention.ts"
+import { indexedJournal } from "./support/indexed-journal.ts"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -210,79 +210,6 @@ function deliveryOf(pr: Change | undefined): string | undefined {
 function ids(initial = 0): () => string {
   let value = initial
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
-}
-
-function indexedJournal(initial: readonly JournalFrame[] = []): Journal<unknown> {
-  const values = initial.map((frame) => parseJournalFrame(structuredClone(frame)))
-  const entityIds = (frame: JournalFrame, kind: JournalEntityKind): readonly string[] => {
-    const ids = new Set<string>()
-    for (const applied of frame.events) {
-      const data = applied.data as Readonly<Record<string, unknown>>
-      if (applied.name === "job/requested") {
-        if (kind === "job") ids.add(applied.id)
-        if (kind === "job-key" && typeof data.key === "string") ids.add(data.key)
-      }
-      if (applied.name === "job/transitioned" && kind === "job" && typeof data.id === "string") ids.add(data.id)
-      if (applied.name === "job/restored" && typeof data.job === "object" && data.job !== null) {
-        const job = data.job as Readonly<{ id?: unknown; key?: unknown }>
-        if (kind === "job" && typeof job.id === "string") ids.add(job.id)
-        if (kind === "job-key" && typeof job.key === "string") ids.add(job.key)
-      }
-      if (kind === "queue") {
-        if (typeof data.run === "string") ids.add(data.run)
-        else if (typeof data.run === "object" && data.run !== null) {
-          const run = data.run as Readonly<{ id?: unknown }>
-          if (typeof run.id === "string") ids.add(run.id)
-        }
-        if (applied.name === "queue/batch/isolated" && typeof data.parent === "string") ids.add(data.parent)
-      }
-    }
-    return [...ids]
-  }
-  return {
-    async *read(after = 0, before = values.length) {
-      const end = Math.min(before, values.length)
-      if (after < end) yield { cursor: end, values: structuredClone(values.slice(after, end)) }
-    },
-    append(value, expectedCursor) {
-      if (expectedCursor !== values.length) return Promise.resolve({ appended: false as const, cursor: values.length })
-      values.push(parseJournalFrame(structuredClone(value)))
-      return Promise.resolve({ appended: true as const, cursor: values.length })
-    },
-    history: {
-      command(query) {
-        return structuredClone(
-          values.find(
-            (frame) =>
-              (query.id !== undefined && frame.command.id === query.id) ||
-              (query.key !== undefined && frame.cause.key === query.key),
-          ),
-        )
-      },
-      hasIdentity(kind, id) {
-        return values.some((frame) =>
-          kind === "cause" ? frame.cause.id === id : frame.events.some((applied) => applied.id === id),
-        )
-      },
-      entity(kind, id) {
-        return values.flatMap((value, index) =>
-          entityIds(value, kind).includes(id) ? [{ cursor: index + 1, value: structuredClone(value) }] : [],
-        )
-      },
-      diagnostics() {
-        return {
-          pageCount: 0,
-          freelistCount: 0,
-          autoVacuum: "incremental" as const,
-          historyFrames: 0,
-          tailFrames: values.length,
-          evictedThrough: 0,
-          oldestRetainedCursor: values.length === 0 ? null : 1,
-          archiveFallbacks: 0,
-        }
-      },
-    },
-  }
 }
 
 function checkpointJournal(base: Journal<unknown>) {

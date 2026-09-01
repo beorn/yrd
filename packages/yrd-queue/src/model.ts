@@ -776,6 +776,14 @@ export type QueueAdmissionRefusal = Readonly<{
   }>
 }>
 
+/** The durable identity assigned to one exact recordless submit fact. */
+type QueueDerivedIdentity = Readonly<{
+  branch: string
+  sha: string
+  id: PRId
+  revision: number
+}>
+
 export type QueuesState = Readonly<{
   batchSize: number
   requires: readonly QueueRequirement[]
@@ -788,6 +796,10 @@ export type QueuesState = Readonly<{
   /** Standing submit facts the queue has retired because the change they derive
    * cannot progress, keyed by branch. See {@link QueueRetiredSubmit}. */
   retiredSubmits: Readonly<Record<string, QueueRetiredSubmit>>
+  /** Append-only recordless identity facts, keyed first by branch and then by
+   * the exact submitted sha. A branch move changes which fact is current at
+   * read time; it never erases the prior `(branch, sha) -> id` fact. */
+  derivedIdentities: Readonly<Record<string, Readonly<Record<string, QueueDerivedIdentity>>>>
   retention: Readonly<{ terminalOrder: Readonly<Record<RunId, number>> }>
 }>
 
@@ -1593,6 +1605,7 @@ export const Queues = Object.freeze({
       authority: { current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
       admissionRefusals: {},
       retiredSubmits: {},
+      derivedIdentities: {},
       retention: { terminalOrder: {} },
     }
   },

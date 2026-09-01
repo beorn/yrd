@@ -88,6 +88,10 @@ const mergeableCandidate: CandidatePreparer = (input) => {
 type Options = Readonly<{
   /** Clock the fixture advances, so submit facts get distinct queue times. */
   now: () => string
+  /** Base identity observed by this compose pass. Defaults to the original
+   * fixture base; stale-check retries override it to model the fresh base the
+   * production resolver observes after each race. */
+  resolveBaseSha?: () => string
   /** Every change whose required checks this compose executed, in order. */
   checked: string[]
   /** Every change whose merge this compose attempted, in order. */
@@ -119,7 +123,7 @@ async function createApp(options: Options) {
     steps: [check, merge] as const,
     batch: false,
     defaultSteps: ["check", "merge"],
-    resolveBaseSha: () => BASE,
+    resolveBaseSha: options.resolveBaseSha ?? (() => BASE),
     prepareCandidate: mergeableCandidate,
     prNumberMint: volatilePrNumberMint(),
     readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
@@ -183,18 +187,15 @@ describe("a derived member holds its own place in the admission line", () => {
 
     for (let pass = 0; pass < 4; pass += 1) await app.queue.run({}, runtime)
 
-    expect(merged, "the record lane re-drives on every pass, unfixed tree included").toEqual([
-      only,
-      only,
-      only,
-      only,
-    ])
+    expect(merged, "the record lane re-drives on every pass, unfixed tree included").toEqual([only, only, only, only])
   })
 
   it("re-drives a member whose run lost to stale-check, past a younger record-lane change", async () => {
     const checked: string[] = []
     let day = 1
     const now = (): string => `2026-01-0${day}T00:00:00.000Z`
+    const bases = ["c".repeat(40), "d".repeat(40), "e".repeat(40)] as const
+    let baseIndex = 0
     // The base races forever: every merge attempt finds main already moved, which
     // is a blameless environmental failure — `queueAuthorityReleaseReason` releases
     // the run's authority so the still-submitted member re-admits against the fresh
@@ -206,6 +207,7 @@ describe("a derived member holds its own place in the admission line", () => {
       now,
       checked,
       merged,
+      resolveBaseSha: () => bases[baseIndex] ?? bases.at(-1)!,
       merge: () => {
         attempt += 1
         return {
@@ -226,16 +228,24 @@ describe("a derived member holds its own place in the admission line", () => {
     // Three compose passes: the first admits and loses to the base race, and the
     // next two must re-drive it. Two consecutive stale-check losses is the exact
     // shape measured on PR2916 (R3722 then R3724, 13 minutes apart).
-    for (let pass = 0; pass < 3; pass += 1) await app.queue.run({}, runtime)
+    for (let pass = 0; pass < 3; pass += 1) {
+      baseIndex = pass
+      await app.queue.run({}, runtime)
+    }
 
     expect(
       merged.filter((id) => id !== younger),
       "each compose must re-drive the released member into a fresh merge attempt against the new base",
     ).toHaveLength(3)
+    const derivedChecks = checked.filter((id) => id !== younger)
     expect(
-      checked.filter((id) => id !== younger),
+      derivedChecks,
       "the derived member's required checks must run on every pass, against the fresh base",
     ).toHaveLength(3)
+    expect(
+      new Set(derivedChecks),
+      "fresh-base admission jobs must retain the branch+sha identity instead of minting siblings",
+    ).toHaveLength(1)
     expect(ranForBranch(app, "issue/derived-oldest"), "the derived member must reach a queue run").toBe(true)
   })
 

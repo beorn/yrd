@@ -5,10 +5,10 @@
  * start a Queue run under an admission-time minted identity.
  *
  * Everything here is a PURE DERIVATION over surviving projections
- * (`bays.submits`, `bays.prs`, `QueuesState`) plus caller-supplied identity —
- * nothing persists, nothing journals a new event type, nothing adds state
- * shape (the §3 identity trap, avoided by construction). A derived member's
- * only durable home stays the `queue/run/started` `ChangeSnapshot`.
+ * (`bays.submits`, `bays.prs`, `QueuesState`) plus caller-supplied identity.
+ * The selectorless compose journals the returned number as an exact
+ * branch+sha binding before it exposes the member; once a run starts, the full
+ * member remains durably described by its `queue/run/started` ChangeSnapshot.
  *
  * This is LIVE. The door's compose wires `deriveRunMemberArgs` in where the 2b
  * intake sweep used to run, and derived membership carries real landings: five
