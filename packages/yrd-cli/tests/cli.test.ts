@@ -11521,9 +11521,20 @@ describe("runYrd", () => {
       waiting: [],
       finished: [],
     } as QueueStatusResult
+    // `--strict` is where "loud" now lives. The DEFAULT read contains the row
+    // instead, because one change with unprojectable clocks used to empty the
+    // whole listing — `yrd pr list --json` exited 3 with no stdout at all for
+    // 2275 rows on 2026-09-01. Containment is asserted immediately below, so
+    // the fault is marked and reported, never swallowed.
     expect
-      .soft(() => humanQueueProjection(futureResult, Date.parse("2026-07-12T12:00:00.000Z"), { state: NO_BAYS }))
+      .soft(() =>
+        humanQueueProjection(futureResult, Date.parse("2026-07-12T12:00:00.000Z"), { state: NO_BAYS, strict: true }),
+      )
       .toThrow(/precedes/u)
+    const contained = humanQueueProjection(futureResult, Date.parse("2026-07-12T12:00:00.000Z"), { state: NO_BAYS })
+    const containedRow = [...contained.queue, ...contained.recent].find((row) => row.pr === "PR94")
+    expect.soft(containedRow?.state).toBe("unreadable")
+    expect.soft(containedRow?.result).toMatch(/precedes/u)
 
     const rejected = timelineFixturePr("PR95", "rejected", "2026-07-12T11:59:00.000Z", undefined, {
       headSha: HEAD_SHA,
@@ -11547,8 +11558,16 @@ describe("runYrd", () => {
       finished: [backwards],
     } as QueueStatusResult
     expect
-      .soft(() => humanQueueProjection(backwardsResult, Date.parse("2026-07-12T12:03:00.000Z"), { state: NO_BAYS }))
+      .soft(() =>
+        humanQueueProjection(backwardsResult, Date.parse("2026-07-12T12:03:00.000Z"), { state: NO_BAYS, strict: true }),
+      )
       .toThrow(/precedes/u)
+    const containedBackwards = humanQueueProjection(backwardsResult, Date.parse("2026-07-12T12:03:00.000Z"), {
+      state: NO_BAYS,
+    })
+    expect
+      .soft([...containedBackwards.queue, ...containedBackwards.recent].find((row) => row.pr === "PR95")?.state)
+      .toBe("unreadable")
   })
 
   it("renders the newest twenty history records as honest columnar rows without list glyphs", async () => {

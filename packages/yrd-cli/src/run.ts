@@ -6994,7 +6994,7 @@ const CHANGE_LIST_STATE_HELP = CHANGE_LIST_STATES.join(", ")
 async function listPrs(
   app: YrdCliApp,
   options: JsonOption &
-    Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean; reviewer?: string }>,
+    Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean; reviewer?: string; strict?: boolean }>,
   io: YrdCliIO,
 ): Promise<void> {
   if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
@@ -7109,7 +7109,7 @@ async function listPrs(
       runs: runs.map(projectQueueRunTaskStatus),
     },
     createElement(ChangeListView, {
-      rows: changeListRows(rows, runs, io.now?.() ?? Date.now(), merges),
+      rows: changeListRows(rows, runs, io.now?.() ?? Date.now(), merges, options.strict === true),
       columns: io.columns ?? 120,
       window: { hidden: matching.length - listed.length, total: matching.length },
     }),
@@ -13759,6 +13759,7 @@ function buildProgram(
     .option("--needs-review", "show revisions needing approval")
     .option("--reviewer <reviewer>", "scope --needs-review to one requested reviewer")
     .option("--json", "emit stable JSON")
+    .option("--strict", "fail loud (exit 3) on the first unreadable change instead of marking its row")
     .action(async (options) => listPrs(installed(), options, io))
   list.addHelpSection(
     "Status fields:",

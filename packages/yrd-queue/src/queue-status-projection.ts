@@ -614,8 +614,49 @@ export type ChangeRevisionHistoryClock = Readonly<{
   pr: string
   revision: number
   headSha: string
+  /**
+   * A terminal fact this revision still carries that belongs to a PREVIOUS
+   * admission of the same sha — moved off `terminal` by
+   * {@link currentAdmissionFinish} so no age is measured to it, and kept here
+   * so nothing is silently discarded and a row can say why it reads pending.
+   */
+  supersededTerminal?: ChangeRevTerminal
 }> &
   ChangeRevClock
+
+/**
+ * The finish belonging to the CURRENT admission — or `undefined` when the only
+ * finish on record belongs to a previous one.
+ *
+ * A revision's submit fact is MUTABLE. Re-submitting the same sha (the
+ * documented remedy when a run consumes a change's submit authority) rewrites
+ * `submittedAt` forward and leaves the earlier settle's terminal fact, and the
+ * check results behind it, in place. Those describe an admission that is over.
+ * Pairing them with the refreshed start measures an age between two different
+ * admissions of the same sha, which is why every such pair came out negative
+ * and threw.
+ *
+ * Read forward instead: a finish that precedes its own start is not corruption
+ * and not a clock fault. It is a resubmitted sha whose results are stale, and
+ * the current admission simply has no finish yet — so the honest reading is
+ * PENDING, which is what this returns.
+ *
+ * Live 2026-09-01 on 0.0.1+caacf98e21, change 'PR2749' resubmitted at
+ * 18:40:25Z over an 08-30T22:56Z settle: `yrd pr list --json` exited 3 with
+ * EMPTY stdout for all 2275 rows, and `yrd watch` died outright.
+ */
+export function currentAdmissionFinish(
+  startedAt: string | undefined,
+  finishedAt: string | undefined,
+): string | undefined {
+  if (startedAt === undefined || finishedAt === undefined) return finishedAt
+  const start = Date.parse(startedAt)
+  const finish = Date.parse(finishedAt)
+  // An unparseable clock is a different defect; leave it to the reader that
+  // knows how to name it rather than swallowing it here.
+  if (!Number.isFinite(start) || !Number.isFinite(finish)) return finishedAt
+  return finish < start ? undefined : finishedAt
+}
 
 export type ChangeRunRevisionClock =
   | (ChangeRevisionHistoryClock & Readonly<{ admittedBy: "submission"; submittedAt: string }>)
@@ -745,40 +786,67 @@ function validateRevisionClock(pr: Change, clock: ChangeRevisionHistoryClock): C
       )
     }
   }
-  if (clock.terminal !== undefined) {
+  // SCOPE BEFORE MEASURING. A terminal fact recorded before this revision's own
+  // submit fact belongs to a previous admission of the same sha — a legal state
+  // a re-submission produces, not a corrupt clock. `currentAdmissionFinish`
+  // names it; the fact is re-homed onto `supersededTerminal` so the revision
+  // reads PENDING everywhere an age is measured, and nothing is discarded.
+  // Before this, the pair below was measured anyway and threw, and one such row
+  // emptied `yrd pr list --json` for all 2275 rows.
+  const superseded =
+    clock.terminal !== undefined &&
+    currentAdmissionFinish(clock.submittedAt ?? clock.pushedAt, clock.terminal.at) === undefined
+      ? clock.terminal
+      : undefined
+  const scoped: ChangeRevisionHistoryClock = superseded === undefined ? clock : withSupersededTerminal(clock)
+  if (scoped.terminal !== undefined) {
     const terminal = elapsedMs(
-      clock.submittedAt ?? clock.pushedAt,
-      clock.terminal.at,
-      `change '${pr.id}' revision ${clock.revision}@${clock.headSha} submitted-to-terminal age`,
+      scoped.submittedAt ?? scoped.pushedAt,
+      scoped.terminal.at,
+      `change '${pr.id}' revision ${scoped.revision}@${scoped.headSha} submitted-to-terminal age`,
     )
     if (terminal === undefined) {
       throw new Error(
-        `yrd: change '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid terminal clock '${clock.terminal.at}'`,
+        `yrd: change '${pr.id}' revision ${scoped.revision}@${scoped.headSha} has an invalid terminal clock '${scoped.terminal.at}'`,
       )
     }
   }
 
-  if (clock.revision !== changeRevisionNumber(pr) || clock.headSha !== changeHead(pr)) return clock
+  if (scoped.revision !== changeRevisionNumber(pr) || scoped.headSha !== changeHead(pr)) return scoped
   const expected = currentTerminalFact(pr)
   if (expected === undefined) {
-    if (clock.terminal !== undefined) {
+    // A superseded terminal on the CURRENT revision is precisely the
+    // resubmitted-with-stale-results shape: the change is back in `submitted`,
+    // so no terminal fact is expected, and the one still on the revision is the
+    // previous admission's. That is the state this refusal was misreading —
+    // its own wording already called the clock "stale". A terminal that is NOT
+    // superseded still contradicts the record and stays loud.
+    if (scoped.terminal !== undefined) {
       throw new Error(
-        `yrd: change '${pr.id}' current revision ${clock.revision}@${clock.headSha} retains stale ${clock.terminal.kind} terminal clock`,
+        `yrd: change '${pr.id}' current revision ${scoped.revision}@${scoped.headSha} retains stale ${scoped.terminal.kind} terminal clock`,
       )
     }
-    return clock
+    return scoped
   }
-  if (clock.terminal === undefined) {
+  if (scoped.terminal === undefined) {
     throw new Error(
-      `yrd: change '${pr.id}' current revision ${clock.revision}@${clock.headSha} has no ${expected.kind} terminal clock`,
+      `yrd: change '${pr.id}' current revision ${scoped.revision}@${scoped.headSha} has no ${expected.kind} terminal clock`,
     )
   }
-  if (clock.terminal.kind !== expected.kind || clock.terminal.at !== expected.at) {
+  if (scoped.terminal.kind !== expected.kind || scoped.terminal.at !== expected.at) {
     throw new Error(
-      `yrd: change '${pr.id}' current revision ${clock.revision}@${clock.headSha} ${expected.kind} terminal clock contradicts current PR state`,
+      `yrd: change '${pr.id}' current revision ${scoped.revision}@${scoped.headSha} ${expected.kind} terminal clock contradicts current PR state`,
     )
   }
-  return clock
+  return scoped
+}
+
+/** Move a superseded terminal fact off `terminal`, where ages are measured, and
+ * onto `supersededTerminal`, where a reader can still see it and say why the
+ * revision reads pending. Nothing is dropped. */
+function withSupersededTerminal(clock: ChangeRevisionHistoryClock): ChangeRevisionHistoryClock {
+  const { terminal, ...rest } = clock
+  return terminal === undefined ? clock : { ...rest, supersededTerminal: terminal }
 }
 
 function revisionHistoryClock(pr: Change, revision: Change["revs"][number]): ChangeRevisionHistoryClock {

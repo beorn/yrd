@@ -59,6 +59,7 @@ import {
   type ChangeRunRevisionClock,
   CHECK_REQUEST_ECHO_TOLERANCE_MS,
   checkDiagnosticText,
+  currentAdmissionFinish,
   collapseRecomposedSources,
   descriptionWithoutDuplicatedIssue,
   type DurationDistribution,
@@ -1518,7 +1519,15 @@ function timelineRunMemberRows(
     let queueWaitMs: number | null = null
     let ageFault: QueueMemberReadFault | undefined
     try {
-      ageMs = elapsedMs(sourceReadyAt, ageEndIso, `change '${member.id}' source-ready age`) ?? null
+      // Scoped from BOTH ends by the one shared rule: `memberSourceReadyAt`
+      // keeps the start inside this run's admission, `currentAdmissionFinish`
+      // drops a finish that belongs to an earlier one.
+      ageMs =
+        elapsedMs(
+          sourceReadyAt,
+          currentAdmissionFinish(sourceReadyAt, ageEndIso),
+          `change '${member.id}' source-ready age`,
+        ) ?? null
       // The member's queue wait shares this member's `submittedAt` and this
       // run's start, so it is the same arithmetic over the same refreshable
       // clock — and it threw FIRST, before the age ever ran. Derived here,
@@ -2216,7 +2225,14 @@ function projectPR(
                 ? pr.withdrawnAt
                 : undefined
       : undefined)
-  const parsedTerminalAt = terminalAt === undefined ? Number.NaN : Date.parse(terminalAt)
+  // Scope the finish to the CURRENT admission before measuring to it. A
+  // terminal fact or run finish that precedes this change's own source-ready
+  // clock belongs to a previous admission of the same sha, and pairing the two
+  // is what emptied `yrd pr list --json` for every row — the human rows at
+  // run.ts `changeListRows(...)` are built eagerly even in JSON mode, so the
+  // machine-readable path inherited the human projection's throw.
+  const currentFinish = currentAdmissionFinish(sourceReadyAt ?? submittedAt ?? revision?.pushedAt, terminalAt)
+  const parsedTerminalAt = currentFinish === undefined ? Number.NaN : Date.parse(currentFinish)
   const ageAt = Number.isFinite(parsedTerminalAt) ? parsedTerminalAt : now
   const failure = fact === undefined || run === undefined ? undefined : projectFailure(fact, evidence)
   const candidateId = run?.candidateId ?? candidate?.id
@@ -2370,19 +2386,30 @@ function projectedChangeRows(
   result: QueueStatusResult,
   now: number,
   selected: ReadonlySet<string> = new Set<string>(),
+  /** `--strict`: restore the historical abort instead of marking the row. */
+  strict = false,
 ): HumanChangeProjection[] {
   return [
-    ...result.prs.map((pr) =>
-      projectPR(
-        state,
-        result,
-        pr,
-        now,
-        undefined,
-        latestCandidateForCurrentRevision(result, pr),
-        eligibilityForCurrentRevision(result, pr),
-      ),
-    ),
+    ...result.prs.flatMap((pr) => {
+      // Same containment as `changeListRows`: one change whose clocks cannot be
+      // projected marks its own row and never blanks the queue listing.
+      try {
+        return [
+          projectPR(
+            state,
+            result,
+            pr,
+            now,
+            undefined,
+            latestCandidateForCurrentRevision(result, pr),
+            eligibilityForCurrentRevision(result, pr),
+          ),
+        ]
+      } catch (error) {
+        if (strict) throw error
+        return [unreadableChangeRow(pr, error)]
+      }
+    }),
     ...submitFactChangeRows(state, result, now),
     // `row.pr` is the change id on a record row and the BRANCH on a derived
     // one, and the scope carries both spellings of every named delivery
@@ -2422,10 +2449,13 @@ export function humanQueueProjection(
   options: Readonly<{
     selected?: ReadonlySet<string>
     state: BaysState
+    /** `--strict`: restore the historical abort instead of marking the row. */
+    strict?: boolean
   }>,
 ): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
-  const rows = projectedChangeRows(options.state, result, now, selected)
+  const strict = options.strict === true
+  const rows = projectedChangeRows(options.state, result, now, selected, strict)
   const positions = queueAdmissionPositions(result.admissionOrder)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted" || row.nativeStatus === "ready")
@@ -2445,7 +2475,15 @@ export function humanQueueProjection(
       if (selected.size > 0 && (!selected.has(pr.id) || delivery === "submitted" || delivery === "ready")) {
         return []
       }
-      return [projectPR(options.state, result, pr, now, run)]
+      // The RECENT half of the listing needs the same containment as the queue
+      // half above: a historical row whose clocks cannot be projected must not
+      // take the whole `yrd queue list` down with it.
+      try {
+        return [projectPR(options.state, result, pr, now, run)]
+      } catch (error) {
+        if (strict) throw error
+        return [unreadableChangeRow(pr, error)]
+      }
     }),
   )
   const represented = new Set(historical.map((row) => row.pr))
@@ -2543,11 +2581,77 @@ function reviewLabel(eligibility: ChangeEligibility): ChangeListRow["review"] {
   return eligibility.review.approved && !eligibility.review.stale ? "ok" : "need"
 }
 
+/** {@link unreadableChangeListRow}'s counterpart for the queue listing: the
+ * same "mark it, never drop it" rule in that surface's row shape. */
+function unreadableChangeRow(pr: Change, error: unknown): HumanChangeProjection {
+  const cause = error instanceof Error ? error.message : String(error)
+  // KEEP THE ROW IN ITS OWN BUCKET. `humanQueueProjection` sorts by
+  // `nativeStatus`, so a marked row given a placeholder status falls out of
+  // both the queue and the recent lists — it renders nowhere, which reads as
+  // "no such change" and is worse than the abort it replaced. The delivery
+  // state is read from the record directly, and only if THAT also refuses does
+  // the row fall back to the pre-submission status.
+  let nativeStatus: ChangeDeliveryState = "pushed"
+  try {
+    nativeStatus = changeDeliveryState(pr)
+  } catch {
+    nativeStatus = "pushed"
+  }
+  return {
+    nativeStatus,
+    // No published admission position is claimed for a row whose own
+    // projection failed: `requiredQueuePosition` is a loud contract on the
+    // record lane, and a marked row must not trip it on the way to being seen.
+    factOnly: true,
+    pr: pr.id,
+    state: "unreadable",
+    target: pr.base,
+    age: "-",
+    touched: "-",
+    run: "-",
+    step: "-",
+    result: `${cause} — read this change's admission history with \`yrd log --pr ${pr.id}\``,
+    artifactCount: 0,
+    revision: pr.revs.at(-1)?.n ?? 0,
+    branch: pr.branch,
+    subject: boundedQueue(pr.title ?? pr.name ?? pr.branch, 80),
+    taskStatus: "blocked",
+    revisionLineage: [],
+  }
+}
+
+/** The row a change gets when its own clocks cannot be projected: everything
+ * that can still be read from the record, an explicit `unreadable` state, and
+ * the verbatim cause with the remedy that resolves it. Never a dropped row —
+ * a change missing from a listing reads as "no such change". */
+function unreadableChangeListRow(pr: Change, revision: number, error: unknown): ChangeListRow {
+  const cause = error instanceof Error ? error.message : String(error)
+  return {
+    pr: pr.id,
+    state: "unreadable",
+    stateLabel: "? unreadable",
+    glyph: "?",
+    revision,
+    lineage: String(revision),
+    subject: boundedQueue(pr.title ?? pr.name ?? pr.branch, 80),
+    submitter: revisionSubmitter(pr) ?? "-",
+    target: pr.base,
+    review: "n/a",
+    checks: "n/a",
+    why: "clock-unreadable",
+    whyMessage: `${cause} — this change's recorded clocks cannot be projected, so its row is marked instead of dropped; read its admission history with \`yrd log --pr ${pr.id}\``,
+    age: "-",
+    touched: "-",
+  }
+}
+
 export function changeListRows(
   entries: readonly Readonly<{ pr: Change; eligibility: ChangeEligibility }>[],
   runs: readonly Run[],
   now: number,
   merges: ReadonlyMap<string, Readonly<{ code: string }>> = new Map(),
+  /** `--strict`: restore the historical abort instead of marking the row. */
+  strict = false,
 ): ChangeListRow[] {
   const summary: QueueSummary = {
     base: "*",
@@ -2565,7 +2669,19 @@ export function changeListRows(
     if (!eligibility.runnable && eligibility.reason === undefined) {
       throw new Error(`yrd: change '${pr.id}' revision ${revision} is ineligible without a typed blocking reason`)
     }
-    const projected = projectPR(undefined, summary, pr, now, undefined, undefined, eligibility)
+    // One row whose clocks cannot be reconciled must not empty the whole
+    // listing. `yrd pr list --json` built these HUMAN rows eagerly as an
+    // argument even in JSON mode, so a single throw here exited 3 with EMPTY
+    // stdout for all 2275 rows (live 2026-09-01). Same containment idiom as
+    // `queueLogRows`: the row renders, says it is unreadable, and carries the
+    // verbatim cause plus a remedy.
+    let projected: HumanChangeProjection
+    try {
+      projected = projectPR(undefined, summary, pr, now, undefined, undefined, eligibility)
+    } catch (error) {
+      if (strict) throw error
+      return unreadableChangeListRow(pr, revision, error)
+    }
     // A proven merge outranks the recorded state: `withdrawn` is a claim
     // about content, and a head already reachable from the base contradicts it.
     // Showing the later write as the whole truth sends the author back to
@@ -5589,7 +5705,19 @@ export function queueLogRows(
           }
           submittedAt = undefined
         }
-        const ageMs = elapsedMs(submittedAt, finishedAt, `change '${pr.id}' submitted-to-terminal age`)
+        // Same scoping rule as every other age here: a run finish that
+        // precedes this member's submit clock belongs to a previous admission
+        // of the same sha, so this admission has no finish yet and the row
+        // reads pending rather than throwing a negative age.
+        //
+        // Gated on the SAME fault accounting the containment above uses. A
+        // caller that passed none is `--strict`, which asks to be told loudly
+        // about anything this read could not take at face value — a superseded
+        // finish included. So strict keeps the historical refusal
+        // (cli.test.ts "fails loud when … submission chronology goes
+        // backwards"), and only the default read scopes.
+        const scopedFinish = readFaults === undefined ? finishedAt : currentAdmissionFinish(submittedAt, finishedAt)
+        const ageMs = elapsedMs(submittedAt, scopedFinish, `change '${pr.id}' submitted-to-terminal age`)
         const showLocation = changeStatus?.get(pr.id) === "withdrawn" ? undefined : location
         const taskStatus = runTaskStatusOf(run)
         rows.push({
