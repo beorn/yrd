@@ -745,6 +745,9 @@ export type QueueAdmissionRefusal = Readonly<{
   revision?: number
   /** Exact refused head. Missing only while replaying pre-22528 journals. */
   headSha?: string
+  /** Exact base used by a derived admission attempt. Missing on record-lane
+   * refusals and while replaying facts written before bounded derived retry. */
+  baseSha?: string
   /** The refusal code of the most recent skip in this streak. */
   code: string
   /** The failure-fact kind of the most recent skip, when it carried one. */
@@ -756,6 +759,8 @@ export type QueueAdmissionRefusal = Readonly<{
    * rather than parsing `reason`; absent for a watchdog kill, an infra fault,
    * an unreadable red, and every row written before it shipped. */
   judgedFailure?: true
+  /** The most recent attempt ended without judging the content. */
+  verdictless?: true
   /** Consecutive refusals since the last admission / push / re-merge. */
   count: number
   /** Consecutive refusals carrying the current exact `code`. Unlike `count`,
@@ -1294,6 +1299,7 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "orphaned-requested-job",
   "unisolable-stale-plan",
   "admission-refusal-loop",
+  "admission-verdictless-repeat",
   "admission-refusal-needs-person",
   "queue-never-started",
   "queue-progress-stalled",

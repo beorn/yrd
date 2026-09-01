@@ -36,6 +36,7 @@ import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
   candidateRefFor,
+  deriveRunMemberArgs,
   Queues,
   withMerge,
   withQueue,
@@ -110,31 +111,35 @@ async function createApp(
     log?: ReturnType<typeof createLogger>
     queueMint?: PrNumberMint
     prepareCandidate?: CandidatePreparer
+    resolveBaseSha?: () => string
     /** The OTHER non-progressing shape, measured live 2026-08-30 01:10-01:32:
      * the candidate merges fine and its required check fails. */
-    failCheck?: boolean
+    failCheck?: () => boolean | Promise<boolean>
+    checkResult?: (input: StepExecution) => JobResult<CheckResult> | Promise<JobResult<CheckResult>>
   }> = {},
 ) {
   const check = withStep(
     "check",
-    (_input: StepExecution): JobResult<CheckResult> =>
-      options.failCheck === true
-        ? {
-            status: "completed",
-            conclusion: "failure",
-            // A VERDICT, not a runner-error: the check ran and said no. A
-            // verdictless failure is infrastructure and propagates instead,
-            // which is a different (and already-handled) path.
-            error: { code: "check-failed", message: "the required check failed on this content" },
-          }
-        : { status: "completed", conclusion: "success", output: { checked: true } },
+    async (input: StepExecution): Promise<JobResult<CheckResult>> =>
+      options.checkResult !== undefined
+        ? options.checkResult(input)
+        : (await options.failCheck?.()) === true
+          ? {
+              status: "completed",
+              conclusion: "failure",
+              // A VERDICT, not a runner-error: the check ran and said no. A
+              // verdictless failure is infrastructure and follows the bounded
+              // retry path exercised below.
+              error: { code: "check-failed", message: "the required check failed on this content" },
+            }
+          : { status: "completed", conclusion: "success", output: { checked: true } },
     { revision: "check-v1", output: CheckResultSchema },
   )
   const merge = withMerge(
     async (): Promise<JobResult<IntegrationProof>> => ({
       status: "completed",
       conclusion: "success",
-      output: { commit: MERGED, baseSha: BASE },
+      output: { commit: MERGED, baseSha: options.resolveBaseSha?.() ?? BASE },
     }),
     { revision: "merge-v1" },
   )
@@ -142,7 +147,7 @@ async function createApp(
     steps: [check, merge] as const,
     batch: false,
     defaultSteps: ["check", "merge"],
-    resolveBaseSha: () => BASE,
+    resolveBaseSha: options.resolveBaseSha ?? (() => BASE),
     prepareCandidate: options.prepareCandidate ?? mergeableCandidate,
     prNumberMint: options.queueMint ?? volatilePrNumberMint(),
     readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
@@ -266,7 +271,7 @@ describe("a standing submit fact derives at most ONE live change", () => {
     expect(queueMint.highWater(), "the cure must be derivable again").toBe(2)
   })
 
-  it("a required check that fails retires the fact too — the invariant is outcome-agnostic", async () => {
+  it("a failed derived member retires once while a new member still admits normally", async () => {
     // The SECOND live shape, measured 2026-08-30 01:10-01:32: fact
     // issue/sop-due-harness-r2 at 6e4952c0 derived PR2695 (check failed 01:14),
     // then PR2696 (failed 01:25), then PR2697 (failed 01:32) — one identical
@@ -278,21 +283,232 @@ describe("a standing submit fact derives at most ONE live change", () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const queueMint = volatilePrNumberMint()
-    await using app = await createApp({ log, queueMint, failCheck: true })
+    let checksFail = true
+    await using app = await createApp({ log, queueMint, failCheck: () => checksFail })
     await app.bays.recordBranchSubmit({ branch: "issue/failing-check", sha: SHA, base: "main" })
 
     await app.queue.run({}, runtime)
     expect(queueMint.highWater(), "the first pass derives exactly one change").toBe(1)
 
+    const identity = app.state().queues.derivedIdentities["issue/failing-check"]?.[SHA]
+    expect(identity, "the failing fact has one durable logical identity").toMatchObject({ id: "PR1", revision: 1 })
+
+    const refusal = app.state().queues.admissionRefusals["PR1"]
+    const failingMemberComposeCount = events.filter(
+      (event) =>
+        event.kind === "log" &&
+        event.props?.action === "compose-derived-admitted" &&
+        event.props.branch === "issue/failing-check",
+    ).length
+    expect(failingMemberComposeCount, "the failing member composes once").toBe(1)
+    expect(refusal, "the refusal ledger stays keyed to the derived identity").toMatchObject({
+      pr: "PR1",
+      code: "check-failed",
+      count: 1,
+      sameCodeCount: failingMemberComposeCount,
+    })
+
     await app.queue.run({}, runtime)
     expect(queueMint.highWater(), "a failed check must not mint a second change").toBe(1)
 
+    expect(
+      events.filter(
+        (event) =>
+          event.kind === "log" &&
+          event.props?.action === "compose-derived-admitted" &&
+          event.props.branch === "issue/failing-check",
+      ),
+      "the next pass must not re-admit the retired fact",
+    ).toHaveLength(failingMemberComposeCount)
+    expect(app.state().queues.admissionRefusals["PR1"]?.sameCodeCount).toBe(failingMemberComposeCount)
+
     const retired = app.state().queues.retiredSubmits["issue/failing-check"]
     expect(retired, "the fact is retired on this shape too").toBeDefined()
-    expect(retired).toMatchObject({ branch: "issue/failing-check", sha: SHA, pr: "PR1" })
-    // The finding names the OUTCOME it reached, not a hardcoded conflict.
-    expect(retired?.code).not.toBe("candidate-conflicting")
+    expect(retired).toMatchObject({
+      branch: "issue/failing-check",
+      sha: SHA,
+      pr: "PR1",
+      code: "check-failed",
+      reason: "the required check failed on this content",
+    })
+
+    const finding = (await app.queue.audit()).findings.find(
+      (candidate) => candidate.code === "submit-fact-terminal" && candidate.pr === "PR1",
+    )
+    expect(finding, "the retired failure must be loud in queue audit").toBeDefined()
+    expect(finding?.refusal).toBe("check-failed")
+    expect(finding?.message).toContain("the required check failed on this content")
     expect(actionsLogged(events)).toContain("submit-fact-retired")
+
+    // A terminal verdict belongs only to this exact submit fact. A different
+    // member arriving behind it must still use the normal derived admission
+    // path and integrate; otherwise retirement has become a lane-wide park.
+    checksFail = false
+    const nextSha = "8".repeat(40)
+    await app.bays.recordBranchSubmit({ branch: "issue/new-member", sha: nextSha, base: "main" })
+    const runs = await app.queue.run({}, runtime)
+
+    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
+    expect(queueMint.highWater(), "the new member uses the next identity normally").toBe(2)
+    expect(app.state().queues.derivedIdentities["issue/new-member"]?.[nextSha]).toMatchObject({
+      id: "PR2",
+      revision: 1,
+    })
+    expect(app.state().queues.retiredSubmits["issue/new-member"]).toBeUndefined()
+  })
+
+  it("a derived candidate infrastructure failure retries three times, then reports without parking its lane", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const queueMint = volatilePrNumberMint()
+    let checkCalls = 0
+    let currentBase = BASE
+    const branch = "issue/infrastructure-retry"
+    await using app = await createApp({
+      log,
+      queueMint,
+      resolveBaseSha: () => currentBase,
+      checkResult: (input) => {
+        checkCalls += 1
+        if (input.prs[0]?.branch === branch) {
+          throw new Error("required-check runner disappeared before producing a verdict")
+        }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
+      },
+    })
+    await app.bays.recordBranchSubmit({ branch, sha: SHA, base: "main" })
+
+    for (let outcome = 1; outcome <= 4; outcome += 1) {
+      await expect(app.queue.run({}, runtime), `verdictless outcome ${outcome} stays pass-local`).resolves.toEqual([])
+      expect(checkCalls, `outcome ${outcome} executes exactly one attempt`).toBe(outcome)
+      expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+        pr: "PR1",
+        revision: 1,
+        headSha: SHA,
+        baseSha: BASE,
+        code: "runner-error",
+        kind: "infrastructure",
+        verdictless: true,
+        count: outcome,
+        sameCodeCount: outcome,
+      })
+      expect(app.state().queues.retiredSubmits[branch], "machinery failure is not a content verdict").toBeUndefined()
+    }
+
+    await expect(app.queue.run({}, runtime), "the fifth pass observes the cap without spinning").resolves.toEqual([])
+    expect(checkCalls, "one first attempt plus at most three retries").toBe(4)
+    expect(queueMint.highWater(), "infrastructure retry retains one logical identity").toBe(1)
+    expect(app.state().queues.derivedIdentities[branch]?.[SHA]).toMatchObject({ id: "PR1", revision: 1 })
+    expect(app.state().bays.submits[branch]?.sha, "the submit fact remains standing for an operator cure").toBe(SHA)
+    const finding = (await app.queue.audit()).findings.find(
+      (candidate) => candidate.code === "admission-verdictless-repeat" && candidate.pr === "PR1",
+    )
+    expect(finding).toMatchObject({ refusal: "runner-error", count: 4 })
+    expect(finding?.message).toContain("four verdictless required-check outcomes")
+
+    currentBase = "4".repeat(40)
+    await expect(app.queue.run({}, runtime), "a new base re-arms the standing member").resolves.toEqual([])
+    expect(checkCalls, "the new base gets a fresh first attempt").toBe(5)
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+      baseSha: currentBase,
+      kind: "infrastructure",
+      verdictless: true,
+      count: 1,
+    })
+
+    const healthySha = "5".repeat(40)
+    await app.bays.recordBranchSubmit({ branch: "issue/healthy-after-infrastructure", sha: healthySha, base: "main" })
+    const runs = await app.queue.run({}, runtime)
+    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
+    expect(checkCalls, "the retrying member and its healthy peer each get one attempt").toBe(7)
+    expect(queueMint.highWater(), "the capped member does not park its healthy peer").toBe(2)
+    expect(app.state().queues.derivedIdentities["issue/healthy-after-infrastructure"]?.[healthySha]).toMatchObject({
+      id: "PR2",
+      revision: 1,
+    })
+    expect(app.state().queues.retiredSubmits[branch]).toBeUndefined()
+    expect(actionsLogged(events), "the transient infrastructure verdict stays loud").toContain(
+      "admission-infrastructure-retryable",
+    )
+  })
+
+  it("does not stamp an old derived failure onto a submit fact that moved while its check ran", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const queueMint = volatilePrNumberMint()
+    const branch = "issue/moved-during-check"
+    const nextSha = "6".repeat(40)
+    let moveDuringCheck = true
+    let checksFail = true
+    const appRef: { current?: Awaited<ReturnType<typeof createApp>> } = {}
+    await using app = await createApp({
+      log,
+      queueMint,
+      failCheck: async () => {
+        if (moveDuringCheck) {
+          moveDuringCheck = false
+          if (appRef.current === undefined) throw new Error("test app is not initialized")
+          await appRef.current.bays.recordBranchSubmit({ branch, sha: nextSha, base: "main" })
+        }
+        return checksFail
+      },
+    })
+    appRef.current = app
+    await app.bays.recordBranchSubmit({ branch, sha: SHA, base: "main" })
+
+    await app.queue.run({}, runtime)
+
+    expect(app.state().bays.submits[branch]?.sha).toBe(nextSha)
+    expect(app.state().queues.derivedIdentities[branch]?.[SHA]).toMatchObject({ id: "PR1", revision: 1 })
+    expect(app.state().queues.admissionRefusals.PR1, "the old verdict must not attach to fresh content").toBeUndefined()
+    expect(actionsLogged(events), "the stale attribution must be loud").toContain("admission-refusal-stale")
+
+    checksFail = false
+    const runs = await app.queue.run({}, runtime)
+    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
+    expect(queueMint.highWater()).toBe(2)
+    expect(app.state().queues.derivedIdentities[branch]?.[nextSha]).toMatchObject({ id: "PR2", revision: 1 })
+  })
+
+  it("does not let a record alias steal a canonical derived member's refusal", async () => {
+    const queueMint = volatilePrNumberMint()
+    await using app = await createApp({ queueMint, failCheck: () => true })
+    await app.bays.submit({ branch: "PR2", headSha: "3".repeat(40), base: "main", baseSha: BASE })
+    await app.bays.closePr({ pr: "PR1", reason: "alias fixture is terminal" })
+    await app.bays.recordBranchSubmit({ branch: "issue/derived-with-aliased-id", sha: SHA, base: "main" })
+
+    await app.queue.run({}, runtime)
+
+    expect(app.state().queues.derivedIdentities["issue/derived-with-aliased-id"]?.[SHA]).toMatchObject({ id: "PR2" })
+    expect(app.state().queues.admissionRefusals.PR2).toMatchObject({ code: "check-failed", sameCodeCount: 1 })
+    expect(app.state().queues.admissionRefusals.PR1, "the aliased record must stay untouched").toBeUndefined()
+  })
+
+  it("keeps a canonical derived member distinct from a record alias throughout mixed explicit compose", async () => {
+    const queueMint = volatilePrNumberMint(2)
+    await using app = await createApp({ queueMint })
+    await app.bays.submit({ branch: "PR3", headSha: "3".repeat(40), base: "main", baseSha: BASE })
+    const branch = "issue/mixed-explicit-derived"
+    await app.bays.recordBranchSubmit({ branch, sha: SHA, base: "main" })
+    const derived = deriveRunMemberArgs({
+      bays: app.state().bays,
+      queues: app.state().queues,
+      mint: queueMint,
+      branch,
+      enrichment: { changeId: `I${SHA}` },
+    })
+    expect(derived.id).toBe("PR3")
+
+    const runs = await app.queue.run({ prs: ["PR1"], derived: [derived] }, runtime)
+
+    expect(runs).toHaveLength(2)
+    expect(runs.flatMap((run) => run.prs.map((member) => member.id)).toSorted()).toEqual(["PR1", "PR3"])
+    expect(runs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "completed", conclusion: "success" }),
+        expect.objectContaining({ status: "completed", conclusion: "success" }),
+      ]),
+    )
   })
 
   it("a refusal raised while PREPARING the candidate is a park, not a verdict: the same fact still integrates", async () => {
@@ -322,12 +538,17 @@ describe("a standing submit fact derives at most ONE live change", () => {
 
     await app.queue.run({}, runtime)
     expect(app.state().queues.retiredSubmits["issue/parked"], "a park must not retire the fact").toBeUndefined()
+    expect(app.state().queues.admissionRefusals.PR1, "a park must not acquire a refusal-ledger row").toBeUndefined()
+    expect(app.state().queues.derivedIdentities["issue/parked"]?.[SHA]).toMatchObject({ id: "PR1", revision: 1 })
+    expect(queueMint.highWater(), "a park keeps the first identity live").toBe(1)
 
     // The arrangement the refusal named now exists. The durable fact alone
     // carries the next pass.
     arrangementMissing = false
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
+    expect(queueMint.highWater(), "the recovery pass reuses the parked identity").toBe(1)
+    expect(app.state().queues.derivedIdentities["issue/parked"]?.[SHA]).toMatchObject({ id: "PR1", revision: 1 })
   })
 
   it("the retirement is a terminal finding naming the conflicting path and the cure", async () => {

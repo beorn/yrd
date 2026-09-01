@@ -8,6 +8,10 @@ export const JobErrorSchema = z
     code: NameSchema,
     message: z.string().min(1),
     evidence: JsonSchema.optional(),
+    /** The attempt ended without a verdict on the submitted content. Written
+     * at the execution-classification boundary; downstream queue policy must
+     * not guess this fact back from a code string. */
+    verdictless: z.literal(true).optional(),
   })
   .strict()
 export type JobError = z.infer<typeof JobErrorSchema>

@@ -897,10 +897,13 @@ describe("Jobs", () => {
   it("keeps a REQUIRED job's succeeded completion at INFO", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    const app = await jobsApp(delivery(undefined, "transport-v1", undefined, () => ({ required: true })), {
-      id: ids("send", "C-send", JOB_ID),
-      log,
-    })
+    const app = await jobsApp(
+      delivery(undefined, "transport-v1", undefined, () => ({ required: true })),
+      {
+        id: ids("send", "C-send", JOB_ID),
+        log,
+      },
+    )
     try {
       const requested = await app.dispatch(app.commands.sender.send, { message: "still-ok" })
       await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })
@@ -1589,6 +1592,50 @@ describe("Jobs", () => {
       .map(({ data }) => data as { type: string })
     expect(transitions.filter(({ type }) => type === "heartbeat").length).toBeGreaterThanOrEqual(2)
     await app.close()
+  })
+
+  it("marks a heartbeat writer failure verdictless at the Job boundary", async () => {
+    const memory = createMemoryJournal()
+    let appends = 0
+    const journal = {
+      read: memory.read,
+      append(value: Parameters<typeof memory.append>[0], cursor: number) {
+        appends += 1
+        return appends === 3 ? Promise.reject(new Error("heartbeat journal unavailable")) : memory.append(value, cursor)
+      },
+    }
+    const started = Promise.withResolvers<void>()
+    const app = await jobsApp(
+      delivery(async (_input, context) => {
+        started.resolve()
+        await new Promise<void>((resolve) => {
+          if (context.signal.aborted) resolve()
+          else context.signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+        return { status: "completed", conclusion: "success", output: { result: "too-late" } }
+      }),
+      { journal, id: ids("send", "C-send", JOB_ID) },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "heartbeat" })
+
+    vi.useFakeTimers()
+    try {
+      const running = app.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 20, heartbeatMs: 5 })
+      await started.promise
+      await vi.advanceTimersByTimeAsync(5)
+      await expect(running).resolves.toMatchObject({
+        status: "completed",
+        conclusion: "failure",
+        error: {
+          code: "heartbeat-failed",
+          message: "heartbeat journal unavailable",
+          verdictless: true,
+        },
+      })
+    } finally {
+      vi.useRealTimers()
+      await app.close()
+    }
   })
 
   // The lease/stall seam (@yrd/core/21085-target-model/21094, #undead). These three

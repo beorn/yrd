@@ -14,12 +14,13 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
   candidateRefFor,
+  deriveRunMemberArgs,
   withMerge,
   withQueue,
   withStep,
@@ -78,6 +79,7 @@ async function createApp(
     calls?: Map<string, number>
     checkRun?: () => JobResult<z.infer<typeof CheckResultSchema>>
     resolveDeclaredPlan?: (baseSha: string) => DeclaredStepPlanAtBase
+    queueMint?: PrNumberMint
   }> = {},
 ) {
   const count = (step: string): void => {
@@ -107,7 +109,7 @@ async function createApp(
     defaultSteps: ["check", "merge"],
     resolveBaseSha: () => BASE,
     prepareCandidate: mergeableCandidate,
-    prNumberMint: volatilePrNumberMint(),
+    prNumberMint: options.queueMint ?? volatilePrNumberMint(),
     readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
     ...(options.resolveDeclaredPlan === undefined ? {} : { resolveDeclaredPlan: options.resolveDeclaredPlan }),
   })
@@ -144,20 +146,37 @@ describe("derived admission executes each step exactly once and fails loud (post
 
   it("a step callback that THROWS during a derived admission fails the compose loudly with the registered runner-error code", async () => {
     const calls = new Map<string, number>()
+    const queueMint = volatilePrNumberMint()
     await using app = await createApp({
       calls,
+      queueMint,
       checkRun: () => {
         throw new Error("git object store unreadable: input/output error")
       },
     })
-    await app.bays.recordBranchSubmit({ branch: "issue/infra", sha: SHA, base: "main" })
+    const branch = "issue/infra"
+    await app.bays.recordBranchSubmit({ branch, sha: SHA, base: "main" })
+    const derived = deriveRunMemberArgs({
+      bays: app.state().bays,
+      queues: app.state().queues,
+      mint: queueMint,
+      branch,
+      enrichment: { changeId: `I${SHA}` },
+    })
 
     // A thrown callback is machinery failure, not a check verdict — the job
-    // layer records it as the registered `runner-error` code. The record lane
-    // absorbs it into a durable admission-refused record; a DERIVED member has
-    // no record to carry that verdict, so proceeding silently would leave the
-    // failure recorded NOWHERE. The compose must refuse loudly instead.
-    await expect(app.queue.run({}, runtime)).rejects.toThrow(/runner-error|input\/output error/u)
+    // layer records it as the registered `runner-error` code. An explicit
+    // one-member request still receives that infrastructure failure directly.
+    // Assert the Job writer's typed marker here; the selectorless lifecycle
+    // suite proves that marker is then consumed into the exact retry ledger.
+    await expect(app.queue.run({ prs: [], derived: [derived] }, runtime)).rejects.toThrow(
+      /runner-error|input\/output error/u,
+    )
+    expect(
+      Object.values(app.state().jobs.byId).find(
+        (job) => job.status === "completed" && job.conclusion === "failure" && job.error.code === "runner-error",
+      ),
+    ).toMatchObject({ error: { code: "runner-error", verdictless: true } })
     expect(calls.get("merge")).toBeUndefined()
   })
 

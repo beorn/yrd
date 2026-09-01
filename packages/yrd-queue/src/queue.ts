@@ -109,6 +109,7 @@ import {
   type QueueAuditFinding,
   type QueueAuditFindingEmission,
   type QueueAuditReviewCertification,
+  type QueueAdmissionRefusal,
   type QueueAuthorityState,
   type QueueAuthorityToken,
   type QueueFailure,
@@ -886,19 +887,36 @@ const AdmissionRefusedSchema = z
      * instead of parsing `reason` back apart. Absent for every refusal that is
      * not a judged check red, and for every fact written before this shipped. */
     judgedFailure: z.literal(true).optional(),
+    /** The attempt ended without judging the submitted content. Classified
+     * once at execution; queue policy never infers it from `code`. */
+    verdictless: z.literal(true).optional(),
   })
   .strict()
 type AdmissionRefusedArgs = Readonly<z.infer<typeof AdmissionRefusedSchema>>
 export type RecordAdmissionRefusalArgs = AdmissionRefusedArgs
+const ExactDerivedAdmissionRefusedSchema = AdmissionRefusedSchema.extend({
+  branch: GitRefSchema,
+  revision: z.number().int().positive(),
+  headSha: GitShaSchema,
+  baseSha: GitShaSchema,
+}).strict()
+type ExactDerivedAdmissionRefusedArgs = Readonly<z.infer<typeof ExactDerivedAdmissionRefusedSchema>>
+const MAX_DERIVED_VERDICTLESS_RETRIES = 3
 const AdmissionRefusedFactSchema = AdmissionRefusedSchema.extend({
   /** Optional only for replaying facts written before exact-revision refusal
    * identity was introduced by 22528. New commands always populate both. */
   revision: z.number().int().positive().optional(),
   headSha: GitShaSchema.optional(),
+  /** Present on exact derived-attempt facts so retry streaks reset when the
+   * same content is judged against a different base. */
+  baseSha: GitShaSchema.optional(),
 })
   .strict()
   .refine((fact) => (fact.revision === undefined) === (fact.headSha === undefined), {
     message: "revision and headSha must be provided together",
+  })
+  .refine((fact) => fact.baseSha === undefined || fact.revision !== undefined, {
+    message: "baseSha requires exact revision and headSha attribution",
   })
 const SettleAdmissionRefusalSchema = z
   .object({
@@ -1487,6 +1505,7 @@ type InstalledQueueCommands = Readonly<{
   queue: QueueCommands["queue"] &
     Readonly<{
       bindDerivedIdentity: CommandHandler<DerivedIdentityBound, RuntimeState>
+      exactDerivedAdmissionRefused: CommandHandler<ExactDerivedAdmissionRefusedArgs, RuntimeState>
     }>
 }>
 
@@ -1742,6 +1761,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               quiesceLegacyRun: (args) => yrd.dispatch(commands.queue.quiesceLegacyRun, args),
               settleOrphanedRun: (args) => yrd.dispatch(commands.queue.settleOrphanedRun, args),
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
+              exactDerivedAdmissionRefused: (args) => yrd.dispatch(commands.queue.exactDerivedAdmissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               retireSubmitFact: (args) => yrd.dispatch(commands.queue.retireSubmitFact, args),
               bindDerivedIdentity: (args) => yrd.dispatch(commands.queue.bindDerivedIdentity, args),
@@ -1801,6 +1821,7 @@ type QueueActions = Readonly<{
   quiesceLegacyRun(args: QuiesceLegacyRunArgs): Promise<CommandResult>
   settleOrphanedRun(args: SettleOrphanedRunArgs): Promise<CommandResult>
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
+  exactDerivedAdmissionRefused(args: ExactDerivedAdmissionRefusedArgs): Promise<CommandResult>
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
   bindDerivedIdentity(args: DerivedIdentityBound): Promise<CommandResult>
@@ -2773,6 +2794,41 @@ function createQueue<Shape extends ChangeShape>(
     return recordedRequestCount(tally)
   }
 
+  type RevisionAdmissionFailure = Readonly<{
+    code: string
+    kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
+    reason: string
+    verdictless?: true
+  }>
+  type RevisionAdmissionRefusal =
+    | Readonly<{ stage: "preparation"; failure: RevisionAdmissionFailure }>
+    | Readonly<{
+        stage: "candidate"
+        failure: RevisionAdmissionFailure
+        attribution: Readonly<{ pr: string; branch: string; revision: number; headSha: string; baseSha: string }>
+      }>
+  type RevisionAdmissionOutcome = Readonly<{
+    processed: boolean
+    refusal?: RevisionAdmissionRefusal
+    /** This member was deliberately released from the current drain without
+     * recording another outcome (the bounded verdictless-retry stop). */
+    released?: true
+  }>
+
+  const derivedVerdictlessRetryExhausted = (pr: DeepReadonly<Change>, baseSha: string): boolean => {
+    if (hasChangeRecord(runtime().bays, pr.id)) return false
+    const refusal = runtime().queues.admissionRefusals[pr.id]
+    const revision = currentChangeRev(pr)
+    return (
+      refusal?.revision === revision.n &&
+      refusal.headSha === revision.head &&
+      refusal.baseSha === baseSha &&
+      refusal.kind === "infrastructure" &&
+      refusal.verdictless === true &&
+      refusal.count > MAX_DERIVED_VERDICTLESS_RETRIES
+    )
+  }
+
   const refuseRevisionAdmission = async (
     pr: DeepReadonly<Change>,
     baseSha: string,
@@ -2786,9 +2842,7 @@ function createQueue<Shape extends ChangeShape>(
        * the retirement below can say WHAT conflicted. */
       conflicts?: readonly string[]
     }> = {},
-  ): Promise<
-    Readonly<{ code: string; kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]; reason: string }>
-  > => {
+  ): Promise<RevisionAdmissionRefusal> => {
     const kind = options.kind ?? admissionFailureKind(result, false)
     await recordRevisionAdmission(pr, {
       status: "refused",
@@ -2827,17 +2881,26 @@ function createQueue<Shape extends ChangeShape>(
     if (options.candidate !== undefined && kind !== "infrastructure") {
       await retireDerivedSubmitFact(pr, changeHead(pr as Change), result, options.conflicts)
     }
-    return { code: result.code, kind, reason: result.message }
+    const failure = {
+      code: result.code,
+      kind,
+      reason: result.message,
+      ...(result.verdictless === true ? { verdictless: true as const } : {}),
+    }
+    return options.candidate === undefined
+      ? { stage: "preparation", failure }
+      : {
+          stage: "candidate",
+          failure,
+          attribution: {
+            pr: pr.id,
+            branch: pr.branch,
+            revision: changeRevisionNumber(pr),
+            headSha: changeHead(pr),
+            baseSha,
+          },
+        }
   }
-
-  type RevisionAdmissionOutcome = Readonly<{
-    processed: boolean
-    refusal?: Readonly<{
-      code: string
-      kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
-      reason: string
-    }>
-  }>
 
   const admitChangeRevision = async (
     pr: DeepReadonly<Change>,
@@ -2853,6 +2916,19 @@ function createQueue<Shape extends ChangeShape>(
     selectorless = false,
   ): Promise<RevisionAdmissionOutcome> => {
     const selected = admissionSteps(steps)
+    if (derivedVerdictlessRetryExhausted(pr, baseSha)) {
+      const refusal = runtime().queues.admissionRefusals[pr.id]
+      log.debug?.(`queue stopped retrying ${pr.id}'s verdictless derived admission on the same content and base`, {
+        action: "admission-verdictless-exhausted",
+        pr: pr.id,
+        branch: pr.branch,
+        revision: changeRevisionNumber(pr),
+        headSha: changeHead(pr),
+        baseSha,
+        ...(refusal === undefined ? {} : { count: refusal.count, code: refusal.code, reason: refusal.reason }),
+      })
+      return { processed: false, released: true }
+    }
     const prior = changeAdmission(pr)
     const freshRetry = prior?.status === "refused" && hasFreshRevisionCheckAuthority(runtime(), pr, steps)
     if (
@@ -2958,8 +3034,12 @@ function createQueue<Shape extends ChangeShape>(
         requestedJob ?? jobs.getByKey(key)?.id ?? jobs.getByKey(admissionJobKey(snapshot, baseSha, index))?.id
       if (jobId === undefined) throw new Error(`yrd: required check '${step.name}' did not request a Job`)
       let beforeRun = jobs.get(jobId)
+      const retryableDerivedInfrastructure =
+        !hasChangeRecord(runtime().bays, pr.id) &&
+        beforeRun !== undefined &&
+        retryableAdmissionInfrastructureJob(beforeRun)
       if (
-        freshRetry &&
+        (freshRetry || retryableDerivedInfrastructure) &&
         beforeRun?.status === "completed" &&
         (beforeRun.conclusion === "failure" || beforeRun.conclusion === "timed_out")
       ) {
@@ -2985,37 +3065,20 @@ function createQueue<Shape extends ChangeShape>(
       }
       if (job.conclusion !== "success") {
         const result = jobFailure(job)
-        // Machinery failure, not a check verdict: a lost/canceled Job (the
-        // classes admissionFailureKind marks "infrastructure") or a THROWN
-        // callback (the job layer's registered `runner-error`). The record lane
-        // absorbs these into a durable admission-refused record; a DERIVED
-        // member has no record to carry that verdict (recordRevisionAdmission
-        // deliberately skips it) and no run exists yet to attribute a ledger
-        // row to, so the same absorb would leave the failure recorded NOWHERE
-        // while the compose resolves clean. Propagate instead — the door's own
-        // policy for infrastructure: it needs a human, not a retry loop.
-        if (
-          !hasChangeRecord(runtime().bays, pr.id) &&
-          (job.conclusion !== "failure" || result.code === "runner-error")
-        ) {
-          raiseFailure(
-            "infrastructure",
-            result.code,
-            `yrd: derived member '${pr.id}' required check '${step.name}' failed without a verdict ` +
-              `(${result.code}): ${result.message}`,
-          )
-        }
+        const verdictless = result.verdictless === true || job.conclusion !== "failure"
+        const classifiedResult: JobError = verdictless ? { ...result, verdictless: true } : result
+        const kind = admissionFailureKind(classifiedResult, verdictless)
         const failed: ChangeAdmissionStep = {
           name: step.name,
           revision: step.revision,
           job: job.id,
           status: "refused",
           ...("output" in job && job.output !== undefined ? { output: job.output } : {}),
-          receipt: result,
+          receipt: classifiedResult,
         }
-        const refusal = await refuseRevisionAdmission(pr, baseSha, step.name, result, {
+        const refusal = await refuseRevisionAdmission(pr, baseSha, step.name, classifiedResult, {
           candidate: candidate.id,
-          kind: admissionFailureKind(result, job.conclusion !== "failure"),
+          kind,
           steps: [...evidence, failed],
         })
         return { processed: true, refusal }
@@ -3112,6 +3175,10 @@ function createQueue<Shape extends ChangeShape>(
     await actions.admissionRefused(args)
   }
 
+  const appendExactDerivedAdmissionRefusal = async (args: ExactDerivedAdmissionRefusedArgs): Promise<void> => {
+    await actions.exactDerivedAdmissionRefused(args)
+  }
+
   const noteCandidateRefusal = async (
     selectors: readonly (string | undefined)[],
     refusal: Readonly<{ code?: string; kind?: string; reason: string }>,
@@ -3123,7 +3190,7 @@ function createQueue<Shape extends ChangeShape>(
       // has no record but its refusal streak must still attribute — a wedge
       // against a recordless member is exactly as invisible as 22395's. A
       // selector neither resolves is the `pr-not-found` refusal itself: there
-      // is nothing to attribute a streak to, and the caller already logged it
+      // nothing to attribute a streak to, and the caller already logged it
       // loud. Anything else would invent a wedge against a phantom id.
       const pr = resolveMemberById(snapshot.bays, snapshot.queues, selector)
       if (pr === undefined) continue
@@ -3229,12 +3296,51 @@ function createQueue<Shape extends ChangeShape>(
     pr: string,
     refusal: NonNullable<RevisionAdmissionOutcome["refusal"]>,
   ): Promise<void> => {
+    const { failure } = refusal
     log.warn?.(`queue admit skipped ${pr}, which failed its required checks`, {
       action: "compose-candidate-skip",
       pr,
-      ...refusal,
+      ...failure,
     })
-    await noteCandidateRefusal([pr], refusal)
+    if (hasChangeRecord(runtime().bays, pr)) {
+      await noteCandidateRefusal([pr], failure)
+      return
+    }
+    // A preparation refusal is a park: no Candidate was judged, so the same
+    // standing fact must be free to retry on the next pass. A candidate
+    // verdict carries its immutable member attribution through the write;
+    // never rediscover it from a submit fact that may have moved meanwhile.
+    if (refusal.stage === "preparation") return
+    try {
+      await appendExactDerivedAdmissionRefusal({ ...refusal.attribution, ...failure })
+      if (failure.kind === "infrastructure") {
+        const streak = runtime().queues.admissionRefusals[pr]
+        log.warn?.(`queue left ${pr}'s derived admission retryable after an infrastructure failure`, {
+          action: "admission-infrastructure-retryable",
+          ...refusal.attribution,
+          code: failure.code,
+          reason: failure.reason,
+          ...(streak === undefined ? {} : { count: streak.count }),
+        })
+      }
+    } catch (error) {
+      const fact = failureFact(error)
+      if (fact?.code === "stale-pr") {
+        log.warn?.(`queue did not journal ${pr}'s obsolete required-check failure because its submit fact moved`, {
+          action: "admission-refusal-stale",
+          ...refusal.attribution,
+          code: failure.code,
+          reason: fact.message,
+        })
+        return
+      }
+      log.error?.(`queue could not journal ${pr}'s required-check failure; the wedge oracle will under-count`, {
+        action: "admission-refusal-unrecorded",
+        pr,
+        code: failure.code,
+        reason: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
 
   /** One admission turn's outcome. `refused` names the selectors this turn
@@ -3256,7 +3362,10 @@ function createQueue<Shape extends ChangeShape>(
     const selectorless = selection !== "explicit"
     for (const selector of selectors) {
       try {
-        const pr = resolveChange(runtime().bays, selector) ?? derived.find((member) => member.id === selector)
+        const pr =
+          getChangeRecord(runtime().bays, selector) ??
+          derived.find((member) => member.id === selector) ??
+          resolveChange(runtime().bays, selector)
         if (pr === undefined) {
           raiseFailure(
             "refusal",
@@ -3306,8 +3415,21 @@ function createQueue<Shape extends ChangeShape>(
         const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
         const outcome = await admitChangeRevision(pr, baseSha, runOptions, selectorless)
         if (outcome.processed) admitted.push(pr.id)
+        if (outcome.released === true) refused.push(pr.id)
         if (outcome.refusal !== undefined) {
           await noteRevisionAdmissionRefusal(pr.id, outcome.refusal)
+          if (
+            !selectorless &&
+            !hasChangeRecord(snapshot.bays, pr.id) &&
+            outcome.refusal.failure.kind === "infrastructure"
+          ) {
+            const failure = outcome.refusal.failure
+            raiseFailure(
+              "infrastructure",
+              failure.code,
+              `yrd: derived member '${pr.id}' failed without a verdict (${failure.code}): ${failure.reason}`,
+            )
+          }
           refused.push(pr.id)
         }
       } catch (error) {
@@ -3343,10 +3465,20 @@ function createQueue<Shape extends ChangeShape>(
     const targets = new Set(selectors)
     const admitted = new Set<string>()
     for (const selector of targets) {
-      const pr = resolveChange(runtime().bays, selector)
+      const current = runtime()
+      const pr =
+        getChangeRecord(current.bays, selector) ??
+        derived.find((member) => member.id === selector) ??
+        resolveChange(current.bays, selector)
       if (pr === undefined) continue
       const delivery = changeDeliveryState(pr)
-      if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
+      if (
+        hasChangeRecord(current.bays, pr.id) &&
+        delivery !== "pushed" &&
+        delivery !== "submitted" &&
+        delivery !== "ready" &&
+        delivery !== "needs-author"
+      ) {
         await cancelRevisionAdmissionJobs(pr, `PR became ${delivery}`)
       }
     }
@@ -3412,7 +3544,10 @@ function createQueue<Shape extends ChangeShape>(
       if (dispatched.admitted.length > 0 && dispatched.refused.length === 0) continue
 
       for (const selector of targets) {
-        const pr = resolveChange(snapshot.bays, selector) ?? derived.find((member) => member.id === selector)
+        const pr =
+          getChangeRecord(snapshot.bays, selector) ??
+          derived.find((member) => member.id === selector) ??
+          resolveChange(snapshot.bays, selector)
         if (pr === undefined) continue
         const runId = checkEligibility(snapshot, pr, steps).run
         if (runId !== undefined) {
@@ -3571,7 +3706,11 @@ function createQueue<Shape extends ChangeShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
-          const selection = args.prs !== undefined && args.prs.length > 0 ? "explicit" : undefined
+          // `prs: []` plus caller-supplied derived members is the documented
+          // explicit all-derived selection. A derived list minted internally
+          // from an absent `prs` remains the selectorless drain.
+          const selection =
+            args.prs !== undefined && (args.prs.length > 0 || (args.derived?.length ?? 0) > 0) ? "explicit" : undefined
           const explicitStepAuthority = args.steps !== undefined
           // A selectorless compose is a multi-candidate drain (the long-lived
           // habitant's default path, and any bare `queue run`): one candidate lost
@@ -3579,7 +3718,7 @@ function createQueue<Shape extends ChangeShape>(
           // habitant. Skip it LOUD and continue. A targeted one-shot run has no
           // other candidate to fall through to, so it stays fail-loud, and a
           // non-refusal (a real bug) always propagates.
-          const selectorless = args.prs === undefined || args.prs.length === 0
+          const selectorless = selection !== "explicit"
           const settleCandidate = async (candidateId: RunId): Promise<void> => {
             try {
               await settle(candidateId, runOptions)
@@ -3997,10 +4136,13 @@ function createQueue<Shape extends ChangeShape>(
             // runs without changing WHICH carriers it admits once it does. It
             // also makes the returned set the set actually admitted from, rather
             // than dropping every pushed carrier the drain took.
-            const enteringDerived = materializedDerived(runtime())
+            const enteringSnapshot = runtime()
+            const enteringDerived = materializedDerived(enteringSnapshot)
             const entering = refreshable.flatMap((pr) => {
               const current =
-                resolveChange(runtime().bays, pr.id) ?? enteringDerived.find((member) => member.id === pr.id)
+                getChangeRecord(enteringSnapshot.bays, pr.id) ??
+                enteringDerived.find((member) => member.id === pr.id) ??
+                resolveChange(enteringSnapshot.bays, pr.id)
               return current === undefined ? [] : [current]
             })
             await drainAdmissions(
@@ -4040,7 +4182,10 @@ function createQueue<Shape extends ChangeShape>(
           snapshot = runtime()
           const settledDerived = materializedDerived(snapshot)
           const currentChecked = checked.flatMap((pr) => {
-            const current = resolveChange(snapshot.bays, pr.id) ?? settledDerived.find((member) => member.id === pr.id)
+            const current =
+              getChangeRecord(snapshot.bays, pr.id) ??
+              settledDerived.find((member) => member.id === pr.id) ??
+              resolveChange(snapshot.bays, pr.id)
             return current === undefined ? [] : [current]
           })
           const unsettled = currentChecked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
@@ -5648,40 +5793,96 @@ function createQueueCommands(
     },
   })
 
+  const admissionRefusalEvents = (
+    args: AdmissionRefusedArgs,
+    revision: number,
+    headSha: string,
+    baseSha?: string,
+  ): EventDraft[] => {
+    const refused = event("queue/admission/refused", {
+      pr: args.pr,
+      code: args.code,
+      ...(args.kind === undefined ? {} : { kind: args.kind }),
+      reason: args.reason,
+      ...(args.judgedFailure === undefined ? {} : { judgedFailure: args.judgedFailure }),
+      ...(args.verdictless === undefined ? {} : { verdictless: args.verdictless }),
+      revision,
+      headSha,
+      ...(baseSha === undefined ? {} : { baseSha }),
+    })
+    if (!structurallyPermanentAdmissionRefusal(args.code, args)) return [refused]
+    return [
+      refused,
+      event("queue/admission/settled", {
+        pr: args.pr,
+        revision,
+        headSha,
+        disposition: "needs-person",
+        reason: permanentRefusalReason(args.pr, args.code, args.reason),
+      }),
+    ]
+  }
+
   const admissionRefused = command({
     title: "Record a compose cycle that skipped a change without admitting it",
     params: AdmissionRefusedSchema,
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionRefusedArgs) {
       // Fail loud on an unattributable refusal: the ledger's whole job is to name
       // the wedged PR, so a phantom id must never become a phantom finding. A
-      // DERIVED member (S6) is attributable through the id-seam — its identity
-      // lives in retained run snapshots, never the record store.
-      const member = resolveMemberById(state.bays, state.queues, args.pr)
-      if (member === undefined) {
-        raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state.bays, state.queues, args.pr))
+      // canonical record id wins; only a pre-binding derived member falls back
+      // to the retained-snapshot id seam. Never use alias-aware resolution for
+      // this internal canonical PR id — a record alias must not steal another
+      // member's refusal.
+      const record = getChangeRecord(state.bays, args.pr)
+      const snapshot =
+        record === undefined
+          ? latestChangeSnapshot(state.queues as QueuesState, (candidate) => candidate.id === args.pr)
+          : undefined
+      if (record === undefined && snapshot === undefined) {
+        const message = queueChangeNotFoundMessage(state.bays, state.queues, args.pr)
+        raiseFailure("refusal", "pr-not-found", message)
+        throw new Error(message)
       }
-      const revision =
-        member.source === "record"
-          ? { n: currentChangeRev(member.record).n, head: currentChangeRev(member.record).head }
-          : { n: member.snapshot.revision, head: member.snapshot.headSha }
-      const refused = event("queue/admission/refused", {
-        ...args,
-        revision: revision.n,
-        headSha: revision.head,
-      })
-      if (!structurallyPermanentAdmissionRefusal(args.code, args)) return { events: [refused] }
-      return {
-        events: [
-          refused,
-          event("queue/admission/settled", {
-            pr: args.pr,
-            revision: revision.n,
-            headSha: revision.head,
-            disposition: "needs-person",
-            reason: permanentRefusalReason(args.pr, args.code, args.reason),
-          }),
-        ],
+      const exact = (() => {
+        if (record !== undefined) {
+          const current = currentChangeRev(record)
+          return { revision: current.n, headSha: current.head }
+        }
+        if (snapshot === undefined) throw new Error(`yrd: refusal lost change '${args.pr}'`)
+        return { revision: snapshot.revision, headSha: snapshot.headSha }
+      })()
+      const { revision, headSha } = exact
+      return { events: admissionRefusalEvents(args, revision, headSha) }
+    },
+  })
+
+  const exactDerivedAdmissionRefused = command({
+    title: "Record a refusal for one exact pre-run derived member",
+    visibility: "internal",
+    params: ExactDerivedAdmissionRefusedSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: ExactDerivedAdmissionRefusedArgs) {
+      if (getChangeRecord(state.bays, args.pr) !== undefined) {
+        throw new Error(`yrd: exact derived refusal '${args.pr}' names a record-backed change`)
       }
+      const bound = state.queues.derivedIdentities[args.branch]?.[args.headSha]
+      if (bound?.id !== args.pr || bound.revision !== args.revision) {
+        raiseFailure(
+          "refusal",
+          "stale-pr",
+          `yrd: derived refusal for '${args.pr}' revision ${args.revision} at ${args.headSha} does not match ` +
+            `the exact identity binding for branch '${args.branch}'`,
+        )
+      }
+      const submit = state.bays.submits[args.branch]
+      if (submit?.sha !== args.headSha) {
+        raiseFailure(
+          "refusal",
+          "stale-pr",
+          `yrd: derived refusal for '${args.pr}' revision ${args.revision} at ${args.headSha} is stale: branch ` +
+            `'${args.branch}' now ${submit === undefined ? "has no standing submit fact" : `stands at ${submit.sha}`}`,
+        )
+      }
+      return { events: admissionRefusalEvents(args, args.revision, args.headSha, args.baseSha) }
     },
   })
 
@@ -5817,6 +6018,7 @@ function createQueueCommands(
       quiesceLegacyRun,
       settleOrphanedRun,
       admissionRefused,
+      exactDerivedAdmissionRefused,
       settleAdmissionRefusal,
       retireSubmitFact,
       reconcileMerge,
@@ -6280,6 +6482,29 @@ function markQueueTerminalRoot(queues: DeepReadonly<QueuesState>, root: RunId): 
   }
 }
 
+/** Resolve an exact recordless refusal back to the one still-standing submit
+ * fact that owns it. This is the retention/audit proof; an id alone is not
+ * enough because record aliases can share its spelling. */
+function standingDerivedRefusalBranch(
+  bays: DeepReadonly<BaysState>,
+  queues: DeepReadonly<QueuesState>,
+  id: string,
+  refusal: DeepReadonly<QueueAdmissionRefusal>,
+): string | undefined {
+  if (refusal.revision === undefined || refusal.headSha === undefined) return undefined
+  for (const [branch, identities] of Object.entries(queues.derivedIdentities)) {
+    const identity = identities[refusal.headSha]
+    if (
+      identity?.id === id &&
+      identity.revision === refusal.revision &&
+      bays.submits[branch]?.sha === refusal.headSha
+    ) {
+      return branch
+    }
+  }
+  return undefined
+}
+
 function compactQueueProjection(
   queues: DeepReadonly<QueuesState>,
   jobs: DeepReadonly<JobsState>,
@@ -6312,9 +6537,9 @@ function compactQueueProjection(
   // the entries for PRs that left the bay or reached a terminal delivery state
   // so the ledger cannot grow without bound (or outlive the wedge it names).
   const admissionRefusals = Object.fromEntries(
-    Object.entries(queues.admissionRefusals).filter(([id]) => {
+    Object.entries(queues.admissionRefusals).filter(([id, refusal]) => {
       const pr = getChangeRecord(bays, id)
-      if (pr === undefined) return false
+      if (pr === undefined) return standingDerivedRefusalBranch(bays, queues, id, refusal) !== undefined
       const delivery = changeDeliveryState(pr)
       return delivery === "pushed" || delivery === "submitted"
     }),
@@ -6717,7 +6942,9 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     const sameRevision =
       refusal.revision === undefined ||
       streak?.revision === undefined ||
-      (streak.revision === refusal.revision && streak.headSha === refusal.headSha)
+      (streak.revision === refusal.revision &&
+        streak.headSha === refusal.headSha &&
+        (refusal.baseSha === undefined || streak.baseSha === refusal.baseSha))
     const prior = sameRevision ? streak : undefined
     const sameCode = prior?.code === refusal.code
     return {
@@ -6732,6 +6959,11 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
                 ? {}
                 : { revision: prior.revision, headSha: prior.headSha }
               : { revision: refusal.revision, headSha: refusal.headSha }),
+            ...(refusal.baseSha === undefined
+              ? prior?.baseSha === undefined
+                ? {}
+                : { baseSha: prior.baseSha }
+              : { baseSha: refusal.baseSha }),
             code: refusal.code,
             ...(refusal.kind === undefined ? {} : { kind: refusal.kind }),
             reason: refusal.reason,
@@ -6739,6 +6971,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             // the refusal that produced it, so a later unjudged red must not
             // inherit an earlier judged one's permanence.
             ...(refusal.judgedFailure === undefined ? {} : { judgedFailure: refusal.judgedFailure }),
+            ...(refusal.verdictless === undefined ? {} : { verdictless: refusal.verdictless }),
             // The streak counts cycles, not codes: a wedge that flaps between
             // refusal codes is still one change that never got in. The latest code
             // is what an operator needs to act on.
@@ -8560,6 +8793,37 @@ function admissionRefusalAuditFindings(
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
   )) {
+    const derivedBranch =
+      getChangeRecord(state.bays, refusal.pr) === undefined
+        ? standingDerivedRefusalBranch(state.bays, state.queues, refusal.pr, refusal)
+        : undefined
+    if (
+      derivedBranch !== undefined &&
+      refusal.kind === "infrastructure" &&
+      refusal.verdictless === true &&
+      refusal.baseSha !== undefined &&
+      refusal.count > MAX_DERIVED_VERDICTLESS_RETRIES
+    ) {
+      const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(refusal.firstAt))
+      findings.push({
+        code: "admission-verdictless-repeat",
+        message:
+          `derived change '${refusal.pr}' from '${derivedBranch}' produced four verdictless required-check outcomes ` +
+          `on ${refusal.headSha} against base ${refusal.baseSha}; automatic retries stopped while the submit fact ` +
+          `remains standing. Latest infrastructure failure '${refusal.code}': ${refusal.reason}`,
+        pr: refusal.pr,
+        specimen: `pr:${refusal.pr}:verdictless:${refusal.headSha}:${refusal.baseSha}`,
+        refusal: refusal.code,
+        count: refusal.count,
+        since: refusal.firstAt,
+        blockedMs,
+        resolution: [
+          "restore the required-check runner or its dependencies",
+          `push a fresh head for '${derivedBranch}' or let the target base advance to re-arm admission`,
+        ],
+      })
+      continue
+    }
     // A settled refusal stopped being a head-of-line RETRY loop the moment a
     // person's judgment replaced automatic remediation — but "stop retrying"
     // and "stop REPORTING" are different facts, and the original design
@@ -9249,7 +9513,10 @@ function admissionQueue(
       // is already dispatched. Without this exit the drain loop re-admits the
       // same recordless member forever.
       if (hasChangeRecord(state.bays, pr.id)) return true
-      return checkEligibility(state, pr, steps).status === "queued"
+      const status = checkEligibility(state, pr, steps).status
+      if (status === "queued") return true
+      if (status !== "failed") return false
+      return currentRevisionAdmissionJobs(state, pr, steps)?.some(retryableAdmissionInfrastructureJob) === true
     })
     .filter((pr) => {
       const snapshot = Queues.snapshot(pr)
@@ -10325,6 +10592,7 @@ const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["nee
 export const YRD_REFUSAL_CODES = [
   "admission-refusal-loop",
   "admission-refusal-needs-person",
+  "admission-verdictless-repeat",
   "admission-refused",
   // The gitlink-advance verb's own `-failed` refusals (yrd 9e6af249 /
   // 2fd122a9). Registered NOT because they become a persisted Run/Job failure
@@ -10677,6 +10945,19 @@ function admissionFailureKind(
 ): Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"] {
   if (infrastructure) return "infrastructure"
   return NEEDS_AUTHOR_CODES.has(result.code) ? "refusal" : "failure"
+}
+
+/** A terminal admission Job whose failure describes machinery, not content,
+ * and whose Job protocol supports retrying the SAME identity. Cancelled and
+ * skipped Jobs are infrastructure-shaped too, but the Job state machine does
+ * not permit retrying those conclusions without a fresh authority action. */
+function retryableAdmissionInfrastructureJob(job: DeepReadonly<Job> | undefined): boolean {
+  if (job?.status !== "completed" || (job.conclusion !== "failure" && job.conclusion !== "timed_out")) {
+    return false
+  }
+  const result = jobFailure(job)
+  const verdictless = result.verdictless === true || job.conclusion !== "failure"
+  return admissionFailureKind(result, verdictless) === "infrastructure"
 }
 
 type InfraRetryCompositionFailure =
@@ -11244,7 +11525,7 @@ function isIntegrated(shape: ChangeShape): shape is IntegratedShape {
   return "integration" in shape
 }
 
-function jobFailure(job: Job): JobError {
+function jobFailure(job: DeepReadonly<Job>): JobError {
   if (job.status === "completed" && job.conclusion === "failure") return job.error
   if (job.status === "completed" && job.conclusion === "timed_out") {
     return { code: "job-lost", message: job.lostReason }

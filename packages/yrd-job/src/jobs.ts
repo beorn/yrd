@@ -1013,7 +1013,9 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         const active = current(id)
         if (!Job.owns(active, attempt, parsed.runner, "in_progress")) return active
         const result =
-          outcome.heartbeatError === undefined ? outcome.result : failed("heartbeat-failed", outcome.heartbeatError)
+          outcome.heartbeatError === undefined
+            ? outcome.result
+            : verdictlessFailure("heartbeat-failed", outcome.heartbeatError)
         await commit(settlement(id, attempt, parsed.runner, result))
         observedResult = result
         return current(id)
@@ -1481,7 +1483,7 @@ async function executeWithHeartbeat(
     result =
       settled.type === "result"
         ? settled.value
-        : failed("runner-error", settled.type === "error" ? settled.error : heartbeatError)
+        : verdictlessFailure("runner-error", settled.type === "error" ? settled.error : heartbeatError)
   } finally {
     await scope[Symbol.asyncDispose]()
     await heartbeats
@@ -1497,11 +1499,12 @@ function settlement(id: string, attempt: number, runner: string, result: JobResu
   return { type: "finish", id, attempt, runner, result }
 }
 
-function failed(code: string, error: unknown): JobResult<never> {
+/** A Job-owned machinery failure that says nothing about the submitted content. */
+function verdictlessFailure(code: string, error: unknown): JobResult<never> {
   return {
     status: "completed",
     conclusion: "failure",
-    error: { code, message: error instanceof Error ? error.message : String(error) },
+    error: { code, message: error instanceof Error ? error.message : String(error), verdictless: true },
   }
 }
 
