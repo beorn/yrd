@@ -211,3 +211,39 @@ narrower proxy.
 Secondary, lower stakes: **should the freshness sweep (`yrd-cli/src/run.ts:11277`) take
 the same narrowing in the same change, or a follow-on bead?** I left it out; it is one
 package away and would double the review surface.
+
+---
+
+## 6. Known consequences a reviewer should weigh
+
+**A waiting carrier now reads "checks passed" at a base that is not main.** That is the
+whole point of the filter — its request and its verdict keep naming the base it was
+proved at — but it changes what the operator-facing projections show. It is the same
+state a carrier held by a live run has always had (`queue.ts:3553` relies on exactly
+this shape), so nothing new is representable; more carriers now sit in it, for longer.
+If `queue-status-projection.ts` or the plan audit reads "passed" as "passed against
+main", that reading was already wrong and is now wrong more often. Worth a look before
+this lands.
+
+**Merge selection can pick a carrier whose verdict is stale.** Eligibility reads the
+request/verdict pair, and a matching-but-stale pair now reads as passed. This is sound:
+the merge run re-executes its pre-merge prefix whenever `reusableRevisionAdmission`
+denies reuse (`queue.ts:9268`), which a stale base guarantees. The check still runs
+against the base the change merges onto, before the merge step — the work moves from the
+admission pass into the run, which is where it is actually spent. Net work is the same
+or lower; the placement differs.
+
+**One partition per base, not one per (base, flow, integration proof).**
+`partitionCandidates` groups on a wider key than base alone, so two partitions can share
+a base. The window takes the first per *base*, because `activeBases` serializes on base
+identity — a second partition on the same base cannot hold a run while the first does.
+Within a single in-process cycle the compose loop can still reach a second partition; it
+composes, and its check runs inside its run per the paragraph above. Correct, and worth
+re-reading if `activeBases` ever stops being base-keyed.
+
+**The window is built with `explicitStepAuthority: true`** (`ignoreChecks`), matching
+`freshnessCandidateBatches` (`queue.ts:4270`). That is deliberate: the window must
+contain the change that is next in line *whether or not its checks have passed*, since
+the whole purpose of putting it in the window is to prove it. Using the checks-aware
+selection would admit only already-green carriers and never refresh the one that needs
+it.

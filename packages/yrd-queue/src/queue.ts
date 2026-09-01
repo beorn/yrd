@@ -3567,10 +3567,11 @@ function createQueue<Shape extends ChangeShape>(
           // charges the same carriers for them again on the next base move.
           // An explicit selection names its own targets and is left alone.
           const landable = selectorless ? landingWindow(snapshot, steps, needsPersonOwner) : undefined
+          const admissionPlan = admissionSteps(steps)
           const refreshable =
             landable === undefined
               ? everyRefreshable
-              : everyRefreshable.filter((pr) => landable.has(pr.id) || !spendableAdmission(pr, admissionSteps(steps)))
+              : everyRefreshable.filter((pr) => landable.has(pr.id) || !spendableAdmission(pr, admissionPlan))
           // Admission is revision-owned evidence, not a Queue Run. Revalidate
           // each requested revision against this cycle's base before selecting
           // merge work. The driver still settles any historical active
