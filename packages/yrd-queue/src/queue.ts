@@ -1661,7 +1661,7 @@ function createQueue<Shape extends ChangeShape>(
    * `const { unrecordedSubmits } = queue` must still ask git. */
   const takeLandingScan = async (snapshot: DeepReadonly<RuntimeState>): Promise<LandedSubmitScan | undefined> => {
     if (!landing.wired) {
-      log.warn?.(
+      log.error?.(
         "queue cannot ask the repository which standing submit facts already landed: no scanLandedSubmits " +
           "reader is configured for the queue plugin. Every waiting-list row this process reports is " +
           "UNVERIFIED — the change-record store is deliberately not consulted, because its answer was wrong " +
@@ -1683,7 +1683,7 @@ function createQueue<Shape extends ChangeShape>(
       // the queue recognizing it already did this work, not a fault. The line
       // still exists, with its population, so it stays distinguishable from a
       // run that never looked.
-      log.info?.("queue run emitted zero events because a reusable prefix covered every selected step", {
+      log.debug?.("queue run emitted zero events because a reusable prefix covered every selected step", {
         action: "queue-run-reuse-covered",
         ...covered.data,
       })
@@ -4027,7 +4027,7 @@ function createQueue<Shape extends ChangeShape>(
             })
           }
           if (staleAdmissions.length > 0) {
-            log.warn?.("Stopped required-check jobs whose PR revision is no longer live.", {
+            log.info?.("Stopped required-check jobs whose PR revision is no longer live.", {
               action: "recover-stale-admission-settle",
               reason: "stale-admission-job",
               jobs: staleAdmissions.map((job) => job.id),
@@ -4066,7 +4066,7 @@ function createQueue<Shape extends ChangeShape>(
             if (ownsRecoveredJob) affected.add(candidate.id)
           }
           if (staleQueued.length > 0) {
-            log.warn?.("Stopped queue runs whose queued step definition changed.", {
+            log.info?.("Stopped queue runs whose queued step definition changed.", {
               action: "recover-stale-steps-release",
               reason: "stale-steps",
               runs: staleQueued.map(({ run }) => run),

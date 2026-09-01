@@ -1055,7 +1055,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       // gap (2026-07-20 outage: CI stopped taking new work on cold-fold debt).
       if (!checkpointWarning && checkpointDebt() >= PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES) {
         checkpointWarning = true
-        coreLog.info?.("Yrd's saved state will be updated by the next write-capable command.")
+        coreLog.debug?.("Yrd's saved state will be updated by the next write-capable command.")
       }
       return
     }
@@ -1386,7 +1386,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     }
     state(projection.state)
     if (projection.unknownEvents.size > 0) {
-      coreLog.info?.("Journal carries events with unregistered names; replay quarantined them (unknownEventNames()).", {
+      coreLog.warn?.("Journal carries events with unregistered names; replay quarantined them (unknownEventNames()).", {
         names: [...projection.unknownEvents.keys()].toSorted(),
       })
     }
