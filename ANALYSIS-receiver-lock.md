@@ -2,7 +2,50 @@
 
 Branch `task/yrd-receiver-lock-20260831`, cut from `e4be7989023b24e4f4733d4ab792cd6dd70b00cd` (the live `vendor/yrd` pin).
 
-## Verdict, in one paragraph
+## Correction after prior-art review (read this first)
+
+A claude-era `@cto` session had already diagnosed and fixed the actual
+**deadlock** about two hours before this work began, on the git-super side:
+`51c72de fix(worktree): skip no-op config repair lock`, which is now the tip of
+git-super's own `origin/main`. Its gitlink advance into the hh superproject is
+still pending on `origin/task/@i/10-yrd/receiver-hook-lock-hoist`, and the bay's
+pin is still `5b3312c`, so the fix is landed on the component but not yet in our
+checkout. Its bead is
+`@i/10-yrd/receiver-hook-deadlocks-inside-its-own-push`.
+
+**The mechanism, in its own words:** "Store initialization acquired the worktree
+mutation lock before learning that `extensions.worktreeConfig=true` and
+`core.bare=false` required no repair. A receiver hook descended from
+`git super push` then waited on the lock held by its own ancestor."
+
+That is a true self-deadlock across a process tree, and the chain reaches our
+side exactly:
+
+    git-super push  -- holds <common-dir>/yrd-worktree-mutations/writer.lock
+      git push -> receive-pack -> yrd receiver-hook
+        runReceiverHook                    packages/yrd-cli/src/host.ts:4090
+        createDefaultYrdDefinition         packages/yrd-cli/src/host.ts:2139-2147
+          options.workspace is undefined on the hook path, and
+          intakeRemote: receiverPath forces removeLegacySharedPushDefault
+        createGitWorkspace                 packages/yrd-bay/src/git.ts:240-249
+        createGitWorktreeStore             packages/yrd-bay/src/git.ts:245
+        mutationLock()                     vendor/git-super/src/worktree.ts:279-296
+          unconditional acquire, timeouts.mutationLock ?? GIT_TIMEOUT_MS = 30_000
+          (vendor/git-super/src/worktree.ts:269 and :52)
+
+**So the root-cause verdict below is revised: this branch does NOT fix the
+deadlock, and never claimed the git-super lock.** The hoist does. What remains
+after it — and what this branch fixes — is that the drain's critical section is
+still unbounded and the partial state it leaves is still unnameable. The two are
+complementary and cannot conflict: different lock (`drain-lock` vs
+`yrd-worktree-mutations`), different repository, disjoint files.
+
+One detail worth keeping: the lock-busy test added here prints
+`owner=pid:N; contender=pid:N` — the same pid on both sides. I flagged that as
+"worth knowing before anyone adds a nested acquire". It was not hypothetical; it
+is the signature of the live bug the hoist fixes.
+
+## Verdict, in one paragraph (as written before the prior-art review)
 
 The receiver's drain lock was never the thing that waited. Its own timeout is
 `?? 0` on the receive path, so a **contender** fails instantly and loudly, with
@@ -34,8 +77,17 @@ CLI runtime path, so this is not an ABBA deadlock — it is a convoy.
 
 ## Where the 102 seconds comes from
 
-Not from any single timeout constant; nothing in the tree equals 102 s. Two
-compositions both land there, and both are `3 x 30 s + hook boot`:
+Not from any single timeout constant; nothing in the tree equals 102 s. THREE
+legs can each contribute 30 s, and the first is the one with a diagnosis, a
+regression test and a bead behind it — the other two are arithmetic that fits,
+which is not the same as arithmetic that is proven:
+
+* **Ancestor-held worktree mutation lock (the hoist's leg, measured).** The
+  receiver hook waits `timeouts.mutationLock = 30_000` on a lock its own
+  ancestor `git-super push` holds. Fixed by `51c72de`; see the correction at the
+  top of this document.
+
+The two remaining legs are mine, and both are `3 x 30 s + hook boot`:
 
 * **Git-retry composition.** Every git child in the receiver runs with
   `GIT_TIMEOUT_MS = 30_000` (`packages/yrd-bay/src/receiver.ts:735`). The
@@ -49,7 +101,7 @@ compositions both land there, and both are `3 x 30 s + hook boot`:
   the replay `journal-read`, and again for each append inside the drain. Three
   contended acquisitions is `90_000 ms`.
 
-Either way, add the hook's own boot — `loadGitPushReceiver`,
+Add the hook's own boot — `loadGitPushReceiver`,
 `discoverYrdRepository`, `loadRepositoryConfig`, `createJournal` +
 `createDefaultYrdRuntimeApp` — and the measured **102 232 ms** is accounted for
 within about a second. The useful conclusion is the one both compositions
@@ -130,6 +182,10 @@ The anchor now omits the prefix.
 
 ## What I deliberately did not change
 
+* **The git-super worktree mutation lock.** Not mine to touch, and already
+  fixed upstream by `51c72de`. Do not duplicate it. What this branch needs from
+  it is only that the gitlink advance on
+  `origin/task/@i/10-yrd/receiver-hook-lock-hoist` lands.
 * **The drain still runs on the post-receive path.** Moving it to a background
   handoff is the structurally better answer and is a much larger change: it
   needs a durable trigger, an owner, and a story for what happens when no runner
@@ -200,6 +256,10 @@ unmodified code, characterizing today's behavior exactly:
   the wrong directory — but the finding always prints the directory it looked
   at, so the answer is wrong loudly rather than clean quietly. Neither
   production call site passes one.
+* **Sequencing.** This branch is worth little on its own if the hoist's gitlink
+  advance does not land: the self-deadlock dominates, and bounding the drain
+  only trims what is left after it. Land
+  `origin/task/@i/10-yrd/receiver-hook-lock-hoist` first, then this.
 * **I could not reproduce the 102 s end to end.** The queue is in the garage and
   no runner may be started, so the timing above is derived from the constants
   and the code path, not measured on a live push. The two compositions are

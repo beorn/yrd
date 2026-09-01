@@ -245,9 +245,17 @@ export type ReceiverHookOptions = {
    * each, retried by the caller's process wrapper) plus whatever the caller's
    * `intake` does — for the production hook, journal appends that take a
    * SECOND lock with its own 30s wait. Nothing bounded the total, so a push
-   * paid for every other branch's backlog: measured at 102s on 2026-08-31,
-   * past the pusher's own patience, leaving refs applied and the inbox result
-   * mid-flight with nothing able to say so.
+   * paid for every other branch's backlog, leaving refs applied and the inbox
+   * result mid-flight with nothing able to say so.
+   *
+   * This bound is NOT the fix for the 102s stall measured on 2026-08-31 —
+   * do not read it as one. That was a genuine self-deadlock: the hook's own
+   * `createGitWorkspace` initialized a git-super worktree store, which took
+   * `<common-dir>/yrd-worktree-mutations/writer.lock` while the hook's ANCESTOR
+   * `git-super push` already held it. Fixed in git-super by `51c72de`
+   * ("skip no-op config repair lock", `@i/10-yrd/receiver-hook-deadlocks-inside-its-own-push`).
+   * What this bound covers is the latency that remains after that one: a
+   * backlogged inbox is still an unbounded bill charged to whoever pushes next.
    *
    * The budget is checked BEFORE each result, never inside one: a result is
    * always run to completion or not started, so a deferral is a result still

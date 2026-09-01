@@ -4150,8 +4150,13 @@ async function runReceiverHook(
       // post-receive exits. Every other bound in this path is per-git-call
       // (`GIT_TIMEOUT_MS`, retried three times by `withGitTimeoutRetry`) or
       // per-lock (the journal's own 30s), so the TOTAL was unbounded and a
-      // push paid for every branch waiting in the inbox — 102s measured on
-      // 2026-08-31. This is the only bound over the whole critical section.
+      // push paid for every branch waiting in the inbox. This is the only
+      // bound over the whole critical section.
+      //
+      // Not the cure for the 102s stall of 2026-08-31: that was the hook's own
+      // worktree-store init waiting on `yrd-worktree-mutations/writer.lock`
+      // held by its ANCESTOR `git-super push`, fixed in git-super by 51c72de.
+      // This bounds what is left over once that deadlock is gone.
       drainDeadlineMs: RECEIVE_DRAIN_BUDGET_MS,
       // Wait briefly rather than not at all: a concurrent drain usually
       // finishes in well under a second, and the alternative (`?? 0`) turned
