@@ -9572,7 +9572,7 @@ function implicitSelectionAccounting(
       held.push({
         code: "claimed",
         reason: `queue run '${consumer}' already holds this change and has not settled`,
-        remedy: `this change is reconsidered once run '${consumer}' settles; inspect it with 'yrd queue show ${consumer}'`,
+        remedy: `this change is reconsidered once run '${consumer}' settles; 'yrd queue audit' names what holds it`,
         run: consumer,
       })
     }
