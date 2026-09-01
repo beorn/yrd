@@ -609,8 +609,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // carries `judgedFailure`, and the widened schemas accept both. The
     // predecessor 1d285ebf — the ledger's own superseded last entry — gains a
     // retained edge.
+    // Conscious update 2026-09-01: pre-Candidate derived identities add the
+    // empty `queues.derivedIdentities` projection and its binding event. The
+    // former target fd6a78df is retained; the new target is 3f8a2627.
     const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c")
+    expect(first.manifest.targetIdentity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -1865,6 +1868,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .passthrough()
       .parse(checkpointValue.value.state["bays"])
     const queues = z.record(z.string(), z.unknown()).parse(checkpointValue.value.state["queues"])
+    const { derivedIdentities: _modernDerivedIdentities, ...queuesAt36d } = queues
     const pr = bays.prs["PR1"]
     if (pr === undefined) throw new Error("expected predecessor PR1 projection")
     // A checkpoint written before the intent rail's deletion (2026-08-18) still carries a
@@ -1907,7 +1911,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
           ...checkpointValue.value.state,
           intents: staleIntents,
           bays: { ...bays, prs: { ...bays.prs, PR1: { ...pr, regressions: staleRegressions } } },
-          queues: { ...queues, terminalAssociations: { pending: {}, applied: {} } },
+          queues: { ...queuesAt36d, terminalAssociations: { pending: {}, applied: {} } },
         },
       },
       identity: retainedIdentity,
@@ -1933,6 +1937,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(restored.state()).not.toHaveProperty("intents")
     expect(restored.state().bays.prs.PR1).not.toHaveProperty("regressions")
     expect(restored.state().queues).not.toHaveProperty("terminalAssociations")
+    expect(restored.state().queues.derivedIdentities).toEqual({})
     await restored.close()
 
     // The drop is durable: the checkpoint THIS boot writes back to disk does not carry the
@@ -2041,7 +2046,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c")
+    expect(rewritten.checkpoint_identity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2130,7 +2135,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c")
+    expect(rewritten.checkpoint_identity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
     redatabase.close()
   })
 

@@ -29,7 +29,16 @@ import {
   type BayWorkspace,
   type PrNumberMint,
 } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, failureFact, parseJournalFrame, pipe } from "@yrd/core"
+import {
+  createMemoryJournal,
+  createYrd,
+  createYrdDef,
+  failureFact,
+  parseJournalFrame,
+  pipe,
+  type Journal,
+  type JournalFrame,
+} from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
@@ -49,6 +58,7 @@ import {
   type IntegrationProof,
   type StepExecution,
 } from "@yrd/queue"
+import { indexedJournal } from "./support/indexed-journal.ts"
 
 const packagesRoot = join(import.meta.dirname, "..", "..")
 const BASE = "a".repeat(40)
@@ -103,6 +113,13 @@ const passingCheck = () =>
     { revision: "check-v1", output: CheckResultSchema },
   )
 
+const waitingCheck = () =>
+  withStep(
+    "check",
+    (_input: StepExecution): JobResult<CheckResult> => ({ status: "waiting", token: "still-checking" }),
+    { revision: "check-v1", output: CheckResultSchema },
+  )
+
 const passingMerge = () =>
   withMerge(
     async (): Promise<JobResult<IntegrationProof>> => ({
@@ -138,7 +155,7 @@ const authorFailingMerge = () =>
 
 async function createApp(
   options: Readonly<{
-    journal?: ReturnType<typeof createMemoryJournal>
+    journal?: Journal<unknown>
     id?: () => string
     log?: ReturnType<typeof createLogger>
     steps?: readonly ReturnType<typeof passingCheck | typeof passingMerge | typeof passingDeploy>[]
@@ -228,7 +245,7 @@ function stepsMapOf(app: App): ReadonlyMap<string, never> {
 /** Every journaled event of `name`, in order — the door's terminal facts live
  * ONLY in the journal (the store write is a no-op for derived members). */
 async function journalEvents(
-  journal: ReturnType<typeof createMemoryJournal>,
+  journal: Journal<unknown>,
   name: string,
 ): Promise<readonly Readonly<{ name: string; data: unknown }>[]> {
   const out: Readonly<{ name: string; data: unknown }>[] = []
@@ -239,6 +256,24 @@ async function journalEvents(
     }
   }
   return out
+}
+
+async function journalFrames(journal: Journal<unknown>): Promise<readonly JournalFrame[]> {
+  const frames: JournalFrame[] = []
+  for await (const batch of journal.read(0)) {
+    frames.push(...batch.values.map((value) => parseJournalFrame(value)))
+  }
+  return frames
+}
+
+function admissionRequestEvents(frames: readonly JournalFrame[], pr: string) {
+  return frames.flatMap((frame) =>
+    frame.events.filter((applied) => {
+      if (applied.name !== "job/requested") return false
+      const input = (applied.data as { input?: { prs?: readonly { id?: unknown }[] } }).input
+      return input?.prs?.some((member) => member.id === pr) === true
+    }),
+  )
 }
 
 /** One compose log line by its `action` prop — module-scoped so every test in
@@ -626,16 +661,14 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     // "queued") means it is never re-invoked either. Checks-pending held
     // open on every later pass, deterministically, instead of racing a real
     // clock.
-    const stillChecking = () =>
-      withStep(
-        "check",
-        (_input: StepExecution): JobResult<CheckResult> => ({ status: "waiting", token: "still-checking" }),
-        { revision: "check-v1", output: CheckResultSchema },
-      )
     const events: LogEvent[] = []
+    const journal = indexedJournal()
+    const id = ids()
     const mint = volatilePrNumberMint()
     await using app = await createApp({
-      steps: [stillChecking()],
+      journal,
+      id,
+      steps: [waitingCheck()],
       defaultSteps: ["check"],
       prNumberMint: mint,
       baysPrNumberMint: mint,
@@ -646,6 +679,40 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     await app.queue.run({}, runtime)
     const firstMint = composeEvent(events, "compose-derived-admitted")
     expect(firstMint?.props).toMatchObject({ branch: "issue/slow-checks", pr: "PR1", revision: 1 })
+    expect(mint.highWater()).toBe(1)
+    const firstFrames = await journalFrames(journal)
+    const bindingFrame = firstFrames.findIndex((frame) =>
+      frame.events.some(
+        (applied) => applied.name === "queue/derived-identity/bound" && (applied.data as { id?: unknown }).id === "PR1",
+      ),
+    )
+    const requestFrame = firstFrames.findIndex((frame) => admissionRequestEvents([frame], "PR1").length > 0)
+    // The mint's durable binding precedes the effectful candidate preparation
+    // and its Job request. A crash in this deliberate gap leaves enough truth
+    // for the next pass to request work under the SAME id.
+    expect(bindingFrame).toBeGreaterThanOrEqual(0)
+    expect(requestFrame).toBeGreaterThan(bindingFrame)
+
+    const crashedJournal = indexedJournal(firstFrames.slice(0, bindingFrame + 1))
+    const crashedAt = (await journalFrames(crashedJournal)).length
+    await using restarted = await createApp({
+      journal: crashedJournal,
+      id,
+      steps: [waitingCheck()],
+      defaultSteps: ["check"],
+      prNumberMint: mint,
+      baysPrNumberMint: mint,
+    })
+    await restarted.queue.run({}, runtime)
+    const recoveredFrames = (await journalFrames(crashedJournal)).slice(crashedAt)
+    expect(
+      recoveredFrames.filter((frame) =>
+        frame.events.some((applied) => applied.name === "queue/derived-identity/bound"),
+      ),
+    ).toHaveLength(0)
+    const recoveredRequests = admissionRequestEvents(recoveredFrames, "PR1")
+    expect(recoveredRequests).toHaveLength(1)
+    expect(recoveredRequests[0]?.data).toMatchObject({ key: `admission:PR1:1:${BASE}:0:check-v1` })
     expect(mint.highWater()).toBe(1)
 
     events.length = 0
@@ -663,11 +730,174 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     const thirdMint = composeEvent(events, "compose-derived-admitted")
     expect(thirdMint?.props).toMatchObject({ branch: "issue/slow-checks", pr: "PR1", revision: 1 })
     expect(mint.highWater()).toBe(1)
+    const requestsAfterThreePasses = admissionRequestEvents(await journalFrames(journal), "PR1")
+    expect(requestsAfterThreePasses).toHaveLength(1)
+    expect(requestsAfterThreePasses[0]?.data).toMatchObject({ key: `admission:PR1:1:${BASE}:0:check-v1` })
 
     // Still correctly "not yet landed" — that row is not the bug; the number
     // churn underneath it was. `unrecordedSubmits` only retires once a Queue
     // run actually starts, and none has (the check never settles here).
     expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/slow-checks"])
+  })
+
+  it("retires a legacy SHA-only Candidate loudly and binds a fresh identity to the exact branch+sha", async () => {
+    const events: LogEvent[] = []
+    const mint = volatilePrNumberMint(7)
+    await using app = await createApp({
+      steps: [waitingCheck()],
+      defaultSteps: ["check"],
+      prNumberMint: mint,
+      baysPrNumberMint: mint,
+      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]),
+    })
+    const legacyBranch = "issue/legacy-source-unknown"
+    const branch = "issue/current-owner"
+    await app.bays.recordBranchSubmit({ branch: legacyBranch, sha: SHA, base: "main" })
+    await app.queue.run(
+      {
+        derived: [{ branch: legacyBranch, id: "PR7", changeId: CHANGE_ID, revision: 1, headSha: SHA }],
+      },
+      runtime,
+    )
+    expect(
+      Object.values(app.state().queues.candidates).some((candidate) =>
+        candidate.revs.some((revision) => revision.pr === "PR7" && revision.head === SHA),
+      ),
+    ).toBe(true)
+    await app.bays.recordBranchUnsubmit({ branch: legacyBranch, reason: "superseded" })
+    await app.bays.recordBranchSubmit({ branch, sha: SHA, base: "main" })
+
+    events.length = 0
+    await app.queue.run({}, runtime)
+
+    expect(composeEvent(events, "compose-derived-legacy-candidate-retired")?.props).toMatchObject({
+      branch,
+      sha: SHA,
+      legacyPr: "PR7",
+      replacementPr: "PR8",
+      remedy: `legacy SHA-only candidate; re-push under branch ${branch} takes the mint path`,
+    })
+    expect(app.state().queues.derivedIdentities[branch]?.[SHA]).toMatchObject({ id: "PR8", revision: 1 })
+    expect(mint.highWater()).toBe(8)
+  })
+
+  it("does not misclassify another branch's exactly-bound Candidate as legacy at a shared sha", async () => {
+    const events: LogEvent[] = []
+    const mint = volatilePrNumberMint()
+    await using app = await createApp({
+      steps: [waitingCheck()],
+      defaultSteps: ["check"],
+      prNumberMint: mint,
+      baysPrNumberMint: mint,
+      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]),
+    })
+    const first = "issue/shared-sha-one"
+    const second = "issue/shared-sha-two"
+    await app.bays.recordBranchSubmit({ branch: first, sha: SHA, base: "main" })
+    await app.queue.run({}, runtime)
+    expect(app.state().queues.derivedIdentities[first]?.[SHA]).toMatchObject({ id: "PR1" })
+
+    events.length = 0
+    await app.bays.recordBranchSubmit({ branch: second, sha: SHA, base: "main" })
+    await app.queue.run({}, runtime)
+
+    expect(app.state().queues.derivedIdentities[second]?.[SHA]).toMatchObject({ id: "PR2" })
+    expect(composeEvent(events, "compose-derived-legacy-candidate-retired")).toBeUndefined()
+  })
+
+  it.each([
+    {
+      name: "an unsubmit and same-sha resubmit",
+      transitions: [undefined, SHA],
+      expectedIds: ["PR1", "PR1"],
+      expectedBindings: 1,
+    },
+    {
+      name: "a move away and return to the original sha",
+      transitions: [RESUBMIT_SHA, SHA],
+      expectedIds: ["PR1", "PR2", "PR1"],
+      expectedBindings: 2,
+    },
+  ] as const)("keeps branch+sha identity stable through $name, live and under cold replay", async (fixture) => {
+    const journal = indexedJournal()
+    const id = ids()
+    const mint = volatilePrNumberMint()
+    const branch = "issue/identity-lifecycle"
+    const composed: string[] = []
+    const events: LogEvent[] = []
+
+    const compose = async (app: App) => {
+      events.length = 0
+      await app.queue.run({}, runtime)
+      const pr = composeEvent(events, "compose-derived-admitted")?.props?.pr
+      if (typeof pr !== "string") throw new Error("expected compose-derived-admitted identity")
+      composed.push(pr)
+      const candidateMembers = Object.values(app.state().queues.candidates).flatMap((candidate) =>
+        candidate.revs.map((revision) => revision.pr),
+      )
+      const runMembers = Queues.values(app.state().queues).flatMap((run) => run.prs.map((member) => member.id))
+      expect(candidateMembers).not.toContain(pr)
+      expect(runMembers).not.toContain(pr)
+    }
+
+    {
+      await using app = await createApp({
+        journal,
+        id,
+        steps: [passingCheck()],
+        defaultSteps: ["check"],
+        prNumberMint: mint,
+        baysPrNumberMint: mint,
+        log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]),
+      })
+      await app.queue.pause({
+        base: "main",
+        reason: "keep the identity pre-Candidate while exercising submit-fact lifecycle",
+        allowedPRs: [],
+        expiresAt: "2026-01-01T01:00:00.000Z",
+      })
+      await app.bays.recordBranchSubmit({ branch, sha: SHA, base: "main" })
+      await compose(app)
+
+      for (const sha of fixture.transitions) {
+        if (sha === undefined) await app.bays.recordBranchUnsubmit({ branch, reason: "deleted" })
+        else await app.bays.recordBranchSubmit({ branch, sha, base: "main" })
+        // Submit lifecycle changes which historical pair is current; it never
+        // erases the old fact. Returning to SHA must find PR1 again live and
+        // under cold replay.
+        expect(app.state().queues.derivedIdentities[branch]?.[SHA]).toMatchObject({ id: "PR1" })
+        if (sha !== undefined && sha !== SHA) {
+          expect(app.state().queues.derivedIdentities[branch]?.[sha]).toBeUndefined()
+        }
+        if (sha === undefined) continue
+        await compose(app)
+      }
+
+      expect(composed).toEqual(fixture.expectedIds)
+      expect(mint.highWater()).toBe(fixture.expectedBindings)
+      await expect(app.historySnapshot()).resolves.toBeDefined()
+    }
+
+    const replayEvents: LogEvent[] = []
+    await using replayed = await createApp({
+      journal,
+      id,
+      steps: [passingCheck()],
+      defaultSteps: ["check"],
+      prNumberMint: mint,
+      baysPrNumberMint: mint,
+      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => replayEvents.push(event) }]),
+    })
+    expect(replayed.state().bays.submits[branch]).toMatchObject({ sha: SHA })
+    await replayed.queue.run({}, runtime)
+    expect(composeEvent(replayEvents, "compose-derived-admitted")?.props).toMatchObject({ branch, pr: "PR1" })
+    expect(mint.highWater()).toBe(fixture.expectedBindings)
+    expect(await journalEvents(journal, "queue/derived-identity/bound")).toHaveLength(fixture.expectedBindings)
+    expect(Object.keys(replayed.state().queues.derivedIdentities[branch] ?? {})).toHaveLength(fixture.expectedBindings)
+    const frames = await journalFrames(journal)
+    expect(frames.filter((frame) => frame.command.op === "queue.bindDerivedIdentity")).toHaveLength(
+      fixture.expectedBindings,
+    )
   })
 
   it("replay converges over a journal holding recordless terminal events, with zero store writes for the derived era (A5 full)", async () => {

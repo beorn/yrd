@@ -370,6 +370,33 @@ describe("id-seam — admission-time mint (commit-before-escape)", () => {
     expect(identity).toEqual({ id: "PR8", revision: 4, minted: true })
   })
 
+  it("does not reuse a migrated snapshot id that an exact binding already attributes to another branch", () => {
+    const mint = volatilePrNumberMint(9)
+    const first = "issue/legacy-alias-one"
+    const second = "issue/legacy-alias-two"
+    const queues = {
+      ...queuesWith(
+        runRecord("R1", [
+          snapshot({ id: "PR7", branch: first, revision: 1, headSha: HEAD }),
+          snapshot({ id: "PR7", branch: second, revision: 1, headSha: HEAD }),
+        ]),
+      ),
+      derivedIdentities: {
+        [first]: { [HEAD]: { branch: first, sha: HEAD, id: "PR7", revision: 1 } },
+      },
+    }
+    const bays = {
+      ...baysWith(),
+      submits: { [second]: { sha: HEAD, base: "main", at: AT } },
+    }
+
+    expect(mintDerivedMemberIdentity({ mint, bays, queues, branch: second })).toEqual({
+      id: "PR10",
+      revision: 1,
+      minted: true,
+    })
+  })
+
   it("a live record refuses the derived lane loudly", () => {
     const bays = baysWith(changeRecord({ id: "PR5", branch: "issue/live" }))
     expect(() =>
@@ -389,12 +416,11 @@ describe("id-seam — admission-time mint (commit-before-escape)", () => {
  * Regression — the phantom-remint livelock (2026-09-01, yrd runner
  * c576de2a): `deriveRefOnlyMembers` derives+mints an identity and dispatches
  * its required-check Jobs BEFORE any Queue run exists (queue.ts's `S6 door`
- * doc), so the ONLY durable trace of that admission, before a run starts, is
- * the `Candidate` `admissionStep` journals on its first dispatch
- * (`queue/candidate/created`) — never a `queue/run/started` ChangeSnapshot.
- * `mintDerivedMemberIdentity`'s reuse arm read ONLY the run-started
- * snapshot, so a branch whose checks took longer than one compose pass to
- * settle was re-derived from scratch every pass: a fresh number minted, a
+ * doc). Before the exact identity binding existed, no branch-proven durable
+ * trace survived until `queue/run/started`: the SHA-only Candidate could not
+ * prove which branch owned its id. A branch whose checks took longer than one
+ * compose pass to settle was therefore re-derived from scratch every pass: a
+ * fresh number minted, a
  * fresh Job dispatched under that number's `admissionJobKey`, the PRIOR
  * pass's Job (and number) abandoned — forever, because progress never had
  * anywhere durable to survive between passes. Measured live: PR2919 minted
@@ -402,13 +428,10 @@ describe("id-seam — admission-time mint (commit-before-escape)", () => {
  * 08:01:10 for the exact same (branch, sha) — repeating every ~55s, eleven
  * branches wedged simultaneously.
  */
-describe("id-seam — pending admission reuse (no run has started yet)", () => {
+describe("id-seam — pending admission identity (no run has started yet)", () => {
   const SHA = "9".repeat(40)
 
-  /** `baysWith` deliberately carries no live submit facts (every existing
-   * case in this file reuses from a retained snapshot, which never consults
-   * one) — the pending-candidate arm reads the branch's LIVE sha, so these
-   * cases need one. */
+  /** Candidate compatibility cases require the branch's live submit fact. */
   function baysWithSubmit(branch: string, sha: string, ...prs: readonly Change[]): BaysState {
     return {
       ...baysWith(...prs),
@@ -436,43 +459,16 @@ describe("id-seam — pending admission reuse (no run has started yet)", () => {
     }
   }
 
-  it("reuses the identity an in-flight admission Candidate already names for the live sha — same id, same revision, nothing minted", () => {
+  it("never reuses a legacy SHA-only Candidate, even when it is the sole exact-sha match", () => {
     const mint = volatilePrNumberMint(9)
     const branch = "issue/slow-checks"
     const queues = queuesWithCandidate({ pr: "PR7", n: 1, head: SHA })
     const identity = mintDerivedMemberIdentity({ mint, bays: baysWithSubmit(branch, SHA), queues, branch })
-    expect(identity).toEqual({ id: "PR7", revision: 1, minted: false })
-    // THE bug: before this fix, nothing here found the candidate, so this
-    // fell straight through to a fresh mint and the high-water moved.
-    expect(mint.highWater()).toBe(9)
-  })
-
-  it("a candidate for a DIFFERENT sha (the branch was re-pushed since) is not reusable — a fresh mint is correct", () => {
-    const mint = volatilePrNumberMint(9)
-    const branch = "issue/repushed"
-    const queues = queuesWithCandidate({ pr: "PR7", n: 1, head: "8".repeat(40) })
-    const identity = mintDerivedMemberIdentity({ mint, bays: baysWithSubmit(branch, SHA), queues, branch })
     expect(identity).toEqual({ id: "PR10", revision: 1, minted: true })
+    expect(mint.highWater()).toBe(10)
   })
 
-  it("a candidate whose id now names a real record is not reusable — the record lane claimed that number since", () => {
-    const mint = volatilePrNumberMint(9)
-    const branch = "issue/slow-checks"
-    const record = changeRecord({ id: "PR7", branch: "issue/other" })
-    const queues = queuesWithCandidate({ pr: "PR7", n: 1, head: SHA })
-    const identity = mintDerivedMemberIdentity({ mint, bays: baysWithSubmit(branch, SHA, record), queues, branch })
-    expect(identity).toEqual({ id: "PR10", revision: 1, minted: true })
-  })
-
-  it("the LOWEST-numbered candidate wins when the bug already minted more than one phantom for the same sha", () => {
-    const mint = volatilePrNumberMint(9)
-    const branch = "issue/already-phantomed"
-    const queues = queuesWithCandidate({ pr: "PR9", n: 1, head: SHA }, { pr: "PR7", n: 1, head: SHA })
-    const identity = mintDerivedMemberIdentity({ mint, bays: baysWithSubmit(branch, SHA), queues, branch })
-    expect(identity).toEqual({ id: "PR7", revision: 1, minted: false })
-  })
-
-  it("a retained run-started snapshot still wins over a pending candidate — once a run exists, it is the authority", () => {
+  it("a branch-proven run snapshot still wins over a legacy Candidate", () => {
     const mint = volatilePrNumberMint(9)
     const branch = "issue/started"
     const queues = {
@@ -480,8 +476,8 @@ describe("id-seam — pending admission reuse (no run has started yet)", () => {
       records: queuesWith(runRecord("R1", [snapshot({ id: "PR7", branch, revision: 1 })])).records,
     }
     const identity = mintDerivedMemberIdentity({ mint, bays: baysWithSubmit(branch, SHA), queues, branch })
-    // Revision bumps to 2 (the run-snapshot arm), proving it — not the
-    // pending-candidate arm, which would have replayed revision 1 unchanged.
+    // Revision bumps to 2, proving the branch-proven snapshot — not the
+    // SHA-only Candidate — supplied the identity.
     expect(identity).toEqual({ id: "PR7", revision: 2, minted: false })
   })
 })

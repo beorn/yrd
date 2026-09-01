@@ -398,6 +398,13 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // already stores still parses unchanged, and the forward callback's drops
   // are all no-ops on it.
   "1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4",
+  // The composition immediately before recordless derived identities gained
+  // their pre-Candidate branch+sha binding (2026-09-01). This is the ledger's
+  // own superseded last entry in `checkpoint-bump-gate.ts`, hence the value a
+  // deployment was asked to store. Its checkpoint simply lacks
+  // `queues.derivedIdentities`; `fillMissingStateFromInitial` supplies the
+  // empty record before replay resumes after the stored cursor.
+  "fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -2369,16 +2376,19 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
       migrate: (state) => {
         // The live deployment already wrote a 36d85bbb checkpoint before
         // this retired nested field was noticed. A real forward edge is the
-        // only opportunity to remove it from runtime and durable state.
+        // only opportunity to remove it from runtime and durable state. It
+        // also predates later top-level projection fields; unlike the retained
+        // predecessor callbacks above, this direct edge must fill them here.
+        const filled = fillMissingStateFromInitial(definition.initialState, state)
         const prsWithoutRegressions = Object.fromEntries(
-          recordChangeEntries(state.bays).map(([id, pr]) => {
+          recordChangeEntries(filled.bays).map(([id, pr]) => {
             const { regressions: _retiredRegressions, ...withoutRegressions } = pr as typeof pr &
               Readonly<{ regressions?: unknown }>
             return [id, withoutRegressions]
           }),
         )
         const { terminalAssociations: _retiredBackfill, ...queuesWithoutBackfill } =
-          state.queues as typeof state.queues & Readonly<{ terminalAssociations?: unknown }>
+          filled.queues as typeof filled.queues & Readonly<{ terminalAssociations?: unknown }>
         // 22991 phase 2, first store-deletion door: the queue's stored copy of
         // per-change delivery state (`authority.statuses`) is deleted from the
         // contract — ChangeDeliveryState is "derived, never stored" and the
@@ -2388,7 +2398,8 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // the cut (2084/2084 stored labels equal the record derivation).
         const { statuses: _retiredStatusCopy, ...authorityWithoutStatusCopy } =
           queuesWithoutBackfill.authority as typeof queuesWithoutBackfill.authority & Readonly<{ statuses?: unknown }>
-        const { intents: _deadIntents, ...withoutDeadIntents } = state as typeof state & Readonly<{ intents?: unknown }>
+        const { intents: _deadIntents, ...withoutDeadIntents } = filled as typeof filled &
+          Readonly<{ intents?: unknown }>
         return {
           ...withoutDeadIntents,
           bays: { ...withoutDeadIntents.bays, prs: prsWithoutRegressions },
