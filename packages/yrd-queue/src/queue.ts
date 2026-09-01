@@ -141,6 +141,7 @@ import {
   DerivedRunMemberSchema,
   deriveRunMemberArgs,
   derivedAuthorityLookup,
+  derivedIntegration,
   derivedLaneBranches,
   isDerivedRunMember,
   materializeDerivedRunMembers,
@@ -3578,6 +3579,77 @@ function createQueue<Shape extends ChangeShape>(
                 return []
               }
             })
+          /**
+           * RETIRE every admitted derived member whose submit fact stopped
+           * standing while this pass was busy somewhere else.
+           *
+           * `admitDerived` validates against the state at the TOP of the pass.
+           * The settle loop below it then drives real runs — 28 minutes on the
+           * 2026-09-01T18:51:13Z specimen — and another seat's withdraw lands
+           * inside that window. The entry left in `cycleDerived` is stale from
+           * that moment on, and `requestedPRs` materialized it unguarded: the
+           * typed `derived-submit-vanished` refusal escaped `queue.run`, and
+           * under the service's `restart: "never"` andon the resident exited 1
+           * with no page raised. ONE member losing its fact took the whole
+           * queue offline (PR3090).
+           *
+           * A member losing its fact is the WORLD CHANGING under the pass, not
+           * a journal that disagrees with itself, so it RETIRES rather than
+           * kills: a loud row naming the branch, the id being retired and the
+           * remedy; a ledger row so the refusal streak still attributes; and
+           * the member dropped from the pass. Nothing further needs releasing —
+           * a derived member's authority IS its live submit fact
+           * ({@link derivedAuthorityLookup} reads `bays.submits[branch]` and
+           * answers `undefined` without one), so the vanished fact already
+           * withdrew every claim the member held.
+           *
+           * Validated against the SAME immutable snapshot the selection below
+           * reads, so a survivor of this loop cannot refuse down there.
+           */
+          const retireVanishedDerived = async (
+            members: readonly DerivedRunMember[],
+            state: DeepReadonly<RuntimeState>,
+          ): Promise<DerivedRunMember[]> => {
+            const surviving: DerivedRunMember[] = []
+            for (const member of members) {
+              try {
+                materializeDerivedRunMembers(state.bays, state.queues, [member])
+                surviving.push(member)
+              } catch (error) {
+                const fact = failureFact(error)
+                // The same boundary `admitDerived` draws: a typed refusal or a
+                // lost resource retires this member, while a mint collision or
+                // a duplicate payload still PROPAGATES — those mean an identity
+                // escaped the monotone mint, which is exactly the inconsistency
+                // fatal is reserved for.
+                if (fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) throw error
+                const landed = derivedIntegration(state.queues, member)
+                const remedy =
+                  landed === undefined
+                    ? `re-submit under a new branch name, or re-push refs/yrd/submit/${member.branch} to re-admit this head`
+                    : `nothing to do — run ${landed.run} already merged '${member.branch}' at ${member.headSha}`
+                composeLog.warn?.(
+                  `retired derived member ${member.id} (${member.branch}) [${fact.code}]: ${fact.message}`,
+                  {
+                    action: "compose-derived-retire",
+                    pr: member.id,
+                    branch: member.branch,
+                    headSha: member.headSha,
+                    code: fact.code,
+                    kind: fact.kind,
+                    reason: fact.message,
+                    remedy,
+                  },
+                )
+                await noteCandidateRefusal([member.id], {
+                  code: fact.code,
+                  kind: fact.kind,
+                  reason: `${fact.message}; remedy: ${remedy}`,
+                })
+              }
+            }
+            return surviving
+          }
           // The intent lane that used to interleave here with a head-of-line
           // release (keyed by submodule) is retired along with the rest of the
           // intent rail — there is no longer a second lane of queue members to
@@ -3591,6 +3663,12 @@ function createQueue<Shape extends ChangeShape>(
           for (const run of resumable) await settleCandidate(run.id)
 
           snapshot = runtime()
+          // The settle loop above is this pass's one long await, and a member's
+          // submit fact can vanish inside it. Re-prune BEFORE anything reads
+          // `cycleArgs`, against this very snapshot, so selection can only ever
+          // see members that still materialize.
+          cycleDerived = await retireVanishedDerived(cycleDerived, snapshot)
+          cycleArgs = cycleDerived.length === 0 ? { ...args, derived: undefined } : { ...args, derived: cycleDerived }
           // Base identity AND the specific non-terminal run holding it: the
           // Set alone (below) answers "is this base blocked", but the C5(1)
           // report a few dozen lines down needs to NAME the run too — "held

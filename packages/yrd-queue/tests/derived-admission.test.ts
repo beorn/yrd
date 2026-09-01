@@ -37,6 +37,7 @@ import {
   candidateRefFor,
   deriveRunMemberArgs,
   derivedAuthorityLookup,
+  derivedIntegration,
   isDerivedRunMember,
   materializeDerivedRunMembers,
   Queues,
@@ -1142,5 +1143,155 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
     if (member === undefined) throw new Error("expected a materialized member")
     expect(member).toMatchObject({ state: "open", merged: false })
     expect(changeDeliveryState(member)).not.toBe("integrated")
+  })
+})
+
+/**
+ * The 2026-09-01T18:51:13Z resident kill. A derived member is admitted at the
+ * top of a compose pass; the pass then spends real time driving a settling run
+ * (28 minutes, on the specimen); another seat withdraws that member's branch in
+ * the window; and the selection call BELOW the settle loop re-materializes the
+ * now-stale entry. `derived-submit-vanished` is a TYPED refusal every other
+ * derived seam in the compose already tolerates — `admitDerived`,
+ * `materializedDerived`, `settleCandidate` — but `requestedPRs` did not, so it
+ * escaped `queue.run`. Under the service's `restart: "never"` andon the
+ * resident stayed down and no page was raised: one member losing its submit
+ * fact took the whole queue offline.
+ *
+ * The world changing under a pass is ORDINARY. Fatal is reserved for an
+ * inconsistent journal.
+ */
+describe("S6 derived lane — a member unsubmitted mid-pass RETIRES, it never kills the resident", () => {
+  /**
+   * A run seeded with a still-QUEUED job, so the compose's settle loop has real
+   * work to do between admitting a derived member and selecting it — the only
+   * window in which the world can change under one pass. The low-level command
+   * mints the run without driving it, exactly as `seedOrphan` does elsewhere.
+   */
+  async function seedSettlingRun(app: App, pr: string, head: string): Promise<void> {
+    await app.dispatch(app.commands.queue.run, {
+      prs: [pr],
+      steps: ["check", "merge"],
+      candidate: {
+        id: "C9",
+        queueId: "main",
+        baseSha: BASE,
+        revs: [{ pr, n: 1, head }],
+        sha: MERGED,
+        ref: candidateRefFor(MERGED),
+        mergeability: "mergeable",
+      },
+    })
+  }
+
+  /** A check step that fires `withdraw` once, from inside the settle loop —
+   * the compose's only await between admission and selection, and so the only
+   * place the incident's race can be reproduced. */
+  function withdrawingCheck(hook: () => (() => Promise<void>) | undefined, clear: () => void) {
+    return withStep(
+      "check",
+      async (_input: StepExecution): Promise<JobResult<CheckResult>> => {
+        const fire = hook()
+        clear()
+        if (fire !== undefined) await fire()
+        return { status: "completed", conclusion: "success", output: { checked: true } }
+      },
+      { revision: "check-v1", output: CheckResultSchema },
+    )
+  }
+
+  it("retires the member with branch, former id and remedy instead of failing the compose", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    let withdraw: (() => Promise<void>) | undefined
+    await using app = await createApp({
+      steps: [
+        withdrawingCheck(
+          () => withdraw,
+          () => {
+            withdraw = undefined
+          },
+        ),
+        passingMerge(),
+      ],
+      log,
+    })
+    await strandDerivedBranch(app, "issue/derived")
+    const holderHead = "5".repeat(40)
+    await app.bays.submit({ branch: "issue/holder", headSha: holderHead, base: "main", baseSha: BASE })
+    // Mint well above the record store so the derived identity cannot collide
+    // with the holder's PR2, exactly as the shared production mint guarantees.
+    const entry = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(50) })
+    await seedSettlingRun(app, "PR2", holderHead)
+    expect(app.queue.get("R1")?.steps[0]?.job?.status, "the settle loop must have work to do").toBe("queued")
+
+    withdraw = async () => {
+      await app.bays.recordBranchUnsubmit({ branch: "issue/derived", reason: "deleted" })
+    }
+    events.length = 0
+
+    // THE SPEC: the pass survives. Before this fix it rejected with
+    // `derived-submit-vanished` and the resident exited 1.
+    await expect(app.queue.run({ derived: [entry] }, runtime)).resolves.toBeDefined()
+    expect(withdraw, "the withdraw must have landed inside the settle loop").toBeUndefined()
+    expect(app.state().bays.submits["issue/derived"], "the fact is really gone").toBeUndefined()
+
+    // The retirement is LOUD and actionable: the branch, the id being retired,
+    // and what a human should do about it.
+    const retired = composeEvent(events, "compose-derived-retire")
+    expect(retired, "a retired member must leave a row").toBeDefined()
+    expect(retired?.props).toMatchObject({
+      pr: entry.id,
+      branch: "issue/derived",
+      code: "derived-submit-vanished",
+      kind: "refusal",
+    })
+    expect(String(retired?.props?.remedy)).toMatch(/re-submit under a new branch name/u)
+
+    // And it is dropped from the pass: nothing ran it.
+    const ran = Queues.values(app.state().queues).find((record) => record.prs.some((member) => member.id === entry.id))
+    expect(ran, "a retired member must not be selected").toBeUndefined()
+  })
+
+  it("names 'nothing to do' as the remedy when a run already merged the vanished head", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    let withdraw: (() => Promise<void>) | undefined
+    await using app = await createApp({
+      steps: [
+        withdrawingCheck(
+          () => withdraw,
+          () => {
+            withdraw = undefined
+          },
+        ),
+        passingMerge(),
+      ],
+      log,
+    })
+    await strandDerivedBranch(app, "issue/derived")
+    const entry = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(50) })
+
+    // The member LANDS first: the merge proof on its run is a derived member's
+    // whole record of having integrated.
+    await expect(app.queue.run({ derived: [entry] }, runtime)).resolves.toBeDefined()
+    expect(derivedIntegration(app.state().queues, entry), "the member must have merged").toBeDefined()
+
+    // A second change, and a settling run, to open the same mid-pass window.
+    const holderHead = "5".repeat(40)
+    await app.bays.submit({ branch: "issue/holder", headSha: holderHead, base: "main", baseSha: BASE })
+    const holder = Object.values(app.state().bays.prs).find((pr) => pr.branch === "issue/holder")
+    if (holder === undefined) throw new Error("no record for 'issue/holder'")
+    await seedSettlingRun(app, holder.id, holderHead)
+    const readmitted = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(80) })
+    withdraw = async () => {
+      await app.bays.recordBranchUnsubmit({ branch: "issue/derived", reason: "superseded" })
+    }
+    events.length = 0
+
+    await expect(app.queue.run({ derived: [readmitted] }, runtime)).resolves.toBeDefined()
+    const retired = composeEvent(events, "compose-derived-retire")
+    expect(retired?.props?.pr).toBe(readmitted.id)
+    expect(String(retired?.props?.remedy)).toMatch(/nothing to do/u)
   })
 })
