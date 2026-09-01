@@ -1434,7 +1434,7 @@ export type QueueTimelineAdmissionReads = Readonly<{
  * the record store cannot date.
  *
  * Same whole-population rule as {@link queueRunRevisionReads}: one member whose
- * revision was never journaled used to abort `yrd queue status` and the whole
+ * revision was never journaled used to abort `yrd queue list` and the whole
  * timeline for every caller (@i/10-yrd/23228). The member is reported through
  * `faults` and its row renders marked, never dropped.
  */

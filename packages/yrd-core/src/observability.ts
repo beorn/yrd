@@ -178,10 +178,10 @@ export async function observeYrdLifecycle<Result>(
  * UUIDs, which identify nothing a reader can act on. */
 const LIFECYCLE_OBJECT_KEYS = ["pr", "run", "branch", "issue", "op", "job", "step", "ref", "path"] as const
 
-/** The one key that reads as an ACTOR rather than a thing acted on. A lock is
+/** The one key that reads as the SUBJECT rather than a thing acted on. A lock is
  * the case that needs it: `journal-read locked <path>` says who holds it, which
  * is the whole question a reader has when a lock line appears. */
-const LIFECYCLE_ACTOR_KEY = "holder"
+const LIFECYCLE_SUBJECT_KEY = "holder"
 
 /** Past-tense verbs for the lifecycles where the outcome word alone reads
  * badly. Everything else falls back to the outcome word (or a supplied summary
@@ -225,7 +225,7 @@ function lifecycleObject(props: Readonly<Record<string, unknown>>): string | und
   return undefined
 }
 
-/** Build one lifecycle message: `actor verb object [code] duration`.
+/** Build one lifecycle message: `subject verb object [code] duration`.
  *
  * The lifecycle word itself is NOT in the message, and that is the rule rather
  * than an omission — `observeYrdLifecycle` logs on `root.child(lifecycle)`, so
@@ -248,7 +248,7 @@ function lifecycleMessage(
   props: Readonly<Record<string, unknown>>,
 ): string {
   const verb = LIFECYCLE_VERBS[lifecycle]?.[outcome] ?? descriptor
-  const actor = scalar(props[LIFECYCLE_ACTOR_KEY])
+  const subject = scalar(props[LIFECYCLE_SUBJECT_KEY])
   const object = lifecycleObject(props)
   const failure = props.failure
   const conclusion = scalar(props.conclusion)
@@ -259,7 +259,7 @@ function lifecycleMessage(
   const failing = outcome === "failed" || outcome === "recovered"
   const duration =
     failing && typeof durationMs === "number" && durationMs > 0 ? formatLifecycleDuration(durationMs) : undefined
-  return [actor, verb, object, code === undefined ? undefined : `[${code}]`, duration]
+  return [subject, verb, object, code === undefined ? undefined : `[${code}]`, duration]
     .filter((part): part is string => part !== undefined)
     .join(" ")
 }

@@ -9108,7 +9108,7 @@ async function logRuns(
       waiting: merged.waiting.filter(inScope),
       finished: merged.finished.filter(inScope),
     }
-    // C3b: both lanes, same reason as `queueStatusSnapshots` — `yrd queue log`
+    // C3b: both lanes, same reason as `queueStatusSnapshots` — `yrd log`
     // listed a run and omitted its own member from the `prs` beside it.
     const groupPrs = queueChanges(state.bays, state.queues).filter((pr) => group.aliases.has(pr.base))
     const groupChangeIds = new Set(groupPrs.map((pr) => pr.id))

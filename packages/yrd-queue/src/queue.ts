@@ -9431,8 +9431,8 @@ function admissionWithholding(
   return holder === undefined
     ? undefined
     : {
-        code: "admission-line-held",
-        reason: `change '${holder.id}' is ahead of it in the admission line and carries no refusal streak`,
+        code: "admission-order-held",
+        reason: `change '${holder.id}' is ahead of it in the admission order and carries no refusal streak`,
         remedy: `no action: this change is admitted on its own turn once '${holder.id}' is admitted or refused`,
         holder: holder.id,
       }
