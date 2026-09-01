@@ -10758,6 +10758,39 @@ function createHabitantRecoveryReporter(log: YrdCliApp["log"]): Readonly<{
  * duplicate. The next cycle re-snapshots — the busy queue frees, the departed
  * PR is gone from the submitted set — so the loop makes progress on what remains.
  */
+/**
+ * The refusals that are about THIS PROCESS rather than about a change, and so
+ * must still stop the runner.
+ *
+ * A DENYLIST, and the direction is the whole point. What stood here before was
+ * an allowlist of the thirteen change-scoped codes that were survivable, which
+ * made every refusal code absent from it a latent resident kill — and the codes
+ * absent from it were, by definition, the ones nobody had met yet. Two of them
+ * collected on 2026-09-01, 21 minutes apart, and each took the whole queue
+ * offline under `restart: "never"`. An allowlist defaults to killing the
+ * process; this defaults to surviving, which is the safe default for a class
+ * whose members are discovered one production outage at a time.
+ *
+ * These few default the other way because a restart is their literal cure:
+ * `installed-plan-stale` ends with "Restart this queue runner so it builds the
+ * declared steps", and a runner whose own status or caps will not parse cannot
+ * be fixed by composing again. Swallowing one would leave a runner alive and
+ * permanently useless behind a green exit, which is the exact failure the
+ * cli.test.ts "exits non-zero on every habitant refusal" case pins.
+ *
+ * The set is short, stable and enumerable because it is the runner talking
+ * about itself; the per-change population is neither, which is why it is the
+ * one that gets the safe default.
+ */
+const RUNNER_SCOPED_REFUSALS: ReadonlySet<string> = new Set([
+  "installed-plan-stale",
+  "installed-plan-reload-exhausted",
+  "habitant-installed-plan-empty",
+  "habitant-rss-cap-invalid",
+  "resident-runner-status-invalid",
+  "resident-source-stale-threshold-invalid",
+])
+
 function habitantCycleRecovery(error: unknown): HabitantCycleRecovery | undefined {
   if (isConcurrentSettlementConflict(error)) {
     return {
@@ -10796,7 +10829,41 @@ function habitantCycleRecovery(error: unknown): HabitantCycleRecovery | undefine
       props: { action: "resident-journal-busy-skip", code: fact.code, reason: fact.message },
     }
   }
-  if (fact !== undefined && (fact.kind === "refusal" || fact.kind === "infrastructure")) {
+  // EVERY typed refusal is a cycle skip, keyed on the KIND and never on a list
+  // of codes.
+  //
+  // A refusal is by construction a decision about one change or candidate, not
+  // about this process: the compose already skips them per candidate, so one
+  // arriving here means a seam upstream missed it, and the worst a skip costs
+  // is this cycle. What used to sit here was a hand-kept allowlist of thirteen
+  // codes, which made every refusal code ABSENT from it a latent resident kill.
+  // Two of them collected on 2026-09-01, 21 minutes apart, while their thirteen
+  // siblings were survivable: `derived-submit-vanished` (a seat withdrew a
+  // branch, 18:51:13Z) and `derived-submit-moved` (an author re-pushed one,
+  // 19:12:20Z). Each took the whole queue offline under `restart: "never"`, and
+  // with a fleet pushing every few minutes every later push took it offline
+  // again. Adding those two codes to the list would have bought the same bug a
+  // third name; keyed on the kind, the next code anyone writes is survivable
+  // the day it is written.
+  //
+  // A JOURNAL THAT DISAGREES WITH ITSELF is what stays fatal, and this codebase
+  // already spells it differently: an invariant breach raises a BARE Error —
+  // derived-admission.ts's mint-collision and duplicate-payload throws are both
+  // bare — which carries no FailureFact and so falls through to the `undefined`
+  // below and stops the runner, exactly as fail-loud requires.
+  if (fact?.kind === "refusal" && !RUNNER_SCOPED_REFUSALS.has(fact.code)) {
+    return {
+      message: "habitant runner skipped a cycle lost to a per-PR failure",
+      props: { action: "resident-pr-refusal-skip", code: fact.code, reason: fact.message },
+    }
+  }
+  // Infrastructure keeps the narrow allowlist. A refusal is a verdict and can
+  // only repeat as long as the change does, but an unavailable RESOURCE can
+  // stay unavailable forever, and this cycle-skip path never reaches the
+  // poisoned-observer breaker that would otherwise recycle the process. So the
+  // ones named here are the ones proven to be derived from the candidate under
+  // admission, and anything else still recycles the runner.
+  if (fact?.kind === "infrastructure") {
     const changeScoped =
       fact.code === "pr-not-admissible" ||
       fact.code === "pr-not-ready" ||

@@ -272,3 +272,123 @@ describe("habitant runner — tolerated skips are loggily-only (Defect 3)", () =
     expect(h.stderr.join("")).toBe("")
   })
 })
+
+/**
+ * The 2026-09-01 double kill, at the boundary rather than at the seam.
+ *
+ * The compose already skips a per-candidate refusal at every derived seam, so
+ * one reaching this classifier means a seam missed it. What decided the
+ * resident's life at that point was a hand-kept allowlist of thirteen codes:
+ * a refusal ON the list skipped the cycle, and a refusal absent from it exited
+ * the process. Two derived-lane codes were absent, and under `restart: "never"`
+ * each took the whole queue offline — 18:51:13Z on a withdrawn branch, then
+ * 19:12:20Z on a re-pushed one, with a fleet pushing every few minutes.
+ *
+ * Adding two names to a list would have bought the same bug a third name. The
+ * rule is the kind: a typed REFUSAL is a verdict about one change and is always
+ * survivable; a journal that disagrees with itself raises a BARE Error, carries
+ * no FailureFact, and still stops the runner.
+ */
+describe("habitant runner — a typed refusal never exits the process, whatever its code", () => {
+  it.each(["derived-submit-vanished", "derived-submit-moved", "derived-record-lane"] as const)(
+    "skips the derived-lane refusal %s instead of taking the queue offline",
+    async (code) => {
+      const { createFailure } = await import("@yrd/core")
+      const h = harness([
+        () =>
+          Promise.reject(
+            createFailure({
+              kind: "refusal",
+              code,
+              message: `yrd: derived member 'PR3111' (task/21201-seat-wind-down) [${code}]`,
+            }),
+          ),
+        () => {
+          h.drain()
+          return Promise.resolve([])
+        },
+      ])
+      await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+      expect(h.runCalls(), "the runner must live to compose again").toBe(2)
+      expect(h.warnings).toContainEqual(
+        expect.objectContaining({ props: expect.objectContaining({ action: "resident-pr-refusal-skip", code }) }),
+      )
+      expect(h.stderr.join("")).toBe("")
+    },
+  )
+
+  it("skips a refusal code nobody has written yet — the rule is the kind, not a list", async () => {
+    // The point of the whole change: a code invented after this test was
+    // written is survivable on the day it is written, with no edit here.
+    const { createFailure } = await import("@yrd/core")
+    const h = harness([
+      () =>
+        Promise.reject(
+          createFailure({
+            kind: "refusal",
+            code: "some-future-per-change-refusal",
+            message: "yrd: a refusal code that did not exist when the classifier was written",
+          }),
+        ),
+      () => {
+        h.drain()
+        return Promise.resolve([])
+      },
+    ])
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+    expect(h.runCalls()).toBe(2)
+    expect(h.warnings).toContainEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({
+          action: "resident-pr-refusal-skip",
+          code: "some-future-per-change-refusal",
+        }),
+      }),
+    )
+  })
+
+  it("still dies on an untyped throw — a journal that disagrees with itself stays fatal", async () => {
+    // The other half of the rule, and the half that must not regress: the two
+    // invariant breaches in derived-admission.ts (an id that already names a
+    // record, one payload under two identities) raise BARE Errors carrying no
+    // FailureFact. Those mean the mint was breached, not that the world moved,
+    // and fail-loud requires the runner to stop.
+    const h = harness([
+      () =>
+        Promise.reject(
+          new Error(
+            "yrd: derived member id 'PR3111' already names a record — the mint is monotone above the frozen store",
+          ),
+        ),
+      () => {
+        h.drain()
+        return Promise.resolve([])
+      },
+    ])
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).rejects.toThrow(/already names a record/u)
+    expect(h.runCalls(), "a breached invariant stops the runner on the spot").toBe(1)
+  })
+
+  it.each(["installed-plan-stale", "resident-runner-status-invalid"] as const)(
+    "still stops the runner on the runner-scoped refusal %s — a restart IS its cure",
+    async (code) => {
+      // The trap the kind-only rule fell into. Not every refusal is about a
+      // change: `installed-plan-stale` ends with "Restart this queue runner so
+      // it builds the declared steps", and a runner whose own status will not
+      // parse cannot be fixed by composing again. Swallowing one would leave a
+      // runner alive and permanently useless behind a green exit — the exact
+      // thing cli.test.ts's "exits non-zero on every habitant refusal" pins,
+      // and the thing that caught a kind-only classifier here.
+      const { createFailure } = await import("@yrd/core")
+      const h = harness([
+        () => Promise.reject(createFailure({ kind: "refusal", code, message: `yrd: ${code}` })),
+        () => {
+          h.drain()
+          return Promise.resolve([])
+        },
+      ])
+      await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).rejects.toThrow(code)
+      expect(h.runCalls(), "a runner-scoped refusal stops on the spot").toBe(1)
+    },
+  )
+})
