@@ -3559,7 +3559,18 @@ function createQueue<Shape extends ChangeShape>(
               )
             : []
           const checkedIds = new Set(checked.map((pr) => pr.id))
-          const refreshable = [...checked, ...admissible.filter((pr) => !checkedIds.has(pr.id))]
+          const everyRefreshable = [...checked, ...admissible.filter((pr) => !checkedIds.has(pr.id))]
+          // Spend the cycle's base move on the carriers that can USE it. A
+          // re-point discards a passing verdict (see `spendableAdmission`), and
+          // `batchSize` serializes one candidate per base, so re-pointing the
+          // rest throws away verdicts nothing could have spent this cycle and
+          // charges the same carriers for them again on the next base move.
+          // An explicit selection names its own targets and is left alone.
+          const landable = selectorless ? landingWindow(snapshot, steps, needsPersonOwner) : undefined
+          const refreshable =
+            landable === undefined
+              ? everyRefreshable
+              : everyRefreshable.filter((pr) => landable.has(pr.id) || !spendableAdmission(pr, admissionSteps(steps)))
           // Admission is revision-owned evidence, not a Queue Run. Revalidate
           // each requested revision against this cycle's base before selecting
           // merge work. The driver still settles any historical active
@@ -8526,6 +8537,77 @@ function automaticAdmissionAttemptsExhausted(
   if (exactRequests === 0) return false
   const releasedFailures = releasedAdmissionFailures(state.queues.index, snapshot, selected)
   return releasedFailures >= exactRequests + AUTOMATIC_ADMISSION_RETRIES
+}
+
+/**
+ * Whether this change already holds a passing verdict for the plan it is being
+ * admitted against — the thing a re-point would throw away.
+ *
+ * `refreshCheckIdentities` re-points a carrier's check request at the cycle
+ * base, and an admission proved at any OTHER base is not reusable
+ * (`admitChangeRevision`'s `prior.baseSha === baseSha` gate,
+ * `reusableRevisionAdmission`'s `admission.baseSha !== snapshot.baseSha`). So
+ * for a carrier holding one of these, a re-point IS a discard: it re-enters
+ * `admissionQueue` and re-executes every pre-merge step over a tree that has
+ * not moved.
+ *
+ * A refused verdict is deliberately NOT spendable: its carrier is on the
+ * refusal-retry path and must be re-pointed like any unproved one.
+ */
+function spendableAdmission(pr: DeepReadonly<Change>, selected: readonly RuntimeStep[]): boolean {
+  const admission = changeAdmission(pr)
+  if (admission?.status !== "passed" || admission.steps.length !== selected.length) return false
+  return admission.steps.every(
+    (evidence, index) =>
+      evidence.status === "passed" &&
+      evidence.name === selected[index]?.name &&
+      evidence.revision === selected[index]?.revision,
+  )
+}
+
+/**
+ * The carriers a cycle can still LAND, one candidate per base — the only ones
+ * whose freshly-taken verdict this cycle could spend.
+ *
+ * `batchSize` serializes one candidate per base (the `activeBases` filter in
+ * the compose pass says so in its own words), so a cycle that re-points every
+ * ready carrier discards `n - 1` passing verdicts to buy one merge, and the
+ * carriers behind the line pay for them again on the next base move, and the
+ * one after that: PR2059 was admitted at 14 distinct bases across 56 attempts,
+ * PR1073 at 13, PR2145 at 8 over 25, while each merge itself took one to three
+ * minutes.
+ *
+ * This narrows WHO is re-pointed; it never widens what counts as a proof. A
+ * carrier still merges only on a verdict taken against the base it merges
+ * onto — the ruled speculative-execution direction is what would let a verdict
+ * outlive a base move, and it is not this. A carrier left alone keeps a
+ * request and an admission naming the same base, which is exactly the shape
+ * `admissionQueue` retires structurally, so the refreshed set and the admitted
+ * set stay the same set (@yrd/core/refresh-coverage-gap).
+ *
+ * Derived (recordless) members are absent from `runnablePRs` by construction
+ * and so are never in the window; the caller's carve-out for carriers holding
+ * no spendable verdict is what keeps them, and every first proof, refreshing.
+ */
+function landingWindow(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  needsPersonOwner: string,
+): ReadonlySet<string> {
+  const candidates = runnablePRs(state, {}, steps, needsPersonOwner, new Set(), {
+    explicitStepAuthority: true,
+  }).filter((pr) => checksRequested(pr))
+  const window = new Set<string>()
+  const claimed = new Set<string>()
+  for (const partition of partitionCandidates(candidates, state.queues.batchSize, state.queues)) {
+    const first = partition[0]
+    if (first === undefined) continue
+    const base = baseIdentity(first.base)
+    if (claimed.has(base)) continue
+    claimed.add(base)
+    for (const pr of partition) window.add(pr.id)
+  }
+  return window
 }
 
 function admissionQueue(

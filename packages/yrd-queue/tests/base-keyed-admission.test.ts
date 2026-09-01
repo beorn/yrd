@@ -75,7 +75,7 @@ const preparer: CandidatePreparer = (input) => {
  * that apart from a retry. */
 type Execution = Readonly<{ pr: string; baseSha: string | undefined }>
 
-function harness() {
+function harness(options: Readonly<{ onMerge?: () => void }> = {}) {
   const executions: Execution[] = []
   let merges = 0
   let mainSha = BASE
@@ -92,6 +92,7 @@ function harness() {
     (input): JobResult<{ commit: string; baseSha: string }> => {
       const composedAt = input.candidate?.baseSha
       merges += 1
+      options.onMerge?.()
       mainSha = mainAfter(merges)
       return { status: "completed", conclusion: "success", output: { commit: mainSha, baseSha: composedAt ?? BASE } }
     },
@@ -218,4 +219,47 @@ describe("base-keyed admission — a merge invalidates every other candidate's p
     }
   })
 
+  it("leaves a passing verdict alone while its change cannot land, and spends it when it can", async () => {
+    // The fix. `batchSize` serializes one candidate per base, so a cycle can
+    // land exactly one change; re-pointing the others discards verdicts the
+    // cycle had no way to spend. The compose pass now re-points only the
+    // carriers inside that landing window, plus every carrier that holds no
+    // passing verdict yet — a first proof is author feedback and is never
+    // withheld.
+    let mergedThisCycle = 0
+    const { executions, queue, merges } = harness({
+      onMerge: () => {
+        mergedThisCycle += 1
+      },
+    })
+    await using app = await createApp(queue)
+
+    // A runner that composes ONE candidate per turn: the serialized landing
+    // lane, in process. The admission phase runs before any merge, so the gate
+    // is open throughout it and closes only after the cycle's single merge.
+    const serial = { runner: "local", leaseMs: 60_000, continueAdmissions: () => mergedThisCycle < 1 }
+
+    const changes = []
+    for (const name of ["issue/first", "issue/second", "issue/third"]) {
+      changes.push(await submitBranch(app, name))
+    }
+    for (const change of changes) await app.bays.requestChecks({ pr: change.id, baseSha: BASE })
+
+    for (let cycle = 0; cycle < 8 && merges() < changes.length; cycle += 1) {
+      mergedThisCycle = 0
+      await app.queue.run({}, serial)
+    }
+    expect(merges(), "every change merged").toBe(changes.length)
+
+    const perChange = new Map<string, number>()
+    for (const execution of executions) {
+      perChange.set(execution.pr, (perChange.get(execution.pr) ?? 0) + 1)
+    }
+    // Each change proves itself once for its author and once for the base it
+    // actually merges onto — never for a base move it could not have used.
+    // Before this filter the third change also proved itself at the base the
+    // FIRST merge produced, a verdict the second merge destroyed unspent.
+    expect([...perChange.values()]).toEqual([1, 2, 2])
+    expect(executions).toHaveLength(5)
+  })
 })
