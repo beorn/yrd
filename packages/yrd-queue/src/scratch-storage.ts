@@ -238,6 +238,29 @@ export type ScratchReapReport = Readonly<{
   failures: readonly string[]
 }>
 
+/**
+ * The newest write anywhere under `path`, including `path` itself.
+ *
+ * A directory's own mtime says when its immediate children last changed, which
+ * for a run's artifact directory is when it was created and never again — the
+ * step logs are appended to two levels down. That is the reading that would
+ * delete work still in progress, so the age of a tree is the newest write in
+ * it, not the age of its root.
+ */
+async function newestMtimeMs(path: string): Promise<number> {
+  let newest = (await lstat(path)).mtimeMs
+  const walk = async (current: string): Promise<void> => {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const child = join(current, entry.name)
+      const stats = await lstat(child)
+      if (stats.mtimeMs > newest) newest = stats.mtimeMs
+      if (entry.isDirectory() && !entry.isSymbolicLink()) await walk(child)
+    }
+  }
+  await walk(path)
+  return newest
+}
+
 async function directorySize(path: string): Promise<number> {
   let total = 0
   const walk = async (current: string): Promise<void> => {
@@ -462,12 +485,27 @@ export async function liveScratchOwners(
  */
 export async function reapOrphanedScratch(
   root: string,
-  options: Readonly<{ olderThanMs?: number; now?: number; keep?: ReadonlySet<string>; namePrefix?: string }> = {},
+  options: Readonly<{
+    olderThanMs?: number
+    now?: number
+    keep?: ReadonlySet<string>
+    namePrefix?: string
+    /**
+     * Which mtime decides an entry's age. `"entry"` (the default) reads the
+     * entry directory's own mtime, which is right for a scratch checkout: it is
+     * created, used and removed as a unit. `"tree"` reads the newest write
+     * anywhere inside it, which is what an artifact directory needs — its root
+     * is stamped once at creation while its logs keep being appended to, so the
+     * entry reading would condemn the longest-running work first.
+     */
+    ageFrom?: "entry" | "tree"
+  }> = {},
 ): Promise<ScratchReapReport> {
   const olderThanMs = options.olderThanMs ?? ORPHANED_SCRATCH_MAX_AGE_MS
   const now = options.now ?? systemClock.now()
   const keep = options.keep ?? new Set<string>()
   const namePrefix = options.namePrefix ?? SCRATCH_NAME_PREFIX
+  const ageFrom = options.ageFrom ?? "entry"
   let entries: string[]
   try {
     entries = await readdir(root)
@@ -496,6 +534,13 @@ export async function reapOrphanedScratch(
         continue
       }
       if (now - stats.mtimeMs <= olderThanMs) {
+        keptYoung += 1
+        continue
+      }
+      // Only for an entry that already looks old: a recent root mtime is
+      // already proof of a recent write, so the walk is paid solely by the
+      // candidates for removal.
+      if (ageFrom === "tree" && now - (await newestMtimeMs(path)) <= olderThanMs) {
         keptYoung += 1
         continue
       }
@@ -536,4 +581,93 @@ export function describeScratchReap(report: ScratchReapReport): string {
     `${report.keptForeign} kept foreign, ${report.failures.length} failed` +
     `${report.failures.length === 0 ? "" : `: ${report.failures.join("; ")}`}`
   )
+}
+/**
+ * How long a run's artifacts are kept once the run has stopped writing them.
+ *
+ * The store had no retention at all: `createArtifactSink` writes one directory
+ * per run, per step, per attempt, holding `stdout.log`, `stderr.log`,
+ * `output.log` and `terminal.json`, and nothing has ever removed one. Measured
+ * on the live queue state dir 2026-09-01: 694 MB across 5,684 run directories,
+ * zero removals in 31 days.
+ *
+ * Fourteen days because the artifacts answer one question — what did this run
+ * actually print — and that question is asked while the change is still in
+ * play. A fortnight covers a change that sat over two weekends; past that the
+ * run has landed or been withdrawn and the journal holds its verdict.
+ */
+export const DEFAULT_ARTIFACT_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
+
+/** Operator override for the artifact retention floor, in milliseconds. */
+export const ARTIFACT_RETENTION_ENV = "YRD_ARTIFACT_RETENTION_MS"
+
+/**
+ * How often one process re-sweeps the artifact root.
+ *
+ * The sibling reapers here sweep once per root per process, which is right for
+ * scratch a short CLI invocation leaves behind and wrong for a resident that
+ * runs for weeks: it would sweep at boot and never again. Hourly, gated on the
+ * clock rather than scheduled, so a resident sweeps at its first artifact write
+ * after boot and roughly hourly while it works — no timer, no second scheduler,
+ * and no sweep at all on a process that writes no artifacts, which is also a
+ * process that is not growing the store.
+ */
+export const ARTIFACT_PRUNE_INTERVAL_MS = 60 * 60 * 1000
+
+/**
+ * Resolve the retention floor from the host environment. An unset or blank
+ * override yields the default; anything else that is not a positive integer of
+ * milliseconds refuses loudly. Zero is refused with the rest: a silent
+ * fallback, or a zero read as "keep nothing", is how a retention knob deletes
+ * a store it was meant to bound.
+ */
+export function resolveArtifactRetentionMs(environment: Readonly<Partial<Record<string, string>>>): number {
+  const raw = environment[ARTIFACT_RETENTION_ENV]
+  if (raw === undefined || raw.trim() === "") return DEFAULT_ARTIFACT_RETENTION_MS
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`yrd: ${ARTIFACT_RETENTION_ENV} must be a positive integer of milliseconds, got '${raw}'`)
+  }
+  return parsed
+}
+
+/** When each artifact root was last swept, so the hourly gate needs no timer. */
+const artifactSweepAt = new Map<string, number>()
+
+/**
+ * Remove run artifacts nothing has written for `olderThanMs`, at most once an
+ * hour per root. Returns the sweep's report, or `undefined` when the hourly
+ * gate is closed and no sweep ran — which a caller must not log as a clean
+ * sweep, because it is not a sweep.
+ *
+ * Age is read from the whole tree (`ageFrom: "tree"`), and that is what keeps a
+ * run still in flight. A long admission's run directory is created once and
+ * never touched again while its step logs are appended to for hours or days, so
+ * the directory's own mtime is ancient the entire time the run is alive.
+ * Reading it alone would delete the artifacts of running work, longest runs
+ * first. The journal knows which admissions are open, but it does not reach
+ * this seam — `createArtifactSink` is called from a step body, which carries no
+ * journal — so this uses the newest write anywhere in the tree instead. That is
+ * the weaker signal the brief allows, and it is sound in the direction that
+ * matters: anything being written to is young, whatever the journal says.
+ *
+ * No name filter. Every entry directly under an artifact root is a run key
+ * `createArtifactSink` minted, so unlike the scratch roots there is no foreign
+ * population to protect — the root is not shared with anything.
+ */
+export async function reapAgedArtifacts(
+  root: string,
+  options: Readonly<{ olderThanMs?: number; now?: number }> = {},
+): Promise<ScratchReapReport | undefined> {
+  const key = resolve(root)
+  const now = options.now ?? systemClock.now()
+  const last = artifactSweepAt.get(key)
+  if (last !== undefined && now - last < ARTIFACT_PRUNE_INTERVAL_MS) return undefined
+  artifactSweepAt.set(key, now)
+  return reapOrphanedScratch(key, {
+    olderThanMs: options.olderThanMs ?? DEFAULT_ARTIFACT_RETENTION_MS,
+    now,
+    namePrefix: "",
+    ageFrom: "tree",
+  })
 }

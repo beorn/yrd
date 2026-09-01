@@ -82,10 +82,15 @@ export * from "./command.ts"
 // them with these primitives rather than a fork, which is what
 // `liveWorktreeEntries` was extracted for.
 export {
+  ARTIFACT_PRUNE_INTERVAL_MS,
+  ARTIFACT_RETENTION_ENV,
+  DEFAULT_ARTIFACT_RETENTION_MS,
   describeScratchReap,
   liveScratchOwners,
   liveWorktreeEntries,
+  reapAgedArtifacts,
   reapOrphanedScratch,
+  resolveArtifactRetentionMs,
   SCRATCH_OWNER_FILE,
   type ScratchOwner,
   type ScratchOwnerCensus,

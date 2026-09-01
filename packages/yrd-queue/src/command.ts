@@ -60,8 +60,10 @@ import {
   describeScratchReap,
   isStorageExhaustion,
   liveWorktreeEntries,
+  reapAgedArtifacts,
   queueScratchParent,
   reapOrphanedScratch,
+  resolveArtifactRetentionMs,
   storageExhaustionError,
   tagStorageExhaustion,
   taggedStorageExhaustion,
@@ -522,6 +524,7 @@ function configuredCommand<Shape extends ChangeShape>(
       ...options.variables?.(input),
     }
     const artifactRoot = resolve(options.artifactRoot ?? defaultCommandArtifactRoot(cwd, process))
+    await pruneArtifactsOnce(artifactRoot, options.env ?? globalThis.process.env)
     const artifactSink = await createArtifactSink(artifactRoot, input, context.attempt)
     const env = commandEnvironment(options.env ?? globalThis.process.env, variables, declaration)
     let result: Awaited<ReturnType<Process["run"]>>
@@ -2564,6 +2567,48 @@ async function reapOnce(git: Git, repo: string, root: string): Promise<void> {
       reaped: report.reaped,
       failures: report.failures.length,
     })
+  }
+}
+
+/**
+ * Prune run artifacts nothing has written for the retention floor, before this
+ * step adds its own.
+ *
+ * Placed at the artifact WRITE site for the same reason `reapOnce` sits at the
+ * scratch creation site: every entry point that can grow the store pays for
+ * bounding it, and nothing else has to remember to schedule anything. The
+ * gate inside `reapAgedArtifacts` is hourly rather than once-per-process
+ * because the process that writes most artifacts is a resident that runs for
+ * weeks — a once-per-process sweep would run at boot and never again.
+ *
+ * A prune failure is reported and swallowed deliberately: a step's verdict must
+ * not depend on housekeeping. It is reported at `warn`, which is the level an
+ * operator sees by default, because a store that cannot be pruned goes back to
+ * growing without bound and nothing else would ever say so.
+ */
+async function pruneArtifactsOnce(root: string, environment: Readonly<Partial<Record<string, string>>>): Promise<void> {
+  try {
+    const report = await reapAgedArtifacts(root, { olderThanMs: resolveArtifactRetentionMs(environment) })
+    // `undefined` is the hourly gate, not an empty sweep. Logging it as a
+    // sweep would report a clean run for work that never happened.
+    if (report === undefined) return
+    const record =
+      report.failures.length > 0 ? scratchReapLog.warn : report.reaped > 0 ? scratchReapLog.info : undefined
+    record?.(describeScratchReap(report), {
+      action: "queue-artifact-retention",
+      root: report.root,
+      scanned: report.entries,
+      reaped: report.reaped,
+      keptYoung: report.keptYoung,
+      failed: report.failures.length,
+      bytes: report.bytes,
+    })
+  } catch (cause) {
+    scratchReapLog.warn?.(
+      `yrd: could not prune run artifacts under '${root}', so the store keeps growing: ` +
+        `${cause instanceof Error ? cause.message : String(cause)}`,
+      { action: "queue-artifact-retention-failed", root },
+    )
   }
 }
 
