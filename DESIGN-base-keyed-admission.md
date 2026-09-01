@@ -183,7 +183,8 @@ behavior and stay green either way:
 The tests record the **base each check ran against**, not a count: a bare count cannot
 tell a re-proof from a retry.
 
-**Suite:** see §5 for the before/after numbers on the full `packages/yrd-queue/tests` run.
+**Suite:** §7 carries the before/after numbers, and why the full-repo run is not a number
+anyone should act on.
 
 **Typecheck:** `bun run typecheck` reports zero errors in `packages/yrd-queue/src/queue.ts`.
 Pre-existing errors elsewhere (`vendor/termless` missing `@types/upng-js` and `gifenc`,
@@ -247,3 +248,44 @@ contain the change that is next in line *whether or not its checks have passed*,
 the whole purpose of putting it in the window is to prove it. Using the checks-aware
 selection would admit only already-green carriers and never refresh the one that needs
 it.
+
+---
+
+## 7. Suite evidence, and why the full-repo number is not evidence
+
+**`packages/yrd-queue/tests` — the package that covers this change.** Deterministic
+across runs, and the only comparison I would put weight on.
+
+| | files | tests |
+|---|---|---|
+| baseline at `e4be7989`, before any edit | 2 failed / 65 passed (67) | 2 failed / 965 passed / 1 expected fail (968) |
+| with the change | 2 failed / 66 passed (68) | 2 failed / 968 passed / 1 expected fail (971) |
+
+Same two failures both times — `command.test.ts > does not roll the submodule back for a
+clean-headed carrier that moves the gitlink backward` and `audit-finding-codes.test.ts >
+covers exactly what the producers emit`, both red before I touched anything. The `+3` is
+this branch's own new tests.
+
+**The full-repo `vitest run` is non-deterministic in this environment and I am not
+citing it as a result.** Two runs of the *identical, unmodified* `e4be7989` tree gave
+**28** and **30** failures, differing on `gitlink-advance.test.ts > fast-forwards the
+submodule's own main…` and `plan-audit.test.ts > compares each recorded Run against git
+at its base…`. The run with my change gave 39. That spread is what parallel workers doing
+real git work in a symlink-mirrored `node_modules` (no `bun install`) produce; a ±2 jitter
+between two identical trees is not a scale on which to read a +9.
+
+**So I ran the discriminating experiment instead**: the exact eight files that failed in
+the full run with the change but not in the control, run in isolation, sequentially, once
+per tree.
+
+| | files | tests | failing set |
+|---|---|---|---|
+| control tree at `e4be7989` | 1 failed / 7 passed (8) | 1 failed / 337 passed (338) | the pre-existing submodule-rollback test |
+| this branch | 1 failed / 7 passed (8) | 1 failed / 337 passed (338) | *identical* |
+
+`comm` over the two sorted failure sets is empty **in both directions**. Every one of
+those twelve was noise.
+
+If someone wants a full-repo number they can act on, it needs a real `bun install` and a
+serialized run; that is a test-infrastructure gap this branch did not create and did not
+close.
