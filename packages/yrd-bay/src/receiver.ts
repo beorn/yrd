@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises"
 import { basename, delimiter, dirname, join, resolve } from "node:path"
-import { systemClock } from "@yrd/core"
+import { failureFact, systemClock } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
@@ -237,11 +237,60 @@ export type ReceiverHookOptions = {
    * standing fact; the receiver never emits it.
    */
   branchUnsubmitted?: (fact: Readonly<{ branch: string; reason: "deleted" | "archived" }>) => Promise<void>
+  /**
+   * Wall-clock budget for ONE drain pass's critical section, in milliseconds.
+   *
+   * The drain holds an exclusive lock while it runs every waiting result, and
+   * each result costs an unbounded number of git children (`GIT_TIMEOUT_MS`
+   * each, retried by the caller's process wrapper) plus whatever the caller's
+   * `intake` does — for the production hook, journal appends that take a
+   * SECOND lock with its own 30s wait. Nothing bounded the total, so a push
+   * paid for every other branch's backlog: measured at 102s on 2026-08-31,
+   * past the pusher's own patience, leaving refs applied and the inbox result
+   * mid-flight with nothing able to say so.
+   *
+   * The budget is checked BEFORE each result, never inside one: a result is
+   * always run to completion or not started, so a deferral is a result still
+   * fully `pending` — the state the next drain already retries — and never a
+   * half-consumed one. Omit and the pass is unbounded, which is what a
+   * foreground `yrd` command wants; the receive path always names one.
+   */
+  drainDeadlineMs?: number
+  /**
+   * How long a drain waits for the drain lock before deferring, in
+   * milliseconds. Zero (the default) tries once. See {@link ReceiverDrainResult.lockBusy}.
+   */
+  lockTimeoutMs?: number
+  /**
+   * Called with the pass's own result when the post-receive drain deferred
+   * anything, so the caller can say so on the channel the pusher is watching.
+   * The receiver cannot: it owns no logger and no output convention. Omit and
+   * a deferral is still in the returned {@link ReceiverDrainResult} — this is
+   * the reporting hook, never the record.
+   */
+  drainDeferred?: (drained: Readonly<ReceiverDrainResult>) => void
 }
 export type ReceiverDrainResult = {
   delivered: string[]
   failed: Array<{ id: string; error: string }>
   ambiguous: string[]
+  /**
+   * Results this pass deliberately did not attempt — the lock was held, or the
+   * budget ran out. NOT failures: each is still `pending` on disk and the next
+   * drain retries it untouched. Reporting them as `failed` would make an
+   * ordinary "someone else is draining" read as wreckage, and reporting them
+   * nowhere is the silent-fallback this field exists to refuse.
+   */
+  deferred: string[]
+  /**
+   * The lock-busy refusal, holder and owning pid included, when the pass never
+   * entered its critical section. Set INSTEAD of throwing: on the receive path
+   * the push has already been applied by git, so failing the hook here turns a
+   * benign collision into an error against work that actually succeeded.
+   */
+  lockBusy?: string
+  /** True when {@link ReceiverHookOptions.drainDeadlineMs} stopped the pass. */
+  deadlineExceeded?: boolean
 }
 
 type ReceiverOptions = Readonly<{
@@ -305,6 +354,16 @@ export function receiverHookSource(mode: HookMode, entry: string): string {
   ].join("\n")
 }
 
+/**
+ * Where a receiver keeps its intake inbox, given the state dir — the ONE
+ * derivation, so a reader that is not the receiver (the `queue audit` inbox
+ * census) cannot drift onto a directory the receiver stopped using and then
+ * report the empty result as clean.
+ */
+export function receiverInboxDir(stateDir: string): string {
+  return join(resolve(stateDir), "receiver-inbox")
+}
+
 export async function createGitPushReceiver(options: ReceiverOptions): Promise<GitPushReceiver> {
   const hookEntry = options.hookEntry ?? declaredReceiverHookEntry(options.mainRepo)
   const requestedState = resolve(options.stateDir)
@@ -312,53 +371,63 @@ export async function createGitPushReceiver(options: ReceiverOptions): Promise<G
   const mainRepo = await realpath(resolve(options.mainRepo))
   const stateDir = await realpath(requestedState)
   const receiverPath = resolve(options.receiverPath ?? join(stateDir, "prs.git"))
-  const inboxDir = resolve(options.inboxDir ?? join(stateDir, "receiver-inbox"))
+  const inboxDir = resolve(options.inboxDir ?? receiverInboxDir(stateDir))
   const mainFormat = parseObjectFormat(
     (await mainGit(options.process, mainRepo, ["rev-parse", "--show-object-format"])).stdout,
   )
   const exclusive = createExclusive(join(stateDir, "receiver-init"), { timeoutMs: 30_000, pollIntervalMs: 10 })
-  return exclusive.run(async () => {
-    const current = await entry(receiverPath)
-    check(!current?.isSymbolicLink(), `will not use a symlinked prs.git at '${receiverPath}'`)
-    check(current === undefined || current.isDirectory(), `'${receiverPath}' exists and is not a directory`)
-    if (current === undefined) {
-      await mkdir(dirname(receiverPath), { recursive: true, mode: 0o700 })
-      await mkdir(receiverPath, { mode: 0o700 })
-      await exec(
-        options.process,
-        ["git", "init", "--bare", "--initial-branch=main", `--object-format=${mainFormat.objectFormat}`, receiverPath],
-        dirname(receiverPath),
+  return exclusive.run(
+    async () => {
+      const current = await entry(receiverPath)
+      check(!current?.isSymbolicLink(), `will not use a symlinked prs.git at '${receiverPath}'`)
+      check(current === undefined || current.isDirectory(), `'${receiverPath}' exists and is not a directory`)
+      if (current === undefined) {
+        await mkdir(dirname(receiverPath), { recursive: true, mode: 0o700 })
+        await mkdir(receiverPath, { mode: 0o700 })
+        await exec(
+          options.process,
+          [
+            "git",
+            "init",
+            "--bare",
+            "--initial-branch=main",
+            `--object-format=${mainFormat.objectFormat}`,
+            receiverPath,
+          ],
+          dirname(receiverPath),
+        )
+      }
+      const receiverFormat = await bareFormat(options.process, receiverPath)
+      check(
+        receiverFormat.objectFormat === mainFormat.objectFormat,
+        `object format mismatch: main uses ${mainFormat.objectFormat}, prs.git uses ${receiverFormat.objectFormat}`,
       )
-    }
-    const receiverFormat = await bareFormat(options.process, receiverPath)
-    check(
-      receiverFormat.objectFormat === mainFormat.objectFormat,
-      `object format mismatch: main uses ${mainFormat.objectFormat}, prs.git uses ${receiverFormat.objectFormat}`,
-    )
-    const receiver = createReceiver({
-      version: RECEIVER_VERSION,
-      receiverPath,
-      mainRepo,
-      stateDir,
-      inboxDir,
-      process: options.process,
-      ...receiverFormat,
-    })
-    await validateBinding(receiver)
-    await preflightHooks(receiverPath, hookEntry)
-    await mkdir(inboxDir, { recursive: true, mode: 0o700 })
-    for (const [key, value] of receiverConfig(receiver)) {
-      await receiverGit(receiver, ["config", "--local", key, value])
-    }
-    if (
-      (await mainGit(options.process, mainRepo, ["for-each-ref", "--format=%(refname)", "refs/heads"])).stdout !== ""
-    ) {
-      await receiverGit(receiver, ["fetch", "--quiet", "--no-tags", mainRepo, "+refs/heads/*:refs/yrd/bases/*"])
-    }
-    await writeHook(receiverPath, "pre-receive", hookEntry)
-    await writeHook(receiverPath, "post-receive", hookEntry)
-    return receiver
-  }, { holder: "receiver-init" })
+      const receiver = createReceiver({
+        version: RECEIVER_VERSION,
+        receiverPath,
+        mainRepo,
+        stateDir,
+        inboxDir,
+        process: options.process,
+        ...receiverFormat,
+      })
+      await validateBinding(receiver)
+      await preflightHooks(receiverPath, hookEntry)
+      await mkdir(inboxDir, { recursive: true, mode: 0o700 })
+      for (const [key, value] of receiverConfig(receiver)) {
+        await receiverGit(receiver, ["config", "--local", key, value])
+      }
+      if (
+        (await mainGit(options.process, mainRepo, ["for-each-ref", "--format=%(refname)", "refs/heads"])).stdout !== ""
+      ) {
+        await receiverGit(receiver, ["fetch", "--quiet", "--no-tags", mainRepo, "+refs/heads/*:refs/yrd/bases/*"])
+      }
+      await writeHook(receiverPath, "pre-receive", hookEntry)
+      await writeHook(receiverPath, "post-receive", hookEntry)
+      return receiver
+    },
+    { holder: "receiver-init" },
+  )
 }
 
 export async function loadGitPushReceiver(path: string, process: Pick<Process, "run">): Promise<GitPushReceiver> {
@@ -526,8 +595,32 @@ async function finalizeReceiverUpdates(
       results.push(result)
     }
   }
-  if (options.intake) await receiver.drain({ ...options, intake: options.intake })
+  if (options.intake) {
+    const drained = await receiver.drain({ ...options, intake: options.intake })
+    if (drained.deferred.length > 0) options.drainDeferred?.(drained)
+  }
   return results
+}
+
+/**
+ * Every result still waiting on disk, read WITHOUT the drain lock.
+ *
+ * A deferral has to say what it deferred, and the one moment it cannot ask the
+ * inbox through the ordinary path is the moment the lock is held. `readdir` of
+ * a directory whose entries are only ever created by `rename` is safe to read
+ * unlocked: an id either has a file or does not, and a name that vanishes
+ * between this listing and the next drain was delivered, which is the outcome
+ * the reader wanted anyway.
+ */
+async function waitingResultIds(receiver: GitPushReceiver): Promise<string[]> {
+  const ids: string[] = []
+  for (const state of ["prepared", "pending"] as const) {
+    const suffix = `.${state}.json`
+    for (const path of await resultFiles(receiver, state)) {
+      ids.push(basename(path).slice(0, -suffix.length))
+    }
+  }
+  return ids.toSorted()
 }
 
 async function drainReceiverInbox(
@@ -535,67 +628,105 @@ async function drainReceiverInbox(
   options: ReceiverHookOptions & { intake: DurableReceiverIntake; lockTimeoutMs?: number },
 ): Promise<ReceiverDrainResult> {
   await mkdir(receiver.inboxDir, { recursive: true, mode: 0o700 })
-  const drain: ReceiverDrainResult = { delivered: [], failed: [], ambiguous: [] }
+  const drain: ReceiverDrainResult = { delivered: [], failed: [], ambiguous: [], deferred: [] }
+  const budgetMs = options.drainDeadlineMs
+  if (budgetMs !== undefined && (!Number.isFinite(budgetMs) || budgetMs <= 0)) {
+    throw new Error(`yrd: receiver: drainDeadlineMs must be a positive number of milliseconds, got ${String(budgetMs)}`)
+  }
+  const deadline = budgetMs === undefined ? undefined : Date.now() + budgetMs
   const exclusive = createExclusive(join(receiver.inboxDir, "drain-lock"), {
     timeoutMs: options.lockTimeoutMs ?? 0,
     pollIntervalMs: 10,
   })
-  return exclusive.run(async () => {
-    await recoverPrepared(receiver, options, drain)
-    const blocked = new Set<string>()
-    for (const { path, result } of await pendingResults(receiver, drain)) {
-      if (blocked.has(result.branch)) {
-        // Not a failure of its own: an earlier result for this same branch
-        // threw in this same drain pass (`blocked.add` sits in that catch,
-        // beside the real error). Saying only "blocked" sends the reader
-        // hunting for a cause that is already in front of them, in this very
-        // result set — and because a failed result stays pending and retries,
-        // this line reappears every drain until that first one is dealt with,
-        // which reads like a stuck queue rather than one waiting on a fix.
-        drain.failed.push({
-          id: result.id,
-          error:
-            `blocked by an earlier failed result for branch '${result.branch}'; that earlier result failed in ` +
-            "this same drain and carries the real error — fix that one, and this retries on the next drain",
-        })
-        continue
-      }
-      try {
-        await validateStored(receiver, result, options)
-        await options.intake(result)
-        // A `refs/for/` result IS a submission — re-point the submit ref at
-        // this tip (dual-write, phase 1: `result.intake.submit` above already
-        // carries the fact for the caller's own bay/journal; phase 2 re-points
-        // readers here instead). After intake, not before: a failed intake
-        // retries the whole result on the next drain, and this write should
-        // not have happened for a result nothing downstream has accepted yet.
-        if (result.change !== undefined) {
-          await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, result.intake.base, options)
-        } else if (!ZERO_SHA.test(result.oldSha)) {
-          // An ordinary push to an EXISTING branch (never creation — that is
-          // `applyCreationClassification`'s job, run atomically with the
-          // creation push itself at post-receive, not deferred here). "auto.
-          // submit is the express lane... every push to an auto-submit
-          // branch submits its exact tip" — lane-ness is re-derived from the
-          // CURRENT config on every push, never from whether a submit ref
-          // already exists (a manual submit must not turn an unrelated
-          // branch into a lane). Draft/ignore/no-match are creation-only by
-          // construction: nothing re-checks them on a later push.
-          const verdict = await evaluateClassification(receiver, options, result.intake.base, result.branch)
-          if (verdict === "submit") {
-            await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, result.intake.base, options)
+  try {
+    return await exclusive.run(
+      async () => {
+        await recoverPrepared(receiver, options, drain)
+        const blocked = new Set<string>()
+        const waiting = await pendingResults(receiver, drain)
+        for (const [index, entry] of waiting.entries()) {
+          if (deadline !== undefined && Date.now() >= deadline) {
+            // Between results, never inside one. Everything from here on is
+            // untouched and still `pending`; the next drain starts where this
+            // one stopped.
+            drain.deadlineExceeded = true
+            for (const remaining of waiting.slice(index)) drain.deferred.push(remaining.result.id)
+            break
           }
+          await drainOneResult(receiver, options, drain, blocked, entry)
         }
-        await rm(path)
-        await syncDir(receiver.inboxDir)
-        drain.delivered.push(result.id)
-      } catch (cause) {
-        blocked.add(result.branch)
-        drain.failed.push({ id: result.id, error: message(cause) })
+        return drain
+      },
+      { holder: "receiver-inbox-drain" },
+    )
+  } catch (cause) {
+    // A collision is not wreckage: the other holder is draining the same inbox
+    // and will take these results. Typed, named, and non-fatal — but never
+    // silent, because an empty pass that looks identical to a clean one is the
+    // exact shape that let a stuck receiver read as healthy.
+    if (failureFact(cause)?.code !== "exclusive-busy") throw cause
+    drain.lockBusy = message(cause)
+    drain.deferred = await waitingResultIds(receiver)
+    return drain
+  }
+}
+
+async function drainOneResult(
+  receiver: GitPushReceiver,
+  options: ReceiverHookOptions & { intake: DurableReceiverIntake },
+  drain: ReceiverDrainResult,
+  blocked: Set<string>,
+  { path, result }: StoredResult,
+): Promise<void> {
+  if (blocked.has(result.branch)) {
+    // Not a failure of its own: an earlier result for this same branch
+    // threw in this same drain pass (`blocked.add` sits in that catch,
+    // beside the real error). Saying only "blocked" sends the reader
+    // hunting for a cause that is already in front of them, in this very
+    // result set — and because a failed result stays pending and retries,
+    // this line reappears every drain until that first one is dealt with,
+    // which reads like a stuck queue rather than one waiting on a fix.
+    drain.failed.push({
+      id: result.id,
+      error:
+        `blocked by an earlier failed result for branch '${result.branch}'; that earlier result failed in ` +
+        "this same drain and carries the real error — fix that one, and this retries on the next drain",
+    })
+    return
+  }
+  try {
+    await validateStored(receiver, result, options)
+    await options.intake(result)
+    // A `refs/for/` result IS a submission — re-point the submit ref at
+    // this tip (dual-write, phase 1: `result.intake.submit` above already
+    // carries the fact for the caller's own bay/journal; phase 2 re-points
+    // readers here instead). After intake, not before: a failed intake
+    // retries the whole result on the next drain, and this write should
+    // not have happened for a result nothing downstream has accepted yet.
+    if (result.change !== undefined) {
+      await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, result.intake.base, options)
+    } else if (!ZERO_SHA.test(result.oldSha)) {
+      // An ordinary push to an EXISTING branch (never creation — that is
+      // `applyCreationClassification`'s job, run atomically with the
+      // creation push itself at post-receive, not deferred here). "auto.
+      // submit is the express lane... every push to an auto-submit
+      // branch submits its exact tip" — lane-ness is re-derived from the
+      // CURRENT config on every push, never from whether a submit ref
+      // already exists (a manual submit must not turn an unrelated
+      // branch into a lane). Draft/ignore/no-match are creation-only by
+      // construction: nothing re-checks them on a later push.
+      const verdict = await evaluateClassification(receiver, options, result.intake.base, result.branch)
+      if (verdict === "submit") {
+        await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, result.intake.base, options)
       }
     }
-    return drain
-  }, { holder: "receiver-inbox-drain" })
+    await rm(path)
+    await syncDir(receiver.inboxDir)
+    drain.delivered.push(result.id)
+  } catch (cause) {
+    blocked.add(result.branch)
+    drain.failed.push({ id: result.id, error: message(cause) })
+  }
 }
 
 export async function runReceiverHookFromEnvironment(

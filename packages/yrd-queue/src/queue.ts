@@ -9647,6 +9647,13 @@ export const YRD_REFUSAL_CODES = [
   "queue-paused",
   "queue-progress-stalled",
   "queue-read-boundary-moved",
+  // The receiver-inbox census finding (receiver-inbox-audit.ts): a push git
+  // ACCEPTED whose durable inbox result has not reached intake past its grace
+  // window. Registered for the same reason as every other audit finding code
+  // here — it classifies through `failureDisposition` instead of throwing —
+  // and the fall-through disposition is right: the next drain retries it, and
+  // no automation should act on the finding itself.
+  "receiver-intake-stranded",
   // S6 door: both retired mint arms (bay intake + submit) refuse with this one
   // code when a live submit fact owns the branch and no record does.
   "record-mint-retired",

@@ -16,6 +16,7 @@ import {
   resolveBayWorkspacePath,
   baseIdentity,
   defaultBayBranch,
+  receiverInboxDir,
   loadGitPushReceiver,
   normalizeV1CorrelationToProps,
   runReceiverHookFromEnvironment,
@@ -26,6 +27,7 @@ import {
   type GitPushReceiver,
   type GitWorkspaceLifecycleHooks,
   type RemoteBranchSnapshot,
+  type ReceiverDrainResult,
   type ReceiverResult,
   type ReceiverRefUpdate,
   type ReceiverSubmitIntent,
@@ -66,6 +68,7 @@ import {
   configuredCommandStep,
   configuredMergeStep,
   configuredWaitingCommandStep,
+  censusReceiverInbox,
   censusSubmoduleAlternates,
   createCandidatePool,
   createCandidatePoolGit,
@@ -79,6 +82,7 @@ import {
   inspectGitQueueTarget,
   overlayGateScripts,
   resolveGitQueueTarget,
+  receiverInboxFindings,
   submoduleAlternatesFindings,
   worktreeContexts,
   withQueue,
@@ -3244,6 +3248,15 @@ function queueAdministration(
         )
       }
       findings.push(...submoduleAlternatesFindings(await censusSubmoduleAlternates(commonDir), commonDir))
+      // The receive path's own window, which no journal or ref walk can see: a
+      // push git ACCEPTED whose result has not reached intake yet. The
+      // directory is the receiver's default (`createGitPushReceiver` derives
+      // it from the same stateDir and neither host call site overrides it) and
+      // the census names it in every finding, so a census that looked in the
+      // wrong place says where it looked rather than reporting clean.
+      findings.push(
+        ...receiverInboxFindings(await censusReceiverInbox(receiverInboxDir(repository.stateDir), Date.now())),
+      )
       const comparison: QueueEnvironmentAuditComparison = {
         base,
         tip: {
@@ -4132,11 +4145,65 @@ async function runReceiverHook(
       branchUnsubmitted: async (fact) => {
         await runtimeApp.bays.recordBranchUnsubmit(fact)
       },
+      // The pusher is blocked on this hook for its whole duration: git has
+      // already applied the refs, and receive-pack does not return until
+      // post-receive exits. Every other bound in this path is per-git-call
+      // (`GIT_TIMEOUT_MS`, retried three times by `withGitTimeoutRetry`) or
+      // per-lock (the journal's own 30s), so the TOTAL was unbounded and a
+      // push paid for every branch waiting in the inbox — 102s measured on
+      // 2026-08-31. This is the only bound over the whole critical section.
+      drainDeadlineMs: RECEIVE_DRAIN_BUDGET_MS,
+      // Wait briefly rather than not at all: a concurrent drain usually
+      // finishes in well under a second, and the alternative (`?? 0`) turned
+      // an ordinary overlap into a deferral on every collision.
+      lockTimeoutMs: RECEIVE_DRAIN_LOCK_WAIT_MS,
+      drainDeferred: (drained) => reportDeferredDrain(log, drained),
     })
   } finally {
     await closeRuntime(app, runtimeProcess, scope)
     rootLog.end()
   }
+}
+
+/**
+ * How long ONE post-receive drain pass may run, and how long it waits for the
+ * drain lock.
+ *
+ * The budget is a latency promise to the pusher, not a capacity limit: results
+ * the pass does not reach stay `pending`, and the next push or the resident
+ * runner takes them. Ten seconds is well under any human's patience for a push
+ * and comfortably above the ~1s a healthy single-result drain measures.
+ */
+const RECEIVE_DRAIN_BUDGET_MS = 10_000
+const RECEIVE_DRAIN_LOCK_WAIT_MS = 2_000
+
+/**
+ * Say, on the pusher's own terminal, that this push's inbox result is still
+ * waiting — and why.
+ *
+ * The hook's stderr is git's `remote:` channel, so this reaches the person who
+ * pushed. Loud, because the alternative is the shape this whole change exists
+ * to kill: a drain that quietly did nothing looks exactly like a drain that
+ * cleanly did everything, and for 102 seconds on 2026-08-31 nobody could tell
+ * which had happened.
+ */
+function reportDeferredDrain(log: ConditionalLogger, drained: Readonly<ReceiverDrainResult>): void {
+  if (drained.deferred.length === 0) return
+  const why =
+    drained.lockBusy ??
+    (drained.deadlineExceeded === true
+      ? `this drain pass hit its ${String(RECEIVE_DRAIN_BUDGET_MS)}ms budget`
+      : "the drain pass ended early")
+  log.warn?.(
+    `yrd: ${String(drained.deferred.length)} receiver inbox result(s) are still waiting after this push: ${why}. ` +
+      "The push itself is accepted and the refs stand; the results are durable and the next drain takes them. " +
+      "Run 'yrd queue audit' if they do not clear.",
+    {
+      action: "receiver-drain-deferred",
+      deferred: drained.deferred,
+      ...(drained.lockBusy === undefined ? {} : { lockBusy: drained.lockBusy }),
+    },
+  )
 }
 
 /**

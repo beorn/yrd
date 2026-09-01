@@ -680,7 +680,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
           throw new Error("must not run before ref acceptance")
         },
       }),
-    ).toEqual({ delivered: [], failed: [], ambiguous: [result!.id] })
+    ).toEqual({ delivered: [], failed: [], ambiguous: [result!.id], deferred: [] })
     expect(await inboxFiles(f.receiver)).toEqual([`${result!.id}.prepared.json`])
     await git(f.receiver.receiverPath, "update-ref", "refs/heads/issue/recover", headSha, zero)
 
@@ -703,7 +703,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
         retried.push(current.id)
       },
     })
-    expect(recovered).toEqual({ delivered: [result!.id], failed: [], ambiguous: [] })
+    expect(recovered).toEqual({ delivered: [result!.id], failed: [], ambiguous: [], deferred: [] })
     expect(retried).toEqual([result!.id])
     expect(await inboxFiles(f.receiver)).toEqual([])
   })

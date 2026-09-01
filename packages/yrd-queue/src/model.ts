@@ -1314,6 +1314,13 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
    * on one sha) from the check-failure shape, none of it visible to `pr list`
    * or to this audit (@i/10-yrd/absent-branch-is-terminal). */
   "submit-fact-terminal",
+  /** A durable receiver-inbox result waiting past its grace window: git
+   * ACCEPTED the push and told the pusher so, and the queue still cannot see
+   * the change. Every other finding here reads the journal or git refs, so
+   * before this one the whole receive-path window was unnameable — the 102s
+   * post-receive stall on 2026-08-31 left exactly this state and `queue audit`
+   * reported clean. Emitted by `receiverInboxFindings`; read-only. */
+  "receiver-intake-stranded",
 ] as const
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]
