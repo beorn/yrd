@@ -212,7 +212,7 @@ describe("buildMergedTruthIndex", () => {
     })
   })
 
-  it("surfaces a hand merge (default git subject, no member) as a specimen too", async () => {
+  it("never treats a hand merge (default git subject, multi-parent, no member) as a specimen — a merge commit can never itself be the change", async () => {
     const repo = await makeRepo()
     await git.text(repo, ["checkout", "-q", "-b", "task/e"])
     await commitFile(repo, "e.txt", "e\n", ["feat: e"])
@@ -221,9 +221,8 @@ describe("buildMergedTruthIndex", () => {
 
     const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
 
-    expect(index.specimens).toHaveLength(1)
-    expect(index.specimens[0]).toMatchObject({ problem: "trailer-absent", subject: "Merge branch 'task/e'" })
-    expect(index.specimens[0]?.member).toBeUndefined()
+    expect(index.specimens).toEqual([])
+    expect(index.commitsWalked).toBe(2)
   })
 
   it("treats an old-era queue-lane subject without a trailer as a specimen even with one parent", async () => {
@@ -469,7 +468,7 @@ describe("mergedByChangeId", () => {
     expect(mergedByChangeId(fixture.index, ID_C, { member: "PR2" })).toMatchObject({ kind: "unknown" })
   })
 
-  it("never lets member context filter a member-less hand merge out of the veto", async () => {
+  it("a hand merge never vetoes a lookup — a multi-parent commit can never itself be the queried change", async () => {
     const repo = await makeRepo()
     await git.text(repo, ["checkout", "-q", "-b", "task/e"])
     await commitFile(repo, "e.txt", "e\n", ["feat: e"])
@@ -477,7 +476,46 @@ describe("mergedByChangeId", () => {
     await git.text(repo, ["merge", "--no-ff", "-m", "Merge branch 'task/e'", "task/e"])
     const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
 
-    expect(mergedByChangeId(index, ID_C, { member: "PR9" })).toMatchObject({ kind: "unknown" })
+    expect(mergedByChangeId(index, ID_C, { member: "PR9" })).toMatchObject({ kind: "not-merged" })
+    expect(mergedByChangeId(index, ID_C)).toMatchObject({ kind: "not-merged" })
+  })
+
+  it("regression 2026-08-31: N identifiable landed changes resolve cleanly beside a specimen-free hand merge, instead of every not-found lookup vetoing to unknown", async () => {
+    const repo = await makeRepo()
+    await queueMerge(repo, { branch: "task/f", file: "f.txt", member: "PR10", revision: 1, changeId: ID_A })
+    await queueMerge(repo, { branch: "task/g", file: "g.txt", member: "PR11", revision: 1, changeId: ID_B })
+    // A routine sync-merge sits between the two landed changes — an author's
+    // branch merging origin/main, or an equivalent hand back-merge. It carries
+    // no queue-lane subject and no Change-Id trailer, exactly like the three
+    // real commits (c0eb0de00707, ba7a75685801, 526d84cc3878) that vetoed 1230
+    // unrelated lookups for 45+ minutes on hh 2026-08-31.
+    await git.text(repo, ["checkout", "-q", "-b", "task/sync"])
+    await commitFile(repo, "sync.txt", "sync\n", ["feat: sync"])
+    await git.text(repo, ["checkout", "-q", "main"])
+    await git.text(repo, ["merge", "--no-ff", "-m", "Merge remote-tracking branch 'origin/main' into task/sync", "task/sync"])
+
+    const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
+
+    // No specimen at all — the hand merge is structurally excluded.
+    expect(index.specimens).toEqual([])
+    // The identifiable landed changes still resolve merged (unaffected either way).
+    expect(mergedByChangeId(index, ID_A)).toMatchObject({ kind: "merged" })
+    expect(mergedByChangeId(index, ID_B)).toMatchObject({ kind: "merged" })
+    // A change that is genuinely absent resolves a definitive not-merged — not
+    // the loud unknown a member-less hand-merge specimen used to force onto
+    // every miss, however unrelated the queried member.
+    expect(mergedByChangeId(index, ID_C, { member: "PR12" })).toMatchObject({ kind: "not-merged" })
+  })
+
+  it("negative control: a single-parent queue-lane trailer-drop still vetoes — the fix is parent count, not conservatism", async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, "old.txt", "old\n", ["yrd: compose PR112"])
+    const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
+
+    expect(mergedByChangeId(index, ID_C)).toMatchObject({ kind: "unknown", reason: "trailer-absent" })
+    expect(mergedByChangeId(index, ID_C, { member: "PR112" })).toMatchObject({ kind: "unknown" })
+    // A different member is still ruled out — the queue-lane subject named its own.
+    expect(mergedByChangeId(index, ID_C, { member: "PR999" })).toMatchObject({ kind: "not-merged" })
   })
 
   it("answers a definitive not-merged over a specimen-free window, with the denominator", async () => {
