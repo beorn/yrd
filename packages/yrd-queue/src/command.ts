@@ -209,6 +209,13 @@ export const CommandEvidenceSchema = z
     /** True when the command was settled by its wall-clock bound (21012 S1). */
     timedOut: z.boolean().optional(),
     stageVerdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
+    /** The configured bound that produced `stageVerdict`, in ms: `noProgressTimeoutMs`
+     * for STALLED, `timeoutMs` for TIMED_OUT. Absent for EXITED (no bound fired) or
+     * when `stageVerdict` itself is absent — the two watchdogs share one wall-clock
+     * failure shape upstream (a killed process, `timedOut: true`) and are otherwise
+     * indistinguishable from durationMs alone, which only bounds the STALLED case
+     * from below. */
+    stageBoundMs: z.number().nonnegative().optional(),
     lastProgressAtMs: z.number().nonnegative().optional(),
     lastProgressBytes: z.number().int().nonnegative().optional(),
     sweepFailure: z.string().min(1).optional(),
@@ -229,6 +236,15 @@ export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
  * `null` together only when no process ever ran (the step refused before
  * spawning one); otherwise they are the process's own terminal facts,
  * independent of whatever business-logic verdict the step layered on top.
+ *
+ * `timedOut` alone answers only "did a wall-clock bound fire," collapsing the
+ * no-progress watchdog and the ceiling timeout into the same `true` — the
+ * PR2061-era ambiguity that cost hours reading exit 143 without knowing which
+ * bound killed the process. `stageVerdict`/`stageBoundMs` carry the same
+ * distinction {@link CommandEvidenceSchema} already resolves, onto this
+ * narrower attempt-directory record. Both optional: a record from before this
+ * field existed, or one for a step that never got as far as producing a
+ * verdict, parses exactly as it did before.
  */
 export const CommandTerminalSchema = z
   .object({
@@ -236,6 +252,8 @@ export const CommandTerminalSchema = z
     exitCode: z.number().int().nullable(),
     signal: z.string().nullable(),
     timedOut: z.boolean(),
+    stageVerdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
+    stageBoundMs: z.number().nonnegative().optional(),
     startedAt: z.string(),
     endedAt: z.string(),
     durationMs: z.number().nonnegative(),
@@ -528,6 +546,16 @@ function configuredCommand<Shape extends ChangeShape>(
     const gateReports = commandGateReports(message)
     const checkpointMigration = commandCheckpointMigration(message)
     const progress = result as typeof result & ProgressResult
+    // The bound that actually fired, not both configured bounds: STALLED and
+    // TIMED_OUT are mutually exclusive verdicts (yrd-process yields exactly one),
+    // so naming the other stage's bound here would misattribute a failure to a
+    // watchdog that never ran.
+    const stageBoundMs =
+      progress.verdict === "STALLED"
+        ? options.noProgressTimeoutMs
+        : progress.verdict === "TIMED_OUT"
+          ? options.timeoutMs
+          : undefined
     const evidence = CommandEvidenceSchema.parse({
       command: argv,
       exitCode: result.exitCode,
@@ -544,6 +572,7 @@ function configuredCommand<Shape extends ChangeShape>(
       ...(diagnostics.truncated ? { diagnosticsTruncated: true as const } : {}),
       ...(result.timedOut ? { timedOut: true } : {}),
       ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
+      ...(stageBoundMs === undefined ? {} : { stageBoundMs }),
       ...(progress.lastProgressAtMs === undefined ? {} : { lastProgressAtMs: progress.lastProgressAtMs }),
       ...(progress.lastProgressBytes === undefined ? {} : { lastProgressBytes: progress.lastProgressBytes }),
       ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
@@ -648,6 +677,8 @@ function configuredCommand<Shape extends ChangeShape>(
       exitCode: result.exitCode,
       signal: result.signal,
       timedOut: result.timedOut,
+      ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
+      ...(stageBoundMs === undefined ? {} : { stageBoundMs }),
       startedAt,
       endedAt,
       durationMs: result.durationMs,
@@ -1104,9 +1135,17 @@ async function hasTerminalRecord(dir: string): Promise<boolean> {
 }
 
 /** Human-readable rendering of a typed step failure, for operators reading the
- * attempt directory rather than the journal. */
-function renderStepFailure(error: JobError): string {
+ * attempt directory rather than the journal. `output` is the step's own result
+ * payload (CommandEvidence for a configured command) — passed separately from
+ * `error` because `stageVerdict`/`stageBoundMs` live there, not nested under
+ * `error.evidence` (see {@link failed}). */
+export function renderStepFailure(error: JobError, output?: JsonValue): string {
   const lines = [`yrd: step failed with '${error.code}'`, "", error.message]
+  const evidence = jsonRecord(output)
+  if (typeof evidence?.stageVerdict === "string") {
+    const bound = typeof evidence.stageBoundMs === "number" ? ` (bound ${evidence.stageBoundMs}ms)` : ""
+    lines.push("", `watchdog verdict: ${evidence.stageVerdict}${bound}`)
+  }
   const cause = jsonRecord(jsonRecord(error.evidence)?.error)
   if (typeof cause?.code === "string") {
     lines.push("", `cause: ${cause.code}`)
@@ -1144,7 +1183,7 @@ async function discloseStepFailure<Output extends JsonValue>(
     // Never clobber the command's own streams: they are the richer evidence,
     // and error.json already carries the typed verdict alongside them.
     if (!(await hasCommandOutput(dir))) {
-      await writeFile(join(dir, "output.log"), renderStepFailure(result.error))
+      await writeFile(join(dir, "output.log"), renderStepFailure(result.error, result.output))
     }
     // A step that refused before any command ran gets no terminal record from
     // configuredCommand — there was no process to report on — so this is the
