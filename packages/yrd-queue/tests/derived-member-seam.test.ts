@@ -34,6 +34,7 @@ import {
   newestTruthRecord,
   Queues,
   resolveMemberById,
+  resolveQueueChange,
   withQueue,
   withStep,
   type ChangeSnapshot,
@@ -302,22 +303,37 @@ function queuesWith(...records: readonly QueueRecord[]): QueuesState {
   return { ...empty, records: records.reduce((lookup, record) => Queues.set(lookup, record), empty.records) }
 }
 
-describe("id-seam — store-first by id", () => {
+describe("id-seam — canonical ids before aliases", () => {
   const terminal = changeRecord({ id: "PR7", branch: "issue/old", state: "closed", merged: true, revisions: 3 })
 
   it("a record answers its id even when snapshots also name it; recordless ids answer from the newest snapshot", () => {
     const bays = baysWith(terminal)
     const queues = queuesWith(
-      runRecord("R2", [snapshot({ id: "PR7", branch: "issue/old", revision: 3 })]),
+      runRecord("R2", [
+        snapshot({ id: "PR7", branch: "issue/old", revision: 3 }),
+        snapshot({ id: "PR9", branch: "issue/new", revision: 1, changeId: "I0123abcd" }),
+      ]),
       runRecord("R10", [snapshot({ id: "PR9", branch: "issue/new", revision: 2, changeId: "I0123abcd" })]),
     )
     expect(resolveMemberById(bays, queues, "PR7")).toMatchObject({ source: "record", id: "PR7" })
+    expect(resolveMemberById(bays, queues, "PR7.1")).toMatchObject({
+      source: "record",
+      id: "PR7",
+      record: { revs: [{ n: 1 }] },
+    })
+    expect(resolveQueueChange(bays, queues, "PR7.1")).toMatchObject({ id: "PR7", revs: [{ n: 1 }] })
     expect(resolveMemberById(bays, queues, "pr#9")).toMatchObject({
       source: "snapshot",
       id: "PR9",
       snapshot: { revision: 2, changeId: "I0123abcd" },
     })
     expect(resolveMemberById(bays, queues, "9")).toMatchObject({ source: "snapshot", id: "PR9" })
+    expect(resolveMemberById(bays, queues, "PR9.1")).toMatchObject({
+      source: "snapshot",
+      id: "PR9",
+      snapshot: { revision: 1 },
+    })
+    expect(resolveQueueChange(bays, queues, "PR9.1")).toMatchObject({ id: "PR9", revs: [{ n: 1 }] })
     expect(resolveMemberById(bays, queues, "PR8")).toBeUndefined()
   })
 
@@ -329,6 +345,37 @@ describe("id-seam — store-first by id", () => {
     expect(latestChangeSnapshot(queues, (candidate) => candidate.id === "PR9")?.revision).toBe(4)
     expect(maxChangeSnapshotRevision(queues, "PR9")).toBe(4)
     expect(maxChangeSnapshotRevision(queues, "PR404")).toBe(0)
+  })
+
+  it("an exact derived id wins over a record alias spelling the same selector", () => {
+    const alias = changeRecord({ id: "PR1", branch: "PR9", state: "closed" })
+    const branch = "issue/derived"
+    const bays = {
+      ...baysWith(alias),
+      submits: { [branch]: { sha: HEAD, base: "main", at: AT } },
+    }
+    const bound = {
+      ...queuesWith(),
+      derivedIdentities: {
+        [branch]: { [HEAD]: { branch, sha: HEAD, id: "PR9", revision: 1 } },
+      },
+    }
+
+    // Binding commits the canonical namespace before a Queue run can retain a
+    // materializable snapshot. The old record alias may not steal that id in
+    // this interval; there simply is not a Change to return yet.
+    expect(resolveMemberById(bays, bound, "PR9")).toBeUndefined()
+    expect(resolveQueueChange(bays, bound, "PR9")).toBeUndefined()
+
+    const queues = {
+      ...bound,
+      records: queuesWith(runRecord("R1", [snapshot({ id: "PR9", branch, revision: 1, headSha: HEAD })])).records,
+    }
+
+    expect(resolveMemberById(bays, queues, "PR9")).toMatchObject({ source: "snapshot", id: "PR9" })
+    expect(resolveQueueChange(bays, queues, "PR9")).toMatchObject({ id: "PR9", branch })
+    expect(resolveMemberById(bays, queues, "PR1")).toMatchObject({ source: "record", id: "PR1" })
+    expect(resolveQueueChange(bays, queues, "PR1")).toMatchObject({ id: "PR1", branch: "PR9" })
   })
 })
 

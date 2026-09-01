@@ -611,9 +611,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // retained edge.
     // Conscious update 2026-09-01: pre-Candidate derived identities add the
     // empty `queues.derivedIdentities` projection and its binding event. The
-    // former target fd6a78df is retained; the new target is 3f8a2627.
+    // former target fd6a78df is retained.
+    // Conscious update 2026-09-01: verdictless Job errors and exact derived
+    // refusal facts gain optional classification/base keys, while jobs-v9
+    // records retry semantics for cancelled/skipped terminal Jobs. The former
+    // target 3f8a2627 is retained; the new target is 2e5785f5.
     const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
+    expect(first.manifest.targetIdentity).toBe("2e5785f523cb5f3cae0be4e84989e8d6de347878f3a51840dc336506652d9818")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -2046,7 +2050,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
+    expect(rewritten.checkpoint_identity).toBe("2e5785f523cb5f3cae0be4e84989e8d6de347878f3a51840dc336506652d9818")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2135,7 +2139,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
+    expect(rewritten.checkpoint_identity).toBe("2e5785f523cb5f3cae0be4e84989e8d6de347878f3a51840dc336506652d9818")
     redatabase.close()
   })
 
@@ -3777,6 +3781,9 @@ checks: [{check: {run: "true"}}]
       // running yrd-runner is asked to store — retained across the
       // containedInBase bump (bd1c0b88, 2026-08-28).
       { from: "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c", to: releasedHop },
+      // The derived-identity composition's released target, retained across
+      // the verdictless classification/base-key bump in this branch.
+      { from: "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa", to: releasedHop },
       { from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7", to: releasedHop },
       // The production composition's identity before branch-is-change 2a.
       { from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37", to: releasedHop },

@@ -77,6 +77,7 @@ import {
   type JobCompletion,
   type JobHandler,
   type JobResult,
+  type JobTransition,
   type JobsState,
   type Jobs,
   type Runner,
@@ -875,7 +876,7 @@ type DerivedIdentityBound = Readonly<z.infer<typeof DerivedIdentityBoundSchema>>
 /** One compose/admission cycle that skipped a change without producing a queue run.
  * The `compose-candidate-skip` warns that accompany it are loggily-only, so this
  * is the fact that makes a head-of-line refusal loop survive the process. */
-const AdmissionRefusedSchema = z
+const AdmissionRefusedBaseSchema = z
   .object({
     pr: PRIdSchema,
     code: z.string().trim().min(1),
@@ -892,17 +893,30 @@ const AdmissionRefusedSchema = z
     verdictless: z.literal(true).optional(),
   })
   .strict()
+const consistentAdmissionRefusal = (refusal: z.infer<typeof AdmissionRefusedBaseSchema>): boolean =>
+  refusal.verdictless !== true || (refusal.judgedFailure !== true && refusal.kind === "infrastructure")
+const AdmissionRefusedSchema = AdmissionRefusedBaseSchema.refine(consistentAdmissionRefusal, {
+  message: "verdictless refusals require infrastructure kind and cannot also be judged failures",
+})
 type AdmissionRefusedArgs = Readonly<z.infer<typeof AdmissionRefusedSchema>>
 export type RecordAdmissionRefusalArgs = AdmissionRefusedArgs
-const ExactDerivedAdmissionRefusedSchema = AdmissionRefusedSchema.extend({
+const ExactDerivedAdmissionRefusedSchema = AdmissionRefusedBaseSchema.extend({
   branch: GitRefSchema,
   revision: z.number().int().positive(),
   headSha: GitShaSchema,
   baseSha: GitShaSchema,
-}).strict()
+  /** The terminal admission Job whose verdictless outcome this command
+   * records. When the retry budget remains, its retry transition shares this
+   * command frame so one outcome can neither be counted twice nor skipped. */
+  retryJob: z.string().trim().min(1).optional(),
+})
+  .strict()
+  .refine(consistentAdmissionRefusal, {
+    message: "verdictless refusals require infrastructure kind and cannot also be judged failures",
+  })
 type ExactDerivedAdmissionRefusedArgs = Readonly<z.infer<typeof ExactDerivedAdmissionRefusedSchema>>
 const MAX_DERIVED_VERDICTLESS_RETRIES = 3
-const AdmissionRefusedFactSchema = AdmissionRefusedSchema.extend({
+const AdmissionRefusedFactSchema = AdmissionRefusedBaseSchema.extend({
   /** Optional only for replaying facts written before exact-revision refusal
    * identity was introduced by 22528. New commands always populate both. */
   revision: z.number().int().positive().optional(),
@@ -912,6 +926,9 @@ const AdmissionRefusedFactSchema = AdmissionRefusedSchema.extend({
   baseSha: GitShaSchema.optional(),
 })
   .strict()
+  .refine(consistentAdmissionRefusal, {
+    message: "verdictless refusals require infrastructure kind and cannot also be judged failures",
+  })
   .refine((fact) => (fact.revision === undefined) === (fact.headSha === undefined), {
     message: "revision and headSha must be provided together",
   })
@@ -2799,6 +2816,7 @@ function createQueue<Shape extends ChangeShape>(
     kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
     reason: string
     verdictless?: true
+    retryJob?: string
   }>
   type RevisionAdmissionRefusal =
     | Readonly<{ stage: "preparation"; failure: RevisionAdmissionFailure }>
@@ -2841,6 +2859,9 @@ function createQueue<Shape extends ChangeShape>(
       /** The paths a conflicting candidate named, when it named any. Carried so
        * the retirement below can say WHAT conflicted. */
       conflicts?: readonly string[]
+      /** Exact terminal Job to requeue atomically with a derived verdictless
+       * refusal while this `(head, base)` still owns retry budget. */
+      retryJob?: string
     }> = {},
   ): Promise<RevisionAdmissionRefusal> => {
     const kind = options.kind ?? admissionFailureKind(result, false)
@@ -2886,6 +2907,7 @@ function createQueue<Shape extends ChangeShape>(
       kind,
       reason: result.message,
       ...(result.verdictless === true ? { verdictless: true as const } : {}),
+      ...(options.retryJob === undefined ? {} : { retryJob: options.retryJob }),
     }
     return options.candidate === undefined
       ? { stage: "preparation", failure }
@@ -3034,15 +3056,11 @@ function createQueue<Shape extends ChangeShape>(
         requestedJob ?? jobs.getByKey(key)?.id ?? jobs.getByKey(admissionJobKey(snapshot, baseSha, index))?.id
       if (jobId === undefined) throw new Error(`yrd: required check '${step.name}' did not request a Job`)
       let beforeRun = jobs.get(jobId)
-      const retryableDerivedInfrastructure =
-        !hasChangeRecord(runtime().bays, pr.id) &&
-        beforeRun !== undefined &&
-        retryableAdmissionInfrastructureJob(beforeRun)
-      if (
-        (freshRetry || retryableDerivedInfrastructure) &&
+      const recordTerminalReadyForRetry =
+        freshRetry &&
         beforeRun?.status === "completed" &&
         (beforeRun.conclusion === "failure" || beforeRun.conclusion === "timed_out")
-      ) {
+      if (recordTerminalReadyForRetry && beforeRun?.status === "completed" && beforeRun.conclusion !== "success") {
         beforeRun = await jobs.retry(jobId)
       }
       const job =
@@ -3080,6 +3098,11 @@ function createQueue<Shape extends ChangeShape>(
           candidate: candidate.id,
           kind,
           steps: [...evidence, failed],
+          ...(!hasChangeRecord(runtime().bays, pr.id) &&
+          kind === "infrastructure" &&
+          classifiedResult.verdictless === true
+            ? { retryJob: job.id }
+            : {}),
         })
         return { processed: true, refusal }
       }
@@ -5882,7 +5905,49 @@ function createQueueCommands(
             `'${args.branch}' now ${submit === undefined ? "has no standing submit fact" : `stands at ${submit.sha}`}`,
         )
       }
-      return { events: admissionRefusalEvents(args, args.revision, args.headSha, args.baseSha) }
+      const refusalEvents = admissionRefusalEvents(args, args.revision, args.headSha, args.baseSha)
+      if (args.retryJob === undefined) return { events: refusalEvents }
+      if (args.kind !== "infrastructure" || args.verdictless !== true) {
+        throw new Error(`yrd: derived refusal '${args.pr}' may retry a Job only for verdictless infrastructure`)
+      }
+      const job = state.jobs.byId[args.retryJob]
+      if (job === undefined) throw new Error(`yrd: derived refusal '${args.pr}' lost retry Job '${args.retryJob}'`)
+      const expectedKeyPrefix = `${admissionRevisionKeyPrefix(args.pr, args.revision)}${args.baseSha}:`
+      if (job.key?.startsWith(expectedKeyPrefix) !== true) {
+        throw new Error(
+          `yrd: derived refusal '${args.pr}' retry Job '${args.retryJob}' does not belong to revision ` +
+            `${args.revision} on base ${args.baseSha}`,
+        )
+      }
+      const retryFailure = jobFailure(job)
+      if (
+        !retryableAdmissionInfrastructureJob(job) ||
+        retryFailure.code !== args.code ||
+        retryFailure.message !== args.reason
+      ) {
+        throw new Error(
+          `yrd: derived refusal '${args.pr}' retry Job '${args.retryJob}' does not match verdictless outcome ` +
+            `'${args.code}'`,
+        )
+      }
+      const streak = state.queues.admissionRefusals[args.pr]
+      const sameRevision =
+        streak?.revision === undefined ||
+        (streak.revision === args.revision && streak.headSha === args.headSha && streak.baseSha === args.baseSha)
+      const priorCount = sameRevision ? (streak?.count ?? 0) : 0
+      if (priorCount > MAX_DERIVED_VERDICTLESS_RETRIES) {
+        throw new Error(
+          `yrd: derived refusal '${args.pr}' has exhausted its ${String(MAX_DERIVED_VERDICTLESS_RETRIES)} retries ` +
+            `for this content and base`,
+        )
+      }
+      const retry = { type: "retry", id: args.retryJob } satisfies JobTransition
+      return {
+        events:
+          priorCount < MAX_DERIVED_VERDICTLESS_RETRIES
+            ? [...refusalEvents, event("job/transitioned", retry)]
+            : refusalEvents,
+      }
     },
   })
 
@@ -10947,14 +11012,12 @@ function admissionFailureKind(
   return NEEDS_AUTHOR_CODES.has(result.code) ? "refusal" : "failure"
 }
 
-/** A terminal admission Job whose failure describes machinery, not content,
- * and whose Job protocol supports retrying the SAME identity. Cancelled and
- * skipped Jobs are infrastructure-shaped too, but the Job state machine does
- * not permit retrying those conclusions without a fresh authority action. */
+/** A terminal admission Job whose outcome describes machinery, not content,
+ * and whose Job protocol supports requeueing the same identity for a fresh
+ * attempt. The change delivery filters decide whether that retry still has
+ * authority; a withdrawn or explicitly cancelled change never reaches here. */
 function retryableAdmissionInfrastructureJob(job: DeepReadonly<Job> | undefined): boolean {
-  if (job?.status !== "completed" || (job.conclusion !== "failure" && job.conclusion !== "timed_out")) {
-    return false
-  }
+  if (job?.status !== "completed" || job.conclusion === "success") return false
   const result = jobFailure(job)
   const verdictless = result.verdictless === true || job.conclusion !== "failure"
   return admissionFailureKind(result, verdictless) === "infrastructure"

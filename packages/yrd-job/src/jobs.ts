@@ -695,7 +695,7 @@ export const Job = Object.freeze({
         }
 
       case "retry":
-        requireConclusion(current, "timed_out or failure", "timed_out", "failure")
+        requireRetryableConclusion(current)
         return { ...jobBase(current), status: "queued", changedAt: at }
     }
   },
@@ -1146,7 +1146,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       if (live === undefined) {
         const historical = archived("job", id)
         if (historical === undefined) throw new Error(`yrd: no job '${id}'`)
-        requireConclusion(historical, "timed_out or failure", "timed_out", "failure")
+        requireRetryableConclusion(historical)
         await options.restore(historical, queueJobRun(historical.key) === undefined ? undefined : "detached-queue")
         return current(id)
       }
@@ -1256,7 +1256,7 @@ export function withJobs(options: JobsOptions = {}) {
       if (args.job.key !== undefined && state.jobs.byKey[args.job.key] !== undefined) {
         throw new Error(`yrd: job key '${args.job.key}' is already in use`)
       }
-      requireConclusion(args.job, "timed_out or failure", "timed_out", "failure")
+      requireRetryableConclusion(args.job)
       return { events: [event("job/restored", args)] }
     },
   })
@@ -1276,7 +1276,7 @@ export function withJobs(options: JobsOptions = {}) {
         "job/transitioned": ReplayJobTransitionSchema,
         "job/restored": ReplayRestoreJobSchema,
       },
-      projectionVersion: "jobs-v8-target-model-retention",
+      projectionVersion: "jobs-v9-retry-all-non-success-conclusions",
       project: projectJobs,
       compact: (state) => ({ jobs: compactJobsState(state.jobs) }),
       create(yrd) {
@@ -1568,6 +1568,12 @@ function requireConclusion<Conclusion extends JobConclusion>(
     const actual = job.status === "completed" ? `${job.status}+${job.conclusion}` : job.status
     throw new JobStateConflict(job.id, job.status, `${expected}; actual ${actual}`)
   }
+}
+
+function requireRetryableConclusion(
+  job: Job,
+): asserts job is Extract<Job, { status: "completed"; conclusion: "timed_out" | "failure" | "cancelled" | "skipped" }> {
+  requireConclusion(job, "timed_out, failure, cancelled, or skipped", "timed_out", "failure", "cancelled", "skipped")
 }
 
 /** True while the job still holds the exact lease (in_progress) or wait token

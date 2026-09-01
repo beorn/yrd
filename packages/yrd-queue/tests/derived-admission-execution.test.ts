@@ -3,12 +3,11 @@
  * admission (once as the drain's standalone admission Job, once again inside
  * the root run, because the run's admission-reuse read is record-backed and a
  * derived member has no record), or an infrastructure-class failure inside the
- * admission drain — a step callback that THROWS instead of returning a
- * verdict, or a base-declared plan this process cannot execute — is downgraded
- * to a warn-and-skip and the selectorless compose resolves cleanly having
- * recorded that verdict nowhere. Both are invisible to step callbacks that are
- * idempotent and never raise, which is every callback the door's own tests
- * use; these fixtures count invocations and throw on purpose.
+ * admission drain must remain distinct from a content verdict: a step callback
+ * that THROWS writes `verdictless` at the Job boundary, while an explicit
+ * caller still receives the infrastructure failure. Both defects are invisible
+ * to idempotent callbacks that never raise, so these fixtures count invocations
+ * and throw on purpose.
  * @level l2
  * @consumer @yrd/queue
  */

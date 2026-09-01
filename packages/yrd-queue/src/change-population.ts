@@ -34,6 +34,7 @@
  * reader conclude the push never landed.
  */
 import {
+  getChangeRecord,
   hasChangeRecord,
   resolveChange,
   parseChangeSelector,
@@ -43,6 +44,7 @@ import {
 } from "@yrd/bay"
 import type { DeepReadonly } from "@yrd/core"
 import { derivedChange } from "./derived-admission.ts"
+import { hasStandingDerivedIdentity } from "./derived-identity-binding.ts"
 import { Queues, type ChangeSnapshot, type QueueRecord, type QueuesState } from "./model.ts"
 
 /**
@@ -58,6 +60,7 @@ import { Queues, type ChangeSnapshot, type QueueRecord, type QueuesState } from 
 function derivedSnapshots(
   bays: DeepReadonly<BaysState>,
   queues: DeepReadonly<QueuesState>,
+  revision?: number,
 ): Map<string, Readonly<{ snapshot: ChangeSnapshot; record: DeepReadonly<QueueRecord> }>> {
   const latest = new Map<string, Readonly<{ snapshot: ChangeSnapshot; record: DeepReadonly<QueueRecord> }>>()
   for (const record of Queues.values(queues as QueuesState) as readonly DeepReadonly<QueueRecord>[]) {
@@ -67,6 +70,7 @@ function derivedSnapshots(
       // already in the population from the store side.
       if (snapshot.intent !== undefined) continue
       if (hasChangeRecord(bays, snapshot.id)) continue
+      if (revision !== undefined && snapshot.revision !== revision) continue
       latest.set(snapshot.id, { snapshot: snapshot as ChangeSnapshot, record })
     }
   }
@@ -183,11 +187,11 @@ export function carriedBranches(bays: DeepReadonly<BaysState>, queues: DeepReado
  * Resolve a selector against BOTH lanes — the one entry point every `change`
  * verb calls instead of indexing `bays.prs`.
  *
- * Store first, by the store's own resolver (ids, revision selectors, branch,
- * name and bay aliases all keep working exactly as before). Only when the
- * store has no answer does the derived lane run, and it cannot collide: post-
- * door ids are minted strictly above the frozen store's max, so an id has a
- * record or snapshots, never both.
+ * Canonical ids first across both lanes, then aliases: exact record id, exact
+ * derived id, record aliases, and finally a derived branch. Post-door ids are
+ * minted above the frozen store's max, so exact ids cannot collide; aliases
+ * still can (a record branch named `PR9` beside derived PR9), and must never
+ * steal the canonical member.
  *
  * A derived change answers to its id (`PR2706`, `pr#2706`, `2706.1`) and to
  * its branch, because the branch is what the operator pushed and the id is
@@ -198,12 +202,19 @@ export function resolveQueueChange(
   queues: DeepReadonly<QueuesState>,
   selector: string,
 ): Change | undefined {
-  const record = resolveChange(bays as BaysState, selector)
-  if (record !== undefined) return record
-  const id = parseChangeSelector(selector)?.pr ?? selector
+  const parsed = parseChangeSelector(selector)
+  const id = parsed?.pr ?? selector
+  const exactRecord = getChangeRecord(bays, id)
+  if (exactRecord !== undefined) return resolveChange(bays as BaysState, selector)
   const snapshots = derivedSnapshots(bays, queues)
-  const byId = snapshots.get(id)
-  if (byId !== undefined) return changeOfSnapshot(bays, queues, byId)
+  const owned = snapshots.get(id)
+  if (owned !== undefined) {
+    const selected = parsed?.revision === undefined ? owned : derivedSnapshots(bays, queues, parsed.revision).get(id)
+    return selected === undefined ? undefined : changeOfSnapshot(bays, queues, selected)
+  }
+  if (hasStandingDerivedIdentity(bays, queues, id)) return undefined
+  const alias = resolveChange(bays as BaysState, selector)
+  if (alias !== undefined) return alias
   const byBranch = [...snapshots.values()].findLast((entry) => entry.snapshot.branch === selector)
   return byBranch === undefined ? undefined : changeOfSnapshot(bays, queues, byBranch)
 }

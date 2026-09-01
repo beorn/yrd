@@ -18,6 +18,7 @@ import {
   changeHead,
   changeRemerge,
   changeRevisionNumber,
+  getChangeRecord,
   isLiveChange,
   parseChangeSelector,
   resolveChange,
@@ -30,6 +31,7 @@ import { compareNatural, JsonSchema, resolveSelector, type JsonValue } from "@yr
 import type { StepKind } from "@yrd/config"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
+import { hasStandingDerivedIdentity } from "./derived-identity-binding.ts"
 import {
   projectionLookupGet,
   projectionLookupSet,
@@ -1092,24 +1094,38 @@ export function arbitrateDerivedChange(
 }
 
 /**
- * The store-first-by-id half of the S6 seam: `PRnnn` selectors answer from the
- * record store when a record exists (the frozen store is complete for its own
- * era), else from the newest retained `ChangeSnapshot` naming that id (the
- * only home a post-door derived member's identity has). The two sources cannot
- * disagree about one id: post-door ids are minted strictly above the frozen
- * store's max (mint monotonicity, pr-mint commit-before-escape), so an id has
- * a record or snapshots, never a record AND recordless snapshots.
+ * The canonical-id half of the S6 seam: an exact record id wins, then an exact
+ * derived id, and only then may record aliases participate. Mint monotonicity
+ * prevents an exact id collision, but a record branch/name alias can still
+ * spell a later derived id (record PR1 on branch `PR9`, derived PR9). Letting
+ * alias-aware resolution run first would silently hand PR9's work to PR1.
  */
 export type ResolvedMember =
   | Readonly<{ source: "record"; id: PRId; record: Change }>
   | Readonly<{ source: "snapshot"; id: string; snapshot: ChangeSnapshot }>
 
 export function resolveMemberById(bays: BaysState, queues: QueuesState, selector: string): ResolvedMember | undefined {
-  const record = resolveChange(bays, selector)
-  if (record !== undefined) return { source: "record", id: record.id, record }
-  const id = parseChangeSelector(selector)?.pr ?? selector
-  const snapshot = latestChangeSnapshot(queues, (candidate) => candidate.id === id)
-  return snapshot === undefined ? undefined : { source: "snapshot", id: snapshot.id, snapshot }
+  const parsed = parseChangeSelector(selector)
+  const id = parsed?.pr ?? selector
+  const exactRecord = getChangeRecord(bays, id)
+  if (exactRecord !== undefined) {
+    const selected = resolveChange(bays, selector)
+    return selected === undefined ? undefined : { source: "record", id: selected.id, record: selected }
+  }
+  const latest = latestChangeSnapshot(queues, (candidate) => candidate.id === id)
+  if (latest !== undefined) {
+    const selected =
+      parsed?.revision === undefined
+        ? latest
+        : latestChangeSnapshot(queues, (candidate) => candidate.id === id && candidate.revision === parsed.revision)
+    return selected === undefined ? undefined : { source: "snapshot", id: selected.id, snapshot: selected }
+  }
+  // A binding escapes before the first Queue run snapshot. During that window
+  // the canonical id is real but not yet materializable; it must still shadow
+  // a historical record alias spelling the same token.
+  if (hasStandingDerivedIdentity(bays, queues, id)) return undefined
+  const alias = resolveChange(bays, selector)
+  return alias === undefined ? undefined : { source: "record", id: alias.id, record: alias }
 }
 
 /**

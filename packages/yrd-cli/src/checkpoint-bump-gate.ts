@@ -121,8 +121,17 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // derived-member identity binding before a Candidate or run exists. The
   // queue gains an empty `derivedIdentities` projection, one registered event,
   // and queues-v12; the retained predecessor above supplies the empty record
-  // to stored checkpoints before replay. Current.
+  // to stored checkpoints before replay.
   "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa",
+  // 2026-09-01 — verdictless admission outcomes carry their classification
+  // at the writer boundary. `JobError` gains optional `verdictless`, while
+  // `queue/admission/refused` gains optional `verdictless` and `baseSha` so a
+  // derived retry streak is exact to content and base. jobs-v9 also records
+  // that retry transitions now accept cancelled/skipped terminal Jobs. Historical
+  // facts omit the new keys and still parse unchanged; no stored projection
+  // needs rewriting.
+  // Current.
+  "2e5785f523cb5f3cae0be4e84989e8d6de347878f3a51840dc336506652d9818",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

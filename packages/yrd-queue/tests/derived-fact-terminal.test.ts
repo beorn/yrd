@@ -32,7 +32,7 @@ import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, raiseFailure } from "@yrd/core"
-import { withJobs, type JobResult } from "@yrd/job"
+import { localRunner, withJobs, type Jobs, type JobResult, type Runner } from "@yrd/job"
 import * as z from "zod"
 import {
   candidateRefFor,
@@ -45,6 +45,7 @@ import {
   type IntegrationProof,
   type StepExecution,
 } from "@yrd/queue"
+import { indexedJournal } from "./support/indexed-journal.ts"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -116,6 +117,7 @@ async function createApp(
      * the candidate merges fine and its required check fails. */
     failCheck?: () => boolean | Promise<boolean>
     checkResult?: (input: StepExecution) => JobResult<CheckResult> | Promise<JobResult<CheckResult>>
+    runner?: (jobs: Jobs) => Runner
   }> = {},
 ) {
   const check = withStep(
@@ -149,6 +151,7 @@ async function createApp(
     defaultSteps: ["check", "merge"],
     resolveBaseSha: options.resolveBaseSha ?? (() => BASE),
     prepareCandidate: options.prepareCandidate ?? mergeableCandidate,
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
     prNumberMint: options.queueMint ?? volatilePrNumberMint(),
     readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
   })
@@ -357,17 +360,31 @@ describe("a standing submit fact derives at most ONE live change", () => {
     expect(app.state().queues.retiredSubmits["issue/new-member"]).toBeUndefined()
   })
 
-  it("a derived candidate infrastructure failure retries three times, then reports without parking its lane", async () => {
+  it("derived admission machinery shares one bounded retry budget across repeated cancellation and runner failure", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const queueMint = volatilePrNumberMint()
     let checkCalls = 0
     let currentBase = BASE
+    let holdJob = true
     const branch = "issue/infrastructure-retry"
     await using app = await createApp({
+      journal: indexedJournal(),
       log,
       queueMint,
       resolveBaseSha: () => currentBase,
+      runner: (jobs) => {
+        const active = localRunner({ id: "local", jobs, leaseMs: 60_000 })
+        return {
+          ...active,
+          submit: async (input) => {
+            if (!holdJob) return active.submit(input)
+            const held = jobs.get(input.job)
+            if (held === undefined) throw new Error(`expected admission Job '${input.job}'`)
+            return held
+          },
+        }
+      },
       checkResult: (input) => {
         checkCalls += 1
         if (input.prs[0]?.branch === branch) {
@@ -378,9 +395,62 @@ describe("a standing submit fact derives at most ONE live change", () => {
     })
     await app.bays.recordBranchSubmit({ branch, sha: SHA, base: "main" })
 
-    for (let outcome = 1; outcome <= 4; outcome += 1) {
+    let firstTurn = true
+    await expect(
+      app.queue.run(
+        {},
+        {
+          ...runtime,
+          continueAdmissions: () => {
+            const run = firstTurn
+            firstTurn = false
+            return run
+          },
+        },
+      ),
+      "the first pass leaves one admission Job queued",
+    ).resolves.toEqual([])
+    const pending = Object.values(app.state().jobs.byId).find((job) => job.key?.startsWith("admission:PR1:1:"))
+    expect(pending).toMatchObject({ status: "queued", attempt: 0 })
+    if (pending === undefined) throw new Error("expected the derived admission Job")
+    await app.jobs.cancel({ id: pending.id, attempt: pending.attempt, by: "yrd/queue", reason: "runner cycled" })
+
+    await expect(
+      app.queue.run({}, runtime),
+      "the cancellation stays pass-local and enters the ledger",
+    ).resolves.toEqual([])
+    expect(checkCalls, "the cancelled attempt does not execute the check").toBe(0)
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+      pr: "PR1",
+      revision: 1,
+      headSha: SHA,
+      baseSha: BASE,
+      code: "run-canceled",
+      kind: "infrastructure",
+      verdictless: true,
+      count: 1,
+      sameCodeCount: 1,
+    })
+
+    const retried = app.jobs.get(pending.id)
+    expect(retried).toMatchObject({ status: "queued", attempt: 0 })
+    if (retried === undefined) throw new Error("expected the first cancellation to atomically requeue its Job")
+    await app.jobs.cancel({ id: retried.id, attempt: retried.attempt, by: "yrd/queue", reason: "runner cycled" })
+    await expect(
+      app.queue.run({}, runtime),
+      "the same cancellation code still consumes a second outcome",
+    ).resolves.toEqual([])
+    expect(checkCalls, "neither cancelled attempt executes the check").toBe(0)
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+      code: "run-canceled",
+      count: 2,
+      sameCodeCount: 2,
+    })
+
+    holdJob = false
+    for (let outcome = 3; outcome <= 4; outcome += 1) {
       await expect(app.queue.run({}, runtime), `verdictless outcome ${outcome} stays pass-local`).resolves.toEqual([])
-      expect(checkCalls, `outcome ${outcome} executes exactly one attempt`).toBe(outcome)
+      expect(checkCalls, `outcome ${outcome} executes each fresh runner attempt once`).toBe(outcome - 2)
       expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
         pr: "PR1",
         revision: 1,
@@ -390,13 +460,13 @@ describe("a standing submit fact derives at most ONE live change", () => {
         kind: "infrastructure",
         verdictless: true,
         count: outcome,
-        sameCodeCount: outcome,
+        sameCodeCount: outcome - 2,
       })
       expect(app.state().queues.retiredSubmits[branch], "machinery failure is not a content verdict").toBeUndefined()
     }
 
     await expect(app.queue.run({}, runtime), "the fifth pass observes the cap without spinning").resolves.toEqual([])
-    expect(checkCalls, "one first attempt plus at most three retries").toBe(4)
+    expect(checkCalls, "two cancelled outcomes plus at most two fresh runner attempts").toBe(2)
     expect(queueMint.highWater(), "infrastructure retry retains one logical identity").toBe(1)
     expect(app.state().queues.derivedIdentities[branch]?.[SHA]).toMatchObject({ id: "PR1", revision: 1 })
     expect(app.state().bays.submits[branch]?.sha, "the submit fact remains standing for an operator cure").toBe(SHA)
@@ -408,7 +478,7 @@ describe("a standing submit fact derives at most ONE live change", () => {
 
     currentBase = "4".repeat(40)
     await expect(app.queue.run({}, runtime), "a new base re-arms the standing member").resolves.toEqual([])
-    expect(checkCalls, "the new base gets a fresh first attempt").toBe(5)
+    expect(checkCalls, "the new base gets a fresh first attempt").toBe(3)
     expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
       baseSha: currentBase,
       kind: "infrastructure",
@@ -420,7 +490,7 @@ describe("a standing submit fact derives at most ONE live change", () => {
     await app.bays.recordBranchSubmit({ branch: "issue/healthy-after-infrastructure", sha: healthySha, base: "main" })
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
-    expect(checkCalls, "the retrying member and its healthy peer each get one attempt").toBe(7)
+    expect(checkCalls, "the retrying member and its healthy peer each get one attempt").toBe(5)
     expect(queueMint.highWater(), "the capped member does not park its healthy peer").toBe(2)
     expect(app.state().queues.derivedIdentities["issue/healthy-after-infrastructure"]?.[healthySha]).toMatchObject({
       id: "PR2",
@@ -468,20 +538,6 @@ describe("a standing submit fact derives at most ONE live change", () => {
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
     expect(queueMint.highWater()).toBe(2)
     expect(app.state().queues.derivedIdentities[branch]?.[nextSha]).toMatchObject({ id: "PR2", revision: 1 })
-  })
-
-  it("does not let a record alias steal a canonical derived member's refusal", async () => {
-    const queueMint = volatilePrNumberMint()
-    await using app = await createApp({ queueMint, failCheck: () => true })
-    await app.bays.submit({ branch: "PR2", headSha: "3".repeat(40), base: "main", baseSha: BASE })
-    await app.bays.closePr({ pr: "PR1", reason: "alias fixture is terminal" })
-    await app.bays.recordBranchSubmit({ branch: "issue/derived-with-aliased-id", sha: SHA, base: "main" })
-
-    await app.queue.run({}, runtime)
-
-    expect(app.state().queues.derivedIdentities["issue/derived-with-aliased-id"]?.[SHA]).toMatchObject({ id: "PR2" })
-    expect(app.state().queues.admissionRefusals.PR2).toMatchObject({ code: "check-failed", sameCodeCount: 1 })
-    expect(app.state().queues.admissionRefusals.PR1, "the aliased record must stay untouched").toBeUndefined()
   })
 
   it("keeps a canonical derived member distinct from a record alias throughout mixed explicit compose", async () => {

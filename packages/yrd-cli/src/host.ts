@@ -406,6 +406,12 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // `queues.derivedIdentities`; `fillMissingStateFromInitial` supplies the
   // empty record before replay resumes after the stored cursor.
   "fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c",
+  // The composition immediately before verdictless admission outcomes began
+  // carrying their classification at the writer boundary (2026-09-01). This
+  // is the shipped ledger's superseded target. `JobError.verdictless` and the
+  // refusal fact's `verdictless`/`baseSha` keys are optional, so historical
+  // events parse unchanged and the shared migration preserves state verbatim.
+  "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.

@@ -269,6 +269,31 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
   })
 
+  it("rejects a verdictless refusal that also claims a content judgment", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/contradictory-verdictless-refusal")
+
+    for (const contradiction of [
+      { kind: "failure" as const },
+      { kind: "infrastructure" as const, judgedFailure: true as const },
+    ]) {
+      await expect(
+        app.queue.recordAdmissionRefusal({
+          pr: pr.id,
+          code: "runner-error",
+          reason: "the runner ended without a content verdict",
+          verdictless: true,
+          ...contradiction,
+        }),
+      ).rejects.toThrow("verdictless refusals require infrastructure kind and cannot also be judged failures")
+    }
+    expect(app.state().queues.admissionRefusals[pr.id]).toBeUndefined()
+  })
+
   it("names a configured needsPersonOwner on a needs-person finding instead of the unowned default", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createApp(

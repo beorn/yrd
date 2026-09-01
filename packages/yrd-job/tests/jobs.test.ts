@@ -292,6 +292,35 @@ describe("Jobs", () => {
     expect(isTerminalJobStatus("completed")).toBe(true)
   })
 
+  it("requeues cancelled and skipped terminal Jobs", () => {
+    const requested = Job.requested(JOB_ID, "2026-01-01T00:00:00.000Z", {
+      definition: "message.deliver",
+      revision: "transport-v1",
+      input: { message: "hello" },
+    })
+    const terminals: readonly JobRecord[] = [
+      Job.apply(
+        requested,
+        { type: "cancel", id: JOB_ID, attempt: 0, by: "yrd/queue", reason: "runner cycled" },
+        "2026-01-01T00:00:01.000Z",
+      ),
+      {
+        ...requested,
+        status: "completed",
+        conclusion: "skipped",
+        finishedAt: "2026-01-01T00:00:01.000Z",
+        changedAt: "2026-01-01T00:00:01.000Z",
+      },
+    ]
+
+    for (const terminal of terminals) {
+      expect(Job.apply(terminal, { type: "retry", id: JOB_ID }, "2026-01-01T00:00:02.000Z")).toMatchObject({
+        status: "queued",
+        attempt: 0,
+      })
+    }
+  })
+
   it("replays pre-target-model terminal Jobs into GitHub status and conclusion", async () => {
     const completionCommand = { id: testId(100), op: "legacy.complete" }
     const restoredJobId = testId(104)
