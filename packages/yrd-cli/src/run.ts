@@ -288,6 +288,8 @@ import {
   foldMemoryCap,
   HABITANT_RSS_CAP_DEFAULT_MB,
   HABITANT_RSS_CAP_ENV,
+  habitantMemoryObservation,
+  type HabitantMemorySample,
   type HabitantMemoryStall,
 } from "./habitant-memory.ts"
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
@@ -12120,6 +12122,43 @@ function processRssBytes(io: Pick<YrdCliIO, "rssBytes">): number | undefined {
 }
 
 /**
+ * The wider per-cycle read behind the observation row.
+ *
+ * `rssBytes` still comes through {@link processRssBytes}, so an injected
+ * reading keeps overriding the runtime for tests and for hosts that measure
+ * resident size their own way. The heap detail has no such injection point and
+ * is read straight from the runtime, because nothing decides against it.
+ */
+function processMemorySample(io: Pick<YrdCliIO, "rssBytes">): HabitantMemorySample {
+  const rssBytes = processRssBytes(io)
+  const measured = (value: number | undefined): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
+  try {
+    const usage = process.memoryUsage()
+    return {
+      rssBytes,
+      heapUsedBytes: measured(usage.heapUsed),
+      heapTotalBytes: measured(usage.heapTotal),
+      externalBytes: measured(usage.external),
+      arrayBuffersBytes: measured(usage.arrayBuffers),
+    }
+  } catch {
+    // silent-fallback-allow: a runtime with no heap accounting still yields a
+    // row carrying whatever resident size it could report. Nothing is reported
+    // healthy on this catch and no value is invented — the absent fields read
+    // as "not measured", which is what they are, and the cap logic below never
+    // consulted them in the first place.
+    return {
+      rssBytes,
+      heapUsedBytes: undefined,
+      heapTotalBytes: undefined,
+      externalBytes: undefined,
+      arrayBuffersBytes: undefined,
+    }
+  }
+}
+
+/**
  * Fold one settled cycle into the RSS-cap window and say whether this habitant
  * should stand down over its own size.
  *
@@ -12135,8 +12174,19 @@ export function habitantMemoryHealth(
   habitant: boolean,
   capBytes: number | undefined,
 ): Readonly<{ stall: HabitantMemoryStall | undefined; standDown: boolean }> {
-  if (!habitant || capBytes === undefined) return { stall: undefined, standDown: false }
-  const next = foldMemoryCap(stall, { rssBytes: processRssBytes(io), capBytes })
+  if (!habitant) return { stall: undefined, standDown: false }
+  // Emitted BEFORE the cap gate, and on every cycle rather than only on the
+  // ones that breach: the growth this row exists to measure is a floor that
+  // rises over hours, and a series that only records its own breaches cannot
+  // show a floor at all. An undeclared cap still gets rows — a host measuring
+  // its working set before choosing a number is exactly the reader here.
+  const sample = processMemorySample(io)
+  app.log.debug?.("Queue runner memory observation.", {
+    action: "habitant-memory-observation",
+    ...habitantMemoryObservation(sample, capBytes),
+  })
+  if (capBytes === undefined) return { stall: undefined, standDown: false }
+  const next = foldMemoryCap(stall, { rssBytes: sample.rssBytes, capBytes })
   const action = decideHabitantMemory(next)
   if (action.kind === "serve") return { stall: next, standDown: false }
   const mb = (bytes: number): string => String(Math.round(bytes / (1024 * 1024)))
