@@ -21,7 +21,8 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u
  * retained predecessor is free: `projectionCheckpointIdentity` hashes `v`,
  * `initialState`, `events`, `replayEvents` and `projectionVersions` only, so
  * migrations are NOT an identity input and retaining one cannot move the
- * target.
+ * target. One noted exception: a never-deployed identity introduced and removed
+ * between deployments may be delisted, with a dated comment.
  *
  * WHAT THIS LIST DELIBERATELY DOES NOT COVER, recorded rather than dropped
  * silently. Five identities this composition shipped before the gate existed
@@ -108,10 +109,12 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // and both are exactly what the widened schemas still accept; replay resumes
   // after the stored cursor. The predecessor retained below is this ledger's
   // own superseded last entry — what the project has ASKED every deployment to
-  // store since 2026-08-30. The interim identity a9b486dc, computed while the
-  // first of these two widenings stood alone on an unmerged branch, was never
-  // stored by any deployment, so it is deliberately NOT retained (the fe430448
-  // precedent above).
+  // store since 2026-08-30. The interim identity a9b486dc existed only between
+  // two same-garage-window fast-forwards (2026-08-31→09-01) while the queue
+  // runner was off; no deployment ever stored it; delisted under a
+  // never-deployed rationale — distinct from the five shipped-but-unlisted
+  // identities (fe430448 et al.), whose exclusion has acknowledged startup
+  // cost.
   // Current.
   "fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c",
 ])
