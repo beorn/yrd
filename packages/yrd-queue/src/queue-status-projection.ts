@@ -20,6 +20,7 @@ import {
   changeRevisionLineage,
   changeRevisionNumber,
   type ChangeRevTerminal,
+  currentAdmissionFinish,
   changeSourceReadyAt,
   currentChangeRev,
   formatChangeRevisionSelector,
@@ -614,49 +615,22 @@ export type ChangeRevisionHistoryClock = Readonly<{
   pr: string
   revision: number
   headSha: string
-  /**
-   * A terminal fact this revision still carries that belongs to a PREVIOUS
-   * admission of the same sha — moved off `terminal` by
-   * {@link currentAdmissionFinish} so no age is measured to it, and kept here
-   * so nothing is silently discarded and a row can say why it reads pending.
-   */
-  supersededTerminal?: ChangeRevTerminal
 }> &
+  // `supersededTerminal` rides in from `ChangeRevClock`: the writer records a
+  // refused settle there, and this projection puts one it finds at READ time in
+  // the same field, so a reader cannot tell — and does not need to tell — which
+  // of the two put it there.
   ChangeRevClock
 
 /**
- * The finish belonging to the CURRENT admission — or `undefined` when the only
- * finish on record belongs to a previous one.
- *
- * A revision's submit fact is MUTABLE. Re-submitting the same sha (the
- * documented remedy when a run consumes a change's submit authority) rewrites
- * `submittedAt` forward and leaves the earlier settle's terminal fact, and the
- * check results behind it, in place. Those describe an admission that is over.
- * Pairing them with the refreshed start measures an age between two different
- * admissions of the same sha, which is why every such pair came out negative
- * and threw.
- *
- * Read forward instead: a finish that precedes its own start is not corruption
- * and not a clock fault. It is a resubmitted sha whose results are stale, and
- * the current admission simply has no finish yet — so the honest reading is
- * PENDING, which is what this returns.
- *
- * Live 2026-09-01 on 0.0.1+caacf98e21, change 'PR2749' resubmitted at
- * 18:40:25Z over an 08-30T22:56Z settle: `yrd pr list --json` exited 3 with
- * EMPTY stdout for all 2275 rows, and `yrd watch` died outright.
+ * Re-exported, never redefined. The rule lives in the shared model
+ * (`@yrd/bay`) because {@link changeDeliveryState} — what the QUEUE ADMITS —
+ * and these read projections must never disagree about which admission a clock
+ * belongs to. Live 2026-09-01 on 0.0.1+caacf98e21: change 'PR2749' resubmitted
+ * at 18:40:25Z over an 08-30T22:56Z settle emptied `yrd pr list --json` for all
+ * 2275 rows and killed `yrd watch` outright.
  */
-export function currentAdmissionFinish(
-  startedAt: string | undefined,
-  finishedAt: string | undefined,
-): string | undefined {
-  if (startedAt === undefined || finishedAt === undefined) return finishedAt
-  const start = Date.parse(startedAt)
-  const finish = Date.parse(finishedAt)
-  // An unparseable clock is a different defect; leave it to the reader that
-  // knows how to name it rather than swallowing it here.
-  if (!Number.isFinite(start) || !Number.isFinite(finish)) return finishedAt
-  return finish < start ? undefined : finishedAt
-}
+export { currentAdmissionFinish }
 
 export type ChangeRunRevisionClock =
   | (ChangeRevisionHistoryClock & Readonly<{ admittedBy: "submission"; submittedAt: string }>)
