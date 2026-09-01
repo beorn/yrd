@@ -158,6 +158,39 @@ function ranForBranch(app: App, branch: string): boolean {
 }
 
 describe("a derived member holds its own place in the admission line", () => {
+  // THE CONTROL, and it passes on the unfixed tree — which is the finding, not a
+  // gap in the suite. A record-lane change IS in the list `admissionLineHolder`
+  // computes, so it gets a real position and is never ordered behind the queue
+  // it belongs to. Stale-check re-drive was therefore never broken in general:
+  // it is broken for exactly the members the line cannot see. Without this
+  // control the red tests below read as "stale-check re-drive is broken", and
+  // the fix would have been aimed at the release path, which works.
+  it("CONTROL: a record-lane member already re-drives after every stale-check loss", async () => {
+    const checked: string[] = []
+    const merged: string[] = []
+    const now = (): string => "2026-01-01T00:00:00.000Z"
+    await using app = await createApp({
+      now,
+      checked,
+      merged,
+      merge: () => ({
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "stale-check", message: "queue 'main' moved" },
+      }),
+    })
+    const only = await recordChange(app, "issue/record-only")
+
+    for (let pass = 0; pass < 4; pass += 1) await app.queue.run({}, runtime)
+
+    expect(merged, "the record lane re-drives on every pass, unfixed tree included").toEqual([
+      only,
+      only,
+      only,
+      only,
+    ])
+  })
+
   it("re-drives a member whose run lost to stale-check, past a younger record-lane change", async () => {
     const checked: string[] = []
     let day = 1
