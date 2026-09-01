@@ -44,6 +44,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
+  RECEIVER_REMOTE_NAME,
   hasChangeRecord,
   type BaysState,
   type Change,
@@ -492,6 +493,88 @@ export function derivedLaneBranches(
       return arbitrateDerivedChange(records as Change[], bays.submits[branch]).lane === "derived"
     })
     .toSorted()
+}
+
+/**
+ * The exact command an operator runs to retire one submit ref by hand.
+ *
+ * Shared by every surface that tells a reader a standing fact is stale — the
+ * compose warn rows (`queue.ts`'s `compose-derived-fact-already-landed` and
+ * `compose-derived-fact-superseded` conditions), the audit's
+ * `unrecordedSubmit` message (`composeAnswer`'s "superseded" case), and
+ * {@link derivedSubmitRetirements}'s own directive — so an operator's warn
+ * row and an automated sweep's retirement can never print two different
+ * strings for the same fix.
+ */
+export function submitRefRetirementCommand(branch: string): string {
+  return `git push ${RECEIVER_REMOTE_NAME} :refs/yrd/submit/${branch}`
+}
+
+/** One derived-lane submit ref this sweep has proven safe to physically
+ * retire, with everything a caller needs to both act and explain the act. */
+export type DerivedSubmitRetirement = Readonly<{
+  branch: string
+  sha: string
+  base: string
+  /** `refs/yrd/submit/<branch>` — the exact ref a retirement deletes. */
+  ref: string
+  /** The same string {@link submitRefRetirementCommand} would print for a
+   * human; carried on the row so an automated retirement and its own log
+   * line never have to re-derive it. */
+  command: string
+}>
+
+/**
+ * Derived-lane submit refs safe to PHYSICALLY retire: standing facts whose
+ * content has already landed on their base, proven the identical way
+ * {@link derivedLaneBranches} proves it safe to stop DERIVING them —
+ * `landedBranches` is the same set (`landedSubmitBranches(scan)`), so a fact
+ * this codebase already trusts enough to exclude from admission is trusted
+ * here too (@yrd/core/22991 derived-lane submit-ref retirement).
+ *
+ * RECORD-lane facts are excluded by the identical `arbitrateDerivedChange`
+ * lane test `derivedLaneBranches` applies: that population already retires
+ * through `submitFactRetirement` (queue.ts) at merge time, for a reason —
+ * the double-merge admission hazard (PR2139, 2026-08-27) — that does not
+ * apply here, because `derivedLaneBranches` already requires a branch to be
+ * recordless before compose can admit it a second time; a stale DERIVED fact
+ * cannot cause that re-merge. So this function's only job is the ref itself.
+ *
+ * Never a journal write, unlike `submitFactRetirement`: `bays.submits`
+ * already reads right for a landed derived fact with no write at all
+ * (derive-at-read, `unrecordedSubmits` / `waiting-list-derived.test.ts`) —
+ * the ref may be swept "on any schedule, or never, without correctness
+ * depending on it" (`unrecordedSubmits`'s own doc). The only genuinely
+ * missing piece is the PHYSICAL ref: `applyArchival` (yrd-bay/receiver.ts)
+ * sweeps a record-lane ref when its branch HEAD is deleted, but the
+ * canonical `git push bay HEAD:refs/for/<base>/<issue>` delivery never
+ * creates one, so nothing has ever swept a derived-lane ref without this.
+ *
+ * PURE — no git, no journal event, no side effect. The caller performs the
+ * retirement (each row's `command`, or the equivalent CAS'd ref delete) and
+ * is responsible for re-validating the fact has not moved immediately
+ * beforehand; this function only names which refs are safe to try.
+ */
+export function derivedSubmitRetirements(
+  bays: DeepReadonly<BaysState>,
+  landedBranches: ReadonlySet<string>,
+): readonly DerivedSubmitRetirement[] {
+  return Object.entries(bays.submits)
+    .filter(([branch]) => landedBranches.has(branch))
+    .filter(([branch]) => {
+      const records = recordChanges(bays).filter((pr) => pr.branch === branch)
+      return arbitrateDerivedChange(records as Change[], bays.submits[branch]).lane === "derived"
+    })
+    .map(
+      ([branch, submit]): DerivedSubmitRetirement => ({
+        branch,
+        sha: submit.sha,
+        base: submit.base,
+        ref: `refs/yrd/submit/${branch}`,
+        command: submitRefRetirementCommand(branch),
+      }),
+    )
+    .toSorted((left, right) => left.branch.localeCompare(right.branch))
 }
 
 /** One standing fact whose content the repository ALREADY carries: its sha is

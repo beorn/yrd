@@ -148,6 +148,7 @@ import {
   retiredSubmitBranches,
   NO_LANDED_SUBMIT_SCAN,
   submitLandingReader,
+  submitRefRetirementCommand,
   type DerivedAuthorityLookup,
   type DerivedRunMember,
   type DerivedSubmitEnrichment,
@@ -708,7 +709,7 @@ function composeAnswer(branch: string, sha: string, wiring: DerivedAdmissionWiri
   if (observation.outcome === "superseded") {
     return (
       `the last compose declined to derive it because its base already contains this content: the fact is ` +
-      `stale — retire it (git push ${RECEIVER_REMOTE_NAME} :refs/yrd/submit/${branch})`
+      `stale — retire it (${submitRefRetirementCommand(branch)})`
     )
   }
   return (
@@ -1959,9 +1960,7 @@ function createQueue<Shape extends ChangeShape>(
         `compose-derived-fact-already-landed:${stale.branch}:${stale.sha}`,
         "warn",
         "queue compose will not derive an admission for a submit fact pointing at already-landed content; " +
-          "the fact is stale — retire it (git push bay :refs/yrd/submit/" +
-          stale.branch +
-          ")",
+          `the fact is stale — retire it (${submitRefRetirementCommand(stale.branch)})`,
         {
           action: "compose-derived-fact-already-landed",
           branch: stale.branch,
@@ -2064,9 +2063,7 @@ function createQueue<Shape extends ChangeShape>(
           `compose-derived-fact-superseded:${branch}:${submit.sha}`,
           "warn",
           "queue compose will not derive an admission for a submit fact whose content the base already " +
-            "contains; the fact is stale — retire it (git push bay :refs/yrd/submit/" +
-            branch +
-            ")",
+            `contains; the fact is stale — retire it (${submitRefRetirementCommand(branch)})`,
           {
             action: "compose-derived-fact-superseded",
             branch,
