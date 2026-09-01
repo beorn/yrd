@@ -12,22 +12,24 @@
  * `refs/notes/yrd/merge-records` are not an input either — they are an index
  * of the same truth, and an index must not certify itself.
  *
- * THE LOUD UNKNOWN (the trailer-drop door-stop): a commit whose subject
- * claims queue synthesis — while carrying NO readable Change-Id — is a
- * SPECIMEN: it merged something this index cannot name. Parent count alone
- * never qualifies a commit as a specimen: a multi-parent commit can never
- * itself BE the change a lookup asks about, so an ordinary merge (an
- * author's branch synced with origin/main, say) is never a specimen just
- * for having two parents — only a subject that claims the queue lane earns
- * that, whatever its parent count. Measured on hh 2026-08-31: three
- * non-queue-lane sync-merges vetoed 1230 unrelated lookups into the loud
- * unknown for 45+ minutes before parent count was dropped from this
- * predicate. While specimens
+ * THE LOUD UNKNOWN (the trailer-drop door-stop): a commit that joined foreign
+ * history into the walked line — any first-parent merge commit, or any commit
+ * whose subject claims queue synthesis — while carrying NO readable Change-Id
+ * is a SPECIMEN: it merged something this index cannot name. While specimens
  * stand in the walked window, "not found" is not "not merged": a lookup that
  * finds nothing answers `unknown: trailer-absent` naming the specimens, never
  * a silent not-merged. Specimens are cleared only by a caller-supplied named
  * exception per commit (the trailer-drop bead's "named derivation exceptions"),
- * or by bounding the walk (`stop`) above them. History that predates trailer
+ * or by bounding the walk (`stop`) above them — a DECLARED RULING IS THE ONLY
+ * CURE, and that is deliberate: nothing else may silence the walk, because
+ * nothing else proves what a merge carried. (A parent-count carve-out was
+ * tried and reverted the same day it shipped — see {@link buildMergedTruthIndex}
+ * — because it silences the walk forever for a future unruled merge, with no
+ * human ever prompted to rule it.) A HIT never needs any of this: a Change-Id
+ * this index CAN name — from its own trailer or from a `carries-change`
+ * ruling — answers `merged` before a specimen is even consulted, so no
+ * specimen, ruled or not, ever blinds an already-identifiable change; only a
+ * MISS reaches the veto. History that predates trailer
  * stamping makes an unbounded walk honestly — and uselessly — unknown-heavy;
  * production callers pass the epoch at which the queue began stamping.
  *
@@ -98,9 +100,8 @@ export type MergedTruthSpecimen = Readonly<{
   detail: string
   operation?: QueueSynthesisOperation
   /** Parsed from the subject when it has the queue synthesis shape. A
-   * specimen WITHOUT a member (a queue-lane subject the parser could not
-   * read a member from) can be any change's synthesis, so member-scoped
-   * lookups never filter it out. */
+   * specimen WITHOUT a member (a hand merge) can be any change's synthesis,
+   * so member-scoped lookups never filter it out. */
   member?: string
   revision?: number
 }>
@@ -533,20 +534,33 @@ export async function buildMergedTruthIndex(
     }
     if (resolvedIds.length > 0) return
 
-    // Parent count never enters this predicate: a multi-parent commit can
-    // never itself BE the change a lookup asks about, so a plain merge (an
-    // author's branch synced with origin/main, a hand back-merge) is not a
-    // specimen just for having two parents. Only a subject that claims the
-    // queue lane does — and it still does regardless of parent count, so a
-    // trailer-dropped `yrd: merge` commit is caught here exactly as before.
-    const queueLaneSubject = QUEUE_LANE_SUBJECT.test(parsed.subject)
-    if (queueLaneSubject) {
+    // A multi-parent commit stays a specimen when unruled — including a
+    // plain merge with no queue-lane subject (an author's branch synced with
+    // origin/main, a hand back-merge). Excluding parent count from this
+    // predicate was tried and reverted (2026-08-31): it silences the walk
+    // FOREVER for a future unruled merge that does hide a change, because
+    // nothing then prompts a human to write the ruling that is the only real
+    // cure (`mergedTruthExceptions`, consumed above). What actually stops an
+    // unruled merge from blinding unrelated lookups is not classification —
+    // it is that a HIT (a Change-Id this index CAN name, whether from its own
+    // trailer or from a caller's `carries-change` ruling) always answers
+    // `merged` before any specimen is even consulted, above. Only a MISS ever
+    // reaches the veto, and staying loud there is the point: three unruled
+    // merges (c0eb0de00707, ba7a75685801, 526d84cc3878) answering `unknown`
+    // for 1230 unrelated misses on hh 2026-08-31 was the walk correctly
+    // refusing to guess — the fix was ruling those three in `.yrd.yml`, not
+    // teaching the walk to stop noticing merges.
+    const mergeLane = parsed.parents.length >= 2 || QUEUE_LANE_SUBJECT.test(parsed.subject)
+    if (mergeLane) {
       specimens.push({
         commit: parsed.commit,
         subject: parsed.subject,
         parents: parsed.parents,
         problem: "trailer-absent",
-        detail: `queue-lane subject carries no Change-Id trailer`,
+        detail:
+          parsed.parents.length >= 2
+            ? `merge commit on the first-parent line carries no Change-Id trailer`
+            : `queue-lane subject carries no Change-Id trailer`,
         ...enrichment,
       })
     }
@@ -616,12 +630,14 @@ export function describeMergedTruthGaps(index: MergedTruthIndex): readonly strin
 
 /** Optional lookup context that narrows which specimens can veto a not-found
  * answer. A specimen whose subject names a DIFFERENT queue member cannot be
- * the queried change's synthesis; a specimen naming no member (a queue-lane
- * subject the parser could not read a member from) always vetoes. Member ids
- * can recycle, so the filter only ever errs toward unknown, never toward
- * not-merged. A plain merge commit — no queue-lane subject at all — is
- * excluded from the specimen set entirely (see {@link buildMergedTruthIndex}),
- * so it never reaches this filter to begin with. */
+ * the queried change's synthesis; a specimen naming no member (a hand merge)
+ * always vetoes. Member ids can recycle, so the filter only ever errs toward
+ * unknown, never toward not-merged. This filter only ever runs for a MISS —
+ * a HIT (the changeId resolves in {@link MergedTruthIndex.byChangeId}, whether
+ * from a trailer or a `carries-change` ruling) answers `merged` in
+ * {@link mergedByChangeId} before any specimen is consulted, so no unruled
+ * merge, however many stand in the window, ever blinds an already-named
+ * change — only an unnamed one stays unknown until it is ruled. */
 export type MergedTruthLookupContext = Readonly<{ member?: string }>
 
 export type MergedByChangeId =

@@ -42,6 +42,10 @@ const ID_C = `Ic${"0".repeat(39)}`
 const ID_D = `Id${"0".repeat(39)}`
 /** Lives only on an authored-subtree commit — must never reach the index. */
 const ID_X = `Ie${"0".repeat(39)}`
+/** Two more of the hand merge's orphaned ids, alongside ID_C and ID_D, for the
+ * carries-change fixture below — the c0eb0de00707 shape names four. */
+const ID_F = `If${"0".repeat(39)}`
+const ID_G = `I${"0".repeat(38)}f1`
 
 async function makeRepo(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "yrd-merged-truth-"))
@@ -157,6 +161,39 @@ async function acceptanceFixture(): Promise<Fixture> {
   }
 }
 
+/**
+ * The 2026-08-31 incident shape, in miniature: two identifiable landed
+ * changes (real Change-Ids, real trailers) either side of one hand merge —
+ * a plain `git merge`, no queue-lane subject, no Change-Id — the shape
+ * c0eb0de00707 and its two siblings wore before `mergedTruthExceptions`
+ * ruled them in production `.yrd.yml`. Pass `exceptions` to rule the hand
+ * merge the way that config does; omit it for the unruled window the
+ * incident actually hit.
+ */
+async function handMergeIncidentFixture(
+  exceptions?: ReadonlyMap<string, TrailerAbsentException>,
+): Promise<Readonly<{ repo: string; handMerge: string; index: MergedTruthIndex }>> {
+  const repo = await makeRepo()
+  await queueMerge(repo, { branch: "task/f", file: "f.txt", member: "PR10", revision: 1, changeId: ID_A })
+
+  await git.text(repo, ["checkout", "-q", "-b", "task/sync"])
+  await commitFile(repo, "sync.txt", "sync\n", ["feat: sync"])
+  await git.text(repo, ["checkout", "-q", "main"])
+  await git.text(repo, [
+    "merge",
+    "--no-ff",
+    "-m",
+    "Merge remote-tracking branch 'origin/main' into task/sync",
+    "task/sync",
+  ])
+  const handMerge = await git.text(repo, ["rev-parse", "HEAD"])
+
+  await queueMerge(repo, { branch: "task/g", file: "g.txt", member: "PR11", revision: 1, changeId: ID_B })
+
+  const index = await buildMergedTruthIndex(git, repo, { tip: "main", ...(exceptions === undefined ? {} : { exceptions }) })
+  return { repo, handMerge, index }
+}
+
 describe("buildMergedTruthIndex", () => {
   it("indexes queue synthesis commits by trailer and reports the walk's denominator", async () => {
     const fixture = await acceptanceFixture()
@@ -212,7 +249,7 @@ describe("buildMergedTruthIndex", () => {
     })
   })
 
-  it("never treats a hand merge (default git subject, multi-parent, no member) as a specimen — a merge commit can never itself be the change", async () => {
+  it("surfaces a hand merge (default git subject, no member) as a specimen too", async () => {
     const repo = await makeRepo()
     await git.text(repo, ["checkout", "-q", "-b", "task/e"])
     await commitFile(repo, "e.txt", "e\n", ["feat: e"])
@@ -221,8 +258,9 @@ describe("buildMergedTruthIndex", () => {
 
     const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
 
-    expect(index.specimens).toEqual([])
-    expect(index.commitsWalked).toBe(2)
+    expect(index.specimens).toHaveLength(1)
+    expect(index.specimens[0]).toMatchObject({ problem: "trailer-absent", subject: "Merge branch 'task/e'" })
+    expect(index.specimens[0]?.member).toBeUndefined()
   })
 
   it("treats an old-era queue-lane subject without a trailer as a specimen even with one parent", async () => {
@@ -468,7 +506,7 @@ describe("mergedByChangeId", () => {
     expect(mergedByChangeId(fixture.index, ID_C, { member: "PR2" })).toMatchObject({ kind: "unknown" })
   })
 
-  it("a hand merge never vetoes a lookup — a multi-parent commit can never itself be the queried change", async () => {
+  it("never lets member context filter a member-less hand merge out of the veto", async () => {
     const repo = await makeRepo()
     await git.text(repo, ["checkout", "-q", "-b", "task/e"])
     await commitFile(repo, "e.txt", "e\n", ["feat: e"])
@@ -476,35 +514,58 @@ describe("mergedByChangeId", () => {
     await git.text(repo, ["merge", "--no-ff", "-m", "Merge branch 'task/e'", "task/e"])
     const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
 
-    expect(mergedByChangeId(index, ID_C, { member: "PR9" })).toMatchObject({ kind: "not-merged" })
-    expect(mergedByChangeId(index, ID_C)).toMatchObject({ kind: "not-merged" })
+    expect(mergedByChangeId(index, ID_C, { member: "PR9" })).toMatchObject({ kind: "unknown" })
   })
 
-  it("regression 2026-08-31: N identifiable landed changes resolve cleanly beside a specimen-free hand merge, instead of every not-found lookup vetoing to unknown", async () => {
-    const repo = await makeRepo()
-    await queueMerge(repo, { branch: "task/f", file: "f.txt", member: "PR10", revision: 1, changeId: ID_A })
-    await queueMerge(repo, { branch: "task/g", file: "g.txt", member: "PR11", revision: 1, changeId: ID_B })
-    // A routine sync-merge sits between the two landed changes — an author's
-    // branch merging origin/main, or an equivalent hand back-merge. It carries
-    // no queue-lane subject and no Change-Id trailer, exactly like the three
-    // real commits (c0eb0de00707, ba7a75685801, 526d84cc3878) that vetoed 1230
-    // unrelated lookups for 45+ minutes on hh 2026-08-31.
-    await git.text(repo, ["checkout", "-q", "-b", "task/sync"])
-    await commitFile(repo, "sync.txt", "sync\n", ["feat: sync"])
-    await git.text(repo, ["checkout", "-q", "main"])
-    await git.text(repo, ["merge", "--no-ff", "-m", "Merge remote-tracking branch 'origin/main' into task/sync", "task/sync"])
+  it("hit-wins-despite-unruled-specimen: identifiable landed changes resolve merged beside an unruled hand merge — the incident shape", async () => {
+    const { index } = await handMergeIncidentFixture()
 
-    const index = await buildMergedTruthIndex(git, repo, { tip: "main" })
-
-    // No specimen at all — the hand merge is structurally excluded.
-    expect(index.specimens).toEqual([])
-    // The identifiable landed changes still resolve merged (unaffected either way).
+    // The hand merge is a live, unruled specimen…
+    expect(index.specimens).toHaveLength(1)
+    // …and it still never reaches either landed change's own lookup: a HIT
+    // is decided from `byChangeId` before any specimen is even consulted.
     expect(mergedByChangeId(index, ID_A)).toMatchObject({ kind: "merged" })
     expect(mergedByChangeId(index, ID_B)).toMatchObject({ kind: "merged" })
-    // A change that is genuinely absent resolves a definitive not-merged — not
-    // the loud unknown a member-less hand-merge specimen used to force onto
-    // every miss, however unrelated the queried member.
-    expect(mergedByChangeId(index, ID_C, { member: "PR12" })).toMatchObject({ kind: "not-merged" })
+  })
+
+  it("miss-beside-unruled-specimen: answers the loud unknown, never not-merged, while the hand merge stands unruled", async () => {
+    const { index } = await handMergeIncidentFixture()
+
+    expect(mergedByChangeId(index, ID_C)).toMatchObject({ kind: "unknown", reason: "trailer-absent" })
+    // However unrelated the queried member — the hand merge names none, so
+    // it vetoes regardless, exactly as it did for 1230 real lookups on
+    // hh 2026-08-31 before .yrd.yml ruled it.
+    expect(mergedByChangeId(index, ID_C, { member: "PR12" })).toMatchObject({ kind: "unknown" })
+  })
+
+  it("miss-with-all-merges-ruled: once the hand merge carries a ruling, an unrelated miss answers a definitive not-merged", async () => {
+    const { handMerge, repo } = await handMergeIncidentFixture()
+    const ruled = await buildMergedTruthIndex(git, repo, {
+      tip: "main",
+      exceptions: new Map([[handMerge, { disposition: "carries-no-change", note: "ruled: routine sync merge" }]]),
+    })
+
+    expect(ruled.specimens).toEqual([])
+    expect(mergedByChangeId(ruled, ID_C, { member: "PR12" })).toMatchObject({ kind: "not-merged" })
+  })
+
+  it("a carries-change ruling's named ids resolve merged — the declared ruling is the only cure, and it works", async () => {
+    const { handMerge, repo } = await handMergeIncidentFixture()
+    // The c0eb0de00707 shape: one unruled hand merge rejoining four distinct
+    // Change-Ids, none reachable on the walked first-parent line any other way.
+    const orphaned = [ID_C, ID_D, ID_F, ID_G] as const
+    const ruled = await buildMergedTruthIndex(git, repo, {
+      tip: "main",
+      exceptions: new Map([[handMerge, { disposition: "carries-change", changeIds: orphaned }]]),
+    })
+
+    expect(ruled.specimens).toEqual([])
+    for (const id of orphaned) {
+      expect(mergedByChangeId(ruled, id)).toMatchObject({ kind: "merged" })
+    }
+    // The landed changes either side of it are, as ever, unaffected.
+    expect(mergedByChangeId(ruled, ID_A)).toMatchObject({ kind: "merged" })
+    expect(mergedByChangeId(ruled, ID_B)).toMatchObject({ kind: "merged" })
   })
 
   it("negative control: a single-parent queue-lane trailer-drop still vetoes — the fix is parent count, not conservatism", async () => {
