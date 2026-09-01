@@ -234,6 +234,10 @@ function materializeDerivedRunMember(
     revision: member.revision,
     headSha: submit.sha,
     submittedAt: submit.at,
+    // Proven above, not assumed: this function refuses `derived-submit-vanished`
+    // when the fact is gone and `derived-submit-moved` when it stands elsewhere,
+    // so reaching here means the fact stands at exactly `member.headSha`.
+    factStands: true,
     changeId: member.changeId,
     ...(member.props === undefined ? {} : { props: member.props }),
     ...(member.issue === undefined ? {} : { issue: member.issue }),
@@ -256,6 +260,24 @@ export type DerivedChangeFacts = Readonly<{
   revision: number
   headSha: string
   submittedAt: string
+  /**
+   * Whether a submit fact still stands for this member's BRANCH — at ANY sha.
+   *
+   * Required, never defaulted: a derived member's submission IS its submit ref
+   * (the PURE-GIT ruling), so this is the one input that decides whether the
+   * change is still live, and a caller that cannot answer it has no business
+   * shaping the change. Both directions already hold the answer — admission
+   * proved the fact stands before it got here, and the reader read
+   * `bays.submits` to pick `submittedAt`.
+   *
+   * At ANY sha, deliberately. A fact standing at a DIFFERENT sha is a re-push:
+   * the branch still has a live submission, this snapshot is merely stale, and
+   * the next compose re-derives the member at the new sha under the same id
+   * ({@link mintDerivedMemberIdentity}'s revision reuse). Reading `moved` as
+   * terminal would flip an author's change to `withdrawn` for the window
+   * between their push and the next pass.
+   */
+  factStands: boolean
   changeId?: string
   props?: ChangeProps
   issue?: string
@@ -277,28 +299,66 @@ export type DerivedChangeFacts = Readonly<{
  * lane's `pr/integrated`/`pr/already-landed` reducers write. Both fields are
  * set from one source so they can never disagree — `integratedChangeShape`
  * throws on a merged change with no proof, so a half-projection is a crash.
+ *
+ * A member that neither landed NOR still has a submit fact reads WITHDRAWN,
+ * and that arm is what makes the ghost head unrepresentable
+ * (@i/10-yrd queue-head-provenance). A derived member has no record, so its
+ * submission is the ref and nothing else; when the receiver sweeps that ref on
+ * branch delete the submission is over. Before this arm the projection asked
+ * only "did a run merge it", so a swept fact left the change reading
+ * `open`/`submitted` off its retained snapshot FOREVER — for PR2131, from
+ * 2026-08-27 until it was found on 2026-09-01. Nothing could retire it: the
+ * compose-side `retireStaleDerived` prunes only members THIS pass admitted, and
+ * `deriveRefOnlyMembers` derives from live facts, so a member whose fact is
+ * gone is never re-admitted and therefore never re-judged. It sat at the head
+ * of 24 queued changes with `checks-pending`, and both disposal verbs printed
+ * cures that could not resolve — `pr view` naming `pr withdraw` (admissible
+ * only for a LIVE change) and `pr withdraw` naming a `refs/yrd/submit/` ref
+ * that no longer existed. Both were downstream of this one lie, and both stop
+ * at their own guards once the delivery state is honest, which is why no verb
+ * was added.
+ *
+ * Retention-bounded exactly like the landing arm above: prune the run holding
+ * the snapshot and the change leaves the population entirely.
  */
 export function derivedChange(queues: DeepReadonly<QueuesState>, facts: DerivedChangeFacts): Change {
   const landed = derivedIntegration(queues, { branch: facts.branch, headSha: facts.headSha })
   const alreadyLanded = landed?.proof.alreadyLanded
+  // Landing WINS: a merged member's fact is swept by design, so asking about
+  // the fact first would read every merged change as withdrawn.
+  const retired = landed === undefined && !facts.factStands
   // The revision carries the SAME terminal fact the change-level fields state.
   // `currentTerminalFact` cross-checks the two and throws when they disagree,
   // so a merged change whose revision clock has no terminal is a crash on
   // every surface that projects delivery history (`pr list` reached it first).
+  //
+  // The withdrawn arm is stamped at `submittedAt` because NO retirement clock
+  // exists: a swept ref leaves no event, and the reader's own `submittedAt`
+  // fallback for a factless member is already the admitting run's `startedAt`.
+  // Deriving a `now` instead would make the same change report a different
+  // terminal on every read and age while nobody touched it. Equal timestamps
+  // also satisfy `currentAdmissionFinish`, which re-homes any terminal that
+  // predates its own submit clock onto `supersededTerminal` — and a
+  // re-homed terminal here would crash `validateRevisionClock` instead.
   const terminal =
-    landed === undefined
-      ? undefined
-      : {
+    landed !== undefined
+      ? {
           kind: alreadyLanded === undefined ? ("integrated" as const) : ("already-landed" as const),
           at: landed.at,
           run: landed.run,
         }
+      : retired
+        ? { kind: "withdrawn" as const, at: facts.submittedAt }
+        : undefined
   return {
     id: facts.id,
     branch: facts.branch,
     base: facts.base,
-    state: landed === undefined ? "open" : "closed",
+    state: landed === undefined && !retired ? "open" : "closed",
     merged: landed !== undefined,
+    // `changeDeliveryState` reads closed + unmerged + no `canceledAt` as
+    // `withdrawn`, and `currentTerminalFact` demands the matching timestamp.
+    ...(retired ? { withdrawnAt: facts.submittedAt } : {}),
     ...(landed === undefined
       ? {}
       : {
@@ -651,17 +711,15 @@ export function derivedSubmitRetirements(bays: DeepReadonly<BaysState>, scan: La
 
   const authorErrorSuspects = lane
     .filter((row) => row.via === "change-id")
-    .map(
-      (row): DerivedSubmitAuthorErrorSuspect => ({
-        branch: row.branch,
-        sha: row.sha,
-        ...(row.mergeCommit === undefined ? {} : { mergeCommit: row.mergeCommit }),
-        remedy:
-          `the CHANGE landed under a different commit, so this fact's own content is unproven: if it carries ` +
-          `new work, resubmit it under a fresh Change-Id; if it is an abandoned revision, retire it explicitly ` +
-          `(${submitRefRetirementCommand(row.branch)})`,
-      }),
-    )
+    .map((row): DerivedSubmitAuthorErrorSuspect => ({
+      branch: row.branch,
+      sha: row.sha,
+      ...(row.mergeCommit === undefined ? {} : { mergeCommit: row.mergeCommit }),
+      remedy:
+        `the CHANGE landed under a different commit, so this fact's own content is unproven: if it carries ` +
+        `new work, resubmit it under a fresh Change-Id; if it is an abandoned revision, retire it explicitly ` +
+        `(${submitRefRetirementCommand(row.branch)})`,
+    }))
     .toSorted(byBranch)
 
   return { retirements, authorErrorSuspects }
