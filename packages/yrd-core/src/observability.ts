@@ -1,10 +1,11 @@
 import type { ConditionalLogger, LogLevel } from "loggily"
 import { systemClock } from "./clock.ts"
 import { formatLifecycleDuration } from "./duration.ts"
-import { failureFact } from "./failure.ts"
+import { failureFact, type FailureFact } from "./failure.ts"
 
 /** Default severity by lifecycle outcome. Delivery-step starts are the one
- * explicit identity-aware promotion; see observeYrdLifecycle. */
+ * explicit identity-aware promotion; a thrown "failed" is another — see
+ * observeYrdLifecycle and thrownFailureLevel below. */
 export const YRD_LIFECYCLE_LEVELS = Object.freeze({
   started: "debug",
   progress: "trace",
@@ -14,10 +15,11 @@ export const YRD_LIFECYCLE_LEVELS = Object.freeze({
   // ERROR; the enclosing levels settle at INFO so one failure is reported once,
   // never re-raised as a duplicate ERROR up the tree.
   settled: "info",
-  // One-shot commands report their final error at the CLI boundary. Keeping
-  // lifecycle failures at INFO avoids printing the same failure twice; the
-  // habitant runner enables INFO and still records every background outcome.
   recovered: "warn",
+  // The residual default for a non-throwing "failed" Result whose caller
+  // supplies no `failureLevel`. A THROWN failure always overrides this from
+  // its own FailureKind instead -- see thrownFailureLevel -- so this value is
+  // only ever read for a domain Result a caller chose not to classify.
   failed: "info",
 } as const satisfies Record<string, Exclude<LogLevel, "silent">>)
 
@@ -58,9 +60,24 @@ export type YrdLifecycleOptions<Result> = Readonly<{
    * required, gating verdict against the work under test versus an
    * optional/advisory one — sharpen the default `YRD_LIFECYCLE_LEVELS.failed`.
    * Consulted only when `outcome` resolves to "failed" from a Result the
-   * operation returned; the thrown-error branch has no Result and always
-   * keeps the shared default. */
+   * operation returned; the thrown-error branch has no Result, so this is
+   * never consulted there -- it classifies itself instead from the thrown
+   * error's own FailureKind (see `thrownFailureLevel` below), unless
+   * `reportedAtBoundary` says someone else already owns reporting it. */
   failureLevel?(result: Result): Exclude<LogLevel, "silent">
+  /** This lifecycle's thrown failure is a ONE-SHOT command's own top-level
+   * operation, whose caller (the CLI boundary; see yrd-cli's
+   * `classifyFailure`) ALWAYS prints a final structured error regardless of
+   * log level. Promoting the lifecycle's own record to WARN/ERROR there would
+   * print a second, redundant line to the SAME default stderr stream — for a
+   * `--json` invocation, a second line that breaks single-blob JSON parsing,
+   * not just a cosmetic echo (measured: `yrd pr create --json` against an
+   * unfetchable origin, 2026-08-31). This is the thrown-branch counterpart of
+   * why `settled` stays quiet when a deeper step already owns the one loud
+   * report — set it only where something else is provably already reporting
+   * the same failure on the same stream. Leaves `failed` at its quiet default
+   * (`YRD_LIFECYCLE_LEVELS.failed`); does not affect a non-throwing Result. */
+  reportedAtBoundary?: boolean
   resultAttributes?: (result: Result) => Readonly<Record<string, unknown>>
   /** Replace the flat outcome word in the completion message with a computed
    * summary label (e.g. a mixed-outcome tally: `settled: 1 failed, 1 passed`).
@@ -72,8 +89,13 @@ export type YrdLifecycleOptions<Result> = Readonly<{
 }>
 
 /** Observe one existing Yrd lifecycle without writing journal facts or
- * inventing identities. Callers may classify non-throwing domain results,
- * while thrown refusal/usage/configuration failures remain WARNs. */
+ * inventing identities. Callers may classify non-throwing domain results via
+ * `failureLevel`; a thrown failure has no Result to hand it, so it classifies
+ * itself from its own FailureKind instead (`thrownFailureLevel`) -- a thrown
+ * refusal/usage/configuration failure is a known, caller-attributable
+ * rejection and settles at the abnormal-recoverable WARN, while a thrown
+ * infrastructure failure, or any thrown error this module cannot classify at
+ * all, stays loud at ERROR. */
 export async function observeYrdLifecycle<Result>(
   root: ConditionalLogger,
   options: YrdLifecycleOptions<Result>,
@@ -112,7 +134,14 @@ export async function observeYrdLifecycle<Result>(
     if (invalidDuration) {
       log.warn?.(`Could not measure how long ${options.lifecycle} took; its result is unchanged.`, { ...spanProps })
     }
-    const levelOverride = outcome === "failed" && result !== undefined ? options.failureLevel?.(result) : undefined
+    const levelOverride =
+      outcome !== "failed"
+        ? undefined
+        : result !== undefined
+          ? options.failureLevel?.(result)
+          : options.reportedAtBoundary === true
+            ? undefined
+            : thrownFailureLevel(failure)
     emitLifecycle(log, options.lifecycle, outcome, summary ?? outcome, { ...spanProps }, levelOverride)
   }
 
@@ -233,6 +262,26 @@ function lifecycleMessage(
   return [actor, verb, object, code === undefined ? undefined : `[${code}]`, duration]
     .filter((part): part is string => part !== undefined)
     .join(" ")
+}
+
+/** The thrown-error counterpart to a caller's `failureLevel(result)`: with no
+ * Result to hand a caller-supplied classifier, a thrown failure classifies
+ * itself from its own FailureKind against the three-way failure model
+ * (normal/INFO, abnormal-recoverable/WARN, abnormal-not-auto-fixable/ERROR,
+ * operator ruling 2026-08-31) -- UNLESS `options.reportedAtBoundary` says a
+ * one-shot command's own boundary already owns reporting it, which keeps
+ * `failed` at its quiet default instead (see that option's doc).
+ *
+ * `refusal`/`usage`/`configuration` are known, caller-attributable rejections
+ * -- the thing that threw already told its own caller what went wrong, so
+ * nobody else need act -- and settle at WARN.
+ * `infrastructure`, and any thrown error that isn't even a YrdFailure (no
+ * `failure` at all -- a bug, an unclassified environment failure), is
+ * presumptively the worse class and stays loud at ERROR; this mirrors
+ * yrd-cli's own `classifyFailure`, which gives an unclassified error the same
+ * "infrastructure" exit code rather than the gentler refusal/usage one. */
+function thrownFailureLevel(failure: FailureFact | undefined): Exclude<LogLevel, "silent"> {
+  return failure !== undefined && failure.kind !== "infrastructure" ? "warn" : "error"
 }
 
 function emitLifecycle(
