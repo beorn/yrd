@@ -25,6 +25,10 @@ type HabitantHarnessOptions = Readonly<{
   run(context: HabitantRunContext): Promise<readonly unknown[]>
   state?: () => HabitantState
   bays?: Readonly<Record<string, unknown>>
+  /** The queue's own audit findings. Every ERROR the resident raises about the
+   * QUEUE (rather than about itself) is routed from here, so a test cannot
+   * exercise the loud paths without being able to state them. */
+  audit?: () => Readonly<{ findings: readonly Record<string, unknown>[] }>
 }>
 
 const emptyState = (): HabitantState => ({
@@ -66,6 +70,7 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
   const signal = { aborted: false }
   const drainController = new AbortController()
   const warnings: HabitantWarnCall[] = []
+  const errors: HabitantWarnCall[] = []
   const stderr: string[] = []
   const stdout: string[] = []
   const stateFactory = options.state ?? emptyState
@@ -92,10 +97,23 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
     },
     log: {
       warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }),
+      /**
+       * The ERROR stream, and its absence here was a hole rather than an
+       * omission. `app.log.error?.()` is an OPTIONAL call: with no `error` on
+       * this double every one of the resident's six ERROR rows — the queue
+       * liveness wedge, the needs-a-person plans, the unappliable remedy — was
+       * a silent no-op in every test that used this harness. A runner that
+       * stood down loudly and one that died saying nothing produced identical
+       * transcripts, so no test could tell them apart, and
+       * `habitant-queue-liveness.test.ts` had to hand-roll its own double to
+       * assert one line. Loud-versus-silent is exactly the distinction the
+       * stand-down conditions turn on, so the harness has to carry it.
+       */
+      error: (message: string, props: Record<string, unknown>) => errors.push({ message, props }),
     },
     ...(options.bays === undefined ? {} : { bays: options.bays }),
     queue: {
-      audit: () => ({ findings: [] }),
+      audit: options.audit ?? (() => ({ findings: [] })),
       expirePauses: async () => [],
       // Every habitant cycle sweeps lapsed leases before deciding anything, so
       // a harness without it cannot drive the loop as a habitant at all.
@@ -125,6 +143,7 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
     signal,
     drain: () => drainController.abort(),
     warnings,
+    errors,
     stderr,
     stdout,
     refreshCalls: () => refreshCalls,

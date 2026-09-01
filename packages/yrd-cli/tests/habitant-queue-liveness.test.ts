@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest"
 import { createConditionReporter } from "@yrd/core"
 import { logQueueLivenessWedge } from "../src/run.ts"
 import type { YrdCliApp } from "../src/types.ts"
+import { createHabitantHarness } from "./support/habitant-harness.ts"
 
 const NOW = "2026-08-30T00:10:00.000Z"
 
@@ -211,5 +212,51 @@ describe("logQueueLivenessWedge — dedup and escalation via an explicit Conditi
     logQueueLivenessWedge(app, NOW, conditions) // resolves with nothing suppressed
 
     expect(errors).toHaveLength(1)
+  })
+})
+
+/**
+ * The shared habitant double, and why this block exists beside the two
+ * hand-rolled ones above.
+ *
+ * Those two exist for ONE reason: `createHabitantHarness` had no `error` on its
+ * log. `app.log.error?.()` is an optional call, so on that double every ERROR
+ * the resident raises was a silent no-op — a runner that stood down loudly and
+ * one that died saying nothing left identical transcripts, and no test using
+ * the shared harness could tell them apart. Anything wanting to assert a loud
+ * line had to bring its own app, which is how one file ends up with three.
+ *
+ * The harness now carries the stream, and this pins that it really is wired to
+ * the same `log` the resident writes through. The two doubles above are
+ * redundant once this holds; retiring them is a mechanical follow-up, kept out
+ * of this change so the capability lands without rewriting five call sites.
+ */
+describe("logQueueLivenessWedge — through the SHARED habitant harness", () => {
+  it("captures the ERROR, so a loud stand-down is distinguishable from a silent death", () => {
+    const finding = {
+      code: "queue-liveness-wedged",
+      message: "Queue 'main' wedged",
+      pr: "PR7",
+      blockedMs: 3_600_000,
+      since: "2026-08-29T23:10:00.000Z",
+    }
+    const harness = createHabitantHarness({ run: async () => [], audit: () => ({ findings: [finding] }) })
+
+    logQueueLivenessWedge(harness.app, NOW)
+
+    expect(harness.errors).toHaveLength(1)
+    expect(harness.errors[0]).toMatchObject({
+      message: finding.message,
+      props: { action: "resident-queue-liveness-wedged", pr: "PR7" },
+    })
+    // The distinction the whole capability is for: loud went to `errors`, and
+    // stayed out of the warn stream a tolerated cycle skip writes to.
+    expect(harness.warnings).toEqual([])
+  })
+
+  it("stays silent when the queue is draining — an empty ERROR stream is a real answer", () => {
+    const harness = createHabitantHarness({ run: async () => [] })
+    logQueueLivenessWedge(harness.app, NOW)
+    expect(harness.errors).toEqual([])
   })
 })
