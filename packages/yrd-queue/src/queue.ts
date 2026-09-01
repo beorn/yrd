@@ -3185,12 +3185,33 @@ function createQueue<Shape extends ChangeShape>(
           await cancelRevisionAdmissionJobs(pr, `PR became ${delivery}`)
           throw new ChangeCheckabilityConflict(pr.id, delivery)
         }
-        if (
-          blockingQueuePause(snapshot, pr) !== undefined ||
-          admissionSteps(steps).length === 0 ||
-          runningQueue(snapshot.queues, snapshot.jobs, pr.base) !== undefined ||
-          (selection !== "explicit" && admissionLineHolder(snapshot, steps, pr) !== undefined)
-        ) {
+        // NO SILENT ERRORS. This used to be one boolean and a bare `continue`:
+        // a change withheld here left no journal row, no ledger entry and no
+        // log line, so a member the door could never admit was invisible to
+        // every surface at once. Measured 2026-09-01 on hh main — a DERIVED
+        // member (PR2916, task/base-health-trailer-pointer) sat withheld for
+        // 6h07m across 1471 compose passes with ZERO journal events of its own,
+        // while `queue audit` suppressed its waiting-list row too
+        // ({@link unrecordedSubmits}: a branch with a retained snapshot at the
+        // standing sha "lives in run/status rows"), and the runner's own
+        // status.json never named it. Say WHICH guard withheld it, and what
+        // clears it; the reporter's dedup memo collapses the steady-state
+        // repeats into one summary.
+        const withheld = admissionWithholding(snapshot, steps, pr, selection, derived)
+        if (withheld !== undefined) {
+          composeConditions.report(
+            `admission-withheld:${pr.id}:${withheld.code}`,
+            "warn",
+            `queue admission withheld change '${pr.id}': ${withheld.reason} — ${withheld.remedy}`,
+            {
+              action: "admission-withheld",
+              pr: pr.id,
+              code: withheld.code,
+              reason: withheld.reason,
+              remedy: withheld.remedy,
+              ...(withheld.holder === undefined ? {} : { holder: withheld.holder }),
+            },
+          )
           continue
         }
         const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
@@ -9123,16 +9144,81 @@ function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): Change[] 
  *
  * Only PRs strictly AHEAD of `pr` are considered, so a change with a stale streak
  * of its own is never blocked by the very PRs it outranks.
+ *
+ * `derived` is REQUIRED to be the caller's own derived (S6, recordless)
+ * members, and passing it is the whole correctness of the position. This line
+ * used to be computed as `admissionQueue(state, steps)` — the record lane
+ * alone. A derived member is never in that list by construction
+ * ({@link admissionQueue} materializes derived members only when handed them),
+ * so its `findIndex` was always -1, the `position < 0` arm handed it the ENTIRE
+ * queue as "ahead", and every derived member sorted behind every record-lane
+ * change no matter how much older its submit fact was. The queue then withheld
+ * it silently, forever, whenever any record-lane change sat queued-but-not-yet-
+ * dispatched — and under the habitant drain (one admission per turn) the
+ * withheld head is neither admitted nor refused, so the head-of-line release
+ * below it never fires and the drain ends having admitted NOTHING. Measured
+ * 2026-09-01 on hh main: derived PR2916, submit fact standing since 06:09 and
+ * the oldest member in the queue, withheld behind four `recut-change-id-missing`
+ * record changes for 6h07m and 1471 compose passes, zero merges queue-wide.
  */
 function admissionLineHolder(
   state: DeepReadonly<RuntimeState>,
   steps: readonly RuntimeStep[],
   pr: DeepReadonly<Change>,
+  derived: readonly DeepReadonly<Change>[] = [],
 ): DeepReadonly<Change> | undefined {
-  const queued = admissionQueue(state, steps)
+  const queued = admissionQueue(state, steps, undefined, derived)
   const position = queued.findIndex((candidate) => candidate.id === pr.id)
   const ahead = position < 0 ? queued : queued.slice(0, position)
   return ahead.find((candidate) => state.queues.admissionRefusals[candidate.id] === undefined)
+}
+
+/** Why this pass will not admit `pr`, or `undefined` when nothing withholds it.
+ *
+ * One derivation for the four conditions {@link dispatchAdmissions} skips on,
+ * so the skip and the row that reports it can never disagree about the cause.
+ * Each carries the remedy that clears it, because a withheld member's reader is
+ * whoever is waiting for it to merge. */
+function admissionWithholding(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  pr: DeepReadonly<Change>,
+  selection: "explicit" | undefined,
+  derived: readonly DeepReadonly<Change>[],
+): Readonly<{ code: string; reason: string; remedy: string; holder?: string }> | undefined {
+  const pause = blockingQueuePause(state, pr)
+  if (pause !== undefined) {
+    return {
+      code: "queue-paused",
+      reason: `queue '${baseIdentity(pr.base)}' is paused and this change is not in its allow-list`,
+      remedy: `resume it with 'yrd queue resume ${baseIdentity(pr.base)}'`,
+    }
+  }
+  if (admissionSteps(steps).length === 0) {
+    return {
+      code: "admission-steps-empty",
+      reason: "the installed plan declares no pre-merge admission step",
+      remedy: "no action: this queue admits at merge time",
+    }
+  }
+  const running = runningQueue(state.queues, state.jobs, pr.base)
+  if (running !== undefined) {
+    return {
+      code: "queue-run-active",
+      reason: `queue run '${running.id}' is still live on base '${baseIdentity(pr.base)}'`,
+      remedy: "no action: the next pass admits this change once that run settles",
+    }
+  }
+  if (selection === "explicit") return undefined
+  const holder = admissionLineHolder(state, steps, pr, derived)
+  return holder === undefined
+    ? undefined
+    : {
+        code: "admission-line-held",
+        reason: `change '${holder.id}' is ahead of it in the admission line and carries no refusal streak`,
+        remedy: `no action: this change is admitted on its own turn once '${holder.id}' is admitted or refused`,
+        holder: holder.id,
+      }
 }
 
 function blockingQueuePause(
