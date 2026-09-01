@@ -2317,6 +2317,29 @@ function assertTerminalApplies(
  * This REFUSES rather than throws on purpose. The reducer runs on every replay,
  * not only on live append, and the live journal already contains such a row —
  * a throw here would make that journal unreplayable.
+ *
+ * AND THE REDUCER IS THE ONLY SITE THIS RULE CAN LIVE AT, which is why it is
+ * not on the emitter where a write guard would normally belong. Neither event
+ * it covers has a live writer any more — measured across every package's `src`,
+ * excluding tests, with the other terminal facts as positive controls:
+ *
+ *     pr/rejected        0 emitters
+ *     pr/canceled        0 emitters
+ *     pr/withdrawn       2 emitters
+ *     pr/integrated      3 emitters
+ *     pr/needs-author    3 emitters
+ *
+ * Today's queue settles an author-fixable failure through `pr/needs-author`
+ * instead (see queue.ts, and the note there that a run-canceled record must
+ * never emit `pr/canceled` or `pr/rejected`). So these two arrive ONLY by
+ * replaying journal history that is already written, and there is no append to
+ * refuse before. If a writer for either is ever reintroduced, the same
+ * predicate belongs on it as well — the check is deliberately a pure function
+ * over the change and the terminal so it can be lifted there unchanged.
+ *
+ * The two kinds that DO still have writers are excluded on their own merits
+ * above: `withdrawn` is operator-initiated and names no run, and `integrated`
+ * is a landing claim.
  */
 function supersededSettle(pr: DeepReadonly<Change>, terminal: ChangeRevTerminal): boolean {
   if (terminal.run === undefined) return false
