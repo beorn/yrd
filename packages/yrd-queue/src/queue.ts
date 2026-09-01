@@ -10671,11 +10671,29 @@ export function canonicalRefusalCode(code: string, options: CanonicalRefusalCode
   return DYNAMIC_STEP_FAILURE_CODE.test(code) ? "check-failed" : undefined
 }
 
+/**
+ * Which of the three things a failed admission was: an infrastructure fault, a
+ * refusal the author must cure, or an ordinary failure.
+ *
+ * `infrastructure` is the CALLER's answer, for the two sites holding an OUTER
+ * fact the result itself cannot see — a Job that was lost or cancelled, or a
+ * candidate-preparation failure already typed by its producer.
+ *
+ * `verdictless` is the RESULT's own answer, and it is why this is not a code
+ * list. A check that was killed before it could judge anything reports the
+ * machinery, never the content, so it is infrastructure no matter which step
+ * name its code was built from. Deciding that here by code would need one
+ * entry per configured step name per fault, which is a list that is wrong the
+ * day someone adds a step: PR3141 was consumed on 2026-09-01 because
+ * `affected-tests-stalled` was in no list, so a 15m45s stall under a host load
+ * of 40-61 read as a verdict on the author's change and retired their standing
+ * submit fact. The producer already knew; it just had nowhere to say so.
+ */
 function admissionFailureKind(
   result: DeepReadonly<JobError>,
   infrastructure: boolean,
 ): Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"] {
-  if (infrastructure) return "infrastructure"
+  if (infrastructure || result.verdictless === true) return "infrastructure"
   return NEEDS_AUTHOR_CODES.has(result.code) ? "refusal" : "failure"
 }
 
@@ -10695,8 +10713,12 @@ function isInfraRetryCompositionFailure(code: string | undefined): code is Infra
 function terminalJobError(job: DeepReadonly<Job> | undefined): JobError | undefined {
   if (job?.status !== "completed") return undefined
   if (job.conclusion === "failure") return job.error
-  if (job.conclusion === "timed_out") return { code: "job-lost", message: job.lostReason }
-  if (job.conclusion === "cancelled") return jobFailure(job)
+  // Both synthesized conclusions go through the one producer. `timed_out` used
+  // to build its own `job-lost` inline, identical to `jobFailure`'s — which was
+  // harmless while the two agreed and became a silent disagreement the moment
+  // that error gained a field. One producer, so there is nothing to keep in
+  // step.
+  if (job.conclusion === "timed_out" || job.conclusion === "cancelled") return jobFailure(job)
   return undefined
 }
 
@@ -11244,16 +11266,37 @@ function isIntegrated(shape: ChangeShape): shape is IntegratedShape {
   return "integration" in shape
 }
 
+/**
+ * The failure a terminal Job reports, as a JobError.
+ *
+ * The `failure` conclusion returns the Job's OWN error untouched — the check
+ * ran, and whatever it concluded (including whether it reached a verdict at
+ * all) was decided at the process and travels on that error already.
+ *
+ * Every other terminal conclusion is synthesized HERE, and every one of them is
+ * verdictless by construction: a lost Job, a cancelled run and a skipped step
+ * all end the work before anything judged the content. Marking them at this one
+ * producer is what lets a reader holding only the JobError — with no Job beside
+ * it to ask about `conclusion` — tell an infrastructure fault from a verdict.
+ * The live specimen, 2026-09-01 15:11 PDT: a second one-shot pass cancelled the
+ * first pass's run, and PR2916's `affected-tests` reported `run-canceled` with
+ * the words "failed without a verdict" already in its message — a fact the
+ * message stated and the data did not.
+ */
 function jobFailure(job: Job): JobError {
   if (job.status === "completed" && job.conclusion === "failure") return job.error
   if (job.status === "completed" && job.conclusion === "timed_out") {
-    return { code: "job-lost", message: job.lostReason }
+    return { code: "job-lost", message: job.lostReason, verdictless: true }
   }
   if (job.status === "completed" && job.conclusion === "cancelled") {
-    return { code: "run-canceled", message: `Queue run canceled by ${job.canceledBy}: ${job.cancelReason}` }
+    return {
+      code: "run-canceled",
+      message: `Queue run canceled by ${job.canceledBy}: ${job.cancelReason}`,
+      verdictless: true,
+    }
   }
   if (job.status === "completed" && job.conclusion === "skipped") {
-    return { code: "job-skipped", message: `Job '${job.id}' was skipped` }
+    return { code: "job-skipped", message: `Job '${job.id}' was skipped`, verdictless: true }
   }
   throw new Error(
     `yrd: job '${job.id}' is ${job.status}${job.status === "completed" ? `+${job.conclusion}` : ""}, not failed`,

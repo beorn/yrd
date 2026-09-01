@@ -8,6 +8,23 @@ export const JobErrorSchema = z
     code: NameSchema,
     message: z.string().min(1),
     evidence: JsonSchema.optional(),
+    /** The work was ENDED before it could judge its subject, so this failure
+     * reports the machinery and says nothing about the content. A watchdog kill
+     * (no output progress, a wall-clock bound, a descendant holding the output
+     * pipe) and a SIGKILL are the shapes: in every one the process never got as
+     * far as stating a verdict.
+     *
+     * Written ONCE, by the producer that holds the process facts, and read as a
+     * boolean everywhere else. `code` keeps naming the specific fault because
+     * readers key on it; this is the second field, so no consumer has to keep a
+     * list of which codes happen to be verdictless — the list is what goes
+     * stale, and a missed entry dead-letters the victim of someone else's
+     * outage.
+     *
+     * Absent means "not known to be verdictless", never "judged": a producer
+     * that predates this field, or one that cannot tell, writes nothing, and
+     * every consumer's absent-case behaviour is what it was before. */
+    verdictless: z.literal(true).optional(),
   })
   .strict()
 export type JobError = z.infer<typeof JobErrorSchema>

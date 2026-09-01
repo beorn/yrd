@@ -3291,7 +3291,9 @@ describe("Queue", () => {
         name: "queue/run/failed",
         data: {
           run: "R1",
-          error: { code: "job-lost" },
+          // Same producer, same rule: a Job whose runner vanished never reached
+          // a verdict on the content.
+          error: { code: "job-lost", verdictless: true },
           prs: [{ pr: "PR1", revision: 1, headSha: HEAD, submitter: "operator" }],
         },
       },
@@ -3462,7 +3464,14 @@ describe("Queue", () => {
     expect(app.queue.get("R1")).toMatchObject({
       status: "completed",
       conclusion: "cancelled",
-      error: { code: "run-canceled" },
+      // A cancelled run judged nothing, so its synthesized error says so. Live
+      // specimen 2026-09-01 15:11 PDT: a second one-shot pass cancelled the
+      // first pass's run and PR2916's affected-tests reported "failed without a
+      // verdict (run-canceled)" -- words the message carried and the data did
+      // not. The read side is `admissionFailureKind`; see
+      // tests/verdictless-outcome.test.ts for the command-level members of this
+      // same family.
+      error: { code: "run-canceled", verdictless: true },
       prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, props }],
       steps: [
         expect.objectContaining({
@@ -3479,8 +3488,15 @@ describe("Queue", () => {
     expect(eventNames).not.toContain("pr/rejected")
     expect(eventNames).not.toContain("pr/canceled")
     expect(app.queue.get("R1")?.error?.code).not.toBe("job-lost")
+    // The class survives replay, because it is written into the error the
+    // journal carries rather than re-derived from the Job beside it. That is
+    // the whole point of the field: a reader holding only the error -- a
+    // refusal row, a status projection, a later process -- can still tell an
+    // infrastructure fault from a verdict about the author's content.
+    expect(app.queue.get("R1")?.error?.verdictless).toBe(true)
 
     await using replayed = await createQueueApp({}, journal, undefined, id)
+    expect(replayed.queue.get("R1")?.error?.verdictless).toBe(true)
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "completed",
       conclusion: "cancelled",

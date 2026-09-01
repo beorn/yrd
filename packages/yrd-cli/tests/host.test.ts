@@ -612,8 +612,15 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // Conscious update 2026-09-01: pre-Candidate derived identities add the
     // empty `queues.derivedIdentities` projection and its binding event. The
     // former target fd6a78df is retained; the new target is 3f8a2627.
+    // Conscious update 2026-09-01 (verdictless check outcomes): `JobError`
+    // gains an optional `verdictless`, so a watchdog kill stops reading as a
+    // verdict on the author's content. One more optional key in an accepted
+    // input shape — the same identity input `judgedFailure` records above — and
+    // no stored record needs rewriting, because no error ever journaled carries
+    // it. The predecessor 3f8a2627 — the ledger's own superseded last entry —
+    // gains a retained edge below.
     const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
+    expect(first.manifest.targetIdentity).toBe("f0ea21d0d2610d724aed6b89c87720361833d6394372cdb54b5c99b10e9c9fe5")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -2046,7 +2053,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
+    expect(rewritten.checkpoint_identity).toBe("f0ea21d0d2610d724aed6b89c87720361833d6394372cdb54b5c99b10e9c9fe5")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2135,7 +2142,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
+    expect(rewritten.checkpoint_identity).toBe("f0ea21d0d2610d724aed6b89c87720361833d6394372cdb54b5c99b10e9c9fe5")
     redatabase.close()
   })
 
@@ -3777,6 +3784,9 @@ checks: [{check: {run: "true"}}]
       // running yrd-runner is asked to store — retained across the
       // containedInBase bump (bd1c0b88, 2026-08-28).
       { from: "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c", to: releasedHop },
+      // The derived-identity composition's released identity, retained across
+      // the verdictless-JobError bump this branch introduces.
+      { from: "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa", to: releasedHop },
       { from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7", to: releasedHop },
       // The production composition's identity before branch-is-change 2a.
       { from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37", to: releasedHop },
