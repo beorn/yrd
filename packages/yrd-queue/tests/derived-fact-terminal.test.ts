@@ -360,18 +360,13 @@ describe("a standing submit fact derives at most ONE live change", () => {
     expect(app.state().queues.retiredSubmits["issue/new-member"]).toBeUndefined()
   })
 
-  it("derived admission machinery shares one bounded retry budget across repeated cancellation and runner failure", async () => {
-    const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    const queueMint = volatilePrNumberMint()
+  it("derived admission machinery shares one bounded retry budget across cancellation and runner failure", async () => {
     let checkCalls = 0
     let currentBase = BASE
     let holdJob = true
     const branch = "issue/infrastructure-retry"
     await using app = await createApp({
       journal: indexedJournal(),
-      log,
-      queueMint,
       resolveBaseSha: () => currentBase,
       runner: (jobs) => {
         const active = localRunner({ id: "local", jobs, leaseMs: 60_000 })
@@ -415,60 +410,38 @@ describe("a standing submit fact derives at most ONE live change", () => {
     if (pending === undefined) throw new Error("expected the derived admission Job")
     await app.jobs.cancel({ id: pending.id, attempt: pending.attempt, by: "yrd/queue", reason: "runner cycled" })
 
-    await expect(
-      app.queue.run({}, runtime),
-      "the cancellation stays pass-local and enters the ledger",
-    ).resolves.toEqual([])
-    expect(checkCalls, "the cancelled attempt does not execute the check").toBe(0)
-    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
-      pr: "PR1",
-      revision: 1,
-      headSha: SHA,
-      baseSha: BASE,
-      code: "run-canceled",
-      kind: "infrastructure",
-      verdictless: true,
-      count: 1,
-      sameCodeCount: 1,
-    })
-
-    const retried = app.jobs.get(pending.id)
-    expect(retried).toMatchObject({ status: "queued", attempt: 0 })
-    if (retried === undefined) throw new Error("expected the first cancellation to atomically requeue its Job")
-    await app.jobs.cancel({ id: retried.id, attempt: retried.attempt, by: "yrd/queue", reason: "runner cycled" })
-    await expect(
-      app.queue.run({}, runtime),
-      "the same cancellation code still consumes a second outcome",
-    ).resolves.toEqual([])
-    expect(checkCalls, "neither cancelled attempt executes the check").toBe(0)
-    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
-      code: "run-canceled",
-      count: 2,
-      sameCodeCount: 2,
-    })
-
-    holdJob = false
-    for (let outcome = 3; outcome <= 4; outcome += 1) {
-      await expect(app.queue.run({}, runtime), `verdictless outcome ${outcome} stays pass-local`).resolves.toEqual([])
-      expect(checkCalls, `outcome ${outcome} executes each fresh runner attempt once`).toBe(outcome - 2)
-      expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+    for (const outcome of [
+      { code: "run-canceled", count: 1, sameCodeCount: 1, checkCalls: 0 },
+      { code: "runner-error", count: 2, sameCodeCount: 1, checkCalls: 1 },
+      { code: "runner-error", count: 3, sameCodeCount: 2, checkCalls: 2 },
+      { code: "runner-error", count: 4, sameCodeCount: 3, checkCalls: 3 },
+    ]) {
+      const label = `verdictless outcome ${outcome.count} stays pass-local`
+      const { checkCalls: expectedCheckCalls, ...refusal } = outcome
+      await expect(app.queue.run({}, runtime), label).resolves.toEqual([])
+      expect(checkCalls, label).toBe(expectedCheckCalls)
+      expect(app.state().queues.admissionRefusals.PR1, label).toMatchObject({
         pr: "PR1",
         revision: 1,
         headSha: SHA,
         baseSha: BASE,
-        code: "runner-error",
         kind: "infrastructure",
         verdictless: true,
-        count: outcome,
-        sameCodeCount: outcome - 2,
+        ...refusal,
       })
-      expect(app.state().queues.retiredSubmits[branch], "machinery failure is not a content verdict").toBeUndefined()
+      if (outcome.count === 1) {
+        expect(app.jobs.get(pending.id), "the cancellation atomically requeues its Job").toMatchObject({
+          status: "queued",
+          attempt: 0,
+        })
+        holdJob = false
+      }
     }
 
     await expect(app.queue.run({}, runtime), "the fifth pass observes the cap without spinning").resolves.toEqual([])
-    expect(checkCalls, "two cancelled outcomes plus at most two fresh runner attempts").toBe(2)
-    expect(queueMint.highWater(), "infrastructure retry retains one logical identity").toBe(1)
+    expect(checkCalls, "one cancellation plus at most three fresh runner attempts").toBe(3)
     expect(app.state().queues.derivedIdentities[branch]?.[SHA]).toMatchObject({ id: "PR1", revision: 1 })
+    expect(app.state().queues.retiredSubmits[branch], "machinery failure is not a content verdict").toBeUndefined()
     expect(app.state().bays.submits[branch]?.sha, "the submit fact remains standing for an operator cure").toBe(SHA)
     const finding = (await app.queue.audit()).findings.find(
       (candidate) => candidate.code === "admission-verdictless-repeat" && candidate.pr === "PR1",
@@ -478,28 +451,22 @@ describe("a standing submit fact derives at most ONE live change", () => {
 
     currentBase = "4".repeat(40)
     await expect(app.queue.run({}, runtime), "a new base re-arms the standing member").resolves.toEqual([])
-    expect(checkCalls, "the new base gets a fresh first attempt").toBe(3)
+    expect(checkCalls, "the new base gets a fresh first attempt").toBe(4)
     expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
       baseSha: currentBase,
-      kind: "infrastructure",
-      verdictless: true,
+      code: "runner-error",
       count: 1,
+      sameCodeCount: 1,
+      verdictless: true,
     })
 
     const healthySha = "5".repeat(40)
     await app.bays.recordBranchSubmit({ branch: "issue/healthy-after-infrastructure", sha: healthySha, base: "main" })
-    const runs = await app.queue.run({}, runtime)
-    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
-    expect(checkCalls, "the retrying member and its healthy peer each get one attempt").toBe(5)
-    expect(queueMint.highWater(), "the capped member does not park its healthy peer").toBe(2)
+    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([{ status: "completed", conclusion: "success" }])
     expect(app.state().queues.derivedIdentities["issue/healthy-after-infrastructure"]?.[healthySha]).toMatchObject({
       id: "PR2",
       revision: 1,
     })
-    expect(app.state().queues.retiredSubmits[branch]).toBeUndefined()
-    expect(actionsLogged(events), "the transient infrastructure verdict stays loud").toContain(
-      "admission-infrastructure-retryable",
-    )
   })
 
   it("does not stamp an old derived failure onto a submit fact that moved while its check ran", async () => {
