@@ -1236,7 +1236,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
     } finally {
       live.close()
     }
-    runtime.log.info?.("Yrd's saved state is ready.", {
+    runtime.log.debug?.("Yrd's saved state is ready.", {
       action: legacy === null ? "initialized" : "migrated",
       path: runtime.path,
       cursor: head,
@@ -2171,7 +2171,7 @@ function evictHistory(runtime: Context, database: Database, snapshotCursor: numb
 
 function reportEviction(runtime: Context, outcome: EvictionOutcome): void {
   const window = runtime.retention === "disabled" ? {} : runtime.retention
-  runtime.log.info?.("Trimmed Yrd's saved history to its retention window.", {
+  runtime.log.debug?.("Trimmed Yrd's saved history to its retention window.", {
     action: "history-evicted",
     path: runtime.path,
     frames: outcome.frames,

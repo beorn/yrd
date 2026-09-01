@@ -3406,14 +3406,14 @@ async function acquireHabitantRunner(
     )
     try {
       await Promise.race([acquired.promise, held])
-      runnerLog.info?.("Habitant runner lease acquired", { runner: identity.id, stateDir })
+      runnerLog.debug?.("Habitant runner lease acquired", { runner: identity.id, stateDir })
       let closePromise: Promise<void> | undefined
       return Object.freeze({
         close: () =>
           (closePromise ??= (async () => {
             released.resolve()
             await held
-            runnerLog.info?.("Habitant runner lease released", { runner: identity.id, stateDir })
+            runnerLog.debug?.("Habitant runner lease released", { runner: identity.id, stateDir })
           })()),
       })
     } catch (error) {
@@ -3513,7 +3513,7 @@ async function settleOneShotQueueRun(
       reason: `one-shot queue runner interrupted by ${signal}`,
     })
     if (runs.length > 0) {
-      log.warn?.(`Stopped queue run ${runs.map((run) => run.id).join(", ")} safely after ${signal}.`)
+      log.info?.(`Stopped queue run ${runs.map((run) => run.id).join(", ")} safely after ${signal}.`)
     }
   } catch (error) {
     // No recovery argv to attach (5e cut 6): the next runner start reclaims

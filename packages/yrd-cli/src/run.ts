@@ -9397,7 +9397,7 @@ function createStrandedSweeper(
         inFlight = true
         void refresh(nowMs)
           .catch((error: unknown) => {
-            log.error?.("stranded-refs sweep failed; the rail will show its previous observation aging", { error })
+            log.warn?.("stranded-refs sweep failed; the rail will show its previous observation aging", { error })
           })
           .finally(() => {
             inFlight = false
@@ -11074,7 +11074,7 @@ export async function refreshTrackedQueueRevisions(
         recorded: freshness.status === "tracked-drift",
       }
       outcomes.push(outcome)
-      app.log.info?.("Prepared the latest tracked change revision for the merge queue's entry checks.", {
+      app.log.debug?.("Prepared the latest tracked change revision for the merge queue's entry checks.", {
         action: "queue-track-prepared",
         ...outcome,
       })
@@ -11121,7 +11121,7 @@ export async function refreshTrackedQueueRevisions(
           // The reason is named from the CODE rather than assumed: this handler
           // now covers two different causes, and "the change changed" is true of
           // only one of them.
-          app.log.info?.(
+          app.log.debug?.(
             settlementFailure.code === "comment-current-changed"
               ? "Skipped settling a tracked change preflight because the change changed."
               : "Skipped settling a tracked change preflight because its settlement ref already records a " +
@@ -11399,7 +11399,7 @@ export async function refreshAdmittedQueueRevisions(
           code: "recut-current-changed",
           message: failure.message,
         })
-        app.log.info?.("Skipped updating a queued PR because it changed.", {
+        app.log.debug?.("Skipped updating a queued PR because it changed.", {
           action: "queue-freshness-deferred",
           pr: candidate.id,
           revision: candidateRevision.n,
