@@ -86,7 +86,11 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import type { StepKind } from "@yrd/config"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
-import { CandidateFailureResultEvidenceSchema, candidateFailureResultEvidence } from "./check-attribution.ts"
+import {
+  CandidateFailureResultEvidenceSchema,
+  candidateFailureResultEvidence,
+  type CandidateFailureResultEvidence,
+} from "./check-attribution.ts"
 import {
   CandidateSchema,
   IntegrationProofSchema,
@@ -876,12 +880,17 @@ export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
  * revision that carries it. Such a refusal needs a NEW revision, so the queue
  * parks it on the first refusal rather than re-refusing it at the head.
  *
- * Deliberately empty since the re-merge refactor deleted the certificate
- * machinery (its members `recut-gitlink-conflict` and `recut-base-diverged`
- * lost their last producers in Phase 1's deletion sweeps): candidates are
- * rebuilt by merge, so no admission refusal is structurally permanent today.
- * The set and its park-after-1-refusal machinery stay for the next such code;
- * item 3's retirement-with-a-reason design is the eventual successor.
+ * Still empty as a literal SET: the re-merge refactor deleted the certificate
+ * machinery its members `recut-gitlink-conflict` and `recut-base-diverged`
+ * depended on, and candidates are rebuilt by merge, so no refusal is permanent
+ * on its CODE ALONE.
+ *
+ * The permanence question moved to {@link structurallyPermanentAdmissionRefusal},
+ * which the operator's no-parking ruling gave the next such codes: user-level
+ * content faults. A refusal is now permanent when the code is in the
+ * `needs-author` bucket, or when a `check-failed` carries certified evidence
+ * that the red is the change's. Membership here remains the escape hatch for a
+ * future code that is permanent no matter what change carries it.
  */
 const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set<string>([])
 
@@ -912,8 +921,77 @@ function attributableMember(
   return members.some((member) => member.id === pr) ? pr : undefined
 }
 
-function structurallyPermanentAdmissionRefusal(code: string): boolean {
-  return STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(code)
+/**
+ * The certified content fault a change carries, when it carries one.
+ *
+ * A required-check red is the AUTHOR's fault only when the check's own
+ * evidence certifies it: net-new diagnostics measured against the exact base
+ * ({@link candidateFailureResultEvidence}). Without that certificate the red is
+ * unattributed — a base-health step describing its own environment, an opaque
+ * red, an inherited failure, or a flake that reddened this run and not the next
+ * — and it must RETRY, never reject a revision.
+ *
+ * This reads the SAME line the check tooling already draws for `needs-author`
+ * attribution rather than inventing a second one. A partition that disagreed
+ * with the one the author is shown would reject changes for failures the
+ * message says are not theirs.
+ */
+function attributedContentFault(record: DeepReadonly<Change> | undefined): CandidateFailureResultEvidence | undefined {
+  if (record === undefined) return undefined
+  const receipt = changeNeedsAuthor(record)?.receipt
+  if (receipt === undefined) return undefined
+  const attributed = CandidateFailureResultEvidenceSchema.safeParse(receipt.evidence)
+  return attributed.success ? attributed.data : undefined
+}
+
+/**
+ * Whether this refusal ends the revision's queue life instead of being retried.
+ *
+ * Three ways in, and the middle one is where the operator's no-parking ruling
+ * landed: the legacy structural set above; a composition failure in the
+ * `needs-author` bucket, which already means only a new revision cures this;
+ * and a required-check failure the check's own evidence CERTIFIES as the
+ * change's (see {@link attributedContentFault}) — never an uncertified red.
+ *
+ * `record` is required rather than optional on purpose: the check-failed arm is
+ * a judgment about a specific change, and a caller that could omit the record
+ * would silently get the retry answer for a change that deserves rejection.
+ */
+function structurallyPermanentAdmissionRefusal(code: string, record: DeepReadonly<Change> | undefined): boolean {
+  if (STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(code)) return true
+  const canonical = canonicalRefusalCode(code) ?? code
+  if (NEEDS_AUTHOR_CODES.has(canonical)) return true
+  return canonical === "check-failed" && attributedContentFault(record) !== undefined
+}
+
+/**
+ * Why this refusal ends the revision's queue life, as reason - evidence -
+ * remedy.
+ *
+ * Rejection is not a ban. It closes THIS revision's turn in the queue and says
+ * so; the author re-enters by pushing a new revision, which is the only thing
+ * that can change a verdict about content. Saying that in the settlement is the
+ * difference between a dead letter and a park: a reader who is told the remedy
+ * acts on it, and a reader who is told nothing waits.
+ */
+function permanentRefusalReason(
+  pr: string,
+  code: string,
+  reason: string,
+  attributed: CandidateFailureResultEvidence | undefined,
+): string {
+  const unchanged = attributed?.unchangedBaselineCount
+  const evidence =
+    attributed === undefined
+      ? ""
+      : ` Failing: ${renderAttributedFailures(attributed)}${
+          unchanged === undefined ? "" : `; ${unchanged} baseline error${unchanged === 1 ? "" : "s"} unchanged`
+        }.`
+  // No trailing period: every caller embeds this in a sentence of its own.
+  return (
+    `change '${pr}' is refused by '${code}' and no retry can change that fact: ${reason}.${evidence}` +
+    " This revision's turn in the queue ends here; push a new revision to re-enter"
+  )
 }
 
 /**
@@ -938,10 +1016,15 @@ function structurallyPermanentAdmissionRefusal(code: string): boolean {
  * required-check failure deliberately takes the plain default; the dynamic
  * `<step>-failed` family canonicalizes onto it and inherits this with it.
  *
- * Deliberately distinct from {@link structurallyPermanentAdmissionRefusal},
- * which settles the change needs-person on its first refusal: that changes
- * what the QUEUE does with a refusal, this changes only when the AUDIT speaks
- * about one.
+ * Still distinct from {@link structurallyPermanentAdmissionRefusal}, which
+ * settles the change needs-person on its first refusal: that changes what the
+ * QUEUE does with a refusal, this changes only when the AUDIT speaks about
+ * one. Since the no-parking ruling the two overlap without being the same
+ * predicate — every code this reports at threshold 1 also ends the revision's
+ * queue life, EXCEPT a `check-failed` whose evidence never certified the red
+ * against the base. The audit speaks about that one immediately (a person
+ * should look), and the queue keeps retrying it (nothing proves it is the
+ * author's), which is exactly the asymmetry the two predicates exist to hold.
  */
 function contentVerdictAdmissionRefusal(code: string): boolean {
   const canonical = canonicalRefusalCode(code) ?? code
@@ -5187,19 +5270,22 @@ function createQueueCommands(
         revision: revision.n,
         headSha: revision.head,
       })
+      // A DERIVED member has no record to read a content verdict from, so it
+      // can only ever reach the legacy structural set — never the check-failed
+      // arm, which needs the change's own certified evidence.
+      const record = member.source === "record" ? member.record : undefined
+      if (!structurallyPermanentAdmissionRefusal(args.code, record)) return { events: [refused] }
       return {
-        events: structurallyPermanentAdmissionRefusal(args.code)
-          ? [
-              refused,
-              event("queue/admission/settled", {
-                pr: args.pr,
-                revision: revision.n,
-                headSha: revision.head,
-                disposition: "needs-person",
-                reason: args.reason,
-              }),
-            ]
-          : [refused],
+        events: [
+          refused,
+          event("queue/admission/settled", {
+            pr: args.pr,
+            revision: revision.n,
+            headSha: revision.head,
+            disposition: "needs-person",
+            reason: permanentRefusalReason(args.pr, args.code, args.reason, attributedContentFault(record)),
+          }),
+        ],
       }
     },
   })
@@ -8050,7 +8136,8 @@ function admissionRefusalAuditFindings(
     const sameCodeFirstAt = refusal.sameCodeFirstAt ?? refusal.firstAt
     if (head?.id !== refusal.pr) continue
     const threshold =
-      structurallyPermanentAdmissionRefusal(refusal.code) || contentVerdictAdmissionRefusal(refusal.code)
+      structurallyPermanentAdmissionRefusal(refusal.code, getChangeRecord(state.bays, refusal.pr)) ||
+      contentVerdictAdmissionRefusal(refusal.code)
         ? 1
         : progress.refusalCount
     if (sameCodeCount < threshold) continue
@@ -9934,15 +10021,22 @@ function needsAuthorResult(
   return undefined
 }
 
-function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string {
-  const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
-  if (!attributed.success) return `change '${pr.id}' cannot be composed as submitted: ${result.message}`
-  const failures = attributed.data.failures
+/** The certified failures a content fault names, as `file:line[:col] message`.
+ * Shared so the author-facing message and the rejection settlement can never
+ * disagree about which tests failed. */
+function renderAttributedFailures(attributed: CandidateFailureResultEvidence): string {
+  return attributed.failures
     .map(
       (failure) =>
         `${failure.file}:${failure.line}${failure.column === undefined ? "" : `:${failure.column}`} ${failure.message}`,
     )
     .join("; ")
+}
+
+function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string {
+  const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
+  if (!attributed.success) return `change '${pr.id}' cannot be composed as submitted: ${result.message}`
+  const failures = renderAttributedFailures(attributed.data)
   const unchanged = attributed.data.unchangedBaselineCount
   const footer = unchanged === undefined ? "" : `; ${unchanged} baseline error${unchanged === 1 ? "" : "s"} unchanged`
   return `change '${pr.id}' introduced ${attributed.data.failures.length} check failure(s): ${failures}${footer}`

@@ -5563,9 +5563,13 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       prepareCandidate: () => {
         prepares += 1
+        // A RETRYABLE refusal: this test counts how often a check request is
+        // spent, which needs a code the queue keeps retrying. A needs-author
+        // verdict ends the revision's queue life on refusal one instead (the
+        // no-parking ruling), so nothing would spend a second request.
         throw createFailure({
           kind: "refusal",
-          code: "authored-gitlink",
+          code: "recut-certificate",
           message: "recut the carrier before required checks",
         })
       },

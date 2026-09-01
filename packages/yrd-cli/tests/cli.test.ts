@@ -5545,13 +5545,21 @@ describe("runYrd", () => {
     // about the single change nobody can act on. This is the same conflation
     // the settled-refusal branch of `admissionRefusalAuditFindings` already
     // fixed once: "stop retrying" and "stop REPORTING" are different facts.
-    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({ code: "authored-gitlink", count: 1 })
+    // The no-parking ruling then made the quarantine explicit rather than
+    // implicit: a needs-author verdict SETTLES on refusal one, so the finding
+    // names a person and a remedy instead of counting a loop nobody is
+    // running any more.
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+      code: "authored-gitlink",
+      count: 1,
+      settlement: expect.objectContaining({ disposition: "needs-person" }),
+    })
     expect(app.queue.audit().findings).toEqual([
       expect.objectContaining({
-        code: "admission-refusal-loop",
+        code: "admission-refusal-needs-person",
         pr: "PR1",
         refusal: "authored-gitlink",
-        count: 1,
+        owner: "operator",
       }),
     ])
   })
@@ -5584,13 +5592,21 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(app.queue.eligibility("PR1")).toMatchObject({ reason: { code: "admission-refused" } })
 
+    // The base advances under the change. `carrier-drops-landed` is a
+    // needs-author verdict, so the no-parking ruling already ended this
+    // revision's queue life on the first refusal: it does NOT take a second
+    // admission to chase the new base, and the recorded refusal stays pinned
+    // to the base it was actually measured against.
     currentBaseSha = advancedBaseSha
     await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
     expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
-      baseSha: advancedBaseSha,
+      baseSha: BASE_SHA,
       receipt: { code: "carrier-drops-landed" },
     })
+    // The base refresh still MINTS its check request — that half is unchanged,
+    // and it is what makes the run actionable rather than idle. What the
+    // settlement stops is spending it on another admission.
     expect(app.bays.pr("PR1")?.checkRequests).toMatchObject([
       { revision: 1, headSha: HEAD_SHA, baseSha: BASE_SHA },
       { revision: 1, headSha: HEAD_SHA, baseSha: advancedBaseSha },
@@ -5602,7 +5618,7 @@ describe("runYrd", () => {
 
     expect(once.stdout()).not.toContain("Queue idle")
     expect(once.stdout()).toContain("carrier-drops-landed")
-    expect(once.stdout()).toContain("tracked changes re-merge implicitly")
+    expect(once.stdout()).toContain("push a new revision to re-enter")
 
     const json = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), json.io), json.stderr()).toBe(0)
@@ -5615,7 +5631,7 @@ describe("runYrd", () => {
           eligibility: {
             reason: {
               code: "admission-refused",
-              message: expect.stringContaining("tracked changes re-merge implicitly"),
+              message: expect.stringContaining("push a new revision to re-enter"),
             },
           },
         },
@@ -5666,6 +5682,8 @@ describe("runYrd", () => {
     // the whole operational point — the exit code is how a heartbeat learns
     // about an immutable refusal, and it now learns one cycle in instead of
     // three (or, in this shape, never, since the streak cannot advance).
+    // The no-parking ruling went one further: the verdict SETTLES on that
+    // first refusal, so the finding names a person and a remedy.
     expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io), audit.stderr()).toBe(1)
     // The STALL finding is this test's subject: an immutable refusal that
     // settled must never read as a stalled queue, and an exact code list keeps
@@ -5675,7 +5693,7 @@ describe("runYrd", () => {
       findings: readonly Readonly<{ code: string }>[]
     }>
     expect(audited.command).toBe("queue.audit")
-    expect(audited.findings.map((finding) => finding.code)).toEqual(["admission-refusal-loop"])
+    expect(audited.findings.map((finding) => finding.code)).toEqual(["admission-refusal-needs-person"])
   })
 
   it("records an external failing verdict successfully while the queue run becomes failed", async () => {

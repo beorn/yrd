@@ -237,7 +237,12 @@ describe("native needs-author lifecycle", () => {
     expect(eligibility.reason?.code).toBe("admission-refused")
     expect(eligibility.reason?.result).toBeUndefined()
     expect(eligibility.reason?.message).toContain("composition-retired")
-    expect(eligibility.reason?.message).toContain("tracked changes re-merge implicitly")
+    // `composition-retired` is a needs-author verdict, so the no-parking ruling
+    // ends this revision's queue life on the first refusal and the message says
+    // so. The re-merge drill it used to print was exactly the wrong advice
+    // here: re-merging a retired composition re-refuses it forever.
+    expect(eligibility.reason?.message).toContain("push a new revision to re-enter")
+    expect(eligibility.reason?.message).not.toContain("tracked changes re-merge implicitly")
     expect(Queues.ids(app.state().queues)).toEqual([])
 
     // Receiver/refresh replay of the unchanged rejected head is idempotent:
