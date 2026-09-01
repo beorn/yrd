@@ -8,15 +8,25 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { YRD_QUEUE_AUDIT_FINDING_CODES, type QueueAuditEmission } from "@yrd/queue"
 
-/** The three producers whose findings `queue audit` concatenates: the core
+/** The four producers whose findings `queue audit` concatenates: the core
  * walk in this package, the derived plan audit (git vs journal vs process) in
- * the CLI, and the submodule-alternates census in this package. */
+ * the CLI, and the submodule-alternates and receiver-inbox censuses in this
+ * package. */
 const PRODUCERS = [
-  { module: "packages/yrd-queue/src/queue.ts", from: "function auditQueues(", to: "\nfunction latestQueueMergeMs(" },
+  // The end anchor deliberately omits any `export`/newline prefix: adding
+  // `export` to `latestQueueMergeMs` silently broke this guard, and because the
+  // re-anchor error throws BEFORE the coverage assertion, every producer's
+  // codes went unchecked while the suite reported one ordinary failure.
+  { module: "packages/yrd-queue/src/queue.ts", from: "function auditQueues(", to: "function latestQueueMergeMs(" },
   { module: "packages/yrd-cli/src/plan-audit.ts", from: "export function installedPlanStale(", to: null },
   {
     module: "packages/yrd-queue/src/alternates-audit.ts",
     from: "export function submoduleAlternatesFindings(",
+    to: null,
+  },
+  {
+    module: "packages/yrd-queue/src/receiver-inbox-audit.ts",
+    from: "export function receiverInboxFindings(",
     to: null,
   },
 ] as const

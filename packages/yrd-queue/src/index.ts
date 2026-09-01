@@ -1,4 +1,5 @@
 export * from "./alternates-audit.ts"
+export * from "./receiver-inbox-audit.ts"
 export * from "./change-population.ts"
 export * from "./derived-admission.ts"
 export * from "./derived-member.ts"
