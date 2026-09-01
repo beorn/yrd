@@ -1852,7 +1852,7 @@ function createQueue<Shape extends ChangeShape>(
     }
     const rejected = QueueRunNoRunnablePRsSchema.safeParse(value)
     if (rejected.success) {
-      log.warn?.("queue run emitted zero events because every considered PR was ineligible", {
+      log.info?.("queue run emitted zero events because every considered PR was ineligible", {
         action: "queue-run-no-runnable-prs",
         ...rejected.data,
       })
@@ -3478,7 +3478,7 @@ function createQueue<Shape extends ChangeShape>(
               // Retire it once so it cannot poison every future habitant cycle.
               if (fact.code === "stale-plan") {
                 await actions.retireStalePlan(candidateId)
-                log.warn?.(`Skipped outdated batch ${candidateId} because its PRs can no longer be tested together.`, {
+                log.info?.(`Skipped outdated batch ${candidateId} because its PRs can no longer be tested together.`, {
                   action: "compose-stale-plan-retire",
                   run: candidateId,
                   code: fact.code,
@@ -4311,7 +4311,7 @@ function createQueue<Shape extends ChangeShape>(
             if (orphan.reason === "run-terminal") affected.add(orphan.run)
           }
           if (settledOrphans.length > 0) {
-            log.warn?.("Stopped jobs whose queue run had already ended.", {
+            log.info?.("Stopped jobs whose queue run had already ended.", {
               action: "recover-orphan-settle",
               reason: "orphaned-requested-job",
               jobs: settledOrphans.map((orphan) => orphan.job.id),
@@ -4332,7 +4332,7 @@ function createQueue<Shape extends ChangeShape>(
             affected.add(orphan.run)
           }
           if (orphanedRuns.length > 0) {
-            log.warn?.("Stopped queue runs whose next step never started.", {
+            log.info?.("Stopped queue runs whose next step never started.", {
               action: "recover-orphan-run-settle",
               reason: "orphaned-run",
               runs: orphanedRuns.map((orphan) => orphan.run),
@@ -4362,7 +4362,7 @@ function createQueue<Shape extends ChangeShape>(
             affected.add(planned.run)
           }
           if (retiredBatches.length > 0) {
-            log.warn?.("Removed outdated batches that can no longer be tested.", {
+            log.info?.("Removed outdated batches that can no longer be tested.", {
               action: "recover-stale-plan-retire",
               reason: "stale-plan",
               runs: retiredBatches.map((batch) => batch.run),
@@ -4555,7 +4555,7 @@ function createQueue<Shape extends ChangeShape>(
       }
       if (quiesced.length > 0) {
         // ONE loud structured result naming every settled root and job.
-        log.warn?.(`Stopped old queue runs during startup: ${quiesced.map((entry) => entry.run).join(", ")}.`, {
+        log.info?.(`Stopped old queue runs during startup: ${quiesced.map((entry) => entry.run).join(", ")}.`, {
           action: "legacy-quiesce",
           reason: "legacy-quiesced",
           by: options.by,

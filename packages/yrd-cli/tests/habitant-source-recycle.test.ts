@@ -54,6 +54,7 @@ type Warn = Readonly<{ message: string; props: Record<string, unknown> }>
  */
 function fixture(bootedSha: string, sourceCheckout: string, existingStateDir?: string) {
   const warnings: Warn[] = []
+  const errors: Warn[] = []
   const queueRepo = initRepo("yrd-source-recycle-queue-")
   commit(queueRepo, "queue repository, unrelated history")
   // A successive process after a re-exec reuses the SAME durable state dir —
@@ -61,7 +62,10 @@ function fixture(bootedSha: string, sourceCheckout: string, existingStateDir?: s
   const stateDir = existingStateDir ?? mkdtempSync(join(tmpdir(), "yrd-source-recycle-state-"))
   if (existingStateDir === undefined) roots.push(stateDir)
   const app = {
-    log: { warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }) },
+    log: {
+      warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }),
+      error: (message: string, props: Record<string, unknown>) => errors.push({ message, props }),
+    },
   } as unknown as YrdCliApp
   const io = {
     cwd: queueRepo,
@@ -75,6 +79,7 @@ function fixture(bootedSha: string, sourceCheckout: string, existingStateDir?: s
     app,
     io,
     warnings,
+    errors,
     stateDir,
     recyclePath,
     readRecycle: () => JSON.parse(readFileSync(recyclePath, "utf8")) as Record<string, unknown>,
@@ -202,7 +207,9 @@ describe("habitant source recycle — the restart that changes nothing", () => {
     const outcome = await second.observe(HABITANT_SOURCE_STALE_OBSERVATIONS + 2)
 
     expect(outcome.recycle).toBe(false)
-    const warning = second.warnings.find((w) => w.props.action === "resident-source-stale-checkout-behind")
+    // The restart budget is spent and nothing automatic can fix this — that is
+    // ERROR (abnormal-not-auto-fixable), not WARN (abnormal-and-recovered).
+    const warning = second.errors.find((w) => w.props.action === "resident-source-stale-checkout-behind")
     expect(warning).toBeDefined()
     expect(warning?.props).toMatchObject({
       bootedSha: source.bootedSha,

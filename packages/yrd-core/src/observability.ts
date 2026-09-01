@@ -110,7 +110,7 @@ export async function observeYrdLifecycle<Result>(
     })
     if (span !== undefined) Object.assign(span.spanData as Record<string, unknown>, spanProps)
     if (invalidDuration) {
-      log.error?.(`Could not measure how long ${options.lifecycle} took; its result is unchanged.`, { ...spanProps })
+      log.warn?.(`Could not measure how long ${options.lifecycle} took; its result is unchanged.`, { ...spanProps })
     }
     const levelOverride = outcome === "failed" && result !== undefined ? options.failureLevel?.(result) : undefined
     emitLifecycle(log, options.lifecycle, outcome, summary ?? outcome, { ...spanProps }, levelOverride)

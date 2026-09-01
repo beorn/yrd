@@ -33,10 +33,14 @@ function tracing(): Readonly<{ log: ReturnType<typeof createLogger>; events: Log
   return { log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]), events }
 }
 
-function result(events: readonly LogEvent[], action: string) {
+function result(
+  events: readonly LogEvent[],
+  action: string,
+  level: Extract<LogEvent, { kind: "log" }>["level"] = "warn",
+) {
   return events.find(
     (event): event is Extract<LogEvent, { kind: "log" }> =>
-      event.kind === "log" && event.level === "warn" && event.props?.action === action,
+      event.kind === "log" && event.level === level && event.props?.action === action,
   )
 }
 
@@ -215,7 +219,7 @@ describe("recovery reads a queue population one record at a time", () => {
     expect(repaired?.status).toBe("completed")
     expect(repaired?.error?.code).toBe("orphaned-run")
     expect(repaired?.error?.message).toContain("runner disappeared before step 'first' started")
-    expect(result(events, "recover-orphan-run-settle")?.props).toMatchObject({
+    expect(result(events, "recover-orphan-run-settle", "info")?.props).toMatchObject({
       reason: "orphaned-run",
       runs: ["R2"],
       steps: ["first"],

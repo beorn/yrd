@@ -589,7 +589,7 @@ describe("Yrd lifecycle records", () => {
     log.end()
   })
 
-  it("clamps a backwards clock and emits ERROR without failing successful work", async () => {
+  it("clamps a backwards clock and emits WARN without failing successful work", async () => {
     const events: Event[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
     const ticks = [20, 10]
@@ -597,11 +597,13 @@ describe("Yrd lifecycle records", () => {
     await expect(
       observeYrdLifecycle(log, { lifecycle: "check", now: () => ticks.shift() ?? 10 }, async () => "passed"),
     ).resolves.toBe("passed")
+    // WARN, not ERROR: the measurement is abnormal (a backwards clock) but the
+    // work itself is unaffected and nothing needs a human to intervene.
     expect(events).toContainEqual(
       expect.objectContaining({
         kind: "log",
         namespace: "yrd:check",
-        level: "error",
+        level: "warn",
         props: expect.objectContaining({
           lifecycle: "check",
           outcome: "succeeded",

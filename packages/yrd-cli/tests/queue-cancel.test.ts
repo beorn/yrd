@@ -85,6 +85,7 @@ describe("habitantRecoverySweep — the habitant's per-tick lease-expiry sweep (
   function sweepHarness(settle: (call: RecoverCall) => readonly { id: string }[]) {
     const recoverCalls: RecoverCall[] = []
     const warnings: WarnCall[] = []
+    const infos: WarnCall[] = []
     const app = {
       queue: {
         recover: async (call: RecoverCall) => {
@@ -92,9 +93,12 @@ describe("habitantRecoverySweep — the habitant's per-tick lease-expiry sweep (
           return settle(call)
         },
       },
-      log: { warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }) },
+      log: {
+        warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }),
+        info: (message: string, props: Record<string, unknown>) => infos.push({ message, props }),
+      },
     } as unknown as Parameters<typeof habitantRecoverySweep>[0]
-    return { app, recoverCalls, warnings }
+    return { app, recoverCalls, warnings, infos }
   }
 
   it("recovers expired leases unscoped, throttled ~60s, logging loudly only when it settles", async () => {
@@ -123,10 +127,12 @@ describe("habitantRecoverySweep — the habitant's per-tick lease-expiry sweep (
     // Unscoped: never a runner arg; reason names the sweep.
     expect(h.recoverCalls.every((call) => call.runner === undefined)).toBe(true)
     expect(h.recoverCalls[0]).toMatchObject({ reason: expect.stringContaining("sweep") })
-    // Loud structured warn ONLY on the tick that settled something, naming the ids.
-    const sweepWarnings = h.warnings.filter((warning) => warning.props.action === "resident-recovery-sweep")
-    expect(sweepWarnings).toHaveLength(1)
-    expect(sweepWarnings[0]?.props).toMatchObject({ runs: ["R9"], reason: expect.any(String) })
+    // Structured result ONLY on the tick that settled something, naming the ids.
+    // INFO, not WARN: routine self-healing during a normal recovery sweep, same
+    // family as the other "Stopped/Removed X" recovery-pass demotions.
+    const sweepInfos = h.infos.filter((info) => info.props.action === "resident-recovery-sweep")
+    expect(sweepInfos).toHaveLength(1)
+    expect(sweepInfos[0]?.props).toMatchObject({ runs: ["R9"], reason: expect.any(String) })
   })
 
   it("defaults to the wall clock and does not sweep again within the throttle window", async () => {
