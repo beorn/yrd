@@ -8,6 +8,17 @@ export type YrdQueueRunnerDeclaration = Readonly<{
   serviceName: string
   repository: Readonly<{ name: string; path: string }>
   queue: Readonly<{ base: string }>
+  /**
+   * The tribe seat Hab pages when this runner's restart budget exhausts —
+   * `HabServiceDefinition.owner` in ag/packages/hab-config.
+   *
+   * Required, not optional, and that is the point. Under `restart: "never"` a
+   * crashed runner stays exited and pages ONCE; an undeclared owner resolves to
+   * the fleet-wide default, so "nobody chose" and "we chose the default" become
+   * the same declaration. A runner nobody is named for is a runner that stays
+   * down while its page arrives as news to a seat that cannot act on it.
+   */
+  owner: string
 }>
 
 function requiredText(value: string, label: string): string {
@@ -25,6 +36,7 @@ export function defineYrdQueueRunnerDeclarations<const Rows extends readonly Yrd
     requiredText(row.repository.name, "repository name")
     requiredText(row.repository.path, "repository path")
     requiredText(row.queue.base, "queue base")
+    requiredText(row.owner, "owner")
     if (services.has(row.serviceName)) throw new Error(`duplicate service name '${row.serviceName}'`)
     if (repositories.has(row.repository.name)) {
       throw new Error(`duplicate repository name '${row.repository.name}'`)
@@ -36,7 +48,7 @@ export function defineYrdQueueRunnerDeclarations<const Rows extends readonly Yrd
 }
 
 export const yrdQueueRunnerDeclarations = defineYrdQueueRunnerDeclarations([
-  { serviceName: "yrd-runner", repository: { name: "code", path: "." }, queue: { base: "main" } },
+  { serviceName: "yrd-runner", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
 ] as const)
 
 /**
@@ -80,6 +92,23 @@ export default {
         // exited and pages once; every restart is a deliberate operator/CTO
         // act, never supervision. hab-config validates the value.
         restart: "never" as const,
+        // NO `owner` KEY HERE YET, and the omission is deliberate. The seat
+        // that page is FOR is declared above, on the registry row; what is
+        // missing is the wire, not the decision.
+        //
+        // `HabServiceDefinition.owner` exists in ag/packages/hab-config and is
+        // read through habplan lowering, the launch envelope and the page rail,
+        // where a declared owner wins and a blank one falls back to @chief. But
+        // `SERVICE_KEYS` in that same file does not list "owner", and any key
+        // outside that allowlist is a FATAL config diagnostic rather than an
+        // ignored one — the fail-loud guard that closed the silent-typo gap.
+        // So spreading `owner` in today would not route the page; it would stop
+        // yrd-runner from loading at all, and under `restart: "never"` that is
+        // the merge queue down behind a config error.
+        //
+        // Unblock, in this order: add "owner" to SERVICE_KEYS in
+        // ag/packages/hab-config, then `owner,` here, then delete the pin in
+        // tests/hab-projects.ts that asserts this absence.
       },
     ]),
   ),
