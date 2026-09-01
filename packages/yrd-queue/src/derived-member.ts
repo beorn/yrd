@@ -8,7 +8,8 @@
  * Crash-safety contract, unchanged from intake: the durable high-water is
  * committed BEFORE the id escapes (`mintChangeId` → PrNumberMint.commit), so a
  * crash between commit and use skips a number but can never re-issue one. The
- * id first escapes into the `queue/run/started` snapshot.
+ * compose journals an exact branch+sha identity binding before the id
+ * escapes into a log line, Candidate, or `queue/run/started` snapshot.
  */
 import {
   changeRevisionNumber,
@@ -16,17 +17,10 @@ import {
   mintChangeId,
   hasChangeRecord,
   type BaysState,
-  type Change,
   type PrNumberMint,
   recordChanges,
 } from "@yrd/bay"
-import {
-  latestChangeSnapshot,
-  maxChangeSnapshotRevision,
-  newestTruthRecord,
-  type CandidateRev,
-  type QueuesState,
-} from "./model.ts"
+import { latestChangeSnapshot, maxChangeSnapshotRevision, newestTruthRecord, type QueuesState } from "./model.ts"
 
 export type DerivedMemberIdentity = Readonly<{
   id: string
@@ -37,18 +31,20 @@ export type DerivedMemberIdentity = Readonly<{
    * function owns the NUMBER contract only. */
   changeId?: string
   revision: number
-  /** True when a fresh number was committed to the mint; false when the latest
-   * retained recordless snapshot for the branch supplied the identity. */
+  /** True when a fresh number was committed to the mint; false when a durable
+   * exact binding or branch-proven run snapshot supplied it. */
   minted: boolean
 }>
 
 /**
  * Mint — or reuse — the identity a derived member of `branch` runs under.
  *
- * - Reuse: the latest retained `ChangeSnapshot` for the branch whose id no
- *   record carries (a recordless id can only have been minted for a derived
- *   member) keeps its id and changeId across re-pushes; the revision continues
- *   as 1 + the highest revision any retained snapshot records for that id.
+ * - Exact reuse: the journaled binding for the branch's current submit sha
+ *   returns the SAME id and revision before a Candidate or run has to exist.
+ * - Revision reuse: the latest retained `ChangeSnapshot` for the branch whose
+ *   id no record carries keeps its id and changeId across re-pushes; the
+ *   revision continues as 1 + the highest revision any retained snapshot
+ *   records for that id.
  * - Fresh: `mintChangeId` commits max(high-water, frozen-store max) + 1 before
  *   the id escapes — a derived member's number is always strictly above both
  *   (A9). The revision seeds from the branch's newest terminal record when the
@@ -79,9 +75,26 @@ export function mintDerivedMemberIdentity(
         `a derived member may only be admitted for a branch with no live record`,
     )
   }
+  const submit = bays.submits[branch]
+  const bound = submit === undefined ? undefined : queues.derivedIdentities[branch]?.[submit.sha]
+  if (bound !== undefined) {
+    const number = changeIdNumber(bound.id)
+    if (number !== undefined && number > mint.highWater()) {
+      throw new Error(
+        `yrd: derived member '${bound.id}' for branch '${branch}' exceeds the mint high-water ` +
+          `${String(mint.highWater())} — an id escaped without its commit; refusing to reuse it`,
+      )
+    }
+    return { id: bound.id, revision: bound.revision, minted: false }
+  }
   const reusable = latestChangeSnapshot(
     queues,
-    (snapshot) => snapshot.branch === branch && !hasChangeRecord(bays, snapshot.id),
+    (snapshot) =>
+      snapshot.branch === branch &&
+      !hasChangeRecord(bays, snapshot.id) &&
+      !Object.values(queues.derivedIdentities)
+        .flatMap((identities) => Object.values(identities))
+        .some((identity) => identity.branch !== branch && identity.id === snapshot.id),
   )
   if (reusable !== undefined) {
     const number = changeIdNumber(reusable.id)
@@ -98,65 +111,9 @@ export function mintDerivedMemberIdentity(
       minted: false,
     }
   }
-  // No run has ever started for this branch, so `latestChangeSnapshot` above
-  // has nothing to find — but admission may already be IN FLIGHT for the
-  // exact live submit fact: `admissionStep`'s first dispatch durably records
-  // the Candidate it built (`queue/candidate/created`, queue.ts) before any
-  // Queue run exists to retain a ChangeSnapshot. Reusing THAT identity here,
-  // unchanged (same id, same revision — no bump), is what lets
-  // `admissionJobKey` resolve to the SAME already-dispatched Job on the next
-  // compose pass instead of abandoning it and minting a phantom sibling.
-  // See {@link pendingDerivedCandidate}.
-  const sha = bays.submits[branch]?.sha
-  const pending = sha === undefined ? undefined : pendingDerivedCandidate(bays, queues, sha)
-  if (pending !== undefined) {
-    return { id: pending.id, revision: pending.revision, minted: false }
-  }
   const id = mintChangeId(mint, bays.prs)
   const seed = newestTruthRecord(records)
   return { id, revision: (seed === undefined ? 0 : changeRevisionNumber(seed)) + 1, minted: true }
-}
-
-/**
- * The lowest-numbered recordless identity any retained admission Candidate
- * carries for the live submit fact at `sha` — the durable trace an admission
- * attempt leaves the MOMENT its first required-check Job is requested, well
- * before any Queue run starts (measured 2026-09-01 at yrd c576de2a: PR2919
- * minted 07:59:30, its checks still settling, then the NEXT compose pass
- * re-derived the same (branch, sha) from scratch and minted PR2920 — every
- * pass, forever, because nothing survived to tell {@link
- * mintDerivedMemberIdentity} an admission was already in flight, and
- * `admissionJobKey` (keyed on id + revision) could never resolve back to the
- * Job already dispatched under the burned number).
- *
- * Reads `queues.candidates`, which the admission path already writes
- * durably and unconditionally on its first dispatch — no new durable state,
- * no new journal event, no projection-checkpoint migration.
- *
- * Lowest id wins when more than one candidate matches (a branch whose checks
- * spanned several compose passes before this fix minted more than one
- * phantom for the same sha): the first identity issued is the one worth
- * converging on — every later mint for the same content is exactly the
- * livelock this closes, not a second legitimate attempt.
- */
-function pendingDerivedCandidate(
-  bays: BaysState,
-  queues: QueuesState,
-  sha: string,
-): Readonly<{ id: string; revision: number }> | undefined {
-  let best: CandidateRev | undefined
-  let bestNumber = Number.POSITIVE_INFINITY
-  for (const candidate of Object.values(queues.candidates)) {
-    for (const rev of candidate.revs) {
-      if (rev.head !== sha || hasChangeRecord(bays, rev.pr)) continue
-      const number = changeIdNumber(rev.pr) ?? Number.POSITIVE_INFINITY
-      if (number < bestNumber) {
-        best = rev
-        bestNumber = number
-      }
-    }
-  }
-  return best === undefined ? undefined : { id: best.pr, revision: best.n }
 }
 
 function changeIdNumber(id: string): number | undefined {

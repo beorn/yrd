@@ -861,6 +861,15 @@ const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
 const ExpireQueuePauseArgsSchema = z
   .object({ base: GitRefSchema, expiresAt: z.iso.datetime({ offset: true }) })
   .strict()
+const DerivedIdentityBoundSchema = z
+  .object({
+    branch: GitRefSchema,
+    sha: GitShaSchema,
+    id: PRIdSchema,
+    revision: z.number().int().positive(),
+  })
+  .strict()
+type DerivedIdentityBound = Readonly<z.infer<typeof DerivedIdentityBoundSchema>>
 /** One compose/admission cycle that skipped a change without producing a queue run.
  * The `compose-candidate-skip` warns that accompany it are loggily-only, so this
  * is the fact that makes a head-of-line refusal loop survive the process. */
@@ -1471,6 +1480,15 @@ export type QueueCommands = Readonly<{
   }>
 }>
 
+/** Commands the installed plugin uses internally but does not add to the
+ * public QueueCommands contract. */
+type InstalledQueueCommands = Readonly<{
+  queue: QueueCommands["queue"] &
+    Readonly<{
+      bindDerivedIdentity: CommandHandler<DerivedIdentityBound, RuntimeState>
+    }>
+}>
+
 export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   readonly shape?: Shape
   state: ReadSignal<DeepReadonly<QueuesState>>
@@ -1656,6 +1674,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
       initialState: { queues: initial },
       commands,
       events: {
+        "queue/derived-identity/bound": journalEvent(1, DerivedIdentityBoundSchema),
         "queue/candidate/created": journalEvent(1, CandidateCreatedSchema),
         "queue/run/started": journalEvent(1, z.object({ run: QueueStartSchema }).strict()),
         "queue/run/failed": journalEvent(1, QueueFailedSchema),
@@ -1677,7 +1696,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v11-component-model-ruling-spend",
+      projectionVersion: "queues-v12-derived-identity-binding",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -1724,6 +1743,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               retireSubmitFact: (args) => yrd.dispatch(commands.queue.retireSubmitFact, args),
+              bindDerivedIdentity: (args) => yrd.dispatch(commands.queue.bindDerivedIdentity, args),
               reconcileMerge: (args) => yrd.dispatch(commands.queue.reconcileMerge, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
@@ -1782,6 +1802,7 @@ type QueueActions = Readonly<{
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
+  bindDerivedIdentity(args: DerivedIdentityBound): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
   reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<CommandResult>
@@ -2004,6 +2025,35 @@ function createQueue<Shape extends ChangeShape>(
   const composeConditions = conditions.child("compose")
   const composeLog = log.child("compose")
 
+  /** Every recordless Candidate that names `sha` but carries neither record
+   * nor exact-binding provenance. Pre-v12 journals can contain these rows.
+   * They are diagnostic history only: an exact branch+sha binding is the sole
+   * pre-Candidate reuse authority. */
+  const legacyDerivedCandidates = (
+    bays: DeepReadonly<BaysState>,
+    queues: DeepReadonly<QueuesState>,
+    sha: string,
+  ): readonly Readonly<{ id: string; revision: number }>[] => {
+    const legacy = new Map<string, Readonly<{ id: string; revision: number }>>()
+    const boundIds = new Set(
+      Object.values(queues.derivedIdentities).flatMap((identities) =>
+        Object.values(identities).map((identity) => identity.id),
+      ),
+    )
+    for (const candidate of Object.values(queues.candidates)) {
+      for (const revision of candidate.revs) {
+        if (revision.head !== sha || hasChangeRecord(bays as BaysState, revision.pr) || boundIds.has(revision.pr)) {
+          continue
+        }
+        const observed = legacy.get(revision.pr)
+        if (observed === undefined || revision.n < observed.revision) {
+          legacy.set(revision.pr, { id: revision.pr, revision: revision.n })
+        }
+      }
+    }
+    return [...legacy.values()].toSorted((left, right) => compareNatural(left.id, right.id))
+  }
+
   /**
    * S6 door — DERIVED admission of ref-only approvals, replacing the retired
    * 2b intake sweep (census #3): every live projected submit ref on a
@@ -2012,8 +2062,8 @@ function createQueue<Shape extends ChangeShape>(
    * compose below) becomes a derived run member — identity minted here at
    * admission time under the durable PR-number mint (commit-before-escape),
    * enrichment (Change-Id trailer, props, issue) read from git through the
-   * host's configured reader, and the ChangeSnapshot the run journals is the
-   * identity's only durable home. No record is minted, and the DERIVED lane
+   * host's configured reader. The exact identity binding is journaled before
+   * admission work; a later ChangeSnapshot carries the full run member. No record is minted, and the DERIVED lane
    * retires no submit fact: the fact IS the submission, and it stands until
    * the receiver sweeps the ref (branch delete) or a re-push renews it. (The
    * RECORD lane's merge does retire its own branch's fact —
@@ -2251,6 +2301,12 @@ function createQueue<Shape extends ChangeShape>(
       const submit = snapshot.bays.submits[branch]
       if (submit === undefined) continue
       try {
+        const currentIdentity = snapshot.queues.derivedIdentities[branch]?.[submit.sha]
+        // Always scan, including after an exact binding exists: a process can
+        // crash after binding but before the loud compatibility row. Bound ids
+        // are excluded inside the query, so only genuinely unowned legacy
+        // Candidates survive and every restart gets another chance to report.
+        const legacyCandidates = legacyDerivedCandidates(snapshot.bays, snapshot.queues, submit.sha)
         const enrichment =
           readSubmitEnrichment === undefined ? undefined : await readSubmitEnrichment({ branch, sha: submit.sha })
         const member = deriveRunMemberArgs({
@@ -2260,6 +2316,39 @@ function createQueue<Shape extends ChangeShape>(
           branch,
           ...(enrichment === undefined ? {} : { enrichment }),
         })
+        // The number mint commits before `deriveRunMemberArgs` returns; bind
+        // that exact identity in the journal before the member escapes into a
+        // log line, Candidate, or run. A crash between the two durable writes
+        // can skip a number, but no unbound identity becomes observable.
+        if (
+          currentIdentity === undefined ||
+          currentIdentity.id !== member.id ||
+          currentIdentity.revision !== member.revision
+        ) {
+          await actions.bindDerivedIdentity({
+            branch,
+            sha: submit.sha,
+            id: member.id,
+            revision: member.revision,
+          })
+        }
+        for (const legacyCandidate of legacyCandidates) {
+          const remedy = `legacy SHA-only candidate; re-push under branch ${branch} takes the mint path`
+          composeConditions.report(
+            `compose-derived-legacy-candidate-retired:${branch}:${submit.sha}:${legacyCandidate.id}`,
+            "warn",
+            `queue compose retired legacy Candidate '${legacyCandidate.id}' from identity selection because its ` +
+              `sha carries no branch provenance; '${member.id}' is bound to the exact submit fact instead — ${remedy}`,
+            {
+              action: "compose-derived-legacy-candidate-retired",
+              branch,
+              sha: submit.sha,
+              legacyPr: legacyCandidate.id,
+              replacementPr: member.id,
+              remedy,
+            },
+          )
+        }
         derived.push(member)
         composes.observe(branch, submit.sha, { outcome: "derived" })
         log.info?.("queue compose derived an admission for a branch submitted only in git", {
@@ -4848,7 +4937,50 @@ function createQueueCommands(
   wiring: DerivedAdmissionWiring,
   landing: SubmitLandingMemo,
   requiresPreparedCandidate = false,
-): QueueCommands {
+): InstalledQueueCommands {
+  const bindDerivedIdentity = command({
+    title: "Bind one derived member identity",
+    visibility: "internal",
+    params: DerivedIdentityBoundSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: DerivedIdentityBound) {
+      const submit = state.bays.submits[args.branch]
+      if (submit === undefined) {
+        raiseFailure(
+          "refusal",
+          "derived-submit-vanished",
+          `yrd: submit fact for branch '${args.branch}' vanished before derived identity '${args.id}' could be bound`,
+        )
+      }
+      if (submit.sha !== args.sha) {
+        raiseFailure(
+          "refusal",
+          "derived-submit-moved",
+          `yrd: submit fact for branch '${args.branch}' moved from ${args.sha} to ${submit.sha} before derived identity '${args.id}' could be bound`,
+        )
+      }
+      const branchIdentities = state.queues.derivedIdentities[args.branch] ?? {}
+      const current = branchIdentities[args.sha]
+      if (current !== undefined) {
+        if (current.id !== args.id || current.revision !== args.revision) {
+          throw new Error(
+            `yrd: submit fact '${args.branch}' at ${args.sha} is already bound to ${current.id} revision ${current.revision}; refusing conflicting identity ${args.id} revision ${args.revision}`,
+          )
+        }
+        return { events: [] }
+      }
+      const ownedElsewhere = Object.values(state.queues.derivedIdentities)
+        .flatMap((identities) => Object.values(identities))
+        .find((identity) => identity.branch !== args.branch && identity.id === args.id)
+      if (ownedElsewhere !== undefined) {
+        throw new Error(
+          `yrd: derived identity ${args.id} revision ${args.revision} is already bound to branch ` +
+            `'${ownedElsewhere.branch}'; refusing to alias it to '${args.branch}'`,
+        )
+      }
+      return { events: [event("queue/derived-identity/bound", args)] }
+    },
+  })
+
   const admissionStep = command({
     title: "Run one revision required check",
     params: AdmissionStepArgsSchema,
@@ -5522,6 +5654,7 @@ function createQueueCommands(
 
   return {
     queue: {
+      bindDerivedIdentity,
       admissionStep,
       run,
       pause,
@@ -6237,6 +6370,38 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       queues: {
         ...state.queues,
         authority: invalidateChangeAuthority(state.queues.authority, closed.pr),
+      },
+    }
+  }
+  if (applied.name === "queue/derived-identity/bound") {
+    const bound = DerivedIdentityBoundSchema.parse(applied.data)
+    const branchIdentities = state.queues.derivedIdentities[bound.branch] ?? {}
+    const current = branchIdentities[bound.sha]
+    if (current !== undefined) {
+      if (current.id !== bound.id || current.revision !== bound.revision) {
+        throw new Error(
+          `yrd: submit fact '${bound.branch}' at ${bound.sha} replays conflicting derived identities ` +
+            `${current.id} revision ${current.revision} and ${bound.id} revision ${bound.revision}`,
+        )
+      }
+      return state
+    }
+    const ownedElsewhere = Object.values(state.queues.derivedIdentities)
+      .flatMap((identities) => Object.values(identities))
+      .find((identity) => identity.branch !== bound.branch && identity.id === bound.id)
+    if (ownedElsewhere !== undefined) {
+      throw new Error(
+        `yrd: derived identity ${bound.id} revision ${bound.revision} replays for both ` +
+          `'${ownedElsewhere.branch}' and '${bound.branch}'`,
+      )
+    }
+    return {
+      queues: {
+        ...state.queues,
+        derivedIdentities: {
+          ...state.queues.derivedIdentities,
+          [bound.branch]: { ...branchIdentities, [bound.sha]: bound },
+        },
       },
     }
   }
