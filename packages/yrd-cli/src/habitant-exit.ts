@@ -56,6 +56,17 @@ export const HABITANT_EXIT = {
    * wedge and stands down again. That is why it is the first condition
    * dispositioned `stand-down`. */
   "queue-wedged": 14,
+  /** One typed refusal cost every cycle in a window past its declared bound, so
+   * the habitant stopped rather than keep skipping cycles it will keep losing
+   * (`habitant-refusal-loop.ts`). The 2026-09-01 kind-keyed skip is what makes
+   * this reachable, and rightly so: killing the runner on a single refusal took
+   * the whole queue offline twice in 21 minutes. But a refusal about the WORLD
+   * is not spent by being skipped — it arrives again next cycle, and the runner
+   * serves nothing while every instrument reads it as healthy. Dispositioned
+   * `stand-down` for the same reason as `queue-wedged`: the verdict lives in the
+   * journal this runner reads, so a successor re-derives the same member and is
+   * refused the same way. */
+  "refusal-loop": 15,
 } as const
 
 export type HabitantExitCondition = keyof typeof HABITANT_EXIT
@@ -90,6 +101,7 @@ export const HABITANT_EXIT_DISPOSITION: Readonly<Record<HabitantExitCondition, H
     // is exactly the cure — same reasoning as `source-stale`.
     "installed-plan-stale": "restart-immediately",
     "queue-wedged": "stand-down",
+    "refusal-loop": "stand-down",
   })
 
 /**
