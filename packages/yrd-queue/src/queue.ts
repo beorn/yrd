@@ -10671,11 +10671,29 @@ export function canonicalRefusalCode(code: string, options: CanonicalRefusalCode
   return DYNAMIC_STEP_FAILURE_CODE.test(code) ? "check-failed" : undefined
 }
 
+/**
+ * Which of the three things a failed admission was: an infrastructure fault, a
+ * refusal the author must cure, or an ordinary failure.
+ *
+ * `infrastructure` is the CALLER's answer, for the two sites holding an OUTER
+ * fact the result itself cannot see — a Job that was lost or cancelled, or a
+ * candidate-preparation failure already typed by its producer.
+ *
+ * `verdictless` is the RESULT's own answer, and it is why this is not a code
+ * list. A check that was killed before it could judge anything reports the
+ * machinery, never the content, so it is infrastructure no matter which step
+ * name its code was built from. Deciding that here by code would need one
+ * entry per configured step name per fault, which is a list that is wrong the
+ * day someone adds a step: PR3141 was consumed on 2026-09-01 because
+ * `affected-tests-stalled` was in no list, so a 15m45s stall under a host load
+ * of 40-61 read as a verdict on the author's change and retired their standing
+ * submit fact. The producer already knew; it just had nowhere to say so.
+ */
 function admissionFailureKind(
   result: DeepReadonly<JobError>,
   infrastructure: boolean,
 ): Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"] {
-  if (infrastructure) return "infrastructure"
+  if (infrastructure || result.verdictless === true) return "infrastructure"
   return NEEDS_AUTHOR_CODES.has(result.code) ? "refusal" : "failure"
 }
 
