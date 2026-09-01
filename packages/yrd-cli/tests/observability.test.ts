@@ -394,7 +394,7 @@ describe("Yrd lifecycle records", () => {
           event.kind === "log" && event.namespace === namespace && event.props?.outcome === "succeeded",
       )
 
-    // `actor verb object`, with the lifecycle word dropped because the
+    // `subject verb object`, with the lifecycle word dropped because the
     // namespace already carries it — `yrd:storage:lock lock succeeded` said
     // `lock` twice and named neither the holder nor the file.
     expect(settledEvent("yrd:storage:append")?.message).toBe("appended queue.advance")

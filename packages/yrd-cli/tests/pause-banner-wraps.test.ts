@@ -6,7 +6,7 @@
  * four failed recovery attempts and ~90 minutes on 2026-08-01
  * (@yrd/stopline-truncates-its-predicate, @yrd/hold-status-truncates-its-own-instruction).
  * @level l2
- * @consumer @yrd/cli watch, queue status
+ * @consumer @yrd/cli watch, queue list
  *
  * Asserts on RENDERED bytes at a narrow width, never on the source string —
  * the 2026-08-27 ADR's rendered-bytes obligation, and the only assertion that
@@ -103,7 +103,7 @@ async function bannerText(cols: number): Promise<string> {
   }
 }
 
-describe("the queue hold banner wraps instead of truncating", () => {
+describe("the queue pause banner wraps instead of truncating", () => {
   for (const cols of [60, 80, 120]) {
     it(`renders the whole reason at ${cols} columns, ellipsis-free`, async () => {
       const text = await bannerText(cols)

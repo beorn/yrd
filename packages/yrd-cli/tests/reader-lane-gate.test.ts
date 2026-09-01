@@ -1,7 +1,7 @@
 /**
  * @failure A read view joins a run member against the retained record store and
  * throws on the first member the store does not hold, so ONE mixed-lane state —
- * record, derived, and intent members coexisting — crashes `yrd queue status`,
+ * record, derived, and intent members coexisting — crashes `yrd queue list`,
  * `yrd log`, and the timeline for the whole repository. This exact state is
  * live main post-S6 (2026-08-27: PR2131's derived member crashed three readers
  * serially, each discovered by a production incident, because no fixture held

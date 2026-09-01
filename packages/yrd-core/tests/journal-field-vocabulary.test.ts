@@ -4,8 +4,9 @@
  * event NAME only, so growing an existing event's payload leaves that number
  * untouched: the writer-side check passes, the row merges, and every reader
  * pinned below the new field strands on it — the reported specimen being one
- * `bay/opened` row carrying `by` against `actor`-pinned readers. The strand is
- * not recoverable by the reader, so the write is what has to refuse.
+ * `bay/opened` row carrying `by` against readers still pinned to the previous
+ * role field. The strand is not recoverable by the reader, so the write is
+ * what has to refuse.
  * @level l1
  * @consumer @yrd/core
  */
