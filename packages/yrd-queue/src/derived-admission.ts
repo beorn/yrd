@@ -525,12 +525,60 @@ export type DerivedSubmitRetirement = Readonly<{
 }>
 
 /**
- * Derived-lane submit refs safe to PHYSICALLY retire: standing facts whose
- * content has already landed on their base, proven the identical way
- * {@link derivedLaneBranches} proves it safe to stop DERIVING them —
- * `landedBranches` is the same set (`landedSubmitBranches(scan)`), so a fact
- * this codebase already trusts enough to exclude from admission is trusted
- * here too (@yrd/core/22991 derived-lane submit-ref retirement).
+ * A standing derived-lane fact whose CHANGE landed under a different commit
+ * (`via: "change-id"`) — never safe to sweep, and never silently dropped.
+ *
+ * Per {@link LandedSubmit.via}, this proof is benign for an abandoned revision
+ * and an AUTHOR ERROR for a fact carrying new work under a landed identity —
+ * and nothing here can tell those apart, because the difference is what the
+ * author meant. Deleting the ref decides it the one way that destroys
+ * evidence: the fact is the only pointer to that unlanded work. So this arm
+ * reports and stops, and a human resolves it.
+ */
+export type DerivedSubmitAuthorErrorSuspect = Readonly<{
+  branch: string
+  sha: string
+  /** The first-parent merge commit that carried the CHANGE, when the walked
+   * window names one — the commit an author compares against to decide
+   * whether their work is really in it. */
+  mergeCommit?: string
+  /** What the author does about it, in one sentence, naming both exits. */
+  remedy: string
+}>
+
+/** The two answers {@link derivedSubmitRetirements} returns, kept apart on
+ * purpose: acting on the wrong one deletes live work. */
+export type DerivedSubmitSweep = Readonly<{
+  /** Safe to physically retire — `via: "ancestry"` only. */
+  retirements: readonly DerivedSubmitRetirement[]
+  /** Report-only; NEVER swept automatically. */
+  authorErrorSuspects: readonly DerivedSubmitAuthorErrorSuspect[]
+}>
+
+/**
+ * Derived-lane submit refs safe to PHYSICALLY retire, and — kept separate —
+ * the ones that merely LOOK it (@yrd/core/22991 derived-lane submit-ref
+ * retirement).
+ *
+ * Takes the SCAN, not `landedSubmitBranches(scan)`, and that is the whole
+ * point. That set folds three different proofs into one bare "landed", which
+ * is right for its original consumer — admission exclusion, where
+ * over-excluding is safe because the work merely waits — and WRONG here,
+ * because this decision DELETES. The three separate:
+ *
+ * - `via: "ancestry"` — the fact's OWN commit is on the base. Genuinely
+ *   spent, and the only arm this function will retire.
+ * - `via: "change-id"` — the CHANGE landed under a different commit. Benign
+ *   for an abandoned revision, an author error for a fact carrying new work
+ *   ({@link LandedSubmit.via}); the ref is then the only pointer to that
+ *   work, so sweeping it destroys the evidence. Reported as
+ *   {@link DerivedSubmitAuthorErrorSuspect}, never retired.
+ * - degenerate-unresolved — barred from admission by
+ *   {@link landedSubmitBranches}, but NOT proven landed: containment held for
+ *   free against the walked tip. Absent from both arms here. Its surface is
+ *   the compose's own warn row, which words retirement as the OPERATOR's call
+ *   ("retire the fact … if it is stale"), and a mechanical sweep must not
+ *   preempt that judgement.
  *
  * RECORD-lane facts are excluded by the identical `arbitrateDerivedChange`
  * lane test `derivedLaneBranches` applies: that population already retires
@@ -555,26 +603,48 @@ export type DerivedSubmitRetirement = Readonly<{
  * is responsible for re-validating the fact has not moved immediately
  * beforehand; this function only names which refs are safe to try.
  */
-export function derivedSubmitRetirements(
-  bays: DeepReadonly<BaysState>,
-  landedBranches: ReadonlySet<string>,
-): readonly DerivedSubmitRetirement[] {
-  return Object.entries(bays.submits)
-    .filter(([branch]) => landedBranches.has(branch))
-    .filter(([branch]) => {
-      const records = recordChanges(bays).filter((pr) => pr.branch === branch)
-      return arbitrateDerivedChange(records as Change[], bays.submits[branch]).lane === "derived"
-    })
-    .map(
-      ([branch, submit]): DerivedSubmitRetirement => ({
-        branch,
+export function derivedSubmitRetirements(bays: DeepReadonly<BaysState>, scan: LandedSubmitScan): DerivedSubmitSweep {
+  const derivedLane = (branch: string): boolean => {
+    const submit = bays.submits[branch]
+    if (submit === undefined) return false
+    const records = recordChanges(bays).filter((pr) => pr.branch === branch)
+    return arbitrateDerivedChange(records as Change[], submit).lane === "derived"
+  }
+  const byBranch = (left: { branch: string }, right: { branch: string }): number =>
+    left.branch.localeCompare(right.branch)
+  const lane = scan.landed.filter((row) => derivedLane(row.branch))
+
+  const retirements = lane
+    .filter((row) => row.via === "ancestry")
+    .map((row): DerivedSubmitRetirement => {
+      const submit = bays.submits[row.branch]
+      if (submit === undefined) throw new Error(`yrd: landed row '${row.branch}' has no standing submit fact`)
+      return {
+        branch: row.branch,
         sha: submit.sha,
         base: submit.base,
-        ref: `refs/yrd/submit/${branch}`,
-        command: submitRefRetirementCommand(branch),
+        ref: `refs/yrd/submit/${row.branch}`,
+        command: submitRefRetirementCommand(row.branch),
+      }
+    })
+    .toSorted(byBranch)
+
+  const authorErrorSuspects = lane
+    .filter((row) => row.via === "change-id")
+    .map(
+      (row): DerivedSubmitAuthorErrorSuspect => ({
+        branch: row.branch,
+        sha: row.sha,
+        ...(row.mergeCommit === undefined ? {} : { mergeCommit: row.mergeCommit }),
+        remedy:
+          `the CHANGE landed under a different commit, so this fact's own content is unproven: if it carries ` +
+          `new work, resubmit it under a fresh Change-Id; if it is an abandoned revision, retire it explicitly ` +
+          `(${submitRefRetirementCommand(row.branch)})`,
       }),
     )
-    .toSorted((left, right) => left.branch.localeCompare(right.branch))
+    .toSorted(byBranch)
+
+  return { retirements, authorErrorSuspects }
 }
 
 /** One standing fact whose content the repository ALREADY carries: its sha is

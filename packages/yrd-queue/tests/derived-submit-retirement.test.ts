@@ -10,16 +10,19 @@
  *
  * @level l1
  * @consumer @yrd/queue `derivedSubmitRetirements` — the derived-lane
- *   counterpart of `submitFactRetirement` (queue.ts), reusing the exact
- *   `landedBranches` proof `derivedLaneBranches` already trusts to exclude a
- *   fact from admission.
+ *   counterpart of `submitFactRetirement` (queue.ts). It reads the landing
+ *   SCAN rather than `landedSubmitBranches(scan)`: that set folds ancestry,
+ *   change-id and degenerate proofs into one bare "landed", which is correct
+ *   for admission exclusion (over-excluding only makes work wait) and wrong
+ *   for a decision that DELETES.
  *
  * The mandatory negative control runs at BOTH layers this file tests: the
- * pure decision (an explicit `landedBranches` set) and the real proof
- * pipeline (`landedSubmits` over an actual git repository). Deleting a LIVE
+ * pure decision (a hand-built scan) and the real proof pipeline
+ * (`landedSubmits` over an actual git repository). Deleting a LIVE
  * derived-lane approval is the one outcome worse than never sweeping at all,
  * so every "landed" case here is paired with an "unlanded" sibling built from
- * the same fixture.
+ * the same fixture — and each non-ancestry proof kind has its own control
+ * proving it reaches neither arm.
  */
 import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -33,6 +36,8 @@ import {
   landedSubmitBranches,
   landedSubmits,
   submitRefRetirementCommand,
+  type LandedSubmitScan,
+  type UnresolvedSubmit,
 } from "../src/derived-admission.ts"
 import { buildMergedTruthIndex, type MergedTruthIndex } from "../src/merged-truth.ts"
 import { fixtureRefGit } from "./support/remerge-fixtures.ts"
@@ -72,11 +77,32 @@ function bays(facts: readonly FactSpec[], records: readonly RecordSpec[] = []): 
   } as unknown as DeepReadonly<BaysState>
 }
 
-describe("derivedSubmitRetirements — pure decision over a supplied landedBranches set", () => {
+type LandedSpec = Readonly<{ branch: string; sha: string; via?: "ancestry" | "change-id"; mergeCommit?: string }>
+
+/** A `LandedSubmitScan` naming exactly the proof kinds one case exercises.
+ * The sweep reads the SCAN, not `landedSubmitBranches(scan)`: that set folds
+ * ancestry, change-id and degenerate together, which is safe for admission
+ * exclusion and unsafe for a decision that DELETES. `via` defaults to
+ * `ancestry` so the cases about lane arbitration stay about lane
+ * arbitration. */
+function scan(landed: readonly LandedSpec[], unresolved: readonly UnresolvedSubmit[] = []): LandedSubmitScan {
+  return {
+    landed: landed.map((row) => ({
+      branch: row.branch,
+      sha: row.sha,
+      via: row.via ?? "ancestry",
+      ...(row.mergeCommit === undefined ? {} : { mergeCommit: row.mergeCommit }),
+    })),
+    unresolved,
+    facts: landed.length + unresolved.length,
+  }
+}
+
+describe("derivedSubmitRetirements — pure decision over a supplied landing scan", () => {
   it("names a recordless derived-lane branch proven landed, with the exact retirement directive", () => {
     const state = bays([{ branch: "issue/ghost", sha: "a".repeat(40) }])
 
-    expect(derivedSubmitRetirements(state, new Set(["issue/ghost"]))).toEqual([
+    expect(derivedSubmitRetirements(state, scan([{ branch: "issue/ghost", sha: "a".repeat(40) }])).retirements).toEqual([
       {
         branch: "issue/ghost",
         sha: "a".repeat(40),
@@ -87,13 +113,13 @@ describe("derivedSubmitRetirements — pure decision over a supplied landedBranc
     ])
   })
 
-  it("NEGATIVE CONTROL: leaves an UNLANDED derived-lane branch alone — same fixture, empty landedBranches", () => {
+  it("NEGATIVE CONTROL: leaves an UNLANDED derived-lane branch alone — same fixture, empty scan", () => {
     // The disaster this sweep must never cause: retiring a ref nothing has
     // proven landed deletes a live approval unrecoverably. 7 of the 11 refs
     // in the last census were exactly this — still pending.
     const state = bays([{ branch: "issue/ghost", sha: "a".repeat(40) }])
 
-    expect(derivedSubmitRetirements(state, new Set())).toEqual([])
+    expect(derivedSubmitRetirements(state, scan([])).retirements).toEqual([])
   })
 
   it("never retires a branch a LIVE record owns, even when the branch is reported landed", () => {
@@ -103,7 +129,7 @@ describe("derivedSubmitRetirements — pure decision over a supplied landedBranc
     const sha = "b".repeat(40)
     const state = bays([{ branch: "task/live", sha }], [{ id: "PR1", branch: "task/live", head: sha, live: true }])
 
-    expect(derivedSubmitRetirements(state, new Set(["task/live"]))).toEqual([])
+    expect(derivedSubmitRetirements(state, scan([{ branch: "task/live", sha }])).retirements).toEqual([])
   })
 
   it("retires a post-integration resubmit: TERMINAL record, fact moved past it, still arbitrates derived", () => {
@@ -117,7 +143,7 @@ describe("derivedSubmitRetirements — pure decision over a supplied landedBranc
       [{ id: "PR2", branch: "task/again", head: mergedHead }],
     )
 
-    expect(derivedSubmitRetirements(state, new Set(["task/again"]))).toEqual([
+    expect(derivedSubmitRetirements(state, scan([{ branch: "task/again", sha: resubmitted }])).retirements).toEqual([
       {
         branch: "task/again",
         sha: resubmitted,
@@ -132,11 +158,11 @@ describe("derivedSubmitRetirements — pure decision over a supplied landedBranc
     // arbitrateDerivedChange: terminal record + SAME-sha submit stays
     // `record` lane (the ref names exactly the head the record already
     // accounts for); this sweep must not act on it even if a caller's
-    // landedBranches set names the branch.
+    // scan names the branch as landed.
     const head = "e".repeat(40)
     const state = bays([{ branch: "task/settled", sha: head }], [{ id: "PR3", branch: "task/settled", head }])
 
-    expect(derivedSubmitRetirements(state, new Set(["task/settled"]))).toEqual([])
+    expect(derivedSubmitRetirements(state, scan([{ branch: "task/settled", sha: head }])).retirements).toEqual([])
   })
 
   it("sorts multiple retirements by branch and matches submitRefRetirementCommand's own string exactly", () => {
@@ -148,7 +174,10 @@ describe("derivedSubmitRetirements — pure decision over a supplied landedBranc
       { branch: "issue/alpha", sha: "2".repeat(40) },
     ])
 
-    const result = derivedSubmitRetirements(state, new Set(["issue/zebra", "issue/alpha"]))
+    const result = derivedSubmitRetirements(state, scan([
+      { branch: "issue/zebra", sha: "1".repeat(40) },
+      { branch: "issue/alpha", sha: "2".repeat(40) },
+    ])).retirements
     expect(result.map((row) => row.branch)).toEqual(["issue/alpha", "issue/zebra"])
     for (const row of result) {
       expect(row.command).toBe(submitRefRetirementCommand(row.branch))
@@ -156,7 +185,70 @@ describe("derivedSubmitRetirements — pure decision over a supplied landedBranc
   })
 
   it("answers empty over an empty bays.submits, never throws", () => {
-    expect(derivedSubmitRetirements(bays([]), new Set(["anything"]))).toEqual([])
+    const swept = derivedSubmitRetirements(bays([]), scan([]))
+    expect(swept.retirements).toEqual([])
+    expect(swept.authorErrorSuspects).toEqual([])
+  })
+
+  it("NEGATIVE CONTROL: a `via: change-id` fact is NEVER retired — it is reported as an author-error suspect", () => {
+    // The proof kinds are not interchangeable. `change-id` says the CHANGE
+    // landed under a DIFFERENT commit; this fact's own content is unproven,
+    // and when it carries new work the ref is the only pointer to it. The
+    // folded `landedSubmitBranches` set cannot express this — it is exactly
+    // the fold this function stopped consuming.
+    const sha = "f".repeat(40)
+    const merge = "9".repeat(40)
+    const state = bays([{ branch: "issue/renamed", sha }])
+
+    const landing = scan([{ branch: "issue/renamed", sha, via: "change-id", mergeCommit: merge }])
+
+    // Teeth: the fold this function stopped consuming DOES name this branch,
+    // so the previous set-based signature would have swept it. That is the
+    // whole delta, and without this line the assertion below could pass for
+    // the trivial reason that nothing reached the sweep at all.
+    expect(landedSubmitBranches(landing), "the folded set cannot tell the proofs apart").toEqual(
+      new Set(["issue/renamed"]),
+    )
+
+    const swept = derivedSubmitRetirements(state, landing)
+
+    expect(swept.retirements, "a change-id proof must never authorize a deletion").toEqual([])
+    expect(swept.authorErrorSuspects).toEqual([
+      {
+        branch: "issue/renamed",
+        sha,
+        mergeCommit: merge,
+        remedy:
+          "the CHANGE landed under a different commit, so this fact's own content is unproven: if it carries " +
+          "new work, resubmit it under a fresh Change-Id; if it is an abandoned revision, retire it explicitly " +
+          "(git push bay :refs/yrd/submit/issue/renamed)",
+      },
+    ])
+  })
+
+  it("NEGATIVE CONTROL: a DEGENERATE unresolved fact appears in NEITHER arm", () => {
+    // `landedSubmitBranches` folds degenerate rows in, because barring
+    // admission on one is safe. Deleting on one is not: containment held for
+    // free against the walked tip, so nothing was proven. Its surface is the
+    // compose's own warn row, which words retirement as the OPERATOR's call —
+    // a mechanical sweep must not preempt that.
+    const sha = "7".repeat(40)
+    const state = bays([{ branch: "issue/degenerate", sha }])
+    const degenerate: UnresolvedSubmit = {
+      branch: "issue/degenerate",
+      sha,
+      reason: "degenerate",
+      detail: "the fact stands at the walked tip itself",
+    }
+
+    // The fold this function no longer trusts DOES name it — that is the point.
+    expect(landedSubmitBranches(scan([], [degenerate])), "the folded set bars it from admission").toEqual(
+      new Set(["issue/degenerate"]),
+    )
+
+    const swept = derivedSubmitRetirements(state, scan([], [degenerate]))
+    expect(swept.retirements, "a degenerate row proves nothing and must not be swept").toEqual([])
+    expect(swept.authorErrorSuspects, "nor is it an author error — it is simply unproven").toEqual([])
   })
 })
 
@@ -209,13 +301,13 @@ describe("derivedSubmitRetirements — over a REAL landing scan (proof pipeline,
     const authoredTip = await queueMerge(repo, "issue/real-landing", "landing.txt", "PR1")
     const state = bays([{ branch: "issue/real-landing", sha: authoredTip }])
 
-    const scan = await landedSubmits(git, async () => await indexOf(repo), state)
-    const landed = landedSubmitBranches(scan)
+    const scanResult = await landedSubmits(git, async () => await indexOf(repo), state)
+    const landed = landedSubmitBranches(scanResult)
     expect(landed, "the proof pipeline this function relies on must see the merge").toEqual(
       new Set(["issue/real-landing"]),
     )
 
-    expect(derivedSubmitRetirements(state, landed)).toEqual([
+    expect(derivedSubmitRetirements(state, scanResult).retirements).toEqual([
       {
         branch: "issue/real-landing",
         sha: authoredTip,
@@ -231,11 +323,11 @@ describe("derivedSubmitRetirements — over a REAL landing scan (proof pipeline,
     const authoredTip = await authorOnly(repo, "issue/still-pending", "pending.txt")
     const state = bays([{ branch: "issue/still-pending", sha: authoredTip }])
 
-    const scan = await landedSubmits(git, async () => await indexOf(repo), state)
-    const landed = landedSubmitBranches(scan)
+    const scanResult = await landedSubmits(git, async () => await indexOf(repo), state)
+    const landed = landedSubmitBranches(scanResult)
     expect(landed, "an unmerged branch must not read as landed").toEqual(new Set())
 
-    expect(derivedSubmitRetirements(state, landed)).toEqual([])
+    expect(derivedSubmitRetirements(state, scanResult).retirements).toEqual([])
   })
 
   it("NEGATIVE CONTROL (real git, mixed population): the pending sibling survives beside the landed one", async () => {
@@ -250,9 +342,9 @@ describe("derivedSubmitRetirements — over a REAL landing scan (proof pipeline,
       { branch: "issue/pending", sha: pendingTip },
     ])
 
-    const scan = await landedSubmits(git, async () => await indexOf(repo), state)
-    const landed = landedSubmitBranches(scan)
-    const result = derivedSubmitRetirements(state, landed)
+    const scanResult = await landedSubmits(git, async () => await indexOf(repo), state)
+    const landed = landedSubmitBranches(scanResult)
+    const result = derivedSubmitRetirements(state, scanResult).retirements
 
     expect(result.map((row) => row.branch)).toEqual(["issue/done"])
   })
