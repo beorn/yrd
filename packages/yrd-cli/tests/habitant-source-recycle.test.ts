@@ -330,9 +330,21 @@ describe("habitant source recycle — the quiet queue, where a runner actually g
         props: expect.objectContaining({ action: "resident-source-stale-restart", headSha: source.headSha }),
       }),
     )
-    // The point of the test: it got there on IDLE cycles. Only the first
-    // cycle runs the queue, so anything beyond that is the quiet path doing it.
-    expect(h.runCalls()).toBe(1)
+    // The point of the test: it got there on IDLE cycles — the state factory
+    // returns ONE stable snapshot forever, so no external delta ever fired an
+    // edge, and every cycle past the first is the quiet path.
+    //
+    // `toBe(1)` used to stand here, and it described the edge-only scheduler:
+    // only the `starting` cycle ran the queue. Since the D1b LEVEL trigger a
+    // supervised habitant runs the queue once per MAINTENANCE cycle, and this
+    // io advances 61s per cycle, so the count now tracks the cadence. It only
+    // read as 1 at all because a state slice the heartbeat walks was missing
+    // and the loop died in its first cycle (see completeState in
+    // support/habitant-harness.ts) — the assertion was measuring a crash.
+    // What must still hold is the bound: the queue ran on the maintenance
+    // cadence and never more often than the loop cycled.
+    expect(h.runCalls()).toBeGreaterThanOrEqual(1)
+    expect(h.runCalls()).toBeLessThanOrEqual(cycles)
     expect(cycles).toBeLessThanOrEqual(HABITANT_SOURCE_STALE_OBSERVATIONS + 3)
   })
 })
