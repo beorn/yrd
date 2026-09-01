@@ -913,6 +913,38 @@ describe("withBays", () => {
       current: { n: 2, head: HEAD_2, recut: { fromRevision: 1 } },
     })
     expect(currentChangeRev(app.bays.pr("PR8")!)).not.toHaveProperty("submitter")
+    const legacyIdentityCure = "git push --no-recurse-submodules bay <new-branch>:refs/for/main/<issue>"
+    await expect(
+      app.bays.intake({
+        branch: "topic/legacy-recut-with-provenance",
+        headSha: "9".repeat(40),
+        base: "main",
+        baseSha: BASE,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "legacy-change-id-missing",
+        message: expect.stringContaining(legacyIdentityCure),
+      },
+    })
+    await expect(
+      app.bays.recut({
+        pr: "PR7",
+        fromRevision: 2,
+        headSha: "9".repeat(40),
+        baseSha: BASE,
+        treeSha: "a".repeat(40),
+        patchId: "b".repeat(40),
+        reviewCarried: false,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "legacy-change-id-missing",
+        message: expect.stringContaining(legacyIdentityCure),
+      },
+    })
     await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.transitionalReject, undefined)).rejects.toThrow()

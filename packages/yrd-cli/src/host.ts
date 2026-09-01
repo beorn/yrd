@@ -3086,7 +3086,7 @@ function reportFrozenRecord(log: ConditionalLogger, app: YrdCliApp, result: Read
       `owns branch '${branch}'. The push was accepted — the submit fact stands at ${result.headSha} and the queue ` +
       `derives a NEW change from it — so nothing is lost, but revision ${currentChangeRev(record).n + 1} of ` +
       `'${change}' is not what this produced. To submit this content under a name that says so, push a fresh ref: ` +
-      `git push bay HEAD:${freshSubmitRef(base, change)}`,
+      `git push --no-recurse-submodules bay HEAD:${freshSubmitRef(base, change)}`,
     {
       action: "receiver-frozen-record-no-revision",
       branch,

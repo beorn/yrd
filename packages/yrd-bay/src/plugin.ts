@@ -1904,7 +1904,7 @@ function changeIdForRevision(existing: DeepReadonly<Change> | undefined, command
     "refusal",
     "legacy-change-id-missing",
     `yrd: change '${existing.id}' predates stable Change-Id identity — there is no migration verb, because identity is never invented for an existing record. Re-pushing THIS branch cannot help: identity is branch-keyed, so it resolves to this same change and refuses again. Deliver the payload under a NEW branch name, which takes the mint path and gets a stable Change-Id: ` +
-      `git push ${RECEIVER_REMOTE_NAME} <new-branch>:refs/for/${baseIdentity(existing.base)}/<issue>. ` +
+      `git push --no-recurse-submodules ${RECEIVER_REMOTE_NAME} <new-branch>:refs/for/${baseIdentity(existing.base)}/<issue>. ` +
       `No work is lost (the payload is on the branch) and no withdraw is needed`,
   )
 }
@@ -1991,7 +1991,7 @@ function intakePR(
       "record-mint-retired",
       `yrd: record creation is retired (S6 door): branch '${branch}' has a live submit ref and no live change ` +
         `record — it runs as a derived member from that ref; re-push the branch and its submit ref ` +
-        `('git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
+        `('git push --no-recurse-submodules ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
     )
   }
   const id = existing?.id ?? mintChangeId(mint, current.prs)
@@ -2120,7 +2120,7 @@ function submitWork(
       "record-mint-retired",
       `yrd: record creation is retired (S6 door): branch '${args.branch}' has a live submit ref and no change ` +
         `record to reopen — it runs as a derived member from that ref; re-push the branch and its submit ref ` +
-        `('git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
+        `('git push --no-recurse-submodules ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
     )
   }
   const id = resubmitted?.id ?? mintChangeId(mint, current.prs)
@@ -2539,7 +2539,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
       "refusal",
       "legacy-change-id-missing",
       `yrd: change '${pr.id}' predates stable Change-Id identity — there is no migration verb, because identity is never invented for an existing record. Re-pushing THIS branch cannot help: identity is branch-keyed, so it resolves to this same change and refuses again. Deliver the payload under a NEW branch name, which takes the mint path and gets a stable Change-Id: ` +
-        `git push ${RECEIVER_REMOTE_NAME} <new-branch>:refs/for/${baseIdentity(pr.base)}/<issue>. ` +
+        `git push --no-recurse-submodules ${RECEIVER_REMOTE_NAME} <new-branch>:refs/for/${baseIdentity(pr.base)}/<issue>. ` +
         `No work is lost (the payload is on the branch) and no withdraw is needed`,
     )
   }

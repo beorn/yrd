@@ -106,7 +106,7 @@ branch deleted .............. abandoned; there is no withdrawn state
 - **submit** — handing the change to the queue, once your own gate is green.
   Submitting writes one ref, `refs/yrd/submit/<branch>`, valued at the commit
   you approve to merge; **pushing that ref is the API**. One push does both:
-  `git push <yrd remote> HEAD:refs/for/main/<issue>` pushes the branch and
+  `git push --no-recurse-submodules <yrd remote> HEAD:refs/for/main/<issue>` pushes the branch and
   submits that exact tip in the same act.
 - **draft / submitted / merged** — **derived from git, never stored.** *Draft*
   is a non-empty diff with no live submit. *Submitted* is a live submit — its
@@ -192,7 +192,7 @@ model.
 ### Submitting a change
 
 ```console
-$ git push <yrd remote> HEAD:refs/for/main/23045   # push and submit, one act
+$ git push --no-recurse-submodules <yrd remote> HEAD:refs/for/main/23045   # push and submit, one act
 ```
 
 `<yrd remote>` is whatever your clone names the managed receiver. That single

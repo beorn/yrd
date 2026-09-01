@@ -3132,7 +3132,9 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(pushCode, `the push must still succeed — this is a notice, not a refusal:\n${pushErr}`).toBe(0)
     expect(pushErr, `the notice must reach the pusher:\n${pushErr}`).toContain("did not append a revision")
     expect(pushErr, "the change the author thought they were revising").toContain(change)
-    expect(pushErr, "and the fresh ref that WOULD carry it").toContain(`refs/for/main/${change}-r2`)
+    expect(pushErr, "and the fresh ref that WOULD carry it").toContain(
+      `git push --no-recurse-submodules bay HEAD:refs/for/main/${change}-r2`,
+    )
 
     // Nothing was lost: the submit fact stands and the queue derives from it.
     await using reopened = await createYrdHost({ cwd: repo, defaultSubmitter: "@dev/3" })

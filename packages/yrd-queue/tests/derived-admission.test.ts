@@ -1199,7 +1199,7 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
       .then(() => undefined)
       .catch((error: unknown) => failureFact(error))
     expect(refusal).toMatchObject({ kind: "refusal", code: "record-mint-retired" })
-    expect(refusal?.message).toMatch(/refs\/for\/main\/<issue>/)
+    expect(refusal?.message).toContain("git push --no-recurse-submodules bay HEAD:refs/for/main/<issue>")
     expect(app.state().bays.prs).toEqual({})
   })
 
@@ -1214,7 +1214,7 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
       .then(() => undefined)
       .catch((error: unknown) => failureFact(error))
     expect(refusal).toMatchObject({ kind: "refusal", code: "record-mint-retired" })
-    expect(refusal?.message).toMatch(/refs\/for\/main\/<issue>/)
+    expect(refusal?.message).toContain("git push --no-recurse-submodules bay HEAD:refs/for/main/<issue>")
     expect(app.state().bays.prs).toEqual({})
   })
 
@@ -1252,14 +1252,23 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
     })
     const cures: string[] = []
     const originCures: string[] = []
+    const recursiveCures: string[] = []
     for (const root of roots) {
       for (const entry of readdirSync(root, { recursive: true }) as string[]) {
         if (!entry.endsWith(".ts") && !entry.endsWith(".tsx")) continue
         const path = join(root, entry)
         for (const line of readFileSync(path, "utf8").split(/\r?\n/u)) {
           if (!/git\s+push\s+\S+[^\n]*refs\/for\//u.test(line)) continue
-          cures.push(`${path}:${line.trim()}`)
+          const trimmed = line.trim()
+          cures.push(`${path}:${trimmed}`)
           if (/git\s+push\s+origin\b/u.test(line)) originCures.push(`${path}:${line.trim()}`)
+          if (
+            !trimmed.startsWith("*") &&
+            !trimmed.startsWith("//") &&
+            !/git\s+push\s+--no-recurse-submodules\s+\S+/u.test(line)
+          ) {
+            recursiveCures.push(`${path}:${trimmed}`)
+          }
         }
       }
     }
@@ -1267,6 +1276,7 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
     // walk would pass `originCures` for the wrong reason.
     expect(cures.length).toBeGreaterThanOrEqual(3)
     expect(originCures).toEqual([])
+    expect(recursiveCures).toEqual([])
   })
 
   it("the receiver's lane rule: intake dispatches only for a branch a LIVE record owns", async () => {

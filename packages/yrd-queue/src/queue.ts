@@ -8307,7 +8307,9 @@ function auditQueues(
         // persists for is `unrecordedSubmit`'s to report from the observed
         // wiring — this walk must not restate the enumeration that fix removed.
         // Re-pushing branch + submit ref renews the authority either way.
-        resolution: [`git push ${RECEIVER_REMOTE_NAME} ${submit.branch}:refs/for/${submit.base}/<issue>`],
+        resolution: [
+          `git push --no-recurse-submodules ${RECEIVER_REMOTE_NAME} ${submit.branch}:refs/for/${submit.base}/<issue>`,
+        ],
       })
     }
   }
@@ -8532,7 +8534,7 @@ function retiredSubmitAuditFindings(state: DeepReadonly<RuntimeState>): QueueAud
               `resolve ${row.paths.join(", ")} — for a gitlink, set it to a commit that is a DESCENDANT of the one ` +
                 `'${row.base}' records, never a sibling lineage`,
             ]),
-        `git push bay HEAD:refs/for/${row.base}/<issue>`,
+        `git push --no-recurse-submodules bay HEAD:refs/for/${row.base}/<issue>`,
       ],
     })
   }
@@ -10952,7 +10954,7 @@ function ChangeEligibility(
         message:
           `change '${pr.id}' required check failed${run}; checks re-run on new content only — amend or rebase ` +
           `the branch and push it again ` +
-          `(git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${baseIdentity(pr.base)}/<issue>)`,
+          `(git push --no-recurse-submodules ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${baseIdentity(pr.base)}/<issue>)`,
       })
     }
     if (required && !reviewed.approved) {

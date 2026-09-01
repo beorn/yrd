@@ -427,7 +427,7 @@ describe("native needs-author lifecycle", () => {
     const message = app.queue.eligibility(pr).reason?.message ?? ""
     expect(message).not.toContain("request fresh checks")
     expect(message).toContain("new content")
-    expect(message).toContain("refs/for/")
+    expect(message).toContain("git push --no-recurse-submodules bay HEAD:refs/for/main/<issue>")
 
     // The rendered bytes a reader sees, not the source literal (the
     // 2026-08-27 ADR's obligation).

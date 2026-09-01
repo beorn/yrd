@@ -355,5 +355,6 @@ describe("a standing submit fact derives at most ONE live change", () => {
     expect(resolution).toContain("rebase origin/main")
     expect(resolution).toContain(GITLINK_PATH)
     expect(resolution).toContain("DESCENDANT")
+    expect(resolution).toContain("git push --no-recurse-submodules bay HEAD:refs/for/main/<issue>")
   })
 })

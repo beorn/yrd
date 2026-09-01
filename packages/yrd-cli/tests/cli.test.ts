@@ -7569,7 +7569,9 @@ describe("runYrd", () => {
       expect(await runYrd(app, yrd("queue", "audit"), audit.io), audit.stderr()).toBe(1)
       expect(audit.stdout()).toContain("err=unrecorded-submit")
       expect(audit.stdout()).toContain("issue/ref-only")
-      expect(audit.stdout()).toContain("resolve: git push bay issue/ref-only:refs/for/main/<issue>")
+      expect(audit.stdout()).toContain(
+        "resolve: git push --no-recurse-submodules bay issue/ref-only:refs/for/main/<issue>",
+      )
       const json = outputIO({ now: () => Date.parse("2026-07-09T13:00:00.000Z") })
       expect(await runYrd(app, yrd("queue", "audit", "--json"), json.io)).toBe(1)
       const findings = (JSON.parse(json.stdout()) as { findings: ReadonlyArray<Record<string, unknown>> }).findings
