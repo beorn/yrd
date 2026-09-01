@@ -71,6 +71,7 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
   const drainController = new AbortController()
   const warnings: HabitantWarnCall[] = []
   const errors: HabitantWarnCall[] = []
+  const debugs: HabitantWarnCall[] = []
   const stderr: string[] = []
   const stdout: string[] = []
   const stateFactory = options.state ?? emptyState
@@ -110,6 +111,14 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
        * stand-down conditions turn on, so the harness has to carry it.
        */
       error: (message: string, props: Record<string, unknown>) => errors.push({ message, props }),
+      /**
+       * The DEBUG stream, a hole of exactly the shape the ERROR one above was.
+       * The per-cycle memory observation is a `log.debug?.()` call, so without
+       * this the row the resident emits on every tick would be a no-op in
+       * every harness test — a runner measuring itself and one measuring
+       * nothing would again read identically.
+       */
+      debug: (message: string, props: Record<string, unknown>) => debugs.push({ message, props }),
     },
     ...(options.bays === undefined ? {} : { bays: options.bays }),
     queue: {
@@ -144,6 +153,7 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
     drain: () => drainController.abort(),
     warnings,
     errors,
+    debugs,
     stderr,
     stdout,
     refreshCalls: () => refreshCalls,

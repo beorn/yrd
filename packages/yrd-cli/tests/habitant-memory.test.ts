@@ -22,6 +22,7 @@ import {
   HABITANT_RSS_CAP_DEFAULT_MB,
   HABITANT_RSS_CAP_ENV,
   HABITANT_RSS_CAP_OBSERVATIONS,
+  habitantMemoryObservation,
   type HabitantMemoryStall,
 } from "../src/habitant-memory.ts"
 import { HABITANT_EXIT } from "../src/habitant-exit.ts"
@@ -223,5 +224,97 @@ describe("habitant RSS cap — the follow loop stands down over a forced cap", (
 
     await expect(exit).resolves.not.toBe(HABITANT_EXIT["memory-cap"])
     expect(h.warnings.map((warning) => warning.props.action)).not.toContain("habitant-memory-cap-restart")
+  })
+
+  it("emits one memory observation row per cycle, with no cap declared", async () => {
+    delete process.env[HABITANT_RSS_CAP_ENV]
+    const { h, exit } = drive(700 * MB, { habitant: true })
+    await exit
+
+    const rows = h.debugs.filter((entry) => entry.props.action === "habitant-memory-observation")
+    // Growth is a floor that rises over hours, so the series cannot be limited
+    // to the cycles that breach a cap — least of all when no cap is declared,
+    // which is the state a host measuring its working set is deliberately in.
+    expect(rows.length).toBeGreaterThan(1)
+    expect(rows[0]?.props.rssBytes).toBe(700 * MB)
+    expect(rows[0]?.props).not.toHaveProperty("capBytes")
+    expect(rows[0]?.props).toHaveProperty("heapUsedBytes")
+    expect(rows[0]?.props).toHaveProperty("unattributedBytes")
+  })
+
+  it("carries the declared cap on every row, not only the breaching ones", async () => {
+    process.env[HABITANT_RSS_CAP_ENV] = "512"
+    const { h, exit } = drive(200 * MB, { habitant: true })
+    await exit
+
+    const rows = h.debugs.filter((entry) => entry.props.action === "habitant-memory-observation")
+    expect(rows.length).toBeGreaterThan(1)
+    expect(rows[0]?.props.capBytes).toBe(512 * MB)
+    // The negative control for the row: an under-cap runner still measures.
+    expect(h.warnings.map((warning) => warning.props.action)).not.toContain("habitant-memory-cap-restart")
+  })
+})
+
+/**
+ * The observation row. The cap answers "is this process too big"; this answers
+ * "which pool is the growth in", which resident size alone never can — and
+ * which is the question a resident climbing 1 GB → 11.5 GB across admissions
+ * actually poses.
+ */
+describe("habitant memory observation row", () => {
+  const sample = {
+    rssBytes: 900 * MB,
+    heapUsedBytes: 300 * MB,
+    heapTotalBytes: 400 * MB,
+    externalBytes: 100 * MB,
+    arrayBuffersBytes: 20 * MB,
+  }
+
+  it("attributes resident bytes to the heap, to external buffers, and to neither", () => {
+    const row = habitantMemoryObservation(sample, CAP)
+
+    expect(row).toEqual({
+      rssBytes: 900 * MB,
+      heapUsedBytes: 300 * MB,
+      heapTotalBytes: 400 * MB,
+      externalBytes: 100 * MB,
+      arrayBuffersBytes: 20 * MB,
+      // 900 - 300 - 100: the share no reported pool claims, which is where a
+      // SQLite page cache or allocator fragmentation would show up alone.
+      // Subtracts heapUsed, never heapTotal -- under Bun the reserve reads
+      // SMALLER than the live bytes in it, so subtracting it would leave the
+      // whole JS heap sitting in this field.
+      unattributedBytes: 500 * MB,
+      capBytes: CAP,
+    })
+  })
+
+  it("leaves an unmeasurable field absent rather than zero", () => {
+    const row = habitantMemoryObservation({ ...sample, externalBytes: undefined }, undefined)
+
+    expect(row).not.toHaveProperty("externalBytes")
+    expect(row).not.toHaveProperty("capBytes")
+    // The derived field goes too: computing it from a missing input would
+    // publish a confident number built on an absence.
+    expect(row).not.toHaveProperty("unattributedBytes")
+    expect(row.rssBytes).toBe(900 * MB)
+  })
+
+  it("still attributes the split when heapTotal is missing — it is not an input", () => {
+    // The regression this pins: an earlier formula subtracted heapTotal, which
+    // Bun reports SMALLER than heapUsed. Reaching for it again would both break
+    // here and silently reclassify the whole JS heap as native memory.
+    const row = habitantMemoryObservation({ ...sample, heapTotalBytes: undefined }, undefined)
+
+    expect(row).not.toHaveProperty("heapTotalBytes")
+    expect(row.unattributedBytes).toBe(900 * MB - 300 * MB - 100 * MB)
+  })
+
+  it("reports a negative unattributed share instead of clamping it away", () => {
+    const row = habitantMemoryObservation({ ...sample, rssBytes: 100 * MB }, undefined)
+
+    // Overlapping pools are a fact about the runtime's accounting. Clamping at
+    // zero would make a double-counting runtime read exactly like a tidy one.
+    expect(row.unattributedBytes).toBe(100 * MB - 300 * MB - 100 * MB)
   })
 })

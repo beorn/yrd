@@ -126,3 +126,87 @@ export function decideHabitantMemory(
     observations: stall.observations,
   })
 }
+
+/**
+ * One cycle's full memory picture, as the runtime reports it.
+ *
+ * `foldMemoryCap` needs only `rssBytes`, because a cap is a question about
+ * resident size alone. This is the wider read the OBSERVATION row carries, and
+ * it exists for a different question: not "is this process too big" but "which
+ * pool is the growth in", which resident size by itself can never answer.
+ *
+ * Every field is independently optional. A runtime that reports resident size
+ * but no heap detail must still produce a row — a partial measurement is
+ * evidence, and dropping the row because one field is missing would hide the
+ * very ticks most worth seeing.
+ */
+export type HabitantMemorySample = Readonly<{
+  rssBytes: number | undefined
+  heapUsedBytes: number | undefined
+  heapTotalBytes: number | undefined
+  externalBytes: number | undefined
+  arrayBuffersBytes: number | undefined
+}>
+
+/**
+ * The observation row's structured fields, with unmeasurable ones ABSENT
+ * rather than zero — the same rule `HabitantMemoryObservation` states for
+ * `rssBytes`, for the same reason: "I could not tell" and "it is zero" are
+ * opposite evidence, and a reader aggregating these rows must be able to tell
+ * them apart without a second source.
+ */
+export type HabitantMemoryObservationRow = Readonly<{
+  rssBytes?: number
+  heapUsedBytes?: number
+  heapTotalBytes?: number
+  externalBytes?: number
+  arrayBuffersBytes?: number
+  /**
+   * Resident bytes the runtime attributes to NEITHER live JS objects nor its
+   * external buffers: `rss - heapUsed - external`.
+   *
+   * This is the field the row exists for. Retained JS objects grow `heapUsed`;
+   * native buffers grow `external`; allocator fragmentation and native
+   * mappings the runtime does not account for (a SQLite page cache among them)
+   * grow only resident size, and show up here and nowhere else. Which of those
+   * three is climbing decides where a fix belongs, and no single reported
+   * number distinguishes them.
+   *
+   * `heapUsed` rather than the `heapTotal` this first reached for: under Bun
+   * `heapTotal` does not track the heap at all. Measured 2026-09-01 on Bun
+   * 1.3.14, a process holding 40 large arrays reported `heapUsed` 32.2 MB
+   * against `heapTotal` 0.6 MB — the reserve reading SMALLER than the live
+   * bytes inside it. Subtracting it would have left the entire JS heap sitting
+   * in this field and pointed every investigation at native memory.
+   *
+   * Present only when all three inputs are measured, and deliberately NOT
+   * clamped at zero: a negative value means the runtime's own pools overlap or
+   * double-count, which is a fact about the measurement worth seeing rather
+   * than one worth rounding away. Bun does overlap them — the same session
+   * measured `external` counting bytes that resident size also carried — so
+   * this is an expected reading, not a defect to hide.
+   */
+  unattributedBytes?: number
+  capBytes?: number
+}>
+
+/** Build one observation row from a sample. Pure; the caller does the I/O. */
+export function habitantMemoryObservation(
+  sample: HabitantMemorySample,
+  capBytes: number | undefined,
+): HabitantMemoryObservationRow {
+  const { rssBytes, heapUsedBytes, heapTotalBytes, externalBytes, arrayBuffersBytes } = sample
+  const unattributed =
+    rssBytes === undefined || heapUsedBytes === undefined || externalBytes === undefined
+      ? undefined
+      : rssBytes - heapUsedBytes - externalBytes
+  return Object.freeze({
+    ...(rssBytes === undefined ? {} : { rssBytes }),
+    ...(heapUsedBytes === undefined ? {} : { heapUsedBytes }),
+    ...(heapTotalBytes === undefined ? {} : { heapTotalBytes }),
+    ...(externalBytes === undefined ? {} : { externalBytes }),
+    ...(arrayBuffersBytes === undefined ? {} : { arrayBuffersBytes }),
+    ...(unattributed === undefined ? {} : { unattributedBytes: unattributed }),
+    ...(capBytes === undefined ? {} : { capBytes }),
+  })
+}
