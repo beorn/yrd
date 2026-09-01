@@ -175,7 +175,7 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
 
     const result = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
-        event.kind === "log" && event.level === "warn" && event.props?.action === "recover-orphan-run-settle",
+        event.kind === "log" && event.level === "info" && event.props?.action === "recover-orphan-run-settle",
     )
     expect(result, "recover must emit a loud structured result for settled orphan runs").toBeDefined()
     expect(result?.props).toMatchObject({ reason: "orphaned-run", runs: ["R1"], steps: ["first"] })

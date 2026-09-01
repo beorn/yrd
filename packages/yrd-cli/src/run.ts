@@ -10967,7 +10967,7 @@ export async function refreshTrackedQueueRevisions(
     // THIS process, identical for every candidate: report it once per cycle and
     // leave the recorded revisions authoritative, instead of crashing the queue
     // runner or parking candidates one by one as if it were per-branch weather.
-    app.log.warn?.(
+    app.log.info?.(
       `Skipped tracked-branch observation for ${String(candidates.length)} candidate(s): no Git process is installed.`,
       {
         action: "queue-track-observation-unavailable",
@@ -11864,7 +11864,7 @@ export async function habitantSourceHealth(
     // checkout that moved — a custody freeze holding the source back, a
     // launcher attesting a stale identity, a shim resolving another tree — so
     // name the checkout and the remedy instead of burning the restart budget.
-    app.log.warn?.(
+    app.log.error?.(
       `Restarting did not refresh the queue runner's source: it is running git:${action.bootedSha} again while its source checkout '${sourceRoot ?? "unknown"}' is ${String(action.behind)} commits ahead at git:${action.headSha}. Not restarting again — advance the checkout the runner boots from and restart it by hand.`,
       {
         action: "resident-source-stale-checkout-behind",
@@ -12078,7 +12078,7 @@ export async function habitantRecoverySweep(
     reason: "habitant lease-expiry sweep",
   })
   if (settled.length > 0) {
-    app.log.warn?.(`Stopped abandoned queue runs: ${settled.map((run) => run.id).join(", ")}.`, {
+    app.log.info?.(`Stopped abandoned queue runs: ${settled.map((run) => run.id).join(", ")}.`, {
       action: "resident-recovery-sweep",
       reason: "runner lease expired",
       runs: settled.map((run) => run.id),

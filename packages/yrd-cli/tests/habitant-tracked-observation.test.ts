@@ -314,7 +314,7 @@ describe("habitant tracking pass — one unobservable branch never stops the oth
     expect(events).toContainEqual(
       expect.objectContaining({
         kind: "log",
-        level: "warn",
+        level: "info",
         props: expect.objectContaining({ action: "queue-track-observation-unavailable", prs: ["PR1"] }),
       }),
     )

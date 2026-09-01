@@ -1752,7 +1752,7 @@ describe("Queue", () => {
 
     const results = events.filter(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
-        event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue",
+        event.kind === "log" && event.level === "info" && event.namespace === "yrd:queue",
     )
     expect(results).toHaveLength(1)
     expect(results[0]?.message).toContain("R1")
@@ -5705,7 +5705,7 @@ describe("Queue", () => {
     expect(events).toContainEqual(
       expect.objectContaining({
         kind: "log",
-        level: "warn",
+        level: "info",
         message: "queue run emitted zero events because every considered PR was ineligible",
         props: expect.objectContaining({
           action: "queue-run-no-runnable-prs",

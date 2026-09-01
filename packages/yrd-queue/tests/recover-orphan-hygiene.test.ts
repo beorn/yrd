@@ -122,7 +122,7 @@ describe("recover orphan hygiene — a stranded requested Job is flagged and set
 
     const result = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
-        event.kind === "log" && event.level === "warn" && event.props?.action === "recover-orphan-settle",
+        event.kind === "log" && event.level === "info" && event.props?.action === "recover-orphan-settle",
     )
     expect(result, "recover must emit a loud structured result for settled orphans").toBeDefined()
     expect(result?.props).toMatchObject({ reason: "orphaned-requested-job", jobs: [jobId], runs: ["R1"] })
