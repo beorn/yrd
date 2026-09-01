@@ -25,6 +25,7 @@ const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
+const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 
 /** The wedge's wall clock: the test moves it, so `firstAt`/`lastAt`/`blockedMs`
@@ -304,12 +305,14 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
         code: "admission-refusal-needs-person",
         pr: pr.id,
         owner: "@ci",
-        message: expect.stringContaining("Owner: @ci."),
+        // The configured role wins over the recorded submitter, and the text
+        // says which of the three rules picked the recipient.
+        message: expect.stringContaining("Owner: @ci (the configured needsPerson.owner in .yrd.yml)."),
       }),
     )
   })
 
-  it("falls back to the unowned default when needsPersonOwner is configured as blank", async () => {
+  it("routes to the change's recorded submitter when needsPersonOwner is configured as blank", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createApp(
       refuseForever(() => ""),
@@ -339,13 +342,13 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       reason: "the change touches generated-only gitlinks; an exact ruling is needed",
     })
 
-    expect(app.queue.audit().findings).toContainEqual(
-      expect.objectContaining({
-        code: "admission-refusal-needs-person",
-        pr: pr.id,
-        owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
-      }),
-    )
+    // A dead letter addressed to nobody is not a delivery. With no configured
+    // role the recipient is the one identity the record already holds — the
+    // submitter — and the finding says which rule chose them.
+    const finding = app.queue.audit().findings.find((candidate) => candidate.code === "admission-refusal-needs-person")
+    expect(finding?.owner).toBe("operator")
+    expect(finding?.owner).not.toContain("unowned")
+    expect(finding?.message).toContain("Owner: operator (the change's recorded submitter")
   })
 
   it("keeps the needs-person finding honest when the revision records no submitter", async () => {
@@ -389,11 +392,12 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     const finding = app.queue.audit().findings.find((candidate) => candidate.code === "admission-refusal-needs-person")
     expect(finding, "an unattributed settlement still needs a person and must still flag").toBeDefined()
-    expect(finding?.owner, "the empty owner slot is shown explicitly, never invented from identity").toBe(
-      "unowned — no needsPerson.owner is configured in .yrd.yml",
-    )
+    // Nothing configured and nothing recorded: the last rule is the standing
+    // owner of the yrd surfaces, so the dead letter still reaches a person.
+    expect(finding?.owner, "a needs-person finding is never addressed to nobody").toBe("@cto")
+    expect(finding?.owner).not.toContain("unowned")
     expect(finding?.submitter, "no recorded identity means no field, never a plausible-looking owner").toBeUndefined()
-    expect(finding?.message).toContain("Owner: unowned — no needsPerson.owner is configured in .yrd.yml.")
+    expect(finding?.message).toContain("Owner: @cto (the yrd-surfaces owner of record")
     expect(finding?.message).not.toContain("undefined")
   })
 
@@ -498,15 +502,25 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     // `authored-gitlink` is a needs-author verdict on the CONTENT: the same
     // branch at the same head sha authors the same gitlink bump forever, so
     // cycles two and three can only measure how long we waited to say so.
-    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "authored-gitlink", count: 1 })
+    // The no-parking ruling took that reasoning one step further — a verdict
+    // no retry can change ENDS the revision's queue life on the first refusal
+    // rather than being reported and then retried forever.
+    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
+      code: "authored-gitlink",
+      count: 1,
+      settlement: expect.objectContaining({ disposition: "needs-person" }),
+    })
     expect(app.queue.audit().findings).toContainEqual(
       expect.objectContaining({
-        code: "admission-refusal-loop",
+        code: "admission-refusal-needs-person",
         pr: pr.id,
         refusal: "authored-gitlink",
-        count: 1,
         since: "2026-01-01T00:00:00.000Z",
       }),
+    )
+    // Never a retry loop: the queue stopped asking, so nothing counts cycles.
+    expect(app.queue.audit().findings).not.toContainEqual(
+      expect.objectContaining({ code: "admission-refusal-loop", pr: pr.id }),
     )
   })
 
@@ -778,7 +792,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     const journal = createMemoryJournal()
     const id = ids()
-    let refusalCode = "authored-gitlink"
+    // A RETRYABLE code to open the streak: a needs-author verdict would end the
+    // revision's queue life on refusal one (the no-parking ruling), and this
+    // test is about the counter, not the reject class.
+    let refusalCode = "recut-certificate"
     const prepare: CandidatePreparer = () => {
       throw createFailure({
         kind: "refusal",
@@ -848,7 +865,13 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createApp(
-      refuseForever(() => blocked),
+      // A RETRYABLE refusal: only a code that can clear itself accumulates a
+      // streak. A needs-author verdict ends the revision's queue life on the
+      // first refusal (the no-parking ruling), and this test is the counter.
+      refuseForever(() => blocked, {
+        code: "recut-certificate",
+        message: (pr) => `yrd: change '${pr}' has a certified base this repository cannot read`,
+      }),
       clock.read,
       createMemoryJournal(),
       ids(),
@@ -881,8 +904,8 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       code: "admission-refusal-loop",
       message: expect.stringContaining(`change '${pr.id}'`),
       pr: pr.id,
-      specimen: `pr:${pr.id}:refusal:authored-gitlink`,
-      refusal: "authored-gitlink",
+      specimen: `pr:${pr.id}:refusal:recut-certificate`,
+      refusal: "recut-certificate",
       count: 3,
       since: "2026-01-01T00:00:00.000Z",
       blockedMs: 5 * 3_600_000 + 46 * 60_000,
@@ -890,8 +913,8 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const finding = app.queue.audit().findings.find((item) => item.code === "admission-refusal-loop")
     expect(finding?.message).toBe(
       `change '${pr.id}' at the head of the required-check queue failed its entry checks 3 consecutive times over 5h46m ` +
-        `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest failure 'authored-gitlink': ` +
-        `yrd: change '${pr.id}' authors a gitlink bump`,
+        `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest failure 'recut-certificate': ` +
+        `yrd: change '${pr.id}' has a certified base this repository cannot read`,
     )
     log.end()
   })
@@ -905,14 +928,17 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
   // "still spends the full three cycles on a refusal that can clear itself"
   // above now holds. The replay half of this test is untouched: the ledger is
   // journal-derived state either way.
-  it("reports a content verdict from its first cycle and survives replay from the journal", async () => {
+  it("accumulates the refusal ledger across cycles and survives replay from the journal", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     const journal = createMemoryJournal()
     const id = ids()
     let blocked = ""
     {
       await using app = await createApp(
-        refuseForever(() => blocked),
+        refuseForever(() => blocked, {
+          code: "recut-certificate",
+          message: (pr) => `yrd: change '${pr}' has a certified base this repository cannot read`,
+        }),
         clock.read,
         journal,
         id,
@@ -920,16 +946,17 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       const pr = await submitAndRequestChecks(app, "issue/head-of-queue-wedge")
       blocked = pr.id
 
+      // The LEDGER counts every cycle; the audit stays quiet until the streak
+      // reaches the threshold, because a refusal that can clear itself must not
+      // page a human over one losable race.
       await app.queue.run({}, runtime)
-      expect(app.queue.audit().findings).toContainEqual(
-        expect.objectContaining({ code: "admission-refusal-loop", count: 1 }),
-      )
+      expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "recut-certificate", count: 1 })
+      expect(app.queue.audit().findings).toEqual([])
       clock.set("2026-01-01T00:10:00.000Z")
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
-      expect(app.queue.audit().findings).toContainEqual(
-        expect.objectContaining({ code: "admission-refusal-loop", count: 2 }),
-      )
+      expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ count: 2 })
+      expect(app.queue.audit().findings).toEqual([])
       clock.set("2026-01-01T00:20:00.000Z")
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
@@ -941,7 +968,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     // A fresh process replaying the same journal sees the same wedge: the ledger
     // is journal-derived state, not in-process bookkeeping.
     await using replayed = await createApp(
-      refuseForever(() => blocked),
+      refuseForever(() => blocked, {
+        code: "recut-certificate",
+        message: (pr) => `yrd: change '${pr}' has a certified base this repository cannot read`,
+      }),
       clock.read,
       journal,
       id,
@@ -950,7 +980,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       expect.objectContaining({
         code: "admission-refusal-loop",
         pr: "PR1",
-        refusal: "authored-gitlink",
+        refusal: "recut-certificate",
         count: 3,
         since: "2026-01-01T00:00:00.000Z",
         blockedMs: 20 * 60_000,
@@ -962,7 +992,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     let blocked = ""
     await using app = await createApp(
-      refuseForever(() => blocked),
+      refuseForever(() => blocked, {
+        code: "recut-certificate",
+        message: (pr) => `yrd: change '${pr}' has a certified base this repository cannot read`,
+      }),
       clock.read,
     )
     const pr = await submitAndRequestChecks(app, "issue/transient-wedge")
@@ -997,7 +1030,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const id = ids()
     let blocked = ""
     let preparations = 0
-    const refusing = refuseForever(() => blocked)
+    const refusing = refuseForever(() => blocked, {
+      code: "recut-certificate",
+      message: (pr) => `yrd: change '${pr}' has a certified base this repository cannot read`,
+    })
     const prepare: CandidatePreparer = (input) => {
       preparations += 1
       return refusing(input)
@@ -1040,7 +1076,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
         },
       })
       expect(app.queue.eligibility(pr.id).reason?.message).not.toContain("yrd pr recut")
-      expect(app.queue.eligibility(pr.id).reason?.message).toContain("authored-gitlink")
+      expect(app.queue.eligibility(pr.id).reason?.message).toContain("recut-certificate")
     }
 
     const beforeReplay = await Array.fromAsync(journal.read()).then((events) => events.length)
@@ -1101,7 +1137,11 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.eligibility(pr.id).reason?.code).toBe("admission-refused")
     expect(message).toContain("Settled needs-person at 2026-01-01T00:00:00.000Z")
     expect(message).toContain("the recut certificate requires human judgment")
-    expect(message).toContain("decision owner: unowned — no needsPerson.owner is configured in .yrd.yml")
+    // Unconfigured repository: the reader-facing message routes the decision
+    // the same way the audit finding does — to the recorded submitter, naming
+    // the rule — rather than declining to say who.
+    expect(message).toContain("decision owner: operator (the change's recorded submitter")
+    expect(message).not.toContain("unowned")
     expect(message).not.toContain("yrd pr recut")
   })
 
@@ -1212,15 +1252,21 @@ describe("a submitted PR with no check request and a ledgered refusal never wedg
     expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "authored-gitlink" })
 
     // Pre-fix both of these threw "queued change '<id>' has no current check
-    // request" out of the head sort. Post-fix the state is a finding: the
-    // head's own content verdict lands on its first cycle (23236), and the
-    // never-started window names the change the moment it exceeds the policy.
+    // request" out of the head sort. Post-fix the state is a finding: both
+    // codes are needs-author verdicts, so under the no-parking ruling each
+    // ends its revision's queue life on the first refusal and is reported as
+    // needing a person, and the never-started window still names the change
+    // the moment it exceeds the policy.
     expect(app.queue.audit().findings).toEqual([
       expect.objectContaining({
-        code: "admission-refusal-loop",
+        code: "admission-refusal-needs-person",
         pr: ahead.id,
         refusal: "carrier-drops-landed",
-        count: 1,
+      }),
+      expect.objectContaining({
+        code: "admission-refusal-needs-person",
+        pr: pr.id,
+        refusal: "authored-gitlink",
       }),
     ])
     expect(app.queue.audit({ now: "2026-01-01T06:00:00.000Z" }).findings).toContainEqual(
@@ -1242,5 +1288,139 @@ describe("a submitted PR with no check request and a ledgered refusal never wedg
     expect(app.queue.audit({ now: "2026-01-01T06:00:00.000Z" }).findings).toContainEqual(
       expect.objectContaining({ code: "queue-never-started", pr: pr.id }),
     )
+  })
+})
+
+/** The delta-comparison evidence a check step emits when it can certify that a
+ * red is the CHANGE's, not the base's: net-new diagnostics measured against
+ * the exact base sha, with a certificate naming both shas. */
+function certifiedDelta(candidateSha: string, unchanged?: number) {
+  return {
+    mode: "delta" as const,
+    classification: "carrier" as const,
+    baseSha: BASE,
+    candidateSha,
+    comparison: {
+      netNewDiagnostics: [
+        { file: "packages/km/tests/board.test.ts", [sourceRowKey]: 42, message: "expected 3, got 4" },
+      ],
+      ...(unchanged === undefined ? {} : { unchangedDiagnosticCount: unchanged }),
+    },
+    certificate: { mode: "delta" as const, baseSha: BASE, candidateSha },
+  }
+}
+
+/** A check-only plan whose check FAILS. `output` decides whether the red is
+ * certified against the base or opaque — the one difference the reject class
+ * turns on. */
+function failingCheckApp(clock: () => string, output: () => unknown, code = "check-failed") {
+  const bayJobs = createBayJobDefs(workspace())
+  const check = withStep(
+    "check",
+    (input: StepExecution): JobResult => ({
+      status: "completed",
+      conclusion: "failure",
+      error: { code, message: `'affected-tests' exited 1 for ${input.run}` },
+      output: output() as never,
+    }),
+    { revision: "check-v1" },
+  )
+  const queue = withQueue({
+    steps: [check] as const,
+    batch: false,
+    defaultSteps: ["check"],
+    progress: { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
+  })
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
+  return createYrd(queue(base), {
+    inject: { journal: createMemoryJournal(), id: ids(), clock, log: createLogger("test", [{ level: "silent" }]) },
+  })
+}
+
+describe("the reject class — a content fault ends THIS revision's queue life on the first refusal", () => {
+  // The operator's no-parking ruling: a change the queue cannot merge is either
+  // fixed and continued, or REJECTED loudly with reason, evidence and remedy.
+  // What it must never do is park. `STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS`
+  // was emptied when its last two codes lost their producers, leaving a live
+  // settle-on-first-refusal path with nothing to settle; the ruling supplies
+  // the next such codes — user-level content faults.
+  it("settles a CERTIFIED check failure needs-person on the FIRST refusal, naming the failing tests", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await failingCheckApp(clock.read, () => certifiedDelta("2".repeat(40), 7))
+    const pr = await submitAndRequestChecks(app, "issue/genuinely-red")
+    await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    // The check's own evidence certifies the red against the exact base, so the
+    // change carries an attributed content fault.
+    expect(app.state().bays.prs[pr.id]?.needsAuthor?.receipt).toMatchObject({
+      code: "check-failed",
+      evidence: { kind: "candidate-attributed-check-failure" },
+    })
+
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "check-failed",
+      kind: "refusal",
+      reason: "required checks failed",
+    })
+
+    // ONE refusal, not three: no retry can change a verdict about content.
+    const refusal = app.state().queues.admissionRefusals[pr.id]
+    expect(refusal?.count).toBe(1)
+    expect(refusal?.settlement?.disposition).toBe("needs-person")
+    // reason - evidence - remedy, with the failing test named.
+    const reason = refusal?.settlement?.reason ?? ""
+    expect(reason).toContain("packages/km/tests/board.test.ts:42")
+    expect(reason).toContain("expected 3, got 4")
+    expect(reason).toContain("new revision")
+  })
+
+  it("never settles an UNCERTIFIED check failure — an unattributed red retries", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    // The negative control, and the whole discrimination: the check failed, but
+    // it produced no candidate-vs-base certificate. A base-health red, an
+    // opaque red and a flake all land here, and none of them is the author's
+    // fault — so this refusal keeps retrying instead of rejecting a revision.
+    await using app = await failingCheckApp(clock.read, () => ({ exitCode: 1, note: "no comparison ran" }))
+    const pr = await submitAndRequestChecks(app, "issue/unattributed-red")
+    await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    expect(app.state().bays.prs[pr.id]?.needsAuthor?.receipt.evidence).toBeUndefined()
+
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "check-failed",
+      kind: "refusal",
+      reason: "required checks failed",
+    })
+
+    const refusal = app.state().queues.admissionRefusals[pr.id]
+    expect(refusal?.count).toBe(1)
+    expect(refusal?.settlement, "an unattributed red is not a content fault").toBeUndefined()
+  })
+
+  it("settles a needs-author COMPOSITION failure on the first refusal — the bucket is already the judgment", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => "PR1"),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/composition-fault")
+
+    // `authored-gitlink` is in COMPOSITION_FAILURE_BUCKETS["needs-author"],
+    // which already means only a new revision cures this — no evidence needed.
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "authored-gitlink",
+      kind: "refusal",
+      reason: "the change touches generated-only gitlinks",
+    })
+
+    const refusal = app.state().queues.admissionRefusals[pr.id]
+    expect(refusal?.count).toBe(1)
+    expect(refusal?.settlement?.disposition).toBe("needs-person")
+    expect(refusal?.settlement?.reason).toContain("new revision")
   })
 })

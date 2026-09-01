@@ -557,7 +557,13 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       id: IdSchema,
       attempt: AttemptSchema,
       runner: IdSchema,
-      leaseExpiresAt: TimestampSchema,
+      // An in_progress job is fenced by its lease, a waiting job by its token:
+      // exactly one is present, and `apply` requires the one that matches the
+      // status it meets. Both are optional here so a single transition can end
+      // either hold; history written before waiting jobs were reclaimable
+      // carries `leaseExpiresAt` and replays unchanged.
+      leaseExpiresAt: TimestampSchema.optional(),
+      token: IdSchema.optional(),
       reason: z.string().min(1),
     })
     .strict(),
@@ -655,9 +661,15 @@ export const Job = Object.freeze({
 
       case "lose":
         requireOwner(current, change)
-        requireStatus(current, "in_progress", "in_progress")
-        if (current.leaseExpiresAt !== change.leaseExpiresAt) {
+        requireStatus(current, "in_progress or waiting", "in_progress", "waiting")
+        if (current.status === "in_progress" && current.leaseExpiresAt !== change.leaseExpiresAt) {
           throw new Error(`yrd: job '${current.id}' lease changed before recovery`)
+        }
+        // A waiting job holds no lease, so the token is its fence: recovery must
+        // name the exact wait it is ending, or a callback that arrived first
+        // could be overwritten by a stale reclaim.
+        if (current.status === "waiting" && current.token !== change.token) {
+          throw new Error(`yrd: job '${current.id}' token mismatch`)
         }
         return {
           ...execution(current),
@@ -775,7 +787,9 @@ export type Jobs = Readonly<{
   finish(id: string, completion: JobCompletion): Promise<Job>
   cancel(input: CancelJobInput): Promise<Job>
   retry(id: string): Promise<Job>
-  recover(options: Readonly<{ now: string; reason?: string; runner?: string }>): Promise<readonly string[]>
+  recover(
+    options: Readonly<{ now: string; reason?: string; runner?: string; waitBoundMs?: number }>,
+  ): Promise<readonly string[]>
   requested(source: CommandResult | readonly Event[]): readonly string[]
 }>
 
@@ -811,11 +825,29 @@ const CompletionSchema = z
   })
   .strict()
 
+/**
+ * How long a job may sit `waiting` on an external callback before recovery
+ * ends the wait as a typed failure.
+ *
+ * A waiting job has no lease to expire, so before this bound existed nothing
+ * could ever end one: `recover` walked only `in_progress` jobs and the queue's
+ * jobless-run reaper skips a step that HAS a job. A wait whose callback never
+ * came was therefore a permanent park, holding its run and the base behind it.
+ *
+ * The bound exists to end that park, NOT to race a legitimate check. The
+ * longest observed real wait — a parked check that leaked a core for 63
+ * minutes — sets the floor; a day is far outside it while still ending the
+ * park inside the operator's next session. Callers that know their checks
+ * (queue recovery, tests) pass `waitBoundMs` instead.
+ */
+const DEFAULT_JOB_WAIT_BOUND_MS = 24 * 60 * 60_000
+
 const RecoverOptionsSchema = z
   .object({
     now: TimestampSchema,
     reason: z.string().min(1).optional(),
     runner: IdSchema.optional(),
+    waitBoundMs: z.number().int().positive().optional(),
   })
   .strict()
 
@@ -1132,16 +1164,26 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       // the caller's dead-runner reason applies only to the named runner's
       // jobs; an expired lease of another runner says so.
       const deadRunner = parsed.runner
+      const waitBoundMs = parsed.waitBoundMs ?? DEFAULT_JOB_WAIT_BOUND_MS
       const recovered: string[] = []
       for (const job of Object.values(state().byId)) {
-        if (job.status !== "in_progress") continue
+        if (job.status !== "in_progress" && job.status !== "waiting") continue
         const named = deadRunner !== undefined && job.runner === deadRunner
-        const expired = Date.parse(job.leaseExpiresAt) <= cutoff
+        // A waiting job holds no lease. Its two ways out are the same dead-runner
+        // evidence the in_progress arm uses, and the wait bound — without both it
+        // parks forever, which the no-parking ruling forbids.
+        const expired =
+          job.status === "in_progress"
+            ? Date.parse(job.leaseExpiresAt) <= cutoff
+            : Date.parse(job.changedAt) + waitBoundMs <= cutoff
         if (!named && !expired) continue
         const reason =
-          named || deadRunner === undefined
-            ? (parsed.reason ?? (named ? "runner disappeared" : "runner lease expired"))
-            : "runner lease expired"
+          job.status === "waiting"
+            ? waitEndedReason(job, named ? (parsed.reason ?? "runner disappeared") : undefined, waitBoundMs)
+            : named || deadRunner === undefined
+              ? (parsed.reason ?? (named ? "runner disappeared" : "runner lease expired"))
+              : "runner lease expired"
+        const fence = job.status === "in_progress" ? { leaseExpiresAt: job.leaseExpiresAt } : { token: job.token }
         try {
           await observeYrdLifecycle(
             options.log,
@@ -1149,7 +1191,8 @@ export function createJobs(options: CreateJobsOptions): Jobs {
               lifecycle: "recover",
               identity: { job: job.id, attempt: job.attempt, runner: job.runner },
               attributes: {
-                leaseExpiresAt: job.leaseExpiresAt,
+                ...fence,
+                waitingSince: job.status === "waiting" ? job.changedAt : undefined,
                 reason,
               },
               outcome: "recovered",
@@ -1160,13 +1203,13 @@ export function createJobs(options: CreateJobsOptions): Jobs {
                 id: job.id,
                 attempt: job.attempt,
                 runner: job.runner,
-                leaseExpiresAt: job.leaseExpiresAt,
+                ...fence,
                 reason,
               }),
           )
         } catch (error) {
           const latest = current(job.id)
-          if (!sameLease(latest, job)) continue
+          if (!sameHold(latest, job)) continue
           throw error
         }
         recovered.push(job.id)
@@ -1524,11 +1567,33 @@ function requireConclusion<Conclusion extends JobConclusion>(
   }
 }
 
-function sameLease(left: Job, right: Extract<Job, { status: "in_progress" }>): boolean {
-  return (
-    left.status === "in_progress" &&
-    left.attempt === right.attempt &&
-    left.runner === right.runner &&
-    left.leaseExpiresAt === right.leaseExpiresAt
-  )
+/** True while the job still holds the exact lease (in_progress) or wait token
+ * (waiting) recovery observed — i.e. a failed reclaim was NOT a losable race
+ * against a writer that moved the job on, and must keep propagating. */
+function sameHold(left: Job, right: Extract<Job, { status: "in_progress" | "waiting" }>): boolean {
+  if (left.status !== right.status || left.attempt !== right.attempt) return false
+  if (!("runner" in left) || left.runner !== right.runner) return false
+  return right.status === "in_progress"
+    ? left.status === "in_progress" && left.leaseExpiresAt === right.leaseExpiresAt
+    : left.status === "waiting" && left.token === right.token
+}
+
+/**
+ * Why a waiting job's wait ended, as reason - evidence - remedy in the one
+ * string that becomes the `job-lost` refusal message downstream.
+ *
+ * `deadRunnerReason` is the caller's dead-runner assertion when it named this
+ * job's runner; without it the wait ended on the bound alone. Either way the
+ * text names the wait and its holder, so an operator reading the refusal knows
+ * which external result never arrived and who was owed it.
+ */
+function waitEndedReason(
+  job: Extract<Job, { status: "waiting" }>,
+  deadRunnerReason: string | undefined,
+  waitBoundMs: number,
+): string {
+  const held = `waiting on token '${job.token}' held by runner '${job.runner}' since ${job.changedAt}`
+  return deadRunnerReason === undefined
+    ? `job was ${held}, past the ${waitBoundMs}ms wait bound; the external result never arrived. Retry the job to run the step again, or raise the wait bound if this check legitimately runs longer.`
+    : `${deadRunnerReason}; job was ${held}, and no callback can arrive for a dead holder. Retry the job to run the step again.`
 }

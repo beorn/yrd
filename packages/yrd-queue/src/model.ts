@@ -1176,15 +1176,20 @@ export type QueueAuditFinding = Readonly<{
   reviewCertification?: string
   /**
    * Who a JUDGMENT disposition (a refusal with no mechanical remedy) routes
-   * to — a STATIC, repository-declared routing fact, deliberately different
-   * from {@link submitter}: `submitter` names an individual, recorded per
-   * instance, and is absent rather than guessed when unrecorded; `owner`
-   * names a ROLE, declared once for the whole repository (`.yrd.yml`
-   * `needsPerson.owner`), true regardless of who currently staffs it. A
-   * finding that carries `owner` at all always sets it to a real string — an
-   * unconfigured repository reads it as explicitly unowned, never by
-   * omitting the field, so the empty slot itself is what a reader sees
-   * (@i/10-merge-queue/22918-needs-person-unowned).
+   * to. Still deliberately different from {@link submitter}, which reports the
+   * identity RECORDED on the revision and stays absent rather than guessed:
+   * `owner` names who DECIDES, and is always a real name.
+   *
+   * Resolved in three rules — the repository's declared role (`.yrd.yml`
+   * `needsPerson.owner`), else the change's recorded submitter, else the
+   * standing owner of the yrd surfaces. The finding's message names which rule
+   * chose the recipient, so a reader can tell a declared role from a fallback.
+   *
+   * It is never the explicitly-unowned string. Naming the empty slot was
+   * honest about configuration and useless as routing: the judgment reached
+   * nobody and the change stayed parked
+   * (@i/10-merge-queue/22918-needs-person-unowned, and the no-parking ruling
+   * that followed it).
    */
   owner?: string
 }>

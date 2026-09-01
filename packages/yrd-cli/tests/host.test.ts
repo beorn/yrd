@@ -597,8 +597,17 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // `queue/submit/retired` event, and `Candidate.conflicts` as another
     // optional key in an accepted input shape. The predecessor 74775b57 —
     // the ledger's own superseded last entry — gains a retained edge below.
+    // Conscious update 2026-08-31 (the no-parking ruling): lease recovery
+    // reclaims a WAITING job whose runner is dead, so an external wait stops
+    // parking its run — and its base — forever. The `lose` Job transition gains
+    // an optional `token` and makes `leaseExpiresAt` optional beside it, two
+    // more optional keys in an accepted input shape, exactly the identity input
+    // `CandidateChange.containedInBase` records above. No stored record needs
+    // rewriting: every `lose` ever journaled carries `leaseExpiresAt` and no
+    // `token`, which the widened schema still accepts. The predecessor
+    // 1d285ebf — the ledger's own superseded last entry — gains a retained edge.
     const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4")
+    expect(first.manifest.targetIdentity).toBe("a9b486dc1a74eed9d9b53921562b6b3531406b79e725546124df2dfcab0c9bbe")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -2029,7 +2038,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4")
+    expect(rewritten.checkpoint_identity).toBe("a9b486dc1a74eed9d9b53921562b6b3531406b79e725546124df2dfcab0c9bbe")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2118,7 +2127,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4")
+    expect(rewritten.checkpoint_identity).toBe("a9b486dc1a74eed9d9b53921562b6b3531406b79e725546124df2dfcab0c9bbe")
     redatabase.close()
   })
 
@@ -3740,6 +3749,10 @@ checks: [{check: {run: "true"}}]
       { from: "0150a374820eafd53c72571ff04caffc85acf1c9839c60736299ecd20f2c4657", to: releasedHop },
       { from: "063c12e0029825f80853c78e29a4c23cde4e992f3257b806b37ee256b260f691", to: releasedHop },
       { from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25", to: releasedHop },
+      // The ledger's superseded last entry — what every deployment has been
+      // asked to store since 2026-08-30 — retained across the waiting-job
+      // reclaim bump (the no-parking ruling, 2026-08-31).
+      { from: "1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4", to: releasedHop },
       // The production composition's correlation-era identity (props cut).
       { from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5", to: releasedHop },
       // The interim step-plan identity the live journal advanced to while
