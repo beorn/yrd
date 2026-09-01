@@ -1,7 +1,8 @@
-import { lstat, readdir, rm, statfs } from "node:fs/promises"
+import { lstat, readdir, readFile, rm, statfs, writeFile } from "node:fs/promises"
 import { dirname, join, resolve, sep } from "node:path"
 import { systemClock } from "@yrd/core"
 import type { JobError } from "@yrd/job"
+import { recordedPidIsRunning, recordedPidLiveness } from "@yrd/process"
 import type { Git } from "git-super/worktree"
 
 /**
@@ -221,10 +222,44 @@ export type ScratchReapReport = Readonly<{
   reaped: number
   /** Entries left alone because they are younger than the threshold or still live. */
   kept: number
+  /**
+   * Why each kept entry was kept, because the totals answer opposite questions.
+   * A sweep that keeps everything as live is a reaper that has gone inert —
+   * which is exactly what 27 GB of abandoned pre-submit checkouts looked like
+   * from the outside — while one that keeps everything as young is a sweep
+   * running too often. Folded into a single `kept`, the two are the same number.
+   */
+  keptLive: number
+  keptYoung: number
+  /** Entries under a shared parent that were never ours to delete. */
+  keptForeign: number
   bytes: number
   /** Removals that failed, kept loud rather than folded into `kept`. */
   failures: readonly string[]
 }>
+
+/**
+ * The newest write anywhere under `path`, including `path` itself.
+ *
+ * A directory's own mtime says when its immediate children last changed, which
+ * for a run's artifact directory is when it was created and never again — the
+ * step logs are appended to two levels down. That is the reading that would
+ * delete work still in progress, so the age of a tree is the newest write in
+ * it, not the age of its root.
+ */
+async function newestMtimeMs(path: string): Promise<number> {
+  let newest = (await lstat(path)).mtimeMs
+  const walk = async (current: string): Promise<void> => {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const child = join(current, entry.name)
+      const stats = await lstat(child)
+      if (stats.mtimeMs > newest) newest = stats.mtimeMs
+      if (entry.isDirectory() && !entry.isSymbolicLink()) await walk(child)
+    }
+  }
+  await walk(path)
+  return newest
+}
 
 async function directorySize(path: string): Promise<number> {
   let total = 0
@@ -288,6 +323,147 @@ export async function liveWorktreeEntries(
 }
 
 /**
+ * The file a pre-submit checkout writes into its own scratch entry, naming the
+ * process that owns it and whether the entry was deliberately retained.
+ *
+ * It exists because the fact it records has no other honest source. Liveness
+ * was previously inferred from `git worktree list`: an entry git still listed
+ * was treated as live. Measured on the live queue state dir 2026-09-01, all 94
+ * abandoned entries under `pre-submit-worktrees` were still registered — the
+ * `.git` file named an admin directory that existed, and that directory's
+ * `gitdir` named the entry back — because the process that died between
+ * `worktree add` and its `finally` left the registration behind exactly the way
+ * it left the directory behind. Registration and abandonment are the same
+ * on-disk state, so no reading of the worktree list can separate them, and the
+ * reaper freed nothing while 27 GB accumulated over 13 days.
+ *
+ * A recorded owner separates them, because it records the two facts the reaper
+ * actually needs and the filesystem cannot infer: which process is using this
+ * entry, and whether a human asked for it to be kept.
+ */
+export const SCRATCH_OWNER_FILE = "owner.json"
+
+export type ScratchOwner = Readonly<{
+  /** The process that created the entry and is using it. */
+  pid: number
+  /** When the record was written — the moment the recorded owner precedes. */
+  startedAtMs: number
+  /**
+   * Set when the entry's creator ran under `--keep-on-failure`, so an entry
+   * that survives its run survived deliberately. Written at creation rather
+   * than at each failure site: every ordinary path removes the whole entry, so
+   * a flag set upfront can only be read on an entry that was kept on purpose.
+   */
+  retained?: boolean
+}>
+
+/** Record the owner of a freshly created scratch entry. */
+export async function writeScratchOwner(entry: string, owner: ScratchOwner): Promise<void> {
+  await writeFile(join(entry, SCRATCH_OWNER_FILE), `${JSON.stringify(owner)}\n`, "utf8")
+}
+
+/**
+ * The owner an entry recorded, or `undefined` when it recorded none.
+ *
+ * A malformed record reads as absent rather than raising: the sweep must not be
+ * held hostage by one unparseable file, and absence is already the conservative
+ * arm for everything except age.
+ */
+export async function readScratchOwner(entry: string): Promise<ScratchOwner | undefined> {
+  let text: string
+  try {
+    text = await readFile(join(entry, SCRATCH_OWNER_FILE), "utf8")
+  } catch {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(text) as Partial<ScratchOwner>
+    if (typeof parsed.pid !== "number" || typeof parsed.startedAtMs !== "number") return undefined
+    return Object.freeze({
+      pid: parsed.pid,
+      startedAtMs: parsed.startedAtMs,
+      ...(parsed.retained === true ? { retained: true } : {}),
+    })
+  } catch {
+    return undefined
+  }
+}
+
+export type ScratchOwnerCensus = Readonly<{
+  /** Entries no sweep may remove, whatever their age. */
+  live: ReadonlySet<string>
+  /** Kept because `--keep-on-failure` asked for them. */
+  retained: number
+  /** Kept because the process that recorded them is still running. */
+  running: number
+  /** Released: the recorded owner has provably exited. */
+  exited: number
+  /** Released: nothing recorded an owner (an entry from before this record, or one abandoned mid-creation). */
+  unowned: number
+}>
+
+/**
+ * Which entries under `root` are still owned, derived per entry from what each
+ * one recorded.
+ *
+ * No global listing, and no git call at all — which is the second half of the
+ * fix. The keep set was previously built from one `git worktree list` over a
+ * repository with 448 registered worktrees, and when that read failed or timed
+ * out the whole sweep was skipped: the keep set was unknown, reaping against an
+ * unknown keep set is unsafe, and skipping was the only safe move left. A
+ * per-entry record has no such failure mode, so there is no longer a state in
+ * which the sweep declines to run.
+ *
+ * Conservative in the one direction that matters: `unknown` liveness counts as
+ * running (`recordedPidIsRunning`), so an unprovable identity keeps the entry.
+ * Only proof — no such process, or a start time that refutes the record —
+ * releases one.
+ */
+export async function liveScratchOwners(
+  root: string,
+  options: Readonly<{ procRoot?: string }> = {},
+): Promise<ScratchOwnerCensus> {
+  let names: string[]
+  try {
+    names = await readdir(root)
+  } catch (cause) {
+    if ((cause as Readonly<{ code?: unknown }>).code === "ENOENT") {
+      return { live: new Set(), retained: 0, running: 0, exited: 0, unowned: 0 }
+    }
+    throw cause
+  }
+  const live = new Set<string>()
+  let retained = 0
+  let running = 0
+  let exited = 0
+  let unowned = 0
+  for (const name of names) {
+    const entry = join(root, name)
+    const owner = await readScratchOwner(entry)
+    if (owner === undefined) {
+      unowned += 1
+      continue
+    }
+    if (owner.retained === true) {
+      retained += 1
+      live.add(entry)
+      continue
+    }
+    const liveness = await recordedPidLiveness(
+      { pid: owner.pid, runningSinceMs: owner.startedAtMs },
+      options.procRoot === undefined ? {} : { procRoot: options.procRoot },
+    )
+    if (recordedPidIsRunning(liveness)) {
+      running += 1
+      live.add(entry)
+      continue
+    }
+    exited += 1
+  }
+  return { live, retained, running, exited, unowned }
+}
+
+/**
  * Remove scratch left behind by a queue process that died between creating a
  * worktree and its `finally`. `withScratchRoot` cleans up on every ordinary
  * path, including failures, but a SIGKILL or a host crash has no `finally` — and
@@ -309,31 +485,63 @@ export async function liveWorktreeEntries(
  */
 export async function reapOrphanedScratch(
   root: string,
-  options: Readonly<{ olderThanMs?: number; now?: number; keep?: ReadonlySet<string>; namePrefix?: string }> = {},
+  options: Readonly<{
+    olderThanMs?: number
+    now?: number
+    keep?: ReadonlySet<string>
+    namePrefix?: string
+    /**
+     * Which mtime decides an entry's age. `"entry"` (the default) reads the
+     * entry directory's own mtime, which is right for a scratch checkout: it is
+     * created, used and removed as a unit. `"tree"` reads the newest write
+     * anywhere inside it, which is what an artifact directory needs — its root
+     * is stamped once at creation while its logs keep being appended to, so the
+     * entry reading would condemn the longest-running work first.
+     */
+    ageFrom?: "entry" | "tree"
+  }> = {},
 ): Promise<ScratchReapReport> {
   const olderThanMs = options.olderThanMs ?? ORPHANED_SCRATCH_MAX_AGE_MS
   const now = options.now ?? systemClock.now()
   const keep = options.keep ?? new Set<string>()
   const namePrefix = options.namePrefix ?? SCRATCH_NAME_PREFIX
+  const ageFrom = options.ageFrom ?? "entry"
   let entries: string[]
   try {
     entries = await readdir(root)
   } catch (cause) {
     if ((cause as Readonly<{ code?: unknown }>).code === "ENOENT") {
-      return { root, entries: 0, reaped: 0, kept: 0, bytes: 0, failures: [] }
+      return { root, entries: 0, reaped: 0, kept: 0, keptLive: 0, keptYoung: 0, keptForeign: 0, bytes: 0, failures: [] }
     }
     throw cause
   }
   let reaped = 0
-  let kept = 0
+  let keptLive = 0
+  let keptYoung = 0
+  let keptForeign = 0
   let bytes = 0
   const failures: string[] = []
   for (const name of entries) {
     const path = join(root, name)
     try {
       const stats = await lstat(path)
-      if (!name.startsWith(namePrefix) || keep.has(path) || now - stats.mtimeMs <= olderThanMs) {
-        kept += 1
+      if (!name.startsWith(namePrefix)) {
+        keptForeign += 1
+        continue
+      }
+      if (keep.has(path)) {
+        keptLive += 1
+        continue
+      }
+      if (now - stats.mtimeMs <= olderThanMs) {
+        keptYoung += 1
+        continue
+      }
+      // Only for an entry that already looks old: a recent root mtime is
+      // already proof of a recent write, so the walk is paid solely by the
+      // candidates for removal.
+      if (ageFrom === "tree" && now - (await newestMtimeMs(path)) <= olderThanMs) {
+        keptYoung += 1
         continue
       }
       const size = await directorySize(path)
@@ -344,14 +552,122 @@ export async function reapOrphanedScratch(
       failures.push(`${path}: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
   }
-  return { root, entries: entries.length, reaped, kept, bytes, failures }
+  return {
+    root,
+    entries: entries.length,
+    reaped,
+    kept: keptLive + keptYoung + keptForeign,
+    keptLive,
+    keptYoung,
+    keptForeign,
+    bytes,
+    failures,
+  }
 }
 
-/** One line naming what was reaped against the denominator it was chosen from. */
+/**
+ * One line naming every outcome of one sweep, against the denominator they were
+ * drawn from.
+ *
+ * Every count is spelled even when it is zero, so the line reads the same shape
+ * every time and an inert sweep is legible as inert: `reaped 0 ... 94 kept live`
+ * says the keep rule is swallowing the whole population, which is the failure
+ * that hid 27 GB behind a reaper that ran on schedule and did nothing.
+ */
 export function describeScratchReap(report: ScratchReapReport): string {
   return (
-    `yrd: reaped ${report.reaped} of ${report.entries} scratch entr${report.entries === 1 ? "y" : "ies"} ` +
-    `under '${report.root}' (${formatBytes(report.bytes)} freed, ${report.kept} kept as live or younger than the ` +
-    `threshold)${report.failures.length === 0 ? "" : `; ${report.failures.length} could not be removed: ${report.failures.join("; ")}`}`
+    `yrd: swept '${report.root}': reaped ${report.reaped} of ${report.entries} scanned ` +
+    `(${formatBytes(report.bytes)} freed), ${report.keptLive} kept live, ${report.keptYoung} kept young, ` +
+    `${report.keptForeign} kept foreign, ${report.failures.length} failed` +
+    `${report.failures.length === 0 ? "" : `: ${report.failures.join("; ")}`}`
   )
+}
+/**
+ * How long a run's artifacts are kept once the run has stopped writing them.
+ *
+ * The store had no retention at all: `createArtifactSink` writes one directory
+ * per run, per step, per attempt, holding `stdout.log`, `stderr.log`,
+ * `output.log` and `terminal.json`, and nothing has ever removed one. Measured
+ * on the live queue state dir 2026-09-01: 694 MB across 5,684 run directories,
+ * zero removals in 31 days.
+ *
+ * Fourteen days because the artifacts answer one question — what did this run
+ * actually print — and that question is asked while the change is still in
+ * play. A fortnight covers a change that sat over two weekends; past that the
+ * run has landed or been withdrawn and the journal holds its verdict.
+ */
+export const DEFAULT_ARTIFACT_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
+
+/** Operator override for the artifact retention floor, in milliseconds. */
+export const ARTIFACT_RETENTION_ENV = "YRD_ARTIFACT_RETENTION_MS"
+
+/**
+ * How often one process re-sweeps the artifact root.
+ *
+ * The sibling reapers here sweep once per root per process, which is right for
+ * scratch a short CLI invocation leaves behind and wrong for a resident that
+ * runs for weeks: it would sweep at boot and never again. Hourly, gated on the
+ * clock rather than scheduled, so a resident sweeps at its first artifact write
+ * after boot and roughly hourly while it works — no timer, no second scheduler,
+ * and no sweep at all on a process that writes no artifacts, which is also a
+ * process that is not growing the store.
+ */
+export const ARTIFACT_PRUNE_INTERVAL_MS = 60 * 60 * 1000
+
+/**
+ * Resolve the retention floor from the host environment. An unset or blank
+ * override yields the default; anything else that is not a positive integer of
+ * milliseconds refuses loudly. Zero is refused with the rest: a silent
+ * fallback, or a zero read as "keep nothing", is how a retention knob deletes
+ * a store it was meant to bound.
+ */
+export function resolveArtifactRetentionMs(environment: Readonly<Partial<Record<string, string>>>): number {
+  const raw = environment[ARTIFACT_RETENTION_ENV]
+  if (raw === undefined || raw.trim() === "") return DEFAULT_ARTIFACT_RETENTION_MS
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`yrd: ${ARTIFACT_RETENTION_ENV} must be a positive integer of milliseconds, got '${raw}'`)
+  }
+  return parsed
+}
+
+/** When each artifact root was last swept, so the hourly gate needs no timer. */
+const artifactSweepAt = new Map<string, number>()
+
+/**
+ * Remove run artifacts nothing has written for `olderThanMs`, at most once an
+ * hour per root. Returns the sweep's report, or `undefined` when the hourly
+ * gate is closed and no sweep ran — which a caller must not log as a clean
+ * sweep, because it is not a sweep.
+ *
+ * Age is read from the whole tree (`ageFrom: "tree"`), and that is what keeps a
+ * run still in flight. A long admission's run directory is created once and
+ * never touched again while its step logs are appended to for hours or days, so
+ * the directory's own mtime is ancient the entire time the run is alive.
+ * Reading it alone would delete the artifacts of running work, longest runs
+ * first. The journal knows which admissions are open, but it does not reach
+ * this seam — `createArtifactSink` is called from a step body, which carries no
+ * journal — so this uses the newest write anywhere in the tree instead. That is
+ * the weaker signal the brief allows, and it is sound in the direction that
+ * matters: anything being written to is young, whatever the journal says.
+ *
+ * No name filter. Every entry directly under an artifact root is a run key
+ * `createArtifactSink` minted, so unlike the scratch roots there is no foreign
+ * population to protect — the root is not shared with anything.
+ */
+export async function reapAgedArtifacts(
+  root: string,
+  options: Readonly<{ olderThanMs?: number; now?: number }> = {},
+): Promise<ScratchReapReport | undefined> {
+  const key = resolve(root)
+  const now = options.now ?? systemClock.now()
+  const last = artifactSweepAt.get(key)
+  if (last !== undefined && now - last < ARTIFACT_PRUNE_INTERVAL_MS) return undefined
+  artifactSweepAt.set(key, now)
+  return reapOrphanedScratch(key, {
+    olderThanMs: options.olderThanMs ?? DEFAULT_ARTIFACT_RETENTION_MS,
+    now,
+    namePrefix: "",
+    ageFrom: "tree",
+  })
 }
