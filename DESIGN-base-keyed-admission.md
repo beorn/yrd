@@ -153,7 +153,7 @@ event, no config:
   every candidate whose base is not current main, not just the ones that can land — and
   the same narrowing applies. I left it alone because it is a second package and a
   second review surface, and because the queue-side filter is what the P0 names. **It is
-  the obvious follow-on and should be beaded.**
+  the obvious follow-on and gets its own bead — §9.**
 
 ---
 
@@ -193,7 +193,12 @@ this branch — the only file I changed is `queue.ts`.
 
 ---
 
-## 5. The decision I need from @cto
+## 5. The decision I needed from @cto — RULED, see §8
+
+> **Answered 2026-08-31: scheduling-only is ACCEPTED as the P0 fix.** The question and
+> its framing are kept below as written, because the ruling's reasoning only reads
+> properly against the question it answers. §8 carries the ruling and what it corrects
+> in my argument.
 
 **Is scheduling-only acceptable as the P0 fix, given that proof *survival* is
 unreachable without speculation?**
@@ -289,3 +294,55 @@ those twelve was noise.
 If someone wants a full-repo number they can act on, it needs a real `bun install` and a
 serialized run; that is a test-infrastructure gap this branch did not create and did not
 close.
+
+---
+
+## 8. Ruling — scheduling-only is ACCEPTED as the P0 fix
+
+@cto, 2026-08-31, answering §5. **(a)-lite and (b) are dead; chaining stays deferred
+under the standing ruling; (d) — the landing-window narrowing on this branch — is the
+P0 fix.** Four reasons, recorded because each one is a thing a later reader would
+otherwise have to re-derive:
+
+1. **The P0's measured harm was waste and starvation, not a missing capability.** PR2059
+   at 14 bases across 56 attempts; a 67–100 hour backlog against merges that take one to
+   three minutes. The filter removes exactly that waste, and it does so without reusing a
+   verdict across a base move — so nothing is bought with unsoundness.
+
+2. **The flake multiplier is load-bearing.** Every redundant re-proof is another draw
+   against a roughly 0.787 oracle (@cto's figure, from the flake work — not measured on
+   this branch). So `n − 1` re-proofs per cycle do not merely cost wall-clock: they
+   *manufacture* spurious rejections, each of which costs another re-proof. Cutting the
+   redundant draws raises effective queue reliability before any flake fix lands. This is
+   the strongest argument for the change and it is one I did not make — §2d argued time
+   and §7 argued determinism; neither reached the compounding.
+
+3. **"Authors see checks move" while a change is WAITING is busy-work, not progress**, and
+   runs against the spirit of the operator's fresh no-parking ruling. The author-facing
+   guarantee that actually matters — the first proof always runs, feedback is never
+   withheld — is exactly what `spendableAdmission`'s carve-out preserves. §2d treated this
+   as a cost to be mitigated; the ruling is that it was never a cost.
+
+4. **It composes with post-G1 chaining rather than competing with it.** The landing-window
+   structure survives intact; chaining widens the window with projected bases instead of
+   replacing it. So this is not a proxy that has to be unwound later.
+
+---
+
+## 9. Follow-ons this branch deliberately leaves open
+
+**The freshness-sweep twin — `packages/yrd-cli/src/run.ts:11277`–`11325`.** Same shape as
+the defect fixed here: it re-merges *every* candidate whose base is not current main
+(`if (candidateRevision.baseSha === target.headSha) skip; else executeRemergeChange(…)`),
+not just the ones that can land, and each re-merge mints a new revision with no admission
+at all. The same narrowing applies. It is one package away and doubles the review
+surface, so it gets **its own bead**, not a rider on this branch.
+
+**The pm-plan direction line needs correcting.** It currently reads as *"admit against the
+projected base"*. That phrasing describes **chaining**, which is deferred — the projected
+base for position N is the carrier of position N−1, so having it means composing on the
+predecessor's carrier. The **landed P0** is a different sentence: **mint only spendable
+verdicts** — re-point, and therefore re-prove, only the carriers that can actually land
+this cycle, plus every carrier that has never been proved. Leaving the old line in place
+would have a later reader believe the P0 shipped speculation, and then be baffled that no
+projected base exists anywhere in the code.
