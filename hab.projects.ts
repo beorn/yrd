@@ -70,6 +70,10 @@ export default {
         // @i/10-yrd/runner-exits-and-respawns — 12 GiB, one habitant per host.
         env: { TRIBE_NAME: "@yrd", YRD_REPOSITORY_ALIASES, YRD_HABITANT_RSS_CAP_MB: "12288" },
         health: { command: `bun tools/yrd-runtime.mjs yrd queue ${repository.name} --check --json` },
+        // Andon policy (operator ruling 2026-09-01): a crashed runner stays
+        // exited and pages once; every restart is a deliberate operator/CTO
+        // act, never supervision. hab-config validates the value.
+        restart: "never",
       },
     ]),
   ),
