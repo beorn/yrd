@@ -3381,6 +3381,48 @@ describe("Queue", () => {
     expect(mergeCalls).toBe(1)
   })
 
+  it("settles a run WAITING on a dead runner's external check and releases the base — a wait is not a park", async () => {
+    let checkCalls = 0
+    await using app = await createQueueApp({
+      check: () => {
+        checkCalls += 1
+        return { status: "waiting" as const, token: "remote-check" }
+      },
+    })
+    const pr = await submitBranch(app, "issue/waiting-park")
+    await expect(app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime)).resolves.toMatchObject([
+      { id: "R1", status: "waiting" },
+    ])
+    // The step HAS a job, so the jobless-run reaper never sees it; the job is
+    // `waiting`, so lease-expiry recovery used to skip it. Between them the run
+    // held its base forever.
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "waiting", runner: "local" })
+
+    // A different runner's reclaim leaves the live wait alone.
+    await expect(
+      app.queue.recover({ recoveryTime: "2026-01-01T00:00:30.000Z", runner: "someone-else" }),
+    ).resolves.toEqual([])
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "waiting" })
+
+    // The holder's reclaim ends the wait and settles the run.
+    await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:00:30.000Z", runner: "local" })).resolves.toEqual([
+      expect.objectContaining({
+        id: "R1",
+        status: "completed",
+        conclusion: "failure",
+        error: expect.objectContaining({ code: "job-lost" }),
+      }),
+    ])
+    // The base is released, so the queue drains behind this change instead of
+    // waiting out an answer that can never come.
+    const authority = Queues.authorityRun(app.state().queues.authority, "R1")
+    expect(authority?.released?.reason).toBe("job-lost")
+    // The change stays submitted: a lost wait is not the author's fault, so it
+    // re-admits fresh rather than being rejected.
+    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
+    expect(checkCalls).toBe(1)
+  })
+
   it("cooperatively aborts a claimed Job when a closed change terminalizes its Queue Run", async () => {
     const started = Promise.withResolvers<void>()
     const aborted = Promise.withResolvers<void>()

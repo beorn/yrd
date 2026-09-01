@@ -1262,6 +1262,136 @@ describe("Jobs", () => {
     await app.close()
   })
 
+  it("reclaims a WAITING job whose named runner is dead — an external wait is not a park", async () => {
+    const app = await jobsApp(
+      delivery(async () => ({ status: "waiting", token: "remote-1" })),
+      {
+        id: ids("send", "C-send", JOB_ID),
+      },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "external" })
+    await app.jobs.run(JOB_ID, { runner: "yrd-cli:111", leaseMs: 60_000 })
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "waiting", token: "remote-1" })
+
+    // The caller asserts yrd-cli:111 is gone. Nobody is left to deliver the
+    // callback this job is waiting for, so the wait can never end on its own.
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z", runner: "yrd-cli:111" })).resolves.toEqual([
+      JOB_ID,
+    ])
+
+    const reclaimed = app.jobs.state().byId[JOB_ID]
+    expect(reclaimed).toMatchObject({ status: "completed", conclusion: "timed_out", attempt: 1 })
+    // reason - evidence - remedy, in the one string that becomes the `job-lost`
+    // refusal message downstream.
+    const lostReason = (reclaimed as { lostReason: string }).lostReason
+    expect(lostReason).toContain("runner disappeared")
+    expect(lostReason).toContain("remote-1")
+    expect(lostReason).toContain("yrd-cli:111")
+    expect(lostReason).toContain("Retry the job")
+    await app.close()
+  })
+
+  it("leaves a WAITING job inside the bound whose runner nobody declared dead — the negative control", async () => {
+    const app = await jobsApp(
+      delivery(async () => ({ status: "waiting", token: "remote-1" })),
+      {
+        id: ids("send", "C-send", JOB_ID),
+        clock: () => "2026-01-01T00:00:00.000Z",
+      },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "external" })
+    await app.jobs.run(JOB_ID, { runner: "yrd-cli:222", leaseMs: 60_000 })
+
+    // No dead runner named, and the wait is seconds old. A legitimate check in
+    // flight must never be raced by recovery.
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z" })).resolves.toEqual([])
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z", runner: "some-other-runner" })).resolves.toEqual(
+      [],
+    )
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({
+      status: "waiting",
+      runner: "yrd-cli:222",
+      token: "remote-1",
+    })
+    await app.close()
+  })
+
+  it("fails a WAITING job past the wait bound with a typed reason naming the wait, the holder and the remedy", async () => {
+    const app = await jobsApp(
+      delivery(async () => ({ status: "waiting", token: "remote-1" })),
+      {
+        id: ids("send", "C-send", JOB_ID),
+        clock: () => "2026-01-01T00:00:00.000Z",
+      },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "external" })
+    await app.jobs.run(JOB_ID, { runner: "yrd-cli:222", leaseMs: 60_000 })
+
+    // Inside the bound: untouched, even though the bound is being applied.
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z", waitBoundMs: 60_000 })).resolves.toEqual([])
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "waiting" })
+
+    // Past it: the wait ends as a typed failure, never a silent park.
+    await expect(app.jobs.recover({ now: "2026-01-01T00:02:00.000Z", waitBoundMs: 60_000 })).resolves.toEqual([JOB_ID])
+    const failed = app.jobs.state().byId[JOB_ID]
+    expect(failed).toMatchObject({ status: "completed", conclusion: "timed_out" })
+    const lostReason = (failed as { lostReason: string }).lostReason
+    expect(lostReason).toContain("remote-1")
+    expect(lostReason).toContain("yrd-cli:222")
+    expect(lostReason).toContain("60000ms")
+    expect(lostReason).toContain("Retry the job")
+    await app.close()
+  })
+
+  it("applies a generous default wait bound so a legitimate long check is never raced", async () => {
+    const app = await jobsApp(
+      delivery(async () => ({ status: "waiting", token: "remote-1" })),
+      {
+        id: ids("send", "C-send", JOB_ID),
+        clock: () => "2026-01-01T00:00:00.000Z",
+      },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "external" })
+    await app.jobs.run(JOB_ID, { runner: "yrd-cli:222", leaseMs: 60_000 })
+
+    // 63 minutes — the measured leaked-core specimen. The default bound exists
+    // to END a park, not to race a check that legitimately runs this long.
+    await expect(app.jobs.recover({ now: "2026-01-01T01:03:00.000Z" })).resolves.toEqual([])
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "waiting" })
+
+    // A day later nothing is coming.
+    await expect(app.jobs.recover({ now: "2026-01-02T00:00:00.000Z" })).resolves.toEqual([JOB_ID])
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "completed", conclusion: "timed_out" })
+    await app.close()
+  })
+
+  it("reclaims an in_progress and a waiting job of the same dead runner in one pass", async () => {
+    const app = await jobsApp(
+      delivery(async () => ({ status: "waiting", token: "remote-1" })),
+      {},
+    )
+    await app.dispatch(app.commands.sender.send, { message: "one" })
+    await app.dispatch(app.commands.sender.send, { message: "two" })
+    const [running, waiting] = Object.keys(app.jobs.state().byId)
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: running!,
+      attempt: 1,
+      runner: "yrd-cli:111",
+      leaseExpiresAt: "2026-01-01T00:05:00.000Z",
+    })
+    await app.jobs.run(waiting!, { runner: "yrd-cli:111", leaseMs: 60_000 })
+    expect(app.jobs.state().byId[waiting!]).toMatchObject({ status: "waiting" })
+
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z", runner: "yrd-cli:111" })).resolves.toEqual([
+      running,
+      waiting,
+    ])
+    expect(app.jobs.state().byId[running!]).toMatchObject({ status: "completed", conclusion: "timed_out" })
+    expect(app.jobs.state().byId[waiting!]).toMatchObject({ status: "completed", conclusion: "timed_out" })
+    await app.close()
+  })
+
   it("emits the dead-runner reclaim reason and identity at WARN", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
