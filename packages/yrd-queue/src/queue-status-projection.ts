@@ -1371,15 +1371,13 @@ export function withTimelineLineage(detail: string, lineages: readonly QueueTime
   return lineage === undefined ? detail : `${detail} · ${lineage}`
 }
 
-export function timelineQueueWaits(run: Run, submissionTimes: ReadonlyMap<string, string | null>): (number | null)[] {
-  return run.prs.map((member) => {
-    const runKey = queueRunRevisionKey(run, member)
-    const submittedAt = submissionTimes.has(runKey)
-      ? (submissionTimes.get(runKey) ?? undefined)
-      : (submissionTimes.get(queueRevisionKey(member)) ?? undefined)
-    return elapsedMs(submittedAt, run.startedAt, `change '${member.id}' queue wait`) ?? null
-  })
-}
+// `timelineQueueWaits` lived here: one whole-run pass computing every member's
+// queue wait, which threw on the FIRST member whose submission clock postdated
+// the run's start and so could only ever fail all of them together. Its single
+// caller (`timelineRunMemberRows`) already derives that member's `submittedAt`
+// for the age anchor, so the wait is now derived beside the age, inside the
+// same per-row guard — one clock read, and one member's bad arithmetic
+// contained to one member's row.
 
 /** What one whole-population admission read produced: the times it could date,
  * and one {@link QueueMemberReadFault} per member it could not. Faults are

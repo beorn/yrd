@@ -2465,6 +2465,11 @@ type QueueListOptions = Readonly<{
   check?: boolean
   json?: boolean
   term?: readonly string[]
+  /** Restore the pre-containment refusal: abort the whole read (exit 3) on the
+   * first run member whose clocks cannot be reconciled, instead of marking its
+   * row `unreadable` and rendering the rest. Same shape and meaning as
+   * `yrd log --strict`. */
+  strict?: boolean
 }>
 
 type WatchOptions = QueueListOptions
@@ -8480,6 +8485,10 @@ async function buildQueueListSnapshot(
     latest: options.latest === true,
     rowLimit: queueTimelineRowLimit(io),
     submissionTimes: queueTimelineAdmissionTimes(results),
+    // --strict restores the historical loud abort for a member whose clocks
+    // cannot be reconciled — the same escape hatch, spelled the same way, that
+    // `yrd log --strict` gives the lister.
+    ...(options.strict === true ? { strict: true } : {}),
     attempts,
     siblingBases: queueBases(state),
     base,
@@ -13445,6 +13454,7 @@ function buildProgram(
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each change")
     .option("--json", "emit stable JSON")
+    .option("--strict", "fail loud (exit 3) on the first unreadable run member instead of marking its row")
     .action(async (filters, options) => {
       setExit(await watchQueue(installed(), filters, options, io, installedServices()))
     })
@@ -13571,6 +13581,7 @@ function buildProgram(
     .option("--watch", "keep this projection live and interactive")
     .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
     .option("--json", "emit stable JSON")
+    .option("--strict", "fail loud (exit 3) on the first unreadable run member instead of marking its row")
     .action(listQueue)
   queue
     .command("list [filter...]")
@@ -13584,6 +13595,7 @@ function buildProgram(
     .option("--watch", "keep this projection live and interactive")
     .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
     .option("--json", "emit stable JSON")
+    .option("--strict", "fail loud (exit 3) on the first unreadable run member instead of marking its row")
     .action(listQueue)
   queue
     .command("audit")

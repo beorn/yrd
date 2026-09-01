@@ -185,7 +185,6 @@ import {
   type TimelineCellLayout,
   timelineLocalCalendarDay,
   timelineMemberSubject,
-  timelineQueueWaits,
   timelineRevisionLineage,
   type TimelineRunCellModel,
   timelineRunCellText,
@@ -716,6 +715,11 @@ export type QueueTimelineProjectionOptions = Readonly<{
    * host declares one, for its configured base; per-queue config labels ride
    * the 37i machinery. */
   queueNames?: ReadonlyMap<string, string>
+  /** Restore the pre-containment refusal: abort the whole projection on the
+   * first run member whose clocks cannot be reconciled, instead of marking its
+   * row `unreadable` and rendering the rest. The `--strict` shape, matching
+   * {@link queueLogRows}' "no fault accounting" path. */
+  strict?: boolean
 }>
 
 export type QueueLogRow = Readonly<{
@@ -1376,6 +1380,63 @@ function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusF
   return "other"
 }
 
+/**
+ * `anchor` while it can still date `scoped` — at or before it — and `scoped`
+ * otherwise. An anchor that does not parse is never preferred.
+ */
+function causalAnchor(anchor: string | undefined, scoped: string): string {
+  if (anchor === undefined) return scoped
+  const at = Date.parse(anchor)
+  const limit = Date.parse(scoped)
+  if (!Number.isFinite(at) || !Number.isFinite(limit)) return scoped
+  return at <= limit ? anchor : scoped
+}
+
+/**
+ * The clock a run member's AGE is measured FROM — the only one that may be
+ * paired with this run's own finish.
+ *
+ * {@link runRevisionClockRead} already resolves the admission that CAUSED this
+ * run: a submit or check-request fact at or before `run.startedAt`, never one
+ * after it. The lineage clock ({@link changeSourceReadyAt}) is a display
+ * preference layered over that — show the cumulative age across a recut
+ * lineage rather than the current revision's own few minutes — and it reads a
+ * MUTABLE field. Re-submitting the same sha (the documented remedy when a run
+ * consumes a change's submit authority) rewrites the lineage root's
+ * `submittedAt` FORWARD, past runs that finished days earlier. Preferring it
+ * unconditionally therefore dated an EARLIER run from a LATER admission, and
+ * `elapsedMs` threw on the inversion — taking down the whole `yrd watch` and
+ * every healthy row with it (measured live 2026-09-01 on 0.0.1+caacf98e21:
+ * change 'PR2749' in run 'R3675', finish '2026-08-30T22:56:44.041Z' against
+ * start '2026-09-01T18:40:25.870Z').
+ *
+ * So a cumulative anchor is used only while it stays causal for THIS run — at
+ * or before the run-scoped clock, which is what "cumulative" already asserts.
+ * Past that the record has been refreshed beyond this run and only the
+ * run-scoped clock can date the member.
+ *
+ * A FAULTED read is the same defect one step further along: the record is
+ * there and holds no causal clock for this run at all. The honest reading is
+ * that this member's age is unknown HERE, not a number borrowed from an
+ * admission that happened after the run ended. A member with no record to
+ * fault (a derived or intent snapshot, S6) is not that case and keeps the only
+ * clocks it has.
+ */
+function memberSourceReadyAt(
+  admission: ChangeRunRevisionClock | undefined,
+  unreadable: QueueMemberReadFault | undefined,
+  lineageSourceReadyAt: string | undefined,
+  submittedAt: string | undefined,
+): string | undefined {
+  if (admission === undefined) {
+    return unreadable === undefined ? (lineageSourceReadyAt ?? submittedAt) : undefined
+  }
+  // The check-request branch was already run-scoped and never consulted the
+  // lineage; it stays exactly as it was.
+  if (admission.admittedBy !== "submission") return admission.checkRequestedAt ?? admission.pushedAt
+  return causalAnchor(lineageSourceReadyAt, admission.submittedAt)
+}
+
 function timelineRunMemberRows(
   result: QueueStatusResult,
   run: Run,
@@ -1386,6 +1447,9 @@ function timelineRunMemberRows(
    * the call site keeps the projection linear in the attempt count instead of
    * rescanning every attempt once per run. */
   runAttempts: readonly QueueAttempt[],
+  /** `--strict`: rethrow a residual clock inconsistency instead of containing
+   * it on the row. */
+  strict = false,
 ): QueueTimelineProjectedRow[] {
   const running = run.status === "queued" || run.status === "in_progress" || run.status === "waiting"
   const terminal = running ? null : terminalProjection(run)
@@ -1416,12 +1480,11 @@ function timelineRunMemberRows(
           ? run.status
           : `${step.name}: ${jobStatus(step)}`
       : actionableFailureSummary(actionableFailure(failure))
-  const queueWaits = timelineQueueWaits(run, submissionTimes)
   const ageEndIso = running ? nowIso : (run.finishedAt ?? nowIso)
   const stepNames = stepNamesOfRun(run)
   const mergeVerdict = running ? ("running" as const) : mergeVerdictOfOutcome(status)
   const recordIds = new Set(result.prs.map((candidate) => candidate.id))
-  return run.prs.map((member, index) => {
+  return run.prs.map((member) => {
     const current = result.prs.find((candidate) => candidate.id === member.id)
     // An intent member's snapshot is its complete record: render from it and
     // skip the change-only enrichments (lineage history, admission clock,
@@ -1444,13 +1507,36 @@ function timelineRunMemberRows(
     // run's finish (the 21106 timestamp-crash class).
     const read = current !== undefined && current.revs.length > 0 ? runRevisionClockRead(current, run) : undefined
     const admission = read?.clock
-    const unreadable = read?.fault
-    const sourceReadyAt =
-      admission === undefined
-        ? (lineage.sourceReadyAt ?? submittedAt)
-        : admission.admittedBy === "submission"
-          ? (lineage.sourceReadyAt ?? admission.submittedAt)
-          : (admission.checkRequestedAt ?? admission.pushedAt)
+    const sourceReadyAt = memberSourceReadyAt(admission, read?.fault, lineage.sourceReadyAt, submittedAt)
+    // A residual inversion is still representable — a derived member with no
+    // record to scope against, or a run whose own finish predates its start —
+    // and one member's arithmetic must never blind the read that exists to
+    // tell an operator what is stuck (e78134986). Contain it on its own row,
+    // verbatim cause plus the remedy, exactly as `queueLogRows` does; only
+    // `--strict`, which asks for the historical abort, still throws.
+    let ageMs: number | null = null
+    let queueWaitMs: number | null = null
+    let ageFault: QueueMemberReadFault | undefined
+    try {
+      ageMs = elapsedMs(sourceReadyAt, ageEndIso, `change '${member.id}' source-ready age`) ?? null
+      // The member's queue wait shares this member's `submittedAt` and this
+      // run's start, so it is the same arithmetic over the same refreshable
+      // clock — and it threw FIRST, before the age ever ran. Derived here,
+      // inside the same guard, rather than in a separate whole-run pass that
+      // can only abort every member at once.
+      queueWaitMs = elapsedMs(submittedAt, run.startedAt, `change '${member.id}' queue wait`) ?? null
+    } catch (error) {
+      if (strict) throw error
+      ageFault = {
+        run: run.id,
+        change: member.id,
+        revision: member.revision,
+        headSha: member.headSha,
+        reason: "no-causal-clock",
+        message: `${error instanceof Error ? error.message : String(error)} — no admission of run '${run.id}' can date this member; read the revision's admission history with \`yrd log --pr ${member.id}\`, or re-run with \`--strict\` to abort on this instead of marking the row`,
+      }
+    }
+    const unreadable = read?.fault ?? ageFault
     const submitter = current === undefined ? undefined : revisionSubmitter(current, member.revision, member.headSha)
     const issue = presentFact(current?.issue ?? member.issue)
     // The detail cell carries the mark too, so an operator reading the timeline
@@ -1484,11 +1570,11 @@ function timelineRunMemberRows(
       ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
       revisionLineage: [lineage],
       ...(failure === undefined ? {} : { failure }),
-      ageMs: elapsedMs(sourceReadyAt, ageEndIso, `change '${member.id}' source-ready age`) ?? null,
+      ageMs,
       totalMs,
       activeMs,
       waitMs,
-      queueWaitMs: queueWaits[index] ?? null,
+      queueWaitMs,
       mergeVerdict,
       stepNames,
     }
@@ -1803,6 +1889,7 @@ function buildQueueTimelineProjection(
         options.submissionTimes,
         options.state,
         attemptsByRun.get(run.id) ?? NO_ATTEMPTS,
+        options.strict === true,
       ),
     ),
   ])
