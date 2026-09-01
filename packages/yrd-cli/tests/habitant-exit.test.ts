@@ -28,15 +28,16 @@ describe("habitant exit taxonomy — one code per condition", () => {
   it("gives every condition a DISTINCT code", () => {
     const codes = CONDITIONS.map((condition) => HABITANT_EXIT[condition])
     expect(new Set(codes).size).toBe(codes.length)
-    expect(codes.length).toBe(5)
+    expect(codes.length).toBe(6)
   })
 
-  it("names the five conditions the supervisor has to tell apart", () => {
+  it("names the six conditions the supervisor has to tell apart", () => {
     expect(CONDITIONS.toSorted()).toEqual([
       "installed-plan-stale",
       "interrupted",
       "memory-cap",
       "poisoned",
+      "refusal-loop",
       "source-stale",
     ])
   })
@@ -74,7 +75,11 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
   })
 
   it("derives the backoff code list from the table rather than restating it", () => {
-    expect(HABITANT_BACKOFF_EXIT_CODES).toEqual([HABITANT_EXIT["memory-cap"]])
+    // `refusal-loop` joins the paced set for the same reason `memory-cap` is in
+    // it: the restart does not cure the condition. The refusal is about the
+    // WORLD, so a fresh process meets it again on its first cycle, and
+    // restarting hot would turn one stuck change into a spawn storm.
+    expect(HABITANT_BACKOFF_EXIT_CODES).toEqual([HABITANT_EXIT["memory-cap"], HABITANT_EXIT["refusal-loop"]])
   })
 })
 

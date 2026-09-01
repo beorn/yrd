@@ -62,6 +62,7 @@ import {
   SUPPORTED_VERSIONS,
   type ConditionReporter,
   type DeepReadonly,
+  type FailureFact,
   type JournalSnapshot,
 } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
@@ -514,6 +515,11 @@ const HABITANT_MEMORY_CAP_EXIT: YrdCliExitCode = HABITANT_EXIT["memory-cap"]
  * record is the detail, and this exit no longer shares `refusal`'s generic
  * code 1 with a genuine failure a supervisor should treat differently. */
 const HABITANT_PLAN_STALE_EXIT: YrdCliExitCode = HABITANT_EXIT["installed-plan-stale"]
+/** A habitant that stood down because ONE refusal skipped its cycle, unchanged,
+ * past the declared bound. Its own code for the same reason as the exits above:
+ * the supervisor has the code and not the record, and a runner wedged on a
+ * refusal needs a different response from one that was interrupted. */
+const HABITANT_REFUSAL_LOOP_EXIT: YrdCliExitCode = HABITANT_EXIT["refusal-loop"]
 
 /** Overrides {@link HABITANT_SOURCE_STALE_BEHIND}; `0` disables the recycle and
  * leaves the staleness visible-only. A runtime knob rather than project config:
@@ -10749,6 +10755,54 @@ function createHabitantRecoveryReporter(log: YrdCliApp["log"]): Readonly<{
  * duplicate. The next cycle re-snapshots — the busy queue frees, the departed
  * PR is gone from the submitted set — so the loop makes progress on what remains.
  */
+/** How many consecutive cycles the SAME refusal may skip before the runner
+ * stands down non-zero. A bound, not a cure: the skip exists so one bad change
+ * cannot take the queue offline, and this exists so a change that never stops
+ * refusing cannot leave the runner spinning green forever. */
+const HABITANT_REFUSAL_LOOP_CYCLES = 20
+
+/** Overrides {@link HABITANT_REFUSAL_LOOP_CYCLES}. A runtime knob, like the
+ * staleness and RSS ones beside it: it describes how this HOST supervises a
+ * habitant, not anything about the repository being merged. */
+const RESIDENT_REFUSAL_LOOP_ENV = "YRD_RESIDENT_REFUSAL_LOOP_CYCLES"
+
+/** Read the stand-down bound. Unparseable is raised rather than defaulted, for
+ * the same reason the staleness threshold and the RSS cap raise it: an operator
+ * who set the knob and silently got the default instead would learn about it
+ * from an unexplained stand-down, or from its absence. */
+function habitantRefusalLoopCycles(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[RESIDENT_REFUSAL_LOOP_ENV]?.trim()
+  if (raw === undefined || raw === "") return HABITANT_REFUSAL_LOOP_CYCLES
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    raiseFailure(
+      "configuration",
+      "habitant-refusal-loop-invalid",
+      `yrd: ${RESIDENT_REFUSAL_LOOP_ENV} must be a positive integer number of cycles, not '${raw}'`,
+    )
+  }
+  return parsed
+}
+
+/**
+ * Consecutive cycles lost to ONE unchanging refusal.
+ *
+ * Identity is the refusal's structure — its code and the member it is
+ * attributable to — never its message. A message carries shas and counts that
+ * move every push, so keying on it would reset the counter exactly when the
+ * world is churning and the runner is least able to make progress.
+ */
+type HabitantRefusalLoop = Readonly<{ signature: string; code: string; pr?: string; cycles: number }>
+
+/** Fold one skipped cycle in. A different refusal starts a fresh streak, which
+ * IS the reset the bound needs: a runner alternating between two refusals is
+ * meeting a moving world, not wedged on one thing. */
+function foldRefusalLoop(previous: HabitantRefusalLoop | undefined, fact: FailureFact): HabitantRefusalLoop {
+  const signature = `${fact.code}:${fact.pr ?? "-"}`
+  const cycles = previous?.signature === signature ? previous.cycles + 1 : 1
+  return { signature, code: fact.code, ...(fact.pr === undefined ? {} : { pr: fact.pr }), cycles }
+}
+
 /**
  * The refusals that are about THIS PROCESS rather than about a change, and so
  * must still stop the runner.
@@ -12273,7 +12327,7 @@ async function prepareHabitantQueueCycle(
 export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { steps?: unknown; json?: boolean; interval?: number },
+  options: { steps?: unknown; json?: boolean; interval?: number; refusalLoopCycles?: number },
   io: YrdCliIO,
   gate: () => Promise<void>,
   services: YrdCliServices = {},
@@ -12357,6 +12411,17 @@ export async function followQueueRuns(
   // which is the entire reason standing down is worth doing.
   let memoryStall: HabitantMemoryStall | undefined
   const rssCapBytes = habitantRssCapBytes()
+  // Consecutive cycles lost to ONE unchanging per-change refusal. Unlike the
+  // three windows above it this is a claim about the WORLD, not about this
+  // process — which is exactly why standing down is paced rather than hot: a
+  // fresh process meets the same refusal on its first cycle.
+  let refusalLoop: HabitantRefusalLoop | undefined
+  // The caller-supplied bound exists so a test can express "past the bound"
+  // without composing twenty times; production reads the env knob.
+  const refusalLoopCycles = options.refusalLoopCycles ?? habitantRefusalLoopCycles()
+  if (!Number.isSafeInteger(refusalLoopCycles) || refusalLoopCycles < 1) {
+    usage("--refusal-loop-cycles must be a positive number of cycles")
+  }
   let firstCycle = true
   let lastMaintenanceAt = 0
 
@@ -12461,6 +12526,11 @@ export async function followQueueRuns(
         return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null
       }
       const runs = await runQueues(app, selectors, options, io)
+      // A cycle that composed at all is progress by the only definition that
+      // matters here: the runner is no longer wedged on one refusal. Reset
+      // before any of the health checks below, so a stand-down can only ever
+      // report cycles that really were consecutive.
+      refusalLoop = undefined
       recoveryReporter.flush()
       heartbeat?.check()
       // The runner is a service; its stdout is a log stream. Human output is
@@ -12550,6 +12620,38 @@ export async function followQueueRuns(
       const recovery = selectors.length === 0 ? habitantCycleRecovery(error) : undefined
       if (recovery === undefined) throw error
       recoveryReporter.report(recovery)
+      // Bound the skip. A per-change refusal is losable so that one bad change
+      // cannot take the queue offline, but a refusal that never stops repeating
+      // has stopped being a skipped candidate and become a runner that will
+      // never merge anything. Under the fatal andon ruling that is a non-fixable
+      // condition, and a non-fixable condition terminates non-zero: the exit is
+      // the alarm edge Hab pages on, and spinning green forever is the
+      // silent-but-healthy state the ruling exists to delete.
+      //
+      // Scoped to REFUSALS on purpose. A busy defer, a locked journal or a
+      // settlement race legitimately repeats while another writer holds the
+      // queue, and bounding those would stand a healthy waiting runner down.
+      const skipped = failureFact(error)
+      if (skipped?.kind === "refusal") {
+        refusalLoop = foldRefusalLoop(refusalLoop, skipped)
+        if (refusalLoop.cycles >= refusalLoopCycles) {
+          app.log.error?.(
+            `Queue runner stood down: refusal '${refusalLoop.code}' skipped ${String(refusalLoop.cycles)} ` +
+              `consecutive cycles unchanged, so this runner will never make progress.`,
+            {
+              action: "resident-refusal-loop-standdown",
+              code: refusalLoop.code,
+              ...(refusalLoop.pr === undefined ? {} : { pr: refusalLoop.pr }),
+              cycles: refusalLoop.cycles,
+              bound: refusalLoopCycles,
+              reason: skipped.message,
+            },
+          )
+          return HABITANT_REFUSAL_LOOP_EXIT
+        }
+      } else {
+        refusalLoop = undefined
+      }
       heartbeat?.check()
       if (drainRequested()) {
         await scope.sleep(interval)

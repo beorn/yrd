@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest"
 import { ChangeCheckabilityConflict } from "@yrd/bay"
 import { createFailure } from "@yrd/core"
 import { QueueRunningConflict } from "@yrd/queue"
+import { HABITANT_EXIT } from "../src/habitant-exit.ts"
 import { followQueueRuns } from "../src/run.ts"
 import { createResponseHabitantHarness as harness } from "./support/habitant-harness.ts"
 
@@ -391,4 +392,108 @@ describe("habitant runner — a typed refusal never exits the process, whatever 
       expect(h.runCalls(), "a runner-scoped refusal stops on the spot").toBe(1)
     },
   )
+})
+
+/**
+ * The bound on the skip, under the fatal andon ruling
+ * (hub/yrd/2026-09-01-fatal-andon-architecture.md).
+ *
+ * Making per-change refusals losable is what stops one bad change taking the
+ * queue offline. Left unbounded it buys that with a worse state: a runner
+ * spinning forever on the same refusal, warning once per cycle, merging
+ * nothing, and reporting healthy to every instrument — which is exactly the
+ * silent-but-healthy condition that ruling exists to delete. A non-fixable
+ * condition must terminate non-zero, because that exit is the one alarm edge
+ * Hab pages on.
+ */
+describe("habitant runner — a refusal that never stops repeating stands the runner down", () => {
+  const refusal = async (code: string, pr?: string) => {
+    const { createFailure } = await import("@yrd/core")
+    return createFailure({
+      kind: "refusal",
+      code,
+      ...(pr === undefined ? {} : { pr }),
+      message: `yrd: ${code} on ${pr ?? "no member"}`,
+    })
+  }
+
+  it("skips every cycle BELOW the bound and keeps the process alive", async () => {
+    // One short of the bound: still a losable skip, still composing.
+    const fail = await refusal("derived-submit-vanished", "PR3090")
+    const h = harness([
+      ...Array.from({ length: 4 }, () => () => Promise.reject(fail)),
+      () => {
+        h.drain()
+        return Promise.resolve([])
+      },
+    ])
+    await expect(followQueueRuns(h.app, [], { interval: 1, refusalLoopCycles: 5 }, h.io, h.gate)).resolves.toBe(0)
+    expect(h.runCalls(), "four skips then a composing cycle").toBe(5)
+    expect(h.warnings.filter((w) => w.props?.action === "resident-pr-refusal-skip")).toHaveLength(4)
+  })
+
+  it("stands down non-zero at the bound, naming the refusal, the member and the count", async () => {
+    const fail = await refusal("derived-submit-vanished", "PR3090")
+    const h = harness(Array.from({ length: 10 }, () => () => Promise.reject(fail)))
+    await expect(followQueueRuns(h.app, [], { interval: 1, refusalLoopCycles: 3 }, h.io, h.gate)).resolves.toBe(
+      HABITANT_EXIT["refusal-loop"],
+    )
+    // It stops AT the bound, not after it: three skips, no fourth compose.
+    expect(h.runCalls()).toBe(3)
+    // The exit row is the alarm's whole payload — an operator reading only this
+    // must know what refused, on which member, and for how long.
+    expect(h.errors).toContainEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({
+          action: "resident-refusal-loop-standdown",
+          code: "derived-submit-vanished",
+          pr: "PR3090",
+          cycles: 3,
+          bound: 3,
+        }),
+      }),
+    )
+  })
+
+  it("resets the count when a DIFFERENT refusal lands in between", async () => {
+    // A runner alternating between refusals is meeting a moving world, not
+    // wedged on one thing. Identity is (code, member) and never the message,
+    // whose shas move on every push — keying on the message would reset the
+    // counter exactly when the world is churning.
+    const wedged = await refusal("derived-submit-vanished", "PR3090")
+    const other = await refusal("derived-record-lane", "PR3111")
+    const h = harness([
+      () => Promise.reject(wedged),
+      () => Promise.reject(wedged),
+      () => Promise.reject(other),
+      () => Promise.reject(wedged),
+      () => Promise.reject(wedged),
+      () => {
+        h.drain()
+        return Promise.resolve([])
+      },
+    ])
+    // Bound 3, and the streak never reaches it because `other` breaks it.
+    await expect(followQueueRuns(h.app, [], { interval: 1, refusalLoopCycles: 3 }, h.io, h.gate)).resolves.toBe(0)
+    expect(h.runCalls()).toBe(6)
+    expect(h.errors.filter((e) => e.props?.action === "resident-refusal-loop-standdown")).toHaveLength(0)
+  })
+
+  it("resets the count when a cycle composes, so an intermittent refusal never trips it", async () => {
+    const fail = await refusal("derived-submit-vanished", "PR3090")
+    const h = harness([
+      () => Promise.reject(fail),
+      () => Promise.reject(fail),
+      () => Promise.resolve([]),
+      () => Promise.reject(fail),
+      () => Promise.reject(fail),
+      () => {
+        h.drain()
+        return Promise.resolve([])
+      },
+    ])
+    await expect(followQueueRuns(h.app, [], { interval: 1, refusalLoopCycles: 3 }, h.io, h.gate)).resolves.toBe(0)
+    expect(h.runCalls()).toBe(6)
+    expect(h.errors.filter((e) => e.props?.action === "resident-refusal-loop-standdown")).toHaveLength(0)
+  })
 })

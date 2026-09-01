@@ -26,7 +26,7 @@ import type { QueueReadModel } from "./queue-read-model.ts"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 import type { RetainedWorkspace } from "./workspace-retention.ts"
 
-export type YrdCliExitCode = 0 | 1 | 2 | 3 | 10 | 11 | 12 | 13
+export type YrdCliExitCode = 0 | 1 | 2 | 3 | 10 | 11 | 12 | 13 | 14
 
 export type JournalRetentionPolicy = ResolvedRetention
 

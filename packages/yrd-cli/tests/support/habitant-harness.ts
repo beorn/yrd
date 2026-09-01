@@ -66,6 +66,11 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
   const signal = { aborted: false }
   const drainController = new AbortController()
   const warnings: HabitantWarnCall[] = []
+  // The habitant's ERROR stream. A stand-down is announced here and nowhere
+  // else, so a harness that captured only warnings could not tell a runner that
+  // exited loudly from one that exited silently — which is the whole
+  // distinction the fatal andon ruling turns on.
+  const errors: HabitantWarnCall[] = []
   const stderr: string[] = []
   const stdout: string[] = []
   const stateFactory = options.state ?? emptyState
@@ -92,6 +97,7 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
     },
     log: {
       warn: (message: string, props: Record<string, unknown>) => warnings.push({ message, props }),
+      error: (message: string, props: Record<string, unknown>) => errors.push({ message, props }),
     },
     ...(options.bays === undefined ? {} : { bays: options.bays }),
     queue: {
@@ -125,6 +131,7 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
     signal,
     drain: () => drainController.abort(),
     warnings,
+    errors,
     stderr,
     stdout,
     refreshCalls: () => refreshCalls,

@@ -48,6 +48,21 @@ export const HABITANT_EXIT = {
    * all by design — and all seven read as failures because this exit shared
    * `refusal`'s generic code 1 with every genuine one. */
   "installed-plan-stale": 13,
+  /**
+   * The same refusal skipped this runner's cycle, unchanged, for more
+   * consecutive cycles than the declared bound.
+   *
+   * A per-change refusal is losable, so the cycle skips it and composes again —
+   * that is what keeps one bad change from taking the queue offline. But a
+   * refusal that never stops repeating has stopped being a skipped candidate
+   * and become a runner that will never make progress, and under the fatal
+   * andon ruling (hub/yrd/2026-09-01-fatal-andon-architecture.md) a non-fixable
+   * condition must terminate non-zero: the exit IS the alarm edge Hab pages on.
+   * Spinning forever with a per-cycle warning is precisely the silent-but-
+   * healthy state that ruling exists to delete — every instrument would report
+   * this runner alive while it merged nothing.
+   */
+  "refusal-loop": 14,
 } as const
 
 export type HabitantExitCondition = keyof typeof HABITANT_EXIT
@@ -74,6 +89,12 @@ export const HABITANT_EXIT_DISPOSITION: Readonly<Record<HabitantExitCondition, H
     // A fresh process installs whatever the base tip declares at boot, which
     // is exactly the cure — same reasoning as `source-stale`.
     "installed-plan-stale": "restart-immediately",
+    // The refusal is about the WORLD, not about this process, so a fresh
+    // process meets the identical refusal on its first cycle and stands down
+    // again. Restarting it hot would convert a stuck change into a spawn storm
+    // — the same reasoning as `memory-cap`, and the reason this condition is
+    // paced rather than cured.
+    "refusal-loop": "restart-with-backoff",
   })
 
 /**
