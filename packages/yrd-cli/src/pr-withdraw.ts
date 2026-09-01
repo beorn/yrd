@@ -23,6 +23,7 @@ import {
   landedSubmits,
   Queues,
   stampingEpochStop,
+  submitRefRetirementCommand,
   type LandedSubmitScan,
   type MergedTruthGit,
   type Run,
@@ -822,7 +823,7 @@ export async function preflightRemerge(
  * it when it refuses to derive an admission for already-landed content — so an
  * operator reads ONE command wherever the same ghost surfaces. */
 function retireFactCommand(branch: string): string {
-  return `git push bay :refs/yrd/submit/${branch}`
+  return submitRefRetirementCommand(branch)
 }
 
 /**

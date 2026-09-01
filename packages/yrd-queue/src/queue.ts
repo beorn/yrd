@@ -1986,9 +1986,7 @@ function createQueue<Shape extends ChangeShape>(
           "already landed; " +
           (open.reason === "degenerate"
             ? "the fact stands at the walked tip itself, so containment proves nothing and the branch is " +
-              "held back — retire the fact (git push bay :refs/yrd/submit/" +
-              open.branch +
-              ") if it is stale"
+              `held back — retire the fact (${submitRefRetirementCommand(open.branch)}) if it is stale`
             : "the fact's commit is unreadable here, so the branch stays admissible rather than dropping " +
               "possibly-live work"),
         {
