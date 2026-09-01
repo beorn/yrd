@@ -384,6 +384,16 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // `fillMissingStateFromInitial` supplies as the empty record, and the
   // forward callback's drops are all no-ops on it.
   "74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1",
+  // The composition immediately before lease recovery learned to reclaim a
+  // WAITING job (the no-parking ruling, 2026-08-31) moved the identity. Not a
+  // harness value (the PR1305 / R2732 lesson above): it is the ledger's own
+  // superseded last entry in `checkpoint-bump-gate.ts` — what this project has
+  // ASKED every deployment to store since 2026-08-30. The edge needs no
+  // transformation of its own: the change widens the `lose` Job transition
+  // with two optional keys, so every transition a checkpoint this recent
+  // already stores still parses unchanged, and the forward callback's drops
+  // are all no-ops on it.
+  "1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
