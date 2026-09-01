@@ -20,7 +20,13 @@ import {
   type PrNumberMint,
   recordChanges,
 } from "@yrd/bay"
-import { latestChangeSnapshot, maxChangeSnapshotRevision, newestTruthRecord, type QueuesState } from "./model.ts"
+import {
+  latestChangeSnapshot,
+  maxChangeSnapshotRevision,
+  newestTruthRecord,
+  type CandidateRev,
+  type QueuesState,
+} from "./model.ts"
 
 export type DerivedMemberIdentity = Readonly<{
   id: string
@@ -92,9 +98,65 @@ export function mintDerivedMemberIdentity(
       minted: false,
     }
   }
+  // No run has ever started for this branch, so `latestChangeSnapshot` above
+  // has nothing to find — but admission may already be IN FLIGHT for the
+  // exact live submit fact: `admissionStep`'s first dispatch durably records
+  // the Candidate it built (`queue/candidate/created`, queue.ts) before any
+  // Queue run exists to retain a ChangeSnapshot. Reusing THAT identity here,
+  // unchanged (same id, same revision — no bump), is what lets
+  // `admissionJobKey` resolve to the SAME already-dispatched Job on the next
+  // compose pass instead of abandoning it and minting a phantom sibling.
+  // See {@link pendingDerivedCandidate}.
+  const sha = bays.submits[branch]?.sha
+  const pending = sha === undefined ? undefined : pendingDerivedCandidate(bays, queues, sha)
+  if (pending !== undefined) {
+    return { id: pending.id, revision: pending.revision, minted: false }
+  }
   const id = mintChangeId(mint, bays.prs)
   const seed = newestTruthRecord(records)
   return { id, revision: (seed === undefined ? 0 : changeRevisionNumber(seed)) + 1, minted: true }
+}
+
+/**
+ * The lowest-numbered recordless identity any retained admission Candidate
+ * carries for the live submit fact at `sha` — the durable trace an admission
+ * attempt leaves the MOMENT its first required-check Job is requested, well
+ * before any Queue run starts (measured 2026-09-01 at yrd c576de2a: PR2919
+ * minted 07:59:30, its checks still settling, then the NEXT compose pass
+ * re-derived the same (branch, sha) from scratch and minted PR2920 — every
+ * pass, forever, because nothing survived to tell {@link
+ * mintDerivedMemberIdentity} an admission was already in flight, and
+ * `admissionJobKey` (keyed on id + revision) could never resolve back to the
+ * Job already dispatched under the burned number).
+ *
+ * Reads `queues.candidates`, which the admission path already writes
+ * durably and unconditionally on its first dispatch — no new durable state,
+ * no new journal event, no projection-checkpoint migration.
+ *
+ * Lowest id wins when more than one candidate matches (a branch whose checks
+ * spanned several compose passes before this fix minted more than one
+ * phantom for the same sha): the first identity issued is the one worth
+ * converging on — every later mint for the same content is exactly the
+ * livelock this closes, not a second legitimate attempt.
+ */
+function pendingDerivedCandidate(
+  bays: BaysState,
+  queues: QueuesState,
+  sha: string,
+): Readonly<{ id: string; revision: number }> | undefined {
+  let best: CandidateRev | undefined
+  let bestNumber = Number.POSITIVE_INFINITY
+  for (const candidate of Object.values(queues.candidates)) {
+    for (const rev of candidate.revs) {
+      if (rev.head !== sha || hasChangeRecord(bays, rev.pr)) continue
+      const number = changeIdNumber(rev.pr) ?? Number.POSITIVE_INFINITY
+      if (number < bestNumber) {
+        best = rev
+        bestNumber = number
+      }
+    }
+  }
+  return best === undefined ? undefined : { id: best.pr, revision: best.n }
 }
 
 function changeIdNumber(id: string): number | undefined {

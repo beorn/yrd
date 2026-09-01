@@ -240,6 +240,14 @@ async function journalEvents(
   return out
 }
 
+/** One compose log line by its `action` prop — module-scoped so every test in
+ * this file can assert on what a compose pass reported, not only the
+ * @i/10-yrd/23996 block that introduced it. */
+const composeEvent = (events: readonly LogEvent[], action: string) =>
+  events.find(
+    (event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log" && event.props?.action === action,
+  )
+
 describe("S6 stage 3 — derived-member selection, admission, run", () => {
   it("a derived member is selected, admitted against its submit-ref sha, and runs under its minted identity with zero record writes (A1 shape, check-only plan)", async () => {
     const journal = createMemoryJournal()
@@ -592,6 +600,67 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/waiting"])
   })
 
+  it("REGRESSION (2026-09-01): a compose pass reuses the SAME minted identity across passes while a derived member's required checks are still settling, instead of re-deriving a phantom sibling and abandoning the Job it just dispatched", async () => {
+    // Live incident shape at yrd c576de2a: `compose-derived-admitted` minted
+    // PR2919 for branch '…-r4' at 07:59:30; 56s later the SAME pass's
+    // `queue-run-no-runnable-prs` still read the branch as unrecorded-submit
+    // ("the last compose DID derive an admission for it… the next read
+    // retires it" — it never did); 44s after that the NEXT compose pass
+    // re-derived the identical (branch, sha) from scratch and minted PR2920.
+    // Repeated every pass, forever — eleven branches wedged the same way.
+    //
+    // A required check that hands back a durable waiting token (the shape a
+    // real remote Runner uses — job.ts's `JobWaiting`) never reaches
+    // "completed": `admitChangeRevision` requests the Job once, reads it
+    // straight back as non-terminal (queue.ts ~2890-2894), and — once
+    // requested — `localRunner.submit`'s own short-circuit (job.status !==
+    // "queued") means it is never re-invoked either. Checks-pending held
+    // open on every later pass, deterministically, instead of racing a real
+    // clock.
+    const stillChecking = () =>
+      withStep(
+        "check",
+        (_input: StepExecution): JobResult<CheckResult> => ({ status: "waiting", token: "still-checking" }),
+        { revision: "check-v1", output: CheckResultSchema },
+      )
+    const events: LogEvent[] = []
+    const mint = volatilePrNumberMint()
+    await using app = await createApp({
+      steps: [stillChecking()],
+      defaultSteps: ["check"],
+      prNumberMint: mint,
+      baysPrNumberMint: mint,
+      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]),
+    })
+    await app.bays.recordBranchSubmit({ branch: "issue/slow-checks", sha: SHA, base: "main" })
+
+    await app.queue.run({}, runtime)
+    const firstMint = composeEvent(events, "compose-derived-admitted")
+    expect(firstMint?.props).toMatchObject({ branch: "issue/slow-checks", pr: "PR1", revision: 1 })
+    expect(mint.highWater()).toBe(1)
+
+    events.length = 0
+    await app.queue.run({}, runtime)
+    const secondMint = composeEvent(events, "compose-derived-admitted")
+    // THE BUG: unfixed, this mints 'PR2' — a phantom sibling for content
+    // whose checks are already in flight under PR1's admissionJobKey, which
+    // the pass then abandons unread.
+    expect(secondMint?.props).toMatchObject({ branch: "issue/slow-checks", pr: "PR1", revision: 1 })
+    expect(mint.highWater()).toBe(1)
+
+    // A third pass for good measure — the bug re-fires every pass, not just once.
+    events.length = 0
+    await app.queue.run({}, runtime)
+    const thirdMint = composeEvent(events, "compose-derived-admitted")
+    expect(thirdMint?.props).toMatchObject({ branch: "issue/slow-checks", pr: "PR1", revision: 1 })
+    expect(mint.highWater()).toBe(1)
+
+    // Still correctly "not yet landed" — that row is not the bug; the number
+    // churn underneath it was. `unrecordedSubmits` only retires once a Queue
+    // run actually starts, and none has (the check never settles here).
+    expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/slow-checks"])
+  })
+
   it("replay converges over a journal holding recordless terminal events, with zero store writes for the derived era (A5 full)", async () => {
     const journal = createMemoryJournal()
     const id = ids()
@@ -807,11 +876,6 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
   // outside the two were the same silence — and the standing unrecorded-submit
   // rows they leave behind read the same too. Both empty returns must now say
   // WHICH, and the two must not say the same thing.
-
-  const composeEvent = (events: readonly LogEvent[], action: string) =>
-    events.find(
-      (event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log" && event.props?.action === action,
-    )
 
   it("says the derived lane is EMPTY, with the population it is empty over, when the mint IS configured", async () => {
     const events: LogEvent[] = []
