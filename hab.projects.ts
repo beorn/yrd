@@ -67,8 +67,14 @@ export default {
         command: `bun tools/yrd-runtime.mjs yrd queue run ${repository.name}`,
         // The habitant stands down over this RSS (exit 12, memory-cap) instead of
         // waiting for the kernel; @cto ruling 2026-08-30 on
-        // @i/10-yrd/runner-exits-and-respawns — 12 GiB, one habitant per host.
-        env: { TRIBE_NAME: "@yrd", YRD_REPOSITORY_ALIASES, YRD_HABITANT_RSS_CAP_MB: "12288" },
+        // @i/10-yrd/runner-exits-and-respawns — one habitant per host. Raised
+        // 12 → 24 GiB on 2026-09-01 (@cto): the resident's measured working set
+        // while running admissions on a 527 MB journal is 6-10 GB (sampled every
+        // minute for 30 min, peak 9.96 GB), and it stood down at 16.5 GB at
+        // 12:58 PDT with restart:"never" — a cap below the working set is an
+        // outage generator, not a guard. The host has 121 GB; the growth itself
+        // is tracked as its own defect. This number is a ceiling for runaway.
+        env: { TRIBE_NAME: "@yrd", YRD_REPOSITORY_ALIASES, YRD_HABITANT_RSS_CAP_MB: "24576" },
         health: { command: `bun tools/yrd-runtime.mjs yrd queue ${repository.name} --check --json` },
         // Andon policy (operator ruling 2026-09-01): a crashed runner stays
         // exited and pages once; every restart is a deliberate operator/CTO
