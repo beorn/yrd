@@ -304,12 +304,14 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
         code: "admission-refusal-needs-person",
         pr: pr.id,
         owner: "@ci",
-        message: expect.stringContaining("Owner: @ci."),
+        // The configured role wins over the recorded submitter, and the text
+        // says which of the three rules picked the recipient.
+        message: expect.stringContaining("Owner: @ci (the configured needsPerson.owner in .yrd.yml)."),
       }),
     )
   })
 
-  it("falls back to the unowned default when needsPersonOwner is configured as blank", async () => {
+  it("routes to the change's recorded submitter when needsPersonOwner is configured as blank", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createApp(
       refuseForever(() => ""),
@@ -339,13 +341,13 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       reason: "the change touches generated-only gitlinks; an exact ruling is needed",
     })
 
-    expect(app.queue.audit().findings).toContainEqual(
-      expect.objectContaining({
-        code: "admission-refusal-needs-person",
-        pr: pr.id,
-        owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
-      }),
-    )
+    // A dead letter addressed to nobody is not a delivery. With no configured
+    // role the recipient is the one identity the record already holds — the
+    // submitter — and the finding says which rule chose them.
+    const finding = app.queue.audit().findings.find((candidate) => candidate.code === "admission-refusal-needs-person")
+    expect(finding?.owner).toBe("operator")
+    expect(finding?.owner).not.toContain("unowned")
+    expect(finding?.message).toContain("Owner: operator (the change's recorded submitter")
   })
 
   it("keeps the needs-person finding honest when the revision records no submitter", async () => {
@@ -389,11 +391,12 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     const finding = app.queue.audit().findings.find((candidate) => candidate.code === "admission-refusal-needs-person")
     expect(finding, "an unattributed settlement still needs a person and must still flag").toBeDefined()
-    expect(finding?.owner, "the empty owner slot is shown explicitly, never invented from identity").toBe(
-      "unowned — no needsPerson.owner is configured in .yrd.yml",
-    )
+    // Nothing configured and nothing recorded: the last rule is the standing
+    // owner of the yrd surfaces, so the dead letter still reaches a person.
+    expect(finding?.owner, "a needs-person finding is never addressed to nobody").toBe("@cto")
+    expect(finding?.owner).not.toContain("unowned")
     expect(finding?.submitter, "no recorded identity means no field, never a plausible-looking owner").toBeUndefined()
-    expect(finding?.message).toContain("Owner: unowned — no needsPerson.owner is configured in .yrd.yml.")
+    expect(finding?.message).toContain("Owner: @cto (the yrd-surfaces owner of record")
     expect(finding?.message).not.toContain("undefined")
   })
 
@@ -1101,7 +1104,11 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.eligibility(pr.id).reason?.code).toBe("admission-refused")
     expect(message).toContain("Settled needs-person at 2026-01-01T00:00:00.000Z")
     expect(message).toContain("the recut certificate requires human judgment")
-    expect(message).toContain("decision owner: unowned — no needsPerson.owner is configured in .yrd.yml")
+    // Unconfigured repository: the reader-facing message routes the decision
+    // the same way the audit finding does — to the recorded submitter, naming
+    // the rule — rather than declining to say who.
+    expect(message).toContain("decision owner: operator (the change's recorded submitter")
+    expect(message).not.toContain("unowned")
     expect(message).not.toContain("yrd pr recut")
   })
 

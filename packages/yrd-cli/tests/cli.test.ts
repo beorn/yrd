@@ -7735,7 +7735,7 @@ describe("runYrd", () => {
    * ROLE — never the revision's recorded submitter, and never omitted: an
    * unconfigured repository shows the explicit unowned default.
    */
-  it("writes an unrouted needs-person change into the habitant heartbeat", async () => {
+  it("routes a needs-person change to its recorded submitter in the habitant heartbeat", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-needs-person-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
@@ -7782,16 +7782,18 @@ describe("runYrd", () => {
       )
       try {
         const written = JSON.parse(readFileSync(statusPath, "utf8")) as Readonly<{ needsPerson: unknown }>
-        // A recorded submitter exists ("@dev/11") and deliberately does NOT
-        // become the owner: `owner` is the repository's declared ROLE, and no
-        // repository config here means the explicit unowned default, never an
-        // individual guessed from push identity.
+        // A recorded submitter exists ("@dev/11"), and with no repository
+        // config it IS the owner. The old contract stopped at the declared
+        // role and named the empty slot when there was none — honest about
+        // configuration, useless as routing, and the change sat parked for
+        // want of a recipient. The no-parking ruling made the recorded
+        // submitter the second rule; the finding says which rule chose them.
         expect(written.needsPerson).toMatchObject([
           {
             code: "admission-refusal-needs-person",
             pr: pr.id,
             refusal: "authored-gitlink",
-            owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
+            owner: "@dev/11",
           },
         ])
         // Must never disagree with queue audit's own reading of the identical
@@ -7915,9 +7917,11 @@ describe("runYrd", () => {
       expect(body.warnings).toHaveLength(1)
       expect(body.warnings[0]).toContain("[admission-refusal-needs-person]")
       expect(body.warnings[0]).toContain(pr.id)
-      // Unconfigured repository: the empty owner slot is SHOWN, never omitted
-      // and never guessed from the recorded submitter ("@dev/7").
-      expect(body.warnings[0]).toContain("Owner: unowned — no needsPerson.owner is configured in .yrd.yml.")
+      // Unconfigured repository: the warning routes to the recorded submitter
+      // ("@dev/7") and says which rule chose them, so the reader knows this is
+      // a fallback rather than a declared role.
+      expect(body.warnings[0]).toContain("Owner: @dev/7 (the change's recorded submitter")
+      expect(body.warnings[0]).not.toContain("unowned")
 
       const humanListing = outputIO({ now: () => Date.parse("2026-07-09T12:05:00.000Z"), columns: 120 })
       expect(await runYrd(app, yrd("queue", "list"), humanListing.io), humanListing.stderr()).toBe(0)
@@ -7934,7 +7938,7 @@ describe("runYrd", () => {
         { queueReadModel: testQueueReadModel(app) },
       )
       expect(snapshot.needsPerson).toHaveLength(1)
-      expect(snapshot.needsPerson?.[0]?.owner).toBe("unowned — no needsPerson.owner is configured in .yrd.yml")
+      expect(snapshot.needsPerson?.[0]?.owner).toBe("@dev/7")
     } finally {
       await app.close()
     }

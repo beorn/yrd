@@ -1257,6 +1257,50 @@ export const DEFAULT_QUEUE_PROGRESS_POLICY: QueueProgressPolicy = Object.freeze(
  */
 export const DEFAULT_NEEDS_PERSON_OWNER = "unowned — no needsPerson.owner is configured in .yrd.yml"
 
+/** Who a needs-person dead letter reaches when the repository declares no role
+ * and the revision records no submitter: the standing owner of the yrd
+ * surfaces. A last rule, not a good one — a repository that lands here should
+ * configure `needsPerson.owner` — but a change parked for a judgment nobody is
+ * addressed to is a park, and the no-parking ruling forbids one. */
+const YRD_SURFACES_OWNER_OF_RECORD = "@cto"
+
+/** A resolved needs-person recipient and the rule that chose them. `rule` is
+ * reader-facing text, printed beside the name so nobody has to guess whether a
+ * recipient was declared, recorded or defaulted. */
+type NeedsPersonRecipient = Readonly<{ owner: string; rule: string }>
+
+/**
+ * Who this change's needs-person judgment routes to.
+ *
+ * Three rules in order — the repository's declared role, else the identity the
+ * revision already records, else {@link YRD_SURFACES_OWNER_OF_RECORD}. The
+ * result is NEVER {@link DEFAULT_NEEDS_PERSON_OWNER}: that string named the
+ * empty slot rather than a person, so an unconfigured repository dead-lettered
+ * every judgment to nobody and the change sat parked until someone happened to
+ * read the audit (@i/10-merge-queue/22918-needs-person-unowned).
+ *
+ * The declared role still wins where it exists, and still means a ROLE:
+ * `owner` names who DECIDES, which is why it can differ from the finding's
+ * `submitter` field even when this resolver falls back to the submitter to
+ * pick it.
+ */
+function needsPersonRecipient(record: DeepReadonly<Change> | undefined, configured: string): NeedsPersonRecipient {
+  if (configured !== DEFAULT_NEEDS_PERSON_OWNER) {
+    return { owner: configured, rule: "the configured needsPerson.owner in .yrd.yml" }
+  }
+  const submitter = record === undefined ? undefined : currentChangeRev(record).submitter
+  if (submitter !== undefined) {
+    return {
+      owner: submitter,
+      rule: "the change's recorded submitter; no needsPerson.owner is configured in .yrd.yml",
+    }
+  }
+  return {
+    owner: YRD_SURFACES_OWNER_OF_RECORD,
+    rule: "the yrd-surfaces owner of record; no needsPerson.owner is configured and this revision records no submitter",
+  }
+}
+
 export type QueueAuditOptions = Readonly<{ now?: string }>
 
 export type CandidatePreparationInput = Readonly<{
@@ -7988,16 +8032,17 @@ function admissionRefusalAuditFindings(
       // between "change went terminal" and "next compaction" is exposed.
       const pr = getChangeRecord(state.bays, refusal.pr)
       if (pr !== undefined && isNonCheckableChangeState(changeDeliveryState(pr))) continue
+      const recipient = needsPersonRecipient(pr, needsPersonOwner)
       findings.push({
         code: "admission-refusal-needs-person",
         message:
           `change '${refusal.pr}' needs a person: its entry-check failure '${refusal.code}' has no ` +
-          `mechanical remedy — ${refusal.settlement.reason}. Owner: ${needsPersonOwner}.`,
+          `mechanical remedy — ${refusal.settlement.reason}. Owner: ${recipient.owner} (${recipient.rule}).`,
         pr: refusal.pr,
         specimen: `pr:${refusal.pr}:needs-person`,
         refusal: refusal.code,
         since: refusal.settlement.settledAt,
-        owner: needsPersonOwner,
+        owner: recipient.owner,
       })
       continue
     }
@@ -9912,14 +9957,18 @@ function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string 
  * message and the finding never disagree about the owner. The drill is only
  * for refusals nothing has settled. */
 function admissionRefusalNext(
-  pr: string,
+  pr: DeepReadonly<Change>,
   settlement: Readonly<{ disposition: string; reason: string; settledAt: string }> | undefined,
   needsPersonOwner: string,
 ): string {
-  return settlement === undefined
-    ? `Next: tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>' (${pr})`
-    : `Settled ${settlement.disposition} at ${settlement.settledAt}: ${settlement.reason}; ` +
-        `decision owner: ${needsPersonOwner} — no mechanical remedy applies`
+  if (settlement === undefined) {
+    return `Next: tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>' (${pr.id})`
+  }
+  const recipient = needsPersonRecipient(pr, needsPersonOwner)
+  return (
+    `Settled ${settlement.disposition} at ${settlement.settledAt}: ${settlement.reason}; ` +
+    `decision owner: ${recipient.owner} (${recipient.rule}) — no mechanical remedy applies`
+  )
 }
 
 /** The current revision's durable settlement, when the refusal ledger holds one
@@ -9982,7 +10031,7 @@ function ChangeEligibility(
           code: "admission-refused",
           message:
             `change '${pr.id}' required checks cannot run after the entry-check failure '${admission.receipt.code}': ` +
-            `${admission.receipt.message}.\n${admissionRefusalNext(pr.id, settledAdmissionRefusal(state, pr), needsPersonOwner)}`,
+            `${admission.receipt.message}.\n${admissionRefusalNext(pr, settledAdmissionRefusal(state, pr), needsPersonOwner)}`,
         })
       }
       const result = changeNeedsAuthor(pr)?.receipt
@@ -10050,7 +10099,7 @@ function ChangeEligibility(
         message:
           `change '${pr.id}' required checks cannot run after the entry-check failure '${admissionRefusal.code}': ` +
           `${admissionRefusal.reason}.\n` +
-          admissionRefusalNext(pr.id, admissionRefusal.settlement, needsPersonOwner),
+          admissionRefusalNext(pr, admissionRefusal.settlement, needsPersonOwner),
       })
     }
     if (options.ignoreChecks !== true && checks.status === "queued") {
