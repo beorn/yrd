@@ -3792,6 +3792,9 @@ checks: [{check: {run: "true"}}]
       { from: "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839", to: releasedHop },
       // Production journal stored identity 2026-08-22 (evictedThrough 27609).
       { from: "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd", to: releasedHop },
+      // The no-parking composition's released identity, retained across the
+      // derived branch+sha binding bump this branch introduces.
+      { from: "fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c", to: releasedHop },
       { from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8", to: releasedHop },
     ])
     expect(existsSync(join(repo, ".git", "yrd"))).toBe(false)
