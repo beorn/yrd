@@ -38,6 +38,7 @@ export {
   withStep,
   withMerge,
   type QueueOptions,
+  type QueueOutcome,
   DEFAULT_QUEUE_BATCH_SIZE,
   type QueueProgressPolicy,
   DEFAULT_QUEUE_PROGRESS_POLICY,

@@ -223,6 +223,8 @@ import {
   type QueuePassFatal,
   type QueuePassStop,
 } from "./queue-drain.ts"
+import { createOutcomeNotifier, spawnNotifier, type OutcomeNotifier } from "./outcome-notify.ts"
+import type { QueueOutcome } from "@yrd/queue"
 import { retainedWorkspaceNote, type RetainedWorkspace } from "./workspace-retention.ts"
 import type {
   YrdCliApp,
@@ -511,6 +513,8 @@ export type DefaultYrdAppOptions = Readonly<{
   contestEvaluators?: readonly ContestEvaluatorDef[]
   contestGit?: CommitResolver
   defaultSubmitter?: string
+  /** The queue's outcome seam (@i/10-yrd/24028): one call per ended attempt. */
+  onOutcome?: (outcome: QueueOutcome) => Promise<void>
   scope?: Scope
   log?: ConditionalLogger
   /** Opt-in warm candidate-worktree pool shared across check steps (R40). */
@@ -2317,6 +2321,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     isSubmitSuperseded: ({ sha, base }) => isSubmitContentLanded(options.process, options.repo, sha, base),
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(options.config.needsPerson === undefined ? {} : { needsPersonOwner: options.config.needsPerson.owner }),
+    ...(options.onOutcome === undefined ? {} : { onOutcome: options.onOutcome }),
     resolveBaseSha: async (base) =>
       (
         await resolveGitQueueTarget({
@@ -4217,6 +4222,18 @@ async function createYrdRuntimeHost(
       await (journal as MutableJournal).views.rebuild()
     }
     const defaultSubmitter = options.defaultSubmitter ?? "operator"
+    // The outcome seam (@i/10-yrd/24028). Built before the runtime app so the
+    // queue's hook can reach it; the ledger and the notify-seat sidecar live in
+    // the state dir beside the journal. The log path is what the ball body
+    // points a reader at: the file the process logs to, when it logs to one.
+    const outcomeNotifier = createOutcomeNotifier({
+      stateDir: repository.stateDir,
+      ...(loaded.config.notify === undefined ? {} : { notifyCommand: loaded.config.notify }),
+      ...(loaded.config.owner === undefined ? {} : { owner: loaded.config.owner }),
+      logPath: env.LOGGILY_FILE ?? `the runner's stderr (LOGGILY_FILE is unset; runner ${habitant?.id ?? String(globalThis.process.pid)})`,
+      log: log.child("outcome"),
+      run: spawnNotifier(repository.repo, env),
+    })
     if (mode === "active") {
       candidatePool = createCandidatePool({
         repo: repository.repo,
@@ -4245,6 +4262,9 @@ async function createYrdRuntimeHost(
       config: loaded.config,
       ...(loaded.path === undefined ? {} : { configAuthority: relative(repository.repo, loaded.path) }),
       defaultSubmitter,
+      onOutcome: async (outcome) => {
+        await outcomeNotifier.notify(outcome)
+      },
       ...(options.authorizeSubmoduleModelChange === undefined
         ? {}
         : { authorizeSubmoduleModelChange: options.authorizeSubmoduleModelChange }),
@@ -4372,6 +4392,7 @@ async function createYrdRuntimeHost(
       [MergeAuthorityBoundary]: loaded.config.merge ?? "expected",
       checks,
       guards,
+      outcomes: outcomeNotifier,
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
           importOrphanJournal({
@@ -4724,6 +4745,7 @@ async function runYrdProcessHost(
 
   let log: ConditionalLogger | undefined
   let host: YrdHost | undefined
+  let outcomes: OutcomeNotifier | undefined
   let oneShotRunner: string | undefined
   let residentRunner: string | undefined
   let shutdownLog: ConditionalLogger | undefined
@@ -4764,6 +4786,20 @@ async function runYrdProcessHost(
         // no-op, so the cooperative case costs nothing.
         const runner = oneShotRunner ?? (isQueuePassFatal(cause) ? residentRunner : undefined)
         if (runner === undefined) return
+        // The pass ended on its own ERROR row: that is an outcome too, and it
+        // is the queue owner's. Sent BEFORE the settle so a settle that hangs
+        // to its bound cannot take the ball with it; a notifier fault here is
+        // logged (it is already an ERROR pass) and never re-enters this path.
+        if (isQueuePassFatal(cause) && outcomes !== undefined) {
+          try {
+            await outcomes.notifyPassError(cause, `pass:${runner}:${new Date().toISOString()}`)
+          } catch (error) {
+            shutdownLog.warn?.(
+              `could not open the queue owner's ball for the pass-ending ERROR: ${error instanceof Error ? error.message : String(error)}`,
+              { action: "notify-pass-error-failed" },
+            )
+          }
+        }
         await settleOneShotQueueRun(host, runner, cause, shutdownLog)
       },
       // Releases the queue runner lease last (`closeRuntime`), on every path
@@ -4882,6 +4918,7 @@ async function runYrdProcessHost(
         }
         habitantArtifacts.root = join(activeHost.repository.stateDir, "artifacts")
         host = activeHost
+        outcomes = activeHost.services.outcomes
         const runnerLog = runtimeLog.child("runner")
         oneShotRunner = posture === "one-shot-queue-run" ? runner?.id : undefined
         residentRunner = posture === "habitant-queue-run" ? runner?.id : undefined

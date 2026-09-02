@@ -1425,6 +1425,51 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
    * (@i/10-merge-queue/22918-needs-person-unowned).
    */
   needsPersonOwner?: string
+  /**
+   * The outcome seam (@i/10-yrd/24028): every ENDED attempt — a merge run
+   * that landed or failed, a revision refused at admission — is handed here
+   * exactly once per pass, so a notifier outside this package can open ONE
+   * ball for it. Queue stays tribe-free: it hands over facts, never sends.
+   * The hook must not throw; a throw is caught and logged as an ERROR row
+   * (`notify-failed`), which ends the pass under the any-ERROR rule.
+   */
+  onOutcome?: (outcome: QueueOutcome) => Promise<void>
+}>
+
+/**
+ * One ended attempt, as the notifier seam receives it. `attemptId` is the
+ * idempotency key: a merge run's id (`R123`, or `R123/PR7` for one member of
+ * a wider batch), or `<pr>@<revision>:admission@<baseSha>` for a revision
+ * refused before any run existed. Re-running the same attempt id must never
+ * open a second ball; the consumer keys its ledger on it.
+ */
+export type QueueOutcome = Readonly<{
+  /** `landed`: merged onto the base. `failed`: a merge run ended without a
+   * merge. `refused`: the revision was refused at admission (a failed
+   * required check, a conflicting candidate, a typed preparation refusal). */
+  kind: "landed" | "failed" | "refused"
+  attemptId: string
+  pr: string
+  revision: number
+  branch: string
+  sha: string
+  base: string
+  baseSha?: string
+  /** The identity the revision records as its submitter, when it records one. */
+  submitter?: string
+  run?: RunId
+  /** The failure/refusal code, resolvable through the refusal-code registry. */
+  code?: string
+  reason?: string
+  /** How admission classified a refusal: `refusal` (a verdict on the content),
+   * `failure` (a required check failed), `infrastructure` (a host fault). */
+  failureKind?: "refusal" | "failure" | "infrastructure"
+  /** The landing, for a `landed` outcome. */
+  integration?: Readonly<{ commit: string; baseSha: string }>
+  /** Diagnostics attributed to THIS candidate (net-new against the exact
+   * base), rendered `file:line[:column] message`. Inherited base reds are
+   * deliberately absent: the send-back names only what the author owns. */
+  attributableFailures?: readonly string[]
 }>
 
 /** Built-in candidate width when a repository does not declare `batch`. */
@@ -1925,6 +1970,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             yrd.log.child("queue"),
             yrd.history,
             async () => (await yrd.historySnapshot()).state as unknown as DeepReadonly<RuntimeState>,
+            options.onOutcome,
           ),
         }
       },
@@ -1990,8 +2036,78 @@ function createQueue<Shape extends ChangeShape>(
   log: ConditionalLogger,
   history: JournalHistory<unknown> | undefined,
   historicalState: () => Promise<DeepReadonly<RuntimeState>>,
+  onOutcome: QueueOptions<readonly AnyStepDef[]>["onOutcome"],
 ): Queue<Shape> {
   const current = (id: RunId): Run => materializeRun(Queues.record(state(), id), runtime().jobs)
+  /** Hand one ENDED attempt to the outcome seam. Never throws into the pass:
+   * a hook fault is its own ERROR row, which ends the pass under the
+   * any-ERROR rule — loud, and never a silently skipped ball. */
+  const reportOutcome = async (outcome: QueueOutcome): Promise<void> => {
+    if (onOutcome === undefined) return
+    try {
+      await onOutcome(outcome)
+    } catch (error) {
+      log.error?.(
+        `queue outcome hook failed for ${outcome.kind} attempt '${outcome.attemptId}' (${outcome.pr}): ` +
+          (error instanceof Error ? error.message : String(error)),
+        {
+          action: "queue-outcome-hook-failed",
+          code: "notify-failed",
+          attempt: outcome.attemptId,
+          pr: outcome.pr,
+          kind: outcome.kind,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      )
+    }
+  }
+  /** The diagnostics attributed to the candidate itself, as lines. Absent
+   * evidence (an opaque red, an inherited-only failure) yields none: the
+   * send-back must not bill the author for the base. */
+  const attributableFailureLines = (result: DeepReadonly<JobErrorFact> | undefined): readonly string[] => {
+    if (result === undefined) return []
+    const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
+    if (!attributed.success) return []
+    return attributed.data.failures.map(
+      (failure) =>
+        `${failure.file}:${failure.line}${failure.column === undefined ? "" : `:${failure.column}`} ${failure.message}`,
+    )
+  }
+  /** One outcome per member of a terminal run. A run that is not terminal
+   * yields none — a deferred merge held open by a remote runner has not
+   * ended, and its outcome belongs to the pass that settles it. */
+  const runOutcomes = (run: Run): readonly QueueOutcome[] => {
+    if (!Queues.terminal(run)) return []
+    const landed = Queues.succeeded(run)
+    if (!landed && !Queues.failed(run)) return []
+    const failure = landed ? undefined : (run.error ?? authorAttributionResult(run))
+    const candidate = state().candidates[run.candidateId]
+    return run.prs.map((member) => {
+      const record = resolveChange(runtime().bays, member.id)
+      const submitter = record === undefined ? undefined : currentChangeRev(record).submitter
+      const baseSha = run.integration?.baseSha ?? member.baseSha ?? candidate?.baseSha
+      return {
+        kind: landed ? "landed" : "failed",
+        attemptId: run.prs.length === 1 ? run.id : `${run.id}/${member.id}`,
+        pr: member.id,
+        revision: member.revision,
+        branch: member.branch,
+        sha: member.headSha,
+        base: run.base,
+        ...(baseSha === undefined ? {} : { baseSha }),
+        ...(submitter === undefined ? {} : { submitter }),
+        run: run.id,
+        ...(landed || failure === undefined ? {} : { code: failure.code, reason: failure.message }),
+        ...(landed && run.integration !== undefined
+          ? { integration: { commit: run.integration.commit, baseSha: run.integration.baseSha } }
+          : {}),
+        ...(landed ? {} : { attributableFailures: attributableFailureLines(failure) }),
+      } satisfies QueueOutcome
+    })
+  }
+  const reportRunOutcomes = async (run: Run): Promise<void> => {
+    for (const outcome of runOutcomes(run)) await reportOutcome(outcome)
+  }
   const byName = new Map(steps.map((step) => [step.name, step] as const))
   // Read ONCE from this process's configuration: every surface that reports why
   // a standing submit fact has not been admitted answers from the same two
@@ -3802,6 +3918,26 @@ function createQueue<Shape extends ChangeShape>(
         if (outcome.refusal !== undefined) {
           await noteRevisionAdmissionRefusal(pr.id, outcome.refusal)
           refused.push(pr.id)
+          // The revision's attempt ENDED here — no run will ever exist for it
+          // at this base — so this is where its one outcome is handed over.
+          const refusedRecord = resolveChange(runtime().bays, pr.id)
+          const revision = currentChangeRev(refusedRecord ?? pr)
+          const receipt = refusedRecord === undefined ? undefined : changeNeedsAuthor(refusedRecord)?.receipt
+          await reportOutcome({
+            kind: "refused",
+            attemptId: `${pr.id}@${String(revision.n)}:admission@${baseSha}`,
+            pr: pr.id,
+            revision: revision.n,
+            branch: pr.branch,
+            sha: revision.head,
+            base: pr.base,
+            baseSha,
+            ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
+            ...(outcome.refusal.code === undefined ? {} : { code: outcome.refusal.code }),
+            reason: outcome.refusal.reason,
+            failureKind: outcome.refusal.kind,
+            attributableFailures: attributableFailureLines(receipt),
+          })
         }
         // A derived head just went green: the Jobs ARE its admission record
         // (a derived member never gets a stored one), so nothing downstream
@@ -5022,6 +5158,10 @@ function createQueue<Shape extends ChangeShape>(
               const root = current(id)
               if (Queues.terminal(root)) await reportFreshTerminal(root)
               else await settleCandidate(id)
+              // The one place both merge paths — the drain's merge-when-green
+              // head and the post-drain selection — pass through, so a run
+              // that ENDED in this pass hands over its outcome exactly once.
+              await reportRunOutcomes(current(id))
               return id
             } catch (error) {
               const fact = failureFact(error)
@@ -11601,6 +11741,17 @@ export const YRD_REFUSAL_CODES = [
   "mock-mismatch",
   "needs-author",
   "no-merge-authority",
+  // The outcome-notifier seam (@i/10-yrd/24028). `notify-failed`: the
+  // configured notifier exited non-zero, timed out, or printed no ball id —
+  // an ERROR row, which ends the pass (NO SILENT ERRORS: an outcome that
+  // reached nobody must not read as delivered). `notify-unconfigured`: no
+  // `notify:` command is declared, so the outcome was journaled without a
+  // ball — one WARN per pass. Both are infrastructure-owned (the queue
+  // owner's), never the author's: registered so the census resolves them to
+  // themselves rather than through the `-failed` dynamic family to
+  // `check-failed`.
+  "notify-failed",
+  "notify-unconfigured",
   "orphaned-requested-job",
   "orphaned-run",
   "payload-certificate",
