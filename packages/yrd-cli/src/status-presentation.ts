@@ -236,6 +236,13 @@ export function failureDisposition(code: string): FailureDisposition {
     return { state: "stale", automation: "auto-requeue", owner: "queue" }
   }
   if (canonical === "stale-pr") return { state: "stale", automation: "none", owner: "queue" }
+  // Ahead of the environment branch, which this code is also a member of: the
+  // membership is what stops the author being billed, and this branch is what
+  // keeps a bound that fired NAMED as a bound. `env` would be true and useless
+  // — the operator reads the status column to know what to go and look at, and
+  // `routeOutcome` keys its "a check TIMEOUT routes here: yrd is broken until
+  // the owner proves otherwise" body on this state (@i/10-yrd, 2026-09-02).
+  if (canonical === "check-timeout") return { state: "timeout", automation: "auto-requeue", owner: "queue" }
   if (ENVIRONMENT_OWNED_FAILURE_CODES.has(canonical) || INFRA_RETRY_FAILURE_CODES.has(canonical)) {
     return { state: "env", automation: "auto-requeue", owner: "queue" }
   }

@@ -27,6 +27,7 @@ import { createLogger, type ConditionalLogger, type Event as LogEvent } from "lo
 import * as z from "zod"
 import {
   CHECK_STUCK,
+  CHECK_TIMEOUT,
   CommandEvidenceSchema,
   CommandTerminalSchema,
   DIAGNOSTICS_COMPARISON_READY,
@@ -3878,30 +3879,38 @@ describe("Queue command adapters", () => {
     { exitCode: 2, conclusion: "failure", code: CHECK_STUCK, name: "2 is stuck" },
     { exitCode: 127, conclusion: "failure", code: CHECK_STUCK, name: "127 — no such check script — is stuck" },
     { exitCode: 3, conclusion: "failure", code: CHECK_STUCK, name: "any other status is stuck" },
-  ])("$name", async ({ exitCode, conclusion, code }) => {
+    {
+      exitCode: 137,
+      conclusion: "failure",
+      code: CHECK_TIMEOUT,
+      timedOut: true,
+      name: "past its bound is stuck, and it is not the author's",
+    },
+  ])("$name", async ({ exitCode, conclusion, code, timedOut = false }) => {
     const cwd = await mkdtemp(join(tmpdir(), "yrd-command-exit-map-"))
     roots.push(cwd)
+    const ran = {
+      exitCode,
+      signal: null,
+      // A judged-failure line in the output, deliberately: a check that could
+      // not do its job judged nothing, whatever it printed on the way out, and
+      // `judgedFailure` must not be recorded for it.
+      stdout: "FAIL src/model.test.ts > model rejects an empty name\n",
+      stderr: "",
+      durationMs: 12,
+    }
+    // Split rather than spread: `ProcessResult` ties `verdict: "TIMED_OUT"` to
+    // the LITERAL `timedOut: true`, which a widened boolean cannot satisfy.
+    const result: ProcessResult = timedOut
+      ? { ...ran, signal: null, timedOut: true, verdict: "TIMED_OUT" }
+      : { ...ran, signal: null, timedOut: false }
     const step = configuredCommandStep<ChangeShape>({
-      inject: {
-        process: {
-          run: () =>
-            Promise.resolve({
-              exitCode,
-              signal: null,
-              // A judged-failure line in the output, deliberately: a check that
-              // could not do its job judged nothing, whatever it printed on the
-              // way out, and `judgedFailure` must not be recorded for it.
-              stdout: "FAIL src/model.test.ts > model rejects an empty name\n",
-              stderr: "",
-              durationMs: 12,
-              timedOut: false,
-            } satisfies ProcessResult),
-        },
-      },
+      inject: { process: { run: () => Promise.resolve(result) } },
       command: ["false"],
       cwd,
       purpose: "check",
       artifactRoot: join(cwd, "artifacts"),
+      ...(timedOut ? { timeoutMs: 1000 } : {}),
     })
     const outcome = await step(
       {
@@ -3927,10 +3936,17 @@ describe("Queue command adapters", () => {
     if (outcome.status !== "completed") throw new Error(`configured command was ${outcome.status}`)
     if (outcome.conclusion === "failure") {
       expect(outcome.error.code).toBe(code)
-      // The record names the check, its exit and the log holding the rest.
       expect(outcome.error.message).toContain("check")
-      expect(outcome.error.message).toContain(String(exitCode))
-      expect(outcome.error.message).toMatch(/output\.log/u)
+      if (timedOut) {
+        // A bound that fired names the bound, not an exit: the process was
+        // killed and never reported one worth reading.
+        expect(outcome.error.message).toContain("1000ms wall-clock bound")
+        expect(outcome.error.message).toContain("never reached a verdict")
+      } else {
+        // The record names the check, its exit and the log holding the rest.
+        expect(outcome.error.message).toContain(String(exitCode))
+        expect(outcome.error.message).toMatch(/output\.log/u)
+      }
     }
     // Only a check that ran to a pass or a fail may be recorded as having
     // JUDGED the change — a judged red is structurally permanent, so a stuck

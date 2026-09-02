@@ -202,6 +202,26 @@ export const DIAGNOSTICS_COMPARISON_READY = "diagnostics-comparison-ready"
 export const CHECK_STUCK = "check-stuck"
 
 /**
+ * A check killed by its own wall-clock bound: STUCK, by the bound.
+ *
+ * Its own code rather than {@link CHECK_STUCK} because a bound that fired is a
+ * different thing to look at from a check that exited strangely — the cure is
+ * the bound or the check's own speed, and `stageBoundMs` in the evidence says
+ * which bound. Same billing either way: the process never reached a verdict, so
+ * nobody is billed and the change stays where it was.
+ *
+ * FIXED, for the reason {@link CHECK_STUCK} is fixed, and this one is the proof
+ * of the hazard: this was `<purpose>-timeout` until 2026-09-02, so it was
+ * outside the closed vocabulary, `failureDisposition` THREW on it, and the only
+ * thing keeping it off the author's bill was a `catch` in the outcome router
+ * that files an unregistered code with the queue owner. The presentation read
+ * `other` and `admissionFailureKind` read `failure`, so the timeout still spent
+ * the author's submit authority. A `-timeout` suffix family could not fix that:
+ * five codes here end in `-timeout` and none of them is about a check.
+ */
+export const CHECK_TIMEOUT = "check-timeout"
+
+/**
  * Whether an exit status means the check could not do its job.
  *
  * The mapping, whole, and the only place it is decided: 0 is pass, 1 is fail,
@@ -733,8 +753,10 @@ function configuredCommand<Shape extends ChangeShape>(
       if (result.timedOut) {
         const action = waiting ? "launcher" : "command"
         return failed(
-          `${options.purpose}-timeout`,
-          `${options.purpose} ${action} exceeded its ${options.timeoutMs ?? result.durationMs}ms wall-clock bound`,
+          CHECK_TIMEOUT,
+          `${options.purpose} ${action} exceeded its ${options.timeoutMs ?? result.durationMs}ms wall-clock bound, ` +
+            "so it never reached a verdict on the change. Nobody is billed for this and the change stays where it " +
+            "was; fix the queue and run it again",
           evidence,
         )
       }

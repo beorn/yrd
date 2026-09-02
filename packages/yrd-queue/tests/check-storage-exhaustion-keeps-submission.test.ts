@@ -26,11 +26,14 @@ import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } f
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createProcess, type Process } from "@yrd/process"
+import { failureDisposition } from "../../yrd-cli/src/status-presentation.ts"
 import {
   candidateRefFor,
   canonicalRefusalCode,
+  CHECK_TIMEOUT,
   COMPOSITION_FAILURE_BUCKETS,
   configuredCommandStep,
+  ENVIRONMENT_OWNED_FAILURE_CODES,
   withMerge,
   withQueue,
   withStep,
@@ -108,15 +111,22 @@ const mergeableCandidate: CandidatePreparer = (input) => {
  * incident had, not a callback returning a hand-built verdict. It counts its
  * invocations; with `passOnRerun` it fails exactly once, modelling a filesystem
  * that has room again by the next pass. */
-function checkScript(
-  root: string,
-  lines: readonly string[],
-  options: Readonly<{ stream: "stdout" | "stderr"; passOnRerun: boolean }>,
-): string {
+type CheckPlan = Readonly<{
+  stream: "stdout" | "stderr"
+  passOnRerun: boolean
+  /** Seconds the check sleeps before it says anything — for the case where the
+   * bound fires and the check never reaches a verdict at all. */
+  sleepSeconds?: number
+  /** The wall-clock bound the step gives the check, when the case is about one. */
+  timeoutMs?: number
+}>
+
+function checkScript(root: string, lines: readonly string[], options: CheckPlan): string {
   const marker = join(root, "already-failed-once")
   return [
     "#!/bin/sh",
     `printf 'run\\n' >> '${join(root, "invocations")}'`,
+    ...(options.sleepSeconds === undefined ? [] : [`sleep ${String(options.sleepSeconds)}`]),
     ...(options.passOnRerun ? [`[ -e '${marker}' ] && exit 0`, `: > '${marker}'`] : []),
     `cat${options.stream === "stderr" ? " >&2" : ""} <<'YRD_CHECK_OUTPUT'`,
     ...lines,
@@ -134,6 +144,7 @@ async function createApp(
   process: Process,
   log: ReturnType<typeof createLogger>,
   journal: ReturnType<typeof createMemoryJournal>,
+  timeoutMs?: number,
 ) {
   const check = withStep(
     STEP,
@@ -143,6 +154,7 @@ async function createApp(
       cwd: root,
       artifactRoot: join(root, "artifacts"),
       purpose: STEP,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
     }),
     { revision: `${STEP}-v1` },
   )
@@ -175,7 +187,7 @@ async function createApp(
 }
 
 /** One standing derived-lane submit fact whose required check is `lines`. */
-async function scenario(lines: readonly string[], options: Parameters<typeof checkScript>[2]) {
+async function scenario(lines: readonly string[], options: CheckPlan) {
   const root = await mkdtemp(join(tmpdir(), "yrd-check-edquot-"))
   roots.push(root)
   const script = join(root, `${STEP}.sh`)
@@ -185,7 +197,7 @@ async function scenario(lines: readonly string[], options: Parameters<typeof che
   const journal = createMemoryJournal()
   const process = createProcess()
   disposables.push(process)
-  const app = await createApp(root, script, process, log, journal)
+  const app = await createApp(root, script, process, log, journal, options.timeoutMs)
   disposables.push(app)
   await app.bays.recordBranchSubmit({ branch: BRANCH, sha: SHA, base: "main" })
   const invocations = async (): Promise<number> => {
@@ -258,6 +270,59 @@ describe("an infrastructure failure inside a check never retires a submission", 
     )
     expect(COMPOSITION_FAILURE_BUCKETS["infra-retry"].has(CHECK_STORAGE_EXHAUSTED)).toBe(true)
   })
+
+  /**
+   * The same contract, reached by the other road: the check ran past its bound
+   * and was killed, so it reached no verdict either.
+   *
+   * It coded `<step>-timeout` until 2026-09-02 — outside the closed vocabulary,
+   * so `failureDisposition` THREW on it and only the outcome router's
+   * unregistered-code `catch` kept it off the author's ball. `admissionFailureKind`
+   * reads the environment-owned SET, not that catch, so it recorded `failure`
+   * and retired the author's submit fact for a bound the author never set. The
+   * fixed `check-timeout` closes it: same registered, environment-owned shape
+   * `check-storage-exhausted` has above.
+   */
+  it("a check killed by its bound is an infrastructure refusal that keeps the submit fact standing", async () => {
+    const { app, events, journal, invocations } = await scenario([], {
+      stream: "stdout",
+      passOnRerun: false,
+      sleepSeconds: 5,
+      timeoutMs: 500,
+    })
+
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+
+    // Positive controls: the check really started, and the refusal path was reached.
+    expect(await invocations(), "the check ran exactly once").toBe(1)
+    const pr = derivedId(events)
+    const refusal = app.state().queues.admissionRefusals[pr]
+    expect(refusal, "the refusal is recorded against the derived member").toBeDefined()
+
+    // A bound that fired is not a verdict on the content.
+    expect(refusal?.code, "a bound that fired is not the author's").toBe(CHECK_TIMEOUT)
+    expect(refusal?.kind).toBe("infrastructure")
+    expect(refusal?.reason).toContain("wall-clock bound")
+    expect(rowsWith(events, "compose-candidate-skip")).toMatchObject([
+      { props: { pr, code: CHECK_TIMEOUT, kind: "infrastructure" } },
+    ])
+
+    // The submission survives: same fact, same sha, nothing retired anywhere.
+    expect(app.state().bays.submits[BRANCH]).toMatchObject({ sha: SHA, base: "main" })
+    expect(app.state().queues.retiredSubmits[BRANCH], "the submit fact must stay standing").toBeUndefined()
+    expect(await journaledEventNames(journal)).not.toContain("queue/submit/retired")
+    expect(rowsWith(events, "submit-fact-retired")).toEqual([])
+
+    // Registered and environment-owned — the two facts every reader keys on,
+    // and neither was true while the code was the dynamic `<step>-timeout`.
+    expect(canonicalRefusalCode(CHECK_TIMEOUT), "registered in YRD_REFUSAL_CODES").toBe(CHECK_TIMEOUT)
+    expect(ENVIRONMENT_OWNED_FAILURE_CODES.has(CHECK_TIMEOUT)).toBe(true)
+    expect(failureDisposition(CHECK_TIMEOUT)).toMatchObject({ state: "timeout", owner: "queue" })
+    // NEGATIVE CONTROL for both assertions above: the author's own red is in
+    // neither, so membership is doing the work and not a vacuous `has`.
+    expect(ENVIRONMENT_OWNED_FAILURE_CODES.has("check-failed")).toBe(false)
+    expect(failureDisposition("check-failed")).toMatchObject({ owner: "author" })
+  }, 20_000)
 
   it("the same member is re-admitted on the next pass", async () => {
     const { app, events, invocations } = await scenario(EDQUOT_OUTPUT, { stream: "stderr", passOnRerun: true })

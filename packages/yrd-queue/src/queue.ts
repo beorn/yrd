@@ -12144,6 +12144,10 @@ export const YRD_REFUSAL_CODES = [
   // judged nothing and the change is not the author's to fix. Environment-owned
   // below, never a composition failure (operator ruling 2026-09-02).
   "check-stuck",
+  // command.ts `CHECK_TIMEOUT` — a check killed by its wall-clock bound, so it
+  // reached no verdict either. Environment-owned below. It was the dynamic
+  // `<purpose>-timeout` until 2026-09-02, which no reader could resolve.
+  "check-timeout",
   "checking",
   "checkpoint-migration-certificate-missing",
   "checkpoint-migration-certificate-stale",
@@ -12554,6 +12558,13 @@ export const ENVIRONMENT_OWNED_FAILURE_CODES: ReadonlySet<string> = new Set<stri
   // reaches the author, and `failureDisposition` reads it and routes the
   // outcome to the queue owner (operator ruling 2026-09-02).
   "check-stuck",
+  // A check killed by its bound (command.ts `CHECK_TIMEOUT`), here for the same
+  // reason and by the same ruling. It reached the owner before this only
+  // because it was UNREGISTERED and the outcome router's unregistered-code
+  // `catch` files those with the owner — while `admissionFailureKind`, which
+  // reads this set and not that catch, still recorded `failure` and retired the
+  // author's submit fact for a bound the author did not set.
+  "check-timeout",
 ])
 
 function admissionFailureKind(
