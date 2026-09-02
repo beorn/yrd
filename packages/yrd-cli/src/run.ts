@@ -12455,7 +12455,10 @@ export async function logQueueLivenessWedge(
   // which would claim the wedge cleared and flush a closing summary for a
   // condition that may still hold the moment the attempt ends.
   if (options.clock?.paused() === true) return
-  const progress = habitantQueueProgress(app, now, options.clock?.epoch())
+  // The epoch takes THIS tick's instant, the same one the audit measures
+  // against, so the clock's in-flight span is folded in at the moment it is
+  // read rather than at some earlier boundary.
+  const progress = habitantQueueProgress(app, now, options.clock?.epoch(Date.parse(now)))
   if (progress.state !== "stalled") {
     conditions?.flush()
     return
@@ -12589,10 +12592,15 @@ export async function followQueueRuns(
     : 0
   const heartbeat = habitant
     ? await startHabitantRunnerHeartbeat(io, {
-        // Through THIS runner's clock, so the service health a supervisor
-        // reads cannot report a wedge older than the process reporting it —
-        // the same epoch the tick above measures against, never a second one.
-        queueProgress: (now) => habitantQueueProgress(app, now, livenessClock.epoch()),
+        // Through THIS runner's clock — INCLUDING the attempt in flight, from
+        // the sample's own instant — so the service health a supervisor reads
+        // cannot report a wedge older than the process reporting it, and a
+        // supervisor reading health mid-attempt sees the reading frozen at
+        // the attempt's start rather than growing past the threshold. Unlike
+        // the tick above, this callback fires every 5s regardless of whether
+        // an attempt is in flight, so the pause has to live in the epoch
+        // itself; the same epoch the tick measures against, never a second one.
+        queueProgress: (now) => habitantQueueProgress(app, now, livenessClock.epoch(Date.parse(now))),
         uncarried: createStrandedSweeper(app, io, base, app.log).observe,
         staleDrafts: (now) => staleDraftFindings(app, now, draftThresholdMs),
         needsPerson: (now) => needsPersonFindings(app, now),

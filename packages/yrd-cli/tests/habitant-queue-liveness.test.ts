@@ -22,7 +22,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { createConditionReporter } from "@yrd/core"
-import { logQueueLivenessWedge } from "../src/run.ts"
+import { habitantQueueProgress, logQueueLivenessWedge } from "../src/run.ts"
 import { createResidentLivenessClock, type ResidentWedgePage } from "../src/resident-liveness.ts"
 import type { YrdCliApp } from "../src/types.ts"
 import { createHabitantHarness } from "./support/habitant-harness.ts"
@@ -380,6 +380,93 @@ describe("logQueueLivenessWedge — the runner's own clock and the page rail", (
     const pages: ResidentWedgePage[] = []
     await logQueueLivenessWedge(app, NOW, undefined, { page: async (page) => void pages.push(page) })
     expect(pages).toEqual([])
+  })
+})
+
+/**
+ * The heartbeat's half of the pause (@i/10-yrd/24039). The maintenance tick
+ * abstains while the clock is paused, but `startHabitantRunnerHeartbeat`
+ * recomputes `queueProgress` every 5s regardless — so an epoch that only
+ * folded in FINISHED attempts stayed frozen at the current attempt's start,
+ * and 30 minutes into any attempt the audit's `noLandingMs` threshold was
+ * crossed and `queue-liveness-wedged` reached service health. A 90-minute
+ * affected-tests turn read as 60 minutes of no progress on the health probe.
+ */
+describe("createResidentLivenessClock — the attempt in flight", () => {
+  const BOOT = Date.parse("2026-08-30T00:00:00.000Z")
+
+  it("counts the attempt IN FLIGHT, so a mid-attempt sample measures from boot plus every attempted millisecond including this one", () => {
+    const clock = createResidentLivenessClock(BOOT)
+
+    // One finished 10-minute attempt, a 5-minute idle gap, then a second
+    // attempt still running at the sampling instant.
+    clock.attemptStarted(BOOT)
+    clock.attemptEnded(BOOT + 10 * 60_000)
+    clock.attemptStarted(BOOT + 15 * 60_000)
+
+    const sampleMs = BOOT + 46 * 60_000 // 31 minutes into the live attempt
+    expect(clock.epoch(sampleMs)).toBe(new Date(BOOT + (10 + 31) * 60_000).toISOString())
+    // The 5 idle minutes are the only span the audit may bill as blocked, so
+    // the epoch is still PAUSED, never CLEARED: it has not reached `sampleMs`.
+    expect(Date.parse(clock.epoch(sampleMs))).toBe(sampleMs - 5 * 60_000)
+  })
+
+  it("is continuous across the end of an attempt — the same instant reads the same epoch before and after attemptEnded", () => {
+    const clock = createResidentLivenessClock(BOOT)
+    clock.attemptStarted(BOOT + 60_000)
+
+    const endMs = BOOT + 91 * 60_000
+    const before = clock.epoch(endMs)
+    clock.attemptEnded(endMs)
+
+    // No jump. `attemptEnded` folds in exactly the span `epoch` was already
+    // counting, so a supervisor sampling one millisecond either side of the
+    // boundary cannot see blocked time appear or vanish.
+    expect(clock.epoch(endMs)).toBe(before)
+  })
+
+  it("never moves the epoch EARLIER when the clock runs backwards inside an attempt", () => {
+    const clock = createResidentLivenessClock(BOOT)
+    clock.attemptStarted(BOOT + 30 * 60_000)
+
+    // An `io.now` fixture or an NTP step hands back an instant before the
+    // attempt started. The floor may not subtract from what it already had.
+    expect(clock.epoch(BOOT + 20 * 60_000)).toBe(new Date(BOOT).toISOString())
+    expect(clock.epoch(BOOT + 40 * 60_000)).toBe(new Date(BOOT + 10 * 60_000).toISOString())
+  })
+})
+
+/**
+ * The seam the heartbeat actually crosses: `habitantQueueProgress` hands the
+ * clock's reading to `queue.audit` as `livenessEpoch`, and the audit measures
+ * `blockedMs = now - max(observed, epoch)`. Pinned here rather than only in
+ * `queue-liveness-wedge.test.ts` because the arithmetic that broke was the
+ * CALLER's: the audit was always correct about the epoch it was given.
+ */
+describe("habitantQueueProgress — the epoch it hands the audit mid-attempt", () => {
+  it("hands the audit an epoch that tracks the sample, so blocked time cannot grow while an attempt is in flight", () => {
+    const { app, auditOptions } = appWithFindings([])
+    const bootMs = Date.parse("2026-08-30T00:00:00.000Z")
+    const clock = createResidentLivenessClock(bootMs)
+
+    // Ten idle minutes, then an attempt that has been running for 31 — one
+    // minute past `noLandingMs`, which is where the old frozen floor started
+    // publishing a wedge into service health.
+    clock.attemptStarted(bootMs + 10 * 60_000)
+    const sampleMs = bootMs + 41 * 60_000
+    const sample = new Date(sampleMs).toISOString()
+
+    habitantQueueProgress(app, sample, clock.epoch(sampleMs))
+
+    expect(auditOptions).toHaveLength(1)
+    // The epoch is the sample minus the IDLE time before the attempt, so the
+    // audit's `now - max(observed, epoch)` can only ever reach 10 minutes for
+    // as long as this attempt runs, whatever the queue's own history says.
+    expect(auditOptions[0]).toMatchObject({
+      now: sample,
+      livenessEpoch: new Date(sampleMs - 10 * 60_000).toISOString(),
+    })
+    expect(sampleMs - Date.parse(String(auditOptions[0]?.livenessEpoch))).toBeLessThan(30 * 60_000)
   })
 })
 

@@ -46,6 +46,7 @@ import {
   type YrdCliIO,
   type YrdCliServices,
 } from "@yrd/cli"
+import { createResidentLivenessClock } from "../src/resident-liveness.ts"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import {
   Command,
@@ -7517,6 +7518,60 @@ describe("runYrd", () => {
           },
         })
         heartbeat.check()
+      } finally {
+        await heartbeat.close(true)
+      }
+    } finally {
+      await app.close()
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
+  /**
+   * The same fixture one minute later, with the runner's own liveness clock
+   * inside an attempt (@i/10-yrd/24039). The maintenance tick abstains while
+   * the clock is paused, but THIS callback is recomputed on every 5s heartbeat
+   * regardless — so an epoch frozen at the attempt's start let `blockedMs`
+   * outrun `noLandingMs` 30 minutes into every long attempt, and a 90-minute
+   * affected-tests turn published `queue-liveness-wedged` into service health
+   * for its last 60. Counting the attempt in flight is what stops that.
+   *
+   * `queue-never-started` is the control and stays: it measures from the
+   * submit fact and owes nothing to the runner's clock. Only the liveness
+   * finding — the one the epoch governs — goes quiet.
+   */
+  it("keeps the liveness wedge out of a heartbeat written mid-attempt, while the findings the epoch does not govern remain", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-runner-midattempt-"))
+    execFileSync("git", ["init", "-q", repo])
+    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
+    let now = Date.parse("2026-07-13T12:00:00.000Z")
+    const app = await createApp({ clock: () => new Date(now).toISOString() })
+    try {
+      await openAndSubmit(app)
+
+      // Boot, then an attempt that starts immediately and is still running 31
+      // minutes later — one minute past the threshold the previous test fires
+      // the wedge at with no clock at all.
+      const livenessClock = createResidentLivenessClock(now)
+      livenessClock.attemptStarted(now)
+      now += 31 * 60_000
+      const heartbeat = await runInternals.startHabitantRunnerHeartbeat(
+        outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, now: () => now }).io,
+        {
+          intervalMs: 60_000,
+          queueProgress: (observedAt) =>
+            runInternals.habitantQueueProgress(app, observedAt, livenessClock.epoch(Date.parse(observedAt))),
+          driver: { queueId: `${repo}#main`, lastMerged: () => null },
+        },
+      )
+      try {
+        const status = JSON.parse(readFileSync(statusPath, "utf8"))
+        const codes = status.queueProgress.findings.map((finding: { code: string }) => finding.code)
+        expect(codes).toContain("queue-never-started")
+        expect(codes).not.toContain("queue-liveness-wedged")
+        // The epoch handed to the audit tracks the sample, so the span it can
+        // bill as blocked stays at zero for as long as this attempt runs.
+        expect(livenessClock.epoch(now)).toBe(new Date(now).toISOString())
       } finally {
         await heartbeat.close(true)
       }
