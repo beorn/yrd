@@ -1530,11 +1530,14 @@ describe("Jobs", () => {
     })
 
     expect(await app.jobs.recover({ now: "2026-01-01T00:00:02.000Z", runner: "yrd-cli:111" })).toEqual([dead])
+    // No caller reason, so the derived orphan description stands alone — and it
+    // says strictly more than the old "runner disappeared" default it replaced:
+    // which holder, its pid, and the live lease the assertion overrode.
     expect(app.jobs.state().byId[dead!]).toMatchObject({
       status: "completed",
       conclusion: "timed_out",
       attempt: 1,
-      lostReason: "runner disappeared",
+      lostReason: "orphaned: holder yrd-cli:111 (pid 111) is dead, lease until 2026-01-01T00:05:00.000Z",
     })
     expect(app.jobs.state().byId[alive!]).toMatchObject({ status: "in_progress", runner: "yrd-cli:222" })
     await app.close()
@@ -1581,20 +1584,59 @@ describe("Jobs", () => {
       }),
     ).resolves.toEqual([dead, expired])
 
-    // Per-job reasons stay TRUTHFUL: the caller's dead-runner reason applies
-    // only to the named runner's job; the other runner's job was reclaimed for
-    // lease expiry and must say so.
+    // Per-job reasons stay TRUTHFUL, and the derived fact is what makes them so.
+    // The caller's dead-runner assertion reaches ONLY the runner it named, where
+    // it prefixes the derived description; the other runner's job was reclaimed
+    // for its own lapsed lease and is described by that lease alone. Either way
+    // the stored reason names the holder and the lease, which is what an operator
+    // reading the downstream refusal needs and what a bare caller reason omits.
     expect(app.jobs.state().byId[dead!]).toMatchObject({
       status: "completed",
       conclusion: "timed_out",
-      lostReason: "previous habitant runner disappeared",
+      lostReason:
+        "previous habitant runner disappeared; orphaned: holder yrd-cli:111 (pid 111) is dead, lease until 2026-01-01T00:05:00.000Z",
     })
     expect(app.jobs.state().byId[expired!]).toMatchObject({
       status: "completed",
       conclusion: "timed_out",
-      lostReason: "runner lease expired",
+      lostReason: "orphaned: lease expired 2026-01-01T00:00:01.000Z, holder yrd-cli:222 (pid 222)",
     })
     expect(app.jobs.state().byId[live!]).toMatchObject({ status: "in_progress", runner: "yrd-cli:333" })
+    await app.close()
+  })
+
+  it("keeps the holder and the lease in the reason when a sweep supplies its own", async () => {
+    const app = await jobsApp(delivery())
+    await app.dispatch(app.commands.sender.send, { message: "swept" })
+    const [swept] = Object.keys(app.jobs.state().byId)
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: swept!,
+      attempt: 1,
+      runner: "yrd-cli:31337",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+
+    // The habitant's per-tick sweep calls recover exactly like this — unscoped,
+    // with a reason that describes the SWEEP and knows nothing about the row it
+    // settles (`habitantRecoverySweep`, yrd-cli run.ts). While a caller reason
+    // could REPLACE the derived text, this job then settled with "habitant
+    // lease-expiry sweep" as its entire stored reason, naming neither the holder
+    // nor the lease — the two facts the downstream `job-lost` refusal exists to
+    // carry, and the ones nobody can reconstruct after the runner is gone.
+    await expect(
+      app.jobs.recover({ now: "2026-01-01T00:01:00.000Z", reason: "habitant lease-expiry sweep" }),
+    ).resolves.toEqual([swept])
+
+    const lostReason = (app.jobs.state().byId[swept!] as { lostReason: string }).lostReason
+    expect(lostReason).toBe(
+      "habitant lease-expiry sweep; orphaned: lease expired 2026-01-01T00:00:01.000Z, holder yrd-cli:31337 (pid 31337)",
+    )
+    // The two obligations separately, so a future caller cannot satisfy the
+    // string above by dropping either one: context in FRONT, facts of record after.
+    expect(lostReason.startsWith("habitant lease-expiry sweep;")).toBe(true)
+    expect(lostReason).toContain("yrd-cli:31337")
+    expect(lostReason).toContain("2026-01-01T00:00:01.000Z")
     await app.close()
   })
 
@@ -1755,7 +1797,10 @@ describe("Jobs", () => {
           outcome: "recovered",
           job: JOB_ID,
           runner: "yrd-cli:333",
-          reason: "runner disappeared",
+          // The log line carries the same derived fact the job stores, so a
+          // reader of the runner's stdout and a reader of the settled job are
+          // never told two different stories about one reclaim.
+          reason: "orphaned: holder yrd-cli:333 (pid 333) is dead, lease until 2026-01-01T00:05:00.000Z",
         }),
       }),
     )
@@ -1870,7 +1915,7 @@ describe("Jobs", () => {
     expect(app.jobs.state().byId[JOB_ID]).toMatchObject({
       status: "completed",
       conclusion: "timed_out",
-      lostReason: "runner lease expired",
+      lostReason: "orphaned: lease expired 2026-01-01T00:00:01.000Z, holder yrd-cli:404 (pid 404)",
     })
     await app.close()
   })
@@ -2177,7 +2222,9 @@ describe("localRunner", () => {
       conclusion: "timed_out",
       runner: "departed",
       context: "worktree-context:9",
-      lostReason: "runner process disappeared",
+      // A holder with no pid in its identity still names the holder and the
+      // lease — the pid is the only part `describeOrphanedRun` can omit.
+      lostReason: "runner process disappeared; orphaned: lease expired 2026-01-01T00:00:01.000Z, holder departed",
     })
     await app.close()
   })

@@ -3000,7 +3000,7 @@ function createMergedTruthReader(
   // at recent log lines is not told about a window that no longer exists.
   const reported = new Set<string>()
   const reportGaps = (index: MergedTruthIndex): void => {
-    const key = `${index.repo} ${index.tip}`
+    const key = `${index.repo}\0${index.tip}`
     if (reported.has(key)) return
     reported.add(key)
     for (const line of describeMergedTruthGaps(index)) options.log?.warn?.(line)
