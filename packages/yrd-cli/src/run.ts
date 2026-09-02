@@ -3793,7 +3793,17 @@ async function resolveBayOpen(
     options.pr === undefined
       ? undefined
       : (resolveQueueChange(openState.bays, openState.queues, options.pr) ??
-        refusal(`no change '${options.pr}'; create it explicitly before using --pr`))
+        refusal(
+          // The old cure said "create it explicitly", which named `pr create` —
+          // retired with the legacy record mint (72c0282e), so the one action
+          // it prescribed refuses. Say the path that works, and let the
+          // both-lane not-found sentence carry the denominator and the count of
+          // branches already submitted and still awaiting admission.
+          `${queueChangeNotFoundMessage(openState.bays, openState.queues, options.pr)}. ` +
+            "A pushed branch with no change becomes one by submitting it plainly " +
+            "('yrd pr submit <branch>'): the next queue round admits it as a derived member and gives it " +
+            "the id --pr resolves.",
+        ))
   const generated = generatedBayName()
   const branchSeed =
     issue === undefined
@@ -4387,8 +4397,9 @@ export function handoffBayMissingRemedy(selector: string, branch: string): strin
     `its live branch and head are the evidence, which is why this command cannot open one for you. ` +
     `Open one from the packet's PR first:\n` +
     `  yrd bay open --pr ${branch}\n` +
-    `then re-run this command. --pr takes the change selector or its branch name; if no PR exists for ` +
-    `'${branch}' yet, run 'yrd pr create' from the pushed branch, then 'bay open --pr'.`
+    `then re-run this command. --pr takes the change selector or its branch name; if no change exists for ` +
+    `'${branch}' yet, push it and submit it plainly ('yrd pr submit ${branch}') — the next queue round admits ` +
+    `it as a derived member with an id, and 'bay open --pr' resolves it then.`
   )
 }
 
