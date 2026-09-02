@@ -534,6 +534,13 @@ const HABITANT_MEMORY_CAP_EXIT: YrdCliExitCode = HABITANT_EXIT["memory-cap"]
  * record is the detail, and this exit no longer shares `refusal`'s generic
  * code 1 with a genuine failure a supervisor should treat differently. */
 const HABITANT_PLAN_STALE_EXIT: YrdCliExitCode = HABITANT_EXIT["installed-plan-stale"]
+/** A habitant whose queue repository advanced its RECORDED Yrd pin while this
+ * process was serving (24047). Its own code, for the same reason as the two
+ * exits above: `resident-root-pin-moved-restart` is the detail, and the
+ * supervisor — which has the code and not the record — must be able to tell
+ * "the pin moved, relaunch me on it" apart from a failure it should leave
+ * down. Third and last member of the restart family 11 / 13 / 18. */
+const HABITANT_ROOT_PIN_MOVED_EXIT: YrdCliExitCode = HABITANT_EXIT["root-pin-moved"]
 /** A habitant that stopped for its own ERROR row (operator ruling 2026-09-01:
  * any ERROR ends the pass). The host latches the row and aborts the drain
  * signal with the fatal cause as its reason; the loop reads that reason here,
@@ -12221,6 +12228,194 @@ export async function habitantSourceHealth(
   return { stall: next, recycle: true }
 }
 
+/**
+ * The ONE way a habitant leaves for a restart it wants: write the shared
+ * recycle record, emit the one notice shape, answer the exit code.
+ *
+ * Every designed exit whose cure IS the relaunch goes through here — the
+ * stale installed plan (13) and the moved root pin (18) today — so a reader
+ * looking for "why did this runner leave" finds one record family and one
+ * line shape rather than one per condition. That is not tidiness: the two
+ * conditions were written eight days apart, and the second was very nearly a
+ * parallel implementation of the first, with its own file, its own props and
+ * its own adjective for the same event.
+ *
+ * "notice:", never "error:" — a designed exit a supervisor is about to fix by
+ * relaunching must not read like a genuine failure (measured 2026-08-30: seven
+ * of these misread as failures and paged @cto).
+ */
+async function habitantRestartExit(
+  app: Pick<YrdCliApp, "log">,
+  io: YrdCliIO,
+  input: Readonly<{
+    reason: NonNullable<HabitantSourceRecycle["reason"]>
+    /** What this process was serving under. */
+    from: string
+    /** What it must come back on. */
+    to: string
+    action: string
+    /** The sentence after "notice: yrd: ", ending with what happens next. */
+    notice: string
+    props?: Readonly<Record<string, unknown>>
+    staleSteps?: readonly string[]
+    exit: YrdCliExitCode
+  }>,
+): Promise<YrdCliExitCode> {
+  const attemptedAt = new Date(io.now?.() ?? Date.now()).toISOString()
+  const cwd = io.cwd ?? process.cwd()
+  await writeHabitantSourceRecycle(cwd, io.stateDir, {
+    reason: input.reason,
+    bootedSha: input.from,
+    headSha: input.to,
+    attemptedAt,
+    ...(input.staleSteps === undefined ? {} : { staleSteps: input.staleSteps }),
+  })
+  app.log.warn?.(`notice: yrd: ${input.notice}`, {
+    action: input.action,
+    bootedSha: input.from,
+    headSha: input.to,
+    ...(input.staleSteps === undefined ? {} : { staleSteps: input.staleSteps }),
+    ...input.props,
+  })
+  return input.exit
+}
+
+/**
+ * The queue repository's recorded Yrd pin as THIS process found it at boot —
+ * the fixed half of the pin-moved comparison (24047).
+ *
+ * Read once, and read as the PIN rather than as this process's own source sha.
+ * That choice is the whole correctness argument, so it is written down here
+ * rather than left to be re-derived:
+ *
+ * A pin check can be built two ways. Comparing the pin against
+ * `habitantBootedSha` — "am I running what the queue prescribes" — is the
+ * question the watcher's `runnerPinBehind` already answers, and it is the
+ * wrong question to EXIT on: those two facts are legitimately unequal for the
+ * whole window between a gitlink advance landing and the submodule checkout
+ * being updated to match. A successor born inside that window is unequal too,
+ * so it exits again immediately, and the queue ends with no runner at all —
+ * a spawn storm bounded only by the supervisor's restart budget.
+ *
+ * Comparing the pin against the pin cannot do that. It is a difference of two
+ * reads of ONE expression at two times, so it detects a CHANGE rather than a
+ * mismatch, and it is loop-free by construction: a successor's boot value is
+ * whatever the pin says at its boot, which is the current pin, so it cannot
+ * leave for a pin advance that already happened. Exactly one restart per
+ * distinct pin value, whatever the checkout is doing.
+ *
+ * The checkout half is not dropped, it is simply not this check's job:
+ * `habitantSourceHealth` (11) already watches whether the source moved under
+ * this process, with its own two-observation window and its own
+ * `checkout-behind` loop guard.
+ */
+export type HabitantRootPin =
+  /** A pin was readable at boot; every pass compares against it. */
+  | Readonly<{ state: "watching"; pinSha: string }>
+  /** No comparison is possible for this lifetime. Never an exit. */
+  | Readonly<{ state: "unwatchable"; reason: string }>
+
+function recordedRootPin(io: YrdCliIO, cwd: string): ReturnType<typeof queueRecordedYrdPin> {
+  return io.recordedRootPin === undefined ? queueRecordedYrdPin(cwd) : io.recordedRootPin(cwd)
+}
+
+/**
+ * Capture the pin this habitant serves under, once, before the first cycle.
+ *
+ * Gated on `habitant` for the same reason every other designed exit is: exiting
+ * is only an actuator when something re-execs us, so a one-shot
+ * `yrd queue run code --once` and a bare programmatic follow never watch the
+ * pin at all — they finish their work on whatever code they started with.
+ *
+ * Both unwatchable answers are SAID, at the level each deserves. `unpinned` is
+ * structural — a queue repository with no Yrd submodule has no pin to be
+ * behind, which is a normal deployment — so it is info. A pin that should have
+ * been readable and was not is warn, with its reason: this check will do
+ * nothing for the rest of the process lifetime, and a self-check that silently
+ * disables itself is the failure it exists to prevent.
+ */
+export function habitantBootRootPin(app: Pick<YrdCliApp, "log">, io: YrdCliIO, habitant: boolean): HabitantRootPin {
+  if (!habitant) return { state: "unwatchable", reason: "not a habitant: no supervisor relaunches this process" }
+  const cwd = io.cwd ?? process.cwd()
+  const pin = recordedRootPin(io, cwd)
+  if (!("state" in pin)) {
+    app.log.info?.(`yrd: watching the recorded Yrd pin ${pin.pinSha.slice(0, 10)} for advances while this runner serves.`, {
+      action: "resident-root-pin-watching",
+      pinSha: pin.pinSha,
+      submoduleRoot: pin.submoduleRoot,
+    })
+    return { state: "watching", pinSha: pin.pinSha }
+  }
+  if (pin.state === "unpinned") {
+    const reason = "the queue repository records no Yrd submodule at origin/main"
+    app.log.info?.(`yrd: not watching a recorded Yrd pin — ${reason}.`, { action: "resident-root-pin-unpinned" })
+    return { state: "unwatchable", reason }
+  }
+  app.log.warn?.(
+    `yrd: cannot read the queue repository's recorded Yrd pin (${pin.reason}), so this runner will NOT notice a ` +
+      "pin advance for the rest of its lifetime; advancing the pin still needs a manual restart.",
+    { action: "resident-root-pin-unreadable-at-boot", reason: pin.reason },
+  )
+  return { state: "unwatchable", reason: pin.reason }
+}
+
+/**
+ * One pass boundary's answer to "has the queue's recorded Yrd pin moved under
+ * me?" — box 3 of the same "the code moved under me" family as
+ * {@link habitantSourceHealth}, and called at the same two boundaries.
+ *
+ * A read failure NEVER exits. The pin is read fresh every pass, so a transient
+ * unreadable one (a fetch mid-write, a busy object store) costs one skipped
+ * comparison and is logged; treating it as an advance would restart a healthy
+ * runner over a torn read, which is strictly worse than serving one more pass.
+ * No confirmation window is needed for the positive answer, unlike the source
+ * check: `origin/main:<path>` resolves a committed tree object behind an
+ * atomic ref update, so there is no half-written state to catch.
+ */
+export function habitantRootPinHealth(
+  app: Pick<YrdCliApp, "log">,
+  io: YrdCliIO,
+  boot: HabitantRootPin,
+): Readonly<{ movedTo: string } | { movedTo: undefined }> {
+  if (boot.state !== "watching") return { movedTo: undefined }
+  const cwd = io.cwd ?? process.cwd()
+  const pin = recordedRootPin(io, cwd)
+  if ("state" in pin) {
+    const reason = pin.state === "unpinned" ? "origin/main no longer records the Yrd submodule" : pin.reason
+    app.log.warn?.(
+      `yrd: could not compare the recorded Yrd pin this pass (${reason}); serving on git:${boot.pinSha.slice(0, 10)} ` +
+        "and re-reading next pass.",
+      { action: "resident-root-pin-unreadable", bootPinSha: boot.pinSha, reason },
+    )
+    return { movedTo: undefined }
+  }
+  return pin.pinSha === boot.pinSha ? { movedTo: undefined } : { movedTo: pin.pinSha }
+}
+
+/** Leave for the supervisor to relaunch this runner on the pin the queue now
+ * records — through the same {@link habitantRestartExit} the stale-plan
+ * recycle uses, so both conditions leave one record family and one line
+ * shape behind them. */
+export async function habitantRootPinRecycle(
+  app: Pick<YrdCliApp, "log">,
+  io: YrdCliIO,
+  from: string,
+  to: string,
+): Promise<YrdCliExitCode> {
+  return habitantRestartExit(app, io, {
+    reason: "root-pin-moved",
+    from,
+    to,
+    action: "resident-root-pin-moved-restart",
+    notice:
+      `the queue repository advanced its recorded Yrd pin from ${from.slice(0, 10)} to ${to.slice(0, 10)} while ` +
+      `this runner was serving. Resident exits for restart on pin ${to.slice(0, 10)}; the supervisor relaunches ` +
+      "it, which reads the pin as it now stands.",
+    props: { fromPinSha: from, toPinSha: to, runner: io.runner },
+    exit: HABITANT_ROOT_PIN_MOVED_EXIT,
+  })
+}
+
 /** Step names whose declaration differs between what this process installed
  * and what the base tip now declares — the symmetric difference by name. A
  * revision-only or reorder-only delta (the SAME names, a different command
@@ -12261,37 +12456,25 @@ export async function habitantPlanRecycle(
   const bootedSha = habitantBootedSha(io.implementationSource) ?? "unknown"
   const headSha = comparison?.tip.sha ?? "unknown"
   const staleSteps = comparison === undefined ? undefined : habitantPlanStaleSteps(comparison)
-  const attemptedAt = new Date(io.now?.() ?? Date.now()).toISOString()
-  const cwd = io.cwd ?? process.cwd()
-  await writeHabitantSourceRecycle(cwd, io.stateDir, {
-    reason: "installed-plan-stale",
-    bootedSha,
-    headSha,
-    attemptedAt,
-    ...(staleSteps === undefined ? {} : { staleSteps }),
-  })
   const revision = headSha === "unknown" ? "unknown" : headSha.slice(0, 8)
   const blob = comparison?.tip.configBlobSha === undefined ? "none" : comparison.tip.configBlobSha.slice(0, 8)
   const base = comparison?.base ?? "the base"
   const steps = staleSteps === undefined || staleSteps.length === 0 ? "the declared steps" : staleSteps.join(", ")
-  // "notice:", never "error:" — a designed exit a supervisor is about to fix
-  // by relaunching must not read like a genuine failure (measured 2026-08-30:
-  // seven of these misread as failures and paged @cto). The rich delta text
-  // `requireInstalledDeclaredPlan` built stays available as `reason` below,
-  // structured, for whoever debugs this after the fact.
-  app.log.warn?.(
-    `notice: yrd: this runner's installed plan is stale — ${base} tip ${revision} (config blob ${blob}) now ` +
-      `declares ${steps} differently than what this process installed at git:${bootedSha}. Recycling: the ` +
-      "supervisor relaunches this runner, which installs the currently declared steps on boot.",
-    {
-      action: "resident-plan-stale-restart",
-      bootedSha,
-      headSha,
-      ...(staleSteps === undefined ? {} : { staleSteps }),
-      reason: finding.message,
-    },
-  )
-  return HABITANT_PLAN_STALE_EXIT
+  // The rich delta text `requireInstalledDeclaredPlan` built stays available as
+  // `reason` below, structured, for whoever debugs this after the fact.
+  return habitantRestartExit(app, io, {
+    reason: "installed-plan-stale",
+    from: bootedSha,
+    to: headSha,
+    action: "resident-plan-stale-restart",
+    notice:
+      `this runner's installed plan is stale — ${base} tip ${revision} (config blob ${blob}) now declares ` +
+      `${steps} differently than what this process installed at git:${bootedSha}. Recycling: the supervisor ` +
+      "relaunches this runner, which installs the currently declared steps on boot.",
+    props: { reason: finding.message },
+    ...(staleSteps === undefined ? {} : { staleSteps }),
+    exit: HABITANT_PLAN_STALE_EXIT,
+  })
 }
 
 /**
@@ -12727,6 +12910,13 @@ export async function followQueueRuns(
   // which is the entire reason standing down is worth doing.
   let memoryStall: HabitantMemoryStall | undefined
   const rssCapBytes = habitantRssCapBytes()
+  // The queue repository's recorded Yrd pin as this process found it (24047).
+  // Captured ONCE, before the first cycle, and never refreshed: it is the fixed
+  // half of the comparison, and re-reading it would compare the pin against
+  // itself and never fire. Unlike the three windows above it needs no
+  // observation count — see `habitantBootRootPin` for why a pin advance has no
+  // torn-read state to catch.
+  const bootRootPin = habitantBootRootPin(app, io, habitant)
   let firstCycle = true
   let lastMaintenanceAt = 0
 
@@ -12831,6 +13021,15 @@ export async function followQueueRuns(
         const idleMemory = habitantMemoryHealth(app, io, memoryStall, habitant, rssCapBytes)
         memoryStall = idleMemory.stall
         if (idleMemory.standDown) return HABITANT_MEMORY_CAP_EXIT
+        // Third box of the same family, at the same boundary and by the same
+        // argument: no run is in flight on this branch by construction, so
+        // leaving here abandons nothing. A quiet queue is also where a pin
+        // advance most needs to be noticed — the tonight-measured ritual was
+        // an operator stopping an IDLE resident to land a gitlink.
+        const idlePin = habitantRootPinHealth(app, io, bootRootPin)
+        if (idlePin.movedTo !== undefined && bootRootPin.state === "watching") {
+          return await habitantRootPinRecycle(app, io, bootRootPin.pinSha, idlePin.movedTo)
+        }
         if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
@@ -12894,6 +13093,13 @@ export async function followQueueRuns(
       const memory = habitantMemoryHealth(app, io, memoryStall, habitant, rssCapBytes)
       memoryStall = memory.stall
       if (memory.standDown) return HABITANT_MEMORY_CAP_EXIT
+      // The in-flight run has just finished, so this exit drains cleanly rather
+      // than abandoning work — the same guarantee the two exits above rely on,
+      // and the reason the pin is never read mid-attempt.
+      const pin = habitantRootPinHealth(app, io, bootRootPin)
+      if (pin.movedTo !== undefined && bootRootPin.state === "watching") {
+        return await habitantRootPinRecycle(app, io, bootRootPin.pinSha, pin.movedTo)
+      }
       if (drainRequested()) {
         if (runs.every(Queues.terminal)) {
           // Operator drain finished with no in-flight work left — the one clean stop.

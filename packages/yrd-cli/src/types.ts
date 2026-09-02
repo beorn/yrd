@@ -340,6 +340,19 @@ export type YrdCliIO = {
    * independent derivations that can drift apart.
    */
   sourceCheckout?: string
+  /**
+   * The queue repository's RECORDED Yrd pin, for the habitant's own pin-moved
+   * check (24047). Absent means "read it from git", which is what the host
+   * does; naming it lets a regression move a pin without building a
+   * superproject that pins a real Yrd submodule.
+   *
+   * Structurally the shape `queueRecordedYrdPin` answers with, spelled here
+   * rather than imported so this module keeps no dependency on `run.ts`.
+   */
+  recordedRootPin?(queueCwd: string):
+    | Readonly<{ pinSha: string; submoduleRoot: string }>
+    | Readonly<{ state: "unknown"; reason: string }>
+    | Readonly<{ state: "unpinned" }>
   leaseMs?: number
   concurrency?: number
   now?: () => number
