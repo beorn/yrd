@@ -150,6 +150,8 @@ import { getLiveRenderer } from "./live-renderer.ts"
 import {
   type ChangeCheckViewRecord,
   type QueueLogCoverage,
+  hostRunnerAlive,
+  hostRunnerLivenessProbe,
   latestRunForCurrentRevision,
   projectedChangeStatus,
   queuePauseWarnings,
@@ -2116,10 +2118,18 @@ async function runClientDeadMan(
             "Inspect the habitant runner log, then restart it.",
           ])
         : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), habitantDriverLastMerged(app, base))
+  // A running row whose holder is dead is NOT in flight (24030): it is named
+  // here — run, holder, lease — rather than counted with the work above. The
+  // audit derives it through the same liveness function every reader uses,
+  // with this host's pid probe, so the line and `queue list` cannot disagree.
+  const orphanedRuns = app.queue
+    .audit({ now: new Date(nowMs).toISOString(), runnerAlive: hostRunnerAlive })
+    .findings.filter((finding) => finding.code === "orphaned-run")
   const observations = [
     ...(queueProgress.state === "stalled"
       ? queueProgress.findings.map((finding) => ({ code: finding.code, cause: finding.message }))
       : []),
+    ...orphanedRuns.map((finding) => ({ code: finding.code, cause: finding.message })),
     ...(runnerError === undefined ? [] : [{ code: runnerError.code, cause: runnerError.cause }]),
   ]
   if (!emitHuman) return
@@ -2173,6 +2183,17 @@ async function checkQueueRunner(
 export type HabitantRunnerReclaim = Readonly<{ reclaim: false }> | Readonly<{ reclaim: true; runner: string }>
 
 /**
+ * The runner identity a yrd process claims Jobs under and reclaims them by:
+ * `yrd-cli:<pid>`, the ONE shape `runnerPid` (@yrd/job) parses back into a
+ * probeable pid (@i/10-yrd/24030). Minted here for the one-shot claim and the
+ * departed-habitant reclaim alike, so `job.runner === deadRunner` in the job
+ * layer compares two strings that were written by the same hand.
+ */
+export function yrdRunnerIdentity(pid: number): string {
+  return `yrd-cli:${String(pid)}`
+}
+
+/**
  * Decide whether an incoming habitant runner should reclaim the leases of the
  * prior habitant recorded in `status.json`. The prior habitant is reclaimable
  * only when it is a different process that is no longer alive; a live prior pid
@@ -2186,7 +2207,7 @@ export function planHabitantRunnerReclaim(
 ): HabitantRunnerReclaim {
   if (prior === null || prior.pid === currentPid) return { reclaim: false }
   if (isProcessAlive(prior.pid)) return { reclaim: false }
-  return { reclaim: true, runner: `yrd-cli:${prior.pid}` }
+  return { reclaim: true, runner: yrdRunnerIdentity(prior.pid) }
 }
 
 async function reclaimDeadHabitantRunner(app: YrdCliApp, io: YrdCliIO): Promise<void> {
@@ -3169,7 +3190,10 @@ function runtimeOptions(io: YrdCliIO): RuntimeOptions {
   // one-shot pass.
   const resident = io.driver !== undefined
   return {
-    runner: io.runner ?? "yrd-cli",
+    // A one-shot pass claims under ITS OWN pid (24030): a bare `yrd-cli` can
+    // never be probed by identity, so its rows could only ever be judged by
+    // their lease — R3742 read `checking` for two hours off exactly that.
+    runner: io.runner ?? yrdRunnerIdentity(process.pid),
     leaseMs: io.leaseMs ?? 5 * 60_000,
     ...(io.now === undefined ? {} : { now: io.now }),
     ...(drainSignal === undefined || !resident ? {} : { continueAdmissions: () => !drainSignal.aborted }),
@@ -7342,10 +7366,13 @@ async function viewChangeRuns(
     const confirmed = await app.journalSnapshot()
     if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
     const eligibility = app.queue.eligibility(pr.id, snapshot.state)
+    // Derived at read (24030): a run whose holder is dead prints `orphaned: …`
+    // on this surface too, through this host's pid probe.
+    const liveness = hostRunnerLivenessProbe(io.now?.() ?? Date.now())
     const data = {
       pr,
       eligibility,
-      runs: runs.map((run) => queueShowData(run, runs, attempts, runRevisionClock(pr, run))),
+      runs: runs.map((run) => queueShowData(run, runs, attempts, runRevisionClock(pr, run), liveness)),
     }
     await printResult(
       io,
@@ -8592,6 +8619,9 @@ async function buildQueueListSnapshot(
   const needsPerson = needsPersonFindings(app, new Date(now).toISOString())
   const clock = createQueueTimelineProjectionClock(results, {
     now,
+    // The host's pid probe (24030): a running row whose holder is dead reads
+    // `orphaned` here, the same way the pass-start settlement judges it.
+    runnerAlive: hostRunnerAlive,
     windowMs: queueTimelineWindow(options.since),
     windowSource: options.since === undefined ? "default" : "explicit",
     metricsWindowMs: queueMetricsWindow(options.since),

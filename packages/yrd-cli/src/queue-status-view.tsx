@@ -28,7 +28,15 @@ import {
 } from "@yrd/bay"
 import { compareNatural, stageAsync, type Event, type JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
-import { derivedLaneBranches, isDerivedMemberId } from "@yrd/queue"
+import {
+  derivedLaneBranches,
+  deriveRunLiveness,
+  describeOrphanedRun,
+  isDerivedMemberId,
+  leaseOnlyLivenessProbe,
+  orphanedRunLiveness,
+  type RunnerLivenessProbe,
+} from "@yrd/queue"
 import type { HabitantSourceRecycle } from "./source-staleness.ts"
 import type {
   Candidate,
@@ -399,7 +407,9 @@ function RunId({ base, run, ...props }: { base: string; run: string } & QueueNou
 // (composition, admission, terminal facts, FLOW stats) — see
 // `timelineNonIntegratedRows`. (`pending` is retained as the shared pre-run
 // group/filter/bucket name; `ready` is the status it now renders.)
-export type QueueTimelineStatus = "draft" | "rev" | "ready" | "pending" | "running" | QueueTerminalOutcome
+/** `orphaned` is a running row whose lease lapsed or whose holder is dead,
+ * derived at read (@i/10-yrd/24030) — open like `running`, never `checking`. */
+export type QueueTimelineStatus = "draft" | "rev" | "ready" | "pending" | "running" | "orphaned" | QueueTerminalOutcome
 
 /**
  * One physical, selectable queue row. The list deliberately denormalizes one
@@ -697,6 +707,13 @@ export type QueueTimelineProjection = Readonly<{
 
 export type QueueTimelineProjectionOptions = Readonly<{
   now: number
+  /**
+   * The host's answer for a running row's holder (24030): whether the process
+   * behind a runner identity is alive, `undefined` when it cannot tell. Absent
+   * (fixtures, older callers) only the lease judges a row — the projection
+   * stays pure; the probe is an input.
+   */
+  runnerAlive?: RunnerLivenessProbe["runnerAlive"]
   windowMs: number
   /**
    * Whether `windowMs` is the DEFAULT bound or an explicit `--since`. Carried
@@ -915,6 +932,9 @@ export type QueueShowData = Readonly<{
   parent: string
   isolationPart: "0" | "1" | "-"
   failure?: HumanFailureProjection
+  /** `orphaned: …` — the dead holder and its lease, derived at read (24030);
+   * present only for an in-progress run whose cursor Job is orphaned. */
+  orphaned?: string
   prs: Run["prs"]
   revisionClock?: ChangeRunRevisionClock
   attempts: readonly (QueueAttempt & TaskStatusFields)[]
@@ -1220,7 +1240,9 @@ function queueOutcome(run: Run): string {
   return run.status === "waiting" ? "waiting" : "running"
 }
 
-function queueState(pr: Change, run: Run | undefined): string {
+function queueState(pr: Change, run: Run | undefined, liveness: RunnerLivenessProbe): string {
+  // Derived at read (24030): a dead holder or a lapsed lease is never `checking`.
+  if (run !== undefined && orphanedRunLiveness(run, liveness) !== undefined) return "orphaned"
   if (run?.status === "queued" || run?.status === "in_progress") return "checking"
   if (run?.status === "waiting") return "waiting"
   if (run?.status === "completed") return terminalProjection(run).display
@@ -1377,7 +1399,14 @@ function terminalProjection(run: Run): QueueTerminalProjection {
 
 /** Reject a nonterminal status at the terminal-fact boundary. */
 function terminalOutcome(status: QueueTimelineStatus): QueueTerminalOutcome {
-  if (status === "draft" || status === "rev" || status === "ready" || status === "pending" || status === "running") {
+  if (
+    status === "draft" ||
+    status === "rev" ||
+    status === "ready" ||
+    status === "pending" ||
+    status === "running" ||
+    status === "orphaned"
+  ) {
     throw new TypeError(`yrd: nonterminal status '${status}' cannot become a terminal FLOW fact`)
   }
   return status
@@ -1428,6 +1457,9 @@ function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusF
   // CLI status filters.
   if (status === "draft" || status === "rev" || status === "ready") return "pending"
   if (status === "already-landed") return "integrated"
+  // An orphaned row is still an OPEN run — the next pass start settles it —
+  // so it filters with `running` and is never bounded out by the window.
+  if (status === "orphaned") return "running"
   if (status === "pending" || status === "running" || status === "rejected" || status === "integrated") {
     return status
   }
@@ -1495,6 +1527,9 @@ function timelineRunMemberRows(
   result: QueueStatusResult,
   run: Run,
   nowIso: string,
+  /** The reader's clock and process probe: a running row's state is derived
+   * from its lease holder here, never read off the stored `in_progress` (24030). */
+  liveness: RunnerLivenessProbe,
   submissionTimes: ReadonlyMap<string, string | null>,
   state: BaysState | undefined,
   /** Attempts for THIS run only — see {@link queueAttemptsByRun}. Narrowing at
@@ -1507,7 +1542,12 @@ function timelineRunMemberRows(
 ): QueueTimelineProjectedRow[] {
   const running = run.status === "queued" || run.status === "in_progress" || run.status === "waiting"
   const terminal = running ? null : terminalProjection(run)
-  const status: QueueTimelineStatus = terminal === null ? "running" : terminal.outcome
+  // DERIVED at read (24030): a run whose cursor Job's lease lapsed or whose
+  // holder is dead is `orphaned`, whatever the stored status says — R3742
+  // read `checking` for two hours off exactly that stored word.
+  const orphaned = running ? orphanedRunLiveness(run, liveness) : undefined
+  const status: QueueTimelineStatus =
+    terminal === null ? (orphaned === undefined ? "running" : "orphaned") : terminal.outcome
   const timestamp = running ? toIso(run.startedAt) : run.finishedAt === undefined ? null : toIso(run.finishedAt)
   const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `Run '${run.id}' timeline`)
   const elapsedRunMs = running
@@ -1527,13 +1567,15 @@ function timelineRunMemberRows(
   const stepLabel =
     running && currentStep !== undefined ? `${run.steps.indexOf(currentStep) + 1}:${currentStep.name}` : undefined
   const baseDetail =
-    failure === undefined
-      ? merged
-        ? queueMerge(run)
-        : step === undefined
-          ? run.status
-          : `${step.name}: ${jobStatus(step)}`
-      : actionableFailureSummary(actionableFailure(failure))
+    orphaned !== undefined
+      ? describeOrphanedRun(orphaned)
+      : failure === undefined
+        ? merged
+          ? queueMerge(run)
+          : step === undefined
+            ? run.status
+            : `${step.name}: ${jobStatus(step, liveness)}`
+        : actionableFailureSummary(actionableFailure(failure))
   const ageEndIso = running ? nowIso : (run.finishedAt ?? nowIso)
   const stepNames = stepNamesOfRun(run)
   const mergeVerdict = running ? ("running" as const) : mergeVerdictOfOutcome(status)
@@ -1957,6 +1999,10 @@ function buildQueueTimelineProjection(
   const selectedStatuses = new Set(statuses)
   const terms = [...new Set(options.terms.map((term) => term.trim().toLocaleLowerCase()).filter(Boolean))]
   const attemptsByRun = queueAttemptsByRun(options.attempts ?? [])
+  const liveness: RunnerLivenessProbe =
+    options.runnerAlive === undefined
+      ? leaseOnlyLivenessProbe(options.now)
+      : { now: options.now, runnerAlive: options.runnerAlive }
   const rawRows = results.flatMap((result) => [
     ...timelineNonIntegratedRows(result, nowIso, options.submissionTimes, options.state),
     ...[...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
@@ -1964,6 +2010,7 @@ function buildQueueTimelineProjection(
         result,
         run,
         nowIso,
+        liveness,
         options.submissionTimes,
         options.state,
         attemptsByRun.get(run.id) ?? NO_ATTEMPTS,
@@ -2218,8 +2265,11 @@ function projectPR(
   runOverride?: Run,
   candidateOverride?: Candidate,
   eligibility?: ChangeEligibility,
+  /** The reader's process probe (24030); absent, the lease alone judges a running row. */
+  liveness: RunnerLivenessProbe = leaseOnlyLivenessProbe(now),
 ): HumanChangeProjection {
   const run = runOverride ?? latestRunForCurrentRevision(pr, result)
+  const orphaned = run === undefined ? undefined : orphanedRunLiveness(run, liveness)
   const candidate = candidateOverride
   const step = relevantStep(run)
   const job = step?.job
@@ -2279,7 +2329,7 @@ function projectPR(
     ? eligibility.reason.code
     : projectedState === "needs-author"
       ? projectedState
-      : queueState(pr, run)
+      : queueState(pr, run, liveness)
   const taskStatus = candidateConflict
     ? "blocked"
     : runOverride === undefined || run === undefined
@@ -2336,9 +2386,10 @@ function projectPR(
     step: step?.name ?? "-",
     result:
       (candidateConflict ? eligibility.reason.message : undefined) ??
+      (orphaned === undefined ? undefined : describeOrphanedRun(orphaned)) ??
       failure?.summary ??
       (job !== undefined && "detail" in job && typeof job.detail === "string" ? boundedQueue(job.detail) : undefined) ??
-      (step === undefined ? "-" : jobStatus(step)),
+      (step === undefined ? "-" : jobStatus(step, liveness)),
     ...(job !== undefined && "url" in job && job.url !== undefined ? { log: job.url } : {}),
     artifactCount: artifacts.length,
     ...(artifact === undefined ? {} : { artifact }),
@@ -2466,6 +2517,7 @@ function projectedChangeRows(
   selected: ReadonlySet<string> = new Set<string>(),
   /** `--strict`: restore the historical abort instead of marking the row. */
   strict = false,
+  liveness: RunnerLivenessProbe = leaseOnlyLivenessProbe(now),
 ): HumanChangeProjection[] {
   return [
     ...result.prs.flatMap((pr) => {
@@ -2481,6 +2533,7 @@ function projectedChangeRows(
             undefined,
             latestCandidateForCurrentRevision(result, pr),
             eligibilityForCurrentRevision(result, pr),
+            liveness,
           ),
         ]
       } catch (error) {
@@ -2529,11 +2582,15 @@ export function humanQueueProjection(
     state: BaysState
     /** `--strict`: restore the historical abort instead of marking the row. */
     strict?: boolean
+    /** The host's process probe for running rows (24030); absent, the lease alone judges them. */
+    runnerAlive?: RunnerLivenessProbe["runnerAlive"]
   }>,
 ): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
   const strict = options.strict === true
-  const rows = projectedChangeRows(options.state, result, now, selected, strict)
+  const liveness: RunnerLivenessProbe =
+    options.runnerAlive === undefined ? leaseOnlyLivenessProbe(now) : { now, runnerAlive: options.runnerAlive }
+  const rows = projectedChangeRows(options.state, result, now, selected, strict, liveness)
   const positions = queueAdmissionPositions(result.admissionOrder)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted" || row.nativeStatus === "ready")
@@ -2557,7 +2614,7 @@ export function humanQueueProjection(
       // half above: a historical row whose clocks cannot be projected must not
       // take the whole `yrd queue list` down with it.
       try {
-        return [projectPR(options.state, result, pr, now, run)]
+        return [projectPR(options.state, result, pr, now, run, undefined, undefined, liveness)]
       } catch (error) {
         if (strict) throw error
         return [unreadableChangeRow(pr, error)]
@@ -3013,6 +3070,7 @@ function diagnosticBlocker(
   run: Run | undefined,
   step: QueueStep | undefined,
   now: number,
+  runnerAlive?: RunnerLivenessProbe["runnerAlive"],
 ): string | undefined {
   const job = step?.job
   if (job?.status === "completed" && job.conclusion === "failure") {
@@ -3025,15 +3083,13 @@ function diagnosticBlocker(
     return actionableFailureSummary(actionableFailure({ code: "job-canceled", message: job.cancelReason }))
   }
   if (job?.status === "in_progress") {
-    const leaseExpiresAt = Date.parse(job.leaseExpiresAt)
-    if (Number.isFinite(leaseExpiresAt) && leaseExpiresAt <= now) {
-      return actionableFailureSummary(
-        actionableFailure({
-          code: "job-lease-expired",
-          message: `${job.leaseExpiresAt} (${formatDuration(now - leaseExpiresAt)} ago)`,
-        }),
-      )
-    }
+    // The SAME derivation the list row prints (24030): the detail diagnostic
+    // and the row can never disagree about whether this run is orphaned.
+    const liveness = deriveRunLiveness(
+      { runner: job.runner, leaseExpiresAt: job.leaseExpiresAt },
+      runnerAlive === undefined ? leaseOnlyLivenessProbe(now) : { now, runnerAlive },
+    )
+    if (liveness.state === "orphaned") return describeOrphanedRun(liveness)
   }
   if (job?.status === "waiting") return `waiting: ${singleQueue(job.detail ?? job.url ?? job.token)}`
   if (run?.error !== undefined) return actionableFailureSummary(actionableFailure(run.error))
@@ -3049,6 +3105,7 @@ export function ChangeDetailView({
   attempts = [],
   now,
   position,
+  runnerAlive,
 }: {
   pr: Change
   liveSource?: Readonly<{ head: string }>
@@ -3057,6 +3114,8 @@ export function ChangeDetailView({
   attempts?: readonly QueueAttempt[]
   now: number
   position?: number
+  /** The host's process probe for a running row's holder (24030). */
+  runnerAlive?: RunnerLivenessProbe["runnerAlive"]
 }) {
   const run = latestChangeRun(pr, runs)
   const runMember = run?.prs.find((member) => member.id === pr.id)
@@ -3073,7 +3132,7 @@ export function ChangeDetailView({
     run !== undefined && runMember !== undefined && runMember.revision !== revision.n ? runMember.revision : undefined
   const currentStateWord = delivery === "submitted" ? "pending" : delivery
   const activeStep = relevantStep(run)
-  const blocker = diagnosticBlocker(pr, run, activeStep, now)
+  const blocker = diagnosticBlocker(pr, run, activeStep, now, runnerAlive)
   const merge = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
   const detail = ChangeDetailData(pr, runs, attempts)
   const lineage = timelineRevisionLineage(pr)
@@ -3663,7 +3722,7 @@ function noticeState(
     if (data.status === "completed" && (data.conclusion === "cancelled" || data.conclusion === "skipped")) {
       return "canceled"
     }
-    if (data.status === "in_progress") return "running"
+    if (data.status === "in_progress") return data.orphaned === undefined ? "running" : "orphaned"
     return statusPresentationState(data.status)
   }
   if (row === undefined) return undefined
@@ -3706,6 +3765,7 @@ function noticeHeadline(
     return word
   }
   if (state === "running") return "checking"
+  if (state === "orphaned") return data?.orphaned ?? "orphaned"
   if (state === "rejected") return "failed"
   if (state === "needs-author") return "needs author"
   return state
@@ -4048,6 +4108,8 @@ const TIMELINE_STATUS_WORDS = {
   ready: "ready",
   pending: "queued",
   running: "checking",
+  // A dead holder or a lapsed lease is NOT checking anything (24030).
+  orphaned: "orphaned",
   integrated: "merged",
   "already-landed": "merged",
   // Non-merge success — never the word "merged" (21801 / 22323).
@@ -4084,6 +4146,8 @@ export function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStat
 // failed terminals.
 function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   if (row.status === "running") return { text: row.step ?? "" }
+  // The dead holder and its lease, not the step it will never finish (24030).
+  if (row.status === "orphaned") return { text: row.detail, color: "$fg-warning" }
   if (row.failure !== undefined) {
     const slug = fitTimelineLabel(failureSlug(row.failure.code), TIMELINE_STATE_CAP)
     return {
@@ -5065,7 +5129,7 @@ function TimelineRunnerBox({
  * already-landed are `done`. Admission-only `passed` is NOT done (21801). */
 export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTimelineStatusBucket {
   if (status === "draft" || status === "rev") return "open"
-  if (status === "ready" || status === "pending" || status === "running") return "running"
+  if (status === "ready" || status === "pending" || status === "running" || status === "orphaned") return "running"
   return status === "integrated" || status === "already-landed" ? "done" : "failed"
 }
 
@@ -5937,7 +6001,7 @@ export function queueLogRows(
   })
 }
 
-function queueShowStepRow(run: Run, step: QueueStep): QueueShowRow {
+function queueShowStepRow(run: Run, step: QueueStep, liveness?: RunnerLivenessProbe): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
   const command = stepCommand(step)
@@ -5951,7 +6015,7 @@ function queueShowStepRow(run: Run, step: QueueStep): QueueShowRow {
   return {
     step: step.name,
     revision: step.revision,
-    status: jobStatus(step),
+    status: jobStatus(step, liveness),
     ...taskStatusFields(taskStatus),
     attempt: step.job === undefined ? "-" : String(step.job.attempt),
     uuid: step.job?.id ?? "-",
@@ -6050,7 +6114,11 @@ function queueShowAttemptRow(run: Run, attempt: QueueAttempt): QueueShowRow {
   }
 }
 
-function queueShowRows(run: Run, attempts: readonly QueueAttempt[]): readonly QueueShowRow[] {
+function queueShowRows(
+  run: Run,
+  attempts: readonly QueueAttempt[],
+  liveness?: RunnerLivenessProbe,
+): readonly QueueShowRow[] {
   const terminalStepIndex = run.steps.findIndex((step) => {
     const job = step.job
     return (
@@ -6065,7 +6133,7 @@ function queueShowRows(run: Run, attempts: readonly QueueAttempt[]): readonly Qu
       for (const attempt of stepAttempts) usedAttempts.add(attempt)
       return stepAttempts.map((attempt) => queueShowAttemptRow(run, attempt))
     }
-    const row = queueShowStepRow(run, step)
+    const row = queueShowStepRow(run, step, liveness)
     const canceled =
       terminalStepIndex >= 0 && index > terminalStepIndex && (step.job === undefined || step.job.status === "queued")
     return canceled ? [{ ...row, status: "canceled", ...taskStatusFields("dropped") }] : [row]
@@ -6081,8 +6149,11 @@ export function queueShowData(
   allRuns: readonly Run[] = [],
   attempts: readonly QueueAttempt[] = [],
   revisionClock?: ChangeRunRevisionClock,
+  /** The reader's clock and process probe (24030); absent, a running row keeps its stored word. */
+  liveness?: RunnerLivenessProbe,
 ): QueueShowData {
   const finished = allRuns.filter((candidate) => candidate.status === "completed")
+  const orphaned = liveness === undefined ? undefined : orphanedRunLiveness(run, liveness)
   const runAttempts = attempts
     .filter((attempt) => attempt.run === run.id)
     .toSorted((left, right) => left.index - right.index || left.attempt - right.attempt)
@@ -6120,10 +6191,11 @@ export function queueShowData(
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
     ...(runFailure === undefined ? {} : { failure: projectFailure(runFailure) }),
+    ...(orphaned === undefined ? {} : { orphaned: describeOrphanedRun(orphaned) }),
     prs: run.prs,
     ...(revisionClock === undefined ? {} : { revisionClock }),
     attempts: runAttempts,
-    steps: queueShowRows(run, runAttempts),
+    steps: queueShowRows(run, runAttempts, liveness),
   }
 }
 

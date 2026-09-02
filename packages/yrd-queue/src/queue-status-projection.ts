@@ -1007,10 +1007,7 @@ type JobDisplayStatus =
  * progress at the cursor — a queued, waiting or completed run has no lease to
  * judge. The projection stays pure: the probe is an input, never a host call.
  */
-export function runLiveness(
-  run: Pick<Run, "steps" | "cursor">,
-  probe: RunnerLivenessProbe,
-): RunLiveness | undefined {
+export function runLiveness(run: Pick<Run, "steps" | "cursor">, probe: RunnerLivenessProbe): RunLiveness | undefined {
   const job = run.steps[run.cursor]?.job
   if (job?.status !== "in_progress") return undefined
   return deriveRunLiveness({ runner: job.runner, leaseExpiresAt: job.leaseExpiresAt }, probe)
