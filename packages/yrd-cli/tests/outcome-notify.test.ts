@@ -183,6 +183,54 @@ describe("routeOutcome — the registry's disposition IS the switch", () => {
     expect(routed.body).toContain("close your bead and retire its lane embed in the same write")
   })
 
+  /**
+   * PR3221's ball read `merged as 27fc05023a3d9e7575a0491b1806ae75dcd00616
+   * (base 27fc05023a3d)` — a commit announced as its own base. The proof's
+   * `baseSha` is the base tip AFTER landing, which for an ordinary merge IS the
+   * merge commit; the base the checks ran at (27fc0502's first parent, 7f4f3305)
+   * lives on the member. The ball now names the merge and what it landed onto.
+   */
+  it("landed → merged as <merge> onto <pre-merge base>, never the merge as its own base", () => {
+    const merge = "c".repeat(40)
+    const routed = routeOutcome(
+      outcome({
+        kind: "landed",
+        attemptId: "R12",
+        run: "R12",
+        code: undefined,
+        reason: undefined,
+        failureKind: undefined,
+        attributableFailures: undefined,
+        // The live shape: the proof's baseSha IS the merge commit.
+        integration: { commit: merge, baseSha: merge },
+        baseSha: BASE_SHA,
+      }),
+      routing,
+    )
+    expect(routed.body).toContain(`merged as ${merge} onto ${BASE_SHA.slice(0, 12)}`)
+    expect(routed.body).not.toContain(`onto ${merge.slice(0, 12)}`)
+    expect(routed.body, "the old shape said (base …) and named the merge itself").not.toContain("(base ")
+  })
+
+  it("landed with no recorded base says nothing rather than inventing one", () => {
+    const routed = routeOutcome(
+      outcome({
+        kind: "landed",
+        attemptId: "R12",
+        run: "R12",
+        code: undefined,
+        reason: undefined,
+        failureKind: undefined,
+        attributableFailures: undefined,
+        integration: { commit: "c".repeat(40), baseSha: "c".repeat(40) },
+        baseSha: undefined,
+      }),
+      routing,
+    )
+    expect(routed.body).toContain(`merged as ${"c".repeat(40)}.`)
+    expect(routed.body).not.toContain("onto")
+  })
+
   it("no recorded submitter (the literal `unknown`, or the bay plugin's `operator` default) → the owner, and the body says so", () => {
     for (const submitter of [undefined, "operator", "", UNKNOWN_SUBMITTER]) {
       const routed = routeOutcome(outcome({ submitter }), routing)

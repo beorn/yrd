@@ -8253,6 +8253,18 @@ async function physicalIntegrationProof(
   return integrationProof(commit, checked, undefined, submoduleMains)
 }
 
+/**
+ * `baseSha: commit` is deliberate and load-bearing, not a copy-paste: the proof's
+ * `baseSha` names the base tip AFTER integration, and after an ordinary merge
+ * that tip IS the merge commit. The already-landed path relies on exactly this
+ * (`commit === baseSha` is how a no-op landing proves it moved nothing).
+ *
+ * So the proof answers "where is the base now", never "what did the checks run
+ * against". Anything reporting a landing to a person wants the second question
+ * and must read the member's own `baseSha` — reading this one printed
+ * `merged as 27fc0502… (base 27fc0502…)` on PR3221's ball, a commit announced
+ * as its own parent, while the checks had run at 7f4f3305.
+ */
 function integrationProof(
   commit: string,
   checked: PinnedCandidate,

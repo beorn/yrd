@@ -146,6 +146,34 @@ describe("every ended attempt reaches the outcome seam exactly once", () => {
     expect(outcomes, "a pass with nothing to do ends no attempt").toHaveLength(1)
   })
 
+  /**
+   * The real `integrationProof()` sets `baseSha: commit` — the proof answers
+   * "where is the base now", and after an ordinary merge that IS the merge
+   * commit. `runOutcomes` used to prefer it, so PR3221's ball read
+   * `merged as 27fc05023a3d… (base 27fc05023a3d)`: a commit as its own base.
+   * The outcome's `baseSha` is the base the CHECKS ran at, which lives on the
+   * member and is the merge's first parent.
+   */
+  it("the outcome's baseSha is the base the checks ran at, never the post-merge tip the proof carries", async () => {
+    const outcomes: QueueOutcome[] = []
+    await using app = await createApp({
+      outcomes,
+      // The shape `integrationProof()` actually produces.
+      mergeRun: async () => ({ status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: MERGED } }),
+    })
+    await app.bays.recordBranchSubmit({ branch: "issue/own-base", sha: SHA, base: "main" })
+
+    await app.queue.run({}, runtime)
+
+    const [landed] = outcomes
+    expect(landed?.kind).toBe("landed")
+    expect(landed?.integration, "the proof keeps its own meaning, unchanged").toMatchObject({
+      commit: MERGED,
+      baseSha: MERGED,
+    })
+    expect(landed?.baseSha, "the member's base, not the merge commit").toBe(BASE)
+  })
+
   it("a revision refused at admission (a failed required check) hands over ONE `refused` outcome with the code and admission kind, and nothing lands", async () => {
     const outcomes: QueueOutcome[] = []
     await using app = await createApp({

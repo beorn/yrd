@@ -237,7 +237,11 @@ export function routeOutcome(outcome: QueueOutcome, options: OutcomeRoutingOptio
       command: `git log -1 ${landing}`,
       body:
         `landed: ${where} merged as ${landing}` +
-        (outcome.integration === undefined ? "" : ` (base ${outcome.integration.baseSha.slice(0, 12)})`) +
+        // The base the checks ran at, which is also the merge's first parent.
+        // `outcome.integration.baseSha` is the base tip AFTER landing — for an
+        // ordinary merge that IS `landing`, so printing it here read
+        // `merged as 27fc0502… (base 27fc0502…)`: a commit as its own base.
+        (outcome.baseSha === undefined ? "" : ` onto ${outcome.baseSha.slice(0, 12)}`) +
         `. ${CLOSE_BEAD_INSTRUCTION}.` +
         (unknown
           ? ` No submitter seat was recorded for this revision (submit with --notify <seat>), so this goes to the queue owner ${owner}.`
