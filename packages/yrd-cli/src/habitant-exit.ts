@@ -67,6 +67,18 @@ export const HABITANT_EXIT = {
    * journal this runner reads, so a successor re-derives the same member and is
    * refused the same way. */
   "refusal-loop": 15,
+  /** A signal asked this pass to stop and it drained: admissions closed, the
+   * job in flight settled to a terminal state with a coded reason, the lease
+   * released (`queue-drain.ts`). Distinct from `interrupted` because the two
+   * differ in exactly the fact a supervisor needs: `interrupted` left work
+   * outstanding and wants the successor to resume draining, while this pass
+   * left nothing outstanding and was stopped ON PURPOSE. Measured 2026-09-01:
+   * three one-shot passes died to signals in one day, and every instrument
+   * read all three as "exited after SIGTERM" — the same string a crashed pass
+   * produces. Dispositioned `stand-down` for the plainest reason in the table:
+   * a person asked this pass to stop, so restarting it is undoing their
+   * request, not curing a fault. */
+  drained: 16,
 } as const
 
 export type HabitantExitCondition = keyof typeof HABITANT_EXIT
@@ -102,6 +114,9 @@ export const HABITANT_EXIT_DISPOSITION: Readonly<Record<HabitantExitCondition, H
     "installed-plan-stale": "restart-immediately",
     "queue-wedged": "stand-down",
     "refusal-loop": "stand-down",
+    // Not "no number of restarts can reach it" like the two above, but the
+    // stronger case: restarting contradicts the instruction that produced it.
+    drained: "stand-down",
   })
 
 /**

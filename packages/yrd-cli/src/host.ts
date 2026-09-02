@@ -210,6 +210,13 @@ import {
   yrdQueueRunnerCheckRequested,
 } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
+import {
+  QUEUE_DRAIN_BOUND_MS,
+  closeDrainedQueuePass,
+  drainedQueuePassExit,
+  queuePostureDrains,
+  settleDrainedQueuePass,
+} from "./queue-drain.ts"
 import { retainedWorkspaceNote, type RetainedWorkspace } from "./workspace-retention.ts"
 import type {
   YrdCliApp,
@@ -3656,7 +3663,6 @@ async function closeRuntime(
 }
 
 type ShutdownSignal = "SIGINT" | "SIGTERM"
-const ONE_SHOT_RECOVERY_CUTOFF = "1970-01-01T00:00:00.000Z"
 
 /** Announce a graceful drain as ONE structured loggily record — never a bare
  * wrapped stderr paragraph, since the habitant runner's stderr IS its log
@@ -3673,72 +3679,110 @@ export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownS
   })
 }
 
+/**
+ * Settle the one-shot pass's own in-flight run, so the journal records why it
+ * stopped instead of leaving a row `in_progress` for the next pass to find.
+ *
+ * Bounded and non-throwing (`settleDrainedQueuePass`): this runs on the way
+ * out, and a throw here would cost BOTH the terminal state and the lease
+ * release that follows it in `closeHost`'s `finally`. Every failure is reported
+ * loudly with its scope instead. No recovery argv rides along (5e cut 6):
+ * restart re-derives recovery — the next runner start reclaims a dead
+ * predecessor's leases and the habitant sweep settles expired ones.
+ */
 async function settleOneShotQueueRun(
   host: YrdHost,
   runner: string,
   signal: ShutdownSignal,
   log: ConditionalLogger,
 ): Promise<void> {
-  try {
-    // A runner-scoped recovery also sweeps every unrelated lease older than its
-    // cutoff. Epoch keeps this signal path exact: only this PID-scoped one-shot
-    // runner is declared dead.
-    const runs = await host.app.queue.recover({
-      recoveryTime: ONE_SHOT_RECOVERY_CUTOFF,
-      runner,
-      reason: `one-shot queue runner interrupted by ${signal}`,
-    })
-    if (runs.length > 0) {
-      log.info?.(`Stopped queue run ${runs.map((run) => run.id).join(", ")} safely after ${signal}.`)
-    }
-  } catch (error) {
-    // No recovery argv to attach (5e cut 6): the next runner start reclaims
-    // this runner's leases, and the habitant sweep settles them once expired.
-    log.error?.(`Could not stop the queue run safely after ${signal}; the next runner start reclaims its leases.`, {
-      error: error instanceof Error ? error.message : String(error),
-      repository: host.repository.repo,
-    })
-    throw error
-  }
+  await settleDrainedQueuePass(host.app.queue, runner, signal, {
+    info: (message, props) => log.info?.(message, { ...props, repository: host.repository.repo }),
+    error: (message, props) => log.error?.(message, { ...props, repository: host.repository.repo }),
+  })
 }
 
-/** Own process signals at the run-to-exit CLI boundary, then restore native
- * signal exit semantics only after the host has drained its resources. */
-function bindProcessShutdown(
+/** The slice of `process` signal ownership needs, injectable so the two-phase
+ * behaviour below can be driven by a test without a test runner that kills
+ * itself on `forward()`. */
+export type ShutdownProcess = Readonly<{
+  on(event: ShutdownSignal, handler: () => void): void
+  off(event: ShutdownSignal, handler: () => void): void
+  kill(pid: number, signal: ShutdownSignal): void
+  readonly pid: number
+}>
+
+/**
+ * Own process signals at the run-to-exit CLI boundary, then restore native
+ * signal exit semantics only after the host has drained its resources.
+ *
+ * Two phases when a `drain` is supplied: the first signal ASKS (the command
+ * keeps running and stops on its own terms), the second TAKES (host close, then
+ * the native signal is re-raised so the exit status stays honest). With no
+ * `drain`, every signal is the second kind — which is what every one-shot queue
+ * pass got until 2026-09-01, and why three of them died mid-job in one day.
+ *
+ * `bound` is the promise the first phase cannot keep on its own: a drain waits
+ * on work it does not control, so without a deadline "graceful" and "hung" are
+ * the same observation. At the bound it escalates itself, exactly as a second
+ * signal would, after saying so.
+ */
+export function bindProcessShutdown(
   shutdown: (signal: ShutdownSignal) => Promise<void>,
   drain?: (signal: ShutdownSignal) => void,
+  bound?: Readonly<{ ms: number; onExpire?: (signal: ShutdownSignal) => void }>,
+  runtime: ShutdownProcess = globalThis.process as unknown as ShutdownProcess,
 ): () => void {
   let draining = false
   let hardSignal: ShutdownSignal | undefined
+  let boundTimer: ReturnType<typeof setTimeout> | undefined
   const remove = (): void => {
-    globalThis.process.off("SIGINT", onSigint)
-    globalThis.process.off("SIGTERM", onSigterm)
+    runtime.off("SIGINT", onSigint)
+    runtime.off("SIGTERM", onSigterm)
   }
   const forward = (signal: ShutdownSignal): void => {
     remove()
-    globalThis.process.kill(globalThis.process.pid, signal)
+    runtime.kill(runtime.pid, signal)
+  }
+  const clearBound = (): void => {
+    if (boundTimer !== undefined) clearTimeout(boundTimer)
+    boundTimer = undefined
   }
   const finish = (): void => {
+    clearBound()
     remove()
     if (hardSignal !== undefined) forward(hardSignal)
   }
-  const onSignal = (signal: ShutdownSignal): void => {
-    if (drain !== undefined && !draining) {
-      draining = true
-      drain(signal)
-      return
-    }
+  const escalate = (signal: ShutdownSignal): void => {
     if (hardSignal !== undefined) return
     hardSignal = signal
+    clearBound()
     // Closing the host aborts a live renderer, but the renderer owns terminal
     // restoration in its surrounding `using` block. Let the command boundary
     // unwind that block before `finish()` restores native signal exit status.
     void shutdown(signal).catch(() => undefined)
   }
+  const onSignal = (signal: ShutdownSignal): void => {
+    if (drain !== undefined && !draining) {
+      draining = true
+      drain(signal)
+      if (bound !== undefined) {
+        boundTimer = setTimeout(() => {
+          bound.onExpire?.(signal)
+          escalate(signal)
+        }, bound.ms)
+        // Never a reason for the process to stay alive: the bound exists to end
+        // a stop, so holding the loop open for it would be the hang it prevents.
+        boundTimer.unref?.()
+      }
+      return
+    }
+    escalate(signal)
+  }
   const onSigint = () => onSignal("SIGINT")
   const onSigterm = () => onSignal("SIGTERM")
-  globalThis.process.on("SIGINT", onSigint)
-  globalThis.process.on("SIGTERM", onSigterm)
+  runtime.on("SIGINT", onSigint)
+  runtime.on("SIGTERM", onSigterm)
   return finish
 }
 
@@ -4548,17 +4592,29 @@ async function runYrdProcessHost(
   let host: YrdHost | undefined
   let oneShotRunner: string | undefined
   let shutdownLog: ConditionalLogger | undefined
+  let drainRequested: ShutdownSignal | undefined
   let closePromise: Promise<void> | undefined
-  const closeHost = (signal?: ShutdownSignal) =>
-    (closePromise ??= (async () => {
-      try {
-        if (signal !== undefined && host !== undefined && oneShotRunner !== undefined && shutdownLog !== undefined) {
-          await settleOneShotQueueRun(host, oneShotRunner, signal, shutdownLog)
-        }
-      } finally {
+  const closeHost = (signal?: ShutdownSignal) => {
+    const stopped = signal ?? drainRequested
+    return (closePromise ??= closeDrainedQueuePass({
+      // A drain reaches here with no `signal` argument: the first signal only
+      // ASKED the pass to stop, and the pass then ran to its own end and fell
+      // into the boundary's `finally`. Settling on that path too is the whole
+      // fix — before it, the drain-free one-shot fired this close CONCURRENTLY
+      // with the still-running pass, so the recovery raced the live job and the
+      // process still died by the re-raised signal.
+      ...(stopped === undefined ? {} : { stopped }),
+      settle: async (interrupt) => {
+        if (host === undefined || oneShotRunner === undefined || shutdownLog === undefined) return
+        await settleOneShotQueueRun(host, oneShotRunner, interrupt, shutdownLog)
+      },
+      // Releases the queue runner lease last (`closeRuntime`), on every path
+      // out including a settle that failed or timed out.
+      close: async () => {
         await host?.close()
-      }
-    })())
+      },
+    }))
+  }
   let removeShutdownSignals: () => void = () => undefined
   let processExit: YrdCliExitCode | undefined
   try {
@@ -4663,19 +4719,35 @@ async function runYrdProcessHost(
         const runnerLog = runtimeLog.child("runner")
         oneShotRunner = posture === "one-shot-queue-run" ? runner?.id : undefined
         shutdownLog = runnerLog
-        const drain =
-          posture === "habitant-queue-run" || posture === "bracketed-bay-open" ? new AbortController() : undefined
+        const drain = queuePostureDrains(posture) ? new AbortController() : undefined
         removeShutdownSignals = bindProcessShutdown(
           closeHost,
           drain === undefined
             ? undefined
             : (signal) => {
                 drain.abort(signal)
-                if (posture === "habitant-queue-run") {
-                  reportGracefulShutdown(runnerLog, signal, activeHost.repository.repo)
-                } else {
+                if (posture === "bracketed-bay-open") {
                   runtimeLog.warn?.(`Bay work was interrupted by ${signal}; preserving the Bay instead of closing it.`)
+                  return
                 }
+                // Both queue postures drain the same way and say so the same
+                // way. The one-shot needs it MORE than the resident, not less:
+                // the resident is supervised and restarts, while a one-shot's
+                // death is final and takes its unsettled run with it.
+                drainRequested = signal
+                reportGracefulShutdown(runnerLog, signal, activeHost.repository.repo)
+              },
+          drain === undefined
+            ? undefined
+            : {
+                ms: QUEUE_DRAIN_BOUND_MS,
+                onExpire: (signal) =>
+                  runnerLog.error?.(`Drain did not finish within ${String(QUEUE_DRAIN_BOUND_MS)}ms; stopping now.`, {
+                    action: "queue-drain-bound-expired",
+                    signal,
+                    boundMs: QUEUE_DRAIN_BOUND_MS,
+                    repository: activeHost.repository.repo,
+                  }),
               },
         )
         return {
@@ -4712,8 +4784,24 @@ async function runYrdProcessHost(
         }
       },
     })
-    processExit = exitCode
-    return exitCode
+    // A drained ONE-SHOT leaves its own code, never the 0 its work would have
+    // returned: nobody supervises a one-shot, so its exit status is the only
+    // thing the operator who sent the signal — or the script that ran it — ever
+    // learns, and "0" there is indistinguishable from a pass that finished.
+    //
+    // Scoped to the one-shot on purpose. The RESIDENT's drained exit is already
+    // specified as 0 and is load-bearing the other way: it runs under
+    // `hab restart=on-failure`, so a clean drain must read as success or the
+    // supervisor restarts the runner an operator just stopped (D3, asserted in
+    // `queue-cancel.test.ts` and `host.test.ts`). Same event, opposite correct
+    // codes, because one of the two has a supervisor and the other has a
+    // terminal.
+    const drainedOneShot = oneShotRunner === undefined ? undefined : drainRequested
+    const stoppedExit = drainedQueuePassExit(exitCode, {
+      ...(drainedOneShot === undefined ? {} : { drained: drainedOneShot }),
+    })
+    processExit = stoppedExit
+    return stoppedExit
   } catch (error) {
     if (isYrdRuntimeReloadRequest(error)) {
       try {
