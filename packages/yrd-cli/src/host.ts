@@ -211,6 +211,7 @@ import {
   runtimeReloadEnv,
   yrdJsonOutputRequested,
   yrdQueueRunnerCheckRequested,
+  yrdRunnerIdentity,
 } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
 import {
@@ -3570,7 +3571,9 @@ function habitantRunnerSeed(env: NodeJS.ProcessEnv): HabitantRunnerSeed {
     .map((value) => value?.trim())
     .find((value): value is string => value !== undefined && value !== "")
   return Object.freeze({
-    id: `yrd-cli:${globalThis.process.pid}`,
+    // The ONE minting of the runner identity (24030): the shape `runnerPid`
+    // parses back, shared with the one-shot claim and the departed reclaim.
+    id: yrdRunnerIdentity(globalThis.process.pid),
     epoch: randomUUID(),
     host: hostname(),
     ...(pane === undefined ? {} : { pane }),
@@ -4417,7 +4420,7 @@ async function createYrdRuntimeHost(
       scope,
       log,
       candidatePool,
-      runnerId: habitant?.id ?? `yrd-cli:${globalThis.process.pid}`,
+      runnerId: habitant?.id ?? yrdRunnerIdentity(globalThis.process.pid),
       ...(implementationSource === undefined ? {} : { implementationSource }),
       ...(discoveredImplementationSource === undefined
         ? {}

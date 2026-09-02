@@ -7,11 +7,30 @@
  * @level l1
  * @consumer @yrd/cli run.ts (yrdRunnerIdentity, planHabitantRunnerReclaim)
  */
+import { readdirSync, readFileSync } from "node:fs"
+import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { runnerPid } from "@yrd/queue"
 import { planHabitantRunnerReclaim, yrdRunnerIdentity } from "../src/run.ts"
 
 describe("the runner identity carries the pid the liveness probe reads (24030)", () => {
+  it("is minted in exactly ONE place — every `yrd-cli:<pid>` in yrd-cli's sources comes from yrdRunnerIdentity", () => {
+    // host.ts minted the habitant seed's id and the hosted one-shot's runnerId
+    // by hand beside the helper until 2026-09-02; three sites is how the
+    // shape drifts. The count is asserted, not the absence, so a walk that
+    // resolved the wrong root reads as a loud zero rather than a green one.
+    const src = fileURLToPath(new URL("../src/", import.meta.url))
+    const sites = new Map<string, number>()
+    for (const entry of readdirSync(src, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !/\.tsx?$/u.test(entry.name)) continue
+      const path = join(entry.parentPath, entry.name)
+      const count = readFileSync(path, "utf8").split("`yrd-cli:${").length - 1
+      if (count > 0) sites.set(path.slice(src.length), count)
+    }
+    expect([...sites.entries()]).toEqual([["run.ts", 1]])
+  })
+
   it("mints yrd-cli:<pid>, and runnerPid reads the pid back", () => {
     expect(yrdRunnerIdentity(4242)).toBe("yrd-cli:4242")
     expect(runnerPid(yrdRunnerIdentity(4242))).toBe(4242)
