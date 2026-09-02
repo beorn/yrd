@@ -54,21 +54,121 @@ export async function queueScratchParent(git: Pick<Git, "run">, repo: string): P
 const commonDirs = new Map<string, string>()
 
 /**
- * ENOSPC reaches us two ways: as a Node filesystem error carrying `code`, and
- * — far more often — as the queue git helper's thrown `Error` whose message is
- * git's own stderr. Both must classify, because the outage surfaced through
- * `worktree add` stderr and through submodule checkout stderr alike.
+ * The two errnos that say the storage under a write is gone, in the two
+ * spellings each arrives in. ENOSPC is the full disk or the exhausted inode
+ * table (2026-08-14); EDQUOT is the per-user quota on a shared tmpfs, which is
+ * the same outage wearing a different errno — measured 2026-09-01 22:24 PDT,
+ * when `/tmp`'s ~42 GB per-user quota filled and every git write under the
+ * `affected-tests` check died on `Disk quota exceeded`. strerror text
+ * (`No space left on device`, `Disk quota exceeded`) is what git and tar
+ * print; the bare errno name is what a Node error message carries
+ * (`EDQUOT: unknown error, write`, `ENOSPC: no space left on device, write`).
+ */
+const STORAGE_EXHAUSTION_MESSAGE = /no space left on device|disk quota exceeded|ENOSPC|EDQUOT/iu
+
+/**
+ * Storage exhaustion reaches us two ways: as a Node filesystem error carrying
+ * `code`, and — far more often — as the queue git helper's thrown `Error`
+ * whose message is git's own stderr. Both must classify, because the outage
+ * surfaced through `worktree add` stderr and through submodule checkout
+ * stderr alike.
  */
 export function isStorageExhaustion(cause: unknown): boolean {
   if (cause === null || cause === undefined) return false
   if (typeof cause === "object") {
     const code = (cause as Readonly<{ code?: unknown }>).code
-    if (code === "ENOSPC") return true
+    if (code === "ENOSPC" || code === "EDQUOT") return true
     const nested = (cause as Readonly<{ cause?: unknown }>).cause
     if (nested !== undefined && nested !== cause && isStorageExhaustion(nested)) return true
   }
   const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : ""
-  return /no space left on device|ENOSPC/iu.test(message)
+  return STORAGE_EXHAUSTION_MESSAGE.test(message)
+}
+
+/**
+ * What storage exhaustion looks like in a CHECK'S OWN OUTPUT — a test runner's
+ * combined stdout/stderr, not an error message. Stricter than
+ * {@link isStorageExhaustion} on purpose: a bare `ENOSPC` token in arbitrary
+ * output can be a test title (`scratch-storage.test.ts` has several), and a
+ * red that merely MENTIONS the errno must stay the check's verdict. The
+ * strerror phrases are unambiguous, and a Node message always spells the
+ * errno as `EDQUOT: <description>`, colon included.
+ */
+const STORAGE_EXHAUSTION_OUTPUT_LINE = /no space left on device|disk quota exceeded|\bE(?:NOSPC|DQUOT): /iu
+
+/**
+ * The typed code for storage exhaustion INSIDE a check's process — the check
+ * ran, its own writes (test fixtures, git objects, tar extracts) hit
+ * ENOSPC/EDQUOT, and it exited non-zero without ever judging the change. The
+ * scratch allocator's twin is {@link WORKTREE_STORAGE_EXHAUSTED}; both sit in
+ * the queue's `infra-retry` bucket, and neither may retire a submission.
+ */
+export const CHECK_STORAGE_EXHAUSTED = "check-storage-exhausted"
+
+export type StorageExhaustionSighting = Readonly<{
+  /** The output line that names the exhaustion, verbatim. */
+  line: string
+  /** The path that line says could not be written, when it names one. */
+  path?: string
+}>
+
+/** The last slash-bearing token before the errno phrase — git's `to '<dst>':
+ * Disk quota exceeded`, its `unable to create file <path>: No space left on
+ * device`, tar's `<path>: Cannot write: Disk quota exceeded`. */
+function exhaustedPath(line: string): string | undefined {
+  const at = line.search(STORAGE_EXHAUSTION_OUTPUT_LINE)
+  if (at === -1) return undefined
+  const tokens = line.slice(0, at).match(/[^\s'":]*\/[^\s'":]+/gu)
+  return tokens?.at(-1)
+}
+
+/**
+ * The first line of a step's output that names storage exhaustion — preferring
+ * one that names the PATH that failed, because that path is the cure: it says
+ * which filesystem to free. PR3159's log opened with five path-less
+ * `unable to write loose object file` lines before the first `cannot copy …
+ * to '/tmp/km-vitest-3001/…'`, and a reader handed the first line alone would
+ * have had to open the artifact to learn it was the tmpfs.
+ */
+export function storageExhaustionSighting(output: string): StorageExhaustionSighting | undefined {
+  let first: string | undefined
+  let relative: StorageExhaustionSighting | undefined
+  for (const raw of output.split(/\r?\n/u)) {
+    const line = raw.trim()
+    if (!STORAGE_EXHAUSTION_OUTPUT_LINE.test(line)) continue
+    const path = exhaustedPath(line)
+    // An absolute path names the filesystem outright (`/tmp/…` IS the tmpfs);
+    // a relative one (tar's `@km/old.md`) only says a write failed somewhere
+    // under the check's cwd, so it is the fallback, not the answer.
+    if (path !== undefined && path.startsWith("/")) return { line, path }
+    if (path !== undefined) relative ??= { line, path }
+    first ??= line
+  }
+  return relative ?? (first === undefined ? undefined : { line: first })
+}
+
+/**
+ * The refusal row for a check that ran out of storage: what happened, that
+ * the change was NOT judged, what to free, and the one command that re-runs
+ * the pass. Operator ruling 2026-09-01: within ten minutes of a merge attempt
+ * there is a decision — yrd is broken (fix yrd) or the PR is broken (send it
+ * back) — and storage exhaustion is always the first, so the row must read as
+ * the queue's own to cure, never as work for the author.
+ */
+export function checkStorageExhaustionMessage(
+  purpose: string,
+  sighting: StorageExhaustionSighting,
+  artifactLog: string,
+): string {
+  const where =
+    sighting.path === undefined
+      ? "the filesystem the check wrote to (the full output names it)"
+      : `the filesystem holding '${sighting.path}'`
+  return (
+    `${purpose} ran out of storage (ENOSPC/EDQUOT) and reached no verdict on the change: ${sighting.line}. ` +
+    `Cure: free ${where} — a full tmpfs, an exhausted per-user quota, or a full disk — then re-run the pass: ` +
+    `yrd queue run --once; full output: ${artifactLog}`
+  )
 }
 
 export type StorageState = Readonly<{

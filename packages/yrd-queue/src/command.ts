@@ -66,6 +66,8 @@ import {
 import { candidateRefFor, sourceCandidateRefFor } from "./candidate-refs.ts"
 import { submoduleMainScratchCleanupFailure } from "./submodule-main-outcome.ts"
 import {
+  CHECK_STORAGE_EXHAUSTED,
+  checkStorageExhaustionMessage,
   describeScratchReap,
   isStorageExhaustion,
   liveWorktreeEntries,
@@ -74,6 +76,7 @@ import {
   reapOrphanedScratch,
   resolveArtifactRetentionMs,
   storageExhaustionError,
+  storageExhaustionSighting,
   tagStorageExhaustion,
   taggedStorageExhaustion,
 } from "./scratch-storage.ts"
@@ -598,7 +601,15 @@ function configuredCommand<Shape extends ChangeShape>(
     // process implementation that predates `verdict` still reports the
     // wall-clock kill, and `ProcessResult` only ties `stalled: true` to the
     // STALLED verdict, so that one needs no separate check here.
+    //
+    // A process whose own writes hit ENOSPC/EDQUOT is the third verdictless
+    // shape, and the one that reads MOST like a verdict: the runner exits
+    // non-zero and prints its failing test names, exactly as a judged red
+    // does. Decided here from the same output, once, so the exit-code branch
+    // below and this flag cannot disagree about whether the check judged.
+    const storageExhausted = storageExhaustionSighting(message)
     const judgedFailure =
+      storageExhausted === undefined &&
       firstJudgedFailureLine(message) !== undefined &&
       progress.verdict !== "STALLED" &&
       progress.verdict !== "TIMED_OUT" &&
@@ -684,6 +695,23 @@ function configuredCommand<Shape extends ChangeShape>(
       }
       if (result.exitCode !== 0) {
         const action = waiting ? "launcher" : "command"
+        // Storage exhaustion INSIDE the check is infrastructure, never the
+        // check's verdict: the runner's fixtures, git objects or tar extracts
+        // could not be written, so nothing about the change was judged. Read
+        // as `${purpose}-failed` it takes the author disposition and, with a
+        // candidate in hand, retires the submission — measured 2026-09-01
+        // 22:24 PDT on PR3159 and PR3175, both `affected-tests-failed` on
+        // `Disk quota exceeded` from a full /tmp quota. Same bucket as the
+        // scratch allocator's `worktree-storage-exhausted`, and the row
+        // carries the cure (the path that filled, `yrd queue run --once`)
+        // because the queue owner, not the author, is who acts on it.
+        if (storageExhausted !== undefined) {
+          return failed(
+            CHECK_STORAGE_EXHAUSTED,
+            checkStorageExhaustionMessage(options.purpose, storageExhausted, artifactSink.log),
+            evidence,
+          )
+        }
         // An exit status is a fact about the process, never about the work.
         // `affected-tests command exited 1` was the WHOLE refusal PR2695/2696/
         // 2697 carried on 2026-08-29, while the two failing test names sat in
@@ -6397,8 +6425,15 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
             )
           } catch (cause) {
             const fact = failureFact(cause)
+            // The DRIVER's own writes — the artifact sink, the terminal
+            // record — can hit the same ENOSPC/EDQUOT the check's process did,
+            // and they surface as a throw rather than an exit status. Name it
+            // as the storage failure it is; the outer `queue-environment-refused`
+            // already carries the environment disposition.
             const error = JobErrorSchema.parse({
-              code: fact?.code ?? `${purpose}-candidate-execution-unavailable`,
+              code:
+                fact?.code ??
+                (isStorageExhaustion(cause) ? CHECK_STORAGE_EXHAUSTED : `${purpose}-candidate-execution-unavailable`),
               message: fact?.message ?? messageOf(cause),
             })
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({

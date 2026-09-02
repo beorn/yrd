@@ -3015,12 +3015,35 @@ function createQueue<Shape extends ChangeShape>(
     // demand a re-push to recover from a condition the re-push does not even
     // address.
     //
-    // Infrastructure is excluded on top: an infra fault says nothing about the
-    // content and clears on its own. Those already propagate rather than refuse
-    // on the derived path, so this is a belt on a brace — kept because the cost
-    // of being wrong is a healthy submission the queue never said it dropped.
-    if (options.candidate !== undefined && kind !== "infrastructure") {
-      await retireDerivedSubmitFact(pr, changeHead(pr as Change), result, options.conflicts)
+    // Infrastructure never retires, whatever the step said: an infra fault
+    // says nothing about the content and clears on its own. The kind is
+    // derived from the CODE's registered owner (`admissionFailureKind` reads
+    // QUEUE_ENVIRONMENT_FAILURE_CODES), and the retire path below takes only
+    // an author-owned disposition by type — so a `failure` conclusion carrying
+    // `check-storage-exhausted` / `worktree-storage-exhausted` /
+    // `queue-environment-refused` cannot reach it. Measured 2026-09-01: a full
+    // /tmp quota inside `affected-tests` retired PR3159 and PR3175 because
+    // this read "a candidate was in hand", never who owned the refusal.
+    if (options.candidate !== undefined) {
+      const disposition = admissionRefusalDisposition(kind, result)
+      if (disposition.owner === "author") {
+        await retireDerivedSubmitFact(pr, changeHead(pr as Change), disposition, options.conflicts)
+      } else {
+        log.warn?.(
+          "queue kept a standing submit fact: its derived change was refused by the queue's own environment, " +
+            "not by a verdict on the content — the same fact re-admits on the next pass once the cure below is applied",
+          {
+            action: "submit-fact-kept-standing",
+            branch: pr.branch,
+            sha: changeHead(pr as Change),
+            pr: pr.id,
+            step,
+            code: result.code,
+            reason: result.message,
+            remedy: "cure the environment the reason names, then: yrd queue run --once",
+          },
+        )
+      }
     }
     return {
       code: result.code,
@@ -3492,7 +3515,11 @@ function createQueue<Shape extends ChangeShape>(
   const retireDerivedSubmitFact = async (
     pr: DeepReadonly<Change>,
     headSha: string,
-    result: Readonly<{ code: string; message: string }>,
+    // Only an AUTHOR-owned refusal is accepted here, by type: the caller
+    // narrows `admissionRefusalDisposition`'s union, and there is no other way
+    // to build this argument. An environment refusal has no path to this
+    // function at all, which is the whole invariant of 24031.
+    result: AuthorOwnedRefusal,
     paths: readonly string[] | undefined,
   ): Promise<void> => {
     const snapshot = runtime()
@@ -11274,6 +11301,14 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // never saw it and it fell through to the author default until the
     // constant-following census caught it (2026-09-01).
     "worktree-storage-exhausted",
+    // ENOSPC/EDQUOT INSIDE a check's own process (scratch-storage.ts
+    // `CHECK_STORAGE_EXHAUSTED`, minted by command.ts's configuredCommand
+    // from the check's output): the runner's fixtures or git objects could
+    // not be written, so it exited red without judging the change. The
+    // in-process twin of `worktree-storage-exhausted` — measured 2026-09-01
+    // 22:24 PDT, PR3159/PR3175 on a full /tmp quota, both read as
+    // `affected-tests-failed` and both submissions retired for it.
+    "check-storage-exhausted",
     "wrapper-generation",
     // This Yrd HOST has no verdict-message resolver wired up, or cannot
     // compute a patch-bound authorization identity (no immutable base SHA, no
@@ -11306,6 +11341,24 @@ export const COMPOSITION_FAILURE_BUCKETS = {
 } as const
 
 const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
+
+/**
+ * Every failure code whose owner is the QUEUE'S ENVIRONMENT, not the author:
+ * the `infra-retry` bucket plus the two codes the step wrappers mint for a
+ * check that could not run or a run nobody finished. One set, two readers —
+ * `@yrd/cli`'s `failureDisposition` presents these as env / auto-requeue /
+ * owner queue, and `admissionFailureKind` below records the refusal as
+ * `infrastructure`, which is the ONE kind that can never retire a standing
+ * submit fact. Kept here so the two cannot disagree about which codes those
+ * are: before this set existed the CLI called `worktree-storage-exhausted`
+ * the queue's while the admission funnel, reading only "a candidate was in
+ * hand", retired the author's submission for it.
+ */
+export const QUEUE_ENVIRONMENT_FAILURE_CODES: ReadonlySet<string> = new Set([
+  ...COMPOSITION_FAILURE_BUCKETS["infra-retry"],
+  "queue-environment-refused",
+  "orphaned-run",
+])
 
 /**
  * Every failure/refusal code `@yrd/cli`'s `failureDisposition` (in
@@ -11392,6 +11445,10 @@ export const YRD_REFUSAL_CODES = [
   // no bucket of its own, always the plain default disposition. Load-bearing
   // for status-presentation.test.ts.
   "check-failed",
+  // scratch-storage.ts `CHECK_STORAGE_EXHAUSTED` — a JobError.code the
+  // configured command step mints when the check's own output shows
+  // ENOSPC/EDQUOT; bucketed `infra-retry` above.
+  "check-storage-exhausted",
   "checking",
   "checkpoint-migration-certificate-missing",
   "checkpoint-migration-certificate-stale",
@@ -11753,8 +11810,37 @@ function admissionFailureKind(
   result: DeepReadonly<JobErrorFact>,
   infrastructure: boolean,
 ): Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"] {
-  if (infrastructure) return "infrastructure"
+  // A verdictless job (lost, canceled, killed) is infrastructure whatever its
+  // code; so is a `failure` conclusion whose CODE the registry owns as the
+  // environment's — a check that ran out of storage, a scratch worktree that
+  // could not be prepared, a candidate command that could not run. The code
+  // decides, never the step that produced it.
+  if (infrastructure || QUEUE_ENVIRONMENT_FAILURE_CODES.has(result.code)) return "infrastructure"
   return NEEDS_AUTHOR_CODES.has(result.code) ? "refusal" : "failure"
+}
+
+/**
+ * Who an admission refusal belongs to, as the ONE typed input the retire path
+ * reads. `author`: a verdict on the content — a conflicting candidate, a
+ * judged red, an author-curable composition refusal — which only new content
+ * clears, so the standing submit fact retires with it. `queue`: the queue's
+ * own environment refused, which says nothing about the content and clears
+ * when the environment is cured, so the fact must stand and re-admit.
+ *
+ * Derived from the refusal's KIND, which {@link admissionFailureKind} derives
+ * from the code's registered owner — never from the step's name, and never
+ * from "a candidate was in hand", which is what retired two submissions for a
+ * full /tmp quota on 2026-09-01.
+ */
+type AuthorOwnedRefusal = Readonly<{ owner: "author"; code: string; message: string }>
+type QueueOwnedRefusal = Readonly<{ owner: "queue"; code: string; message: string }>
+
+function admissionRefusalDisposition(
+  kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"],
+  result: Readonly<{ code: string; message: string }>,
+): AuthorOwnedRefusal | QueueOwnedRefusal {
+  const owner = kind === "infrastructure" ? "queue" : "author"
+  return { owner, code: result.code, message: result.message }
 }
 
 type InfraRetryCompositionFailure =

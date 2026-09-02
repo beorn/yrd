@@ -63,6 +63,7 @@ export {
   advanceQueue,
   type UnreadableQueueRun,
   COMPOSITION_FAILURE_BUCKETS,
+  QUEUE_ENVIRONMENT_FAILURE_CODES,
   YRD_REFUSAL_CODES,
   type RefusalCode,
   YRD_REFUSAL_CODE_ALIASES,
@@ -86,6 +87,10 @@ export * from "./command.ts"
 export {
   ARTIFACT_PRUNE_INTERVAL_MS,
   ARTIFACT_RETENTION_ENV,
+  // The in-check storage-exhaustion code, so a consumer classifying a
+  // check's failure can name it without a literal that the registry census
+  // could not follow.
+  CHECK_STORAGE_EXHAUSTED,
   DEFAULT_ARTIFACT_RETENTION_MS,
   describeScratchReap,
   liveScratchOwners,

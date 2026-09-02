@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { COMPOSITION_FAILURE_BUCKETS } from "../src/queue.ts"
-import { WORKTREE_STORAGE_EXHAUSTED } from "../src/scratch-storage.ts"
+import { CHECK_STORAGE_EXHAUSTED, WORKTREE_STORAGE_EXHAUSTED } from "../src/scratch-storage.ts"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const commandSource = readFileSync(join(here, "..", "src", "command.ts"), "utf8")
@@ -87,6 +87,14 @@ describe("composition failure buckets — the partition is total and disjoint", 
         // the author, until the constant-following registry census caught it).
         if (code === WORKTREE_STORAGE_EXHAUSTED) {
           expect(commandSource).toContain("storageExhaustionError(")
+          continue
+        }
+        // Its in-check twin: minted by `configuredCommand` through the
+        // `CHECK_STORAGE_EXHAUSTED` constant when the check's own output shows
+        // ENOSPC/EDQUOT (PR3159/PR3175, 2026-09-01) — the live producer is the
+        // `failed(CHECK_STORAGE_EXHAUSTED, …)` call, proved by name here.
+        if (code === CHECK_STORAGE_EXHAUSTED) {
+          expect(commandSource).toMatch(/failed\(\s*CHECK_STORAGE_EXHAUSTED,/u)
           continue
         }
         expect(derived.has(code), `bucket '${name}' declares '${code}' which no candidateFailure() produces`).toBe(true)

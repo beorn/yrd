@@ -1,4 +1,4 @@
-import { canonicalRefusalCode, COMPOSITION_FAILURE_BUCKETS } from "@yrd/queue"
+import { canonicalRefusalCode, COMPOSITION_FAILURE_BUCKETS, QUEUE_ENVIRONMENT_FAILURE_CODES } from "@yrd/queue"
 
 export type StatusPresentationState =
   | "queued"
@@ -186,8 +186,13 @@ const NEEDS_AUTHOR_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCK
  * forbid. Read here so bucket membership IS the routing, rather than a
  * declaration a second table may disagree with. */
 const PLAIN_REJECTED_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["plain-rejected"]
+/** The queue's own environment-owned codes (`infra-retry` bucket plus
+ * `queue-environment-refused` / `orphaned-run`), read from the ONE set the
+ * admission funnel also reads to decide that a refusal is the queue's and
+ * must never retire a submission — so what this file presents as the queue's
+ * to retry is exactly what the queue treats that way. */
 const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = new Set([
-  ...COMPOSITION_FAILURE_BUCKETS["infra-retry"],
+  ...QUEUE_ENVIRONMENT_FAILURE_CODES,
   // Historical-only: the retired composed path's source publisher. Nothing
   // produces it since the re-merge refactor, but recorded runs and release
   // reasons still carry it, and their presentation stays honest.
@@ -221,11 +226,7 @@ export function failureDisposition(code: string): FailureDisposition {
     return { state: "stale", automation: "auto-requeue", owner: "queue" }
   }
   if (canonical === "stale-pr") return { state: "stale", automation: "none", owner: "queue" }
-  if (
-    canonical === "queue-environment-refused" ||
-    canonical === "orphaned-run" ||
-    INFRA_RETRY_FAILURE_CODES.has(canonical)
-  ) {
+  if (INFRA_RETRY_FAILURE_CODES.has(canonical)) {
     return { state: "env", automation: "auto-requeue", owner: "queue" }
   }
   if (canonical === "job-lost" || canonical === "job-lease-expired") {

@@ -41,7 +41,11 @@ describe("shared queue-state presentation", () => {
     // ENOSPC while preparing scratch: an infrastructure failure the same
     // candidate clears on retry — never the author's (2026-09-01).
     ["worktree-storage-exhausted", "env", "auto-requeue", "queue"],
+    // EDQUOT/ENOSPC inside the check's own process (PR3159/PR3175, 2026-09-01):
+    // the same bucket, read from the same set the admission funnel reads.
+    ["check-storage-exhausted", "env", "auto-requeue", "queue"],
     ["queue-environment-refused", "env", "auto-requeue", "queue"],
+    ["orphaned-run", "env", "auto-requeue", "queue"],
     ["job-lost", "timeout", "auto-requeue", "queue"],
     ["stale-base", "stale", "auto-re-merge", "queue"],
     ["stale-check", "stale", "auto-requeue", "queue"],
