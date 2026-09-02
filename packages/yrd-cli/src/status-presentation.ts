@@ -192,6 +192,12 @@ const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = new Set([
   // produces it since the re-merge refactor, but recorded runs and release
   // reasons still carry it, and their presentation stays honest.
   "source-publish",
+  // The outcome-notifier seam's own codes (@i/10-yrd/24028): a notifier that
+  // failed or was never configured is the queue owner's fault, never the
+  // author's. Neither is ever a persisted Run/Job failure; they classify here
+  // so the census resolves them without the author default.
+  "notify-failed",
+  "notify-unconfigured",
 ])
 
 /**
