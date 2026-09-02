@@ -49,3 +49,32 @@ export function asFailure(
 export function raiseFailure(kind: FailureKind, code: string, message: string): never {
   throw createFailure({ kind, code, message })
 }
+
+/**
+ * A thrown error that says of ITSELF that the caller can recover from it.
+ *
+ * Every ERROR-level row a queue pass emits now ends that pass (operator ruling
+ * 2026-09-01: "any ERROR should result in it dying"), and a thrown failure
+ * inside an observed lifecycle is one such row unless something says
+ * otherwise. Some throws are races the runner already survives by design — a
+ * peer holding the queue, a journal briefly busy, a job a concurrent writer
+ * settled first — and the lifecycle that reports them cannot know that: it
+ * sees a thrown error, not the catch block three frames up that will skip the
+ * cycle. This marker moves that knowledge onto the error, where the thrower
+ * has it, so the row it produces is the abnormal-recoverable WARN rather than
+ * the ERROR that would stop the runner on a condition it was about to retry.
+ *
+ * A symbol rather than a FailureFact field: the fact is a persisted schema,
+ * and "the process can retry this" is a claim about the process, not about
+ * the journal row.
+ */
+const RECOVERABLE_FAILURE = Symbol.for("yrd.recoverable-failure")
+
+export function markRecoverable<Failure extends Error>(error: Failure): Failure {
+  Object.defineProperty(error, RECOVERABLE_FAILURE, { value: true, enumerable: false })
+  return error
+}
+
+export function isRecoverableFailure(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as Record<symbol, unknown>)[RECOVERABLE_FAILURE] === true
+}

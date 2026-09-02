@@ -153,7 +153,7 @@ import {
   type PathHolder,
 } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
-import { createLogger, type ConditionalLogger } from "loggily"
+import { createLogger, type ConditionalLogger, type Event as LoggilyEvent } from "loggily"
 import { run } from "silvery/runtime"
 import { guardScopedPaths } from "./pre-submit-guard-scope.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
@@ -212,10 +212,16 @@ import {
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
 import {
   QUEUE_DRAIN_BOUND_MS,
+  QUEUE_FATAL_EXIT,
   closeDrainedQueuePass,
+  describeQueuePassFatal,
+  describeQueuePassStop,
   drainedQueuePassExit,
+  isQueuePassFatal,
   queuePostureDrains,
   settleDrainedQueuePass,
+  type QueuePassFatal,
+  type QueuePassStop,
 } from "./queue-drain.ts"
 import { retainedWorkspaceNote, type RetainedWorkspace } from "./workspace-retention.ts"
 import type {
@@ -3693,13 +3699,60 @@ export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownS
 async function settleOneShotQueueRun(
   host: YrdHost,
   runner: string,
-  signal: ShutdownSignal,
+  stop: QueuePassStop,
   log: ConditionalLogger,
 ): Promise<void> {
-  await settleDrainedQueuePass(host.app.queue, runner, signal, {
+  await settleDrainedQueuePass(host.app.queue, runner, stop, {
     info: (message, props) => log.info?.(message, { ...props, repository: host.repository.repo }),
     error: (message, props) => log.error?.(message, { ...props, repository: host.repository.repo }),
   })
+}
+
+/**
+ * The pass just latched its first ERROR row and is stopping for it. INFO on the
+ * runner namespace — the resident's human stream shows it, so the reader sees
+ * WHY admissions stopped between the ERROR above and the exit below; a
+ * one-shot at the default WARN level keeps its stderr to the row and the
+ * terminal line.
+ */
+function reportFatalQueueDrain(log: ConditionalLogger, fatal: QueuePassFatal, repository: string): void {
+  log.info?.(
+    `Stopping the queue pass for ${describeQueuePassFatal(fatal)}: no new admissions; the job in flight ` +
+      `settles, the lease releases, then exit ${String(QUEUE_FATAL_EXIT)} (fatal-error).`,
+    {
+      action: "queue-pass-fatal-drain",
+      namespace: fatal.namespace,
+      message: fatal.message,
+      repository,
+    },
+  )
+}
+
+/**
+ * The terminal line of a pass that stopped for its own ERROR row: what died
+ * and why, as the LAST row, after the settle and the lease release. ERROR
+ * itself, so a one-shot's stderr carries it at the default level and a reader
+ * scanning for the highest severity lands on the answer; the latch it would
+ * otherwise trip is already set by the row this quotes.
+ */
+export function reportFatalQueuePass(
+  log: ConditionalLogger,
+  fatal: QueuePassFatal,
+  exitCode: number,
+  repository: string | undefined,
+): void {
+  log.error?.(
+    `Queue pass stopped for ${describeQueuePassFatal(fatal)}; exiting ${String(exitCode)} (fatal-error). ` +
+      "Any ERROR ends the pass: act on that row, then start the runner again.",
+    {
+      action: "queue-pass-fatal",
+      condition: "fatal-error",
+      exitCode,
+      namespace: fatal.namespace,
+      message: fatal.message,
+      ...(repository === undefined ? {} : { repository }),
+    },
+  )
 }
 
 /** The slice of `process` signal ownership needs, injectable so the two-phase
@@ -3726,15 +3779,28 @@ export type ShutdownProcess = Readonly<{
  * on work it does not control, so without a deadline "graceful" and "hung" are
  * the same observation. At the bound it escalates itself, exactly as a second
  * signal would, after saying so.
+ *
+ * A signal is not the only thing that stops a pass. The pass's own ERROR row
+ * does too (operator ruling 2026-09-01), and it enters through `stop(cause)`
+ * on the returned binding — the SAME two-phase machine, with the same bound,
+ * so an ERROR mid-job asks first and takes at the bound, and a signal that
+ * arrives while the pass is draining for an ERROR is the second stop, not a
+ * fresh first one. `Cause` is what a caller may pass to `stop`; a caller with
+ * nothing but signals leaves it at `never` and every callback keeps its
+ * signal-only type.
  */
-export function bindProcessShutdown(
-  shutdown: (signal: ShutdownSignal) => Promise<void>,
-  drain?: (signal: ShutdownSignal) => void,
-  bound?: Readonly<{ ms: number; onExpire?: (signal: ShutdownSignal) => void }>,
+export type ShutdownBinding<Cause> = (() => void) & Readonly<{ stop: (cause: Cause) => void }>
+
+export function bindProcessShutdown<Cause = never>(
+  shutdown: (cause: ShutdownSignal | Cause) => Promise<void>,
+  drain?: (cause: ShutdownSignal | Cause) => void,
+  bound?: Readonly<{ ms: number; onExpire?: (cause: ShutdownSignal | Cause) => void }>,
   runtime: ShutdownProcess = globalThis.process as unknown as ShutdownProcess,
-): () => void {
+): ShutdownBinding<Cause> {
+  type Stop = ShutdownSignal | Cause
+  const isSignal = (cause: Stop): cause is Stop & ShutdownSignal => cause === "SIGINT" || cause === "SIGTERM"
   let draining = false
-  let hardSignal: ShutdownSignal | undefined
+  let hard: Stop | undefined
   let boundTimer: ReturnType<typeof setTimeout> | undefined
   const remove = (): void => {
     runtime.off("SIGINT", onSigint)
@@ -3751,25 +3817,27 @@ export function bindProcessShutdown(
   const finish = (): void => {
     clearBound()
     remove()
-    if (hardSignal !== undefined) forward(hardSignal)
+    // Only a real signal is re-raised. A programmatic stop has no native exit
+    // status to restore; its exit code is the boundary's to decide.
+    if (hard !== undefined && isSignal(hard)) forward(hard)
   }
-  const escalate = (signal: ShutdownSignal): void => {
-    if (hardSignal !== undefined) return
-    hardSignal = signal
+  const escalate = (cause: Stop): void => {
+    if (hard !== undefined) return
+    hard = cause
     clearBound()
     // Closing the host aborts a live renderer, but the renderer owns terminal
     // restoration in its surrounding `using` block. Let the command boundary
     // unwind that block before `finish()` restores native signal exit status.
-    void shutdown(signal).catch(() => undefined)
+    void shutdown(cause).catch(() => undefined)
   }
-  const onSignal = (signal: ShutdownSignal): void => {
+  const stop = (cause: Stop): void => {
     if (drain !== undefined && !draining) {
       draining = true
-      drain(signal)
+      drain(cause)
       if (bound !== undefined) {
         boundTimer = setTimeout(() => {
-          bound.onExpire?.(signal)
-          escalate(signal)
+          bound.onExpire?.(cause)
+          escalate(cause)
         }, bound.ms)
         // Never a reason for the process to stay alive: the bound exists to end
         // a stop, so holding the loop open for it would be the hang it prevents.
@@ -3777,13 +3845,13 @@ export function bindProcessShutdown(
       }
       return
     }
-    escalate(signal)
+    escalate(cause)
   }
-  const onSigint = () => onSignal("SIGINT")
-  const onSigterm = () => onSignal("SIGTERM")
+  const onSigint = () => stop("SIGINT")
+  const onSigterm = () => stop("SIGTERM")
   runtime.on("SIGINT", onSigint)
   runtime.on("SIGTERM", onSigterm)
-  return finish
+  return Object.assign(finish, { stop: (cause: Cause) => stop(cause) })
 }
 
 export type YrdHostOptions = Readonly<{
@@ -4591,22 +4659,46 @@ async function runYrdProcessHost(
   let log: ConditionalLogger | undefined
   let host: YrdHost | undefined
   let oneShotRunner: string | undefined
+  let residentRunner: string | undefined
   let shutdownLog: ConditionalLogger | undefined
-  let drainRequested: ShutdownSignal | undefined
+  let drainRequested: QueuePassStop | undefined
+  // The first ERROR-level row this queue pass emitted, if any. Set by the
+  // logger's own last pipeline branch (`createYrdLogger`'s `onError`), so it
+  // sees every child namespace; read at the boundary to decide the exit code
+  // and to write the terminal line. First row wins: later ERROR rows — the
+  // terminal line included — are detail, and re-latching would only move the
+  // blame off the row that actually stopped the pass.
+  let fatal: QueuePassFatal | undefined
+  let stopForFatal: ((cause: QueuePassFatal) => void) | undefined
+  const onFatalError = (event: Extract<LoggilyEvent, { kind: "log" }>): void => {
+    if (fatal !== undefined) return
+    fatal = Object.freeze({ kind: "fatal-error" as const, namespace: event.namespace, message: event.message })
+    // Not bound yet during host boot: the stop is issued the moment it is
+    // (below), and the exit code override needs only `fatal`.
+    stopForFatal?.(fatal)
+  }
   let closePromise: Promise<void> | undefined
-  const closeHost = (signal?: ShutdownSignal) => {
-    const stopped = signal ?? drainRequested
+  const closeHost = (stop?: QueuePassStop) => {
+    const stopped = stop ?? drainRequested
     return (closePromise ??= closeDrainedQueuePass({
-      // A drain reaches here with no `signal` argument: the first signal only
+      // A drain reaches here with no `stop` argument: the first signal only
       // ASKED the pass to stop, and the pass then ran to its own end and fell
       // into the boundary's `finally`. Settling on that path too is the whole
       // fix — before it, the drain-free one-shot fired this close CONCURRENTLY
       // with the still-running pass, so the recovery raced the live job and the
       // process still died by the re-raised signal.
       ...(stopped === undefined ? {} : { stopped }),
-      settle: async (interrupt) => {
-        if (host === undefined || oneShotRunner === undefined || shutdownLog === undefined) return
-        await settleOneShotQueueRun(host, oneShotRunner, interrupt, shutdownLog)
+      settle: async (cause) => {
+        if (host === undefined || shutdownLog === undefined) return
+        // A signal settles only a ONE-SHOT's run: the resident finishes its run
+        // cooperatively and its hard stop is unchanged. An ERROR settles
+        // whichever runner this pass is, because a resident dying of its own
+        // row past the drain bound leaves its run in flight exactly as a killed
+        // one-shot does — and a runner-scoped recover of a finished run is a
+        // no-op, so the cooperative case costs nothing.
+        const runner = oneShotRunner ?? (isQueuePassFatal(cause) ? residentRunner : undefined)
+        if (runner === undefined) return
+        await settleOneShotQueueRun(host, runner, cause, shutdownLog)
       },
       // Releases the queue runner lease last (`closeRuntime`), on every path
       // out including a settle that failed or timed out.
@@ -4676,7 +4768,15 @@ async function runYrdProcessHost(
                   includeDebug: observability.explicitLevel || observability.debug !== undefined,
                 })
               }
-        log = createYrdLogger(observability, (text) => io.stderr(text), human)
+        // Only a queue pass dies of its own ERROR row: the ruling is about the
+        // queue, and a plain verb's ERROR already reaches its caller through
+        // the exit code its failure classifies to.
+        log = createYrdLogger(
+          observability,
+          (text) => io.stderr(text),
+          human,
+          runner === undefined ? undefined : onFatalError,
+        )
         const runtimeLog = runner === undefined ? log : habitantRunnerLog(log, runner)
         const selectedImplementationSource = io.implementationSource ?? sourceAttestation
         const activeHost = await createYrdRuntimeHost(
@@ -4718,38 +4818,54 @@ async function runYrdProcessHost(
         host = activeHost
         const runnerLog = runtimeLog.child("runner")
         oneShotRunner = posture === "one-shot-queue-run" ? runner?.id : undefined
+        residentRunner = posture === "habitant-queue-run" ? runner?.id : undefined
         shutdownLog = runnerLog
         const drain = queuePostureDrains(posture) ? new AbortController() : undefined
-        removeShutdownSignals = bindProcessShutdown(
+        const binding = bindProcessShutdown<QueuePassFatal>(
           closeHost,
           drain === undefined
             ? undefined
-            : (signal) => {
-                drain.abort(signal)
+            : (cause) => {
+                // The abort REASON carries the cause, so the resident loop —
+                // which owns its own exit code — reads a fatal stop off the
+                // same signal it already reads for "stop admitting".
+                drain.abort(cause)
                 if (posture === "bracketed-bay-open") {
-                  runtimeLog.warn?.(`Bay work was interrupted by ${signal}; preserving the Bay instead of closing it.`)
+                  runtimeLog.warn?.(
+                    `Bay work was interrupted by ${describeQueuePassStop(cause)}; preserving the Bay instead of closing it.`,
+                  )
                   return
                 }
                 // Both queue postures drain the same way and say so the same
                 // way. The one-shot needs it MORE than the resident, not less:
                 // the resident is supervised and restarts, while a one-shot's
                 // death is final and takes its unsettled run with it.
-                drainRequested = signal
-                reportGracefulShutdown(runnerLog, signal, activeHost.repository.repo)
+                drainRequested = cause
+                if (isQueuePassFatal(cause)) reportFatalQueueDrain(runnerLog, cause, activeHost.repository.repo)
+                else reportGracefulShutdown(runnerLog, cause, activeHost.repository.repo)
               },
           drain === undefined
             ? undefined
             : {
                 ms: QUEUE_DRAIN_BOUND_MS,
-                onExpire: (signal) =>
+                onExpire: (cause) =>
                   runnerLog.error?.(`Drain did not finish within ${String(QUEUE_DRAIN_BOUND_MS)}ms; stopping now.`, {
                     action: "queue-drain-bound-expired",
-                    signal,
+                    stop: describeQueuePassStop(cause),
+                    ...(isQueuePassFatal(cause) ? {} : { signal: cause }),
                     boundMs: QUEUE_DRAIN_BOUND_MS,
                     repository: activeHost.repository.repo,
                   }),
               },
         )
+        removeShutdownSignals = binding
+        if (runner !== undefined) {
+          // The pass's own ERROR row enters the SAME two-phase stop a signal
+          // does: ask (drain, bounded), then take. A row latched during host
+          // boot, before this binding existed, is issued now.
+          stopForFatal = (cause) => binding.stop(cause)
+          if (fatal !== undefined) stopForFatal(fatal)
+        }
         return {
           app: activeHost.app,
           services: activeHost.services,
@@ -4796,9 +4912,15 @@ async function runYrdProcessHost(
     // `queue-cancel.test.ts` and `host.test.ts`). Same event, opposite correct
     // codes, because one of the two has a supervisor and the other has a
     // terminal.
-    const drainedOneShot = oneShotRunner === undefined ? undefined : drainRequested
+    //
+    // A pass that stopped for its own ERROR row outranks both: `fatal` is set
+    // by the logger's latch whatever the pass's work returned, for the
+    // resident and the one-shot alike (operator ruling 2026-09-01).
+    const drainedOneShot =
+      oneShotRunner === undefined || typeof drainRequested !== "string" ? undefined : drainRequested
     const stoppedExit = drainedQueuePassExit(exitCode, {
       ...(drainedOneShot === undefined ? {} : { drained: drainedOneShot }),
+      ...(fatal === undefined ? {} : { fatal }),
     })
     processExit = stoppedExit
     return stoppedExit
@@ -4828,13 +4950,24 @@ async function runYrdProcessHost(
       }
     }
     await diagnostic(io, error, { json: yrdJsonOutputRequested(argv) })
-    processExit = classifyFailure(error).exitCode
+    // A thrown failure inside a pass that had already latched an ERROR row —
+    // the row's own lifecycle re-throwing it, or the fatal drain's hard stop
+    // closing the host under the still-running pass — is that same death, and
+    // says so with the same code.
+    processExit = fatal === undefined ? classifyFailure(error).exitCode : QUEUE_FATAL_EXIT
     return processExit
   } finally {
     try {
       await closeHost()
     } finally {
       removeShutdownSignals()
+      // The terminal line, after the settle and the lease release above, and
+      // before the logger closes: what died and why, as the last row.
+      if (fatal !== undefined) {
+        const terminal = shutdownLog ?? log
+        if (terminal !== undefined)
+          reportFatalQueuePass(terminal, fatal, processExit ?? QUEUE_FATAL_EXIT, host?.repository.repo)
+      }
       // One command, one stage table. Emitted last so it covers the whole
       // invocation, and through the host-owned logger so `DEBUG=yrd:perf`
       // reaches it like any other namespace. `unaccountedMs` is the honest row:

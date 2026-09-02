@@ -816,7 +816,7 @@ describe("Jobs", () => {
       const terminal = events.find(
         (event) => event.kind === "log" && event.props?.outcome === "failed" && event.namespace.startsWith("yrd:jobs:"),
       )
-      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "error" })
+      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "warn" })
     } finally {
       await app.close()
       log.end()
@@ -887,7 +887,7 @@ describe("Jobs", () => {
       // The completion Job's own "run" lifecycle owns this namespace even when
       // reported through `finish` (a waiting Job has no second lifecycle name
       // of its own); `completion: true` is finish's own distinguishing marker.
-      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "error", props: { completion: true } })
+      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "warn", props: { completion: true } })
     } finally {
       await app.close()
       log.end()
@@ -897,10 +897,13 @@ describe("Jobs", () => {
   it("keeps a REQUIRED job's succeeded completion at INFO", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    const app = await jobsApp(delivery(undefined, "transport-v1", undefined, () => ({ required: true })), {
-      id: ids("send", "C-send", JOB_ID),
-      log,
-    })
+    const app = await jobsApp(
+      delivery(undefined, "transport-v1", undefined, () => ({ required: true })),
+      {
+        id: ids("send", "C-send", JOB_ID),
+        log,
+      },
+    )
     try {
       const requested = await app.dispatch(app.commands.sender.send, { message: "still-ok" })
       await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })

@@ -8,6 +8,7 @@ import {
   type DeepReadonly,
   type JsonValue,
   type SelectorMatch,
+  markRecoverable,
 } from "@yrd/core"
 import { JobErrorSchema, type JobError } from "@yrd/job"
 import type { ChangeId } from "./change-identity.ts"
@@ -380,6 +381,11 @@ export class ChangeCheckabilityConflict extends Error {
     this.name = "ChangeCheckabilityConflict"
     this.prId = prId
     this.status = status
+    // Exactly the losable half (`isConcurrentCheckabilityConflict`): the
+    // change left the checkable set under the runner, which skips the cycle.
+    // The lifecycle reporting the throw logs it at WARN, since an ERROR row
+    // now stops the pass; a conflict against a live state stays an ERROR.
+    if (isNonCheckableChangeState(status)) markRecoverable(this)
   }
 }
 

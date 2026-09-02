@@ -62,6 +62,9 @@ import {
   type YrdDef,
   type YrdDeliveryIdentity,
   type YrdLifecycleOutcome,
+  formatLifecycleDuration,
+  markRecoverable,
+  systemClock,
 } from "@yrd/core"
 import {
   createJobDef,
@@ -194,6 +197,10 @@ export class QueueRunningConflict extends Error {
     this.name = "QueueRunningConflict"
     this.base = base
     this.runId = runId
+    // A peer holding the base is a race this runner retries next cycle
+    // (`habitantCycleRecovery`), so the compose lifecycle that reports the
+    // throw must log it at WARN: an ERROR row now stops the pass.
+    markRecoverable(this)
   }
 }
 
@@ -2844,6 +2851,10 @@ function createQueue<Shape extends ChangeShape>(
     code: string
     reason: string
     remedy: string
+    /** When the unusable Job went terminal — the moment this member got stuck. */
+    since: string
+    /** How long it has been stuck, as of this pass. */
+    ageMs: number
   }>
 
   type RevisionAdmissionOutcome = Readonly<{
@@ -3051,6 +3062,8 @@ function createQueue<Shape extends ChangeShape>(
                 "no action if the check is re-driven or the base moves — the next pass admits this member " +
                 "again as soon as a job that can reach a verdict exists; to force one now, re-push " +
                 `refs/yrd/submit/${pr.branch} at this head`,
+              since: job.finishedAt,
+              ageMs: Math.max(0, (runOptions?.now ?? systemClock.now)() - Date.parse(job.finishedAt)),
             },
           }
         }
@@ -3200,9 +3213,11 @@ function createQueue<Shape extends ChangeShape>(
           reason: refusal.reason,
         })
       } catch (error) {
-        // Bookkeeping must never convert a survivable skip into a habitant kill,
-        // but it must never fail quietly either — an unrecorded cycle is exactly
-        // the blindness this ledger exists to remove.
+        // Not thrown, so the refusal itself still settles; but ERROR, and an
+        // ERROR row ends the pass (operator ruling 2026-09-01). A journal that
+        // refuses a ledger write is the system of record failing, and a pass
+        // that carried on past it used to leave the wedge oracle blind while
+        // reading as healthy — exactly the standing ERROR the ruling removes.
         log.error?.(`queue could not journal ${pr.id}'s required-check failure; the wedge oracle will under-count`, {
           action: "admission-refusal-unrecorded",
           pr: pr.id,
@@ -3257,10 +3272,11 @@ function createQueue<Shape extends ChangeShape>(
         ...(paths === undefined || paths.length === 0 ? {} : { paths: [...paths] }),
       })
     } catch (error) {
-      // Bookkeeping must never convert a survivable refusal into a habitant
-      // kill — but an unrecorded retirement is the phantom loop coming back, so
-      // it can never be quiet either. Loud, and the fact stays derivable: a
-      // re-mint that is REPORTED is strictly better than one that is not.
+      // Not thrown, so the refusal that got here still stands; but ERROR, and
+      // an ERROR row ends the pass (operator ruling 2026-09-01): an unrecorded
+      // retirement is the phantom re-mint loop coming back, on a journal that
+      // is refusing writes, and a pass that reports that and carries on is the
+      // standing ERROR the ruling removes. The fact stays derivable either way.
       log.error?.(
         `queue could not retire the submit fact for ${pr.id}, whose candidate cannot merge; it will be derived again`,
         {
@@ -3385,17 +3401,26 @@ function createQueue<Shape extends ChangeShape>(
         const outcome = await admitChangeRevision(pr, baseSha, runOptions, selectorless)
         if (outcome.ejected !== undefined) {
           const ejection = outcome.ejected
-          // error, not warn, and the same row shape the authority-gap eject a
+          // WARN, not error, and the same row shape the authority-gap eject a
           // few hundred lines down already uses: this is the ONLY trace the
           // ejection leaves anywhere, by design, so it carries the change, the
-          // check, the Job, the code that made the Job unusable, and the cure.
-          // Keyed on (pr, code) so the reporter's memo folds a member stuck
-          // this way across passes into one announcement plus its escalation
-          // schedule, instead of one row per pass forever.
+          // check, the Job, the code that made the Job unusable, how long the
+          // member has been stuck, and the cure. Keyed on (pr, code) so the
+          // reporter's memo folds a member stuck this way across a resident's
+          // passes into one announcement plus its escalation schedule.
+          //
+          // WARN is load-bearing since 2026-09-01: an ERROR row now ends the
+          // pass, and this row fires on EVERY pass while the member stays stuck
+          // (recover() re-loses the job each time; measured ~55 rows an hour of
+          // one-shot passes). At ERROR it would have killed every pass forever
+          // for one member — the head-of-line wedge ejecting exists to end. It
+          // is not the queue that is broken here; it is one member's work, and
+          // the row names the member and its age so a reader can act on it.
           composeConditions.report(
             `admission-ejected:${ejection.pr}:${ejection.code}`,
-            "error",
-            `ejected ${ejection.pr} (${ejection.branch}) [${ejection.code}] ${ejection.reason} — ${ejection.remedy}`,
+            "warn",
+            `ejected ${ejection.pr} (${ejection.branch}) [${ejection.code}] ${ejection.reason}; ` +
+              `stuck for ${formatLifecycleDuration(ejection.ageMs)} (since ${ejection.since}) — ${ejection.remedy}`,
             {
               action: "admission-ejected",
               pr: ejection.pr,
@@ -3405,6 +3430,9 @@ function createQueue<Shape extends ChangeShape>(
               code: ejection.code,
               reason: ejection.reason,
               remedy: ejection.remedy,
+              since: ejection.since,
+              ageMs: ejection.ageMs,
+              age: formatLifecycleDuration(ejection.ageMs),
             },
           )
           ejected.push(pr.id)
@@ -3998,15 +4026,18 @@ function createQueue<Shape extends ChangeShape>(
                 gap.reason === "consumed"
                   ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
                   : `no ${gap.kind} authority fact exists`
-              // error, not warn: a `missing` gap leaves no durable trace (the
-              // comment below), so this line is the ONLY record that this PR
-              // cannot be composed — the system cannot verify something it
-              // needs, which is the operator's queue-INTEGRITY bar. Deduped
-              // below: unfixed, this is the exact site measured re-skipping
-              // the same PR every cycle for over an hour.
+              // WARN: a `missing` gap leaves no durable trace (the comment
+              // below), so this line is the ONLY record that this PR cannot be
+              // composed, and it carries the PR, the code and the cure. It was
+              // ERROR until 2026-09-01, when an ERROR row became fatal to the
+              // pass: this site recurs every cycle for as long as ONE change's
+              // authority fact is missing (measured re-skipping the same PR
+              // every cycle for over an hour), and at ERROR it would have
+              // killed every pass for that one change. The queue is not broken
+              // here; the change is unrunnable, and the remedy is printed.
               composeConditions.report(
                 `compose-candidate-skip-authority:${gap.pr}:${gap.kind}:${gap.reason}`,
-                "error",
+                "warn",
                 `ejected ${gap.pr} [queue-${gap.kind}-authority-${gap.reason}] no runnable authority`,
                 {
                   action: "compose-candidate-skip",
@@ -4398,12 +4429,14 @@ function createQueue<Shape extends ChangeShape>(
               if (ejected !== undefined) {
                 const refusal = ChangeNeedsAuthorFactSchema.parse(ejected.data)
                 if (!selectorless) raiseFailure("refusal", refusal.receipt.code, refusal.receipt.message)
-                // error, not warn — same queue-INTEGRITY reasoning as the other
-                // no-runnable-authority site above, and the same measured
-                // every-cycle repeat this key's dedup guards against.
+                // WARN — same reasoning as the other no-runnable-authority site
+                // above: per-change, recurring, remedy printed, and a durable
+                // `pr/needs-author` result already carries the verdict. An
+                // ERROR row ends the pass (2026-09-01), which one unrunnable
+                // change must not do to every change behind it.
                 composeConditions.report(
                   `compose-candidate-skip-authority:${refusal.pr}:${refusal.receipt.code}`,
-                  "error",
+                  "warn",
                   `ejected ${refusal.pr} [${refusal.receipt.code}] no runnable authority`,
                   {
                     action: "compose-candidate-skip",
@@ -5065,14 +5098,21 @@ function queueRunOutcome(run: DeepReadonly<Run>): YrdLifecycleOutcome {
 }
 
 /** failureLevel for queueRunOutcome's "failed" branch. That branch is reached
- * ONLY when no step Job owns the ERROR (an admission-level refusal rejected
+ * ONLY when no step Job owns the failure (an admission-level refusal rejected
  * before any step ran, e.g. a Candidate that conflicts before Job execution) —
  * a step-owned failure settles at "settled" instead and never reaches here.
  * Checking runFailureStepOwned explicitly, rather than relying on that
  * routing implicitly, keeps a future third path to "failed" from silently
- * inheriting the wrong level. */
+ * inheriting the wrong level.
+ *
+ * WARN, not ERROR, for the run-owned failure. It was ERROR so the failure
+ * would not be silent, and WARN keeps that: the row still prints at the
+ * default level and names the run, the code and the duration. What changed
+ * on 2026-09-01 is what ERROR MEANS — it ends the pass — and a run that failed
+ * on its own content (a conflicting candidate, a stale base) is a verdict the
+ * queue records and moves past, not a fault in the queue. */
 function queueRunFailureLevel(run: DeepReadonly<Run>): Exclude<LogLevel, "silent"> {
-  return runFailureStepOwned(run) ? "info" : "error"
+  return runFailureStepOwned(run) ? "info" : "warn"
 }
 
 function queueRunsOutcome(runs: readonly DeepReadonly<Run>[]): YrdLifecycleOutcome {

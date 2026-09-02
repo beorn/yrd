@@ -1,7 +1,7 @@
 import type { ConditionalLogger, LogLevel } from "loggily"
 import { systemClock } from "./clock.ts"
 import { formatLifecycleDuration } from "./duration.ts"
-import { failureFact, type FailureFact } from "./failure.ts"
+import { failureFact, isRecoverableFailure, type FailureFact } from "./failure.ts"
 
 /** Default severity by lifecycle outcome. Delivery-step starts are the one
  * explicit identity-aware promotion; a thrown "failed" is another — see
@@ -141,7 +141,7 @@ export async function observeYrdLifecycle<Result>(
           ? options.failureLevel?.(result)
           : options.reportedAtBoundary === true
             ? undefined
-            : thrownFailureLevel(failure)
+            : thrownFailureLevel(failure, error)
     emitLifecycle(log, options.lifecycle, outcome, summary ?? outcome, { ...spanProps }, levelOverride)
   }
 
@@ -279,8 +279,16 @@ function lifecycleMessage(
  * `failure` at all -- a bug, an unclassified environment failure), is
  * presumptively the worse class and stays loud at ERROR; this mirrors
  * yrd-cli's own `classifyFailure`, which gives an unclassified error the same
- * "infrastructure" exit code rather than the gentler refusal/usage one. */
-function thrownFailureLevel(failure: FailureFact | undefined): Exclude<LogLevel, "silent"> {
+ * "infrastructure" exit code rather than the gentler refusal/usage one.
+ *
+ * One thing outranks the kind: an error that marked ITSELF recoverable
+ * (`markRecoverable`) is a race the thrower knows its caller survives — a
+ * busy journal, a peer holding the queue — and settles at WARN whatever its
+ * kind says. ERROR is fatal to a queue pass (operator ruling 2026-09-01), so
+ * an ERROR here for a condition the runner was about to retry would stop the
+ * runner on its own retry loop. */
+function thrownFailureLevel(failure: FailureFact | undefined, error: unknown): Exclude<LogLevel, "silent"> {
+  if (isRecoverableFailure(error)) return "warn"
   return failure !== undefined && failure.kind !== "infrastructure" ? "warn" : "error"
 }
 

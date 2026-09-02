@@ -14,6 +14,7 @@ import {
   parseJournalFrame,
   type JournalHistory,
   systemClock,
+  markRecoverable,
 } from "@yrd/core"
 import type { Scope } from "@silvery/scope"
 import { computed, type ReadSignal } from "@silvery/signals"
@@ -197,6 +198,42 @@ export type Job =
   | (JobBase & { status: "completed"; conclusion: "skipped"; finishedAt: string })
   | (JobBase & JobCancellation)
   | (JobBase & JobExecution & JobEvidence & JobCancellation)
+
+/**
+ * The failure-code suffix a step mints when the process it ran was ended by
+ * SIGKILL before it produced a verdict (yrd-queue's `gitCheckStep`:
+ * `<purpose>-infrastructure-signal`). Declared here, beside the level rule
+ * that reads it, so the mint and the classification cannot drift apart.
+ */
+export const INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX = "-infrastructure-signal"
+
+/**
+ * A failed Job whose failure is about the MACHINERY this pass runs on, not
+ * about the revision it judged: the definition's callback threw
+ * (`runner-error`), or the process was SIGKILLed before it produced a verdict.
+ * Neither says anything about the content; both say the host is in trouble.
+ */
+export function isMachineryJobFailure(code: string): boolean {
+  return code === "runner-error" || code.endsWith(INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX)
+}
+
+/**
+ * How loud a failed Job's own lifecycle row is.
+ *
+ * A VERDICT — the command exited non-zero, timed out, stalled, its gate report
+ * or checkpoint was invalid — is WARN: the queue refuses the change and the
+ * pass continues, and the row is the list of work that leaves behind. This
+ * used to be ERROR for a required job, on the reasoning that a gating verdict
+ * should be loud; but an ERROR row now ENDS the pass (operator ruling
+ * 2026-09-01, "any ERROR should result in it dying"), and a runner that dies
+ * on every red PR is not a merge queue. A MACHINERY failure
+ * (`isMachineryJobFailure`) stays ERROR, and so stops the pass: it is the
+ * abnormal-not-auto-fixable class, and the change behind it was never judged.
+ */
+function jobFailureLevel(result: Job): "warn" | "error" {
+  if (result.status !== "completed" || result.conclusion !== "failure") return "warn"
+  return isMachineryJobFailure(result.error.code) ? "error" : "warn"
+}
 
 function jobResultAttributes(definition: JobDef, result: Job, observed?: JobResult): Readonly<Record<string, unknown>> {
   const projected = observed === undefined ? undefined : definition.observeResult?.(observed)
@@ -735,6 +772,11 @@ export class JobStateConflict extends Error {
     this.jobId = jobId
     this.actual = actual
     this.expected = expected
+    // Exactly the losable half (`isConcurrentSettlementConflict`): a peer
+    // settled the Job first, and the runner skips the cycle. The lifecycle
+    // reporting the throw logs it at WARN, since an ERROR row now stops the
+    // pass; a conflict against a still-live status stays the ERROR it is.
+    if (isTerminalJobStatus(actual)) markRecoverable(this)
   }
 }
 
@@ -954,12 +996,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
             : result.status === "in_progress" || result.status === "waiting" || result.status === "queued"
               ? "progress"
               : "failed",
-        // A failure this job's own definition marked required is a gating
-        // verdict against the revision under test — the change dies, not the
-        // process — and stays loud at ERROR; everything else (undeclared or
-        // explicitly optional/advisory) settles at the abnormal-recoverable
-        // WARN rather than the prior silent INFO.
-        failureLevel: () => (observation.required === true ? "error" : "warn"),
+        failureLevel: jobFailureLevel,
         resultAttributes: (result) => jobResultAttributes(installed, result, observedResult),
       },
       async () => {
@@ -1117,11 +1154,9 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           },
           outcome: (finished) =>
             finished.status === "completed" && finished.conclusion === "success" ? "succeeded" : "failed",
-          // Same required/advisory split as the in-process `run` completion
-          // above — a required job's failure is a content verdict against the
-          // revision (ERROR), everything else is abnormal-recoverable (WARN),
-          // and success is untouched at INFO.
-          failureLevel: () => (observation.required === true ? "error" : "warn"),
+          // Same verdict/machinery split as the in-process `run` completion
+          // above; success is untouched at INFO.
+          failureLevel: jobFailureLevel,
           resultAttributes: (finished) => jobResultAttributes(installedDef, finished, result),
         },
         async () => {

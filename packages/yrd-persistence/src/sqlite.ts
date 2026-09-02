@@ -22,6 +22,7 @@ import {
   type JournalHistoryEntry,
   type JournalIdentityKind,
   type JournalFrame,
+  markRecoverable,
 } from "@yrd/core"
 import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger } from "loggily"
@@ -907,13 +908,19 @@ function rethrowSqliteBusy(error: unknown): never {
     typeof error === "object" && error !== null ? (error as Readonly<{ code?: unknown; errno?: unknown }>) : undefined
   if (fact?.code !== "SQLITE_BUSY" && fact?.errno !== 5) throw error
   const reason = error instanceof Error ? error.message : String(error)
-  throw createFailure(
-    {
-      kind: "infrastructure",
-      code: "journal-busy",
-      message: `yrd: journal is busy: ${reason}`,
-    },
-    error,
+  // Recoverable by declaration: a busy journal is contention, not damage, and
+  // the resident skips the cycle for it (`habitantCycleRecovery`). Marking it
+  // here keeps the `append` lifecycle's row at WARN — an ERROR row now stops
+  // the pass, which would turn every busy tick into a runner death.
+  throw markRecoverable(
+    createFailure(
+      {
+        kind: "infrastructure",
+        code: "journal-busy",
+        message: `yrd: journal is busy: ${reason}`,
+      },
+      error,
+    ),
   )
 }
 

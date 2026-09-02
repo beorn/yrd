@@ -283,6 +283,7 @@ import {
   type HabitantSourceStall,
 } from "./source-staleness.ts"
 import { HABITANT_EXIT } from "./habitant-exit.ts"
+import { QUEUE_FATAL_EXIT, fatalQueueDrain } from "./queue-drain.ts"
 import {
   decideHabitantMemory,
   foldMemoryCap,
@@ -516,6 +517,13 @@ const HABITANT_MEMORY_CAP_EXIT: YrdCliExitCode = HABITANT_EXIT["memory-cap"]
  * record is the detail, and this exit no longer shares `refusal`'s generic
  * code 1 with a genuine failure a supervisor should treat differently. */
 const HABITANT_PLAN_STALE_EXIT: YrdCliExitCode = HABITANT_EXIT["installed-plan-stale"]
+/** A habitant that stopped for its own ERROR row (operator ruling 2026-09-01:
+ * any ERROR ends the pass). The host latches the row and aborts the drain
+ * signal with the fatal cause as its reason; the loop reads that reason here,
+ * finishes the run in flight exactly as an operator's drain would, and then
+ * exits with the fatal code UNCLEAN — the heartbeat's exit marker must not
+ * call a death "clean" because the runner happened to finish its run first. */
+const HABITANT_FATAL_EXIT: YrdCliExitCode = QUEUE_FATAL_EXIT
 
 /** Overrides {@link HABITANT_SOURCE_STALE_BEHIND}; `0` disables the recycle and
  * leaves the staleness visible-only. A runtime knob rather than project config:
@@ -7043,7 +7051,14 @@ const CHANGE_LIST_STATE_HELP = CHANGE_LIST_STATES.join(", ")
 async function listPrs(
   app: YrdCliApp,
   options: JsonOption &
-    Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean; reviewer?: string; strict?: boolean }>,
+    Readonly<{
+      base?: string
+      state?: string
+      issue?: string
+      needsReview?: boolean
+      reviewer?: string
+      strict?: boolean
+    }>,
   io: YrdCliIO,
 ): Promise<void> {
   if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
@@ -11288,7 +11303,10 @@ export async function refreshTrackedQueueRevisions(
           message: failure.message,
         }
         outcomes.push(outcome)
-        app.log.error?.(`Tracked PR ${currentPr.id} needs an operator decision before entry checks.`, {
+        // WARN: settled `needs-person`, so it does not recur, and it is one
+        // change's work item for a person — not a fault in the runner. An
+        // ERROR row ends the pass (2026-09-01), which one change must not do.
+        app.log.warn?.(`Tracked PR ${currentPr.id} needs an operator decision before entry checks.`, {
           action: "queue-track-needs-person",
           ...outcome,
         })
@@ -11823,7 +11841,9 @@ export async function applyRefusalRemedies(
     if (plan.remedy.kind === "judgment") {
       await settleNeedsPerson(plan.remedy.reason)
       outcomes.push({ status: "escalated", ...identity, reason: plan.remedy.reason, resolution: projected.resolution })
-      app.log.error?.(`PR ${plan.pr} needs a person: its result has no mechanical remedy.`, {
+      // WARN, as for every settled needs-person row: one change's work for a
+      // person, recorded durably, and never a reason to end the pass.
+      app.log.warn?.(`PR ${plan.pr} needs a person: its result has no mechanical remedy.`, {
         action: "queue-refusal-escalated",
         ...identity,
         reason: plan.remedy.reason,
@@ -11846,7 +11866,10 @@ export async function applyRefusalRemedies(
       const failure = error instanceof Error ? error.message : String(error)
       await settleNeedsPerson(failure)
       outcomes.push({ status: "failed", ...identity, commands, failure, resolution: projected.resolution })
-      app.log.error?.(`Could not apply PR ${plan.pr}'s printed remedy; it needs a person.`, {
+      // WARN: the remedy is per-change git work that can fail on the change's
+      // own content, it is settled needs-person right above, and the row
+      // names the PR and the commands. Not the runner's fault, so not fatal.
+      app.log.warn?.(`Could not apply PR ${plan.pr}'s printed remedy; it needs a person.`, {
         action: "queue-refusal-remedy-failed",
         ...identity,
         commands,
@@ -12469,6 +12492,12 @@ export async function followQueueRuns(
   const runCycle = async (): Promise<YrdCliExitCode | null> => {
     try {
       heartbeat?.check()
+      // The pass's own ERROR row stopped it (the host aborted the drain signal
+      // with the fatal cause). Nothing is in flight between cycles, so this is
+      // the clean boundary to leave from — and it must NOT take the ordinary
+      // drain path below, which would run the queue once more to flush it and
+      // then call the stop clean.
+      if (fatalQueueDrain(drainSignal) !== undefined) return HABITANT_FATAL_EXIT
       const starting = firstCycle
       const beforeRefresh = app.state()
       if (!starting) await app.refresh()
@@ -12579,6 +12608,11 @@ export async function followQueueRuns(
           io.stdout(stableJson({ command: "queue.run", mode: "follow", run: projectQueueRunTaskStatus(run) }))
         }
       }
+      // An ERROR row during that run ended the pass. The run it was inside has
+      // just finished (or the host's drain bound cut it short and settled it),
+      // so leave now, unclean, before the drain branch below could read the
+      // finished run as an operator's clean stop.
+      if (fatalQueueDrain(drainSignal) !== undefined) return HABITANT_FATAL_EXIT
       const exit: YrdCliExitCode = runs.some(Queues.failed) ? 1 : 0
       // 22474 specimen 3 — self-health. A long-lived drain that refuses EVERY
       // candidate, cycle after cycle, against a world that is not moving has
@@ -12657,6 +12691,9 @@ export async function followQueueRuns(
       if (recovery === undefined) throw error
       recoveryReporter.report(recovery)
       heartbeat?.check()
+      // A losable race is still a skipped cycle — unless an ERROR row already
+      // ended this pass, in which case there is no next cycle to skip to.
+      if (fatalQueueDrain(drainSignal) !== undefined) return HABITANT_FATAL_EXIT
       if (drainRequested()) {
         await scope.sleep(interval)
         return null

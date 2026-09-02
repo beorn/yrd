@@ -1190,6 +1190,21 @@ both the same under `restart=on-failure`.) A runner killed by an uncatchable sig
 is covered separately: it leaves its heartbeat behind, and its successor reclaims
 the leases (see below).
 
+**Any ERROR ends the pass.** A `queue run` — resident or one-shot — that emits an
+ERROR-level log row does not carry on past it: the row is written, admissions
+close, the job in flight is given the same bounded drain a signal gets (finished
+if it can be, otherwise settled with the coded reason `queue-pass-errored`), the
+lease is released, and the process exits `17` (`fatal-error` in the habitant exit
+taxonomy, `habitant-exit.ts`) after a terminal ERROR line that names the namespace
+and message of the row that killed it. `17` is distinct from every other code the
+runner speaks — `0`/`1` (the work's own result), `3` (interrupted), `16` (drained
+on request) — and is dispositioned `stand-down`: an ERROR is the
+abnormal-not-auto-fixable class, so a restart is not the cure. The consequence for
+log levels is that WARN is where a handled condition lives (a red check, a
+conflicting candidate, a member whose check job was lost, a busy journal), and
+ERROR is reserved for what the queue cannot continue past: a journal that refuses
+a write, a step whose machinery broke, a drain that could not settle.
+
 Every `queue run` — a resident follow-runner and a one-shot pass alike — acquires
 one OS-held lease in the repository's common Yrd state before receiver intake or
 required-check execution, and holds it for the whole of that pass. A second
