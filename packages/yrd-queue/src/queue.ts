@@ -2087,6 +2087,33 @@ function createQueue<Shape extends ChangeShape>(
   const reportRunOutcomes = async (run: Run): Promise<void> => {
     for (const outcome of runOutcomes(run)) await reportOutcome(outcome)
   }
+  /** Is root `id` fully settled — terminal, advanced, and (for a bisected
+   * batch) its whole tree settled? That is the durable, effectively monotonic
+   * "this attempt is over" fact `resumableQueueRoots` and the settled command
+   * already key on, so reading it before and after a settle is the store-free
+   * "did THIS call end the attempt" discriminator: no ledger, no flag. */
+  const fullySettled = (id: RunId): boolean => !needsSettlement(runtime(), current(id))
+  /** Run `operation` over root `id` and, if it is what fully settled the
+   * root, hand every member's outcome to the seam — the ONE emission point
+   * for merge runs (@i/10-yrd/24028 ruling 3). A run that ends inside its
+   * own pass settles here in that pass. A merge a remote Runner holds open is
+   * NOT terminal when its pass ends, so it settles on whichever later pass
+   * observes its Job complete: none before, one then. A root already settled
+   * reads settled on both sides and emits nothing, so re-running a settled
+   * attempt never opens a second ball. A bisection parent settles only once
+   * its whole tree has, so its members are reported exactly once, on that
+   * pass. `fresh`: the root was born by this compose, so it cannot have been
+   * reported before — it is reported now if it is settled now, else by the
+   * later pass that settles it. */
+  const settleReporting = async (
+    id: RunId,
+    operation: () => Promise<unknown>,
+    options: Readonly<{ fresh?: boolean }> = {},
+  ): Promise<void> => {
+    const settledBefore = options.fresh !== true && fullySettled(id)
+    await operation()
+    if (!settledBefore && fullySettled(id)) await reportRunOutcomes(current(id))
+  }
   const byName = new Map(steps.map((step) => [step.name, step] as const))
   // Read ONCE from this process's configuration: every surface that reports why
   // a standing submit fact has not been admitted answers from the same two
@@ -2299,7 +2326,14 @@ function createQueue<Shape extends ChangeShape>(
       if (run === undefined) continue
       if (record.parent !== undefined || needsSettlement(snapshot, run)) continue
       const result = await actions.settled(id)
-      if (result.events.length > 0) cleaned.push(id)
+      if (result.events.length === 0) continue
+      cleaned.push(id)
+      // A root that reaches here ENDED without the pass that ended it settling
+      // it (the process died between its terminal advance and its settled
+      // fact, before `settleReporting` could run). This cleanup is the pass
+      // that settles it, so this is where its outcome is handed over; the
+      // fresh settled events above are what make that once per root.
+      await reportRunOutcomes(run)
     }
     return cleaned
   }
@@ -4502,35 +4536,44 @@ function createQueue<Shape extends ChangeShape>(
           // other candidate to fall through to, so it stays fail-loud, and a
           // non-refusal (a real bug) always propagates.
           const selectorless = args.prs === undefined || args.prs.length === 0
-          const settleCandidate = async (candidateId: RunId): Promise<void> => {
-            try {
-              await settle(candidateId, runOptions)
-            } catch (error) {
-              const fact = failureFact(error)
-              if (!selectorless || fact?.kind !== "refusal") throw error
-              // A stale-plan batch can never isolate under the installed catalog.
-              // Retire it once so it cannot poison every future habitant cycle.
-              if (fact.code === "stale-plan") {
-                await actions.retireStalePlan(candidateId)
-                log.warn?.(`Skipped outdated batch ${candidateId} because its PRs can no longer be tested together.`, {
-                  action: "compose-stale-plan-retire",
+          // Every settle the compose drives — a run started this pass, a run
+          // resumed from an earlier one (a merge a remote Runner held open, a
+          // bisection still isolating) — goes through `settleReporting`, so the
+          // pass that fully settles a root is the pass that hands its outcome
+          // over, and no other pass does.
+          const settleCandidate = (candidateId: RunId): Promise<void> =>
+            settleReporting(candidateId, async () => {
+              try {
+                await settle(candidateId, runOptions)
+              } catch (error) {
+                const fact = failureFact(error)
+                if (!selectorless || fact?.kind !== "refusal") throw error
+                // A stale-plan batch can never isolate under the installed catalog.
+                // Retire it once so it cannot poison every future habitant cycle.
+                if (fact.code === "stale-plan") {
+                  await actions.retireStalePlan(candidateId)
+                  log.warn?.(
+                    `Skipped outdated batch ${candidateId} because its PRs can no longer be tested together.`,
+                    {
+                      action: "compose-stale-plan-retire",
+                      run: candidateId,
+                      code: fact.code,
+                      reason: error instanceof Error ? error.message : String(error),
+                    },
+                  )
+                  return
+                }
+                // Not ledgered: this skip is run-scoped, and a run record already
+                // exists — the record walk in `auditQueues` can see it. The ledger
+                // covers only the skips that never mint a record.
+                composeLog.warn?.(`skipped a change that moved while batch ${candidateId} was being prepared`, {
+                  action: "compose-candidate-skip",
                   run: candidateId,
                   code: fact.code,
                   reason: error instanceof Error ? error.message : String(error),
                 })
-                return
               }
-              // Not ledgered: this skip is run-scoped, and a run record already
-              // exists — the record walk in `auditQueues` can see it. The ledger
-              // covers only the skips that never mint a record.
-              composeLog.warn?.(`skipped a change that moved while batch ${candidateId} was being prepared`, {
-                action: "compose-candidate-skip",
-                run: candidateId,
-                code: fact.code,
-                reason: error instanceof Error ? error.message : String(error),
-              })
-            }
-          }
+            })
           const resolveCycleBase = createBaseResolutionCycle()
           const resolveCyclePlan = createDeclaredPlanCycle()
           await actions.refresh()
@@ -5063,13 +5106,15 @@ function createQueue<Shape extends ChangeShape>(
               if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
               const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
               roots.push(id)
-              const root = current(id)
-              if (Queues.terminal(root)) await reportFreshTerminal(root)
-              else await settleCandidate(id)
               // The one place both merge paths — the drain's merge-when-green
-              // head and the post-drain selection — pass through, so a run
-              // that ENDED in this pass hands over its outcome exactly once.
-              await reportRunOutcomes(current(id))
+              // head and the post-drain selection — pass through. A run that
+              // ENDS in this pass settles here and hands over its outcome
+              // exactly once; one a remote Runner still holds open does not
+              // settle, and its outcome belongs to the later pass that does
+              // (the resumable-roots settle above, through the same wrapper).
+              const root = current(id)
+              if (Queues.terminal(root)) await settleReporting(id, () => reportFreshTerminal(root), { fresh: true })
+              else await settleCandidate(id)
               return id
             } catch (error) {
               const fact = failureFact(error)
