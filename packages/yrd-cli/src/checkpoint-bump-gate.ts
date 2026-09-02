@@ -141,7 +141,7 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // identity moves all the same (the bd1c0b88 trap above); a checkpoint at
   // the predecessor replays after its stored cursor unchanged. An interim
   // identity f800b079 existed on this branch only while the fact's who-field
-  // was still spelled `actor` (a retired noun); no deployment ever stored it,
+  // was still spelled with the retired role noun; no deployment ever stored it,
   // so it is deliberately not retained. Current.
   "7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074",
 ])
