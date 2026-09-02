@@ -125,28 +125,31 @@ describe("mergeJoinedNothing — the nothing-new outcome is a projection over st
     pins: [],
   }
 
-  it("is true exactly when a merged result IS its own base", () => {
-    const record = MergeRecordBodySchema.parse({
-      merge: { ...base, result: "merged", mergedCommit: SHA_BASE },
-      ...skeleton,
-    })
-    expect(mergeJoinedNothing(record)).toBe(true)
-  })
-
-  it("is false for an ordinary merge that moved the base", () => {
-    const record = MergeRecordBodySchema.parse({
-      merge: { ...base, result: "merged", mergedCommit: SHA_MERGED },
-      ...skeleton,
-    })
-    expect(mergeJoinedNothing(record)).toBe(false)
-  })
-
-  it("is false for a failed run even when no commit exists — failure is not up to date", () => {
-    const record = MergeRecordBodySchema.parse({
-      merge: { ...base, result: "failed" },
-      ...skeleton,
+  it.each([
+    {
+      name: "is true exactly when a merged result IS its own base",
+      merge: { result: "merged", mergedCommit: SHA_BASE },
+      reason: undefined,
+      expected: true,
+    },
+    {
+      name: "is false for an ordinary merge that moved the base",
+      merge: { result: "merged", mergedCommit: SHA_MERGED },
+      reason: undefined,
+      expected: false,
+    },
+    {
+      name: "is false for a failed run even when no commit exists — failure is not up to date",
+      merge: { result: "failed", mergedCommit: undefined },
       reason: { code: "merge-failed", message: "boom" },
+      expected: false,
+    },
+  ])("$name", ({ merge, reason, expected }) => {
+    const record = MergeRecordBodySchema.parse({
+      merge: { ...base, ...merge },
+      ...skeleton,
+      reason,
     })
-    expect(mergeJoinedNothing(record)).toBe(false)
+    expect(mergeJoinedNothing(record)).toBe(expected)
   })
 })
