@@ -3,7 +3,7 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import { EventSchema, type Event } from "@yrd/core"
-import { JobRequestSchema, parseJobTransitionForReplay, type JobTransition } from "@yrd/job"
+import { JobRequestSchema, parseJobTransitionForReplay, type ReplayJobTransitionFact } from "@yrd/job"
 import type { JournalView, JournalViewEntry } from "@yrd/persistence"
 import type { QueueAttempt } from "@yrd/queue"
 
@@ -294,7 +294,7 @@ function projectQueueFrame(database: Database, entry: JournalViewEntry): void {
   }
 }
 
-function parseQueueJobTransition(database: Database, entry: JournalViewEntry, event: Event): JobTransition {
+function parseQueueJobTransition(database: Database, entry: JournalViewEntry, event: Event): ReplayJobTransitionFact {
   try {
     return parseJobTransitionForReplay(event.data)
   } catch (error) {

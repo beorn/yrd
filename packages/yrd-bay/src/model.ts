@@ -9,7 +9,7 @@ import {
   type JsonValue,
   type SelectorMatch,
 } from "@yrd/core"
-import { JobErrorSchema, type JobError } from "@yrd/job"
+import { JobErrorFactSchema, JobErrorSchema, type JobError, type JobErrorFact } from "@yrd/job"
 import type { ChangeId } from "./change-identity.ts"
 
 export const BayIdSchema = z.string().trim().min(1)
@@ -107,15 +107,29 @@ const ChangeRejectedFactObjectSchema = z
 export const ChangeRejectedFactSchema = z.preprocess(normalizeLegacyChangeKeys, ChangeRejectedFactObjectSchema)
 export type ChangeRejectedFact = Readonly<z.infer<typeof ChangeRejectedFactSchema>>
 
+function isVerdictlessReceipt(receipt: JobErrorFact | undefined): boolean {
+  return receipt?.verdictless === true
+}
+
 /** Author-owned refusal fact. Unlike `pr/rejected`, this keeps the change in the
  * submitted queue lifecycle and carries the exact typed result needed to fix
  * the branch in place. */
-export const ChangeNeedsAuthorFactSchema = z.preprocess(
-  normalizeLegacyChangeKeys,
-  ChangeRejectedFactObjectSchema.extend({
-    receipt: JobErrorSchema,
-  }).strict(),
-)
+const ChangeNeedsAuthorFactObjectSchema = ChangeRejectedFactObjectSchema.extend({
+  receipt: JobErrorFactSchema,
+  /** Top-level v4 sentinel for the nested JobError vocabulary. */
+  verdictless: z.literal(true).optional(),
+})
+  .strict()
+  .superRefine((fact, context) => {
+    if ((fact.verdictless === true) !== isVerdictlessReceipt(fact.receipt)) {
+      context.addIssue({
+        code: "custom",
+        message: "verdictless must be present exactly when receipt.verdictless is true",
+        path: ["verdictless"],
+      })
+    }
+  })
+export const ChangeNeedsAuthorFactSchema = z.preprocess(normalizeLegacyChangeKeys, ChangeNeedsAuthorFactObjectSchema)
 export type ChangeNeedsAuthorFact = Readonly<z.infer<typeof ChangeNeedsAuthorFactSchema>>
 
 export const GitPayloadPathSchema = z
@@ -214,10 +228,7 @@ export function resolveBase(bases: Iterable<string>, selector: string): string |
   )
 }
 
-export type BayFailure = Readonly<{
-  code: string
-  message: string
-}>
+export type BayFailure = Readonly<JobErrorFact>
 
 export type BayOrphan = Readonly<{
   reason: string
@@ -427,6 +438,15 @@ export type ChangeAdmissionStep = Readonly<{
   receipt?: JobError
 }>
 
+type ChangeAdmissionStepFact = Readonly<{
+  name: string
+  revision: string
+  job: string
+  status: "passed" | "refused"
+  output?: JsonValue
+  receipt?: JobErrorFact
+}>
+
 export const ChangeAdmissionStepSchema = z
   .object({
     name: TextSchema,
@@ -437,18 +457,35 @@ export const ChangeAdmissionStepSchema = z
     receipt: JobErrorSchema.optional(),
   })
   .strict()
-  .superRefine((step, context) => {
-    if ((step.status === "passed") !== (step.receipt === undefined)) {
-      context.addIssue({
-        code: "custom",
-        message:
-          step.status === "passed"
-            ? "a passed entry-check step cannot carry a result"
-            : "a failed entry-check step requires a result",
-        path: ["receipt"],
-      })
-    }
-  }) as z.ZodType<ChangeAdmissionStep>
+  .superRefine(validateAdmissionStep) as z.ZodType<ChangeAdmissionStep>
+
+const ChangeAdmissionStepFactSchema = z
+  .object({
+    name: TextSchema,
+    revision: TextSchema,
+    job: TextSchema,
+    status: z.enum(["passed", "refused"]),
+    output: JsonSchema.optional(),
+    receipt: JobErrorFactSchema.optional(),
+  })
+  .strict()
+  .superRefine(validateAdmissionStep) as z.ZodType<ChangeAdmissionStepFact>
+
+function validateAdmissionStep(
+  step: Readonly<{ status: "passed" | "refused"; receipt?: JobErrorFact }>,
+  context: z.RefinementCtx,
+): void {
+  if ((step.status === "passed") !== (step.receipt === undefined)) {
+    context.addIssue({
+      code: "custom",
+      message:
+        step.status === "passed"
+          ? "a passed entry-check step cannot carry a result"
+          : "a failed entry-check step requires a result",
+      path: ["receipt"],
+    })
+  }
+}
 
 const ChangeAdmissionBaseSchema = z.object({
   baseSha: GitShaSchema,
@@ -482,6 +519,9 @@ const ChangeAdmissionBaseSchema = z.object({
   candidate: TextSchema.optional(),
   steps: z.array(ChangeAdmissionStepSchema),
 })
+const ChangeAdmissionFactBaseSchema = ChangeAdmissionBaseSchema.extend({
+  steps: z.array(ChangeAdmissionStepFactSchema),
+})
 
 export type ChangeAdmissionRecord =
   | Readonly<{
@@ -502,6 +542,25 @@ export type ChangeAdmissionRecord =
       receipt: JobError
     }>
 
+type ChangeAdmissionRecordFact =
+  | Readonly<{
+      status: "passed"
+      baseSha: string
+      requestCount?: number | "unresolved"
+      candidate?: string
+      steps: readonly ChangeAdmissionStepFact[]
+    }>
+  | Readonly<{
+      status: "refused"
+      kind: "refusal" | "failure" | "infrastructure"
+      baseSha: string
+      requestCount?: number | "unresolved"
+      candidate?: string
+      steps: readonly ChangeAdmissionStepFact[]
+      step: string
+      receipt: JobErrorFact
+    }>
+
 export const ChangeAdmissionRecordSchema = z.discriminatedUnion("status", [
   ChangeAdmissionBaseSchema.extend({ status: z.literal("passed") }).strict(),
   ChangeAdmissionBaseSchema.extend({
@@ -511,13 +570,34 @@ export const ChangeAdmissionRecordSchema = z.discriminatedUnion("status", [
     receipt: JobErrorSchema,
   }).strict(),
 ]) as z.ZodType<ChangeAdmissionRecord>
-export type ChangeAdmission = ChangeAdmissionRecord & Readonly<{ at: string }>
+const ChangeAdmissionRecordFactSchema = z.discriminatedUnion("status", [
+  ChangeAdmissionFactBaseSchema.extend({ status: z.literal("passed") }).strict(),
+  ChangeAdmissionFactBaseSchema.extend({
+    status: z.literal("refused"),
+    kind: z.enum(["refusal", "failure", "infrastructure"]),
+    step: TextSchema,
+    receipt: JobErrorFactSchema,
+  }).strict(),
+]) as z.ZodType<ChangeAdmissionRecordFact>
+export type ChangeAdmission = ChangeAdmissionRecordFact & Readonly<{ at: string }>
+
+export const ChangeAdmissionRecordedSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: z.number().int().positive(),
+    headSha: GitShaSchema,
+    admission: ChangeAdmissionRecordSchema,
+  })
+  .strict()
+export type ChangeAdmissionRecorded = Readonly<z.infer<typeof ChangeAdmissionRecordedSchema>>
 
 export type ChangeAdmissionRecordedFact = Readonly<{
   pr: PRId
   revision: number
   headSha: string
-  admission: ChangeAdmissionRecord
+  admission: ChangeAdmissionRecordFact
+  /** Top-level v4 sentinel for a verdictless direct or step receipt. */
+  verdictless?: true
 }>
 
 export const ChangeAdmissionRecordedFactSchema = z
@@ -525,9 +605,22 @@ export const ChangeAdmissionRecordedFactSchema = z
     pr: PRIdSchema,
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
-    admission: ChangeAdmissionRecordSchema,
+    admission: ChangeAdmissionRecordFactSchema,
+    verdictless: z.literal(true).optional(),
   })
-  .strict() as z.ZodType<ChangeAdmissionRecordedFact>
+  .strict()
+  .superRefine((fact, context) => {
+    const hasVerdictlessReceipt =
+      (fact.admission.status === "refused" && isVerdictlessReceipt(fact.admission.receipt)) ||
+      fact.admission.steps.some((step) => isVerdictlessReceipt(step.receipt))
+    if ((fact.verdictless === true) !== hasVerdictlessReceipt) {
+      context.addIssue({
+        code: "custom",
+        message: "verdictless must be present exactly when an admission receipt is verdictless",
+        path: ["verdictless"],
+      })
+    }
+  }) as z.ZodType<ChangeAdmissionRecordedFact>
 
 export const ChangeFreshnessTransitionSchema = z
   .object({ from: z.literal("admitted"), to: z.literal("refreshed") })
@@ -684,7 +777,7 @@ export type Change = Readonly<{
     at: string
     run: string
     step: string
-    receipt: JobError
+    receipt: JobErrorFact
     evidence?: string
     detail?: string
   }>
@@ -1049,6 +1142,26 @@ export const BranchUnsubmitSchema = z
   })
   .strict()
 export type BranchUnsubmit = z.infer<typeof BranchUnsubmitSchema>
+
+/** Journal-only v4 extension. Current commands stay on BranchUnsubmitSchema;
+ * the `landed` reason activates only with its top-level reader sentinel. */
+export const BranchUnsubmitFactSchema = z
+  .object({
+    branch: GitRefSchema,
+    reason: z.union([BranchUnsubmitReasonSchema, z.literal("landed")]),
+    landedReason: z.literal(true).optional(),
+  })
+  .strict()
+  .superRefine((fact, context) => {
+    if ((fact.landedReason === true) !== (fact.reason === "landed")) {
+      context.addIssue({
+        code: "custom",
+        message: "landedReason must be present exactly when reason is 'landed'",
+        path: ["landedReason"],
+      })
+    }
+  })
+export type BranchUnsubmitFact = z.infer<typeof BranchUnsubmitFactSchema>
 
 /** A projected, still-standing submit ref: what was approved, for which base, and when the fact merged. */
 export type ProjectedBranchSubmit = Readonly<{

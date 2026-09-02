@@ -1,5 +1,6 @@
 export {
   createJobDef,
+  JobErrorFactSchema,
   JobErrorSchema,
   JobLaunchSchema,
   JobRequestSchema,
@@ -11,6 +12,7 @@ export type {
   JobContext,
   JobDef,
   JobError,
+  JobErrorFact,
   JobHandler,
   JobConclusion,
   JobLaunch,
@@ -42,6 +44,7 @@ export type {
   JobsOptions,
   JobsState,
   JobTransition,
+  ReplayJobTransitionFact,
   RunManyJobOptions,
   RunJobOptions,
 } from "./jobs.ts"

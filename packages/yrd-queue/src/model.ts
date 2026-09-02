@@ -28,7 +28,7 @@ import {
 } from "@yrd/bay"
 import { compareNatural, JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import type { StepKind } from "@yrd/config"
-import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
+import { JobErrorFactSchema, JobErrorSchema, type Job, type JobErrorFact } from "@yrd/job"
 import * as z from "zod"
 import {
   projectionLookupGet,
@@ -571,7 +571,7 @@ export type StepSelection =
 
 export type QueueFailure = Readonly<{
   at: string
-  error: JobError
+  error: JobErrorFact
   /** Present when the Run failure was derived from a retryable Job attempt. */
   job?: Readonly<{ id: string; attempt: number }>
 }>
@@ -711,7 +711,7 @@ export type Run = Omit<QueueRecord, "initialIntegration" | "initialResults" | "s
     /** answers: When did this Run enter a terminal status? tense: historical. */
     finishedAt?: string
     /** answers: Why did this Run finish without success? tense: historical. */
-    error?: JobError
+    error?: JobErrorFact
   }>
 
 export type QueuePause = Readonly<{
@@ -745,6 +745,8 @@ export type QueueAdmissionRefusal = Readonly<{
   revision?: number
   /** Exact refused head. Missing only while replaying pre-22528 journals. */
   headSha?: string
+  /** Exact base against which this refusal was observed. Present on v4 facts. */
+  baseSha?: string
   /** The refusal code of the most recent skip in this streak. */
   code: string
   /** The failure-fact kind of the most recent skip, when it carried one. */
@@ -756,6 +758,9 @@ export type QueueAdmissionRefusal = Readonly<{
    * rather than parsing `reason`; absent for a watchdog kill, an infra fault,
    * an unreadable red, and every row written before it shipped. */
   judgedFailure?: true
+  /** The refusal carried failure evidence without a content verdict. Present on
+   * v4 facts; absent on every fact written by the v3 writer. */
+  verdictless?: true
   /** Consecutive refusals since the last admission / push / re-merge. */
   count: number
   /** Consecutive refusals carrying the current exact `code`. Unlike `count`,
@@ -868,7 +873,7 @@ export type ChangeEligibilityReason = Readonly<{
   /** The attributed failure result carried by native `pr/needs-author` (or
    * recovered from a legacy rejected journal) for the author to act on. Absent
    * for every other reason code. */
-  result?: JobError
+  result?: JobErrorFact
 }>
 
 export type ChangeEligibility = Readonly<{
@@ -1151,7 +1156,7 @@ export type ChangeCheckRecord = Readonly<{
   command?: readonly string[]
   diagnostics?: JsonValue
   artifact?: string
-  error?: JobError
+  error?: JobErrorFact
 }>
 
 export type QueueSummary = Readonly<{
@@ -1528,6 +1533,17 @@ const replayQueueRecordShape = {
   ...queueRecordShape,
   batchSize: queueRecordShape.batchSize.optional(),
   steps: z.array(ReplayInstalledStepSchema).min(1),
+  failure: z
+    .object({
+      at: z.iso.datetime({ offset: true }),
+      error: JobErrorFactSchema,
+      job: z
+        .object({ id: z.string().trim().min(1), attempt: z.number().int().positive() })
+        .strict()
+        .optional(),
+    })
+    .strict()
+    .optional(),
   /** Replay-only provenance; fresh child Runs use Candidate membership + Run.parent. */
   isolationPart: z.union([z.literal(0), z.literal(1)]).optional(),
 }

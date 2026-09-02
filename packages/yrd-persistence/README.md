@@ -48,23 +48,23 @@ The view's package owns its SQL and projection semantics; persistence never
 learns domain status vocabulary. `journal.views.rebuild()` resets and replays
 the configured set atomically from immutable history.
 
-Hosts may configure the oldest admitted reader explicitly:
+Mutable hosts declare the semantic vocabulary they write explicitly:
 
 ```ts
 const journal = createJournal({
   dir: ".git/yrd",
-  compatibility: {
-    version: 1,
-    reader: "0123456789abcdef0123456789abcdef01234567",
-  },
+  writerVersion: 3,
 })
 ```
 
-If a frame requires a higher semantic journal version, `append()` refuses with
-`journal-write-version-floor` and names the frame's exact reader pin before it
-creates, opens, locks, or mutates SQLite. The commit pins are diagnostics, not
-an ordering mechanism. SQLite's internal `schema_version` is independent of
-this Core frame contract.
+A fresh journal starts at that numeric floor. An existing journal retains its
+repository-wide floor until `yrd admin journal bump` advances it after every
+long-lived reader has been deployed and restarted. If a frame requires a
+higher vocabulary than the installed floor, `append()` refuses with
+`journal-write-version-floor` before mutating SQLite. Readability is decided by
+Core's compiled schemas; the floor controls admission of new writes and carries
+no commit pin. SQLite's internal `schema_version` is independent of this Core
+frame contract.
 
 The synchronous factory is lazy. A fresh mutable journal creates
 `journal.sqlite` on its first operation; a read-only journal never creates,

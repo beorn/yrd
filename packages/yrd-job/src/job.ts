@@ -10,7 +10,12 @@ export const JobErrorSchema = z
     evidence: JsonSchema.optional(),
   })
   .strict()
+
+/** Replay-only Job error vocabulary. Current commands stay on
+ * {@link JobErrorSchema} until the journal-v4 writer activation lands. */
+export const JobErrorFactSchema = JobErrorSchema.extend({ verdictless: z.literal(true).optional() }).strict()
 export type JobError = z.infer<typeof JobErrorSchema>
+export type JobErrorFact = z.infer<typeof JobErrorFactSchema>
 
 export const JobWaitingSchema = z
   .object({

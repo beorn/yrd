@@ -56,7 +56,6 @@ import {
   failureFact,
   pipe,
   raiseFailure,
-  SUPPORTED_VERSIONS,
   stageReport,
   withCheckpointMigrations,
   type Journal,
@@ -414,6 +413,13 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // `queues.derivedIdentities`; `fillMissingStateFromInitial` supplies the
   // empty record before replay resumes after the stored cursor.
   "fd6a78dfadab8397265aaa36309c18cb69794cead6b0577f0982f1c1c1ee1f5c",
+  // The composition immediately before journal-v4 reader PREP taught Job,
+  // Bay, and Queue fact schemas their optional v4 markers and advanced Jobs
+  // to v9 (2026-09-01). This is the ledger's own superseded last entry — what
+  // deployments were asked to store. Existing projected records remain valid:
+  // every new domain field is optional, and the shared callback preserves the
+  // checkpoint before replay resumes at its cursor.
+  "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -470,7 +476,11 @@ function foldLegacyCorrelationDeep(value: unknown): unknown {
 const CHECKPOINT_MIGRATION_DERIVATION_TIMEOUT_MS = 60_000
 
 export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
-  version: SUPPORTED_VERSIONS.at(-1) ?? 0,
+  // Reader capability and writer activation deliberately move in separate
+  // deployments. Keep this literal until the journal floor and every resident
+  // reader have advanced; deriving it from SUPPORTED_VERSIONS would activate a
+  // new vocabulary merely by teaching this checkout to replay it.
+  version: 3,
 }) satisfies JournalCompatibility
 
 export type DefaultYrdAppOptions = Readonly<{

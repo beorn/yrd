@@ -7995,7 +7995,7 @@ describe("runYrd", () => {
           // is written under, so only its shape is checked.
           observedStartedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u),
           lastTickAt: "2026-07-13T12:00:00.000Z",
-          journalVersions: [1, 2, 3],
+          journalVersions: [1, 2, 3, 4],
           // The dedicated RUNNER box renders stale-runner details as `[pid] <command>`.
           command: expect.any(String),
           implementationSource,

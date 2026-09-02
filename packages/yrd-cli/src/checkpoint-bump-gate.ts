@@ -121,8 +121,18 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // derived-member identity binding before a Candidate or run exists. The
   // queue gains an empty `derivedIdentities` projection, one registered event,
   // and queues-v12; the retained predecessor above supplies the empty record
-  // to stored checkpoints before replay. Current.
+  // to stored checkpoints before replay. Retained predecessor.
   "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa",
+  // 2026-09-01 — journal-v4 reader PREP. Existing Job, Bay, and Queue facts
+  // gain optional, field-gated semantic markers while every event keeps its
+  // shipped reader version; Jobs advances to v9 so cancelled/skipped retry
+  // facts can project only after carrying their exact marker. The host writer
+  // remains explicitly v3, so this is reader capability, not activation. A
+  // checkpoint at the predecessor above already has valid state: all added
+  // fields are optional, Jobs advances to v9, Queue advances to v13, and the
+  // shared migration preserves existing state verbatim.
+  // Current.
+  "2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

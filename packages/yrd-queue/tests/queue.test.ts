@@ -22,6 +22,7 @@ import {
   createMemoryJournal,
   createYrd,
   createYrdDef,
+  journalEventVocabulary,
   parseJournalFrame,
   pipe,
   type Journal,
@@ -40,7 +41,6 @@ import {
   withStep,
   Queues,
   QueueRecordSchema,
-  ChangeSnapshotSchema,
   ReplayQueueRecordSchema,
   type AddStepResult,
   type IntegrationProof,
@@ -49,6 +49,7 @@ import {
   type QueueProjectionLookup,
   type QueueProjectionLookupNode,
   type QueueRecord,
+  type Run,
   type ChangeShape,
   type StepExecution,
   type StepRunner,
@@ -74,6 +75,159 @@ const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const UPDATED = "3".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
+
+describe("queue journal v4 reader preparation", () => {
+  function definition() {
+    const bayJobs = createBayJobDefs(workspace())
+    const queue = queuePlugin()
+    const base = pipe(
+      createYrdDef(),
+      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    )
+    return queue(base)
+  }
+
+  it("gates only the narrow v4 fields while every existing event variant stays at its reader", () => {
+    const vocabulary = journalEventVocabulary(definition().events)
+
+    expect(vocabulary["queue/run/failed"]).toMatchObject({
+      reader: 1,
+      fields: expect.objectContaining({ verdictless: 4 }),
+    })
+    expect(vocabulary["queue/admission/refused"]).toMatchObject({
+      reader: 1,
+      fields: expect.objectContaining({ verdictless: 4, baseSha: 4 }),
+    })
+  })
+
+  it("accepts and projects exact v3/v4 facts while rejecting invalid marker combinations", async () => {
+    const queueDefinition = definition()
+    const events = queueDefinition.events
+    const runFailed = events["queue/run/failed"]?.schema
+    const admissionRefused = events["queue/admission/refused"]?.schema
+    if (runFailed === undefined || admissionRefused === undefined) throw new Error("expected Queue journal schemas")
+    const failed = {
+      run: "R1",
+      prs: [{ pr: "PR1", revision: 1, headSha: HEAD }],
+      error: { code: "check-failed", message: "check failed" },
+    }
+    const refused = {
+      pr: "PR1",
+      revision: 1,
+      headSha: HEAD,
+      code: "check-failed",
+      reason: "check failed",
+    }
+
+    for (const [label, schema, value, valid] of [
+      ["v3 run failure", runFailed, failed, true],
+      [
+        "marked verdictless run failure",
+        runFailed,
+        { ...failed, error: { ...failed.error, verdictless: true }, verdictless: true },
+        true,
+      ],
+      ["missing run marker", runFailed, { ...failed, error: { ...failed.error, verdictless: true } }, false],
+      ["spurious run marker", runFailed, { ...failed, verdictless: true }, false],
+      ["v3 admission refusal", admissionRefused, refused, true],
+      [
+        "exact verdictless admission refusal",
+        admissionRefused,
+        { ...refused, kind: "infrastructure", verdictless: true, baseSha: BASE },
+        true,
+      ],
+      [
+        "contradictory verdictless admission refusal",
+        admissionRefused,
+        { ...refused, kind: "failure", verdictless: true },
+        false,
+      ],
+      ["base without exact revision", admissionRefused, { code: "infra", reason: "lost", baseSha: BASE }, false],
+    ] as const) {
+      expect(schema.safeParse(value).success, label).toBe(valid)
+    }
+
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/v4-queue-facts")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check"], baseSha: BASE })
+    const running = app.queue.status("main").running[0]
+    const step = running?.steps[0]
+    const job = step?.job
+    if (running === undefined || step === undefined || job === undefined) {
+      throw new Error("expected one queued check Job")
+    }
+    const at = "2026-01-01T00:00:01.000Z"
+    const attributedRun = {
+      ...running,
+      status: "completed",
+      conclusion: "failure",
+      finishedAt: at,
+      steps: [
+        {
+          ...step,
+          job: {
+            ...job,
+            status: "completed",
+            attempt: 1,
+            runner: "fixture",
+            startedAt: at,
+            changedAt: at,
+            finishedAt: at,
+            conclusion: "failure",
+            error: { code: "fixture-failed", message: "fixture failed without a verdict", verdictless: true },
+            output: {
+              mode: "delta",
+              classification: "carrier",
+              baseSha: BASE,
+              candidateSha: HEAD,
+              comparison: { netNewDiagnostics: [{ file: "src/example.ts", line: 1, message: "fixture red" }] },
+              certificate: { mode: "delta", baseSha: BASE, candidateSha: HEAD },
+            },
+          },
+        },
+      ],
+    } satisfies Run
+    expect(queueApi.authorAttributionResult(attributedRun)).toMatchObject({
+      verdictless: true,
+      evidence: {
+        kind: "candidate-attributed-check-failure",
+        failures: [{ file: "src/example.ts", line: 1, message: "fixture red" }],
+      },
+    })
+    const id = ids(900)
+    const cause = { id: id(), commandId: id(), op: "test.project", commandHash: "0".repeat(64) }
+    const project = (
+      state: typeof queueDefinition.initialState,
+      name: string,
+      data: JournalFrame["events"][number]["data"],
+    ) =>
+      queueDefinition.project(
+        state,
+        {
+          id: id(),
+          name,
+          ts: at,
+          data: events[name]!.schema.parse(data),
+        },
+        cause,
+      )
+    let state = project(app.state(), "queue/admission/refused", {
+      ...refused,
+      kind: "infrastructure",
+      verdictless: true,
+      baseSha: BASE,
+    })
+    state = project(state, "queue/run/failed", {
+      ...failed,
+      error: { ...failed.error, verdictless: true },
+      verdictless: true,
+    })
+
+    expect(state.queues.admissionRefusals.PR1).toMatchObject({ baseSha: BASE, verdictless: true })
+    expect(Queues.get(state.queues, "R1")).toMatchObject({ failure: { error: { verdictless: true } } })
+  })
+})
 
 describe("queue batch policy", () => {
   it("keeps effective batch normalization out of the public Queue API", () => {

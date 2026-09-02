@@ -18,8 +18,12 @@ import {
 import { withJobs, type JobContext, type JobResult } from "@yrd/job"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import {
+  BranchUnsubmitFactSchema,
+  BranchUnsubmitSchema,
   GitShaSchema,
   ChangeAdmissionRecordedFactSchema,
+  ChangeAdmissionRecordedSchema,
+  ChangeNeedsAuthorFactSchema,
   ChangeRejectedFactSchema,
   currentChangeRev,
   isTracked,
@@ -2846,6 +2850,185 @@ describe("admission request-count fact", () => {
     expect(() => ChangeAdmissionRecordedFactSchema.parse(record(-1))).toThrow()
     expect(() => ChangeAdmissionRecordedFactSchema.parse(record(1.5))).toThrow()
     expect(() => ChangeAdmissionRecordedFactSchema.parse(record("unknown"))).toThrow()
+  })
+})
+
+describe("v4 journal semantic markers", () => {
+  const judged = { code: "check-failed", message: "the check judged the change" }
+  const verdictless = { code: "runner-error", message: "the runner stopped before a verdict", verdictless: true }
+  const needsAuthor = (receipt: object, marker?: true) => ({
+    pr: "PR1",
+    revision: 1,
+    headSha: HEAD_1,
+    run: "R1",
+    step: "check",
+    receipt,
+    ...(marker === undefined ? {} : { verdictless: marker }),
+  })
+  const admission = (receipt: object, stepReceipt: object, marker?: true) => ({
+    pr: "PR2",
+    revision: 1,
+    headSha: HEAD_2,
+    admission: {
+      status: "refused",
+      kind: "failure",
+      baseSha: BASE,
+      step: "check",
+      receipt,
+      steps: [{ name: "check", revision: "v1", job: "J1", status: "refused", receipt: stepReceipt }],
+    },
+    ...(marker === undefined ? {} : { verdictless: marker }),
+  })
+
+  it.each([
+    {
+      fact: "pr/needs-author receipt",
+      schema: ChangeNeedsAuthorFactSchema,
+      current: needsAuthor(judged),
+      marked: needsAuthor(verdictless, true),
+      missing: needsAuthor(verdictless),
+      spurious: needsAuthor(judged, true),
+    },
+    {
+      fact: "pr/admission-recorded direct receipt",
+      schema: ChangeAdmissionRecordedFactSchema,
+      current: admission(judged, judged),
+      marked: admission(verdictless, judged, true),
+      missing: admission(verdictless, judged),
+      spurious: admission(judged, judged, true),
+    },
+    {
+      fact: "pr/admission-recorded step receipt",
+      schema: ChangeAdmissionRecordedFactSchema,
+      current: admission(judged, judged),
+      marked: admission(judged, verdictless, true),
+      missing: admission(judged, verdictless),
+      spurious: admission(judged, judged, true),
+    },
+    {
+      fact: "branch/unsubmitted landed reason",
+      schema: BranchUnsubmitFactSchema,
+      current: { branch: "task/current", reason: "superseded" },
+      marked: { branch: "task/landed", reason: "landed", landedReason: true },
+      missing: { branch: "task/landed", reason: "landed" },
+      spurious: { branch: "task/current", reason: "superseded", landedReason: true },
+    },
+  ])(
+    "requires the $fact marker exactly when its nested semantic is present",
+    ({ schema, current, marked, missing, spurious }) => {
+      expect(schema.safeParse(current).success).toBe(true)
+      expect(schema.safeParse(marked).success).toBe(true)
+      expect(schema.safeParse(missing).success).toBe(false)
+      expect(schema.safeParse(spurious).success).toBe(false)
+    },
+  )
+
+  it("keeps current command vocabularies at v3", () => {
+    for (const reason of ["deleted", "archived", "superseded"] as const) {
+      expect(BranchUnsubmitSchema.safeParse({ branch: "task/current", reason }).success).toBe(true)
+    }
+    expect(BranchUnsubmitSchema.safeParse({ branch: "task/landed", reason: "landed" }).success).toBe(false)
+    expect(
+      BranchUnsubmitSchema.safeParse({ branch: "task/landed", reason: "landed", landedReason: true }).success,
+    ).toBe(false)
+    expect(ChangeAdmissionRecordedSchema.safeParse(admission(judged, judged)).success).toBe(true)
+    expect(ChangeAdmissionRecordedSchema.safeParse(admission(verdictless, judged, true)).success).toBe(false)
+  })
+
+  it("replays marked facts while projecting only their domain data", async () => {
+    const nextId = ids()
+    const at = "2026-09-01T12:00:00.000Z"
+    const seededCommand = { id: nextId(), op: "fixture.v4-bay-facts" }
+    const bayJobId = nextId()
+    const pushed = (pr: string, branch: string, headSha: string) => ({
+      id: nextId(),
+      name: "pr/pushed",
+      ts: at,
+      data: { pr, branch, base: "main", headSha, revision: 1 },
+    })
+    const journal = createMemoryJournal([
+      {
+        command: seededCommand,
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
+        compatibility: { version: 4 },
+        events: [
+          pushed("PR1", "task/needs-author", HEAD_1),
+          { id: nextId(), name: "pr/submitted", ts: at, data: { pr: "PR1", revision: 1, headSha: HEAD_1 } },
+          { id: nextId(), name: "pr/needs-author", ts: at, data: needsAuthor(verdictless, true) },
+          pushed("PR2", "task/admission", HEAD_2),
+          { id: nextId(), name: "pr/admission-recorded", ts: at, data: admission(judged, verdictless, true) },
+          {
+            id: nextId(),
+            name: "branch/submitted",
+            ts: at,
+            data: { branch: "task/landed", sha: HEAD_1, base: "main" },
+          },
+          {
+            id: nextId(),
+            name: "branch/unsubmitted",
+            ts: at,
+            data: { branch: "task/landed", reason: "landed", landedReason: true },
+          },
+          {
+            id: nextId(),
+            name: "bay/opened",
+            ts: at,
+            data: { id: "B1", name: "v4-reader", branch: "task/v4-reader", base: "main" },
+          },
+          {
+            id: bayJobId,
+            name: "job/requested",
+            ts: at,
+            data: {
+              definition: "bay.provision",
+              revision: "test-workspace-v1",
+              input: { bay: "B1", name: "v4-reader", branch: "task/v4-reader", base: "main" },
+            },
+          },
+          {
+            id: nextId(),
+            name: "job/transitioned",
+            ts: at,
+            data: { type: "start", id: bayJobId, attempt: 1, runner: "fixture", leaseExpiresAt: at },
+          },
+          {
+            id: nextId(),
+            name: "job/transitioned",
+            ts: at,
+            data: {
+              type: "finish",
+              id: bayJobId,
+              attempt: 1,
+              runner: "fixture",
+              result: { status: "completed", conclusion: "failure", error: verdictless },
+              verdictless: true,
+            },
+          },
+        ],
+      },
+    ] as never)
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
+    )
+
+    await using app = await createYrd(definition, {
+      inject: { journal, clock: () => at, id: nextId, log: silentLog },
+    })
+
+    expect(app.bays.pr("PR1")?.needsAuthor).toMatchObject({ receipt: verdictless })
+    expect(app.bays.pr("PR1")?.needsAuthor).not.toHaveProperty("verdictless")
+    expect(currentChangeRev(app.bays.pr("PR2")!).admission).toMatchObject({ steps: [{ receipt: verdictless }] })
+    expect(currentChangeRev(app.bays.pr("PR2")!).admission).not.toHaveProperty("verdictless")
+    expect(app.bays.state().submits).not.toHaveProperty("task/landed")
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed", failure: verdictless })
   })
 })
 

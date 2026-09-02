@@ -5,7 +5,7 @@ import { freeze } from "./immutable.ts"
 
 /** Journal versions this reader understands. The code is the capability
  * authority; repositories never pin reader commits in consumer config. */
-export const SUPPORTED_VERSIONS = Object.freeze([1, 2, 3] as const)
+export const SUPPORTED_VERSIONS = Object.freeze([1, 2, 3, 4] as const)
 export const JOURNAL_READER_VERSION = SUPPORTED_VERSIONS.at(-1) ?? 0
 
 /**

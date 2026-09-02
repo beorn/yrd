@@ -4,7 +4,6 @@ import {
   journalEvent,
   observeYrdLifecycle,
   raiseFailure,
-  resolveSelector,
   type CommandHandler,
   type CommandResult,
   type CommandTree,
@@ -16,13 +15,14 @@ import {
 } from "@yrd/core"
 import {
   createJobDef,
+  parseJobTransitionForReplay,
   type HasJobs,
   type Job,
   type JobContext,
   type JobDef,
   type JobResult,
   type Jobs,
-  type JobTransition,
+  type ReplayJobTransitionFact,
   type RunJobOptions,
 } from "@yrd/job"
 import type { PrNumberMint } from "@yrd/persistence"
@@ -44,6 +44,7 @@ import {
   PRIdSchema,
   ChangeFreshnessTransitionSchema,
   ChangeAdmissionRecordedFactSchema,
+  ChangeAdmissionRecordedSchema,
   ChangeRemergeCertificateSchema,
   ChangeRemergeSourceSchema,
   ChangeReviewDecisionSchema,
@@ -94,7 +95,7 @@ import {
   type DeprovisionedBay,
   type LiveChange,
   type Change,
-  type ChangeAdmissionRecordedFact,
+  type ChangeAdmissionRecorded,
   type ChangeComment,
   type ChangeRemergeProof,
   type ChangeReview,
@@ -108,6 +109,7 @@ import {
   type RefreshedBay,
   type RemoteBranchSnapshot,
   BranchSubmitSchema,
+  BranchUnsubmitFactSchema,
   BranchUnsubmitSchema,
   type BranchSubmit,
   type BranchUnsubmit,
@@ -732,7 +734,7 @@ export type BayCommands = Readonly<{
     review: CommandHandler<ChangeReviewArgs, BayState>
     comment: CommandHandler<ChangeCommentArgs, BayState>
     requestChecks: CommandHandler<ChangeRequestChecksArgs, BayState>
-    recordAdmission: CommandHandler<ChangeAdmissionRecordedFact, BayState>
+    recordAdmission: CommandHandler<ChangeAdmissionRecorded, BayState>
     requestReview: CommandHandler<ChangeRequestReviewArgs, BayState>
     publish: CommandHandler<ChangePublicationInput, BayState>
   }>
@@ -771,7 +773,7 @@ export type Bays = Readonly<{
   review(args: ChangeReviewArgs): Promise<CommandResult>
   comment(args: ChangeCommentArgs): Promise<CommandResult>
   requestChecks(args: ChangeRequestChecksArgs): Promise<CommandResult>
-  recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
+  recordAdmission(args: ChangeAdmissionRecorded): Promise<CommandResult>
   requestReview(args: ChangeRequestReviewArgs): Promise<CommandResult>
   requestPublication(args: ChangePublicationInput): Promise<CommandResult>
   /** The receiver ACCEPTED a `refs/yrd/submit/<branch>` write — project the approval fact. */
@@ -1412,7 +1414,7 @@ export function withBays(options: WithBaysOptions) {
         // read-boundary fold maps its correlation pair into props on replay.
         "pr/correlation-bound": journalEvent(1, ChangePropsBoundSchema),
         "pr/withdrawn": journalEvent(1, ChangeWithdrawnSchema),
-        "pr/needs-author": journalEvent(1, ChangeNeedsAuthorFactSchema),
+        "pr/needs-author": journalEvent(1, ChangeNeedsAuthorFactSchema, { verdictless: 4 }),
         "pr/rejected": journalEvent(1, ChangeRejectedFactSchema),
         "pr/integrated": journalEvent(2, ChangeIntegratedSchema),
         "pr/already-landed": journalEvent(1, ChangeAlreadyMergedSchema),
@@ -1423,7 +1425,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/session-started": journalEvent(1, RetiredChangeSessionStartedFactSchema),
         "pr/session-ended": journalEvent(1, RetiredChangeSessionEndedFactSchema),
         "pr/checks-requested": journalEvent(1, ChangeCheckRequestFactSchema),
-        "pr/admission-recorded": journalEvent(2, ChangeAdmissionRecordedFactSchema),
+        "pr/admission-recorded": journalEvent(2, ChangeAdmissionRecordedFactSchema, { verdictless: 4 }),
         "pr/review-requested": journalEvent(1, ChangeReviewRequestFactSchema),
         // branch-is-change phase 2a (@yrd/core/22991; @cto efd1fa9a): the
         // receiver projects an ACCEPTED refs/yrd/submit/<branch> write, and its
@@ -1433,7 +1435,7 @@ export function withBays(options: WithBaysOptions) {
         // already there); never a second bridge teaching `pr submit` to write
         // the ref. These two events are what make that a small write.
         "branch/submitted": journalEvent(1, BranchSubmitSchema),
-        "branch/unsubmitted": journalEvent(1, BranchUnsubmitSchema),
+        "branch/unsubmitted": journalEvent(1, BranchUnsubmitFactSchema, { landedReason: 4 }),
       },
       replayEvents: {
         "pr/pushed": ChangePushedReplaySchema,
@@ -1644,8 +1646,8 @@ function createBayCommands(
       }),
       recordAdmission: command({
         title: "Record checks-before-queueing evidence for a change revision",
-        params: ChangeAdmissionRecordedFactSchema,
-        apply: (state: BayState, args: ChangeAdmissionRecordedFact) => recordChangeAdmission(state, args),
+        params: ChangeAdmissionRecordedSchema,
+        apply: (state: BayState, args: ChangeAdmissionRecorded) => recordChangeAdmission(state, args),
       }),
       requestReview: command({
         title: "Replace the requested reviewers for a change",
@@ -2187,12 +2189,6 @@ function propsConflictKey(
   return undefined
 }
 
-function propsLabel(props: DeepReadonly<ChangeProps>): string {
-  return Object.entries(props)
-    .map(([key, value]) => `${key}=${value}`)
-    .join(" ")
-}
-
 function bindChangeProps(pr: DeepReadonly<Change>, props: ChangeProps) {
   const currentProps = changeProps(pr)
   if (propsCovered(currentProps, props)) return { events: [] }
@@ -2665,7 +2661,7 @@ function requestChangeChecks(state: DeepReadonly<BayState>, args: ChangeRequestC
   }
 }
 
-function recordChangeAdmission(state: DeepReadonly<BayState>, args: ChangeAdmissionRecordedFact) {
+function recordChangeAdmission(state: DeepReadonly<BayState>, args: ChangeAdmissionRecorded) {
   const pr: LiveChange = requireLiveChange(state.bays, args.pr)
   if (changeRevisionNumber(pr) !== args.revision || changeHead(pr) !== args.headSha) {
     raiseFailure(
@@ -2941,7 +2937,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "branch/unsubmitted": {
-      const unsubmitted = BranchUnsubmitSchema.parse(data)
+      const unsubmitted = BranchUnsubmitFactSchema.parse(data)
       if (current.submits[unsubmitted.branch] === undefined) return bayState(current)
       const { [unsubmitted.branch]: _removed, ...submits } = current.submits
       return bayState({ ...current, submits })
@@ -3488,13 +3484,13 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         : patchBay(bay, { jobId: applied.id, jobDef: data.definition, failure: undefined })
     }
     case "job/transitioned":
-      return projectBayJob(state, applied, data as JobTransition)
+      return projectBayJob(state, applied, parseJobTransitionForReplay(data))
     default:
       return state
   }
 }
 
-function projectBayJob(state: DeepReadonly<BayState>, applied: Event, change: JobTransition): BayState {
+function projectBayJob(state: DeepReadonly<BayState>, applied: Event, change: ReplayJobTransitionFact): BayState {
   if (change.type !== "finish" && change.type !== "lose") return state
   const bay = Object.values(state.bays.byId).find((candidate) => candidate.jobId === change.id)
   if (bay?.jobDef === undefined || !isBayJob(bay.jobDef)) return state

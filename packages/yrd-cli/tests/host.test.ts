@@ -612,9 +612,15 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // retained edge.
     // Conscious update 2026-09-01: pre-Candidate derived identities add the
     // empty `queues.derivedIdentities` projection and its binding event. The
-    // former target fd6a78df is retained; the new target is 3f8a2627.
+    // former target fd6a78df is retained.
+    // Conscious update 2026-09-01 (journal-v4 reader PREP): Job, Bay, and Queue
+    // schemas accept narrowly field-gated v4 markers, Jobs advances to v9,
+    // and Queue advances to v13 for their replay semantics. The writer remains
+    // v3. Existing checkpoint state needs no rewrite, but accepted schemas and
+    // the projector versions move the identity, so former target 3f8a2627 is
+    // retained.
     const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
+    expect(first.manifest.targetIdentity).toBe("2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -681,6 +687,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // (history_evicted_through 27609) makes that terminal.
     expect(first.manifest.edges).toContainEqual({
       from: "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
+      to: previousTargetIdentity,
+    })
+    expect(first.manifest.edges).toContainEqual({
+      from: "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa",
       to: previousTargetIdentity,
     })
     expect(first.manifest.edges).toContainEqual({
@@ -817,6 +827,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   })
 
   it("stamps every default-host append with the current journal compatibility contract", async () => {
+    expect(CURRENT_JOURNAL_COMPATIBILITY).toEqual({ version: 3 })
+
     const { repo, featureSha } = await repository()
     const journal = createMemoryJournal()
     const config: ResolvedYrdProjectConfig = {
@@ -841,7 +853,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     const batches = await Array.fromAsync(journal.read())
     expect(batches.flatMap(({ values }) => values)).toEqual([
-      expect.objectContaining({ compatibility: CURRENT_JOURNAL_COMPATIBILITY }),
+      expect.objectContaining({ compatibility: { version: 3 } }),
     ])
   })
 
@@ -2047,7 +2059,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
+    expect(rewritten.checkpoint_identity).toBe("2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2136,7 +2148,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa")
+    expect(rewritten.checkpoint_identity).toBe("2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5")
     redatabase.close()
   })
 
@@ -3778,6 +3790,9 @@ checks: [{check: {run: "true"}}]
       // running yrd-runner is asked to store — retained across the
       // containedInBase bump (bd1c0b88, 2026-08-28).
       { from: "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c", to: releasedHop },
+      // The derived-identity composition retained while journal-v4 reader
+      // capability lands without activating its explicitly v3 writer.
+      { from: "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa", to: releasedHop },
       { from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7", to: releasedHop },
       // The production composition's identity before branch-is-change 2a.
       { from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37", to: releasedHop },
