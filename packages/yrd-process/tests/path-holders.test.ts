@@ -194,6 +194,95 @@ describe("inspectPathHolders", () => {
   )
 
   test.runIf(process.platform === "linux")(
+    "a zombie gap certifies deletion with no waiver, and its neighbours still need one",
+    async () => {
+      // A zombie has released its fd table, so /proc/N/fd answers EACCES with
+      // nothing behind it. Requiring an operator to name it is what made the
+      // tolerance flag unreachable: zombies churn between one census and the next.
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-zombie-"))
+      scratch.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      mkdirSync(ownedPath)
+      for (const [pid, state] of [
+        [4242, "Z"],
+        [4243, "S"],
+      ] as const) {
+        const processRoot = join(procRoot, String(pid))
+        mkdirSync(join(processRoot, "fd"), { recursive: true })
+        symlinkSync("/", join(processRoot, "cwd"))
+        symlinkSync("/bin/sh", join(processRoot, "exe"))
+        symlinkSync("/", join(processRoot, "root"))
+        writeFileSync(join(processRoot, "maps"), "")
+        writeFileSync(join(processRoot, "stat"), `${pid} (probe) ${state} 1 0 0 0\n`)
+        // Deny exactly one source, the way a released fd table denies /proc/N/fd.
+        chmodSync(join(processRoot, "maps"), 0o000)
+      }
+
+      const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+      expect(census.holders).toEqual([])
+      expect(census.coverage).toMatchObject({
+        complete: false,
+        unreadable: [
+          { pid: 4242, comm: "probe", state: "Z", denied: ["maps"] },
+          { pid: 4243, comm: "probe", state: "S", denied: ["maps"] },
+        ],
+      })
+
+      const reap = {
+        targetedPids: [],
+        survivorPids: [],
+        survivorHolders: [],
+        survivorCoverage: census.coverage,
+        forcedKill: false,
+        signalFailures: [],
+      }
+      // The live proc still has to be named; the zombie is never asked for.
+      // The identity decoration sits between pid and source, so match across it.
+      const refusal = pathReapDeletionFailure(reap)
+      expect(refusal).toMatch(/pid 4243 \(probe, ppid 1\) via maps/iu)
+      expect(refusal).not.toMatch(/pid 4242 \(probe, ppid 1\) via maps/iu)
+      expect(refusal).toMatch(/auto-cleared as provably empty: 4242/iu)
+      // Naming only the live proc certifies — the zombie needs no waiver.
+      expect(pathReapDeletionFailure(reap, new Set([4243]))).toBeUndefined()
+      // Naming only the zombie does not certify the live proc.
+      expect(pathReapDeletionFailure(reap, new Set([4242]))).toMatch(/pid 4243 \(probe, ppid 1\) via maps/iu)
+    },
+  )
+
+  test.runIf(process.platform === "linux")(
+    "a census whose only gaps are zombies certifies with no flag at all",
+    async () => {
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-all-zombie-"))
+      scratch.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      const processRoot = join(procRoot, "4242")
+      mkdirSync(ownedPath)
+      mkdirSync(join(processRoot, "fd"), { recursive: true })
+      symlinkSync("/", join(processRoot, "cwd"))
+      symlinkSync("/bin/sh", join(processRoot, "exe"))
+      symlinkSync("/", join(processRoot, "root"))
+      writeFileSync(join(processRoot, "maps"), "")
+      writeFileSync(join(processRoot, "stat"), "4242 (defunct) Z 1 0 0 0\n")
+      chmodSync(join(processRoot, "maps"), 0o000)
+
+      const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+      expect(census.coverage).toMatchObject({ complete: false })
+      expect(
+        pathReapDeletionFailure({
+          targetedPids: [],
+          survivorPids: [],
+          survivorHolders: [],
+          survivorCoverage: census.coverage,
+          forcedKill: false,
+          signalFailures: [],
+        }),
+      ).toBeUndefined()
+    },
+  )
+
+  test.runIf(process.platform === "linux")(
     "denied counts without named pids can never be tolerated",
     async () => {
       // An injected census claims denials it cannot attribute to a pid — the

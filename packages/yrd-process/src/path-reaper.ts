@@ -39,8 +39,29 @@ export type UnreadableProcess = Readonly<{
   pid: number
   comm?: string
   ppid?: number
+  /**
+   * Process state from the world-readable `/proc/N/stat`. `Z` (zombie) has
+   * already released its fd table and address space, so it can hold no path —
+   * see isProvablyEmptyProcess.
+   */
+  state?: string
   denied: readonly ("process" | "cwd" | "exe" | "root" | "maps" | "fd")[]
 }>
+
+/**
+ * A census gap that provably holds nothing, so it needs no operator waiver.
+ *
+ * A zombie has already released its fd table and address space; `/proc/N/fd`
+ * answers EACCES precisely BECAUSE there is no table left to read. Clearing
+ * these automatically is what makes `--tolerate-unreadable` reachable on a busy
+ * host: the long-lived dumpable-0 session procs are a stable set an operator can
+ * name once, while transient zombies churn between one census and the next.
+ * Measured 2026-09-01: naming the exact six pids of one refusal was answered by
+ * a refusal naming a different set, with same-uid procs going 187 to 214.
+ */
+export function isProvablyEmptyProcess(proc: UnreadableProcess): boolean {
+  return proc.state === "Z"
+}
 
 export type LinuxPathHolderCoverage = Readonly<{
   platform: "linux"
@@ -181,24 +202,36 @@ export function pathReapDeletionFailure(
           Object.values(coverage.sources).reduce((sum, source) => sum + source.unavailable.denied, 0)
         : 1
     const fullyAttributed = unreadable.length > 0 && namedDenials === countedDenials
-    const tolerated =
-      tolerateUnreadablePids !== undefined &&
-      tolerateUnreadablePids.size > 0 &&
-      fullyAttributed &&
-      unreadable.every(({ pid }) => tolerateUnreadablePids.has(pid))
+    // A gap that provably holds nothing clears itself; only the rest need a
+    // waiver. Without this the flag is unreachable on a live host, because the
+    // set it demands changes between the refusal and the retry.
+    const autoCleared = unreadable.filter((proc) => isProvablyEmptyProcess(proc))
+    const requiresNaming = unreadable.filter((proc) => !isProvablyEmptyProcess(proc))
+    const named =
+      requiresNaming.length === 0 ||
+      (tolerateUnreadablePids !== undefined && requiresNaming.every(({ pid }) => tolerateUnreadablePids.has(pid)))
+    const tolerated = fullyAttributed && named
     if (!tolerated) {
+      const unwaived = requiresNaming.length === 0 ? unreadable : requiresNaming
       const identities =
         unreadable.length === 0
           ? "no denied pids were identified"
-          : `unreadable: ${unreadable
+          : `unreadable: ${unwaived
               .slice(0, 10)
               .map(
                 ({ pid, comm, ppid, denied }) =>
                   `pid ${pid}${comm === undefined ? "" : ` (${comm}${ppid === undefined ? "" : `, ppid ${ppid}`})`} via ${denied.join(",")}`,
               )
-              .join("; ")}${unreadable.length > 10 ? ` … ${unreadable.length - 10} more` : ""}`
+              .join("; ")}${unwaived.length > 10 ? ` … ${unwaived.length - 10} more` : ""}`
+      const cleared =
+        autoCleared.length === 0
+          ? ""
+          : `${autoCleared.length} further gap(s) auto-cleared as provably empty: ${autoCleared
+              .map(({ pid }) => pid)
+              .join(", ")}; `
       parts.push(
         `path-holder census incomplete; deletion cannot be certified: ${identities}; ` +
+          cleared +
           `cure: verify each pid is unrelated to the path, then re-run with --tolerate-unreadable <pid,…> naming exactly those pids; ` +
           `coverage: ${JSON.stringify(coverage)}`,
       )
@@ -552,16 +585,23 @@ async function observeProcessDescriptors(
  * procs): `pid (comm) state ppid …`, comm parsed by the LAST `)` because comm
  * may itself contain parentheses. Best-effort: identity failure never hides
  * the denial it decorates. */
-async function observeProcessIdentity(proc: string): Promise<{ comm?: string; ppid?: number }> {
+async function observeProcessIdentity(proc: string): Promise<{ comm?: string; ppid?: number; state?: string }> {
   try {
     const contents = await readFile(`${proc}/stat`, "utf8")
     const open = contents.indexOf("(")
     const close = contents.lastIndexOf(")")
     if (open === -1 || close === -1 || close < open) return {}
     const comm = contents.slice(open + 1, close)
+    // `pid (comm) state ppid …` — state is the first field after comm, so it
+    // costs nothing beyond the read already made for identity.
     const rest = contents.slice(close + 1).trim().split(/\s+/u)
+    const state = rest[0]
     const ppid = Number(rest[1])
-    return { comm, ...(Number.isSafeInteger(ppid) ? { ppid } : {}) }
+    return {
+      comm,
+      ...(state === undefined || state === "" ? {} : { state }),
+      ...(Number.isSafeInteger(ppid) ? { ppid } : {}),
+    }
   } catch {
     return {}
   }
