@@ -175,14 +175,16 @@ export const HABITANT_BACKOFF_EXIT_CODES: readonly HabitantExitCode[] = Object.f
  *
  * NOT ENFORCED TODAY, and that gap is worth knowing before trusting this list.
  * The Yrd runner is declared `restart: "on-failure"` (`hab.projects.ts`), which
- * restarts on every non-zero exit — these two included — because the policy
- * that would hold them, hab-core's `permanentExitCodes`, is unreachable from a
- * project's service declaration: it is absent from `SERVICE_KEYS` in
- * ag/packages/hab-config, and declaring it anyway is a FATAL unknown key that
- * takes down the whole composition rather than just this service. Inhab's
- * restart budget (three per 600s, then `stop-budget`) is what bounds them
- * meanwhile, so a stand-down condition still ends stopped and paged, three
- * attempts later than it should.
+ * restarts on every non-zero exit — these two included. Hab's `on-failure` has
+ * no narrower spelling: `decideSupervisedRestart` never branches on it, so a
+ * non-zero exit with no declared stop falls through to `restart`, and the only
+ * thing that would declare a stop, `permanentExitCodes`, is unreachable from a
+ * project's service declaration (absent from `SERVICE_KEYS` in
+ * ag/packages/hab-config, and a FATAL unknown key that takes down the whole
+ * composition if declared anyway). Inhab's restart budget — three per 600s,
+ * then `stop-budget` until `hab up` — is what bounds them meanwhile, so a
+ * stand-down condition still ends stopped and paged, three attempts later than
+ * it should. Note that a DELIBERATE exit below spends one of those three too.
  *
  * The list stays derived and exported for the supervisor that CAN consume it:
  * once hab-config accepts the key, `hab.projects.ts` declares exactly this

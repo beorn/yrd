@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { Fragment, createElement } from "react"
@@ -12100,6 +12100,67 @@ function habitantSourceRecyclePath(cwd: string, stateDir?: string): string | und
   return status === undefined ? undefined : join(status, "..", "source-recycle.json")
 }
 
+/** The append-only trail of designed restart-exits, beside the last-write-wins
+ * recycle record rather than instead of it: the two answer different questions
+ * and only one of them is new. */
+function habitantRunnerExitLogPath(cwd: string, stateDir?: string): string | undefined {
+  const status = habitantRunnerStatusPath(cwd, stateDir)
+  return status === undefined ? undefined : join(status, "..", "runner-exits.jsonl")
+}
+
+/** One row of that trail. `row` is the family name a reader greps for. */
+export type HabitantRunnerExitRow = Readonly<{
+  row: `runner/exit/${string}`
+  from: string
+  to: string
+  at: string
+  runnerId?: string
+}>
+
+/**
+ * Append one `runner/exit/<reason>` row.
+ *
+ * Why an append-only trail exists at all, when `source-recycle.json` already
+ * records the last attempt: the supervisor's budget made the COUNT
+ * load-bearing. Inhab's `DEFAULT_RESTART_POLICY` allows three restarts per
+ * 600s trailing window and then parks the service on `stop-budget`, and a
+ * designed pin-change exit spends one of those three exactly like a crash
+ * does. A last-write-wins file cannot answer "how many restart-exits in the
+ * last ten minutes", which is the one question an operator looking at a
+ * budget-parked runner needs answered.
+ *
+ * Deliberately NOT a queue journal event. `queue/...` rows are domain facts
+ * about changes and runs, replayed into a projection; a runner lifecycle row
+ * has no projection to feed, and registering one would add rows to a 527 MB
+ * journal that nothing reads. This trail lives with the runner's other
+ * process-scoped state, which is what it is about.
+ *
+ * A failure to append never blocks the exit. The exit is the actuator and the
+ * row is the evidence; losing the evidence must not strand a runner on code
+ * the queue no longer pins.
+ */
+async function appendHabitantRunnerExit(
+  app: Pick<YrdCliApp, "log">,
+  cwd: string,
+  stateDir: string | undefined,
+  row: HabitantRunnerExitRow,
+): Promise<void> {
+  const path = habitantRunnerExitLogPath(cwd, stateDir)
+  if (path === undefined) return
+  try {
+    await mkdir(join(path, ".."), { recursive: true })
+    await appendFile(path, `${stableJson(row)}\n`, "utf8")
+  } catch (error) {
+    // Loud, and then continue: an unwritable trail is worth saying out loud,
+    // and is never worth holding a runner on stale code for.
+    app.log.warn?.(`yrd: could not append the ${row.row} row to the runner exit trail; the exit itself proceeds.`, {
+      action: "resident-exit-trail-unwritable",
+      row: row.row,
+      reason: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 /** Read back the previous process's recycle attempt. Absent is the normal case
  * (no recycle has ever been attempted here) and reads as "no prior attempt"; a
  * malformed or unreadable record reads the same way, since the only thing it
@@ -12244,6 +12305,21 @@ export async function habitantSourceHealth(
  * relaunching must not read like a genuine failure (measured 2026-08-30: seven
  * of these misread as failures and paged @cto).
  */
+/**
+ * The sentence every designed restart-exit ends with, because the number in it
+ * is the one an operator needs and cannot derive from anything else in the log.
+ *
+ * A designed exit spends one of the supervisor's restarts exactly like a crash
+ * does: Inhab's `DEFAULT_RESTART_POLICY` (inhab/src/restart-loop.ts) allows
+ * three per 600s trailing window and then parks the service on `stop-budget`,
+ * where it stays until someone runs `hab up`. So three pin advances inside ten
+ * minutes leave the queue with no runner — comfortable today, when advances are
+ * minutes to hours apart, and not a fact to rediscover from a dark queue.
+ */
+const HABITANT_RESTART_BUDGET_NOTE =
+  "This spends one of the supervisor's three restarts per 10 minutes; a third inside that window parks the " +
+  "runner on stop-budget until `hab up`."
+
 async function habitantRestartExit(
   app: Pick<YrdCliApp, "log">,
   io: YrdCliIO,
@@ -12270,7 +12346,14 @@ async function habitantRestartExit(
     attemptedAt,
     ...(input.staleSteps === undefined ? {} : { staleSteps: input.staleSteps }),
   })
-  app.log.warn?.(`notice: yrd: ${input.notice}`, {
+  await appendHabitantRunnerExit(app, cwd, io.stateDir, {
+    row: `runner/exit/${input.reason}`,
+    from: input.from,
+    to: input.to,
+    at: attemptedAt,
+    ...(io.runner === undefined ? {} : { runnerId: io.runner }),
+  })
+  app.log.warn?.(`notice: yrd: ${input.notice} ${HABITANT_RESTART_BUDGET_NOTE}`, {
     action: input.action,
     bootedSha: input.from,
     headSha: input.to,

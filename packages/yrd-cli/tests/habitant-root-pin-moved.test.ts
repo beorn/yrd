@@ -16,7 +16,7 @@
  * transient git read.
  */
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -187,10 +187,12 @@ function loop(
     pin: () => ReturnType<NonNullable<YrdCliIO["recordedRootPin"]>>
     run?: () => Promise<readonly unknown[]>
     maxCycles?: number
+    /** Reuse a previous process's durable state dir, as a relaunch does. */
+    stateDir?: string
   }>,
 ) {
-  const stateDir = mkdtempSync(join(tmpdir(), "yrd-root-pin-state-"))
-  roots.push(stateDir)
+  const stateDir = options.stateDir ?? mkdtempSync(join(tmpdir(), "yrd-root-pin-state-"))
+  if (options.stateDir === undefined) roots.push(stateDir)
   const queueRepo = mkdtempSync(join(tmpdir(), "yrd-root-pin-queue-"))
   roots.push(queueRepo)
   execFileSync("git", ["init", "-q", "-b", "main", queueRepo])
@@ -228,11 +230,20 @@ function loop(
     // proves nothing about the path under test.
     now: () => Date.parse("2026-09-02T09:00:00.000Z") + cycles * 61_000,
   } as unknown as YrdCliIO
+  const exitLog = join(stateDir, "resident-runner", "runner-exits.jsonl")
   return {
     h,
     io,
+    stateDir,
     recyclePath: join(stateDir, "resident-runner", "source-recycle.json"),
     readRecycle: () => JSON.parse(readFileSync(join(stateDir, "resident-runner", "source-recycle.json"), "utf8")),
+    readExitRows: (): Array<Record<string, string>> =>
+      existsSync(exitLog)
+        ? readFileSync(exitLog, "utf8")
+            .split("\n")
+            .filter((line) => line !== "")
+            .map((line) => JSON.parse(line) as Record<string, string>)
+        : [],
     follow: () => followQueueRuns(h.app, [], { interval: 1 }, io, h.gate),
     cycles: () => cycles,
   }
@@ -266,12 +277,73 @@ describe("recorded-pin watch — the habitant loop", () => {
     expect(notice?.message).toContain("notice: yrd:")
     expect(notice?.message).toContain("Resident exits for restart on pin")
     expect(notice?.message).toContain("the supervisor relaunches")
+    // The number an operator needs and cannot derive from anything else: a
+    // designed exit spends one of the supervisor's three restarts per 10
+    // minutes exactly like a crash does.
+    expect(notice?.message).toContain("three restarts per 10 minutes")
+    expect(notice?.message).toContain("stop-budget")
     // The durable half, in the SHARED record rather than a second file.
     expect(l.readRecycle()).toMatchObject({
       reason: "root-pin-moved",
       bootedSha: BOOT_PIN,
       headSha: NEXT_PIN,
     })
+    // And the append-only half, which is what makes the budget answerable.
+    expect(l.readExitRows()).toEqual([
+      expect.objectContaining({
+        row: "runner/exit/root-pin-moved",
+        from: BOOT_PIN,
+        to: NEXT_PIN,
+        runnerId: "yrd-cli:root-pin",
+      }),
+    ])
+    expect(typeof l.readExitRows()[0]?.at).toBe("string")
+  })
+
+  it("APPENDS to the exit trail rather than replacing it, so the trailing window is countable", async () => {
+    // The whole reason this trail exists beside the last-write-wins recycle
+    // record: `stop-budget` is a count over a 600s window, and a file that
+    // holds only the newest exit cannot answer how many happened in it. A
+    // successor writes into the SAME state dir, which is the only channel
+    // through which the count survives the restart.
+    const first = loop({
+      pin: (() => {
+        let reads = 0
+        return () => {
+          reads += 1
+          return { pinSha: reads === 1 ? BOOT_PIN : NEXT_PIN, submoduleRoot: SUBMODULE_ROOT }
+        }
+      })(),
+    })
+    await expect(first.follow()).resolves.toBe(HABITANT_EXIT["root-pin-moved"])
+
+    // The relaunched process: same state dir, boots on the pin that moved, and
+    // the pin moves once more under it.
+    const third = "c".repeat(40)
+    const second = loop({
+      stateDir: first.stateDir,
+      pin: (() => {
+        let reads = 0
+        return () => {
+          reads += 1
+          return { pinSha: reads === 1 ? NEXT_PIN : third, submoduleRoot: SUBMODULE_ROOT }
+        }
+      })(),
+    })
+    await expect(second.follow()).resolves.toBe(HABITANT_EXIT["root-pin-moved"])
+
+    expect(second.readExitRows().map((r) => [r.row, r.from, r.to])).toEqual([
+      ["runner/exit/root-pin-moved", BOOT_PIN, NEXT_PIN],
+      ["runner/exit/root-pin-moved", NEXT_PIN, third],
+    ])
+  })
+
+  it("writes no exit row when nothing exits", async () => {
+    // A trail that gains a row on a quiet pass would make the budget read as
+    // spent when it is not.
+    const l = loop({ pin: () => ({ pinSha: BOOT_PIN, submoduleRoot: SUBMODULE_ROOT }) })
+    await l.follow()
+    expect(l.readExitRows()).toEqual([])
   })
 
   it("never exits while an attempt is in flight — the pin moves DURING the run", async () => {

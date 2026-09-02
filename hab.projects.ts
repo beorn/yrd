@@ -12,11 +12,16 @@ export type YrdQueueRunnerDeclaration = Readonly<{
    * The tribe seat Hab pages when this runner's restart budget exhausts —
    * `HabServiceDefinition.owner` in ag/packages/hab-config.
    *
-   * Required, not optional, and that is the point. Under `restart: "never"` a
-   * crashed runner stays exited and pages ONCE; an undeclared owner resolves to
-   * the fleet-wide default, so "nobody chose" and "we chose the default" become
-   * the same declaration. A runner nobody is named for is a runner that stays
-   * down while its page arrives as news to a seat that cannot act on it.
+   * Required, not optional, and that is the point. An undeclared owner resolves
+   * to the fleet-wide default, so "nobody chose" and "we chose the default"
+   * become the same declaration. A runner nobody is named for is a runner that
+   * stays down while its page arrives as news to a seat that cannot act on it.
+   *
+   * hab-config only DEMANDS an owner for a resident declared `restart: "never"`,
+   * and this runner is `"on-failure"` now, so the requirement has lifted. It
+   * stays required here anyway: the page did not go away, it moved from "the
+   * runner crashed" to "the runner exhausted its restart budget and is parked
+   * on stop-budget", and that page needs a named seat every bit as much.
    */
   owner: string
 }>
@@ -111,25 +116,40 @@ export default {
         // restarts on EVERY non-zero exit, so it also restarts the two
         // conditions the taxonomy dispositions `stand-down`: `drained` (16, a
         // person asked this pass to stop) and `fatal-error` (17, an ERROR row
-        // no successor can fix). Inhab's default budget bounds both — three
-        // restarts per 600s with 1s→30s backoff, then `stop-budget` — so a
-        // genuine fault still ends stopped and paged to `owner` below, three
-        // attempts and at most ten minutes later than the andon ruling wants.
+        // no successor can fix), along with the config-fatal exits. There is
+        // no narrower spelling available: `decideSupervisedRestart`
+        // (ag/packages/hab-core/src/restart-taxonomy.ts:81) never branches on
+        // `"on-failure"` at all — a non-zero exit with no declared stop falls
+        // straight through to `restart` — so the give-up arm is unreachable
+        // from any declaration a project can write today.
         //
-        // The narrower policy that would hold those two exactly is hab-core's
-        // `permanentExitCodes`, and it is NOT reachable from here today: it
-        // lives on habd's runtime launch envelope
-        // (ag/packages/hab-core/src/habd-runtime.ts) with no production writer,
-        // and it is absent from `SERVICE_KEYS` in ag/packages/hab-config
-        // (src/index.ts). Declaring it here does not degrade — `validateServiceKeys`
-        // pushes `unknown key 'permanentExitCodes'` onto `diagnostics.errors`,
-        // and `checkHabConfig` then returns no habplan at all, taking down
-        // EVERY service in the composition rather than just this one. So it is
-        // deliberately not declared. Restoring full andon fidelity means adding
-        // the key to `SERVICE_KEYS`, threading it through `HabplanService` to
-        // the launch envelope, and then declaring
-        // `permanentExitCodes: [HABITANT_EXIT.drained, HABITANT_EXIT["fatal-error"]]`
-        // here — a change in ag, not in Yrd.
+        // THE BACKSTOP IS THE BUDGET, and its number belongs in the runbook.
+        // Inhab's `DEFAULT_RESTART_POLICY` (inhab/src/restart-loop.ts:22-27)
+        // allows maxRestarts 3 per 600000 ms trailing window with 1s→30s
+        // backoff, then `stop-budget`, and the service stays down until
+        // `hab up`. Hab's own crash-loop quarantine (ag `recovery`
+        // classify/decide, restartCount, unquarantine) is what catches a
+        // genuine fatal loop. A DELIBERATE exit spends one of those three
+        // exactly like a crash does, so three pin advances — or a pin advance
+        // plus two step-plan drifts — inside ten minutes park the resident on
+        // stop-budget. Acceptable today, when advances are minutes to hours
+        // apart; not a thing to rediscover from a dark queue.
+        //
+        // FOLLOW-UP, on the ag side. The field that would hold 16 and 17 down
+        // exists in hab-core's restart taxonomy as `permanentExitCodes`, but no
+        // declaration path reaches it: it lives on habd's runtime launch
+        // envelope (ag/packages/hab-core/src/habd-runtime.ts:586, test callers
+        // only) and is absent from `SERVICE_KEYS` in ag/packages/hab-config
+        // (src/index.ts), so it is effectively always `[]`. Declaring it here
+        // does not degrade — `validateServiceKeys` pushes
+        // `unknown key 'permanentExitCodes'` onto `diagnostics.errors` and
+        // `checkHabConfig` then returns NO habplan at all, taking down every
+        // service in the composition rather than just this one. Ruled 2026-09-02
+        // (@chief): do NOT thread a new field through hab-config, habplan and
+        // the launch envelope for this; keep the slice in Yrd. When ag does add
+        // the path, the codes to declare here are
+        // `[HABITANT_EXIT.drained, HABITANT_EXIT["fatal-error"]]` — 16 and 17,
+        // the two the taxonomy already dispositions `stand-down`.
         restart: "on-failure" as const,
         // Wired 2026-09-01: `HabServiceDefinition.owner` (ag/packages/hab-config,
         // src/index.ts) now lists "owner" in `SERVICE_KEYS`, and a resident with
