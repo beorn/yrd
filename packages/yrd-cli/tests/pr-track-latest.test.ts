@@ -8,7 +8,7 @@
  * Drives the real `runYrd` command surface like selector-surfaces.test.ts; the
  * live branch head is injected through YrdCliIO.pruneGit + resolveRevision.
  */
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -227,6 +227,22 @@ type SubmitEnvelope = Readonly<{
 const DERIVED_ACCEPTANCE_LINE = `submitted to the derived lane: ${BRANCH} @ ${RECORDED_HEAD.slice(0, 12)} (base main) — composes as a derived member on the next queue pass`
 
 describe("pr submit tracking default", () => {
+  // run.ts resolves the submitter seat from `process.env`, never from the
+  // injected io (@i/10-yrd/24028): a real submit with no seat identity warns
+  // "no submitter seat is recorded" (packages/yrd-cli/src/run.ts). These two
+  // cases assert an exact `warnings` list for the derived-lane/track behavior
+  // this block actually covers, so they must pin a submitter seat themselves
+  // instead of inheriting whatever the ambient shell happens to have set —
+  // the same guard cli.test.ts's withSubmitterEnv uses for the same reason.
+  const priorSubmitter = process.env.YRD_DEFAULT_SUBMITTER
+  beforeEach(() => {
+    process.env.YRD_DEFAULT_SUBMITTER = "@dev/9"
+  })
+  afterEach(() => {
+    if (priorSubmitter === undefined) delete process.env.YRD_DEFAULT_SUBMITTER
+    else process.env.YRD_DEFAULT_SUBMITTER = priorSubmitter
+  })
+
   it("an ordinary submit routes derived with no tracking bit", async () => {
     const app = await createCliApp()
     const output = outputIO(() => RECORDED_HEAD)
