@@ -805,7 +805,30 @@ export type QueuesState = Readonly<{
    * the exact submitted sha. A branch move changes which fact is current at
    * read time; it never erases the prior `(branch, sha) -> id` fact. */
   derivedIdentities: Readonly<Record<string, Readonly<Record<string, QueueDerivedIdentity>>>>
+  /** The ball each ENDED attempt's outcome opened, keyed by attempt id — a
+   * run id (`R123`, or `R123/PR7` for one member of a wider batch), a
+   * `<pr>@<rev>:admission@<baseSha>` admission refusal, or a pass-ending
+   * ERROR. See {@link QueueAttemptOutcome}. */
+  outcomes: Readonly<Record<string, QueueAttemptOutcome>>
   retention: Readonly<{ terminalOrder: Readonly<Record<RunId, number>> }>
+}>
+
+/**
+ * The journaled notification of one ended attempt (@i/10-yrd/24028): who was
+ * told how the attempt ended, and the ball that carries it. The journaled
+ * `ball` IS the idempotency key — a re-run of the same attempt id finds this
+ * row and never sends twice. `ball` is absent only when no notifier was
+ * configured: the outcome is on record, and nobody holds a ball for it.
+ * Facts, never forecasts: the row is written AFTER the notifier answered.
+ */
+export type QueueAttemptOutcome = Readonly<{
+  attempt: string
+  kind: "landed" | "send-back" | "yrd-broken"
+  /** The seat the ball is addressed to — who holds it. */
+  recipient: string
+  disposition: string
+  at: string
+  ball?: string
 }>
 
 /**
@@ -1622,6 +1645,7 @@ export const Queues = Object.freeze({
       admissionRefusals: {},
       retiredSubmits: {},
       derivedIdentities: {},
+      outcomes: {},
       retention: { terminalOrder: {} },
     }
   },

@@ -52,6 +52,7 @@ exports[`bay journal vocabulary > pins every bay event's fields to the reader ve
     "fields": {
       "base": 1,
       "branch": 1,
+      "notify": 2,
       "sha": 1,
     },
     "reader": 1,

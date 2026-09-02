@@ -986,6 +986,24 @@ const RetireRevisionSchema = z
   })
   .strict()
 export type RetireRevisionArgs = Readonly<z.infer<typeof RetireRevisionSchema>>
+/**
+ * The notification of one ENDED attempt (@i/10-yrd/24028): who was told how it
+ * ended and the ball that carries it, journaled on the attempt's own row
+ * ({@link QueueAttemptOutcome}) AFTER the notifier answered — a fact, never a
+ * forecast. The journaled ball is the idempotency key: the notifier looks
+ * this row up before it sends, so a re-run of the same attempt id never
+ * opens a second ball. `ball` is absent only when no notifier was configured.
+ */
+const AttemptNotifiedSchema = z
+  .object({
+    attempt: z.string().trim().min(1),
+    kind: z.enum(["landed", "send-back", "yrd-broken"]),
+    recipient: z.string().trim().min(1),
+    disposition: z.string().trim().min(1),
+    ball: z.string().trim().min(1).optional(),
+  })
+  .strict()
+export type AttemptNotifiedArgs = Readonly<z.infer<typeof AttemptNotifiedSchema>>
 /** The `QueueRetiredSubmit.code` every operator retirement projects under. */
 export const REVISION_RETIRED_CODE = "revision-retired"
 /** Consecutive refusals before `queue audit` calls a change wedged. One skip is a
@@ -1649,6 +1667,7 @@ export type QueueCommands = Readonly<{
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     retireSubmitFact: CommandHandler<RetireSubmitFactArgs, RuntimeState>
     retireRevision: CommandHandler<RetireRevisionArgs, RuntimeState>
+    noteAttemptOutcome: CommandHandler<AttemptNotifiedArgs, RuntimeState>
     reconcileMerge: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
   }>
 }>
@@ -1739,6 +1758,10 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
    * half of the act that deletes both receiver-store rows. See
    * {@link RetireRevisionArgs}. */
   retireRevision(args: RetireRevisionArgs): Promise<void>
+  /** Journal who was told how one ended attempt ended, and the ball that
+   * carries it (@i/10-yrd/24028). Idempotent per attempt id: the first row
+   * stands. See {@link AttemptNotifiedArgs}. */
+  noteAttemptOutcome(args: AttemptNotifiedArgs): Promise<void>
   get(run: RunId): Run | undefined
   retentionDiagnostics(): Readonly<{
     retainedRuns: number
@@ -1869,6 +1892,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/admission/settled": journalEvent(1, SettleAdmissionRefusalSchema),
         "queue/submit/retired": journalEvent(1, RetireSubmitFactSchema),
         "queue/revision/retired": journalEvent(1, RetireRevisionSchema),
+        "queue/attempt/notified": journalEvent(1, AttemptNotifiedSchema),
       },
       replayEvents: {
         "queue/paused": ReplayPauseQueueArgsSchema,
@@ -1878,7 +1902,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v13-journal-v4-markers",
+      projectionVersion: "queues-v14-attempt-outcomes",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -1926,6 +1950,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               retireSubmitFact: (args) => yrd.dispatch(commands.queue.retireSubmitFact, args),
               retireRevision: (args) => yrd.dispatch(commands.queue.retireRevision, args),
+              noteAttemptOutcome: (args) => yrd.dispatch(commands.queue.noteAttemptOutcome, args),
               bindDerivedIdentity: (args) => yrd.dispatch(commands.queue.bindDerivedIdentity, args),
               reconcileMerge: (args) => yrd.dispatch(commands.queue.reconcileMerge, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
@@ -1987,6 +2012,7 @@ type QueueActions = Readonly<{
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
   retireRevision(args: RetireRevisionArgs): Promise<CommandResult>
+  noteAttemptOutcome(args: AttemptNotifiedArgs): Promise<CommandResult>
   bindDerivedIdentity(args: DerivedIdentityBound): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecorded): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
@@ -2055,6 +2081,18 @@ function createQueue<Shape extends ChangeShape>(
   /** One outcome per member of a terminal run. A run that is not terminal
    * yields none — a deferred merge held open by a remote runner has not
    * ended, and its outcome belongs to the pass that settles it. */
+  /** The seat a submission asked to hear its outcome. A record's current
+   * revision carries it as `submitter` (set from `pr submit --notify`, else the
+   * launch-env identity, else `unknown`); a recordless derived member carries
+   * it as `notify` on its standing submit fact, when that fact is still the
+   * exact sha this attempt ran. A refs/for push records neither — that is
+   * `undefined`, which the notifier routes to the queue owner as unknown. */
+  const outcomeSubmitter = (pr: string, branch: string, sha: string): string | undefined => {
+    const record = resolveChange(runtime().bays, pr)
+    if (record !== undefined) return currentChangeRev(record).submitter
+    const submit = runtime().bays.submits[branch]
+    return submit !== undefined && submit.sha === sha ? submit.notify : undefined
+  }
   const runOutcomes = (run: Run): readonly QueueOutcome[] => {
     if (!Queues.terminal(run)) return []
     const landed = Queues.succeeded(run)
@@ -2062,8 +2100,7 @@ function createQueue<Shape extends ChangeShape>(
     const failure = landed ? undefined : (run.error ?? authorAttributionResult(run))
     const candidate = state().candidates[run.candidateId]
     return run.prs.map((member) => {
-      const record = resolveChange(runtime().bays, member.id)
-      const submitter = record === undefined ? undefined : currentChangeRev(record).submitter
+      const submitter = outcomeSubmitter(member.id, member.branch, member.headSha)
       const baseSha = run.integration?.baseSha ?? member.baseSha ?? candidate?.baseSha
       return {
         kind: landed ? "landed" : "failed",
@@ -3840,7 +3877,10 @@ function createQueue<Shape extends ChangeShape>(
             sha: revision.head,
             base: pr.base,
             baseSha,
-            ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
+            ...(() => {
+              const submitter = outcomeSubmitter(pr.id, pr.branch, revision.head)
+              return submitter === undefined ? {} : { submitter }
+            })(),
             ...(outcome.refusal.code === undefined ? {} : { code: outcome.refusal.code }),
             reason: outcome.refusal.reason,
             failureKind: outcome.refusal.kind,
@@ -4440,6 +4480,9 @@ function createQueue<Shape extends ChangeShape>(
     },
     async retireRevision(args) {
       await actions.retireRevision(args)
+    },
+    async noteAttemptOutcome(args) {
+      await actions.noteAttemptOutcome(args)
     },
     waitingAdmission(selector, step) {
       return waitingRevisionAdmission(selector, step)
@@ -6765,6 +6808,18 @@ function createQueueCommands(
     },
   })
 
+  const noteAttemptOutcome = command({
+    title: "Journal who was told how one ended attempt ended, and the ball that carries it",
+    params: AttemptNotifiedSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: AttemptNotifiedArgs) {
+      // The first row stands: the journaled ball is the idempotency key, and
+      // a second notification of the same attempt is exactly the double ball
+      // this seam exists to make impossible.
+      if (state.queues.outcomes[args.attempt] !== undefined) return { events: [] }
+      return { events: [event("queue/attempt/notified", args)] }
+    },
+  })
+
   const settleAdmissionRefusal = command({
     title: "Settle one exact required-check refusal as needing a person",
     params: SettleAdmissionRefusalSchema,
@@ -6884,6 +6939,7 @@ function createQueueCommands(
       settleAdmissionRefusal,
       retireSubmitFact,
       retireRevision,
+      noteAttemptOutcome,
       reconcileMerge,
     },
   }
@@ -7866,6 +7922,26 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             reason:
               `revision ${retired.revision} of change '${retired.changeId}' retired by ${retired.by}` +
               (retired.reason === undefined ? "" : `: ${retired.reason}`),
+            at: applied.ts,
+          },
+        },
+      },
+    }
+  }
+  if (applied.name === "queue/attempt/notified") {
+    const notified = AttemptNotifiedSchema.parse(applied.data)
+    if (state.queues.outcomes[notified.attempt] !== undefined) return state
+    return {
+      queues: {
+        ...state.queues,
+        outcomes: {
+          ...state.queues.outcomes,
+          [notified.attempt]: {
+            attempt: notified.attempt,
+            kind: notified.kind,
+            recipient: notified.recipient,
+            disposition: notified.disposition,
+            ...(notified.ball === undefined ? {} : { ball: notified.ball }),
             at: applied.ts,
           },
         },
