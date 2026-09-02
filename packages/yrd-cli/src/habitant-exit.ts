@@ -48,25 +48,13 @@ export const HABITANT_EXIT = {
    * all by design — and all seven read as failures because this exit shared
    * `refusal`'s generic code 1 with every genuine one. */
   "installed-plan-stale": 13,
-  /** The queue stayed liveness-wedged past its declared stand-down bound, so
-   * the habitant stopped rather than keep logging an ERROR it cannot act on
-   * (@i/10-yrd, andon ruling 2026-09-01). Unlike every condition above it, a
-   * successor process does not change the answer: the wedge lives in the queue
-   * this runner reads, not in the runner, so a fresh one re-reads the same
-   * wedge and stands down again. That is why it is the first condition
-   * dispositioned `stand-down`. */
-  "queue-wedged": 14,
-  /** One typed refusal cost every cycle in a window past its declared bound, so
-   * the habitant stopped rather than keep skipping cycles it will keep losing
-   * (`habitant-refusal-loop.ts`). The 2026-09-01 kind-keyed skip is what makes
-   * this reachable, and rightly so: killing the runner on a single refusal took
-   * the whole queue offline twice in 21 minutes. But a refusal about the WORLD
-   * is not spent by being skipped — it arrives again next cycle, and the runner
-   * serves nothing while every instrument reads it as healthy. Dispositioned
-   * `stand-down` for the same reason as `queue-wedged`: the verdict lives in the
-   * journal this runner reads, so a successor re-derives the same member and is
-   * refused the same way. */
-  "refusal-loop": 15,
+  // 14 and 15 were `queue-wedged` and `refusal-loop`: declared stand-downs
+  // (`habitant-queue-wedge.ts`, `habitant-refusal-loop.ts`) that no call site
+  // ever reached. Deleted with @i/10-yrd/24030: the wedge the 2-hour bound was
+  // meant to catch — a run whose holder died and that nothing settled — is now
+  // settled at every pass start, so the observation the fold consumed no longer
+  // arises from that class, and a declared-but-dead exit reads as coverage. The
+  // numbers stay retired so a supervisor's table never re-reads them.
   /** A signal asked this pass to stop and it drained: admissions closed, the
    * job in flight settled to a terminal state with a coded reason, the lease
    * released (`queue-drain.ts`). Distinct from `interrupted` because the two
@@ -126,10 +114,7 @@ export const HABITANT_EXIT_DISPOSITION: Readonly<Record<HabitantExitCondition, H
     // A fresh process installs whatever the base tip declares at boot, which
     // is exactly the cure — same reasoning as `source-stale`.
     "installed-plan-stale": "restart-immediately",
-    "queue-wedged": "stand-down",
-    "refusal-loop": "stand-down",
-    // Not "no number of restarts can reach it" like the two above, but the
-    // stronger case: restarting contradicts the instruction that produced it.
+    // Restarting contradicts the instruction that produced it.
     drained: "stand-down",
     // ERROR is the abnormal-not-auto-fixable class by definition; a successor
     // meets the same row until a person acts on it.

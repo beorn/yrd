@@ -5,11 +5,11 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, changeDeliveryState, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withStep, withQueue } from "@yrd/queue"
+import { withMerge, withStep, withQueue, type IntegrationProof, type LandedMergeResolver } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -46,21 +46,53 @@ function workspace(): BayWorkspace {
   }
 }
 
+/** The merge commit the recovered proof names (R3747: 313c4bbf98 was on main). */
+const MERGED = "4".repeat(40)
+
+type AppOptions = Readonly<{
+  /** The host probe (24030). Tests that construct `yrd-cli:<pid>` holders MUST
+   * pass one: the default probes the real /proc of this test host. */
+  runnerAlive?: (runner: string) => boolean | undefined
+  landedMerge?: LandedMergeResolver
+  /** Include a merge step after `first` (R3747 shape). */
+  merge?: boolean
+  firstRevision?: string
+}>
+
 async function createApp(
   journal: Journal<unknown> = createMemoryJournal(),
   id: () => string = ids(),
   log?: ReturnType<typeof createLogger>,
+  options: AppOptions = {},
 ) {
   const bayJobs = createBayJobDefs(workspace())
   const first = withStep(
     "first",
     (): JobResult<{ first: boolean }> => ({ status: "completed", conclusion: "success", output: { first: true } }),
     {
-      revision: "first-v1",
+      revision: options.firstRevision ?? "first-v1",
       output: z.object({ first: z.boolean() }).strict(),
     },
   )
-  const queue = withQueue({ steps: [first] as const, batch: false, defaultSteps: ["first"] })
+  const merge = withMerge(
+    async (): Promise<JobResult<IntegrationProof>> => ({
+      status: "completed",
+      conclusion: "success",
+      output: { commit: MERGED, baseSha: BASE },
+    }),
+    { revision: "merge-v1" },
+  )
+  const probe = { runnerAlive: options.runnerAlive ?? (() => undefined) }
+  const queue =
+    options.merge === true
+      ? withQueue({
+          steps: [first, merge] as const,
+          batch: false,
+          defaultSteps: ["first", "merge"],
+          ...probe,
+          ...(options.landedMerge === undefined ? {} : { landedMerge: options.landedMerge }),
+        })
+      : withQueue({ steps: [first] as const, batch: false, defaultSteps: ["first"], ...probe })
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
@@ -203,14 +235,306 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
     expect(app.queue.get("R1")).toEqual(settled)
   })
 
-  it("refuses to settle a run that still has a job at its cursor", async () => {
+  it("refuses to settle a run whose cursor job is queued (live work a runner will take)", async () => {
     await using app = await createApp()
     const pr = await submitBranch(app, "issue/live-run")
     await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first"] })
 
     await expect(
       app.dispatch(app.commands.queue.settleOrphanedRun, { run: "R1", reason: "not an orphan" }),
-    ).rejects.toThrow(/has a job at step 'first'/u)
+    ).rejects.toThrow(/has a queued job at step 'first'/u)
+  })
+
+  it("refuses to settle a run whose in_progress holder is live, and settles one whose holder is dead or whose lease lapsed", async () => {
+    await using app = await createApp()
+    const pr = await submitBranch(app, "issue/held-run")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("expected a requested first step")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "yrd-cli:3411471",
+      leaseExpiresAt: "2026-01-01T00:10:00.000Z",
+    })
+
+    // Held lease, holder not proven dead: live work. Refuse.
+    await expect(
+      app.dispatch(app.commands.queue.settleOrphanedRun, {
+        run: "R1",
+        reason: "not an orphan",
+        now: "2026-01-01T00:05:00.000Z",
+      }),
+    ).rejects.toThrow(/has a live job at step 'first'/u)
+    // Without a clock nothing can judge the holder: refuse rather than guess.
+    await expect(app.dispatch(app.commands.queue.settleOrphanedRun, { run: "R1", reason: "no clock" })).rejects.toThrow(
+      /has a live job at step 'first'/u,
+    )
+
+    // The caller proved the holder dead: the in_progress job at the cursor no
+    // longer makes the run "not orphaned" (R3742's two-hour `checking`).
+    await app.dispatch(app.commands.queue.settleOrphanedRun, {
+      run: "R1",
+      reason: "yrd: holder yrd-cli:3411471 is dead",
+      now: "2026-01-01T00:05:00.000Z",
+      deadRunners: ["yrd-cli:3411471"],
+    })
+    expect(app.queue.get("R1")).toMatchObject({ status: "completed", error: { code: "orphaned-run" } })
+  })
+})
+
+/**
+ * @i/10-yrd/24030 — the two 2026-09-01 specimens. "running" was stored belief:
+ * R3742 read `checking (1:typecheck)` for two hours with its process dead and
+ * an expired lease, and R3747 read `running` after a SIGTERM drain cut it
+ * between its merge commit reaching main and its terminal row. Nothing derived
+ * a row's liveness from its lease holder, and a pass start settled nothing —
+ * a one-shot pass had no recovery at all.
+ */
+describe("pass start settles every run whose holder is gone (24030)", () => {
+  const HOLDER = "yrd-cli:3411471"
+  /** The pass's clock: after the R3742 lease lapsed, inside the R3747 lease. */
+  const PASS = "2026-01-01T00:20:00.000Z"
+  const LAPSED = "2026-01-01T00:05:00.000Z"
+  const HELD = "2026-01-01T01:00:00.000Z"
+
+  function tracing() {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const rows = (action: string) =>
+      events.filter(
+        (event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log" && event.props?.action === action,
+      )
+    return { log, rows }
+  }
+
+  it("R3742 shape: an in_progress job at the cursor with an expired lease and a dead pid is canceled at pass start, its PR re-queues, and one INFO row names the holder", async () => {
+    const { log, rows } = tracing()
+    const journal = createMemoryJournal()
+    await using app = await createApp(journal, ids(), log, {
+      runnerAlive: (runner) => (runner === HOLDER ? false : undefined),
+    })
+    const pr = await submitBranch(app, "issue/r3742")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("expected a requested first step")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: HOLDER,
+      leaseExpiresAt: LAPSED,
+    })
+    expect(app.queue.get("R1")?.status, "the specimen must read as running before the pass").toBe("in_progress")
+
+    // The pass: selectorless, exactly what a habitant cycle or a bare `queue run` does.
+    await app.queue.run({ prs: [] }, { runner: "local", leaseMs: 60_000, now: () => Date.parse(PASS) })
+
+    const settled = app.queue.get("R1")
+    expect(settled, "the orphaned run is canceled, not failed: the fault is not its members' own").toMatchObject({
+      status: "completed",
+      conclusion: "cancelled",
+    })
+    const canceledJob = app.state().jobs.byId[job.id]
+    expect(canceledJob).toMatchObject({
+      status: "completed",
+      conclusion: "cancelled",
+      canceledBy: "yrd/recover",
+      cancelReason: `orphaned: lease expired ${LAPSED}, holder ${HOLDER} (pid 3411471)`,
+    })
+    // Re-queued, never rejected: the member is still submitted (and may already be in a fresh run).
+    expect(changeDeliveryState(app.state().bays.prs[pr.id]!)).not.toBe("rejected")
+    const frames = (await (async () => {
+      const collected: unknown[] = []
+      for await (const page of journal.read()) collected.push(...page.values)
+      return collected
+    })()) as Frame[]
+    const canceledFacts = frames
+      .flatMap((frame) => frame.events ?? [])
+      .filter((event) => event.name === "queue/run/canceled")
+    expect(canceledFacts, "the cancel goes through the same journal fact `queue cancel` writes").toHaveLength(1)
+    expect(canceledFacts[0]?.data).toMatchObject({ run: "R1", by: "yrd/recover" })
+
+    const row = rows("orphaned-run-settled")
+    expect(row, "exactly one INFO row per settlement").toHaveLength(1)
+    expect(row[0]?.level).toBe("info")
+    expect(row[0]?.props).toMatchObject({
+      run: "R1",
+      step: "first",
+      runner: HOLDER,
+      pid: 3411471,
+      leaseExpiresAt: LAPSED,
+      cause: "lease-expired",
+      disposition: "canceled",
+    })
+    log.end()
+  })
+
+  it("R3747 shape: a merge-step job whose holder died after the merge landed is settled merged (recovered) through pr/integrated and queue/run/settled", async () => {
+    const { log, rows } = tracing()
+    const journal = createMemoryJournal()
+    const asked: unknown[] = []
+    await using app = await createApp(journal, ids(), log, {
+      merge: true,
+      runnerAlive: (runner) => (runner === HOLDER ? false : undefined),
+      landedMerge: (input) => {
+        asked.push(input)
+        return { commit: MERGED, baseSha: MERGED }
+      },
+    })
+    const pr = await submitBranch(app, "issue/r3747")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first", "merge"] })
+    const first = app.queue.get("R1")?.steps[0]?.job
+    if (first === undefined) throw new Error("expected a requested first step")
+    await app.jobs.run(first.id, { runner: "local", leaseMs: 60_000 })
+    await app.dispatch(app.commands.queue.advance, { run: "R1" })
+    const merge = app.queue.get("R1")?.steps[1]?.job
+    if (merge === undefined) throw new Error("expected a requested merge step")
+    // The drain cut the holder AFTER the merge reached main and BEFORE the
+    // terminal row: the lease is still held, the process is dead.
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: merge.id,
+      attempt: 1,
+      runner: HOLDER,
+      leaseExpiresAt: HELD,
+    })
+    expect(app.queue.get("R1")?.status).toBe("in_progress")
+
+    await app.queue.run({ prs: [] }, { runner: "local", leaseMs: 60_000, now: () => Date.parse(PASS) })
+
+    expect(asked, "the host is asked once, with the run's members").toHaveLength(1)
+    expect(asked[0]).toMatchObject({
+      run: "R1",
+      base: "main",
+      baseSha: BASE,
+      members: [{ pr: pr.id, headSha: pr.revs[0]!.head }],
+    })
+    const settled = app.queue.get("R1")
+    expect(settled).toMatchObject({ status: "completed", conclusion: "success", integration: { commit: MERGED } })
+    expect(app.state().jobs.byId[merge.id]).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      attempt: 1,
+      runner: HOLDER,
+      output: { commit: MERGED, baseSha: MERGED },
+    })
+    const collected: unknown[] = []
+    for await (const page of journal.read()) collected.push(...page.values)
+    const facts = (collected as Frame[]).flatMap((frame) => frame.events ?? [])
+    const integrated = facts.filter((event) => event.name === "pr/integrated")
+    expect(integrated, "the SAME terminal writer a live merge uses").toHaveLength(1)
+    expect(integrated[0]?.data).toMatchObject({ pr: pr.id, run: "R1", commit: MERGED, baseSha: MERGED })
+    expect(facts.filter((event) => event.name === "queue/run/settled").map((event) => event.data)).toContainEqual(
+      expect.objectContaining({ run: "R1", status: "passed" }),
+    )
+    expect(changeDeliveryState(app.state().bays.prs[pr.id]!)).toBe("integrated")
+
+    const row = rows("orphaned-run-settled")
+    expect(row).toHaveLength(1)
+    expect(row[0]?.props).toMatchObject({
+      run: "R1",
+      step: "merge",
+      runner: HOLDER,
+      pid: 3411471,
+      leaseExpiresAt: HELD,
+      cause: "holder-dead",
+      disposition: "merged-recovered",
+      commit: MERGED,
+    })
+    log.end()
+  })
+
+  it("a merge-step orphan the base does not contain is canceled, and the row says the reader answered", async () => {
+    const { log, rows } = tracing()
+    await using app = await createApp(createMemoryJournal(), ids(), log, {
+      merge: true,
+      runnerAlive: (runner) => (runner === HOLDER ? false : undefined),
+      landedMerge: () => undefined,
+    })
+    const pr = await submitBranch(app, "issue/cut-before-push")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first", "merge"] })
+    const first = app.queue.get("R1")?.steps[0]?.job
+    if (first === undefined) throw new Error("expected a requested first step")
+    await app.jobs.run(first.id, { runner: "local", leaseMs: 60_000 })
+    await app.dispatch(app.commands.queue.advance, { run: "R1" })
+    const merge = app.queue.get("R1")?.steps[1]?.job
+    if (merge === undefined) throw new Error("expected a requested merge step")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: merge.id,
+      attempt: 1,
+      runner: HOLDER,
+      leaseExpiresAt: HELD,
+    })
+
+    await app.queue.run({ prs: [] }, { runner: "local", leaseMs: 60_000, now: () => Date.parse(PASS) })
+
+    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "cancelled" })
+    expect(rows("orphaned-run-settled")[0]?.props).toMatchObject({
+      run: "R1",
+      cause: "holder-dead",
+      disposition: "canceled",
+      landedMergeReader: "consulted",
+    })
+    log.end()
+  })
+
+  it("a live holder with a held lease is left alone by the pass start", async () => {
+    await using app = await createApp(createMemoryJournal(), ids(), undefined, {
+      runnerAlive: (runner) => (runner === HOLDER ? true : undefined),
+    })
+    const pr = await submitBranch(app, "issue/live-holder")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("expected a requested first step")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: HOLDER,
+      leaseExpiresAt: HELD,
+    })
+
+    await app.queue.run({ prs: [] }, { runner: "local", leaseMs: 60_000, now: () => Date.parse(PASS) })
+
+    expect(app.queue.get("R1")?.status, "live work is never settled from under its holder").toBe("in_progress")
+    expect(app.state().jobs.byId[job.id]).toMatchObject({ status: "in_progress", runner: HOLDER })
+  })
+
+  it("outcome 4: a stale step contract on an orphaned run raises no step-revision-drift, so no runner stop derives from it", async () => {
+    const journal = createMemoryJournal()
+    {
+      await using seed = await createApp(journal, ids(), undefined, { runnerAlive: () => undefined })
+      const pr = await submitBranch(seed, "issue/drifted-orphan")
+      await seed.dispatch(seed.commands.queue.run, { prs: [pr.id], steps: ["first"] })
+      const job = seed.queue.get("R1")?.steps[0]?.job
+      if (job === undefined) throw new Error("expected a requested first step")
+      await seed.dispatch(seed.commands.job.transition, {
+        type: "start",
+        id: job.id,
+        attempt: 1,
+        runner: HOLDER,
+        leaseExpiresAt: LAPSED,
+      })
+    }
+    // Replayed under a bumped step revision: the run's plan now DRIFTS from the
+    // installed set — the exact shape the RUNNER box read as "runner stopped:
+    // stale step contract on R3742" while the run's process was simply dead.
+    await using replayed = await createApp(journal, ids(100), undefined, {
+      firstRevision: "first-v2",
+      runnerAlive: () => undefined,
+    })
+    const findings = replayed.queue.audit({ now: PASS }).findings
+    expect(findings.some((finding) => finding.code === "orphaned-run" && finding.run === "R1")).toBe(true)
+    expect(
+      findings.filter((finding) => finding.code === "step-revision-drift" || finding.code === "step-unavailable"),
+      "an orphaned run's contract is not a refusal anyone must act on",
+    ).toEqual([])
+    // Control: the same drift on a LIVE holder still raises the contract finding.
+    const live = replayed.queue.audit({ now: "2026-01-01T00:01:00.000Z" }).findings
+    expect(live.some((finding) => finding.code === "step-revision-drift" && finding.run === "R1")).toBe(true)
   })
 })
 
@@ -458,7 +782,8 @@ describe("lapsed runner lease — a Job-backed run projects as running with noth
   const LEASE_EXPIRES = "2026-01-01T00:00:30.000Z"
 
   async function leasedRun() {
-    const app = await createApp()
+    // A fake probe: the default would read this host's /proc for pid 404.
+    const app = await createApp(createMemoryJournal(), ids(), undefined, { runnerAlive: () => undefined })
     const pr = await submitBranch(app, "issue/lease-lapsed")
     await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first"] })
     const job = app.queue.get("R1")?.steps[0]?.job
@@ -476,14 +801,17 @@ describe("lapsed runner lease — a Job-backed run projects as running with noth
     return app
   }
 
-  it("flags the lapse and how long it has stood", async () => {
+  it("flags the lapse as an orphaned run, and how long it has stood", async () => {
     await using app = await leasedRun()
 
-    const finding = app.queue.audit({ now: STALE }).findings.find((item) => item.code === "run-lease-expired")
+    // `orphaned-run`, the code the settlement writes — derived through the one
+    // liveness function (24030), never a second lease computation.
+    const finding = app.queue.audit({ now: STALE }).findings.find((item) => item.code === "orphaned-run")
     expect(finding, "a lapsed lease must not read as a healthy run").toBeDefined()
     expect(finding?.run).toBe("R1")
     expect(finding?.step).toBe("first")
     expect(finding?.since).toBe(LEASE_EXPIRES)
+    expect(finding?.message).toContain(`lease expired ${LEASE_EXPIRES}, holder yrd-cli:404 (pid 404)`)
     expect(finding?.blockedMs, "the operator needs the age of the gap, not just its existence").toBe(
       Date.parse(STALE) - Date.parse(LEASE_EXPIRES),
     )
@@ -498,6 +826,6 @@ describe("lapsed runner lease — a Job-backed run projects as running with noth
     // check above could pass while flagging every healthy run too.
     const live = "2026-01-01T00:00:10.000Z"
     expect(Date.parse(live)).toBeLessThan(Date.parse(LEASE_EXPIRES))
-    expect(app.queue.audit({ now: live }).findings.some((item) => item.code === "run-lease-expired")).toBe(false)
+    expect(app.queue.audit({ now: live }).findings.some((item) => item.code === "orphaned-run")).toBe(false)
   })
 })

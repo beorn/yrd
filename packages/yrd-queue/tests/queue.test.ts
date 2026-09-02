@@ -74,7 +74,10 @@ const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const UPDATED = "3".repeat(40)
-const runtime = { runner: "local", leaseMs: 60_000 }
+/** One clock for every pass in this file: the leases the local runner mints and
+ * the pass-start settlement (24030) read the same instant, as a live pass does
+ * through `io.now`. */
+const runtime = { runner: "local", leaseMs: 60_000, now: () => Date.parse("2026-01-01T00:00:00.000Z") }
 
 describe("queue journal v4 reader preparation", () => {
   function definition() {
@@ -743,6 +746,8 @@ function queuePlugin(
     defaultSteps: options.defaultSteps ?? ["check", "review", "merge", "deploy"],
     ...(options.requires === undefined ? {} : { requires: options.requires }),
     resolveBaseSha: options.resolveBaseSha ?? (() => BASE),
+    // Fixture holders carry pids this host does not run; only their leases judge them (24030).
+    runnerAlive: () => undefined,
     ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
     ...(options.runner === undefined ? {} : { runner: options.runner }),
   })
@@ -2522,9 +2527,14 @@ describe("Queue", () => {
   it("composes one immutable typed plan and rejects a pre-merge deploy", async () => {
     await using app = await createQueueApp()
     expectTypeOf(app.queue).toMatchTypeOf<Queue<DeployedShape>>()
-    expectTypeOf(app.queue.recover)
-      .parameter(0)
-      .toEqualTypeOf<Readonly<{ recoveryTime: string; reason?: string; runner?: string }>>()
+    expectTypeOf(app.queue.recover).parameter(0).toEqualTypeOf<
+      Readonly<{
+        recoveryTime: string
+        reason?: string
+        runner?: string
+        runnerAlive?: (runner: string) => boolean | undefined
+      }>
+    >()
     expect(app.queue.steps().map((step) => step.name)).toEqual(["check", "review", "merge", "deploy"])
 
     const check = withStep(
@@ -3226,9 +3236,9 @@ describe("Queue", () => {
       expect.objectContaining({
         id: "R1",
         status: "completed",
-        conclusion: "failure",
+        conclusion: "cancelled",
         steps: [
-          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "cancelled" }) }),
           expect.anything(),
         ],
       }),
@@ -3278,9 +3288,9 @@ describe("Queue", () => {
       expect.objectContaining({
         id: "R1",
         status: "completed",
-        conclusion: "failure",
+        conclusion: "cancelled",
         steps: [
-          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "cancelled" }) }),
           expect.anything(),
         ],
       }),
@@ -3320,16 +3330,18 @@ describe("Queue", () => {
       expect.objectContaining({
         id: "R1",
         status: "completed",
-        conclusion: "failure",
+        conclusion: "cancelled",
         steps: [
-          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "cancelled" }) }),
           expect.anything(),
         ],
       }),
     ])
     expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({
       status: "completed",
-      conclusion: "timed_out",
+      conclusion: "cancelled",
+      canceledBy: "yrd/recover",
+      cancelReason: "orphaned: lease expired 2026-01-01T00:00:01.000Z, holder yrd-cli:31337 (pid 31337)",
       runner: "yrd-cli:31337",
     })
     expect(checkCalls).toBe(0)
@@ -3383,14 +3395,14 @@ describe("Queue", () => {
       expect.objectContaining({
         id: "R1",
         status: "completed",
-        conclusion: "failure",
+        conclusion: "cancelled",
         steps: [
-          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "cancelled" }) }),
           expect.anything(),
         ],
       }),
     ])
-    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "failure" })
+    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "cancelled" })
     expect(checkCalls).toBe(0)
   })
 

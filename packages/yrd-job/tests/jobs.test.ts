@@ -1472,6 +1472,41 @@ describe("Jobs", () => {
     log.end()
   })
 
+  it("loses a live-leased job whose holder the probe reports dead, naming the holder in its reason (24030)", async () => {
+    const app = await jobsApp(delivery())
+    await app.dispatch(app.commands.sender.send, { message: "one" })
+    await app.dispatch(app.commands.sender.send, { message: "two" })
+    const [dead, alive] = Object.keys(app.jobs.state().byId)
+    for (const [id, runner] of [
+      [dead!, "yrd-cli:111"],
+      [alive!, "yrd-cli:222"],
+    ] as const) {
+      await app.dispatch(app.commands.job.transition, {
+        type: "start",
+        id,
+        attempt: 1,
+        runner,
+        leaseExpiresAt: "2026-01-01T00:05:00.000Z",
+      })
+    }
+
+    // No runner named, both leases held: only the probe can condemn a row,
+    // and it condemns exactly the holder it proves dead.
+    expect(
+      await app.jobs.recover({
+        now: "2026-01-01T00:00:02.000Z",
+        runnerAlive: (runner) => (runner === "yrd-cli:111" ? false : true),
+      }),
+    ).toEqual([dead])
+    expect(app.jobs.state().byId[dead!]).toMatchObject({
+      status: "completed",
+      conclusion: "timed_out",
+      lostReason: "orphaned: holder yrd-cli:111 (pid 111) is dead, lease until 2026-01-01T00:05:00.000Z",
+    })
+    expect(app.jobs.state().byId[alive!]).toMatchObject({ status: "in_progress", runner: "yrd-cli:222" })
+    await app.close()
+  })
+
   it("reclaims a named dead runner's live-leased jobs and leaves other runners untouched", async () => {
     const app = await jobsApp(delivery())
     await app.dispatch(app.commands.sender.send, { message: "one" })
