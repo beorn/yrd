@@ -1107,13 +1107,23 @@ type RunnerHealthPayload = Readonly<{
 type HabitantRunnerLeaseObservation = Readonly<{
   held: boolean
   driver?: Readonly<{ queueId: string; epoch: string }>
+  /** Which kind of pass holds it (`host.ts` QueueRunnerLeaseMode). A one-shot
+   * `queue run` takes the SAME lease as the resident, so "held" alone no longer
+   * answers "is the resident serving". Undefined when the holder recorded no
+   * mode — an older Yrd, which could only ever have been a resident. */
+  mode?: "resident" | "once"
 }>
 
 function habitantRunnerLeaseDriver(message: string): HabitantRunnerLeaseObservation["driver"] {
-  const match = /holder=queue=(.*?) epoch=([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})(?:;|\))/iu.exec(message)
+  const match = /holder=queue=(.*?) epoch=([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})(?:\s|;|\))/iu.exec(message)
   const queueId = match?.[1]
   const epoch = match?.[2]
   return queueId === undefined || epoch === undefined ? undefined : { queueId, epoch }
+}
+
+function habitantRunnerLeaseMode(message: string): HabitantRunnerLeaseObservation["mode"] {
+  const mode = /holder=[^;)]*\bmode=(resident|once)\b/u.exec(message)?.[1]
+  return mode === "resident" || mode === "once" ? mode : undefined
 }
 
 async function habitantRunnerLeaseObservation(cwd: string): Promise<HabitantRunnerLeaseObservation> {
@@ -1130,7 +1140,8 @@ async function habitantRunnerLeaseObservation(cwd: string): Promise<HabitantRunn
     const fact = failureFact(error)
     if (fact?.code === "exclusive-busy") {
       const driver = habitantRunnerLeaseDriver(fact.message)
-      return { held: true, ...(driver === undefined ? {} : { driver }) }
+      const mode = habitantRunnerLeaseMode(fact.message)
+      return { held: true, ...(driver === undefined ? {} : { driver }), ...(mode === undefined ? {} : { mode }) }
     }
     throw error
   }
@@ -1141,39 +1152,21 @@ export async function habitantRunnerLeaseHeld(cwd: string): Promise<boolean> {
 }
 
 /**
- * Admission has no exclusivity of its own — only settlement does
- * (`habitantOwnsSettlementDrain`, host.ts) — so a one-shot `queue run --once`
- * used to start composing beside a live resident runner instead of refusing.
- * Measured 2026-08-30 (@cto, PR2744): `@ci` ran a one-shot leg next to the
- * resident runner; the second driver sat at zero CPU inside Vitest collection
- * next to another leg's whole-suite run, and the CPU-work lease killed it — a
- * false refusal that cost a real change. Called once, before `gate()` and
- * before any compose/step work, so a held lease is caught before either
- * driver can contend for git state.
+ * Admission used to have no exclusivity of its own — only settlement did — so a
+ * one-shot `queue run --once` could start composing beside another driver.
+ * A PROBE stood here instead: it acquired the resident lease, released it, and
+ * refused if it had been busy. That answered "is a resident running" and could
+ * never answer "is another one-shot running", because a one-shot took nothing
+ * to observe. Measured 2026-09-01, 15:11 PDT: two one-shot passes against one
+ * repository, the second cancelling the first's run on PR2916.
+ *
+ * The probe is gone, and the lease is now taken by BOTH kinds of pass for the
+ * whole of the pass (`acquireQueueRunnerLease`, host.ts), before the command
+ * body runs at all. Two drivers of any kind cannot overlap by construction, and
+ * a probe on this side would now refuse against its own process's lease — flock
+ * denies a second acquire from the same process just as it denies another
+ * process's.
  */
-export async function refuseOneShotQueueRunUnderResidentLease(cwd: string): Promise<void> {
-  // No Git queue dir under this cwd ⇒ no resident lease can exist to contend
-  // with — return and let the command's own repository resolution speak with
-  // its ordinary error. This pre-gate is advisory and must never out-rank the
-  // App's own cwd handling: measured 2026-08-30, raising here turned 23
-  // `tests/cli.test.ts` exit-code assertions into infrastructure exit 3s,
-  // because the fixtures drive whole queue flows against abstracted repos.
-  if (queueGitDir(cwd) === undefined) return
-  const lease = await habitantRunnerLeaseObservation(cwd)
-  if (!lease.held) return
-  const holder =
-    lease.driver === undefined
-      ? "an unidentified habitant"
-      : `queue=${lease.driver.queueId} epoch=${lease.driver.epoch}`
-  raiseFailure(
-    "refusal",
-    "queue-run-resident-owns-admission",
-    `yrd: the resident runner (${holder}) already owns admission for this queue; a one-shot 'queue run --once' ` +
-      "cannot run beside it. Submit with 'yrd pr submit <branch>' and let the resident runner drain it; if the " +
-      "resident is dead, 'hab --hab-dir <root> restart yrd-runner'.",
-  )
-}
-
 function gitDistance(cwd: string, baseSha: string, headSha: string): Omit<RunnerGitDistance, "base" | "baseSha"> {
   try {
     const counts = gitSync(cwd, ["rev-list", "--left-right", "--count", `${baseSha}...${headSha}`])
@@ -1763,11 +1756,13 @@ async function queueRunnerHealth(
   const base = baseIdentity(services.base ?? "main")
   let leaseHeld: boolean | undefined
   let leaseDriver: HabitantRunnerLeaseObservation["driver"]
+  let leaseMode: HabitantRunnerLeaseObservation["mode"]
   let git: RunnerGitHealth = { cwd, headSha: "unknown", dirty: false }
   try {
     const lease = await habitantRunnerLeaseObservation(cwd)
     leaseHeld = lease.held
     leaseDriver = lease.driver
+    leaseMode = lease.mode
     if (audit === undefined) {
       raiseFailure(
         "configuration",
@@ -1783,6 +1778,15 @@ async function queueRunnerHealth(
     const runnerStatus = runnerAgeMs === undefined ? "missing" : runnerAgeMs > RUNNER_STALE_MS ? "stale" : "fresh"
     const queueProgress = options.queueProgress ?? runner?.queueProgress ?? { state: "unknown" as const }
     const progressAgeMs = queueProgress.state === "unknown" ? undefined : QueueRunnerProgress.ageMs(queueProgress, now)
+    // A one-shot `queue run` holds the SAME lease as the resident, so the lock
+    // alone no longer answers the question this probe exists to answer: is the
+    // RESIDENT serving. Reading it as "yes" would report a transient one-shot
+    // pass as a live service — and, worse, page `resident-runner-unhealthy`
+    // for its missing heartbeat, which a supervisor answers by restarting the
+    // resident into a refusal. `facts.lease` stays the honest observation of
+    // the lock; only the resident verdict is narrowed, and the one-shot holder
+    // is named below rather than passed over in silence.
+    const residentHeld = leaseHeld === true && leaseMode !== "once"
     const facts: RunnerHealthFacts = {
       lease: leaseHeld ? "held" : "free",
       ...(leaseDriver === undefined ? {} : { leaseDriver }),
@@ -1806,7 +1810,7 @@ async function queueRunnerHealth(
           command: "queue.list.check",
           service,
           state: "unhealthy",
-          running: leaseHeld,
+          running: residentHeld,
           error: actionableFailure({
             code: first.code,
             message: drift.map((finding) => finding.message).join("\n"),
@@ -1824,9 +1828,13 @@ async function queueRunnerHealth(
         },
       }
     }
-    if (!leaseHeld) {
+    if (!residentHeld) {
       const hasQueuedWork = app !== undefined && queuedDeliveryCount(app) > 0
       if (hasQueuedWork) {
+        // Name the one-shot when there is one: the queue IS being drained, just
+        // not by a service, and an operator told only "no runner owns the lease"
+        // would start one into a refusal.
+        const oneShot = leaseMode === "once" ? " (a one-shot 'yrd queue run' pass currently holds it)" : ""
         return {
           exitCode: 2,
           payload: {
@@ -1837,8 +1845,10 @@ async function queueRunnerHealth(
             running: false,
             error: runnerHealthError(
               "resident-runner-missing",
-              "the queue has work but no habitant runner owns the drain lease",
-              ["Start or restart the habitant queue runner."],
+              `the queue has work but no habitant runner owns the drain lease${oneShot}`,
+              leaseMode === "once"
+                ? ["Let the one-shot pass finish, then start or restart the habitant queue runner."]
+                : ["Start or restart the habitant queue runner."],
             ),
             facts,
           },
@@ -13812,7 +13822,10 @@ function buildProgram(
         setExit(await followQueueRuns(installed(), selectors, options, io, gate, installedServices()))
         return
       }
-      await refuseOneShotQueueRunUnderResidentLease(io.cwd ?? process.cwd())
+      // No admission pre-gate here: this process already holds the queue runner
+      // lease (taken at host construction, before this action ran) or it never
+      // got this far. See the note above `gitDistance` for the probe this
+      // replaced.
       await gate()
       const app = installed()
       const publications = await preparePublicationQueueCycle(app, installedServices(), io)
