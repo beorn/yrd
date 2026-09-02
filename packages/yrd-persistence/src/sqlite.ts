@@ -228,6 +228,9 @@ type Context = Readonly<{
   path: string
   writerVersion: number
   exclusive: Exclusive
+  /** How long a READ may wait for the writer lock when the store needs
+   * maintenance before it can be read (see `ensureReadable`). */
+  readWaitMs: number
   log: ConditionalLogger
   platform: string
   sqliteVersion?: string
@@ -378,6 +381,7 @@ function context(options: JournalOptions): Context {
     path: join(options.dir, DATABASE_FILE),
     writerVersion: journalWriterVersion(options.writerVersion),
     exclusive: inject.exclusive ?? createExclusive(options.dir, options.lock, { log }),
+    readWaitMs: Math.min(READ_MAINTENANCE_WAIT_MS, options.lock?.timeoutMs ?? READ_MAINTENANCE_WAIT_MS),
     log,
     platform: inject.platform ?? process.platform,
     ...(inject.sqliteVersion === undefined ? {} : { sqliteVersion: inject.sqliteVersion }),
@@ -518,16 +522,12 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
     async *read(after = 0, before) {
       assertCursor(after)
       if (before !== undefined) assertCursor(before)
-      const batches =
-        mode === "mutable"
-          ? await runtime.exclusive.run(
-              async () => {
-                await ensureDatabase(runtime)
-                return readBatches(runtime, after, before)
-              },
-              { holder: "journal-read" },
-            )
-          : await readBatches(runtime, after, before)
+      // ONE read path for both modes: a read-only SQLite open inside a BEGIN
+      // snapshot, never the writer lock. The mutable mode differs only in
+      // being allowed to bring a store up to date first — and it takes the
+      // lock for that only when the store actually needs it (24019).
+      if (mode === "mutable") await ensureReadable(runtime)
+      const batches = await readBatches(runtime, after, before)
       for (const batch of batches) yield batch
     },
     async append(value, expectedCursor) {
@@ -651,20 +651,14 @@ async function inspectCheckpoint(runtime: Context, mode: JournalMode): Promise<J
       return checkpoint
     })
   }
-  if (mode === "read-only") return load()
-  return runtime.exclusive.run(
-    async () => {
-      await ensureDatabase(runtime)
-      return load()
-    },
-    { holder: "checkpoint-load" },
-  )
+  if (mode === "mutable") await ensureReadable(runtime)
+  return load()
 }
 
 async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Promise<boolean> {
   assertCursor(checkpoint.cursor)
   try {
-    await runtime.exclusive.run(async () => ensureDatabase(runtime), { holder: "checkpoint-save-ensure" })
+    await ensureReadable(runtime)
     const prepared = prepareCheckpoint(runtime, checkpoint)
     if (prepared === null) return false
     await runtime.phase("checkpoint-prepared", {
@@ -672,7 +666,11 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
       snapshotCursor: prepared.snapshotCursor,
       compactedEvents: prepared.compactedEvents,
     })
-    return await withMutableDatabase(runtime, "checkpoint-save", (database) => {
+    // A checkpoint is an optimization ("the next command may start more
+    // slowly" is its documented failure), so it never waits for another
+    // process: one attempt, and a busy lock skips it. Before this, a READ
+    // verb's close parked here behind a live pass for the writer's whole bound.
+    return await withMutableDatabase(runtime, "checkpoint-save", { timeoutMs: 0 }, (database) => {
       let evicted: EvictionOutcome | undefined
       const current = readSnapshotHeader(database)
       const head = readHead(database)
@@ -929,9 +927,13 @@ async function withMutableDatabase<Result>(
   /** Names this writer in the lock file, so a starved contender can say what
    * held it instead of "unknown operation" (23228). */
   holder: string,
-  operation: (database: Database) => Result,
+  waitOrOperation: Readonly<{ timeoutMs: number }> | ((database: Database) => Result),
+  maybeOperation?: (database: Database) => Result,
 ): Promise<Result> {
   assertMutablePlatform(runtime)
+  const wait = typeof waitOrOperation === "function" ? undefined : waitOrOperation
+  const operation = typeof waitOrOperation === "function" ? waitOrOperation : maybeOperation
+  if (operation === undefined) throw new TypeError("yrd: withMutableDatabase requires an operation")
   try {
     return await runtime.exclusive.run(
       async () => {
@@ -944,11 +946,59 @@ async function withMutableDatabase<Result>(
           database.close()
         }
       },
-      { holder },
+      { holder, ...(wait === undefined ? {} : { timeoutMs: wait.timeoutMs }) },
     )
   } catch (error) {
     rethrowSqliteBusy(error)
   }
+}
+
+/**
+ * The most a READ waits for the writer lock, and only when the store needs
+ * maintenance before it can be read at all. A current store is read with no
+ * lock (see `ensureReadable`). The operator's ceiling for one command waiting
+ * on another is ten seconds (24019).
+ */
+const READ_MAINTENANCE_WAIT_MS = 10_000
+
+/**
+ * Bring a mutable store to a readable state WITHOUT taking the writer lock
+ * unless it actually has to.
+ *
+ * Every read used to run `ensureDatabase` under the lock as "journal-read" —
+ * the migration funnel needs exclusivity, and nothing knew whether it had
+ * work until it looked. So every read of every active-posture command, and
+ * every refresh of the pass itself, parked behind whichever writer was live,
+ * and then held the lock across the whole SELECT (24019). The look is now a
+ * lock-free read-only probe; the lock is taken only when the probe finds
+ * maintenance pending — a missing database, a v1 schema, an interrupted
+ * VACUUM, an uninstalled view registry, a missing version floor, an
+ * unpublished cutover — and then with a read-sized bound whose refusal names
+ * the holder.
+ */
+async function ensureReadable(runtime: Context): Promise<void> {
+  if (!(await storeNeedsMaintenance(runtime))) return
+  await runtime.exclusive.run(() => ensureDatabase(runtime), {
+    holder: "journal-read maintenance",
+    timeoutMs: runtime.readWaitMs,
+  })
+}
+
+/** Lock-free mirror of the decisions `ensureDatabase` makes under the lock. */
+async function storeNeedsMaintenance(runtime: Context): Promise<boolean> {
+  if (!(await exists(runtime.path))) return true
+  using database = openReadOnly(runtime.path)
+  const userVersion = database.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
+  const schema = classifyJournalSchema(SCHEMA_VERSION, userVersion)
+  if (schema.kind !== "same" && schema.kind !== "reader-behind") return true
+  const metadata = (key: string): string | undefined =>
+    database.query<{ value: string }, [string]>("SELECT value FROM journal_metadata WHERE key = ?").get(key)?.value
+  if (metadata("migration_complete") !== "1") return true
+  if (metadata("maintenance_pending") !== "0") return true
+  if (!hasJournalViewRegistry(database)) return true
+  if (metadata(JOURNAL_VERSION_FLOOR) === undefined) return true
+  const cutover = await sqliteCutoverMarker(runtime, database)
+  return cutover !== undefined && cutover.marker.state !== "published"
 }
 
 function openMutable(runtime: Context, verifyViews = true): Database {
@@ -2805,7 +2855,17 @@ async function restoreLegacyPointer(runtime: Context, pointer: LegacySource["poi
   }
 }
 
-async function finalizeExistingSqliteCutover(runtime: Context, database: Database): Promise<void> {
+/**
+ * The legacy cutover marker beside the database, bound to the database's own
+ * source fingerprint, or undefined when there is none. Read-only: the
+ * lock-free readiness probe asks this too, so a journal that carries its
+ * published marker forever is not sent through the writer lock on every read,
+ * while a marker that names some OTHER database still refuses every read.
+ */
+async function sqliteCutoverMarker(
+  runtime: Context,
+  database: Database,
+): Promise<Readonly<{ marker: LegacySqliteCutover; path: string }> | undefined> {
   for (const pointer of [LEGACY_MANIFEST_FILE, LEGACY_V3_FILE] as const) {
     const path = join(runtime.dir, pointer)
     if (!(await exists(path))) continue
@@ -2821,10 +2881,15 @@ async function finalizeExistingSqliteCutover(runtime: Context, database: Databas
     if (readMetadata(database, "source_fingerprint") !== marker.fingerprint) {
       throw new Error(`yrd: SQLite authority fingerprint does not match its cutover marker at ${path}`)
     }
-    if (marker.state === "published") return
-    await writeSqliteCutoverMarker(runtime, marker, "published")
-    return
+    return { marker, path }
   }
+  return undefined
+}
+
+async function finalizeExistingSqliteCutover(runtime: Context, database: Database): Promise<void> {
+  const cutover = await sqliteCutoverMarker(runtime, database)
+  if (cutover === undefined || cutover.marker.state === "published") return
+  await writeSqliteCutoverMarker(runtime, cutover.marker, "published")
 }
 
 async function verifyCandidateFresh(

@@ -2062,7 +2062,7 @@ describe("Queue command adapters", () => {
     // comment for why that half needed splitting out and is currently
     // skipped, discovered while verifying this fix (A1).
     await expect(remerger.recut(input)).rejects.toThrow(
-      /change 'PR1' cannot fill the shaset: 'dep' authored min commit '[0-9a-f]{40}' is not on submodule main '[0-9a-f]{40}'; the author's gitlink is a min commit, never a value — push it to the submodule's own main first, then resubmit/u,
+      /change 'PR1' cannot fill the shaset: 'dep' authored min commit '[0-9a-f]{40}' is not on submodule main '[0-9a-f]{40}'; the author's gitlink is a min commit, never a value — push it to the submodule's own main first; the standing submission retries on the next queue pass/u,
     )
   })
 
