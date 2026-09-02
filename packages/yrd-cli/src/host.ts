@@ -2693,6 +2693,14 @@ export type YrdHost = Readonly<{
   journalRetention?: ResolvedRetention
   services: YrdCliServices
   drain(): Promise<void>
+  /**
+   * Pull every journal writer-lock wait this host is parked in, so a close
+   * that follows can finish. A SIGTERM used to run `close()`, which awaited
+   * the parked operation, which awaited the lock — for the lock's whole bound
+   * (24019). The parked operation fails with `exclusive-interrupted` naming
+   * `reason` and the lock's holder.
+   */
+  interrupt(reason: string): void
   /** Releases the owned app, process, and scope. Idempotent with async disposal. */
   close(): Promise<void>
   /** Releases the host through the same lifecycle as close(). */
@@ -4180,16 +4188,22 @@ async function createYrdRuntimeHost(
           })
         : await createViewerReceiver(repository, process)
     const queueReadModel = createQueueReadModel({ dir: repository.stateDir })
+    // One signal for every writer-lock wait the journal may park in; pulled
+    // by `interrupt()` so a signal-driven close is not held hostage by a
+    // lock another process holds (24019).
+    const lockInterrupt = new AbortController()
     const journal =
       mode === "active"
         ? createJournal({
             dir: repository.stateDir,
             views: [queueReadModel.view],
             writerVersion: CURRENT_JOURNAL_COMPATIBILITY.version,
+            lock: { signal: lockInterrupt.signal },
             inject: { log },
           })
         : createReadOnlyJournal({
             dir: repository.stateDir,
+            lock: { signal: lockInterrupt.signal },
             inject: { log },
           })
     if (options.repairViewsBeforeReplay === true) {
@@ -4395,6 +4409,7 @@ async function createYrdRuntimeHost(
       ...(mode === "active" ? { journalRetention: (journal as MutableJournal).retention } : {}),
       services,
       drain,
+      interrupt: (reason: string) => lockInterrupt.abort(new Error(reason)),
       close,
       [Symbol.asyncDispose]: close,
     })
@@ -4866,7 +4881,13 @@ async function runYrdProcessHost(
         shutdownLog = runnerLog
         const drain = queuePostureDrains(posture) ? new AbortController() : undefined
         const binding = bindProcessShutdown<QueuePassFatal>(
-          closeHost,
+          (cause) => {
+            // A hard stop first pulls every writer-lock wait, or the close
+            // below would await an operation that is itself awaiting another
+            // process's lock (24019).
+            activeHost.interrupt(`stopped by ${describeQueuePassStop(cause)}`)
+            return closeHost(cause)
+          },
           drain === undefined
             ? undefined
             : (cause) => {

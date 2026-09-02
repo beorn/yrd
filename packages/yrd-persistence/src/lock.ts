@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { acquireExclusive, type ExclusiveOptions as GitExclusiveOptions, type WriterLock } from "git-super/exclusive"
 import { createFailure, markRecoverable, observeYrdLifecycle } from "@yrd/core"
@@ -18,9 +19,144 @@ export type Exclusive = Readonly<{
  * "please set this" produced one caller that did out of ten; a required one
  * cannot be omitted by a new call site, which is the only version of this rule
  * that survives the next author.
+ *
+ * `timeoutMs` bounds THIS acquisition and overrides the lock-wide default: a
+ * checkpoint save is an optimization that must never make one command wait
+ * for another process, while an append is the command itself and may wait.
  */
-export type ExclusiveRunOptions = Readonly<{ holder: string }>
-export type ExclusiveOptions = GitExclusiveOptions
+export type ExclusiveRunOptions = Readonly<{ holder: string; timeoutMs?: number }>
+
+/**
+ * `signal` interrupts a wait that is still polling. Without it a contender
+ * parked on a busy lock could not be torn down: SIGTERM ran the host's close,
+ * the close awaited the parked operation, and the parked operation awaited the
+ * lock — for the whole 30 s bound (24019, measured 2026-09-01: a reader sat
+ * over 60 s beside a live pass, ignored TERM and INT, and needed a
+ * process-group KILL).
+ */
+export type ExclusiveOptions = GitExclusiveOptions & Readonly<{ signal?: AbortSignal }>
+
+const DEFAULT_TIMEOUT_MS = 30_000
+const DEFAULT_POLL_MS = 10
+
+/** What the lock file says about its holder: git-super writes `{pid, startedAt, holder}`. */
+export type WriterLockOwner = Readonly<{ pid?: number; holder?: string; startedAt?: string }>
+
+/** Read the holder recorded in `<dir>/writer.lock`, or `{}` when the file is
+ * absent or half-written (the race between a failed acquire and this read is
+ * legitimate, and the caller is already reporting a failure it enriches). */
+export function readWriterLockOwner(dir: string): WriterLockOwner {
+  try {
+    const value = JSON.parse(readFileSync(join(dir, "writer.lock"), "utf8")) as Record<string, unknown>
+    return {
+      ...(typeof value.pid === "number" ? { pid: value.pid } : {}),
+      ...(typeof value.holder === "string" && value.holder.trim() !== "" ? { holder: value.holder } : {}),
+      ...(typeof value.startedAt === "string" ? { startedAt: value.startedAt } : {}),
+    }
+  } catch {
+    // silent-fallback-allow: diagnostic enrichment of a failure that is already
+    // being raised; the lock file can vanish or be mid-write between the failed
+    // acquire and this read. Ownership is decided by flock, never by this text.
+    return {}
+  }
+}
+
+/** `pid:1234 (queue-run pass)` — the two facts a starved contender needs. */
+export function describeWriterLockOwner(owner: WriterLockOwner): string {
+  const pid = owner.pid === undefined ? "another process" : `pid:${String(owner.pid)}`
+  return `${pid} (${owner.holder ?? "unknown operation"})`
+}
+
+function isBusy(error: unknown): error is Error {
+  return error instanceof Error && error.message.includes("worktree mutation lock is busy")
+}
+
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, ms)
+    function finish(): void {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", finish)
+      resolve()
+    }
+    signal?.addEventListener("abort", finish, { once: true })
+  })
+}
+
+function interrupted(dir: string, holder: string, signal: AbortSignal): never {
+  const owner = describeWriterLockOwner(readWriterLockOwner(dir))
+  const reason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "interrupted")
+  throw markRecoverable(
+    createFailure({
+      kind: "infrastructure",
+      code: "exclusive-interrupted",
+      message: `yrd: ${holder} stopped waiting for the writer lock held by ${owner}: ${reason} (${join(dir, "writer.lock")})`,
+    }),
+  )
+}
+
+/**
+ * Wait for the lock with a bound the caller chose and a signal the caller can
+ * pull.
+ *
+ * git-super's own loop is neither: it polls to a deadline and nothing can
+ * reach into it. Each attempt here is one git-super acquire with a zero
+ * deadline — its flock, its lock-file body, its busy message — so the
+ * primitive stays git-super's; only the WAIT policy is Yrd's. The first busy
+ * attempt logs one WARN row naming what holds the lock and how long this
+ * contender will wait, because a wait nobody can see is the ninety-minute
+ * stall of 23228 all over again.
+ */
+async function acquireBounded(
+  dir: string,
+  options: ExclusiveOptions,
+  holder: string,
+  timeoutMs: number,
+  log: ConditionalLogger,
+  now: () => number,
+): Promise<WriterLock> {
+  const pollMs = Math.max(1, options.pollIntervalMs ?? DEFAULT_POLL_MS)
+  const signal = options.signal
+  const started = now()
+  let announced = false
+  while (true) {
+    if (signal?.aborted) interrupted(dir, holder, signal)
+    try {
+      return await acquireExclusive(dir, { timeoutMs: 0, pollIntervalMs: pollMs }, holder)
+    } catch (error) {
+      if (!isBusy(error)) throw error
+      const waited = now() - started
+      const owner = readWriterLockOwner(dir)
+      if (!announced) {
+        announced = true
+        log.warn?.(
+          `${holder} is waiting up to ${String(timeoutMs)}ms for the writer lock held by ${describeWriterLockOwner(owner)}`,
+          {
+            holder,
+            boundMs: timeoutMs,
+            heldBy: owner,
+            path: join(dir, "writer.lock"),
+          },
+        )
+      }
+      if (waited >= timeoutMs) {
+        throw markRecoverable(
+          createFailure(
+            {
+              kind: "infrastructure",
+              code: "exclusive-busy",
+              message:
+                `${error.message.replace("git-super: worktree mutation lock is busy", "yrd: writer lock is busy")}` +
+                ` after ${String(waited)}ms; held by ${describeWriterLockOwner(owner)}`,
+            },
+            error,
+          ),
+        )
+      }
+      await sleep(1 + Math.floor(Math.random() * pollMs), signal)
+    }
+  }
+}
 
 /** Yrd observability/failure policy around git-super's one POSIX lock primitive. */
 export function createExclusive(
@@ -29,6 +165,7 @@ export function createExclusive(
   inject: Readonly<{ log?: ConditionalLogger; now?: () => number }> = {},
 ): Exclusive {
   const log = inject.log ?? createLogger("yrd", [{ level: "warn" }])
+  const now = inject.now ?? (() => Date.now())
   return {
     async run(operation, runOptions) {
       // The type says `holder` is required. That reaches every TypeScript
@@ -52,6 +189,7 @@ export function createExclusive(
       if (holder === "" || /\r|\n/u.test(holder)) {
         throw new TypeError("yrd: exclusive holder must be a non-empty single line")
       }
+      const timeoutMs = Math.max(0, runOptions.timeoutMs ?? options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
       // The busy conversion happens INSIDE the observed operation, so the
       // `lock` lifecycle reports the typed, recoverable `exclusive-busy` fact
       // rather than git-super's bare error. Converting after the lifecycle had
@@ -64,26 +202,12 @@ export function createExclusive(
           lifecycle: "lock",
           attributes: {
             path: join(dir, "writer.lock"),
-            timeoutMs: options.timeoutMs ?? 30_000,
+            timeoutMs,
             holder,
           },
           now: inject.now,
         },
-        async () => {
-          try {
-            return await acquireExclusive(dir, options, holder)
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
-            if (!message.includes("worktree mutation lock is busy")) throw error
-            throw markRecoverable(
-              createFailure({
-                kind: "infrastructure",
-                code: "exclusive-busy",
-                message: message.replace("git-super: worktree mutation lock is busy", "yrd: writer lock is busy"),
-              }),
-            )
-          }
-        },
+        () => acquireBounded(dir, options, holder, timeoutMs, log, now),
       )
       try {
         return await operation()
