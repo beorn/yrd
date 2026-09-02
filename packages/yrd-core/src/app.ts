@@ -697,7 +697,11 @@ export async function createYrd<State extends object, Commands extends CommandTr
   }
 
   const fold = async (base: Projection): Promise<Projection> => {
-    using span = coreLog.span?.("replay", { after: base.cursor })
+    // The replay span is storage bookkeeping, so it opens only when trace is
+    // on — `log.trace` is the level probe, as in `observeYrdLifecycle`. A
+    // queue run folds the journal on every read, and 64 of one empty-lane
+    // run's 565 debug rows were this span (measured 2026-09-02).
+    using span = coreLog.trace === undefined ? undefined : coreLog.span?.("replay", { after: base.cursor })
     let next = base
     let frames = 0
     let events = 0
@@ -880,7 +884,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     if (parsed.at !== expectedAt) throw new Error("checkpoint event-order timestamp does not match results")
     if (history !== undefined) trimResultCache(resultsById, resultsByKey, causeIds, eventIds)
     const registriesValidatedAt = performance.now()
-    coreLog.debug?.("projection checkpoint restored", {
+    coreLog.trace?.("projection checkpoint restored", {
       envelopeMs: envelopeParsedAt - restoreStarted,
       stateMs: stateValidatedAt - envelopeParsedAt,
       resultsMs: resultsValidatedAt - stateValidatedAt,
@@ -1064,7 +1068,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       // gap (2026-07-20 outage: CI stopped taking new work on cold-fold debt).
       if (!checkpointWarning && checkpointDebt() >= PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES) {
         checkpointWarning = true
-        coreLog.debug?.("Yrd's saved state will be updated by the next write-capable command.")
+        coreLog.trace?.("Yrd's saved state will be updated by the next write-capable command.")
       }
       return
     }

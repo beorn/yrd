@@ -681,7 +681,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
         current.prefix_sha256 !== prepared.snapshotPrefixSha256 ||
         current.prefix_last_cursor !== prepared.snapshotPrefixLastCursor
       ) {
-        runtime.log.debug?.("Saved state changed before this update finished; skipped this update.")
+        runtime.log.trace?.("Saved state changed before this update finished; skipped this update.")
         return false
       }
       database.run("BEGIN IMMEDIATE")
@@ -715,7 +715,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
           )
         if (updated.changes !== 1) {
           rollback(database)
-          runtime.log.debug?.("Saved state changed before this update finished; skipped this update.")
+          runtime.log.trace?.("Saved state changed before this update finished; skipped this update.")
           return false
         }
         database.query("DELETE FROM journal_events WHERE cursor <= ?").run(checkpoint.cursor)
@@ -725,7 +725,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
         rollback(database)
         throw error
       }
-      runtime.log.debug?.(`checkpointed at cursor ${String(checkpoint.cursor)} in ${runtime.path}`, {
+      runtime.log.trace?.(`checkpointed at cursor ${String(checkpoint.cursor)} in ${runtime.path}`, {
         action: "checkpoint-written",
         path: runtime.path,
         cursor: checkpoint.cursor,
@@ -751,7 +751,7 @@ function prepareCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Pre
     const { head, snapshot } = assertComplete(database, runtime.path)
     if (checkpoint.cursor > head || checkpoint.cursor < snapshot.cursor) {
       database.run("COMMIT")
-      runtime.log.debug?.("Saved state is already newer; skipped this update.")
+      runtime.log.trace?.("Saved state is already newer; skipped this update.")
       return null
     }
     if (checkpoint.cursor !== snapshot.cursor) {
@@ -1293,7 +1293,7 @@ async function publishCandidate(runtime: Context, legacy: LegacySource | null): 
     } finally {
       live.close()
     }
-    runtime.log.debug?.("Yrd's saved state is ready.", {
+    runtime.log.trace?.("Yrd's saved state is ready.", {
       action: legacy === null ? "initialized" : "migrated",
       path: runtime.path,
       cursor: head,
@@ -2289,7 +2289,7 @@ function checkpointWal(runtime: Context, database: Database): void {
           details,
         )
       } else {
-        runtime.log.debug?.(
+        runtime.log.trace?.(
           `storage cleanup checkpointed ${String(details.checkpointedFrames)} WAL frames in ${runtime.path}`,
           { action: "checkpointed", ...details },
         )

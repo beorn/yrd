@@ -276,11 +276,17 @@ checks:
     // and low-level storage:lock chatter never reaches it...
     expect(stderrText).not.toContain("compose succeeded")
     expect(stderrText).not.toContain("storage:lock")
-    // ...while the structured JSONL sink still retains the full journal detail
-    // AND the full compose settlement record.
+    // ...while the structured JSONL sink still retains the compose settlement
+    // record the human stream drops.
     const records = await readRecords(logFile)
-    expect(records.some((r) => String(r.name) === "yrd:storage:lock")).toBe(true)
     expect(records.some((r) => r.name === "yrd:queue:compose" && r.outcome === "succeeded")).toBe(true)
+    // The writer lock is storage bookkeeping and lives at TRACE, so it is
+    // absent from BOTH at the habitant's debug default. It used to be here,
+    // and the sink kept it: one queue run takes the lock for every fact it
+    // writes, and 186 of one empty-lane queue run's 565 debug rows were this
+    // one namespace (measured 2026-09-02 on pin 0749260a). `observability.test.ts`
+    // pins the level itself, and the boundary suite pins that trace still has it.
+    expect(records.some((r) => String(r.name) === "yrd:storage:lock")).toBe(false)
   }, 40_000)
 
   it("keeps one-shot non-runner commands at WARN — no yrd:storage:lock INFO spam", async () => {

@@ -463,11 +463,26 @@ describe("Yrd lifecycle records", () => {
     log.end()
   })
 
-  it("demotes routine lock and compose successes to DEBUG while keeping run success at INFO", async () => {
+  /**
+   * Three tiers, and each one is a decision.
+   *
+   * Storage bookkeeping — the writer lock and the journal append — reads at
+   * TRACE. It is the journal talking to itself: one queue run takes the lock
+   * and appends a frame for every fact it writes, and at debug that transcript
+   * buried the queue's own decisions (565 rows for one empty-lane queue run,
+   * 308 of them lock and append, measured 2026-09-02 on pin 0749260a). Same
+   * class as the git chatter moved to trace in 8975957f, moved the same way.
+   *
+   * Composition reads at DEBUG: routine per-cycle plumbing, useful when an
+   * operator asks for it. A queue run reads at INFO because it is a delivery
+   * milestone.
+   */
+  it("puts storage bookkeeping at TRACE, compose at DEBUG and a queue run at INFO", async () => {
     const events: Event[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
 
     await observeYrdLifecycle(log.child("storage"), { lifecycle: "lock" }, async () => undefined)
+    await observeYrdLifecycle(log.child("storage"), { lifecycle: "append" }, async () => undefined)
     await observeYrdLifecycle(log.child("queue"), { lifecycle: "compose" }, async () => [])
     await observeYrdLifecycle(log.child("queue"), { lifecycle: "run" }, async () => [])
 
@@ -477,9 +492,39 @@ describe("Yrd lifecycle records", () => {
         .filter((event) => event.props?.outcome === "succeeded")
         .map((event) => [event.namespace, event.level]),
     ).toEqual([
-      ["yrd:storage:lock", "debug"],
+      ["yrd:storage:lock", "trace"],
+      ["yrd:storage:append", "trace"],
       ["yrd:queue:compose", "debug"],
       ["yrd:queue:run", "info"],
+    ])
+    log.end()
+  })
+
+  /**
+   * Bookkeeping goes quiet when it goes right, and stays exactly as loud when
+   * it does not. A lock that could not be taken is a fault, and demoting the
+   * whole lifecycle would have taken the fault down with the chatter.
+   */
+  it("keeps a failed lock and a failed append loud", async () => {
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+
+    for (const lifecycle of ["lock", "append"]) {
+      await expect(
+        observeYrdLifecycle(log.child("storage"), { lifecycle }, async () => {
+          throw new Error("the writer lock is held")
+        }),
+      ).rejects.toThrow("the writer lock is held")
+    }
+
+    expect(
+      events
+        .filter((event): event is Extract<Event, { kind: "log" }> => event.kind === "log")
+        .filter((event) => event.props?.outcome === "failed")
+        .map((event) => [event.namespace, event.level]),
+    ).toEqual([
+      ["yrd:storage:lock", "error"],
+      ["yrd:storage:append", "error"],
     ])
     log.end()
   })
@@ -758,15 +803,24 @@ describe("observable CLI exemplar", () => {
     const routed = evidence.find((record) => record.name === "yrd:bay" && record.action === "submit-derived-routed")
     expect(routed).toEqual(expect.objectContaining({ branch: "issue/observable", sha: headSha, base: "main" }))
     expect(routed?.trace_id, "derived routing must correlate with the submit lifecycle").toBe(submitted?.trace_id)
+    // Storage bookkeeping reads at TRACE, which `-vvv` is: the rows moved down
+    // a level rather than away, and this is where that is proved end to end
+    // through the shipping CLI rather than through the wrapper alone.
+    // `outcome` is named rather than inferred from the level: the started and
+    // finished rows share one level now, so the level no longer tells them
+    // apart and a predicate that leaned on it would find the wrong row.
     expect(
       evidence.find(
         (record) =>
-          record.level === "info" && record.name === "yrd:storage:append" && record.op === "branch.recordSubmit",
+          record.level === "trace" &&
+          record.name === "yrd:storage:append" &&
+          record.op === "branch.recordSubmit" &&
+          record.outcome === "succeeded",
       ),
     ).toEqual(expect.objectContaining({ outcome: "succeeded", durationMs: expect.any(Number) }))
     expect(
       evidence.find(
-        (record) => record.level === "debug" && record.name === "yrd:storage:lock" && record.outcome === "succeeded",
+        (record) => record.level === "trace" && record.name === "yrd:storage:lock" && record.outcome === "succeeded",
       ),
     ).toEqual(expect.objectContaining({ durationMs: expect.any(Number) }))
     expect(

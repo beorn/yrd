@@ -463,4 +463,104 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       `recovery is a count on the run row, not ${JSON.stringify(recovered)}\n${after.report}`,
     ).toBe(true)
   })
+
+  /**
+   * Storage bookkeeping is plumbing, the same class as the git chatter moved
+   * to trace in 8975957f, and a debug log should read as the queue's work.
+   *
+   * Measured 2026-09-02 on pin 0749260a, one empty-lane queue run in shared
+   * main: 565 rows at debug, of which 124 debug plus 62 span were
+   * `yrd:storage:lock`, 61 each of debug, info and span were
+   * `yrd:storage:append`, 64 were `yrd:core:replay` spans and 63 were
+   * `yrd:storage` checkpoint rows. The queue's own decisions were a remainder.
+   */
+  describe("storage bookkeeping", () => {
+    /** Every stderr row loggily prints, one per log line. */
+    const logRows = (stderr: string): readonly string[] =>
+      stderr.split("\n").filter((row) => /^\d\d:\d\d:\d\d /u.test(row))
+
+    /** The lock, append, checkpoint and replay rows, whatever their level.
+     * Matched on the NAMESPACE, right after the level word, so the one perf
+     * row that names every stage in its payload is not mistaken for one. */
+    const bookkeeping = (rows: readonly string[]): readonly string[] =>
+      rows.filter((row) => /^\d\d:\d\d:\d\d [A-Z]+ (?:yrd:storage\b|yrd:core:replay\b)/u.test(row))
+
+    const emptyLaneAt = async (level: string): Promise<QueueRunResult> => {
+      const { repo } = await boundaryRepository({ exit: 0, notify: true })
+      process.env.LOG_LEVEL = level
+      try {
+        return await queueRunOnce(repo)
+      } finally {
+        delete process.env.LOG_LEVEL
+      }
+    }
+
+    it("is absent at debug and present at trace", async () => {
+      const debug = await emptyLaneAt("debug")
+      expect(debug.exitCode, debug.report).toBe(0)
+      const debugRows = logRows(debug.stderr)
+
+      // A positive control under the zero: the queue's own account of the run
+      // is still there, so this is silence about plumbing and not silence.
+      expect(debugRows.length, debug.report).toBeGreaterThan(3)
+      expect(
+        bookkeeping(debugRows),
+        `storage bookkeeping at debug:\n${bookkeeping(debugRows).slice(0, 5).join("\n")}`,
+      ).toEqual([])
+
+      // The rows are moved, not deleted: a mechanic who wants the plumbing
+      // asks for trace and gets all of it.
+      const trace = await emptyLaneAt("trace")
+      expect(trace.exitCode, trace.report).toBe(0)
+      expect(bookkeeping(logRows(trace.stderr)).length, trace.report).toBeGreaterThan(0)
+    })
+
+    it("leaves an empty-lane run well under the plan's bound at debug", async () => {
+      const run = await emptyLaneAt("debug")
+
+      const rows = logRows(run.stderr)
+      expect(rows.length, run.report).toBeGreaterThan(3)
+      expect(rows.length, run.report).toBeLessThan(200)
+    })
+  })
+
+  /**
+   * Stuck is the queue's own fault, so the log says so and the submitter hears
+   * nothing: the two messages a submitter gets are `merged` and `fail`, and
+   * neither may be sent for a queue run that could not do its job.
+   *
+   * The billing underneath is M1's: exit 2 and `check-stuck`, landed
+   * 2026-09-02. This adds the log's account of it.
+   */
+  it("records a stuck result and bills the submitter nothing", async () => {
+    const { repo, notifyLog } = await boundaryRepository({ exit: 2, notify: true })
+    const { branch, headSha } = await submitOneCommit(repo, "two")
+
+    const run = await queueRunOnce(repo)
+    expect(run.exitCode, run.report).toBe(2)
+
+    const { records } = await logOfQueueRun(run)
+
+    const stuck = theOne(records, "result")
+    expect(stuck.result, run.report).toBe("stuck")
+    expect(stuck.branch, run.report).toBe(branch)
+    expect(stuck.head, run.report).toBe(headSha)
+    // Nobody is billed, said in the field that says who is billed.
+    expect(stuck.whose, run.report).toBe("queue")
+
+    // The submitter's two messages are `merged` and `fail`. Neither is sent.
+    for (const message of ofKind(records, "message")) {
+      expect(["merged", "fail"], run.report).not.toContain(message.says)
+    }
+    // ...and the notifier was handed nothing that says either, so the log and
+    // what actually went out agree. The notifier really is reached on this
+    // path — measured 2026-09-02, one `yrd-broken` message — so this is a
+    // checked zero, not an empty file nobody wrote to.
+    const sent = await readFile(notifyLog, "utf8").catch(() => "")
+    expect(sent, run.report).toMatch(/"kind":"yrd-broken"/)
+    expect(sent, run.report).not.toMatch(/"kind":"(landed|send-back)"/)
+
+    // The change stays where it was, so the next queue run takes it again.
+    expect(ofKind(records, "merge"), run.report).toEqual([])
+  })
 })

@@ -23,11 +23,45 @@ export const YRD_LIFECYCLE_LEVELS = Object.freeze({
   failed: "info",
 } as const satisfies Record<string, Exclude<LogLevel, "silent">>)
 
-// Lock acquisition and composition are routine per-cycle plumbing. Their
-// failures remain loud, while successful completion is useful only when an
-// operator explicitly enables DEBUG. Run/check/merge successes remain INFO
-// because they are delivery milestones.
-const DEBUG_SUCCESS_LIFECYCLES = new Set(["lock", "compose"])
+// Composition is routine per-cycle plumbing. Its failure remains loud, while
+// successful completion is useful only when an operator explicitly enables
+// DEBUG. Run/check/merge successes remain INFO because they are delivery
+// milestones.
+const DEBUG_SUCCESS_LIFECYCLES = new Set(["compose"])
+
+/**
+ * STORAGE BOOKKEEPING — the writer lock and the journal append.
+ *
+ * The same class as the git chatter moved to trace in 8975957f, and moved for
+ * the same reason: a queue run takes the lock and appends a frame for every
+ * fact it writes, so at DEBUG the transcript is mostly the journal talking to
+ * itself and the queue's own decisions are a remainder. Measured 2026-09-02 on
+ * pin 0749260a, ONE empty-lane queue run in shared main: 565 rows at debug, of
+ * which 124 debug plus 62 span were `yrd:storage:lock` and 61 each of debug,
+ * info and span were `yrd:storage:append`.
+ *
+ * Every ROUTINE row of these lifecycles moves — the started line, the finished
+ * line and the span alike, because a level change that left the span behind
+ * would silence half a transcript and keep the other half (the half 8975957f
+ * had to fix separately). Failures do not move: a lock that could not be taken
+ * and an append that could not be written are faults, and they stay exactly as
+ * loud as they were.
+ *
+ * The delivery facts the plan names — a queue advance, a retirement — keep
+ * their own INFO rows, which the QUEUE writes under its own namespace. Those
+ * are what a reader at debug is there for; `yrd:storage:append appended` names
+ * a command id beside them and says nothing a reader acts on.
+ *
+ * Decided HERE, in the one wrapper every lifecycle goes through, never per
+ * call site: a per-site rule is wrong the moment someone adds a site.
+ */
+const BOOKKEEPING_LIFECYCLES = new Set(["lock", "append"])
+
+/** Whether this outcome is the lifecycle going as it should. A bookkeeping
+ * lifecycle's routine rows live at trace; its faults are untouched. */
+function routineOutcome(outcome: YrdLifecycleOutcome): boolean {
+  return outcome === "started" || outcome === "progress" || outcome === "succeeded" || outcome === "settled"
+}
 
 export type YrdLifecycleOutcome = keyof typeof YRD_LIFECYCLE_LEVELS
 
@@ -109,7 +143,12 @@ export async function observeYrdLifecycle<Result>(
     ...options.identity,
     lifecycle: options.lifecycle,
   }
-  const span = log.span?.(undefined, () => spanProps)
+  // The span is HALF the transcript, and it is not level-gated on its own —
+  // the CLI turns spans on for the whole process at debug — so a bookkeeping
+  // lifecycle opens none unless trace is on. `log.trace` is the probe: loggily
+  // leaves a level's method undefined when that level is off (8975957f).
+  const bookkeeping = BOOKKEEPING_LIFECYCLES.has(options.lifecycle)
+  const span = bookkeeping && log.trace === undefined ? undefined : log.span?.(undefined, () => spanProps)
   // Delivery-step starts are operator milestones: surface them at INFO even
   // though routine lifecycle starts remain DEBUG. This keeps configured step
   // names generic while making batch execution visible without enabling DEBUG.
@@ -303,7 +342,11 @@ function emitLifecycle(
   const message = lifecycleMessage(lifecycle, outcome, descriptor, props)
   const level =
     levelOverride ??
-    (outcome === "succeeded" && DEBUG_SUCCESS_LIFECYCLES.has(lifecycle) ? "debug" : YRD_LIFECYCLE_LEVELS[outcome])
+    (BOOKKEEPING_LIFECYCLES.has(lifecycle) && routineOutcome(outcome)
+      ? "trace"
+      : outcome === "succeeded" && DEBUG_SUCCESS_LIFECYCLES.has(lifecycle)
+        ? "debug"
+        : YRD_LIFECYCLE_LEVELS[outcome])
   switch (level) {
     case "trace":
       log.trace?.(message, props)
