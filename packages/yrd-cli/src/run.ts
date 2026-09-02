@@ -15154,11 +15154,13 @@ async function executeYrd(
     }
     // A throw that reached here ended the command. For a queue run that is
     // STUCK, never a refusal and never an unknown: see `classifyFailure`.
-    const { exitCode } = classifyFailure(error, { queueRun: invocation.queueRunMode !== undefined })
+    const queueRun = invocation.queueRunMode !== undefined
+    const { exitCode } = classifyFailure(error, { queueRun })
     const globals = program.opts() as Readonly<{ verbose?: number }>
     await diagnostic(runtimeIO, error, {
       json: jsonOutputRequested(program, args),
       verbose: (globals.verbose ?? 0) > 0,
+      queueRun,
     })
     return exitCode
   }

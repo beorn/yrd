@@ -2672,19 +2672,22 @@ describe("runYrd", () => {
     // restarted rather than refuse every candidate it prepares.
     const runtime = outputIO()
     const app = await createApp()
-    expect(await runYrd(app, yrd("queue", "run"), runtime.io, refuse)).toBe(1)
+    // 2, not 1: a queue run has three results, and a process whose installed
+    // plan no longer matches the tip judged nobody's change (2026-09-02).
+    expect(await runYrd(app, yrd("queue", "run"), runtime.io, refuse)).toBe(2)
     expect(runtime.stderr()).toContain("error: this process installed check→merge, but main tip declares")
     const runtimeJson = outputIO()
-    expect(await runYrd(await createApp(), yrd("queue", "run", "--json"), runtimeJson.io, refuse)).toBe(1)
+    expect(await runYrd(await createApp(), yrd("queue", "run", "--json"), runtimeJson.io, refuse)).toBe(2)
     expect(JSON.parse(runtimeJson.stderr())).toMatchObject({
-      failure: { kind: "refusal", code: "installed-plan-stale" },
+      // Retyped with the exit: `refusal` means someone's content was refused.
+      failure: { kind: "infrastructure", code: "installed-plan-stale" },
     })
 
-    // The one-shot path shares the gate and must agree: a refusal is a refusal
-    // whether or not a habitant is following.
+    // The one-shot path shares the gate and must agree: both are queue runs,
+    // and a queue run that cannot execute the plan is stuck either way.
     const once = outputIO()
     const onceApp = await createApp()
-    expect(await runYrd(onceApp, yrd("queue", "run", "--once"), once.io, refuse)).toBe(1)
+    expect(await runYrd(onceApp, yrd("queue", "run", "--once"), once.io, refuse)).toBe(2)
     expect(once.stderr()).toContain("error: this process installed check→merge, but main tip declares")
     // The gate reads the installed leg only: a journal walk is `queue audit`'s
     // job, and a stale record is not something a restart fixes.
@@ -5872,7 +5875,8 @@ describe("runYrd", () => {
       },
     })
     const blocked = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), blocked.io)).toBe(1)
+    // A paused queue is the queue unable to do its job, never a verdict on PR1.
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), blocked.io)).toBe(2)
     expect(blocked.stderr()).toContain("queue 'main' is paused: operator freeze")
     expect(Queues.ids(app.state().queues)).toEqual([])
 
@@ -5936,7 +5940,8 @@ describe("runYrd", () => {
     })
 
     const newlyBlocked = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR4", "--json"), newlyBlocked.io)).toBe(1)
+    // A paused queue, again: the queue cannot act, so nobody is judged.
+    expect(await runYrd(app, yrd("queue", "run", "PR4", "--json"), newlyBlocked.io)).toBe(2)
     expect(newlyBlocked.stderr()).toContain("queue 'main' is paused: operator freeze")
 
     const resume = outputIO()
@@ -12038,7 +12043,8 @@ describe("runYrd", () => {
     expect(noneAtAll.stderr()).toBe("error: no bays are available to close\nresolve: yrd bay open --bay <name>\n")
 
     const missingPR = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(1)
+    // An unknown selector: the queue could not act, and judged nothing.
+    expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(2)
     // WIDENED: `queue run` was one of nine raw emissions inside the queue
     // package, none of which could reach the bay model's builder while it was
     // private. Exporting it collapsed eleven hand-rolled spellings onto one
@@ -12046,10 +12052,11 @@ describe("runYrd", () => {
     expect(missingPR.stderr()).toBe("error: no change 'PR404' — searched 0 change(s)\n")
 
     const missingChangeJson = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR404", "--json"), missingChangeJson.io)).toBe(1)
+    expect(await runYrd(app, yrd("queue", "run", "PR404", "--json"), missingChangeJson.io)).toBe(2)
     expect(JSON.parse(missingChangeJson.stderr())).toEqual({
       failure: {
-        kind: "refusal",
+        // The rendered kind follows the exit: both say the queue could not act.
+        kind: "infrastructure",
         code: "pr-not-found",
         message: "yrd: no change 'PR404' — searched 0 change(s)",
         cause: "no change 'PR404' — searched 0 change(s)",

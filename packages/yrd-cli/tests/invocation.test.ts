@@ -599,7 +599,6 @@ describe("classifyFailure — a crash in a queue run is stuck", () => {
   const raised = (kind: FailureKind) => createFailure({ kind, code: `${kind}-probe`, message: "probe" })
 
   it("maps a crash in a queue run to exit 2, kind infrastructure", () => {
-    // No failure fact, so nothing typed it and nothing judged a change.
     const crash = classifyFailure(new Error("the queue run threw"), { queueRun: true })
     expect(crash.exitCode).toBe(2)
     expect(crash.failure.kind).toBe("infrastructure")
@@ -609,12 +608,17 @@ describe("classifyFailure — a crash in a queue run is stuck", () => {
   })
 
   it.each(["refusal", "usage", "configuration", "infrastructure"] as const)(
-    "leaves a %s the queue run RAISED on purpose exactly where it was",
+    "maps a %s raised on the queue-run path to stuck as well",
     (kind) => {
-      // A raised failure is the designed refusal path, not a crash: an unknown
-      // selector, a second runner already holding the lease. Collapsing these
-      // to stuck cost five tests that were right (measured 2026-09-02).
-      expect(classifyFailure(raised(kind), { queueRun: true })).toEqual(classifyFailure(raised(kind)))
+      // The structural reason, and why this is one predicate rather than a list
+      // of codes: a fail reaches the exit code only through the notifier's
+      // send-back, so a failure arriving at this boundary is never a
+      // submitter's judgment (2026-09-02).
+      const verdict = classifyFailure(raised(kind), { queueRun: true })
+      expect(verdict.exitCode).toBe(2)
+      expect(verdict.failure.kind).toBe("infrastructure")
+      // Retyped, not rewritten: what it WAS is still readable.
+      expect(verdict.failure.code).toBe(`${kind}-probe`)
     },
   )
 

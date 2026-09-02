@@ -5658,7 +5658,9 @@ checks: [{check: {run: "true"}}]
         second.child.exited.then((exitCode) => ({ exitCode })),
         Bun.sleep(2_000).then(() => ({ exitCode: "still-running" as const })),
       ])
-      expect(outcome).toEqual({ exitCode: 1 })
+      // 2: a second runner finding the lease held is the queue unable to do
+      // its job, and no change of anyone's was judged (2026-09-02).
+      expect(outcome).toEqual({ exitCode: 2 })
       // `mode=resident` is part of the holder line: a one-shot pass takes the
       // same lease, so the holder must say which kind of pass it is
       // (queue-runner-lease.test.ts owns the rest of that matrix).

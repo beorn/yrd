@@ -18,7 +18,15 @@ import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Js
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
-import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import {
+  Queues,
+  withMerge,
+  withQueue,
+  withStep,
+  type ChangeShape,
+  type SourceRewrite,
+  type StepExecution,
+} from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
 import {
   withContests,
@@ -345,16 +353,20 @@ describe("case-insensitive CLI selector surfaces", () => {
    * already names a remedy rather than leaving the operator to guess.
    */
   it.each([
-    { surface: "queue run", args: ["queue", "run", "nope", "--json"] },
-    { surface: "pr withdraw", args: ["pr", "withdraw", "nope", "--json"] },
-    { surface: "log --pr", args: ["log", "--pr", "nope", "--json"] },
-    { surface: "pr view", args: ["pr", "view", "nope", "--json"] },
-  ])("$surface says what it searched when a selector finds nothing", async ({ args }) => {
+    // `queue run` alone answers 2: a queue run has three results, and an
+    // unknown selector is none of pass or fail — the queue could not do its
+    // job, and nobody's change was judged (2026-09-02). Every other surface
+    // keeps the refusal exit it documents.
+    { surface: "queue run", args: ["queue", "run", "nope", "--json"], exit: 2 },
+    { surface: "pr withdraw", args: ["pr", "withdraw", "nope", "--json"], exit: 1 },
+    { surface: "log --pr", args: ["log", "--pr", "nope", "--json"], exit: 1 },
+    { surface: "pr view", args: ["pr", "view", "nope", "--json"], exit: 1 },
+  ])("$surface says what it searched when a selector finds nothing", async ({ args, exit }) => {
     const app = await createCliApp()
     await submitOnePR(app)
     const output = outputIO()
 
-    expect(await runYrd(app, yrd(...args), output.io)).toBe(1)
+    expect(await runYrd(app, yrd(...args), output.io)).toBe(exit)
     expect(output.stderr()).toContain("no change 'nope'")
     expect(output.stderr()).toContain("searched 1 change(s)")
   })
@@ -400,5 +412,68 @@ describe("case-insensitive CLI selector surfaces", () => {
     const refused = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), refused.io)).not.toBe(0)
     expect(refused.stderr()).toContain("change 'PR1' required check failed in R1")
+  })
+})
+
+/**
+ * @failure A raised refusal on the queue-run path exits 1, so a supervisor
+ * reading the exit code is told a change was refused when no change was
+ * judged. Seven such failures existed: an unknown selector, a second runner
+ * holding the lease, an exhausted plan reload, a base with no check config, a
+ * journal version skew, an unresolvable runtime source, and a branch that moved
+ * under the compose. The plan gives a queue run three results, and every one of
+ * these is the third.
+ * @level l2
+ * @consumer `yrd queue run` · Hab supervision · anything reading the exit code
+ */
+describe("a raised refusal on the queue-run path is stuck, never a fail", () => {
+  it("an unknown selector: exit 2, kind infrastructure, and no change touched", async () => {
+    const app = await createCliApp()
+    await submitOnePR(app)
+    const before = app.state().bays.prs
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("queue", "run", "nope", "--json"), output.io)).toBe(2)
+
+    // The rendered failure agrees with the exit. Both readings come from one
+    // classification, so they cannot say different things about one failure.
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      failure: { kind: "infrastructure", code: "pr-not-found" },
+    })
+    // Nobody billed: the change the queue DOES have is untouched, and no queue
+    // was even started for it.
+    expect(app.state().bays.prs).toEqual(before)
+    expect(Queues.ids(app.state().queues)).toEqual([])
+  })
+
+  it("a paused queue: exit 2, and the change it would not take is untouched", async () => {
+    const app = await createCliApp()
+    await submitOnePR(app)
+    await app.queue.pause({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [],
+      expiresAt: "2026-12-31T00:00:00.000Z",
+    })
+    const before = app.state().bays.prs
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), output.io)).toBe(2)
+
+    expect(output.stderr()).toContain("queue 'main' is paused")
+    expect(app.state().bays.prs).toEqual(before)
+    expect(Queues.ids(app.state().queues)).toEqual([])
+  })
+
+  it("NEGATIVE CONTROL: the same refusals on another verb keep exit 1", async () => {
+    // Without this the two above would pass on a classifier that simply
+    // answered 2 for everything, which is the change I made first and had to
+    // take back (2026-09-02).
+    const app = await createCliApp()
+    await submitOnePR(app)
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "view", "nope", "--json"), output.io)).toBe(1)
+    expect(JSON.parse(output.stderr())).toMatchObject({ failure: { kind: "refusal", code: "pr-not-found" } })
   })
 })

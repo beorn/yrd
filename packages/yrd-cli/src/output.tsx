@@ -55,6 +55,8 @@ export async function printResultWithWarnings(
 }
 
 export type DiagnosticOptions = Readonly<{
+  /** This failure ended a `yrd queue run`, where every failure is stuck. */
+  queueRun?: boolean
   verbose?: boolean
   json?: boolean
   /** Commander owns parse wording; this replaces only its human projection. */
@@ -65,7 +67,11 @@ export async function diagnostic(io: YrdCliIO, error: unknown, options: Diagnost
   const message = error instanceof Error ? error.message : String(error)
   const detail = message.replace(/^yrd:\s*/u, "")
   const skew = unrecognizedKeyFailure(error)
-  const verdict = classifyFailure(error)
+  // The SAME posture the exit code was decided under. Without it a queue run
+  // exited 2 saying stuck while the JSON beside it said `kind: refusal`,
+  // meaning someone's content was refused — two readers of one failure
+  // disagreeing, which is the defect, not a cosmetic mismatch.
+  const verdict = classifyFailure(error, options.queueRun === true ? { queueRun: true } : {})
   const failure: ActionableFailure =
     skew === undefined
       ? actionableFailure(verdict.failure)
