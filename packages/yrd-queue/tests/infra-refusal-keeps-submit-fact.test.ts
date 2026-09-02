@@ -265,6 +265,33 @@ describe("an infrastructure-disposed check failure never retires the submission"
     expect(app.state().queues.retiredSubmits[ENV_BRANCH]).toBeUndefined()
   })
 
+  it("recovery keeps the re-driven admission Job of a derived member — its standing submit fact is its liveness, not a change record", async () => {
+    const events: LogEvent[] = []
+    const env = environment(STORAGE_EXHAUSTED, DISK_FULL)
+    await using app = await createApp({ check: env.check, log: capturingLog(events) })
+    await app.bays.recordBranchSubmit({ branch: ENV_BRANCH, sha: ENV_SHA, base: "main" })
+
+    await app.queue.run({}, runtime)
+    const [redriven] = rowsWith(events, "admission-job-redriven")
+    const jobId = redriven?.props?.job
+    expect(typeof jobId).toBe("string")
+    expect(app.state().jobs.byId[String(jobId)]).toMatchObject({ status: "queued" })
+
+    // The habitant sweep and the pass-start settle both enter here. Measured
+    // 2026-09-02: this walk read the member's missing change record as "revision
+    // no longer live" and canceled the Job 24031 had just re-driven, so the
+    // next compose reused a canceled Job by key and called the check failed.
+    await app.queue.recover({ recoveryTime: new Date().toISOString(), reason: "habitant lease-expiry sweep" })
+
+    expect(rowsWith(events, "recover-stale-admission-settle")).toEqual([])
+    expect(app.state().jobs.byId[String(jobId)]).toMatchObject({ status: "queued" })
+
+    env.repair()
+    const runs = await app.queue.run({}, runtime)
+    expect(env.runsFor(ENV_SHA), "the re-driven check ran on the next pass").toBe(2)
+    expect(mergedShas(runs)).toEqual([ENV_SHA])
+  })
+
   it("stays bounded while the environment stays broken: one attempt per pass, one identity, and the pass never wedges", async () => {
     const events: LogEvent[] = []
     const env = environment(STORAGE_EXHAUSTED, DISK_FULL)
