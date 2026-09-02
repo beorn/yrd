@@ -1,10 +1,17 @@
 /**
- * The one git seam the core runs through.
+ * The one git seam the core runs through, and the three readings that turn a
+ * non-zero exit into an answer.
  *
  * It is the existing process wrapper, unchanged: the plan reuses it rather than
  * growing a second way to spawn a child. Everything the core knows about a
  * repository comes through this function, so a test drives a real repository
  * and never a mock — the store is git, and a fake git would be a fake store.
+ *
+ * Git answers some questions with exit 1: "that ref is absent", "that commit
+ * is not an ancestor". Those are answers, not errors, and they are read here
+ * and nowhere else. Any other failure — a missing object, a bad sha, a broken
+ * repository — is rethrown, because a wrong answer to either question would
+ * merge or skip the wrong change (NO SILENT ERRORS).
  */
 
 import { createProcess, type Process } from "@yrd/process"
@@ -16,10 +23,46 @@ export function gitIn(cwd: string, process?: Process): Git {
   return async (args: readonly string[]): Promise<string> => {
     const result = await runner.run({ argv: ["git", ...args], cwd })
     if (result.exitCode !== 0) {
-      throw new Error(
-        `git ${args.join(" ")} in ${cwd} exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`,
-      )
+      throw new GitExit(args, cwd, result.exitCode, result.stderr.trim() || result.stdout.trim())
     }
     return result.stdout
   }
+}
+
+export class GitExit extends Error {
+  constructor(
+    readonly args: readonly string[],
+    readonly cwd: string,
+    readonly exitCode: number,
+    detail: string,
+  ) {
+    super(`git ${args.join(" ")} in ${cwd} exited ${exitCode}: ${detail}`)
+    this.name = "GitExit"
+  }
+}
+
+/** The commit a ref names, or undefined when the ref is absent. */
+export async function refAt(git: Git, ref: string): Promise<string | undefined> {
+  try {
+    const out = (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).trim()
+    return out === "" ? undefined : out
+  } catch (error) {
+    if (isExit(error, 1)) return undefined
+    throw error
+  }
+}
+
+/** Whether `sha` is an ancestor of `of`. */
+export async function isAncestor(git: Git, sha: string, of: string): Promise<boolean> {
+  try {
+    await git(["merge-base", "--is-ancestor", sha, of])
+    return true
+  } catch (error) {
+    if (isExit(error, 1)) return false
+    throw error
+  }
+}
+
+function isExit(error: unknown, code: number): boolean {
+  return error instanceof GitExit && error.exitCode === code
 }

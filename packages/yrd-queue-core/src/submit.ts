@@ -13,6 +13,7 @@
  */
 
 import { appendFact, type Git } from "./facts.ts"
+import { refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 
 export type SubmitRequest = Readonly<{
@@ -43,7 +44,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // What the submitter believes the remote holds for the branch: its tracking
   // ref when it has fetched, else nothing at all, so a name somebody else is
   // already using refuses loudly instead of being overwritten.
-  const tracked = await revParse(git, `refs/remotes/${remote}/${request.branch}`)
+  const tracked = await refAt(git, `refs/remotes/${remote}/${request.branch}`)
   const trailers: (readonly [string, string])[] = [
     ["Submitter", request.submitter],
     ["Target", request.target],
@@ -73,13 +74,3 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
 }
 
 const ABSENT = "0".repeat(40)
-
-async function revParse(git: Git, ref: string): Promise<string | undefined> {
-  try {
-    const out = (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).trim()
-    return out === "" ? undefined : out
-  } catch {
-    // `--quiet` exits 1 for an absent ref; that is the one answer asked for.
-    return undefined
-  }
-}

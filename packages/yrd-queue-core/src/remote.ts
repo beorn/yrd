@@ -10,6 +10,7 @@
  */
 
 import { readFacts, type Git } from "./facts.ts"
+import { isAncestor } from "./git.ts"
 import { CHANGES, parseChangeRef } from "./refs.ts"
 import { readChange, type ChangeFacts, type ChangeReading } from "./state.ts"
 
@@ -67,17 +68,4 @@ export async function lane(git: Git, remote: string, target: string): Promise<re
     }
   }
   return entries
-}
-
-async function isAncestor(git: Git, sha: string, of: string): Promise<boolean> {
-  try {
-    await git(["merge-base", "--is-ancestor", sha, of])
-    return true
-  } catch (error) {
-    // Exit 1 is git's "no", the one answer this reader is asking for. Anything
-    // else — a missing object, a bad sha — is rethrown, because a wrong answer
-    // here would merge or skip the wrong change.
-    if (error instanceof Error && / exited 1:/u.test(error.message)) return false
-    throw error
-  }
 }

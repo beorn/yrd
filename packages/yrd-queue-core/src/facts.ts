@@ -21,6 +21,7 @@
  * on one change lose loudly instead of interleaving.
  */
 
+import { refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 
 /** The kinds a fact can be. The vocabulary is closed. */
@@ -62,7 +63,7 @@ export type WriteFact = Readonly<{
  */
 export async function appendFact(git: Git, write: WriteFact): Promise<string> {
   const ref = changeRef(write.branch, write.head)
-  const tip = await refValue(git, ref)
+  const tip = await refAt(git, ref)
   const parents = tip === undefined ? [write.head] : [tip, write.head]
   const message = factMessage(write)
   const args = ["commit-tree", EMPTY_TREE]
@@ -78,7 +79,7 @@ export async function appendFact(git: Git, write: WriteFact): Promise<string> {
 /** Every fact of a change, oldest first. An unknown change reads as no facts. */
 export async function readFacts(git: Git, branch: string, head: string): Promise<readonly Fact[]> {
   const ref = changeRef(branch, head)
-  if ((await refValue(git, ref)) === undefined) return []
+  if ((await refAt(git, ref)) === undefined) return []
   // %x00 separates the fields and %x01 the records, because a commit message
   // holds newlines and a naive split would cut a fact in half.
   const format = "%H%x00%cI%x00%B%x01"
@@ -134,14 +135,4 @@ function parseFact(sha: string, at: string, body: string): Fact | undefined {
 
 function isFactKind(value: string): value is FactKind {
   return (FACT_KINDS as readonly string[]).includes(value)
-}
-
-async function refValue(git: Git, ref: string): Promise<string | undefined> {
-  try {
-    const out = (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).trim()
-    return out === "" ? undefined : out
-  } catch {
-    // `--quiet` exits 1 for an absent ref, which the runner reports as a throw.
-    return undefined
-  }
 }
