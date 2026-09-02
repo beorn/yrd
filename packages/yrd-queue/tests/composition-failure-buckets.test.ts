@@ -10,7 +10,11 @@ import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { COMPOSITION_FAILURE_BUCKETS } from "../src/queue.ts"
-import { CHECK_STORAGE_EXHAUSTED, WORKTREE_STORAGE_EXHAUSTED } from "../src/scratch-storage.ts"
+import {
+  CHECK_STORAGE_EXHAUSTED,
+  SCRATCH_ROOT_UNAVAILABLE,
+  WORKTREE_STORAGE_EXHAUSTED,
+} from "../src/scratch-storage.ts"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const commandSource = readFileSync(join(here, "..", "src", "command.ts"), "utf8")
@@ -95,6 +99,13 @@ describe("composition failure buckets — the partition is total and disjoint", 
           expect(commandSource).toContain("CHECK_STORAGE_EXHAUSTED")
           continue
         }
+        // Thrown by scratch-storage.ts's `ensureScratchRoot` through the
+        // `SCRATCH_ROOT_UNAVAILABLE` constant, from the command runner's spawn
+        // seam (@i/10-yrd/24031) — the live producer is proved by the call.
+        if (code === SCRATCH_ROOT_UNAVAILABLE) {
+          expect(commandSource).toContain("ensureScratchRoot(")
+          continue
+        }
         expect(derived.has(code), `bucket '${name}' declares '${code}' which no candidateFailure() produces`).toBe(true)
       }
     }
@@ -108,11 +119,14 @@ describe("composition failure buckets — the partition is total and disjoint", 
 
   // PR3159 (2026-09-01): an EDQUOT inside `affected-tests` retired the
   // submission as the author's. The filesystem's verdict is infrastructure.
-  it.each(["carrier-inspection", "wrapper-generation", CHECK_STORAGE_EXHAUSTED, WORKTREE_STORAGE_EXHAUSTED])(
-    "routes %s to infra-retry rather than blaming the author",
-    (code) => {
-      expect(COMPOSITION_FAILURE_BUCKETS["infra-retry"].has(code)).toBe(true)
-      expect(COMPOSITION_FAILURE_BUCKETS["needs-author"].has(code)).toBe(false)
-    },
-  )
+  it.each([
+    "carrier-inspection",
+    "wrapper-generation",
+    CHECK_STORAGE_EXHAUSTED,
+    WORKTREE_STORAGE_EXHAUSTED,
+    SCRATCH_ROOT_UNAVAILABLE,
+  ])("routes %s to infra-retry rather than blaming the author", (code) => {
+    expect(COMPOSITION_FAILURE_BUCKETS["infra-retry"].has(code)).toBe(true)
+    expect(COMPOSITION_FAILURE_BUCKETS["needs-author"].has(code)).toBe(false)
+  })
 })

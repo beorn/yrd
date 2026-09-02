@@ -1499,6 +1499,50 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(await readdir(join(stateDir, "pre-submit-worktrees"))).toEqual([])
   })
 
+  it("gives a QUEUE check child the repository-declared scratch root as TMPDIR, created before the spawn (@i/10-yrd/24031)", async () => {
+    // The incident path: the queue's check children inherited the runner's
+    // TMPDIR — unset on the host, so a tmpfs /tmp with a shared per-user quota
+    // — while the pre-submit path above already had a run-scoped one on the
+    // repository's disk. `scratch:` is threaded config -> step plan -> command
+    // runner, exactly the path a step's own `env:` takes.
+    const { repo, featureSha } = await repository()
+    const scratch = join(repo, ".git", "yrd", "check-scratch")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true # scratch-probe", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+      scratch,
+    }
+    const seen: Readonly<{ tmpdir: string | undefined; existed: boolean }>[] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const process = {
+      run(request: ProcessRequest): Promise<ProcessResult> {
+        if (request.argv.some((argument) => argument.includes("scratch-probe"))) {
+          seen.push({ tmpdir: request.env?.TMPDIR, existed: existsSync(request.env?.TMPDIR ?? "") })
+        }
+        return runtimeProcess.run(request)
+      },
+    } satisfies Pick<Process, "run">
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process,
+      config,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(seen.length).toBeGreaterThan(0)
+    for (const spawn of seen) expect(spawn).toEqual({ tmpdir: scratch, existed: true })
+  })
+
   it("composes the operator's own stale branch before an explicit local check reads the tree", async () => {
     const { repo } = await staleBaseCandidateRepository()
     await git(repo, "switch", "-q", "issue/feature")

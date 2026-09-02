@@ -68,6 +68,7 @@ import { submoduleMainScratchCleanupFailure } from "./submodule-main-outcome.ts"
 import {
   CHECK_STORAGE_EXHAUSTED,
   describeScratchReap,
+  ensureScratchRoot,
   isStorageExhaustion,
   liveWorktreeEntries,
   reapAgedArtifacts,
@@ -449,6 +450,12 @@ export type ConfiguredCommandOptions<Shape extends ChangeShape> = ProcessDepende
     environmentOverrides?: Readonly<Record<string, string>>
     /** Ambient names copied into the child beyond the base allowlist — explicit, never implicit. */
     environmentPassthrough?: readonly string[]
+    /** The repository-declared scratch root (`.yrd.yml` `scratch:`), applied as
+     * the child's TMPDIR over the allowlisted ambient value and created before
+     * the spawn — refused loudly, as `scratch-root-unavailable`, when it cannot
+     * be. A declared `environmentOverrides.TMPDIR` wins, and then the root is
+     * left alone. Absent = the ambient TMPDIR, exactly as before. */
+    scratch?: string
     timeoutMs?: number
     noProgressTimeoutMs?: number
     classification?: "base" | "carrier"
@@ -510,6 +517,11 @@ function configuredCommand<Shape extends ChangeShape>(
     options.environmentPassthrough,
     options.environmentOverrides,
   )
+  // Decided once, at construction, from the snapshotted declaration: a step
+  // whose own env declares TMPDIR has said where its scratch goes, and the
+  // repository root is neither applied nor created for it.
+  const scratch =
+    options.scratch === undefined || declaration.overrides.TMPDIR !== undefined ? undefined : resolve(options.scratch)
   const configHash = createHash("sha256")
     .update(options.purpose)
     .update("\0")
@@ -526,7 +538,7 @@ function configuredCommand<Shape extends ChangeShape>(
   ): Promise<JobResult<CommandEvidence>> => {
     const { process } = options.inject
     const artifactSink = await createArtifactSink(artifactRoot, input, context.attempt)
-    const env = commandEnvironment(options.env ?? globalThis.process.env, variables, declaration)
+    const env = commandEnvironment(options.env ?? globalThis.process.env, variables, declaration, scratch)
     let result: Awaited<ReturnType<Process["run"]>>
     const startedAt = new Date().toISOString()
     try {
@@ -777,6 +789,11 @@ function configuredCommand<Shape extends ChangeShape>(
     }
     const artifactRoot = resolve(options.artifactRoot ?? defaultCommandArtifactRoot(cwd, process))
     await pruneArtifactsOnce(artifactRoot, options.env ?? globalThis.process.env)
+    // Before the spawn, and OUTSIDE the storage-exhaustion retype below: a root
+    // that cannot be made is a host fact about a path the repository chose, and
+    // it reaches the caller under its own code, naming that path and that
+    // filesystem — not as an artifact-root write that never happened.
+    if (scratch !== undefined) await ensureScratchRoot(options.purpose, scratch)
     try {
       return await execute(input, context, cwd, variables, artifactRoot)
     } catch (cause) {
@@ -980,7 +997,8 @@ function uniqueComparisonDiagnostics(values: readonly CommandDiagnostic[], cwd: 
 /** The deterministic ambient base every git+bun child needs (merge-queue R42):
  * PATH locates the toolchain binaries; HOME anchors git/bun user config and
  * caches; SHELL satisfies tools that consult the login shell; TMPDIR keeps
- * scratch files on the runner's temp volume; LANG (plus the LC_* family below)
+ * scratch files on the runner's temp volume — or on the repository's declared
+ * `scratch:` root, which replaces it (24031); LANG (plus the LC_* family below)
  * pins text encoding for tool output; USER/LOGNAME feed git's fallback ident.
  * Everything else — NODE_ENV, DEBUG, provider tokens, harness state — is
  * DROPPED so a check verdict never depends on who or where launched the
@@ -1086,6 +1104,7 @@ function commandEnvironment(
   source: NodeJS.ProcessEnv,
   variables: Readonly<Record<string, string | undefined>>,
   declaration: EnvironmentDeclaration,
+  scratch?: string,
 ): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(source)) {
@@ -1093,6 +1112,9 @@ function commandEnvironment(
     if (!COMMAND_ENVIRONMENT_BASE.has(key) && !key.startsWith("LC_") && !declaration.passthrough.has(key)) continue
     env[key] = value
   }
+  // Over the ambient TMPDIR, under the declared overrides: the repository's
+  // root replaces the runner's, and a step's own env.TMPDIR replaces both.
+  if (scratch !== undefined) env.TMPDIR = scratch
   for (const [key, value] of Object.entries(declaration.overrides)) env[key] = value
   for (const [key, value] of Object.entries(variables)) {
     if (!key.startsWith("YRD_")) throw new Error(`yrd: configured command variable '${key}' must start with YRD_`)
@@ -6005,6 +6027,9 @@ export type GitCheckOptions = ProcessDependency &
     env?: NodeJS.ProcessEnv
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
+    /** See {@link ConfiguredCommandOptions.scratch}; applied to the candidate
+     * command and to its base-tree comparison run alike. */
+    scratch?: string
     timeoutMs?: number
     noProgressTimeoutMs?: number
     /** Repo-relative gate-script paths that execute at the BASE ref's version
@@ -6448,6 +6473,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
             ...(options.environmentPassthrough === undefined
               ? {}
               : { environmentPassthrough: options.environmentPassthrough }),
+            ...(options.scratch === undefined ? {} : { scratch: options.scratch }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
             ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
             classification: parentTree ? "base" : (options.classification ?? "carrier"),
@@ -6846,6 +6872,8 @@ export type ConfiguredMergeOptions = ProcessDependency &
     env?: NodeJS.ProcessEnv
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
+    /** See {@link ConfiguredCommandOptions.scratch}. */
+    scratch?: string
     timeoutMs?: number
     refuse?: RefusePathsPolicy
     checkpointIdentity?: string | (() => string)
@@ -7944,6 +7972,7 @@ export function configuredMergeStep<Shape extends ChangeShape>(
         ...(options.environmentPassthrough === undefined
           ? {}
           : { environmentPassthrough: options.environmentPassthrough }),
+        ...(options.scratch === undefined ? {} : { scratch: options.scratch }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         variables: () => ({
           YRD_CANDIDATE_SHA: checked.candidateSha,

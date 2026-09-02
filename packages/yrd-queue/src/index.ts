@@ -83,9 +83,10 @@ export * from "./command.ts"
 // problem: the CLI's `pre-submit-worktrees` root, whose entries a killed process
 // leaves behind exactly as a killed queue run leaves merge scratch. It reaps
 // them with these primitives rather than a fork, which is what
-// `liveWorktreeEntries` was extracted for. The two typed storage-exhaustion
-// CODES cross it too: they are vocabulary, like `YRD_REFUSAL_CODES`, and a
-// consumer names a code by its constant, never by a literal.
+// `liveWorktreeEntries` was extracted for. The typed scratch CODES — the two
+// storage-exhaustion ones and the declared-root refusal — cross it too: they
+// are vocabulary, like `YRD_REFUSAL_CODES`, and a consumer names a code by
+// its constant, never by a literal.
 export {
   ARTIFACT_PRUNE_INTERVAL_MS,
   ARTIFACT_RETENTION_ENV,
@@ -98,6 +99,7 @@ export {
   reapOrphanedScratch,
   resolveArtifactRetentionMs,
   SCRATCH_OWNER_FILE,
+  SCRATCH_ROOT_UNAVAILABLE,
   type ScratchOwner,
   type ScratchOwnerCensus,
   type ScratchReapReport,

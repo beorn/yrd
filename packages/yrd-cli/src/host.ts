@@ -1498,6 +1498,7 @@ function candidateStep(
   checkoutParent: string,
   name: string,
   config: YrdStepConfig,
+  scratch: string | undefined,
   revision: string,
   candidatePool: CandidatePool | undefined,
   kind: "check" | "action",
@@ -1566,6 +1567,7 @@ function candidateStep(
         ...(config.environmentPassthrough === undefined
           ? {}
           : { environmentPassthrough: config.environmentPassthrough }),
+        ...(scratch === undefined ? {} : { scratch }),
         ...(candidatePool === undefined ? {} : { candidatePool }),
         ...(checkpointMigration === undefined ? {} : { checkpointMigration }),
         ...(authorizeSubmoduleModelChange === undefined ? {} : { authorizeSubmoduleModelChange }),
@@ -1815,6 +1817,7 @@ function integratedRunner(
   stateDir: string,
   name: string,
   config: YrdStepConfig,
+  scratch: string | undefined,
 ): StepRunner<IntegratedShape, CommandEvidence> {
   const options = {
     inject: { process },
@@ -1831,6 +1834,7 @@ function integratedRunner(
     }),
     ...(config.env === undefined ? {} : { environmentOverrides: config.env }),
     ...(config.environmentPassthrough === undefined ? {} : { environmentPassthrough: config.environmentPassthrough }),
+    ...(scratch === undefined ? {} : { scratch }),
   }
   return config.runner === "waiting" ? configuredWaitingCommandStep(options) : configuredCommandStep(options)
 }
@@ -1887,6 +1891,7 @@ function configuredQueueSteps(
                 ...(config.environmentPassthrough === undefined
                   ? {}
                   : { environmentPassthrough: config.environmentPassthrough }),
+                ...(options.config.scratch === undefined ? {} : { scratch: options.config.scratch }),
                 ...(options.checkpointMigrationCertification === undefined
                   ? {}
                   : { checkpointIdentity: options.checkpointMigrationCertification.currentIdentity }),
@@ -1905,6 +1910,7 @@ function configuredQueueSteps(
         options.baysRoot,
         name,
         config,
+        options.config.scratch,
         revision,
         options.candidatePool,
         descriptor.kind,
@@ -1913,10 +1919,14 @@ function configuredQueueSteps(
       )
     }
     return eraseStep(
-      withStep(name, integratedRunner(options.process, options.repo, options.stateDir, name, config), {
-        revision,
-        kind: "action",
-      }),
+      withStep(
+        name,
+        integratedRunner(options.process, options.repo, options.stateDir, name, config, options.config.scratch),
+        {
+          revision,
+          kind: "action",
+        },
+      ),
     )
   })
 }

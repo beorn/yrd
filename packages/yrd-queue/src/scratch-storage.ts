@@ -1,6 +1,7 @@
-import { lstat, readdir, readFile, rm, statfs, writeFile } from "node:fs/promises"
+import { constants } from "node:fs"
+import { access, lstat, mkdir, readdir, readFile, rm, statfs, writeFile } from "node:fs/promises"
 import { dirname, join, resolve, sep } from "node:path"
-import { systemClock } from "@yrd/core"
+import { createFailure, systemClock } from "@yrd/core"
 import type { JobError } from "@yrd/job"
 import { recordedPidIsRunning, recordedPidLiveness } from "@yrd/process"
 import type { Git } from "git-super/worktree"
@@ -230,6 +231,56 @@ export const WORKTREE_STORAGE_EXHAUSTED = "worktree-storage-exhausted"
  * its next pass and never retires its submit fact (PR3159, 2026-09-01).
  */
 export const CHECK_STORAGE_EXHAUSTED = "check-storage-exhausted"
+
+/**
+ * The typed code for a repository-declared scratch root (`.yrd.yml`
+ * `scratch:`) that could not be created or is not writable when a step child
+ * was about to be spawned with it as TMPDIR (@i/10-yrd/24031). Registered in
+ * `YRD_REFUSAL_CODES` and bucketed `infra-retry` (queue.ts): the root is a
+ * host fact — a path the repository owner chose and the runner's user cannot
+ * write — never a verdict on the submitted content.
+ */
+export const SCRATCH_ROOT_UNAVAILABLE = "scratch-root-unavailable"
+
+/**
+ * Bring the declared scratch root into being before a step child is spawned
+ * with it as TMPDIR, and refuse loudly — before any child exists — when it
+ * cannot be. `mkdir -p`, then a writability probe: a regular file where a
+ * directory must be, a read-only mount, a directory the runner's user cannot
+ * write, all refuse here with the path and the kernel's own reason, instead of
+ * surfacing later as a child's confusing ENOENT/EACCES under TMPDIR — or not
+ * at all, as a tool that quietly fell back to `/tmp`. An ENOSPC/EDQUOT on the
+ * mkdir itself names the ROOT's filesystem, as every other storage-exhaustion
+ * failure here names the one it read.
+ */
+export async function ensureScratchRoot(purpose: string, root: string): Promise<void> {
+  const refuse = async (problem: string, cause: unknown): Promise<never> => {
+    const reason = cause instanceof Error ? cause.message : String(cause)
+    const exhausted = isStorageExhaustion(cause) ? `; ${(await storageExhaustionReport(root)).detail}` : ""
+    throw createFailure(
+      {
+        kind: "infrastructure",
+        code: SCRATCH_ROOT_UNAVAILABLE,
+        message:
+          `yrd: ${purpose}: the repository's declared scratch root '${root}' (.yrd.yml scratch:) ${problem}: ` +
+          `${reason}${exhausted}. Every step child gets it as TMPDIR, so no child was spawned. Cure: make it a ` +
+          "directory the runner's user can write, or point scratch: at one (a root-filesystem path, never a " +
+          "quota'd tmpfs), then re-run the queue pass",
+      },
+      cause,
+    )
+  }
+  try {
+    await mkdir(root, { recursive: true })
+  } catch (cause) {
+    await refuse("cannot be created", cause)
+  }
+  try {
+    await access(root, constants.W_OK | constants.X_OK)
+  } catch (cause) {
+    await refuse("is not writable", cause)
+  }
+}
 
 /** The machine-readable half of a storage-exhaustion failure: the filesystem's inode/byte split. */
 export type StorageExhaustionEvidence = Readonly<{

@@ -11367,6 +11367,15 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // composition against the current base is the whole remedy.
     "merge-unauthored-deletion",
     "scratch-cleanup-failed",
+    // The repository-declared scratch root (`.yrd.yml` `scratch:`) could not
+    // be created or written when a step child was about to be spawned with it
+    // as TMPDIR (scratch-storage.ts `SCRATCH_ROOT_UNAVAILABLE`, 24031). A host
+    // fact about a path the repository owner chose — the runner's user cannot
+    // write it, or a file sits where the directory must be — never a verdict
+    // on the content. Like the two capability-gap codes below, a bare retry
+    // does not clear it, but the environment owns the cure, and this is the
+    // bucket that says so.
+    "scratch-root-unavailable",
     // ENOSPC while PREPARING scratch (scratch-storage.ts, the 2026-08-14
     // inode outage): nothing about the candidate is wrong and the same
     // candidate merges first try once the filesystem has room — the
@@ -11741,6 +11750,9 @@ export const YRD_REFUSAL_CODES = [
   "runner-health-failed",
   "runtime-reload-exec-failed",
   "scratch-cleanup-failed",
+  // scratch-storage.ts `SCRATCH_ROOT_UNAVAILABLE` — the declared `scratch:`
+  // root refused before a spawn, bucketed `infra-retry` above.
+  "scratch-root-unavailable",
   // HISTORICAL-ONLY: its producer (publishSourceCandidate, the composed
   // path's source publisher) went with re-merge Phase 1, but recorded runs
   // and release reasons still carry it, and status-presentation.ts keeps it
