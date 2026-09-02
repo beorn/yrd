@@ -114,6 +114,17 @@ export function queueDisplayState(
   // filtering `nativeStatus` integrated/already-landed/withdrawn, ~:3862).
   // Callers that DO have a word for a closed record read `delivery`.
   if (pr.state === "closed") return { kind, terminal: true, native, delivery: native, preRun: undefined }
+  // An OPEN record whose current revision a Run already merged. The record is
+  // the slower of the two facts — the integration stamp lands in a separate
+  // write from the run's own settle — so a process death between them left
+  // PR3216 reading `submitted` with `checks: queued` for hours after run #3766
+  // merged it at 06:36 on 2026-09-02, with PR2462 and PR2145 stranded the same
+  // way since 08-28. The Run carries the proof, so the landing is DERIVED here
+  // and the stored stamp is never consulted: whatever the record lost, a landed
+  // change cannot read as ready.
+  if (landedRunForCurrentRevision(pr, options.runs ?? []) !== undefined) {
+    return { kind, terminal: true, native, delivery: "integrated", preRun: undefined }
+  }
   const delivery = options.eligibility?.reason?.code === "needs-author" ? "needs-author" : native
   return {
     kind,
@@ -122,6 +133,31 @@ export function queueDisplayState(
     delivery,
     preRun: preRunBand(pr, native, options.runs ?? [], options.eligibility),
   }
+}
+
+/**
+ * Does this retained Run prove a merge? It has a merge step AND the integration
+ * proof that step produces. A run can reach `completed` with nothing to merge,
+ * and a run that failed a LATER step still landed its members — so neither
+ * status nor conclusion is consulted, only the proof.
+ *
+ * THE one rule for "a Run says this revision is on the base", read by
+ * {@link queueSnapshot}'s eligibility fold and by {@link queueDisplayState}'s
+ * terminal guard. Lifted out of `queueSnapshot`, where it was written; nothing
+ * about its behaviour moved.
+ */
+export function runProvesMerge(run: Pick<Run, "steps" | "integration">): boolean {
+  return run.integration !== undefined && run.steps.some((step) => step.kind === "merge")
+}
+
+/**
+ * The Run that merged this change's CURRENT revision, or `undefined`. A
+ * superseded revision that landed says nothing about the revision now open.
+ */
+export function landedRunForCurrentRevision(pr: Change, runs: readonly Run[]): Run | undefined {
+  const revision = currentChangeRev(pr)
+  const key = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
+  return runs.find((run) => runProvesMerge(run) && run.prs.some((member) => queueRevisionKey(member) === key))
 }
 
 /**
@@ -950,7 +986,9 @@ export function queueSnapshot(
   }
 
   for (const run of scopedRuns) {
-    if (!run.steps.some((step) => step.kind === "merge")) continue
+    // {@link runProvesMerge} — the same rule the display projection's terminal
+    // guard reads, so the row and the state behind it cannot disagree.
+    if (!runProvesMerge(run)) continue
     if (run.integration === undefined) continue
     for (const member of run.prs) terminalRevisions.add(queueRevisionKey(member))
     // Already-landed settles eligibility but is not a merge performed by this

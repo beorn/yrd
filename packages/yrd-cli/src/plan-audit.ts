@@ -293,26 +293,13 @@ export function installedPlanStale(
         `${missing.length === 1 ? "has" : "have"} no Job in ${subject}. `
       : "Runs read WHICH steps run from git, but the commands they execute and the checks-before-queueing projections come " +
         `from the step definitions ${subject} built at startup, which no longer match the tip. `
-  // The arrows are worth printing only when the step LIST is what moved. When
-  // the names, their order and the batch all match and only the step
-  // DEFINITIONS drifted, printing both plans opens the message with two
-  // identical arrows and reads as a contradiction — "installed A, but the tip
-  // declares A" — with the real difference buried after the colon. Measured
-  // 2026-09-02 on the live exit-3 notice, where the two 5-step arrows were
-  // byte-identical and the drift was two command-revision hashes.
-  const sameSequence =
-    installed.batchSize === tip.batchSize &&
-    planArrow(installed.steps) === planArrow(tip.steps) &&
-    installed.steps.length === tip.steps.length
-  const lead = sameSequence
-    ? `yrd: step definitions changed on ${base} tip ${shortSha(tip.sha)} (config blob ${shortSha(tip.configBlobSha)}): ` +
-      `${deltas.join("; ")}; ${subject} installed the older ones at boot. `
-    : `yrd: ${subject} installed ${planArrow(installed.steps)} (batch ${String(installed.batchSize)}), but ` +
-      `${base} tip ${shortSha(tip.sha)} (config blob ${shortSha(tip.configBlobSha)}) declares ` +
-      `${planArrow(tip.steps)} (batch ${String(tip.batchSize)}): ${deltas.join("; ")}. `
   return {
     code: "installed-plan-stale",
-    message: lead + consequence + "Restart this queue runner so it builds the declared steps.",
+    message:
+      `yrd: ${subject} installed ${planArrow(installed.steps)} (batch ${String(installed.batchSize)}), but ` +
+      `${base} tip ${shortSha(tip.sha)} (config blob ${shortSha(tip.configBlobSha)}) declares ` +
+      `${planArrow(tip.steps)} (batch ${String(tip.batchSize)}): ${deltas.join("; ")}. ${consequence}` +
+      "Restart this queue runner so it builds the declared steps.",
     // Not a yrd command, so it cannot be lifted from the prose; without this
     // the projection would print "retry the same command", which is exactly
     // wrong for a process that must be replaced.

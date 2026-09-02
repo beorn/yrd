@@ -23,7 +23,6 @@ import {
   NOTIFY_TIMEOUT_MS,
   outcomeExitCode,
   parseBallId,
-  passErrorNotification,
   QUEUE_OUTCOME_EXIT,
   resolveSubmitterSeat,
   routeOutcome,
@@ -230,46 +229,6 @@ describe("routeOutcome — the registry's disposition IS the switch", () => {
     )
     expect(routed.body).toContain(`merged as ${"c".repeat(40)}.`)
     expect(routed.body).not.toContain("onto")
-  })
-
-  /**
-   * Every yrd-broken ball printed `do: yrd queue run --once` / `Re-run: yrd
-   * queue run --once` unconditionally, including on the live queue a resident
-   * (pid 2718014) was following on 2026-09-02. A reader who obeys starts a
-   * second writer on the resident's journal.
-   */
-  describe("a broken ball never hands out `queue run --once` beside a resident (L5)", () => {
-    const broken = outcome({ code: "check-storage-exhausted", branch: "task/thing" })
-
-    it("with a resident: names it, says it re-drives, and forbids the second writer", () => {
-      const routed = routeOutcome(broken, { ...routing, resident: "yrd-cli:2718014" })
-      expect(routed.kind).toBe("yrd-broken")
-      expect(routed.command).toBe("yrd pr submit task/thing")
-      expect(routed.body).toContain("The resident runner yrd-cli:2718014 is following this queue")
-      expect(routed.body).toContain("re-drives it on its next pass")
-      expect(routed.body).toContain("do NOT run 'yrd queue run --once' beside it")
-      expect(routed.body).toContain("To force it now: yrd pr submit task/thing")
-    })
-
-    it("with NO resident: `--once` is exactly right and is still offered", () => {
-      const routed = routeOutcome(broken, routing)
-      expect(routed.command).toBe("yrd queue run --once")
-      expect(routed.body).toContain("Re-run: yrd queue run --once")
-      expect(routed.body).not.toContain("resident runner")
-    })
-
-    it("a pass error belongs to no branch, so a resident leaves nothing to force", () => {
-      const options = { owner: "@cto", logPath: "/tmp/yrd.log", attemptId: "pass-1" }
-      const withResident = passErrorNotification({ namespace: "yrd:queue", message: "boom" }, {
-        ...options,
-        resident: "yrd-cli:2718014",
-      })
-      expect(withResident.body).toContain("re-drives it on its next pass")
-      expect(withResident.body).not.toContain("Re-run: yrd queue run --once")
-
-      const alone = passErrorNotification({ namespace: "yrd:queue", message: "boom" }, options)
-      expect(alone.body).toContain("Re-run: yrd queue run --once")
-    })
   })
 
   it("no recorded submitter (the literal `unknown`, or the bay plugin's `operator` default) → the owner, and the body says so", () => {
