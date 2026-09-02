@@ -82,6 +82,14 @@ export type OutcomeDisposition =
   | "unregistered-code"
   | "unknown-submitter"
   | "pass-error"
+  /**
+   * The queue has eligible work this runner has stopped draining — a HEALTH
+   * observation about the service, not a verdict on any one change. It reached
+   * the owner as an ERROR row until 2026-09-02, which under the any-ERROR rule
+   * killed the runner that was reporting it; it is a page now, and the runner
+   * keeps running (@i/10-yrd/liveness-is-health).
+   */
+  | "queue-wedged"
 
 /** The three-way verdict a `queue run --once` process exits with. */
 export const QUEUE_OUTCOME_EXIT = Object.freeze({
@@ -300,6 +308,55 @@ export function passErrorNotification(
   }
 }
 
+/** What a wedge page needs to name the condition it is paging about. */
+export type QueueWedgeInput = Readonly<{
+  /** The queue this is about. */
+  base: string
+  /** The audit finding's own message — the count, the span, the head change. */
+  message: string
+  /** The head-of-line change, when the finding named one. */
+  pr?: string
+  /** How long the runner has observed no merge, by ITS OWN clock. */
+  blockedMs?: number
+  /** How many announcements of this condition have gone out, this one included. */
+  generation: number
+}>
+
+/**
+ * A queue this runner has stopped draining, as a page for its owner.
+ *
+ * `yrd-broken` like every other owner-bound outcome — nobody but the owner can
+ * act on it — but it carries no attempt, no revision and no verdict, because
+ * no change was tried and none is being blamed. The body says the runner is
+ * still up, which is the fact that changes what the owner does next: before
+ * this, the same condition arrived as the runner's death certificate.
+ */
+export function queueWedgedNotification(
+  wedge: QueueWedgeInput,
+  options: Readonly<{ owner: string; logPath: string; attemptId: string }>,
+): OutcomeNotification {
+  const owner = options.owner.trim() === "" ? DEFAULT_QUEUE_OWNER : options.owner.trim()
+  const command = "yrd queue audit"
+  return {
+    kind: "yrd-broken",
+    attempt_id: options.attemptId,
+    pr: wedge.pr ?? "-",
+    revision: 0,
+    branch: "-",
+    sha: "-",
+    base: wedge.base,
+    attributable_test_ids: [],
+    disposition: "queue-wedged",
+    log_path: options.logPath,
+    recipient: owner,
+    fallback: owner,
+    command,
+    body:
+      `yrd wedged: ${wedge.message} The runner is still running and still trying; this is a health page, ` +
+      `not a stop (notice ${String(wedge.generation)}). Log: ${options.logPath}. Next: ${command}`,
+  }
+}
+
 /** 17 wins over 1 wins over 0. */
 export function outcomeExitCode(kinds: readonly OutcomeNotification["kind"][]): QueueOutcomeExit {
   if (kinds.includes("yrd-broken")) return QUEUE_OUTCOME_EXIT.yrdFailed
@@ -380,6 +437,20 @@ export type OutcomeNotifier = Readonly<{
   notify(outcome: QueueOutcome): Promise<OutcomeLedgerRow>
   /** The pass ended on an ERROR row: the owner's ball. */
   notifyPassError(fatal: Readonly<{ namespace: string; message: string }>, attemptId: string): Promise<OutcomeLedgerRow>
+  /**
+   * The queue is wedged and the runner is still up: the owner's ball, ADVISORY.
+   *
+   * Advisory is the whole point and is not a softening. Every other outcome
+   * here belongs to a pass that has already ended, so a notifier that fails
+   * may raise an ERROR and end it again harmlessly. This one belongs to a pass
+   * that is still running, and this bead exists because a health observation
+   * about that pass was killing it — so a failure to DELIVER the observation
+   * must not kill it either, or the fault walks back in through the notifier
+   * door. It resolves `undefined` instead: WARN, no ball journaled, and the
+   * next generation tries again. Not silent — the WARN names the notifier, the
+   * exit and the recipient who did not hear.
+   */
+  notifyQueueWedged(wedge: QueueWedgeInput, attemptId: string): Promise<OutcomeLedgerRow | undefined>
   /** `queue run --owner <seat>`. */
   setOwner(seat: string | undefined): void
   owner(): string
@@ -410,6 +481,87 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
     }
     return journaled
   }
+  /**
+   * Deliver one notification whose pass is STILL RUNNING.
+   *
+   * The delivery mechanics are `deliver`'s, minus the two things that only
+   * make sense for an ended attempt: the failure is a WARN rather than an
+   * ERROR (it must not end the live pass — see `notifyQueueWedged`), and the
+   * kind is kept out of `passKinds` so a health page cannot turn a clean
+   * one-shot verdict into `yrd broke`.
+   */
+  const deliverAdvisory = async (notification: OutcomeNotification): Promise<OutcomeLedgerRow | undefined> => {
+    const existing = ledger.lookup(notification.attempt_id)
+    if (existing !== undefined) return existing
+    if (command === undefined || command === "") {
+      if (!warnedUnconfigured) {
+        warnedUnconfigured = true
+        options.log.warn?.(
+          `no notifier is configured (.yrd.yml notify:), so this pass journals outcomes without a ball; ` +
+            `${notification.recipient} does not hear about '${notification.attempt_id}' (${notification.disposition})`,
+          {
+            action: "notify-unconfigured",
+            code: "notify-unconfigured",
+            attempt: notification.attempt_id,
+            kind: notification.kind,
+            recipient: notification.recipient,
+          },
+        )
+      }
+      return journalRow({
+        attempt: notification.attempt_id,
+        kind: notification.kind,
+        recipient: notification.recipient,
+        disposition: notification.disposition,
+      })
+    }
+    const result = await options.run(command, `${JSON.stringify(notification)}\n`)
+    const ball = result.code === 0 && !result.timedOut ? parseBallId(result.stdout) : undefined
+    if (ball === undefined) {
+      const why = result.timedOut
+        ? `timed out after ${String(NOTIFY_TIMEOUT_MS)}ms`
+        : result.code !== 0
+          ? `exited ${String(result.code)}`
+          : "printed no {ball_id}"
+      options.log.warn?.(
+        `notifier '${command}' ${why} for the advisory '${notification.attempt_id}' (${notification.disposition} → ` +
+          `${notification.recipient}); no ball was opened, so nobody heard this notice — the runner keeps running and ` +
+          `the next one retries: ${result.stderr.trim() || result.stdout.trim() || "no output"}`,
+        {
+          action: "notify-advisory-failed",
+          code: "notify-advisory-failed",
+          attempt: notification.attempt_id,
+          kind: notification.kind,
+          disposition: notification.disposition,
+          recipient: notification.recipient,
+          exitCode: result.code,
+          timedOut: result.timedOut,
+          stderr: result.stderr.trim(),
+        },
+      )
+      return undefined
+    }
+    const row = await journalRow({
+      attempt: notification.attempt_id,
+      kind: notification.kind,
+      recipient: notification.recipient,
+      disposition: notification.disposition,
+      ball,
+    })
+    options.log.info?.(
+      `opened ball ${ball} for '${notification.attempt_id}': ${notification.disposition} → ${notification.recipient}`,
+      {
+        action: "outcome-notified",
+        attempt: notification.attempt_id,
+        kind: notification.kind,
+        disposition: notification.disposition,
+        recipient: notification.recipient,
+        ball,
+      },
+    )
+    return row
+  }
+
   const deliver = async (notification: OutcomeNotification): Promise<OutcomeLedgerRow> => {
     const existing = ledger.lookup(notification.attempt_id)
     if (existing !== undefined) {
@@ -492,6 +644,8 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
     notify: (outcome) => deliver(routeOutcome(outcome, { owner, logPath: options.logPath })),
     notifyPassError: (fatal, attemptId) =>
       deliver(passErrorNotification(fatal, { owner, logPath: options.logPath, attemptId })),
+    notifyQueueWedged: (wedge, attemptId) =>
+      deliverAdvisory(queueWedgedNotification(wedge, { owner, logPath: options.logPath, attemptId })),
     setOwner: (seat) => {
       const trimmed = seat?.trim()
       if (trimmed !== undefined && trimmed !== "") owner = trimmed

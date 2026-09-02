@@ -326,6 +326,107 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
     expect(calls[0]?.body).toContain("boom")
   })
 
+  /**
+   * The wedge page (@i/10-yrd/liveness-is-health), and why it is ADVISORY.
+   *
+   * Every other outcome here belongs to a pass that has already ended, so a
+   * notifier that fails may raise an ERROR and end it again harmlessly. This
+   * one belongs to a pass that is STILL RUNNING, and this bead exists because a
+   * health observation about that pass was killing it. A failure to deliver the
+   * observation must not kill it either, or the fault walks straight back in
+   * through the notifier door.
+   */
+  describe("a wedged queue whose runner is still up", () => {
+    const wedge = {
+      base: "main",
+      message: "Queue 'main' has 4 eligible changes outstanding and no merge for 1h25m",
+      pr: "PR7",
+      blockedMs: 5_100_000,
+      generation: 2,
+    }
+
+    it("pages the owner, naming the queue and saying the runner is still running", async () => {
+      const { ledger } = journal()
+      const { calls, run } = fakeRun()
+      const { rows, log } = collectingLog()
+      const notifier = createOutcomeNotifier({
+        ledger,
+        notifyCommand: "notify",
+        owner: "@cto",
+        logPath: "/log",
+        log,
+        run,
+      })
+
+      const row = await notifier.notifyQueueWedged(wedge, "wedge:main:2")
+
+      expect(row?.ball).toBe("ball-1")
+      expect(calls[0]).toMatchObject({
+        kind: "yrd-broken",
+        recipient: "@cto",
+        disposition: "queue-wedged",
+        base: "main",
+      })
+      // The fact that changes what the owner does next: before this, the same
+      // condition arrived as the runner's death certificate.
+      expect(calls[0]?.body).toContain("still running")
+      expect(calls[0]?.body).toContain("notice 2")
+      expect(rows.some((entry) => entry.level === "error")).toBe(false)
+    })
+
+    it("a FAILING notifier warns and resolves undefined — it never raises the ERROR that would end the live pass", async () => {
+      const { ledger } = journal()
+      const { run } = fakeRun({ code: 1, stderr: "no tribe daemon" })
+      const { rows, log } = collectingLog()
+      const notifier = createOutcomeNotifier({
+        ledger,
+        notifyCommand: "notify",
+        owner: "@cto",
+        logPath: "/log",
+        log,
+        run,
+      })
+
+      // CONTROL: the ended-attempt path on the SAME failing notifier still
+      // throws and still raises ERROR, so the quiet below is this call's
+      // disposition and not a broken double.
+      await expect(notifier.notify(outcome())).rejects.toThrow(/notifier/u)
+      expect(rows.filter((entry) => entry.level === "error")).toHaveLength(1)
+
+      await expect(notifier.notifyQueueWedged(wedge, "wedge:main:2")).resolves.toBeUndefined()
+
+      // Still exactly the one ERROR from the control above: the advisory added none.
+      expect(rows.filter((entry) => entry.level === "error")).toHaveLength(1)
+      const warned = rows.filter((entry) => entry.props?.code === "notify-advisory-failed")
+      expect(warned).toHaveLength(1)
+      expect(warned[0]?.level).toBe("warn")
+      // NO SILENT ERRORS: who did not hear, and why.
+      expect(warned[0]?.message).toContain("@cto")
+      expect(warned[0]?.message).toContain("no tribe daemon")
+      // Nothing journaled, so the next generation is free to try again.
+      expect(ledger.lookup("wedge:main:2")).toBeUndefined()
+    })
+
+    it("never contributes to the pass verdict — a health page cannot turn a clean one-shot into `yrd broke`", async () => {
+      const { ledger } = journal()
+      const { run } = fakeRun()
+      const { log } = collectingLog()
+      const notifier = createOutcomeNotifier({
+        ledger,
+        notifyCommand: "notify",
+        owner: "@cto",
+        logPath: "/log",
+        log,
+        run,
+      })
+      notifier.beginPass()
+
+      await notifier.notifyQueueWedged(wedge, "wedge:main:2")
+
+      expect(notifier.exitCode()).toBe(QUEUE_OUTCOME_EXIT.next)
+    })
+  })
+
   it("`queue run --owner` overrides the configured owner for this process", async () => {
     const { ledger } = journal()
     const { calls, run } = fakeRun()

@@ -174,3 +174,69 @@ describe("queue-liveness-wedged — the (eligible, advanced-since-last-tick) pai
     )
   })
 })
+
+/**
+ * `livenessEpoch` — whose silence is this (@i/10-yrd/liveness-is-health).
+ *
+ * A queue's history is older than any one runner, so measured from the journal
+ * alone this finding answers "has this queue merged lately" while being read as
+ * "has THIS runner stopped draining". Measured 2026-09-02: a resident booted
+ * into a queue whose last merge was 1h25m old emitted the finding before
+ * attempting a single member, and under the any-ERROR rule exited 17 — over and
+ * over, so the queue drained never. A caller that owns a runner declares its own
+ * floor here and the clock starts there.
+ */
+describe("queue-liveness-wedged — measured from the observer's own epoch", () => {
+  /** The standing specimen: one PR wedged inside a merge attempt since
+   * 00:00:00, read an hour later. Every case below is the SAME queue state,
+   * differing only in who is asking. */
+  async function wedgedForAnHour() {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    const app = await createDeliveryApp(clock.read, true)
+    const pr = await submitAndRequestChecks(app, "issue/stuck-forever")
+    await app.queue.run({}, runtime)
+    return { app, pr }
+  }
+
+  const NOW = "2026-01-01T01:00:00.000Z"
+  const wedged = expect.objectContaining({ code: "queue-liveness-wedged" })
+
+  it("emits nothing to a runner that booted after the wedge began — it cannot have stopped what it never started", async () => {
+    await using app = (await wedgedForAnHour()).app
+
+    // CONTROL, and the whole point: the SAME audit at the SAME instant still
+    // reports the wedge when nobody declares an epoch. The absence below is
+    // the epoch's doing, not an empty queue or a mis-set clock.
+    expect(app.queue.audit({ now: NOW }).findings).toContainEqual(wedged)
+
+    // A resident five minutes old. The journal's hour is its predecessors'.
+    expect(app.queue.audit({ now: NOW, livenessEpoch: "2026-01-01T00:55:00.000Z" }).findings).not.toContainEqual(wedged)
+  })
+
+  it("still emits to a runner that has been up across the whole wedge — the epoch narrows the claim, it does not disable it", async () => {
+    await using app = (await wedgedForAnHour()).app
+
+    // Up since before the work became eligible: the full hour is this
+    // runner's, so the finding stands and reports the SAME span it always did.
+    expect(app.queue.audit({ now: NOW, livenessEpoch: "2025-12-31T23:00:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({ code: "queue-liveness-wedged", blockedMs: 3_600_000 }),
+    )
+  })
+
+  it("measures the span from the epoch when the epoch is the later floor, and fires exactly at the threshold", async () => {
+    await using app = (await wedgedForAnHour()).app
+
+    // Epoch at 00:30, read at 01:00: 30 minutes of THIS runner's silence, which
+    // is exactly the default `noLandingMs`. One millisecond earlier, nothing.
+    expect(
+      app.queue.audit({ now: "2026-01-01T00:59:59.999Z", livenessEpoch: "2026-01-01T00:30:00.000Z" }).findings,
+    ).not.toContainEqual(wedged)
+    expect(app.queue.audit({ now: NOW, livenessEpoch: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({
+        code: "queue-liveness-wedged",
+        blockedMs: 1_800_000,
+        since: "2026-01-01T00:30:00.000Z",
+      }),
+    )
+  })
+})

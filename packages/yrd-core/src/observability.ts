@@ -336,8 +336,20 @@ function emitLifecycle(
 export type ConditionReporter = Readonly<{
   /** Log (or tally) one occurrence of `key`. First call for a key always logs
    * `message`/`props` at `level`. A call while the key is already active
-   * either tallies silently or re-announces, per the doubling schedule. */
-  report(key: string, level: "warn" | "error", message: string, props?: Readonly<Record<string, unknown>>): void
+   * either tallies silently or re-announces, per the doubling schedule.
+   *
+   * Returns which of those two happened, so a caller with a SECOND consumer
+   * of the announcement — a page, a ball, a metric — can follow the same
+   * escalating schedule as the log instead of firing on every tick. Without
+   * it the only way to page on this condition was to page on every call and
+   * re-implement the doubling beside it, which is the drift this reporter
+   * exists to prevent. */
+  report(
+    key: string,
+    level: "warn" | "error",
+    message: string,
+    props?: Readonly<Record<string, unknown>>,
+  ): "announced" | "suppressed"
   /** The caller observed `key`'s condition clear. Flushes a closing summary
    * naming how many repeats were folded in since the last announcement —
    * silent when there were none, so a condition that fired exactly once never
@@ -405,12 +417,12 @@ function reporterOn(log: ConditionalLogger, active: Map<string, ConditionEntry>)
       if (entry === undefined) {
         active.set(key, { level, message, props, announcements: 1, suppressed: 0 })
         emit(level, message, props)
-        return
+        return "announced"
       }
       const suppressed = entry.suppressed + 1
       if (suppressed < Math.min(2 ** entry.announcements, CONDITION_REPEAT_CAP)) {
         active.set(key, { ...entry, suppressed })
-        return
+        return "suppressed"
       }
       const announcements = entry.announcements + 1
       active.set(key, { level, message, props, announcements, suppressed: 0 })
@@ -419,6 +431,7 @@ function reporterOn(log: ConditionalLogger, active: Map<string, ConditionEntry>)
         `${message} (still ongoing — ${String(suppressed)} repeated occurrence(s) suppressed since the last notice)`,
         { ...props, action: repeatAction(props), suppressedSinceLastNotice: suppressed },
       )
+      return "announced"
     },
     resolve(key) {
       summarize(key)
