@@ -7865,7 +7865,7 @@ describe("Queue command adapters", () => {
     ])
     const retryRows = afterRetry.split("\n")
     expect(retryRows.length, "both runs are legible under one change prefix").toBeGreaterThanOrEqual(1)
-    expect(afterRetry).toContain(firstRows[0]?.split(" ")[1] ?? " ")
+    expect(afterRetry).toContain(firstRows[0]?.split(" ")[1] ?? "\0")
     // One prefix, so a later run looks the change up without knowing which run
     // merged it.
     const prefixes = new Set(retryRows.map((row) => row.split(" ")[1]?.split("/").slice(0, 4).join("/")))
