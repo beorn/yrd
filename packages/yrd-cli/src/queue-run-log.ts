@@ -11,10 +11,19 @@
  * The field names are the boundary suite's table (`tests/boundary/
  * queue-run-log.test.ts`), which is the contract; this file follows it.
  *
- * WHERE THE LOG IS. The queue run names its own log and reports the path as the
- * `log` field of its `--json` result. No environment variable and no flag: the
- * queue has to print a log path per change anyway, so the queue run owns the
- * naming, and one field on the object it already prints is the whole mechanism.
+ * WHERE THE LOG IS. `YRD_QUEUE_RUN_LOG` names the DIRECTORY, defaulting to the
+ * repository's existing log directory; the queue run names the FILE from its
+ * own id, one file per queue run; and it reports the full path as the `log`
+ * field of its `--json` result, which is how every reader finds it.
+ *
+ * AN INCUMBENT-ONLY DERIVATION. These records are PROJECTED from what the
+ * incumbent queue already wrote elsewhere — its admission refusals, its jobs,
+ * its runs, its notifier — and filtered to one queue run by the instant that
+ * queue run started. That is right for M2, which is truthful runs on the
+ * incumbent, and it is not the end state: in M4 the queue run writes these
+ * facts itself as it decides them, and the projection here goes away with the
+ * durable rows it reads. Nothing downstream should be built on the projection;
+ * build it on the records.
  *
  * THREE PROPERTIES, each load-bearing.
  *
@@ -88,6 +97,9 @@ export type QueueRunRecord = QueueRunLogCommon &
     config?: string
     /** The branch this queue is for. */
     target: string
+    /** The target's tip the queue run read first — the commit `config` is the
+     * config AT, so the two travel together or a reader can check neither. */
+    base?: string
   }>
 
 export type QueueChangeRecord = QueueRunLogCommon &
@@ -197,6 +209,18 @@ export type QueueRunLogOptions = Readonly<{
   onFailure?: (message: string, props: Readonly<Record<string, unknown>>) => void
 }>
 
+/** Names the DIRECTORY a queue run writes its log into. Unset, the queue run
+ * uses the repository's own log directory; either way the FILE is named from
+ * the queue run's id, because the plan says one file per queue run and the
+ * service loops queue runs in one process. */
+export const QUEUE_RUN_LOG_ENV = "YRD_QUEUE_RUN_LOG" as const
+
+/** The directory the environment names, or undefined when it names none. */
+export function queueRunLogDirectory(env: NodeJS.ProcessEnv): string | undefined {
+  const value = env[QUEUE_RUN_LOG_ENV]?.trim()
+  return value === undefined || value === "" ? undefined : value
+}
+
 /** The file one queue run writes: `<directory>/<run>.jsonl`. */
 export function queueRunLogFile(directory: string, run: string): string {
   // The run id reaches the filesystem, so anything that is not obviously safe
@@ -265,6 +289,8 @@ export type QueueRunLogSource = Readonly<{
   pin?: string
   /** The target's check config, a blob sha. */
   config?: string
+  /** The target's tip the queue run read first. */
+  base?: string
   /** The runs this queue run drove, in order. */
   runs: readonly QueueRunSourceRun[]
   /** Changes considered and not selected, with the reason. */
@@ -388,6 +414,7 @@ export function queueRunLogRecords(
     kind: "run",
     ...(source.pin === undefined ? {} : { pin: source.pin }),
     ...(source.config === undefined ? {} : { config: source.config }),
+    ...(source.base === undefined ? {} : { base: source.base }),
     target: source.target,
   })
   for (const ran of source.checks ?? []) {

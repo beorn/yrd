@@ -243,6 +243,90 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     })
   })
 
+
+  /**
+   * The `run` record's two facts are read from the TARGET at the queue run's
+   * start, not from a run it may never build.
+   *
+   * A queue run that refuses its change at admission builds no run and resolves
+   * no step selection, so both facts were missing from exactly the queue runs a
+   * reader most needs them for — every fail and every stuck (measured
+   * 2026-09-02). The pair below is the proof that the derivation is the same
+   * one: a merging queue run and a stuck one, on the same target, must report
+   * the same base and the same config blob.
+   */
+  it("names the base and the check config whether or not a run was built", async () => {
+    const merging = await boundaryRepository({ exit: 0, notify: true })
+    await submitOneCommit(merging.repo, "green")
+    const mergedRun = await queueRunOnce(merging.repo)
+    const merged = theOne((await logOfQueueRun(mergedRun)).records, "run")
+
+    // The queue run that DID build a run resolved these two itself and printed
+    // them. The record must carry the same values, or the log is describing a
+    // different queue run from the one that happened — which is the whole
+    // reason the derivation is allowed to be independent.
+    const selection = (
+      JSON.parse(mergedRun.stdout) as {
+        results?: readonly { stepSelection?: { baseSha?: string; configBlobSha?: string } }[]
+      }
+    ).results?.[0]?.stepSelection
+    expect(selection?.baseSha, mergedRun.report).toEqual(expect.any(String))
+    expect(merged.base, mergedRun.report).toBe(selection?.baseSha)
+    expect(merged.config, mergedRun.report).toBe(selection?.configBlobSha)
+
+    // A check that gets stuck builds no run and resolves no step selection at
+    // all, and both facts must still be there.
+    const stuck = await boundaryRepository({ exit: 2, notify: true })
+    await submitOneCommit(stuck.repo, "two")
+    const stuckRun = await queueRunOnce(stuck.repo)
+    expect(stuckRun.exitCode, stuckRun.report).toBe(2)
+    expect(
+      (JSON.parse(stuckRun.stdout) as { results?: readonly unknown[] }).results,
+      "a stuck queue run builds no run, which is what makes this case the point",
+    ).toEqual([])
+    const opened = theOne((await logOfQueueRun(stuckRun)).records, "run")
+
+    expect(opened.base, stuckRun.report).toEqual(expect.any(String))
+    expect(opened.config, stuckRun.report).toEqual(expect.any(String))
+  })
+
+  /**
+   * A refusal is a durable row that outlives the queue run that wrote it, so
+   * the stream is filtered to this queue run by the instant it started.
+   *
+   * Without the filter every queue run re-reports every standing refusal, and a
+   * queue run that did nothing at all reads exactly like the one that refused
+   * the change yesterday. Planted here as a real earlier queue run, because a
+   * hand-written row would prove only that the filter can read a timestamp.
+   */
+  it("reports only this queue run's refusals, not an earlier one's", async () => {
+    const { repo } = await boundaryRepository({ exit: 1, notify: true })
+    const { branch } = await submitOneCommit(repo, "red")
+
+    // Queue run one: the change is refused, and the refusal row is written.
+    const first = await queueRunOnce(repo)
+    expect(first.exitCode, first.report).toBe(1)
+    const refusedFirst = (await logOfQueueRun(first)).records.filter(
+      (record) => record.kind === "change" && record.decision === "failed",
+    )
+    expect(refusedFirst, first.report).toHaveLength(1)
+    expect(refusedFirst[0]?.branch, first.report).toBe(branch)
+
+    // Queue run two: the standing refusal keeps the change out, so this queue
+    // run refuses nothing itself. The row from queue run one is still there.
+    const second = await queueRunOnce(repo)
+    const { records } = await logOfQueueRun(second)
+
+    // A different file, so the two accounts are never confused for one.
+    expect((await logOfQueueRun(second)).path, second.report).not.toBe((await logOfQueueRun(first)).path)
+    for (const record of records) {
+      expect(
+        record.kind === "result" || (record.kind === "change" && record.decision === "failed"),
+        `queue run two re-reported queue run one's refusal: ${JSON.stringify(record)}\n${second.report}`,
+      ).toBe(false)
+    }
+  })
+
   describe("a queue run with nothing submitted", () => {
     /** Nothing happened, so the log says only that the queue run looked. */
     it("writes exactly the run line", async () => {

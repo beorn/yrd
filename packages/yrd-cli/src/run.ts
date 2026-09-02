@@ -308,7 +308,12 @@ import {
   type QueuePassMessage,
 } from "./outcome-notify.ts"
 import type { ConditionalLogger } from "loggily"
-import { createQueueRunLog, queueRunLogRecords, type QueueRunSourceCheck } from "./queue-run-log.ts"
+import {
+  createQueueRunLog,
+  queueRunLogDirectory,
+  queueRunLogRecords,
+  type QueueRunSourceCheck,
+} from "./queue-run-log.ts"
 
 /** How many outcome-ledger rows `queue list` prints beneath the timeline. */
 const QUEUE_LIST_NOTIFICATION_ROWS = 20
@@ -14448,6 +14453,7 @@ function buildProgram(
         runs = draining() ? [] : await runQueues(app, selectors, options, io)
       } catch (cause) {
         writeQueueRunLog({
+          env: bootstrap?.env ?? process.env,
           cwd: io.cwd ?? process.cwd(),
           app,
           since: passStartedAt,
@@ -14477,6 +14483,7 @@ function buildProgram(
       // a path in the JSON that points at a file not yet on disk would be a
       // promise, and every reader of it would race the writer.
       const queueRunLog = writeQueueRunLog({
+        env: bootstrap?.env ?? process.env,
         cwd: io.cwd ?? process.cwd(),
         app,
         since: passStartedAt,
@@ -15207,6 +15214,7 @@ export function runYrd(
  */
 function writeQueueRunLog(
   input: Readonly<{
+    env: NodeJS.ProcessEnv
     cwd: string
     app: YrdCliApp
     /** The instant this queue run started; durable rows older than it belong to
@@ -15220,7 +15228,7 @@ function writeQueueRunLog(
     log: ConditionalLogger
   }>,
 ): string | undefined {
-  const directory = queueRunLogDirectory(input.cwd)
+  const directory = queueRunLogRoot(input.env, input.cwd)
   if (directory === undefined) return undefined
   const state = stateOf(input.app)
   const changes = state.bays.prs
@@ -15243,11 +15251,14 @@ function writeQueueRunLog(
     // one would put a name in the stream that a reader cannot look up.
     .filter((check) => check.name !== undefined && check.name !== "merge")
   const target = input.runs[0]?.base ?? input.blocked[0]?.pr.base ?? Object.values(changes)[0]?.base ?? "main"
+  const authority = queueRunLogAuthority(input.cwd, target)
+  const pin = queueRunLogPin(input.cwd)
   const records = queueRunLogRecords(
     {
       target,
-      ...(queueRunLogPin(input.cwd) === undefined ? {} : { pin: queueRunLogPin(input.cwd) }),
-      ...(queueRunLogConfig(input.runs) === undefined ? {} : { config: queueRunLogConfig(input.runs) }),
+      ...(pin === undefined ? {} : { pin }),
+      ...(authority.base === undefined ? {} : { base: authority.base }),
+      ...(authority.config === undefined ? {} : { config: authority.config }),
       runs: input.runs,
       blocked: input.blocked,
       messages: input.messages,
@@ -15292,12 +15303,56 @@ function writeQueueRunLog(
 /** Where a queue run's logs go: beside its artifacts, under the repository's
  * own git directory. Undefined when this is not a work tree, which is the one
  * case where there is no repository to put them in. */
-function queueRunLogDirectory(cwd: string): string | undefined {
+function queueRunLogRoot(env: NodeJS.ProcessEnv, cwd: string): string | undefined {
+  const declared = queueRunLogDirectory(env)
+  if (declared !== undefined) return declared
   try {
     const gitDir = gitSync(cwd, ["rev-parse", "--absolute-git-dir"]).trim()
     return gitDir === "" ? undefined : join(gitDir, "yrd", "logs")
   } catch {
     return undefined
+  }
+}
+
+/**
+ * The single file the incumbent reads for its on-submit checks.
+ *
+ * `readDeclaredPlanAtBase` resolves exactly this one object — `<base>:<.yrd.yml>`
+ * — per run, and `configAuthority` defaults to it everywhere it is passed. One
+ * file, so there is no primary to choose between.
+ */
+const QUEUE_CONFIG_AUTHORITY = ".yrd.yml"
+
+/**
+ * What the queue run judged from, read at its START and independent of whether
+ * it went on to build a run.
+ *
+ * A queue run that refuses its change at admission builds no run, resolves no
+ * step selection, and so knew neither of these — which left the `run` record of
+ * every fail and every stuck without the two facts that say what it judged by
+ * (measured 2026-09-02). Both come from the target directly: its tip, and the
+ * blob of the check config at that tip. A queue run that DOES build a run must
+ * report the same values, which the boundary suite asserts.
+ */
+function queueRunLogAuthority(cwd: string, target: string): Readonly<{ base?: string; config?: string }> {
+  let base: string
+  try {
+    // No `^{commit}` peel: the sync reader's allowlist takes the verb and its
+    // arguments through a typed command, and the peel syntax does not survive
+    // it. A target ref names a commit already, and the shape check below is
+    // what proves this resolved to one.
+    base = gitSync(cwd, ["rev-parse", target]).trim()
+  } catch {
+    return {}
+  }
+  if (!/^[0-9a-f]{40,64}$/u.test(base)) return {}
+  try {
+    const blob = gitSync(cwd, ["rev-parse", `${base}:${QUEUE_CONFIG_AUTHORITY}`]).trim()
+    return /^[0-9a-f]{40,64}$/u.test(blob) ? { base, config: blob } : { base }
+  } catch {
+    // A target with no check config declares no checks. The tip is still a
+    // fact, and reporting it without the blob says exactly that.
+    return { base }
   }
 }
 
@@ -15321,15 +15376,6 @@ function queueRunLogPin(cwd: string): string | undefined {
   } catch {
     return undefined
   }
-}
-
-/** The target's check config, as the blob sha the runs resolved it to. */
-function queueRunLogConfig(runs: readonly Run[]): string | undefined {
-  for (const run of runs) {
-    const blob = run.stepSelection?.configBlobSha
-    if (blob !== undefined) return blob
-  }
-  return undefined
 }
 
 /**
