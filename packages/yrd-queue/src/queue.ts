@@ -11618,6 +11618,15 @@ export const YRD_REFUSAL_CODES = [
   "retire-target-missing",
   "review-rejected",
   "review-required",
+  // `QueueRetiredSubmit.code` for an OPERATOR retirement (`yrd pr retire`,
+  // emitted as REVISION_RETIRED_CODE): the projection code a retired
+  // revision's row carries, beside the queue's own `candidate-conflicting` /
+  // `required-check-failed` retirements — never a candidate failure. Registered
+  // exactly as those siblings are: in this vocabulary only, in NO
+  // COMPOSITION_FAILURE_BUCKETS set, so `failureDisposition` classifies it as
+  // the default failed / owner author — the row is a verdict on one exact
+  // sha, and only the author pushing new content derives anything again.
+  "revision-retired",
   "run-canceled",
   "run-lease-expired",
   "run-plan-mismatch",
