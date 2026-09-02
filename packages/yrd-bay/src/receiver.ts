@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises"
 import { basename, delimiter, dirname, join, resolve } from "node:path"
-import { failureFact, systemClock } from "@yrd/core"
+import { createFailure, failureFact, systemClock } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
@@ -35,6 +35,69 @@ const SUBMIT_PREFIX = "refs/for/"
  * (@i/10-yrd/a-cure-string-names-a-ref-that-does-not-exist).
  */
 export const SUBMIT_REF_PREFIX = "refs/yrd/submit/"
+/**
+ * The refusal code for a push whose ref name NESTS with a ref the store
+ * already holds — in either direction. Git refuses such an update itself
+ * ("cannot lock ref 'refs/for/main/x/y': 'refs/for/main/x' exists"), but only
+ * at its ref transaction, which runs AFTER pre-receive: the receiver had
+ * already written the push's `.prepared.json` inbox entry, git rejected the
+ * ref, post-receive never ran, and the orphaned entry refused every later
+ * queue pass and every `yrd pr submit` until a person retired the file —
+ * measured 2026-09-01, twice, 58 minutes of fleet-wide wedge each, on
+ * `refs/for/main/@i/4-supervision/<name>` pushed beside an existing
+ * `refs/for/main/@i/4-supervision`. The receiver now refuses FIRST, with the
+ * colliding ref and the cure, and writes nothing. Registered in
+ * `YRD_REFUSAL_CODES` (@yrd/queue) like every emitted code.
+ */
+export const RECEIVER_REF_NESTING_CODE = "receiver-ref-nesting"
+/**
+ * Which way the incoming ref and the existing ref nest.
+ * - `under`: the incoming name lives BELOW an existing ref (`refs/for/main/x`
+ *   exists, push `refs/for/main/x/y`) — the incident's own direction.
+ * - `over`: an existing ref lives below the incoming name (`refs/for/main/x/y`
+ *   exists, push `refs/for/main/x`).
+ */
+export type ReceiverRefNesting = "under" | "over"
+/**
+ * A push-time refusal, handed to {@link ReceiverHookOptions.refused} so the
+ * hook host can log it on the channel the pusher is watching. The receiver
+ * cannot: it owns no logger and no output convention (the same contract as
+ * `drainDeferred`). The thrown failure still carries the message; this is the
+ * reporting hook, never the record.
+ */
+export type ReceiverRefusalReport = Readonly<{
+  code: typeof RECEIVER_REF_NESTING_CODE
+  /** The ref the push asked to create. */
+  ref: string
+  /** The ref the store already holds that the incoming name nests with. */
+  collidingRef: string
+  direction: ReceiverRefNesting
+  /** The flat name the refusal suggests instead. */
+  suggestedRef: string
+  /** The whole sentence the pusher is told, `yrd: receiver: …`. */
+  message: string
+}>
+/**
+ * The one nesting rule git applies to ref names, as a pure function over
+ * names: a ref cannot be created while another ref is a proper path-prefix of
+ * it, or while it is a proper path-prefix of another. Answers the FIRST
+ * colliding name, checking ancestors before descendants (the incident's
+ * direction first, so its message is the one a reader has already seen).
+ * Exported for the same reason `submitRefSplits` is: the rule has one
+ * spelling, tested on its own.
+ */
+export function refNestingConflict(
+  ref: string,
+  existing: readonly string[],
+): Readonly<{ collidingRef: string; direction: ReceiverRefNesting }> | undefined {
+  for (const candidate of existing) {
+    if (candidate !== ref && ref.startsWith(`${candidate}/`)) return { collidingRef: candidate, direction: "under" }
+  }
+  for (const candidate of existing) {
+    if (candidate !== ref && candidate.startsWith(`${ref}/`)) return { collidingRef: candidate, direction: "over" }
+  }
+  return undefined
+}
 /**
  * The branch-is-change model's shelf: a deleted branch is never gone, it is
  * moved here (`<branch>-<old-tip-shortsha>`). Permanent — the receiver
@@ -283,6 +346,14 @@ export type ReceiverHookOptions = {
    * the reporting hook, never the record.
    */
   drainDeferred?: (drained: Readonly<ReceiverDrainResult>) => void
+  /**
+   * Called with a push-time refusal the receiver raised BEFORE writing
+   * anything — today the ref-nesting refusal ({@link RECEIVER_REF_NESTING_CODE})
+   * — so the caller can log one row naming the ref and the ref it collides
+   * with. Same contract as `drainDeferred`: the receiver owns no logger; the
+   * thrown failure is the record, this is the reporting hook.
+   */
+  refused?: (refusal: ReceiverRefusalReport) => void
 }
 /**
  * A prepared result whose push the receiver cannot confirm: pre-receive stored
@@ -522,9 +593,24 @@ async function prepareReceiverUpdates(
   const clock = options.clock ?? systemClock.iso
   const created: string[] = []
   const results: ReceiverResult[] = []
+  const updates = (typeof input === "string" ? parseReceiverUpdates(input) : input).map((value) =>
+    ReceiverRefUpdateSchema.parse(value),
+  )
+  // Two creations in ONE push that nest with each other: neither exists yet,
+  // so the per-update check against the store below cannot see the pair, and
+  // git would apply the first, refuse the second, and run post-receive for
+  // the first only — the second's entry orphaned exactly as a store collision
+  // orphans it. Judged before anything is written, over the batch alone.
+  const creating = updates.filter((update) => ZERO_SHA.test(update.oldSha) && !ZERO_SHA.test(update.newSha))
+  for (const update of creating) {
+    const collision = refNestingConflict(
+      update.ref,
+      creating.map((other) => other.ref),
+    )
+    if (collision !== undefined) refuseRefNesting(update, collision, options, "push")
+  }
   try {
-    for (const value of typeof input === "string" ? parseReceiverUpdates(input) : input) {
-      const update = ReceiverRefUpdateSchema.parse(value)
+    for (const update of updates) {
       const authorized = await authorize(receiver, update, options, "before")
       // A submit-ref write/delete or a branch-deletion archival is fully
       // validated here (that IS the point of running at pre-receive), but
@@ -1372,6 +1458,97 @@ async function validateQueueConfig(
  * in `authorize()`, and — now that deletion is a real, accepted outcome —
  * correctly normalizes a zero sha to "no ref" on EITHER side of the update.
  */
+/**
+ * The ref the store already holds that `ref` would nest with, or `undefined`
+ * when `ref` can be created. Ancestors first — every proper path-prefix of
+ * `ref` down to `refs/<namespace>`, each an exact `show-ref --verify` — then
+ * descendants, from the one `for-each-ref` listing of `ref`'s own subtree
+ * (a pattern matches at path boundaries, so that listing is exactly the refs
+ * below `ref`, plus `ref` itself when it exists). Both directions are what
+ * git refuses; the receiver asks the same questions of the same store, at
+ * pre-receive, before it writes.
+ */
+async function refNestingCollision(
+  receiver: GitPushReceiver,
+  ref: string,
+  env?: Environment,
+): Promise<Readonly<{ collidingRef: string; direction: ReceiverRefNesting }> | undefined> {
+  const segments = ref.split("/")
+  // `refs` alone is never a ref; the shallowest name that can collide is the
+  // namespace itself (`refs/for`), the deepest is the parent.
+  for (let depth = 2; depth < segments.length; depth += 1) {
+    const ancestor = segments.slice(0, depth).join("/")
+    const probe = await receiverGit(receiver, ["show-ref", "--verify", "--quiet", ancestor], {
+      env,
+      allowFailure: true,
+    })
+    if (probe.code === 0) return { collidingRef: ancestor, direction: "under" }
+  }
+  const listing = (await receiverGit(receiver, ["for-each-ref", "--format=%(refname)", ref], { env })).stdout
+  const below = listing.split("\n").filter((name) => name.length > 0 && name !== ref)
+  return refNestingConflict(ref, below)
+}
+
+/**
+ * The flat spelling the refusal suggests: for a name nesting UNDER an existing
+ * ref, the nested tail folded onto the ancestor with `-`; for a name an
+ * existing ref nests under, a `-2` suffix beside it. A suggestion, never a
+ * promise — the pusher picks any flat name.
+ */
+function flatRefSuggestion(
+  ref: string,
+  collision: Readonly<{ collidingRef: string; direction: ReceiverRefNesting }>,
+): string {
+  if (collision.direction === "under") {
+    const tail = ref.slice(collision.collidingRef.length + 1).replaceAll("/", "-")
+    return `${collision.collidingRef}-${tail}`
+  }
+  return `${ref}-2`
+}
+
+/**
+ * Refuse a push whose ref nests with `collision.collidingRef`, on the same
+ * channel and in the same shape as every other push-time refusal (a thrown
+ * `yrd: receiver: …` error the hook host relays to the pusher) — typed with
+ * {@link RECEIVER_REF_NESTING_CODE}, naming the ref, the colliding ref, the
+ * direction and the cure, and reported through `options.refused` so the host
+ * can log one row. Nothing has been written when this fires, by construction:
+ * both call sites run before `storeResult`.
+ */
+function refuseRefNesting(
+  update: ReceiverRefUpdate,
+  collision: Readonly<{ collidingRef: string; direction: ReceiverRefNesting }>,
+  options: Pick<ReceiverHookOptions, "refused">,
+  // Where the colliding ref lives: in the store (the ordinary case), or in
+  // this same push (two creations that nest with each other).
+  origin: "store" | "push" = "store",
+): never {
+  const suggestedRef = flatRefSuggestion(update.ref, collision)
+  const other =
+    origin === "store"
+      ? `the existing ref '${collision.collidingRef}'`
+      : `'${collision.collidingRef}', which this same push also creates`
+  const relation = collision.direction === "under" ? `nests under ${other}` : `would sit above ${other}`
+  const cure =
+    origin === "store"
+      ? `push under a flat name instead, e.g. '${suggestedRef}', or ask the queue owner to retire the stale ref ` +
+        `'${collision.collidingRef}'`
+      : `push the two under flat names instead, e.g. '${suggestedRef}'`
+  const message =
+    `yrd: receiver: ref '${update.ref}' cannot be created: it ${relation}, and git refuses a ref that is a ` +
+    `path prefix of another, so the push would be rejected after the receiver had recorded it; refused first, ` +
+    `nothing recorded — ${cure}`
+  options.refused?.({
+    code: RECEIVER_REF_NESTING_CODE,
+    ref: update.ref,
+    collidingRef: collision.collidingRef,
+    direction: collision.direction,
+    suggestedRef,
+    message,
+  })
+  throw createFailure({ kind: "refusal", code: RECEIVER_REF_NESTING_CODE, message })
+}
+
 async function checkNotStale(
   receiver: GitPushReceiver,
   update: ReceiverRefUpdate,
@@ -1746,6 +1923,19 @@ async function authorize(
   validSha(update.oldSha, receiver.shaLength, "old commit id", true)
   validSha(update.newSha, receiver.shaLength, "new commit id", true)
   const deleting = ZERO_SHA.test(update.newSha)
+
+  // Git's own ref-name rule, mirrored HERE so the receiver refuses before it
+  // writes: a ref cannot be created while the store holds a ref that nests
+  // with it, in either direction. Git enforces this only in its ref
+  // transaction, after pre-receive has run — so an inbox entry stored for
+  // such a push is orphaned the moment git rejects the ref (the 2026-09-01
+  // wedge). Creations only: an existing ref cannot nest with anything, and a
+  // deletion creates nothing. Judged at pre-receive only — at post-receive
+  // the ref itself already stands, which is proof git accepted it.
+  if (stage === "before" && !deleting && ZERO_SHA.test(update.oldSha)) {
+    const collision = await refNestingCollision(receiver, update.ref, options.env)
+    if (collision !== undefined) refuseRefNesting(update, collision, options)
+  }
 
   // The shelf is permanent: written only by `applyArchival` translating a
   // branch deletion, never by a direct push in either direction.

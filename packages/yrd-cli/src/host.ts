@@ -4488,6 +4488,22 @@ async function runReceiverHook(
       // an ordinary overlap into a deferral on every collision.
       lockTimeoutMs: RECEIVE_DRAIN_LOCK_WAIT_MS,
       drainDeferred: (drained) => reportDeferredDrain(log, drained),
+      // A push the receiver refused BEFORE writing anything for it — a ref
+      // name nesting with a ref the store already holds, which git would have
+      // rejected after pre-receive had recorded the push (the 2026-09-01
+      // orphan wedge). The thrown failure is what the pusher reads; this is
+      // the one WARN row the log keeps, naming the ref and the ref it
+      // collides with. No pusher identity: receive-pack's environment carries
+      // none, and every seat pushes under the one shared git identity.
+      refused: (refusal) =>
+        log.warn?.(refusal.message, {
+          action: "receiver-push-refused",
+          code: refusal.code,
+          ref: refusal.ref,
+          collidingRef: refusal.collidingRef,
+          direction: refusal.direction,
+          suggestedRef: refusal.suggestedRef,
+        }),
     })
   } finally {
     await closeRuntime(app, runtimeProcess, scope)
