@@ -233,6 +233,80 @@ export async function checkAttempts(checkLog: string): Promise<number> {
   return (await file.text()).trimEnd().split("\n").filter(Boolean).length
 }
 
+export type YrdJsonResult = Readonly<{
+  exitCode: number
+  /** The parsed `--json` answer, or `undefined` when the CLI printed something else. */
+  json: unknown
+  stdout: string
+  stderr: string
+  /** Everything a failing assertion should print, as one blob. */
+  report: string
+}>
+
+/**
+ * One CLI call whose `--json` answer the caller reads. The generic form behind
+ * every reader: `queue list`, `queue show`, anything a case needs to ask.
+ * Parsing never throws — a CLI that answered with prose leaves `json`
+ * undefined, so the assertion that wanted a field says what it got instead.
+ */
+export async function yrdJson(repo: string, ...args: string[]): Promise<YrdJsonResult> {
+  const call = capture(repo)
+  const exitCode = await yrd(repo, call.io, ...args, "--json")
+  const stdout = call.stdout()
+  const stderr = call.stderr()
+  let json: unknown
+  try {
+    json = JSON.parse(stdout)
+  } catch {
+    json = undefined
+  }
+  return {
+    exitCode,
+    json,
+    stdout,
+    stderr,
+    report: `yrd ${args.join(" ")} --json exited ${String(exitCode)}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
+  }
+}
+
+/**
+ * The target moves without the queue: `sha` merged into it by hand and pushed,
+ * as the mechanic does in the garage. Answers the target's new tip.
+ */
+export async function mergeByHand(repo: string, sha: string, message = "merged by hand"): Promise<string> {
+  await git(repo, "fetch", "-q", "origin")
+  await git(repo, "checkout", "-q", "-B", "main", "origin/main")
+  await git(repo, "merge", "-q", "--no-ff", "-m", message, sha)
+  await git(repo, "push", "-q", "origin", "main")
+  return targetTip(repo)
+}
+
+/**
+ * A second reader of the same queue holding nothing but git: a fresh working
+ * copy of the shared repository with every ref fetched, including any under
+ * `refs/yrd/`. It never ran the queue, so whatever it can say about a change it
+ * derived from the git store alone.
+ */
+export async function secondReader(origin: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-second-reader-"))
+  roots.push(root)
+  const clonePath = join(root, "reader")
+  await git(root, "clone", "-q", origin, clonePath)
+  const clone = await realpath(clonePath)
+  // The bare shared repository's HEAD still names git's default branch, so a
+  // plain clone lands nowhere; the target is `main` and the reader stands on it.
+  await git(clone, "checkout", "-q", "-B", "main", "origin/main")
+  await refreshSecondReader(clone)
+  return clone
+}
+
+/** Everything the shared repository has learned since, into a second reader. */
+export async function refreshSecondReader(clone: string): Promise<void> {
+  await git(clone, "fetch", "-q", "origin")
+  await git(clone, "fetch", "-q", "origin", "+refs/yrd/*:refs/yrd/*")
+  await git(clone, "checkout", "-q", "-B", "main", "origin/main")
+}
+
 function capture(cwd: string): { io: YrdCliIO; stdout(): string; stderr(): string } {
   let stdout = ""
   let stderr = ""
