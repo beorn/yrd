@@ -26,11 +26,11 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@termless/core": "0.8.4",
-    "@termless/ghostty": "0.8.4",
-    "@termless/ghostty-native": "0.8.4",
-    "@termless/test": "0.8.4",
-    "@termless/xtermjs": "0.8.4",
+    "@termless/core": ">=0.8.4 <1.0.0",
+    "@termless/ghostty": ">=0.8.4 <1.0.0",
+    "@termless/ghostty-native": ">=0.8.4 <1.0.0",
+    "@termless/test": ">=0.8.4 <1.0.0",
+    "@termless/xtermjs": ">=0.8.4 <1.0.0",
     "removely": "^0.1.0"
   }
 }
