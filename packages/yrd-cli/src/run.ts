@@ -284,6 +284,7 @@ import {
 } from "./source-staleness.ts"
 import { HABITANT_EXIT } from "./habitant-exit.ts"
 import { QUEUE_FATAL_EXIT, fatalQueueDrain } from "./queue-drain.ts"
+import { QUEUE_OUTCOME_EXIT, recordNotifySeat, submitterSeatFromEnvironment } from "./outcome-notify.ts"
 import {
   decideHabitantMemory,
   foldMemoryCap,
@@ -6228,6 +6229,8 @@ type ChangeSelectionOptions = {
   reviewer?: readonly string[]
   track?: boolean
   keepOnFailure?: boolean
+  /** `pr submit --notify <seat>`: where this submission's outcome ball goes. */
+  notify?: string
   json?: boolean
 }
 
@@ -6333,6 +6336,29 @@ async function applyChangeSelection(
       run: runtimeOptions(io),
       warnings,
     })
+    // The seat this submission's outcome ball goes to (@i/10-yrd/24028): the
+    // explicit --notify, else the managed seat's own launch environment —
+    // never argv, cwd or the git author. Recorded beside the exact (branch,
+    // sha) submitted, on the real submit only (a staging pass writes nothing).
+    if (!stageAsDraft && io.stateDir !== undefined) {
+      const seat =
+        options.notify === undefined || options.notify.trim() === ""
+          ? submitterSeatFromEnvironment(process.env)
+          : { seat: options.notify.trim(), source: "--notify" }
+      if (seat !== undefined) {
+        recordNotifySeat(io.stateDir, {
+          branch: "lane" in submission ? submission.branch : submission.branch,
+          sha: "lane" in submission ? submission.sha : changeHead(submission),
+          seat: seat.seat,
+          source: seat.source,
+          at: new Date(io.now?.() ?? Date.now()).toISOString(),
+        })
+      } else {
+        warnings.push(
+          "no submitter seat is recorded for this submission (pass --notify <seat>, or submit from a managed seat); its outcome ball goes to the queue owner",
+        )
+      }
+    }
     if ("lane" in submission) {
       // Routed to the derived lane: the fact is the submission. Record-lane
       // aftercare (supersede-cancel, reviewers, check requests) does not apply.
@@ -13849,7 +13875,17 @@ function buildProgram(
     .command("run [selector...]")
     .description("drain the queue — habitant follow by default; --once or change selectors for a single pass")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
-    .option("--once", "drain the default queue exactly once, then exit")
+    .option(
+      "--once",
+      "drain the default queue exactly once, then exit " +
+        `(exit ${String(QUEUE_OUTCOME_EXIT.next)}: every attempt landed or nothing to do; ` +
+        `${String(QUEUE_OUTCOME_EXIT.changeRefused)}: a change was refused and sent back to its submitter, the pass continued; ` +
+        `${String(QUEUE_OUTCOME_EXIT.yrdFailed)}: yrd broke — an infra/env/timeout outcome went to the queue owner or the pass ended on an ERROR row; ${String(QUEUE_OUTCOME_EXIT.yrdFailed)} wins over ${String(QUEUE_OUTCOME_EXIT.changeRefused)})`,
+    )
+    .option(
+      "--owner <seat>",
+      "the queue owner every yrd-fault ball routes to (default: .yrd.yml owner:, then @chief)",
+    )
     .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
@@ -13886,6 +13922,9 @@ function buildProgram(
       const draining = () => io.drainSignal?.aborted === true
       const publications = draining() ? [] : await preparePublicationQueueCycle(app, installedServices(), io)
       if (publications.length > 0) await gate()
+      const outcomes = installedServices().outcomes
+      outcomes?.setOwner(typeof options.owner === "string" ? options.owner : undefined)
+      outcomes?.beginPass()
       const runs = draining() ? [] : await runQueues(app, selectors, options, io)
       const selectedChangeIds =
         selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
@@ -13916,7 +13955,13 @@ function buildProgram(
         human,
       )
       const publicationFailed = publications.some((job) => job.status !== "completed" || job.conclusion !== "success")
-      setExit(publicationFailed || runs.some(Queues.failed) ? 1 : 0)
+      // The three-way verdict (@i/10-yrd/24028): computed from the outcomes
+      // this pass handed to the notifier seam, on the registry's disposition,
+      // never from a second reading of the runs. A failed publication is the
+      // queue's own fault. A pass-ending ERROR row outranks this at the host
+      // boundary (`drainedQueuePassExit`), landing on the same code.
+      const verdict = outcomes?.exitCode() ?? (runs.some(Queues.failed) ? QUEUE_OUTCOME_EXIT.changeRefused : QUEUE_OUTCOME_EXIT.next)
+      setExit(publicationFailed ? QUEUE_OUTCOME_EXIT.yrdFailed : verdict)
     })
   queue
     .command("cancel <run>")
@@ -14044,6 +14089,10 @@ function buildProgram(
     .option("--track", TRACK_OPTION_DESCRIPTION)
     .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
     .option("--keep-on-failure", "retain a failed client-side required-check workspace for inspection")
+    .option(
+      "--notify <seat>",
+      "the seat that hears how this submission ends (default: this managed seat's TRIBE_SESSION_NAME/TRIBE_NAME; unknown routes to the queue owner)",
+    )
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>
       setExit(await applyChangeSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),
