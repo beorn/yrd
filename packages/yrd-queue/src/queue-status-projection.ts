@@ -29,7 +29,7 @@ import {
   resolveChange,
 } from "@yrd/bay"
 import { type Event, type JsonValue, stageAsync } from "@yrd/core"
-import { type Job, type JobError, JobRequestSchema, JobTransitionSchema } from "@yrd/job"
+import { type Job, type JobErrorFact, JobRequestSchema, parseJobTransitionForReplay } from "@yrd/job"
 import { GateCertificateSchema } from "./command.ts"
 import { isDerivedMemberId } from "./derived-admission.ts"
 import {
@@ -435,7 +435,7 @@ export type QueueLogAttempt = Readonly<{
 
 type QueueAttemptResult =
   | Readonly<{ status: "passed"; output: JsonValue }>
-  | Readonly<{ status: "failed"; error: JobError; output?: JsonValue }>
+  | Readonly<{ status: "failed"; error: JobErrorFact; output?: JsonValue }>
   // A "lose" transition (Jobs.recover(), the habitant-runner-restart/dead-
   // lease reclaim path) closes an attempt the runner never got to interpret.
   // `code` is always "job-lost" — the SAME registered YRD_REFUSAL_CODES
@@ -560,7 +560,7 @@ async function scanQueueLogAttempts(events: AsyncIterable<Event> | Iterable<Even
     }
 
     if (event.name !== "job/transitioned") continue
-    const transition = JobTransitionSchema.parse(event.data)
+    const transition = parseJobTransitionForReplay(event.data)
     if (transition.type === "start") {
       started.set(`${transition.id}:${transition.attempt}`, {
         attempt: transition.attempt,

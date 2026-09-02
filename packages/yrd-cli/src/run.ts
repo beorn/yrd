@@ -65,7 +65,7 @@ import {
   type JournalSnapshot,
 } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
-import type { Job, JobError } from "@yrd/job"
+import type { Job, JobErrorFact } from "@yrd/job"
 import {
   adaptProcessGit,
   cleanGitEnvironment,
@@ -2615,7 +2615,8 @@ type TrackerDeliveryV1 =
 
 type TrackerDeliveryV2 =
   | TrackerDeliveryV1
-  | (TrackerDeliveryIdentity & Readonly<{ status: "needs-author"; bounce: TrackerBounce; attributedResult: JobError }>)
+  | (TrackerDeliveryIdentity &
+      Readonly<{ status: "needs-author"; bounce: TrackerBounce; attributedResult: JobErrorFact }>)
 
 type TrackerBridgeV1 = Readonly<{
   version: 1
@@ -5498,7 +5499,7 @@ type PublicationProjection = Readonly<{
   status: "publication-required" | "publishing" | "published" | "publication-failed"
   continuation: ChangePublicationInput["continuation"]
   detail: string
-  error?: JobError
+  error?: JobErrorFact
 }>
 
 function publicationJob(app: YrdCliApp, pr: Change): Job | undefined {
@@ -7021,7 +7022,14 @@ const CHANGE_LIST_STATE_HELP = CHANGE_LIST_STATES.join(", ")
 async function listPrs(
   app: YrdCliApp,
   options: JsonOption &
-    Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean; reviewer?: string; strict?: boolean }>,
+    Readonly<{
+      base?: string
+      state?: string
+      issue?: string
+      needsReview?: boolean
+      reviewer?: string
+      strict?: boolean
+    }>,
   io: YrdCliIO,
 ): Promise<void> {
   if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")

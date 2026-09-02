@@ -3,7 +3,7 @@ import { dirname } from "node:path"
 import { pathToFileURL } from "node:url"
 import { changeHead, changeRevisionNumber, type Bay, type Change, type ChangeDeliveryState } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
-import type { JobError } from "@yrd/job"
+import type { JobErrorFact } from "@yrd/job"
 import { projectedChangeStatus, type ChangeEligibility } from "@yrd/queue"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
 import {
@@ -355,7 +355,7 @@ export type IssueDeliveryRow = Readonly<{
   candidateTreeSha?: string
   baseTreeSha?: string
   bounce?: Readonly<{ run: string; detail?: string }>
-  attributedResult?: JobError
+  attributedResult?: JobErrorFact
 }> &
   TaskStatusFields
 

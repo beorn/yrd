@@ -34,7 +34,7 @@ import {
   type Change,
   type ChangeAdmission,
   type ChangeAdmissionRecord,
-  type ChangeAdmissionRecordedFact,
+  type ChangeAdmissionRecorded,
   type ChangeAdmissionStep,
   type PrNumberMint,
   recordChanges,
@@ -66,6 +66,7 @@ import {
 import {
   createJobDef,
   Job,
+  JobErrorFactSchema,
   JobErrorSchema,
   localRunner,
   type HasJobs,
@@ -73,6 +74,7 @@ import {
   type JobDef,
   type JobDefs,
   type JobError,
+  type JobErrorFact,
   type JobObservation,
   type JobCompletion,
   type JobHandler,
@@ -895,10 +897,20 @@ const AdmissionRefusedFactSchema = AdmissionRefusedSchema.extend({
    * identity was introduced by 22528. New commands always populate both. */
   revision: z.number().int().positive().optional(),
   headSha: GitShaSchema.optional(),
+  /** Reader-only v4 fields. The PREP writer remains explicitly v3 and does not
+   * author either field until the fleet floor has moved. */
+  baseSha: GitShaSchema.optional(),
+  verdictless: z.literal(true).optional(),
 })
   .strict()
   .refine((fact) => (fact.revision === undefined) === (fact.headSha === undefined), {
     message: "revision and headSha must be provided together",
+  })
+  .refine((fact) => fact.baseSha === undefined || (fact.revision !== undefined && fact.headSha !== undefined), {
+    message: "baseSha requires exact revision and headSha",
+  })
+  .refine((fact) => fact.verdictless === undefined || (fact.kind === "infrastructure" && fact.judgedFailure !== true), {
+    message: "verdictless refusals must be unjudged infrastructure failures",
   })
 const SettleAdmissionRefusalSchema = z
   .object({
@@ -1087,15 +1099,27 @@ const QueueFailedChangeSchema = z.preprocess(
     })
     .strict(),
 )
-const LegacyQueueFailedSchema = z.object({ run: RunIdSchema, error: JobErrorSchema }).strict()
-const QueueFailedSchema = LegacyQueueFailedSchema.extend({
+const LegacyQueueFailedBaseSchema = z.object({ run: RunIdSchema, error: JobErrorSchema }).strict()
+const LegacyQueueFailedSchema = LegacyQueueFailedBaseSchema.refine(
+  (fact) => !("verdictless" in fact.error && fact.error.verdictless === true),
+  {
+    message: "legacy queue failures cannot carry verdictless v4 evidence",
+  },
+)
+const QueueFailedSchema = LegacyQueueFailedBaseSchema.extend({
   prs: z.array(QueueFailedChangeSchema).min(1),
   job: z
     .object({ id: z.string().trim().min(1), attempt: z.number().int().positive() })
     .strict()
     .optional(),
 }).strict()
-const ReplayQueueFailedSchema = z.union([QueueFailedSchema, LegacyQueueFailedSchema])
+const QueueFailedFactSchema = QueueFailedSchema.omit({ error: true })
+  .extend({ error: JobErrorFactSchema, verdictless: z.literal(true).optional() })
+  .strict()
+  .refine((fact) => ("verdictless" in fact.error && fact.error.verdictless === true) === (fact.verdictless === true), {
+    message: "queue failure verdictless marker must exactly mirror its error",
+  })
+const ReplayQueueFailedSchema = z.union([QueueFailedFactSchema, LegacyQueueFailedSchema])
 const CancelRunArgsSchema = z
   .object({
     run: RunIdSchema,
@@ -1678,14 +1702,17 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/derived-identity/bound": journalEvent(1, DerivedIdentityBoundSchema),
         "queue/candidate/created": journalEvent(1, CandidateCreatedSchema),
         "queue/run/started": journalEvent(1, z.object({ run: QueueStartSchema }).strict()),
-        "queue/run/failed": journalEvent(1, QueueFailedSchema),
+        "queue/run/failed": journalEvent(1, QueueFailedFactSchema, { verdictless: 4 }),
         "queue/run/canceled": journalEvent(1, QueueRunCanceledFactSchema),
         "queue/run/settled": journalEvent(1, SettledEventSchema),
         "queue/paused": journalEvent(2, PauseQueueArgsSchema),
         "queue/pause/expired": journalEvent(1, ExpireQueuePauseArgsSchema),
         "queue/resumed": journalEvent(1, ResumeQueueArgsSchema),
         "queue/batch/isolated": journalEvent(1, BatchIsolatedSchema),
-        "queue/admission/refused": journalEvent(1, AdmissionRefusedFactSchema),
+        "queue/admission/refused": journalEvent(1, AdmissionRefusedFactSchema, {
+          verdictless: 4,
+          baseSha: 4,
+        }),
         "queue/admission/settled": journalEvent(1, SettleAdmissionRefusalSchema),
         "queue/submit/retired": journalEvent(1, RetireSubmitFactSchema),
       },
@@ -1697,7 +1724,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v12-derived-identity-binding",
+      projectionVersion: "queues-v13-journal-v4-markers",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -1804,7 +1831,7 @@ type QueueActions = Readonly<{
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
   bindDerivedIdentity(args: DerivedIdentityBound): Promise<CommandResult>
-  recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
+  recordAdmission(args: ChangeAdmissionRecorded): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
   reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<CommandResult>
 }>
@@ -2984,7 +3011,7 @@ function createQueue<Shape extends ChangeShape>(
         return { processed: requestedJob !== undefined || beforeRun?.status === "queued" }
       }
       if (job.conclusion !== "success") {
-        const result = jobFailure(job)
+        const result = JobErrorSchema.parse(jobFailure(job))
         // Machinery failure, not a check verdict: a lost/canceled Job (the
         // classes admissionFailureKind marks "infrastructure") or a THROWN
         // callback (the job layer's registered `runner-error`). The record lane
@@ -5871,7 +5898,7 @@ function queueAuthorityNeedsAuthorEvent(
 }
 
 function queueAuthorityReleaseReason(
-  error: DeepReadonly<JobError> | undefined,
+  error: DeepReadonly<JobErrorFact> | undefined,
 ): QueueAuthorityRelease["reason"] | undefined {
   // A base race (the base branch or checked candidate ref moved out from under a
   // pinned Run) is environmental, not a change-content fault: release the Run's queue
@@ -6732,6 +6759,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
                 ? {}
                 : { revision: prior.revision, headSha: prior.headSha }
               : { revision: refusal.revision, headSha: refusal.headSha }),
+            ...(refusal.baseSha === undefined ? {} : { baseSha: refusal.baseSha }),
             code: refusal.code,
             ...(refusal.kind === undefined ? {} : { kind: refusal.kind }),
             reason: refusal.reason,
@@ -6739,6 +6767,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             // the refusal that produced it, so a later unjudged red must not
             // inherit an earlier judged one's permanence.
             ...(refusal.judgedFailure === undefined ? {} : { judgedFailure: refusal.judgedFailure }),
+            ...(refusal.verdictless === undefined ? {} : { verdictless: refusal.verdictless }),
             // The streak counts cycles, not codes: a wedge that flaps between
             // refusal codes is still one change that never got in. The latest code
             // is what an operator needs to act on.
@@ -7289,10 +7318,11 @@ export function advanceQueue(
     }
 
     const failure = jobFailure(job)
+    const currentFailure = JobErrorSchema.parse(failure)
     if (queueAuthorityReleaseReason(failure) !== undefined) {
-      return { events: [queueFailedEvent(state, record, failure)] }
+      return { events: [queueFailedEvent(state, record, currentFailure)] }
     }
-    const failed = queueFailedEvent(state, record, failure, job)
+    const failed = queueFailedEvent(state, record, currentFailure, job)
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const current = pr === undefined ? undefined : getChangeRecord(state.bays, pr.id)
     const revision =
@@ -7307,6 +7337,7 @@ export function advanceQueue(
     if (authorResult === undefined || isIntegrated(before) || pr === undefined) {
       return { events: [failed] }
     }
+    const currentAuthorResult = JobErrorSchema.parse(authorResult)
     if (current === undefined) {
       // RE-SOURCE (S6 census #13): a derived member has no record, so the
       // author-facing refusal FACT emits from the run's own snapshot — going
@@ -7325,9 +7356,9 @@ export function advanceQueue(
         ...(pr.props === undefined ? {} : { props: pr.props }),
         step: planned.name,
         ...(evidence === undefined ? {} : { evidence }),
-        detail: failure.message,
+        detail: currentFailure.message,
       }
-      return { events: [failed, event("pr/needs-author", { ...refusal, receipt: authorResult })] }
+      return { events: [failed, event("pr/needs-author", { ...refusal, receipt: currentAuthorResult })] }
     }
     if (changeDeliveryState(current) !== "submitted" && changeDeliveryState(current) !== "ready") {
       return { events: [failed] }
@@ -7342,10 +7373,10 @@ export function advanceQueue(
       ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
       step: planned.name,
       ...(evidence === undefined ? {} : { evidence }),
-      detail: failure.message,
+      detail: currentFailure.message,
     }
     return {
-      events: [failed, event("pr/needs-author", { ...refusal, receipt: authorResult })],
+      events: [failed, event("pr/needs-author", { ...refusal, receipt: currentAuthorResult })],
     }
   }
 
@@ -9631,7 +9662,7 @@ function checkEvidence(job: Job): Record<string, unknown> | undefined {
   return undefined
 }
 
-function checkError(job: Job | undefined, run: Run): JobError | undefined {
+function checkError(job: Job | undefined, run: Run): JobErrorFact | undefined {
   if (job?.status === "completed" && job.conclusion !== "success") return jobFailure(job)
   return run.error
 }
@@ -10672,7 +10703,7 @@ export function canonicalRefusalCode(code: string, options: CanonicalRefusalCode
 }
 
 function admissionFailureKind(
-  result: DeepReadonly<JobError>,
+  result: DeepReadonly<JobErrorFact>,
   infrastructure: boolean,
 ): Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"] {
   if (infrastructure) return "infrastructure"
@@ -10692,7 +10723,7 @@ function isInfraRetryCompositionFailure(code: string | undefined): code is Infra
   return code !== undefined && COMPOSITION_FAILURE_BUCKETS["infra-retry"].has(code)
 }
 
-function terminalJobError(job: DeepReadonly<Job> | undefined): JobError | undefined {
+function terminalJobError(job: DeepReadonly<Job> | undefined): JobErrorFact | undefined {
   if (job?.status !== "completed") return undefined
   if (job.conclusion === "failure") return job.error
   if (job.conclusion === "timed_out") return { code: "job-lost", message: job.lostReason }
@@ -10700,13 +10731,13 @@ function terminalJobError(job: DeepReadonly<Job> | undefined): JobError | undefi
   return undefined
 }
 
-function needsAuthorJobResult(job: DeepReadonly<Job> | undefined): JobError | undefined {
+function needsAuthorJobResult(job: DeepReadonly<Job> | undefined): JobErrorFact | undefined {
   const error = terminalJobError(job)
   if (error === undefined) return undefined
   if (NEEDS_AUTHOR_CODES.has(error.code)) return error
   if (job?.status !== "completed" || job.conclusion !== "failure") return undefined
   const evidence = candidateFailureResultEvidence(job.output)
-  return evidence === undefined ? undefined : JobErrorSchema.parse({ ...error, evidence })
+  return evidence === undefined ? undefined : JobErrorFactSchema.parse({ ...error, evidence })
 }
 
 /** Recover the immutable author-attribution result from an exact Queue run.
@@ -10715,7 +10746,7 @@ function needsAuthorJobResult(job: DeepReadonly<Job> | undefined): JobError | un
 export function authorAttributionResult(
   run: DeepReadonly<Run> | undefined,
   identity?: Readonly<{ pr: string; revision: number; headSha: string }>,
-): JobError | undefined {
+): JobErrorFact | undefined {
   if (run === undefined) return undefined
   if (
     identity !== undefined &&
@@ -10741,7 +10772,7 @@ function needsAuthorResult(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<Change>,
   steps: readonly RuntimeStep[],
-): JobError | undefined {
+): JobErrorFact | undefined {
   const current = changeNeedsAuthor(pr)
   if (current !== undefined) return current.receipt
   const runIds = new Set<RunId>()
@@ -10760,7 +10791,7 @@ function needsAuthorResult(
   return undefined
 }
 
-function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string {
+function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobErrorFact): string {
   const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
   if (!attributed.success) return `change '${pr.id}' cannot be composed as submitted: ${result.message}`
   const failures = attributed.data.failures
@@ -11244,7 +11275,7 @@ function isIntegrated(shape: ChangeShape): shape is IntegratedShape {
   return "integration" in shape
 }
 
-function jobFailure(job: Job): JobError {
+function jobFailure(job: Job): JobErrorFact {
   if (job.status === "completed" && job.conclusion === "failure") return job.error
   if (job.status === "completed" && job.conclusion === "timed_out") {
     return { code: "job-lost", message: job.lostReason }

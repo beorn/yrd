@@ -22,11 +22,12 @@ import * as z from "zod"
 import {
   JobRequestSchema,
   JobWaitingSchema,
+  JobErrorFactSchema,
   JobErrorSchema,
   jobTerminalResultSchema,
   type JobDef,
   type JobConclusion,
-  type JobError,
+  type JobErrorFact,
   type JobRequest,
   type JobResult,
   type JobWaiting,
@@ -62,6 +63,20 @@ const JobEvidenceSchema = z
   .strict()
 const ExecutingJobBaseSchema = JobBaseSchema.extend(JobExecutionSchema.shape)
 const EvidencedJobBaseSchema = ExecutingJobBaseSchema.extend(JobEvidenceSchema.shape)
+const FailedJobSchema = EvidencedJobBaseSchema.extend({
+  status: z.literal("completed"),
+  conclusion: z.literal("failure"),
+  finishedAt: TimestampSchema,
+  error: JobErrorSchema,
+  output: JsonSchema.optional(),
+}).strict()
+const FailedJobFactSchema = EvidencedJobBaseSchema.extend({
+  status: z.literal("completed"),
+  conclusion: z.literal("failure"),
+  finishedAt: TimestampSchema,
+  error: JobErrorFactSchema,
+  output: JsonSchema.optional(),
+}).strict()
 const JobSchema = z.union([
   JobBaseSchema.extend({ status: z.literal("queued") }).strict(),
   ExecutingJobBaseSchema.extend({ status: z.literal("in_progress"), leaseExpiresAt: TimestampSchema }).strict(),
@@ -72,13 +87,7 @@ const JobSchema = z.union([
     finishedAt: TimestampSchema,
     output: JsonSchema,
   }).strict(),
-  EvidencedJobBaseSchema.extend({
-    status: z.literal("completed"),
-    conclusion: z.literal("failure"),
-    finishedAt: TimestampSchema,
-    error: JobErrorSchema,
-    output: JsonSchema.optional(),
-  }).strict(),
+  FailedJobSchema,
   ExecutingJobBaseSchema.extend({
     status: z.literal("completed"),
     conclusion: z.literal("timed_out"),
@@ -151,7 +160,8 @@ const LegacyJobSchema = z.union([
     .strict()
     .transform((job) => ({ ...job, status: "completed" as const, conclusion: "cancelled" as const })),
 ])
-const ReplayJobSchema = z.union([JobSchema, LegacyJobSchema])
+const JobFactSchema = z.union([JobSchema, FailedJobFactSchema])
+const ReplayJobSchema = z.union([JobFactSchema, LegacyJobSchema])
 
 type JobBase = Readonly<z.infer<typeof JobBaseSchema>>
 
@@ -190,7 +200,7 @@ export type Job =
         status: "completed"
         conclusion: "failure"
         finishedAt: string
-        error: JobError
+        error: JobErrorFact
         output?: JsonValue
       })
   | (JobBase & JobExecution & { status: "completed"; conclusion: "timed_out"; finishedAt: string; lostReason: string })
@@ -476,13 +486,84 @@ export function compactJobsState(state: DeepReadonly<JobsState>): JobsState {
   }
 }
 
-const RestoreJobSchema = z.object({ job: JobSchema, retention: z.literal("detached-queue").optional() }).strict()
-const ReplayRestoreJobSchema = z
+export const RestoreJobSchema = z.object({ job: JobSchema, retention: z.literal("detached-queue").optional() }).strict()
+const RestoreJobFactPayloadSchema = z
+  .object({ job: JobFactSchema, retention: z.literal("detached-queue").optional() })
+  .strict()
+const ReplayRestoreJobPayloadSchema = z
   .object({ job: ReplayJobSchema, retention: z.literal("detached-queue").optional() })
   .strict()
 type RestoreJob = Readonly<z.infer<typeof RestoreJobSchema>>
 
+const RetryConclusionSchema = z.enum(["cancelled", "skipped"])
+type RetryConclusion = z.infer<typeof RetryConclusionSchema>
+
+type JobFactMarkers = Readonly<{
+  verdictless?: true
+  retryConclusion?: RetryConclusion
+}>
+
+function exactVerdictlessMarker(value: JobFactMarkers, nestedVerdictless: boolean, context: z.RefinementCtx): void {
+  if ((value.verdictless === true) === nestedVerdictless) return
+  context.addIssue({
+    code: "custom",
+    path: ["verdictless"],
+    message: nestedVerdictless
+      ? "verdictless Job error requires verdictless:true"
+      : "verdictless:true requires a nested verdictless Job error",
+  })
+}
+
+function verdictlessJob(job: z.infer<typeof ReplayJobSchema>): boolean {
+  return (
+    job.status === "completed" &&
+    job.conclusion === "failure" &&
+    "verdictless" in job.error &&
+    job.error.verdictless === true
+  )
+}
+
+function exactRestoreMarkers(
+  value: z.infer<typeof ReplayRestoreJobPayloadSchema> & JobFactMarkers,
+  context: z.RefinementCtx,
+): void {
+  exactVerdictlessMarker(value, verdictlessJob(value.job), context)
+  const expected =
+    value.job.status === "completed" && (value.job.conclusion === "cancelled" || value.job.conclusion === "skipped")
+      ? value.job.conclusion
+      : undefined
+  if (value.retryConclusion === expected) return
+  context.addIssue({
+    code: "custom",
+    path: ["retryConclusion"],
+    message:
+      expected === undefined
+        ? "retryConclusion requires a cancelled or skipped restored Job"
+        : `restored ${expected} Job requires retryConclusion:'${expected}'`,
+  })
+}
+
+const RestoreJobFactSchema = RestoreJobFactPayloadSchema.extend({
+  verdictless: z.literal(true).optional(),
+  retryConclusion: RetryConclusionSchema.optional(),
+}).superRefine(exactRestoreMarkers)
+const ReplayRestoreJobFactSchema = ReplayRestoreJobPayloadSchema.extend({
+  verdictless: z.literal(true).optional(),
+  retryConclusion: RetryConclusionSchema.optional(),
+}).superRefine(exactRestoreMarkers)
+
 const TerminalResultSchema = jobTerminalResultSchema(JsonSchema)
+const TerminalResultFactSchema = z.discriminatedUnion("conclusion", [
+  z.object({ status: z.literal("completed"), conclusion: z.literal("success"), output: JsonSchema }).strict(),
+  z
+    .object({
+      status: z.literal("completed"),
+      conclusion: z.literal("failure"),
+      error: JobErrorFactSchema,
+      output: JsonSchema.optional(),
+    })
+    .strict(),
+])
 const LegacyTerminalResultSchema = z.union([
   z
     .object({ status: z.literal("passed"), output: JsonSchema })
@@ -570,19 +651,78 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
   CancelJobInputSchema.extend({ type: z.literal("cancel") }).strict(),
   z.object({ type: z.literal("retry"), id: IdSchema }).strict(),
 ])
-const ReplayJobTransitionSchema = z.union([
-  JobTransitionSchema,
-  FinishJobTransitionBaseSchema.extend({ result: LegacyTerminalResultSchema }).strict(),
-])
 export type JobTransition = z.infer<typeof JobTransitionSchema>
 
-export function parseJobTransitionForReplay(value: unknown): JobTransition {
-  const parsed = ReplayJobTransitionSchema.safeParse(value)
+type JobTransitionMarkerValue = JobFactMarkers &
+  Readonly<{
+    type: string
+    result?: Readonly<{
+      conclusion?: string
+      error?: Readonly<{ code?: string; message?: string; verdictless?: true }>
+    }>
+  }>
+
+function verdictlessTransition(value: JobTransitionMarkerValue): boolean {
+  return value.type === "finish" && value.result?.conclusion === "failure" && value.result.error?.verdictless === true
+}
+
+function exactTransitionMarkers(value: JobTransitionMarkerValue, context: z.RefinementCtx): void {
+  exactVerdictlessMarker(value, verdictlessTransition(value), context)
+}
+
+const JobTransitionFactSchema = z
+  .union([
+    JobTransitionSchema,
+    FinishJobTransitionBaseSchema.extend({
+      result: TerminalResultFactSchema,
+      verdictless: z.literal(true),
+    }).strict(),
+    z
+      .object({
+        type: z.literal("retry"),
+        id: IdSchema,
+        retryConclusion: RetryConclusionSchema,
+      })
+      .strict(),
+  ])
+  .superRefine(exactTransitionMarkers)
+const ReplayJobTransitionFactSchema = z
+  .union([
+    JobTransitionFactSchema,
+    FinishJobTransitionBaseSchema.extend({
+      result: LegacyTerminalResultSchema,
+      verdictless: z.literal(true).optional(),
+    }).strict(),
+  ])
+  .superRefine(exactTransitionMarkers)
+export type ReplayJobTransitionFact = z.infer<typeof ReplayJobTransitionFactSchema>
+
+function parseJobTransitionFactForReplay(value: unknown): ReplayJobTransitionFact {
+  const parsed = ReplayJobTransitionFactSchema.safeParse(value)
   if (parsed.success) return parsed.data
   const encoded = JSON.stringify(value)
   throw new Error(`yrd: unsupported Job transition in immutable history: ${encoded ?? String(value)}`, {
     cause: parsed.error,
   })
+}
+
+export function parseJobTransitionForReplay(value: unknown): ReplayJobTransitionFact {
+  return parseJobTransitionFactForReplay(value)
+}
+
+function applyRetry(current: Job | undefined, id: string, at: string, retryConclusion?: RetryConclusion): Job {
+  if (current === undefined) throw new Error(`yrd: no job '${id}'`)
+  if (retryConclusion === undefined) {
+    requireConclusion(current, "timed_out or failure", "timed_out", "failure")
+  } else {
+    requireConclusion(current, retryConclusion, retryConclusion)
+  }
+  return { ...jobBase(current), status: "queued", changedAt: at }
+}
+
+function applyTransitionFact(current: Job | undefined, change: ReplayJobTransitionFact, at: string): Job {
+  if (change.type !== "retry") return Job.apply(current, change as JobTransition, at)
+  return applyRetry(current, change.id, at, "retryConclusion" in change ? change.retryConclusion : undefined)
 }
 
 export const Job = Object.freeze({
@@ -695,8 +835,7 @@ export const Job = Object.freeze({
         }
 
       case "retry":
-        requireConclusion(current, "timed_out or failure", "timed_out", "failure")
-        return { ...jobBase(current), status: "queued", changedAt: at }
+        return applyRetry(current, change.id, at)
     }
   },
 
@@ -872,7 +1011,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           const request = JobRequestSchema.parse(applied.data)
           if (request.key === key) bind(applied.id)
         } else if (applied.name === "job/restored") {
-          const restored = ReplayRestoreJobSchema.parse(applied.data)
+          const restored = ReplayRestoreJobFactSchema.parse(applied.data)
           if (restored.job.key === key) bind(restored.job.id)
         }
       }
@@ -1267,14 +1406,20 @@ export function withJobs(options: JobsOptions = {}) {
       commands: { job: { transition, restore } },
       events: {
         "job/requested": journalEvent(1, JobRequestSchema),
-        "job/transitioned": journalEvent(1, JobTransitionSchema),
-        "job/restored": journalEvent(1, RestoreJobSchema),
+        "job/transitioned": journalEvent(1, JobTransitionFactSchema, {
+          verdictless: 4,
+          retryConclusion: 4,
+        }),
+        "job/restored": journalEvent(1, RestoreJobFactSchema, {
+          verdictless: 4,
+          retryConclusion: 4,
+        }),
       },
       replayEvents: {
-        "job/transitioned": ReplayJobTransitionSchema,
-        "job/restored": ReplayRestoreJobSchema,
+        "job/transitioned": ReplayJobTransitionFactSchema,
+        "job/restored": ReplayRestoreJobFactSchema,
       },
-      projectionVersion: "jobs-v8-target-model-retention",
+      projectionVersion: "jobs-v9-journal-v4-markers",
       project: projectJobs,
       compact: (state) => ({ jobs: compactJobsState(state.jobs) }),
       create(yrd) {
@@ -1377,17 +1522,17 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
     }
   }
   if (applied.name === "job/restored") {
-    const restoredFact = ReplayRestoreJobSchema.parse(applied.data)
+    const restoredFact = ReplayRestoreJobFactSchema.parse(applied.data)
     const archived = restoredFact.job
     const current = state.jobs.byId[archived.id]
-    if (current !== undefined && JSON.stringify(JobSchema.parse(current)) !== JSON.stringify(archived)) {
+    if (current !== undefined && JSON.stringify(ReplayJobSchema.parse(current)) !== JSON.stringify(archived)) {
       throw new Error(`yrd: restored job '${archived.id}' does not match projected journal history`)
     }
     const keyed = archived.key === undefined ? undefined : state.jobs.byKey[archived.key]
     if (keyed !== undefined && keyed !== archived.id) {
       throw new Error(`yrd: job key '${archived.key}' is already in use`)
     }
-    const restored = Job.apply(current ?? archived, { type: "retry", id: archived.id }, applied.ts)
+    const restored = applyRetry(current ?? archived, archived.id, applied.ts, restoredFact.retryConclusion)
     return {
       jobs: {
         byId: { ...state.jobs.byId, [archived.id]: restored },
@@ -1397,9 +1542,9 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
     }
   }
   if (applied.name !== "job/transitioned") return state
-  const change = parseJobTransitionForReplay(applied.data)
+  const change = parseJobTransitionFactForReplay(applied.data)
   const current = state.jobs.byId[change.id]
-  const projected = Job.apply(current, change, applied.ts)
+  const projected = applyTransitionFact(current, change, applied.ts)
   const byId = { ...state.jobs.byId, [change.id]: projected }
   let retention = change.type === "retry" ? reopenRetention(state.jobs.retention, projected) : state.jobs.retention
   if (Job.terminal(projected) && (current === undefined || !Job.terminal(current))) {

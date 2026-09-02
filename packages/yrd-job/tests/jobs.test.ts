@@ -12,6 +12,7 @@ import {
   createMemoryJournal,
   createYrd,
   createYrdDef,
+  journalEventVocabulary,
   pipe,
   parseJournalFrame,
   type CommandTree,
@@ -26,7 +27,10 @@ import {
   isConcurrentSettlementConflict,
   isTerminalJobStatus,
   Job,
+  JobErrorFactSchema,
+  JobErrorSchema,
   JobStateConflict,
+  JobTransitionSchema,
   localRunner,
   parseJobTransitionForReplay,
   withJobs,
@@ -34,13 +38,14 @@ import {
   type Job as JobRecord,
   type JobContext,
   type JobDef,
+  type JobError,
   type JobHandler,
   type JobObservation,
   type JobResult,
   type RunnerContexts,
   type JobTransition,
 } from "@yrd/job"
-import { compactJobsState } from "../src/jobs.ts"
+import { compactJobsState, RestoreJobSchema } from "../src/jobs.ts"
 
 type Delivery = {
   message: string
@@ -220,6 +225,31 @@ function indexedJournal(): Journal<unknown> {
       },
     },
   }
+}
+
+function skippedJob(id: string) {
+  return {
+    id,
+    definition: "message.deliver",
+    revision: "transport-v1",
+    input: { message: "skipped" },
+    attempt: 0,
+    requestedAt: "2026-01-01T00:00:00.000Z",
+    changedAt: "2026-01-01T00:00:01.000Z",
+    status: "completed",
+    conclusion: "skipped",
+    finishedAt: "2026-01-01T00:00:01.000Z",
+  } as const
+}
+
+function cancelledJob(id: string) {
+  return {
+    ...skippedJob(id),
+    input: { message: "cancelled" },
+    conclusion: "cancelled",
+    canceledBy: "operator",
+    cancelReason: "keep terminal",
+  } as const
 }
 
 describe("JobDef", () => {
@@ -414,6 +444,148 @@ describe("Jobs", () => {
         result: { status: "completed", conclusion: "superseded" },
       }),
     ).toThrow(/unsupported Job transition.*superseded/u)
+  })
+
+  it("versions only the new Job fact markers and requires exact nested marker evidence", () => {
+    const definition = pipe(createYrdDef(), withJobs())
+    const vocabulary = journalEventVocabulary(definition.events)
+    const transitioned = definition.events["job/transitioned"]!.schema
+    const restored = definition.events["job/restored"]!.schema
+    const replayOnlyError = {
+      code: "runner-lost",
+      message: "runner disappeared",
+      // @ts-expect-error verdictless belongs to replay facts until the v4 writer activates.
+      verdictless: true,
+    } satisfies JobError
+    const failure = {
+      type: "finish",
+      id: JOB_ID,
+      attempt: 1,
+      runner: "worker-1",
+      result: {
+        status: "completed",
+        conclusion: "failure",
+        error: replayOnlyError,
+      },
+    } as const
+    const skipped = skippedJob(testId(110))
+
+    expect(vocabulary["job/transitioned"]).toMatchObject({
+      reader: 1,
+      fields: { type: 1, retryConclusion: 4, verdictless: 4 },
+    })
+    expect(vocabulary["job/restored"]).toMatchObject({
+      reader: 1,
+      fields: { job: 1, retention: 1, retryConclusion: 4, verdictless: 4 },
+    })
+    expect(JobErrorFactSchema.parse(failure.result.error)).toEqual(failure.result.error)
+    expect(JobErrorSchema.safeParse(failure.result.error).success).toBe(false)
+    expect(JobTransitionSchema.safeParse({ ...failure, verdictless: true }).success).toBe(false)
+    expect(transitioned.parse({ ...failure, verdictless: true })).toMatchObject({ verdictless: true })
+    expect(() => transitioned.parse(failure)).toThrow()
+    expect(() =>
+      transitioned.parse({
+        ...failure,
+        verdictless: true,
+        result: { ...failure.result, error: { code: "content", message: "content failed" } },
+      }),
+    ).toThrow()
+    expect(restored.parse({ job: skipped, retryConclusion: "skipped" })).toMatchObject({
+      retryConclusion: "skipped",
+    })
+    expect(() => restored.parse({ job: skipped })).toThrow()
+    expect(() => restored.parse({ job: skipped, retryConclusion: "cancelled" })).toThrow()
+  })
+
+  it("projects only exact v4 retry markers without widening the v3 command guards", async () => {
+    const definition = pipe(createYrdDef(), withJobs())
+    const cause = {
+      id: testId(115),
+      commandId: testId(116),
+      op: "test.project",
+      commandHash: "0".repeat(64),
+    }
+    let sequence = 120
+    const project = (
+      state: typeof definition.initialState,
+      name: string,
+      data: Event["data"],
+      id = testId(++sequence),
+    ) =>
+      definition.project(
+        state,
+        {
+          id,
+          name,
+          ts: new Date(Date.UTC(2026, 0, 1, 0, 0, sequence)).toISOString(),
+          data: definition.events[name]!.schema.parse(data),
+        },
+        cause,
+      )
+    const skippedId = testId(120)
+    const failedId = testId(121)
+    let state = project(
+      definition.initialState,
+      "job/requested",
+      { definition: "message.deliver", revision: "transport-v1", input: { message: "cancelled" } },
+      JOB_ID,
+    )
+    state = project(state, "job/transitioned", {
+      type: "cancel",
+      id: JOB_ID,
+      attempt: 0,
+      by: "operator",
+      reason: "retry me",
+    })
+    expect(() => project(state, "job/transitioned", { type: "retry", id: JOB_ID })).toThrow(/timed_out or failure/u)
+    expect(() => project(state, "job/transitioned", { type: "retry", id: JOB_ID, retryConclusion: "skipped" })).toThrow(
+      /skipped/u,
+    )
+    state = project(state, "job/transitioned", { type: "retry", id: JOB_ID, retryConclusion: "cancelled" })
+    state = project(state, "job/restored", { job: skippedJob(skippedId), retryConclusion: "skipped" })
+    state = project(
+      state,
+      "job/requested",
+      { definition: "message.deliver", revision: "transport-v1", input: { message: "failed" } },
+      failedId,
+    )
+    state = project(state, "job/transitioned", {
+      type: "start",
+      id: failedId,
+      attempt: 1,
+      runner: "worker-1",
+      leaseExpiresAt: "2026-01-01T00:03:07.000Z",
+    })
+    state = project(state, "job/transitioned", {
+      type: "finish",
+      id: failedId,
+      attempt: 1,
+      runner: "worker-1",
+      result: {
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "runner-lost", message: "runner disappeared", verdictless: true },
+      },
+      verdictless: true,
+    })
+
+    expect(state.jobs.byId[JOB_ID]).toMatchObject({ status: "queued" })
+    expect(state.jobs.byId[skippedId]).toMatchObject({ status: "queued" })
+    expect(state.jobs.byId[failedId]).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { verdictless: true },
+    })
+
+    await using app = await jobsApp(delivery(), { id: ids("send", "C-send", JOB_ID) })
+    await app.dispatch(app.commands.sender.send, { message: "guard" })
+    await app.jobs.cancel({ id: JOB_ID, attempt: 0, by: "operator", reason: "keep terminal" })
+    await expect(app.jobs.retry(JOB_ID)).rejects.toThrow(/timed_out or failure/u)
+    const cancelled = cancelledJob(testId(130))
+    await expect(app.dispatch(app.commands.job.restore, { job: cancelled })).rejects.toThrow(/timed_out or failure/u)
+    const verdictless = state.jobs.byId[failedId]
+    if (verdictless === undefined) throw new Error("expected projected verdictless Job")
+    expect(RestoreJobSchema.safeParse({ job: verdictless }).success).toBe(false)
   })
 
   it("retains all live Jobs, the latest 512 standalone terminals, and 512 complete Queue-owned groups", () => {
@@ -897,10 +1069,13 @@ describe("Jobs", () => {
   it("keeps a REQUIRED job's succeeded completion at INFO", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    const app = await jobsApp(delivery(undefined, "transport-v1", undefined, () => ({ required: true })), {
-      id: ids("send", "C-send", JOB_ID),
-      log,
-    })
+    const app = await jobsApp(
+      delivery(undefined, "transport-v1", undefined, () => ({ required: true })),
+      {
+        id: ids("send", "C-send", JOB_ID),
+        log,
+      },
+    )
     try {
       const requested = await app.dispatch(app.commands.sender.send, { message: "still-ok" })
       await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })

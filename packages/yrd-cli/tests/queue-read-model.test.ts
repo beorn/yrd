@@ -245,10 +245,54 @@ describe("queue read model", () => {
     const journal = createJournal({
       dir,
       views: [model.view],
+      writerVersion: 4,
     })
-    const events = attemptEvents("parity")
+    const [requested, started, finished] = attemptEvents("parity")
+    if (requested === undefined || started === undefined || finished === undefined) {
+      throw new Error("expected complete Queue attempt fixture")
+    }
+    const retryJob = uuid("job:parity-retry")
+    const events = [
+      requested,
+      started,
+      EventSchema.parse({
+        ...finished,
+        data: {
+          type: "finish",
+          id: requested.id,
+          attempt: 1,
+          runner: "yrd-test",
+          result: {
+            status: "completed",
+            conclusion: "failure",
+            error: { code: "runner-lost", message: "runner disappeared", verdictless: true },
+          },
+          verdictless: true,
+        },
+      }),
+      EventSchema.parse({
+        id: retryJob,
+        name: "job/requested",
+        ts: "2026-07-28T12:00:05.000Z",
+        data: { definition: "queue.step.check", revision: "check-v1", input: { message: "cancelled" } },
+      }),
+      EventSchema.parse({
+        id: uuid("cancel:parity-retry"),
+        name: "job/transitioned",
+        ts: "2026-07-28T12:00:06.000Z",
+        data: { type: "cancel", id: retryJob, attempt: 0, by: "operator", reason: "retry me" },
+      }),
+      EventSchema.parse({
+        id: uuid("retry:parity-retry"),
+        name: "job/transitioned",
+        ts: "2026-07-28T12:00:07.000Z",
+        data: { type: "retry", id: retryJob, retryConclusion: "cancelled" },
+      }),
+    ]
 
-    await expect(journal.append(journalFrame("parity", events), 0)).resolves.toEqual({
+    await expect(
+      journal.append({ ...journalFrame("parity", events), compatibility: { version: 4 } }, 0),
+    ).resolves.toEqual({
       appended: true,
       cursor: 1,
     })

@@ -157,18 +157,22 @@ Append is optimistic compare-and-append. On conflict, Core catches up and reruns
 the pure command decision. `createMemoryJournal()` is the focused-test adapter;
 filesystem durability belongs to `@yrd/persistence`.
 
-Frames may carry `compatibility: { version, reader }`. `version` is the
-monotonic semantic journal contract used for comparison; `reader` is the full
-commit pin operators must install when their runtime cannot parse that
-version. Legacy frames omit the field and remain version 0. A runtime refuses
-a frame above `JOURNAL_READER_VERSION` before projecting it, and an injected
-compatibility value is stamped on every new frame.
+Frames may carry `compatibility: { version }`. `version` is the monotonic
+semantic journal vocabulary the writer used; legacy immutable frames may also
+carry the retired `reader` diagnostic, which current readers validate and
+discard. Legacy unstamped frames remain version 0. `SUPPORTED_VERSIONS` and
+`JOURNAL_READER_VERSION` describe this build's compiled capability. A declared
+version ahead of that capability is not itself a refusal: the reader parses the
+frame with its own strict schemas and refuses with `journal-version-skew` only
+when the frame actually needs vocabulary it lacks. An injected compatibility
+value is stamped on every new frame.
 
 Every writable event is a `journalEvent(reader, schema)`, so its minimum reader
 and payload schema are one inseparable definition. An event above the active
 writer version refuses before append. Reader support and writer activation
-therefore merge as separate commits: first raise `JOURNAL_READER_VERSION`, then
-activate that version with the first commit's full reader pin.
+therefore ship separately: first raise the compiled reader capability and
+deploy it everywhere, then advance the journal floor and the host's explicit
+writer version. Teaching a reader vN must not silently activate vN writes.
 
 That binding is per FIELD, not only per event name, because an event usually
 grows rather than appears: a payload that gains a key keeps its event name and
