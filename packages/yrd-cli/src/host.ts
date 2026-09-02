@@ -107,8 +107,11 @@ import {
   Queues,
   buildMergedTruthIndex,
   landedSubmits,
+  mergedTruth,
   stampingEpochStop,
   type DerivedSubmitEnrichment,
+  type LandedMergeResolver,
+  type MergedTruth,
   type MergedTruthGit,
   type MergedTruthIndex,
   type TrailerAbsentException,
@@ -2328,6 +2331,15 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
   // outside checkpoint-identity state: mint durability must survive the store
   // re-initialization class (22986).
   const prNumberMint = createDurablePrNumberMint({ dir: options.stateDir })
+  // ONE merged-truth reader behind both of the queue's repository-truth
+  // questions — the compose's landed-submit scan and the pass-start orphan
+  // settlement (24030) — so the two cannot disagree about what the base carries.
+  const mergedTruthReader = createMergedTruthReader({
+    process: options.process,
+    repo: options.repo,
+    exceptions: mergedTruthExceptions(options.config),
+    ...(options.log === undefined ? {} : { log: options.log }),
+  })
   const queue = withQueue({
     steps: configuredQueueSteps(options, mergeCommand, gateScriptShas),
     batch: options.config.batch,
@@ -2336,12 +2348,8 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     requires: options.config.requires,
     prNumberMint,
     readSubmitEnrichment: ({ sha }) => readDerivedSubmitEnrichment(options.process, options.repo, sha),
-    scanLandedSubmits: landedSubmitScanner({
-      process: options.process,
-      repo: options.repo,
-      exceptions: mergedTruthExceptions(options.config),
-      ...(options.log === undefined ? {} : { log: options.log }),
-    }),
+    scanLandedSubmits: landedSubmitScanner(mergedTruthReader),
+    landedMerge: landedMergeResolver(mergedTruthReader, options.log),
     isSubmitSuperseded: ({ sha, base }) => isSubmitContentLanded(options.process, options.repo, sha, base),
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(options.config.needsPerson === undefined ? {} : { needsPersonOwner: options.config.needsPerson.owner }),
@@ -2919,11 +2927,13 @@ export function mergedTruthGit(process: Pick<Process, "run">): MergedTruthGit {
 }
 
 /**
- * The queue's `scanLandedSubmits` capability: which standing submit facts does
- * this repository already carry?
+ * The host's one merged-truth reader, behind the queue's `scanLandedSubmits`
+ * capability (which standing submit facts does this repository already carry?)
+ * and its `landedMerge` capability (did an orphaned merge step's work reach the
+ * base? — 24030).
  *
- * One first-parent index per DISTINCT base, built on demand and cached inside
- * one scan, and BOUNDED at the trailer-stamping epoch — the contract
+ * One first-parent index per DISTINCT base, built on demand and held while its
+ * tip stands, and BOUNDED at the trailer-stamping epoch — the contract
  * `merged-truth.ts` states for its production callers, which this one used to
  * decline.
  *
@@ -2954,7 +2964,13 @@ export function mergedTruthGit(process: Pick<Process, "run">): MergedTruthGit {
  * memoized for the scanner's life, since the oldest stamped commit does not
  * move as the tip advances.
  */
-function landedSubmitScanner(
+type MergedTruthReader = Readonly<{
+  git: MergedTruthGit
+  /** The first-parent index for `base` at its CURRENT tip. */
+  indexFor(base: string): Promise<MergedTruthIndex>
+}>
+
+function createMergedTruthReader(
   options: Readonly<{
     process: Pick<Process, "run">
     repo: string
@@ -2964,7 +2980,7 @@ function landedSubmitScanner(
     exceptions?: ReadonlyMap<string, TrailerAbsentException>
     log?: ConditionalLogger
   }>,
-) {
+): MergedTruthReader {
   const git = mergedTruthGit(options.process)
   const stops = new Map<string, Promise<string | undefined>>()
   const stopFor = (base: string, tip: string): Promise<string | undefined> => {
@@ -2989,28 +3005,121 @@ function landedSubmitScanner(
     reported.add(key)
     for (const line of describeMergedTruthGaps(index)) options.log?.warn?.(line)
   }
+  // ONE INDEX PER BASE WHILE ITS TIP STANDS. The index is a pure function of
+  // (tip, stop, exceptions): history under a fixed sha is immutable and the
+  // other two are fixed for this host's life, so a rebuild at the same tip is
+  // the same value at the price of another walk. It is reused across the
+  // compose's scan and an orphan settlement that may ask for several runs in
+  // one pass, and REPLACED — never accumulated — when the tip moves. Keyed by
+  // the resolved tip, not by a candidate's own `baseSha`: that is the
+  // pre-integration base, which by definition does not contain a landing.
+  const held = new Map<string, Readonly<{ tip: string; index: MergedTruthIndex }>>()
+  const indexFor = async (base: string): Promise<MergedTruthIndex> => {
+    const tip = (
+      await resolveGitQueueTarget({
+        inject: { process: options.process },
+        repo: options.repo,
+        branch: baseIdentity(base),
+      })
+    ).sha
+    const current = held.get(base)
+    if (current !== undefined && current.tip === tip) return current.index
+    const stop = await stopFor(base, tip)
+    const index = await buildMergedTruthIndex(git, options.repo, {
+      tip,
+      ...(stop === undefined ? {} : { stop }),
+      ...(options.exceptions === undefined ? {} : { exceptions: options.exceptions }),
+    })
+    held.set(base, { tip, index })
+    reportGaps(index)
+    return index
+  }
+  return { git, indexFor }
+}
+
+/** The queue's `scanLandedSubmits` capability over the host's one reader. */
+function landedSubmitScanner(reader: MergedTruthReader) {
   return async (input: Readonly<{ bays: Parameters<typeof landedSubmits>[2] }>) =>
-    landedSubmits(
-      git,
-      async (base) => {
-        const tip = (
-          await resolveGitQueueTarget({
-            inject: { process: options.process },
-            repo: options.repo,
-            branch: baseIdentity(base),
-          })
-        ).sha
-        const stop = await stopFor(base, tip)
-        const index = await buildMergedTruthIndex(git, options.repo, {
-          tip,
-          ...(stop === undefined ? {} : { stop }),
-          ...(options.exceptions === undefined ? {} : { exceptions: options.exceptions }),
-        })
-        reportGaps(index)
-        return index
-      },
-      input.bays,
-    )
+    landedSubmits(reader.git, reader.indexFor, input.bays)
+}
+
+/**
+ * The queue's `landedMerge` capability (@i/10-yrd/24030, R3747): does the base
+ * already carry an orphaned merge step's work? Asked of git through the same
+ * reader as the compose's scan, and answered by `mergedTruth` — the ONE
+ * derivation `@yrd/queue` exports: ancestry of the member's authored head
+ * against the walked tip first, then Change-Id lineage, then the loud unknown.
+ * The candidate's own `baseSha` is passed as the degeneracy guard, so a head
+ * that IS its base proves nothing.
+ *
+ * EVERY member must be proven. One unproven member answers `undefined`: the
+ * run then times out through the job layer and its members re-queue — the
+ * same outcome as no reader at all, with a row saying what was asked and what
+ * was found. The proof names the landing commit the index knows for the member
+ * (the first-parent merge that carried its head, else its stamped synthesis
+ * commit, else the head itself for a fast-forward) and the walked tip as
+ * `baseSha` — the base tip after integration, which is what a finished merge
+ * step writes. A batch whose members name different landing commits reports
+ * the walked tip as the landing, the way `pr/already-landed` does when no
+ * single merge commit is nameable. Git faults propagate: an unreadable
+ * repository fails the pass loudly rather than re-queueing a landed change as
+ * "not proven".
+ */
+function landedMergeResolver(reader: MergedTruthReader, log?: ConditionalLogger): LandedMergeResolver {
+  return async (input) => {
+    const index = await reader.indexFor(input.base)
+    const landings = new Set<string>()
+    for (const member of input.members) {
+      const answer = await mergedTruth(reader.git, index, {
+        authoredTip: member.headSha,
+        base: input.baseSha,
+        member: member.pr,
+        ...(member.changeId === undefined ? {} : { changeId: member.changeId }),
+      })
+      if (answer.kind !== "merged") {
+        log?.info?.(
+          `Orphaned merge step of queue run ${input.run}: ${member.pr} revision ${String(member.revision)} at ` +
+            `${member.headSha} is not proven landed on '${input.base}' (${index.tip}): ${describeUnprovenLanding(answer)}`,
+          {
+            action: "orphaned-merge-unproven",
+            run: input.run,
+            base: input.base,
+            tip: index.tip,
+            member: member.pr,
+            revision: member.revision,
+            headSha: member.headSha,
+            verdict: answer.kind,
+            ...(answer.kind === "unknown" ? { reason: answer.reason } : {}),
+          },
+        )
+        return undefined
+      }
+      landings.add(landingCommitOf(answer, index))
+    }
+    const [commit] = landings
+    if (commit === undefined) {
+      throw new Error(`yrd: queue run '${input.run}' names no members, so its merge step has nothing to prove landed`)
+    }
+    return { commit: landings.size === 1 ? commit : index.tip, baseSha: index.tip }
+  }
+}
+
+/** The landing commit a merged answer names, in the order the index can name one. */
+function landingCommitOf(answer: Extract<MergedTruth, { kind: "merged" }>, index: MergedTruthIndex): string {
+  if (answer.mergeCommit !== undefined) return answer.mergeCommit
+  const occurrences = answer.occurrences ?? []
+  const stamped = occurrences.find((occurrence) => occurrence.operation === "merge") ?? occurrences[0]
+  return stamped?.commit ?? answer.authoredTip ?? index.tip
+}
+
+function describeUnprovenLanding(answer: Exclude<MergedTruth, { kind: "merged" }>): string {
+  if (answer.kind === "not-merged") {
+    return `not contained in the walked tip, and no lineage occurrence over ${String(answer.commitsWalked)} walked commits`
+  }
+  if (answer.reason === "trailer-absent") {
+    return `${String(answer.specimens.length)} unreadable specimen(s) in the walked window leave the lineage lookup unanswerable`
+  }
+  return answer.detail
 }
 
 /**
