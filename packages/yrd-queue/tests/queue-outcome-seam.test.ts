@@ -198,13 +198,43 @@ describe("every ended attempt reaches the outcome seam exactly once", () => {
     expect(attempt).toBe(runs[0]?.id)
     expect(app.state().queues.outcomes).toEqual({})
 
-    await app.queue.noteAttemptOutcome({ attempt, kind: "landed", recipient: "@dev/9", disposition: "landed", ball: "ball-1" })
-    await app.queue.noteAttemptOutcome({ attempt, kind: "landed", recipient: "@cto", disposition: "landed", ball: "ball-2" })
-    await app.queue.noteAttemptOutcome({ attempt: "pass:r1:t1", kind: "yrd-broken", recipient: "@cto", disposition: "pass-error" })
+    await app.queue.noteAttemptOutcome({
+      attempt,
+      kind: "landed",
+      recipient: "@dev/9",
+      disposition: "landed",
+      ball: "ball-1",
+    })
+    await app.queue.noteAttemptOutcome({
+      attempt,
+      kind: "landed",
+      recipient: "@cto",
+      disposition: "landed",
+      ball: "ball-2",
+    })
+    await app.queue.noteAttemptOutcome({
+      attempt: "pass:r1:t1",
+      kind: "yrd-broken",
+      recipient: "@cto",
+      disposition: "pass-error",
+    })
 
     expect(app.state().queues.outcomes).toEqual({
-      [attempt]: { attempt, kind: "landed", recipient: "@dev/9", disposition: "landed", ball: "ball-1", at: "2026-01-01T00:00:00.000Z" },
-      "pass:r1:t1": { attempt: "pass:r1:t1", kind: "yrd-broken", recipient: "@cto", disposition: "pass-error", at: "2026-01-01T00:00:00.000Z" },
+      [attempt]: {
+        attempt,
+        kind: "landed",
+        recipient: "@dev/9",
+        disposition: "landed",
+        ball: "ball-1",
+        at: "2026-01-01T00:00:00.000Z",
+      },
+      "pass:r1:t1": {
+        attempt: "pass:r1:t1",
+        kind: "yrd-broken",
+        recipient: "@cto",
+        disposition: "pass-error",
+        at: "2026-01-01T00:00:00.000Z",
+      },
     })
   })
 
@@ -294,7 +324,9 @@ describe("every ended attempt reaches the outcome seam exactly once", () => {
     // soon as the merge Job is started, so the run is live but not terminal
     // when its pass ends; the Job completes on its own clock, and the next
     // pass observes that and settles the run.
-    await deferredMerge((app) => app.bays.submit({ branch: "issue/deferred", headSha: SHA, base: "main", baseSha: BASE }))
+    await deferredMerge((app) =>
+      app.bays.submit({ branch: "issue/deferred", headSha: SHA, base: "main", baseSha: BASE }),
+    )
   })
 
   it.fails("KNOWN GAP — a DERIVED member's deferred merge is never resumed: no claim names its run, so no later selectorless pass settles it, and its outcome never sends", async () => {

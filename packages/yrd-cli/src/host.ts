@@ -4265,7 +4265,9 @@ async function createYrdRuntimeHost(
       }),
       ...(loaded.config.notify === undefined ? {} : { notifyCommand: loaded.config.notify }),
       ...(loaded.config.owner === undefined ? {} : { owner: loaded.config.owner }),
-      logPath: env.LOGGILY_FILE ?? `the runner's stderr (LOGGILY_FILE is unset; runner ${habitant?.id ?? String(globalThis.process.pid)})`,
+      logPath:
+        env.LOGGILY_FILE ??
+        `the runner's stderr (LOGGILY_FILE is unset; runner ${habitant?.id ?? String(globalThis.process.pid)})`,
       log: log.child("outcome"),
       run: spawnNotifier(repository.repo, env),
     })
