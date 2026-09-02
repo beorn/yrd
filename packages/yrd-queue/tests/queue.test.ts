@@ -4574,7 +4574,7 @@ describe("Queue", () => {
     )
   })
 
-  it("bounds environment-refused admission retries and parks unchanged check authority", async () => {
+  it("bounds environment-refused admission retries and parks unchanged check authority — recorded as an infrastructure-kind refusal, never the author's", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     let refuseEnvironment = true
@@ -4612,7 +4612,7 @@ describe("Queue", () => {
       })
       expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({
         status: "refused",
-        kind: "failure",
+        kind: "infrastructure",
         step: "check",
         receipt: { code: "queue-environment-refused" },
       })
@@ -4639,7 +4639,7 @@ describe("Queue", () => {
     expect(checks).toBe(2)
   })
 
-  it("lets an admitted check settle but suppresses every retry once the queue is paused", async () => {
+  it("lets an admitted check settle but suppresses every retry once the queue is paused — the environment refusal is recorded infrastructure-kind", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     const checkStarted = Promise.withResolvers<void>()
@@ -4693,7 +4693,11 @@ describe("Queue", () => {
     await operator.queue.resume("main")
     await runner.refresh()
     expect(await runner.queue.admit({ prs: [pr.id] }, runtime)).toEqual([])
-    expect(changeAdmission(runner.bays.pr(pr.id)!)).toMatchObject({ status: "refused", kind: "failure", step: "check" })
+    expect(changeAdmission(runner.bays.pr(pr.id)!)).toMatchObject({
+      status: "refused",
+      kind: "infrastructure",
+      step: "check",
+    })
     expect(checks).toBe(1)
   })
 
