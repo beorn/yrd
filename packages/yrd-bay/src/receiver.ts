@@ -284,10 +284,29 @@ export type ReceiverHookOptions = {
    */
   drainDeferred?: (drained: Readonly<ReceiverDrainResult>) => void
 }
+/**
+ * A prepared result whose push the receiver cannot confirm: pre-receive stored
+ * the entry, but the ref it names does not contain the head it announced — not
+ * as tip, ancestor, or reflog entry — so post-receive never ran for it. Every
+ * fact the entry carries rides along so the caller can name the branch, ref,
+ * head, age and file instead of an opaque id: an ambiguous entry blocks every
+ * drain until the ref comes to contain the head or the file is retired, and a
+ * re-push does NOT clear it (a new push is a new entry beside this one;
+ * measured 2026-09-01, when one such entry refused every queue pass for an hour).
+ */
+export type ReceiverAmbiguousResult = Readonly<{
+  id: string
+  /** The `.prepared.json` file on disk — the thing an operator has to retire. */
+  path: string
+  ref: string
+  branch: string
+  headSha: string
+  receivedAt: string
+}>
 export type ReceiverDrainResult = {
   delivered: string[]
   failed: Array<{ id: string; error: string }>
-  ambiguous: string[]
+  ambiguous: ReceiverAmbiguousResult[]
   /**
    * Results this pass deliberately did not attempt — the lock was held, or the
    * budget ran out. NOT failures: each is still `pending` on disk and the next
@@ -2035,7 +2054,14 @@ async function recoverPrepared(
     try {
       const result = await readResult(path, id)
       if (!(await refContains(receiver, result.ref, result.headSha))) {
-        drain.ambiguous.push(id)
+        drain.ambiguous.push({
+          id,
+          path,
+          ref: result.ref,
+          branch: result.branch,
+          headSha: result.headSha,
+          receivedAt: result.receivedAt,
+        })
         continue
       }
       await validateStored(receiver, result, options)
