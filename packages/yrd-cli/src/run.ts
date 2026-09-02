@@ -71,13 +71,15 @@ import {
   cleanGitEnvironment,
   createProcess,
   observePidSync,
-  pathReapDeletionFailure,
+  certifyPathReapDeletion,
+  describeToleratedCensusGap,
   type GitSyncReadCommand,
   recordedPidIsRunning,
   recordedPidLiveness,
   recordedPidLivenessSync,
   type Process,
   type ProcessResult,
+  type ToleratedCensusGap,
 } from "@yrd/process"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import {
@@ -4339,8 +4341,16 @@ async function runBaySession(
   try {
     bay = await checkpointRunBay(app, bay, identity.claim, io)
     if (await preserveInterruptedRunBay(app, bay, "post-child checkpoint", io)) return 1
-    const closed = await closeBayWithProcessReap(app, services, bay, {}, io, `bay '${bay.id}' close`)
-    if (closed?.status !== "closed") refusal(`bay '${bay.id}' did not close synchronously`)
+    const { bay: closed, tolerated } = await closeBayWithProcessReap(
+      app,
+      services,
+      bay,
+      {},
+      io,
+      `bay '${bay.id}' close`,
+    )
+    if (closed.status !== "closed") refusal(`bay '${bay.id}' did not close synchronously`)
+    if (tolerated.length > 0) io.stdout(`${toleratedCensusGapsRecord(bay, tolerated)}\n`)
     io.stdout(`closed ${identity.bay}\n`)
     return 0
   } catch (error) {
@@ -4488,22 +4498,24 @@ async function certifyBayHandoff(
   )
 }
 
+/** Certify the teardown; the census gaps it tolerated come back for the record. */
 async function certifyBayProcessesStopped(
   processService: Pick<Process, "reapPath"> | undefined,
   bay: Bay,
   path: string | undefined,
   tolerateUnreadable?: ReadonlySet<number>,
-): Promise<void> {
+): Promise<readonly ToleratedCensusGap[]> {
   // Provision can fail before a workspace exists. There is then no path-owned
   // process tree to reap; explicit force-close must still be able to drive the
   // durable Bay record to a terminal state.
-  if (path === undefined) return
+  if (path === undefined) return []
   if (processService === undefined) configuration("bay close requires the process-backed Yrd runtime")
   const reaped = await processService.reapPath(path)
-  const failure = pathReapDeletionFailure(reaped, tolerateUnreadable)
-  if (failure !== undefined) {
-    throw new Error(`yrd: Bay '${bay.name}' process-tree teardown failed: ${failure}`)
+  const certification = certifyPathReapDeletion(reaped, tolerateUnreadable)
+  if (certification.failure !== undefined) {
+    throw new Error(`yrd: Bay '${bay.name}' process-tree teardown failed: ${certification.failure}`)
   }
+  return certification.tolerated
 }
 
 async function closeBayWithProcessReap(
@@ -4513,23 +4525,32 @@ async function closeBayWithProcessReap(
   options: Readonly<{ withdraw?: boolean; force?: boolean; tolerateUnreadable?: ReadonlySet<number> }>,
   io: YrdCliIO,
   jobContext: string,
-): Promise<Bay> {
+): Promise<Readonly<{ bay: Bay; tolerated: readonly ToleratedCensusGap[] }>> {
   // First empty the active Bay. Then atomically mark it closing so `bay in`
   // refuses new guests, and re-census before the deprovision job removes the
   // ownership root. This closes the attach-between-census-and-delete race.
   const path =
     services.resolveBayWorkspacePath === undefined ? bay.path : services.resolveBayWorkspacePath(bay.id, bay.path)
-  await certifyBayProcessesStopped(services.process, bay, path, options.tolerateUnreadable)
+  const toleratedBefore = await certifyBayProcessesStopped(services.process, bay, path, options.tolerateUnreadable)
   const closing = await app.bays.close({
     bay: bay.id,
     ...(options.withdraw === true ? { withdraw: true } : {}),
     ...(options.force === true ? { force: true } : {}),
   })
-  await certifyBayProcessesStopped(services.process, bay, path, options.tolerateUnreadable)
+  const toleratedAfter = await certifyBayProcessesStopped(services.process, bay, path, options.tolerateUnreadable)
   assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), jobContext)
   const closed = app.bays.get(bay.id)
   if (closed === undefined) throw new Error(`yrd: Bay '${bay.name}' disappeared while it was closing`)
-  return closed
+  // Both censuses certified this teardown; a gap seen by both is one gap, and
+  // the later observation is the one to keep.
+  const byPid = new Map<number, ToleratedCensusGap>()
+  for (const gap of [...toleratedBefore, ...toleratedAfter]) byPid.set(gap.pid, gap)
+  return { bay: closed, tolerated: [...byPid.values()].sort((left, right) => left.pid - right.pid) }
+}
+
+/** The close record's line for the gaps a teardown was certified over. */
+function toleratedCensusGapsRecord(bay: Bay, gaps: readonly ToleratedCensusGap[]): string {
+  return `bay close ${bay.id} ${bay.name}: census gaps tolerated: ${gaps.map(describeToleratedCensusGap).join("; ")}`
 }
 
 function parseToleratedUnreadablePids(value: string | undefined): ReadonlySet<number> | undefined {
@@ -4575,6 +4596,7 @@ async function closeBays(
   }
   const bays = selectedBays(stateOf(app).bays, selectors, cwd, "close")
   const closed: Bay[] = []
+  const tolerated: Array<Readonly<{ bay: Bay["id"]; gaps: readonly ToleratedCensusGap[] }>> = []
   const refused: BayStatusReport[] = []
   const remoteTrackingFresh = await refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
@@ -4605,13 +4627,13 @@ async function closeBays(
         io,
         `bay '${bay.id}' close`,
       )
-      if (tolerateUnreadable !== undefined) {
-        // The waiver is part of the operation's record: say exactly which pids
-        // the operator vouched for while this bay's teardown was certified.
-        await printHuman(
-          io,
-          `bay close ${bay.id} ${bay.name}: census gaps tolerated for unreadable pid(s) ${[...tolerateUnreadable].sort((a, b) => a - b).join(", ")} (operator flag)`,
-        )
+      if (current.tolerated.length > 0) {
+        // The waiver is part of the operation's record: say exactly which census
+        // gaps this bay's teardown was certified over, and for each whether it
+        // cleared itself (zombie, exited) or the operator vouched for it. In
+        // JSON the record rides in the result, never as a line in the stream.
+        tolerated.push({ bay: bay.id, gaps: current.tolerated })
+        if (!jsonEnabled(options)) await printHuman(io, toleratedCensusGapsRecord(bay, current.tolerated))
       }
       if (withdrawing.length > 0) {
         await app.queue.cancel({
@@ -4620,7 +4642,7 @@ async function closeBays(
           reason: "PR withdrawn",
         })
       }
-      closed.push(current)
+      closed.push(current.bay)
     } catch (error) {
       const current = app.bays.get(bay.id)
       const detail = errorDetail(error).replace(/^yrd:\s*/u, "")
@@ -4673,7 +4695,7 @@ async function closeBays(
     await printResult(
       io,
       jsonEnabled(options),
-      { command: "bay.close", bays: closed, refused: refused.map((report) => report.bay) },
+      { command: "bay.close", bays: closed, refused: refused.map((report) => report.bay), tolerated },
       createElement(BayStatusView, { bays: closed }),
     )
   }
@@ -14978,7 +15000,9 @@ function commanderErrorMessage(command: CliCommand | undefined, error: Commander
   // Not "draft PRs are created with 'yrd pr create'": drafts went away with the
   // legacy record mint (72c0282e), so that cure named a command that refuses.
   // A branch with no change is delivered by submitting it plainly.
-  return removedDraftSubmit ? `${error.message}; drafts are retired, submit it with 'yrd pr submit <branch>'` : error.message
+  return removedDraftSubmit
+    ? `${error.message}; drafts are retired, submit it with 'yrd pr submit <branch>'`
+    : error.message
 }
 
 function commandPath(command: CliCommand | undefined, fallback: string): string {

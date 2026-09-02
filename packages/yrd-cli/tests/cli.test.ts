@@ -62,7 +62,7 @@ import {
 } from "@yrd/core"
 import { withJobs, type Job, type JobResult } from "@yrd/job"
 import { createExclusive, createJournal } from "@yrd/persistence"
-import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
+import { createProcess, type ProcessRequest, type ProcessResult, type UnreadableProcess } from "@yrd/process"
 import {
   Queues,
   type Run,
@@ -647,6 +647,49 @@ function completePathReapResult() {
     forcedKill: false,
     signalFailures: [],
   }
+}
+
+/** A process service whose Linux census found no holder but could not read
+ * exactly these same-uid procs; the source counts agree with the named
+ * denials, the way the real census reports them. */
+function censusServices(unreadable: readonly UnreadableProcess[]): YrdCliServices {
+  const denied = (name: UnreadableProcess["denied"][number]) =>
+    unreadable.filter((proc) => proc.denied.includes(name)).length
+  const source = (name: UnreadableProcess["denied"][number]) => ({
+    readable: unreadable.length - denied(name),
+    unavailable: { exited: 0, denied: denied(name) },
+  })
+  return {
+    process: {
+      reapPath: async () => ({
+        targetedPids: [],
+        survivorPids: [],
+        survivorHolders: [],
+        survivorCoverage: {
+          platform: "linux",
+          scope: "same-uid",
+          procRoot: "/proc",
+          complete: false,
+          processes: {
+            enumerated: unreadable.length,
+            sameUid: unreadable.length,
+            otherUid: 0,
+            unavailable: { exited: 0, denied: 0 },
+          },
+          sources: {
+            cwd: source("cwd"),
+            exe: source("exe"),
+            root: source("root"),
+            maps: source("maps"),
+            fd: source("fd"),
+          },
+          unreadable,
+        },
+        forcedKill: false,
+        signalFailures: [],
+      }),
+    },
+  } as unknown as YrdCliServices
 }
 
 function runYrd(
@@ -4086,6 +4129,111 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io, services)).toBe(3)
     expect(close.stderr()).toMatch(/census incomplete.*same-uid.*denied/iu)
     expect(app.state().bays.byId.B1?.status).toBe("active")
+  })
+
+  // A zombie has released its fd table and a proc that exited mid-census is
+  // gone: neither can hold the path, so neither needs an operator to name it
+  // (@i/10-yrd/bay-close-census-refuses-on-unreadable-system-procs: on a live
+  // host that set changes faster than a flag can be retyped). The close still
+  // says what it tolerated and why, the way it records an operator's waiver.
+  it("closes a Bay whose only census gap is a zombie, and records it with its reason", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "zombie-gap", branch: "topic/zombie-gap" })
+    const services = censusServices([
+      { pid: 4242, comm: "bun", ppid: 7, startedAt: "2026-09-01T18:40:12.000Z", state: "Z", denied: ["fd"] },
+    ])
+    const close = outputIO()
+
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io, services), close.stderr()).toBe(0)
+    expect(app.state().bays.byId.B1?.status).toBe("closed")
+    expect(close.stdout()).toContain(
+      "bay close B1 zombie-gap: census gaps tolerated: pid 4242 (bun, ppid 7, started 2026-09-01T18:40:12.000Z) zombie\n",
+    )
+  })
+
+  it("closes a Bay whose only census gap is a proc that exited mid-census, and records it", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "exited-gap", branch: "topic/exited-gap" })
+    const services = censusServices([{ pid: 4243, exited: true, denied: ["fd"] }])
+    const close = outputIO()
+
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io, services), close.stderr()).toBe(0)
+    expect(app.state().bays.byId.B1?.status).toBe("closed")
+    expect(close.stdout()).toContain("bay close B1 exited-gap: census gaps tolerated: pid 4243 exited\n")
+  })
+
+  it("still refuses a Bay whose census gap is a live dumpable-0 proc, naming the pid", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "session-infra", branch: "topic/session-infra" })
+    const services = censusServices([
+      { pid: 2421854, comm: "systemd", ppid: 1, state: "S", denied: ["cwd", "exe", "root", "fd"] },
+    ])
+    const close = outputIO()
+
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io, services)).toBe(3)
+    expect(close.stderr()).toMatch(/census incomplete.*pid 2421854 \(systemd, ppid 1\) via cwd,exe,root,fd/iu)
+    expect(close.stderr()).toMatch(/--tolerate-unreadable/u)
+    expect(app.state().bays.byId.B1?.status).toBe("active")
+  })
+
+  it("closes a Bay when --tolerate-unreadable names the live gap and records the waiver; a wrong pid still refuses", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "waived", branch: "topic/waived" })
+    const services = censusServices([
+      { pid: 2421854, comm: "systemd", ppid: 1, state: "S", denied: ["cwd", "exe", "root", "fd"] },
+    ])
+
+    const wrong = outputIO()
+    expect(
+      await runYrd(app, yrd("bay", "close", "--force", "--tolerate-unreadable", "9999", "B1"), wrong.io, services),
+    ).toBe(3)
+    expect(wrong.stderr()).toMatch(/pid 2421854 \(systemd, ppid 1\) via cwd,exe,root,fd/u)
+    expect(app.state().bays.byId.B1?.status).toBe("active")
+
+    const close = outputIO()
+    expect(
+      await runYrd(app, yrd("bay", "close", "--force", "--tolerate-unreadable", "2421854", "B1"), close.io, services),
+      close.stderr(),
+    ).toBe(0)
+    expect(app.state().bays.byId.B1?.status).toBe("closed")
+    expect(close.stdout()).toContain(
+      "bay close B1 waived: census gaps tolerated: pid 2421854 (systemd, ppid 1) operator flag\n",
+    )
+  })
+
+  it("bay close --json carries the tolerated gaps in the record, never as a line inside the JSON stream", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "json-record", branch: "topic/json-record" })
+    const services = censusServices([
+      { pid: 2421854, comm: "systemd", ppid: 1, state: "S", denied: ["cwd", "exe", "root", "fd"] },
+      { pid: 4243, exited: true, denied: ["fd"] },
+    ])
+    const close = outputIO()
+
+    expect(
+      await runYrd(
+        app,
+        yrd("bay", "close", "--force", "--json", "--tolerate-unreadable", "2421854", "B1"),
+        close.io,
+        services,
+      ),
+      close.stderr(),
+    ).toBe(0)
+    // The result is the last line: `--force` still announces itself in
+    // human text ahead of the JSON (a defect of its own, not fixed here).
+    const lines = close.stdout().trim().split("\n")
+    const record = JSON.parse(lines.at(-1) ?? "") as { command: string; tolerated: unknown }
+    expect(record.command).toBe("bay.close")
+    // Gaps are listed by pid, whatever order the census found them in.
+    expect(record.tolerated).toEqual([
+      {
+        bay: "B1",
+        gaps: [
+          { pid: 4243, reason: "exited" },
+          { pid: 2421854, comm: "systemd", ppid: 1, reason: "operator-flag" },
+        ],
+      },
+    ])
   })
 
   it("admin bay prune refuses a Bay protected by a live external consumer", async () => {
