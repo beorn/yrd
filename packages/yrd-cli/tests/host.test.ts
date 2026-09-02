@@ -4746,24 +4746,32 @@ checks: [{check: {run: "true"}}]
         await host.close()
       }
 
-      // Reported, never swallowed — by id, by the branch it belongs to, and
-      // with its AGE, which is the only thing separating a push happening right
-      // now from one that never finished. An operator cannot clear what nobody
-      // named.
-      const notices = events.filter(
-        (event): event is { props: { entries: { id: string; branch: string; ageMs?: number }[] } } =>
+      // Reported, never swallowed — one row naming the id, the branch it belongs
+      // to, the file to retire and its AGE, which is the only thing separating a
+      // push happening right now from one that never finished. An operator
+      // cannot clear what nobody named. WARN, not ERROR: the level IS the
+      // disposition (`receiver-drain-refusal.ts`), so a skipped entry cannot be
+      // reported as if it had stopped the runtime.
+      const rows = events.filter(
+        (event): event is { level: string; props: Record<string, unknown> } =>
           typeof event === "object" &&
           event !== null &&
           "props" in event &&
           typeof event.props === "object" &&
           event.props !== null &&
           "action" in event.props &&
-          event.props.action === "receiver-inbox-ambiguous-skipped",
+          event.props.action === "receiver-drain-ambiguous",
       )
-      expect(notices).toHaveLength(1)
-      const entry = notices[0]!.props.entries[0]!
-      expect(entry).toMatchObject({ id, branch, receivedAt })
-      expect(entry.ageMs).toBeGreaterThanOrEqual(90_000)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.level).toBe("warn")
+      expect(rows[0]!.props).toMatchObject({
+        disposition: "skipped",
+        id,
+        branch,
+        receivedAt,
+        path: join(inbox, `${id}.prepared.json`),
+      })
+      expect(rows[0]!.props.ageMinutes).toBeGreaterThanOrEqual(1)
 
       // Skipped, not consumed: the entry is still on disk, so a push that was
       // merely SLOW is still delivered by a later drain under the same id, and

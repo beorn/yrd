@@ -156,6 +156,7 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { guardScopedPaths } from "./pre-submit-guard-scope.ts"
+import { reportReceiverDrainOutcome } from "./receiver-drain-refusal.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import { observeFreshRemoteBranch, observeOriginBranchAdvertisement, observeOriginRemote } from "./remote-branch.ts"
 import {
@@ -3662,28 +3663,6 @@ async function closeRuntime(
   }
 }
 
-/**
- * The one-line notice a skipped inbox entry gets. Separate from the structured
- * fields so the count and the plural cannot disagree with the list beneath it.
- */
-function ambiguousInboxNotice(count: number): string {
-  const entries = count === 1 ? "entry" : "entries"
-  return `Skipped ${String(count)} receiver inbox ${entries} whose push never completed; the rest of the inbox drained.`
-}
-
-/**
- * How long an inbox entry has been waiting, as a reportable fact.
- *
- * `ageMs` is absent, never zero, when the stamp cannot be read: an unparseable
- * timestamp is an unknown age, and printing 0 for it would say "this push
- * arrived just now" about the one entry whose arrival we cannot establish —
- * precisely backwards for the reader deciding whether it is in flight.
- */
-function describeInboxEntryAge(receivedAt: string, now: number): Readonly<{ ageMs?: number }> {
-  const received = Date.parse(receivedAt)
-  return Number.isNaN(received) ? {} : { ageMs: Math.max(0, now - received) }
-}
-
 type ShutdownSignal = "SIGINT" | "SIGTERM"
 
 /** Announce a graceful drain as ONE structured loggily record — never a bare
@@ -4198,41 +4177,28 @@ async function createYrdRuntimeHost(
         intake: (result) => intakeResult(runtimeApp, result, process, repository.repo, receiverLog),
         lockTimeoutMs: 30_000,
       })
+      // Two dispositions, because the inbox holds two different things.
+      //
       // A FAILED entry is wreckage — a result that would not parse, or whose
-      // stored authorization no longer matches the push it claims. Refusing on
-      // that is right: it is an integrity signal about this inbox.
-      if (result.failed.length > 0) {
-        throw new Error(`yrd: receiver inbox did not drain cleanly: ${JSON.stringify({ failed: result.failed })}`)
-      }
+      // stored authorization no longer matches the push it claims. Refusing is
+      // right there: it is an integrity signal about this inbox.
+      //
       // An AMBIGUOUS entry is not. `pre-receive` writes the `.prepared.json`
       // BEFORE Git decides whether to accept the update, so a ref that does not
       // carry the head means only "this push did not complete" — in flight,
       // rejected downstream, or abandoned, three events with byte-identical
       // files. It is the same class as `deferred`, which this drain has always
-      // skipped, and `recoverPrepared` retries it on every pass.
+      // skipped, and `recoverPrepared` retries it on every pass, so an entry
+      // that becomes resolvable is delivered later under the same id.
       //
-      // Refusing the whole inbox on one of them made one submitter's
+      // Refusing the whole inbox on one of those made one submitter's
       // interruption stop the queue for everybody: measured 2026-09-01 17:29:57
-      // PDT, an orphaned entry left every later pass exiting 3 while 8 eligible
-      // changes waited behind it. Skipped and reported loudly instead — with the
-      // id, the branch it belongs to and its age, because the age is the only
-      // thing separating a push happening right now from one that never
-      // finished, and an operator cannot clear what nobody named.
-      if (result.ambiguous.length > 0) {
-        const now = Date.now()
-        receiverLog.warn?.(ambiguousInboxNotice(result.ambiguous.length), {
-          action: "receiver-inbox-ambiguous-skipped",
-          delivered: result.delivered.length,
-          entries: result.ambiguous.map((entry) => ({
-            id: entry.id,
-            branch: entry.branch,
-            ref: entry.ref,
-            headSha: entry.headSha,
-            receivedAt: entry.receivedAt,
-            ...describeInboxEntryAge(entry.receivedAt, now),
-          })),
-        })
-      }
+      // PDT, an orphaned entry left every later pass exiting 3 while eight
+      // eligible changes waited behind a row none of them had anything to do
+      // with. So it is skipped and reported, never fatal — and reported with
+      // the per-entry rows, because an operator cannot clear what nobody named.
+      const refusal = reportReceiverDrainOutcome(receiverLog, result, Date.now())
+      if (refusal !== undefined) throw refusal
     }
     if (mode === "active") await drain()
     const checks = configuredChecks(process, repository.stateDir, loaded.config, env)

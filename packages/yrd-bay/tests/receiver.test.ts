@@ -683,12 +683,13 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     ).toEqual({
       delivered: [],
       failed: [],
-      // The facts travel with the id: whoever reports this has to name the
-      // change an operator would go looking for, and `receivedAt` is what
-      // separates a push still in flight from one that never finished.
+      // Not an opaque id: the drain hands back every fact the prepared entry
+      // carries, so the runtime's refusal can name the branch, ref, head, age
+      // and the file an operator has to retire.
       ambiguous: [
         {
           id: result!.id,
+          path: join(f.receiver.inboxDir, `${result!.id}.prepared.json`),
           ref: "refs/heads/issue/recover",
           branch: "issue/recover",
           headSha,

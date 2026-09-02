@@ -285,34 +285,28 @@ export type ReceiverHookOptions = {
   drainDeferred?: (drained: Readonly<ReceiverDrainResult>) => void
 }
 /**
- * A prepared result whose ref does not carry its head.
- *
- * The same class as {@link ReceiverDrainResult.deferred}, and emphatically NOT
- * a failure: `pre-receive` writes the `.prepared.json` BEFORE Git decides
- * whether to accept the update, so an absent ref is simply how "this push has
- * not completed" is represented. That covers a push still in flight, a push a
- * later hook rejected, and a client that hung up — three different events with
- * byte-identical prepared files, which is exactly why the receiver may not act
- * on one. `recoverPrepared` retries every drain, so an entry that becomes
- * resolvable is delivered by the next pass under the same id.
- *
- * The FACTS ride along because a bare id cannot be reported usefully: whoever
- * reports this has to tell an operator which change is affected, and
- * `receivedAt` is the only thing separating a push happening right now from one
- * that never finished.
+ * A prepared result whose push the receiver cannot confirm: pre-receive stored
+ * the entry, but the ref it names does not contain the head it announced — not
+ * as tip, ancestor, or reflog entry — so post-receive never ran for it. Every
+ * fact the entry carries rides along so the caller can name the branch, ref,
+ * head, age and file instead of an opaque id: an ambiguous entry blocks every
+ * drain until the ref comes to contain the head or the file is retired, and a
+ * re-push does NOT clear it (a new push is a new entry beside this one;
+ * measured 2026-09-01, when one such entry refused every queue pass for an hour).
  */
-export type AmbiguousReceiverResult = Readonly<{
+export type ReceiverAmbiguousResult = Readonly<{
   id: string
+  /** The `.prepared.json` file on disk — the thing an operator has to retire. */
+  path: string
   ref: string
   branch: string
   headSha: string
-  /** When `pre-receive` wrote the entry — an ISO datetime with offset. */
   receivedAt: string
 }>
 export type ReceiverDrainResult = {
   delivered: string[]
   failed: Array<{ id: string; error: string }>
-  ambiguous: AmbiguousReceiverResult[]
+  ambiguous: ReceiverAmbiguousResult[]
   /**
    * Results this pass deliberately did not attempt — the lock was held, or the
    * budget ran out. NOT failures: each is still `pending` on disk and the next
@@ -2062,6 +2056,7 @@ async function recoverPrepared(
       if (!(await refContains(receiver, result.ref, result.headSha))) {
         drain.ambiguous.push({
           id,
+          path,
           ref: result.ref,
           branch: result.branch,
           headSha: result.headSha,
