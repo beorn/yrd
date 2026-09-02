@@ -10988,9 +10988,20 @@ const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["nee
  * unverified.
  */
 export const YRD_REFUSAL_CODES = [
+  // The three `admissionWithholding` codes (8816f274; this one renamed from
+  // `admission-line-held` by ef98406f without a registry row): why THIS pass
+  // will not admit a member, carried on the `admission-withheld` row. Never a
+  // persisted Run/Job failure and never a verdict — the member is admitted on
+  // a later turn once the condition clears — so no dedicated
+  // failureDisposition branch; the fall-through default classifies them.
+  // A change ahead in the admission order carries no refusal streak.
+  "admission-order-held",
   "admission-refusal-loop",
   "admission-refusal-needs-person",
   "admission-refused",
+  // The installed plan declares no pre-merge admission step; the queue admits
+  // at merge time.
+  "admission-steps-empty",
   // The gitlink-advance verb's own `-failed` refusals (yrd 9e6af249 /
   // 2fd122a9). Registered NOT because they become a persisted Run/Job failure
   // — they are `raiseFailure` CLI refusals — but because every one of them
@@ -11147,6 +11158,15 @@ export const YRD_REFUSAL_CODES = [
   // Re-merge Phase 1 turned recordProposedHead's codeCarrierRefusal
   // indirection into a direct `code:` literal (command.ts), so the census
   // sees the producer it previously missed.
+  // yrd-process's typed refusal (e13b8286): `Process.run()` called after
+  // `close()` began, thrown as an infrastructure fact so the habitant's
+  // mid-cycle recovery classifier (run.ts, `drainRequested()`) can tell "the
+  // pool is already draining" from a real spawn fault. Preserved through the
+  // git wrapper's could-not-be-started rethrow (command.ts), so it can reach a
+  // Run/Job failure code; no dedicated failureDisposition branch — the
+  // fall-through default classifies it, and a drain-time occurrence is
+  // absorbed before it is ever persisted.
+  "process-closed",
   "proposed-commit-missing",
   "publication-failed",
   "publication-unavailable",
@@ -11176,6 +11196,10 @@ export const YRD_REFUSAL_CODES = [
   "queue-paused",
   "queue-progress-stalled",
   "queue-read-boundary-moved",
+  // The third `admissionWithholding` code (see `admission-order-held` above):
+  // a queue run is still live on the member's base; the next pass admits it
+  // once that run settles.
+  "queue-run-active",
   // The receiver-inbox census finding (receiver-inbox-audit.ts): a push git
   // ACCEPTED whose durable inbox result has not reached intake past its grace
   // window. Registered for the same reason as every other audit finding code
