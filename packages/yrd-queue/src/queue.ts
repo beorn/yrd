@@ -1620,6 +1620,24 @@ export type QueueAuditOptions = Readonly<{
   /** Process probe behind the liveness derivation the audit reads running
    * rows through (24030); absent, the queue's own answers. */
   runnerAlive?: RunnerLivenessProbe["runnerAlive"]
+  /**
+   * The earliest instant the liveness finding may measure "no merge" from.
+   *
+   * A queue's own history is OLDER than any one runner, so a journal read
+   * alone answers a question nobody asked: "has this queue merged lately",
+   * when the finding is written to say "has THIS runner stopped draining".
+   * Measured 2026-09-02: a resident booted into a queue whose last merge was
+   * 1h25m old emitted `queue-liveness-wedged` before it had attempted a
+   * single member — a verdict on its predecessor's silence, billed to a
+   * process that had existed for seconds.
+   *
+   * A caller that owns a runner passes its own epoch here (first tick, pushed
+   * forward by time spent inside attempts) and the clock starts there instead.
+   * Absent, the behaviour is the queue-history read it always was: a one-shot
+   * `queue run --once`, `queue audit` and the client dead-man all ask about
+   * the QUEUE and have no runner uptime to measure from.
+   */
+  livenessEpoch?: string
 }>
 
 /** What the host is asked when an orphaned run's cursor is its merge step. */
@@ -10332,12 +10350,18 @@ function queueLivenessAuditFindings(
   const eligible = queueProgressQueue(state, steps)
   if (eligible.length === 0) return []
   const nowMs = parseAuditTime(options.now, "now")
+  // The observer's own floor, when it declared one. Clamping the START is what
+  // keeps this finding an observation about the RUNNER rather than about the
+  // journal it inherited: see `QueueAuditOptions.livenessEpoch`.
+  const epochMs =
+    options.livenessEpoch === undefined ? undefined : parseAuditTime(options.livenessEpoch, "livenessEpoch")
   const findings: QueueAuditFindingEmission[] = []
   const byBase = Map.groupBy(eligible, (pr) => baseIdentity(pr.base))
   for (const [base, prs] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {
     const latestMergeMs = latestQueueMergeMs(state, base)
     const readyAtMs = Math.min(...prs.map((pr) => parseAuditTime(queueProgressTime(pr), `queue time for ${pr.id}`)))
-    const sinceMs = Math.max(readyAtMs, latestMergeMs ?? readyAtMs)
+    const observedMs = Math.max(readyAtMs, latestMergeMs ?? readyAtMs)
+    const sinceMs = epochMs === undefined ? observedMs : Math.max(observedMs, epochMs)
     const blockedMs = Math.max(0, nowMs - sinceMs)
     if (blockedMs < progress.noLandingMs) continue
     const first = prs[0]

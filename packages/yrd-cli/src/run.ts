@@ -286,6 +286,11 @@ import {
 import { HABITANT_EXIT } from "./habitant-exit.ts"
 import { QUEUE_FATAL_EXIT, fatalQueueDrain } from "./queue-drain.ts"
 import {
+  createResidentLivenessClock,
+  type ResidentLivenessOptions,
+  type WedgeGenerations,
+} from "./resident-liveness.ts"
+import {
   QUEUE_OUTCOME_EXIT,
   resolveSubmitterSeat,
   UNKNOWN_SUBMITTER,
@@ -1580,7 +1585,16 @@ function runnerDriverHealthError(
 /** Project the habitant's canonical progress findings into its lightweight
  * status record. The supervisor can then prove outcome progress without
  * replaying Journal history in its health probe. */
-export function habitantQueueProgress(app: YrdCliApp, now: string): QueueRunnerProgress {
+export function habitantQueueProgress(
+  app: YrdCliApp,
+  now: string,
+  /** This runner's own no-progress floor, when the caller owns one
+   * ({@link ResidentLivenessClock}). The resident passes it so its service
+   * health cannot report a wedge that predates the process; a one-shot, a
+   * probe and the client dead-man have no runner uptime and pass none, which
+   * is the queue-history read this has always been. */
+  livenessEpoch?: string,
+): QueueRunnerProgress {
   // SERVICE health, not QUEUE CONTENT. Every code admitted here makes the
   // habitant service `unhealthy`, and `hab up` refuses to start an unhealthy
   // service — so a finding in this list must be a property the SERVICE can act
@@ -1602,7 +1616,7 @@ export function habitantQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
   // carries it in the WHY column, and delivering it to its named owner is
   // @i/10-yrd/needs-person-reaches-only-the-log. A refusing change needs an
   // OWNER, not a dead runner.
-  const findings = app.queue.audit({ now }).findings.filter(
+  const findings = app.queue.audit({ now, ...(livenessEpoch === undefined ? {} : { livenessEpoch }) }).findings.filter(
     (finding) =>
       finding.code === "queue-progress-stalled" ||
       finding.code === "queue-never-started" ||
@@ -12401,11 +12415,23 @@ export async function habitantRecoverySweep(
  * whether the queue is draining; loggily-only, matching every other habitant
  * log line.
  *
- * error, not warn: by the time `habitantQueueProgress` calls the queue
- * "stalled" it has already applied its own persistence threshold, so this
- * finding fires only once that bar is cleared — the queue cannot self-recover
- * on its own, which is the operator's loud-immediately bar. A live outage
- * (measured: 72 minutes, zero ERROR lines) must not read as healthy.
+ * WARN and a PAGE, never ERROR (@i/10-yrd/liveness-is-health, superseding this
+ * function's own error-not-warn rule of 2026-09-01). The old reasoning still
+ * holds for the half it was written about — a live outage must not read as
+ * healthy, and the queue cannot self-recover — but ERROR acquired a second
+ * meaning the same day it was chosen: "any ERROR ends the pass" (operator
+ * ruling 2026-09-01), latched by the host and exited 17. So the row that
+ * REPORTED the wedge became the row that KILLED the reporter. Measured
+ * 2026-09-02: a resident booted into a queue whose last merge was 1h25m old
+ * emitted this finding before attempting a single member and exited 17, over
+ * and over, and a queue with four eligible changes drained never.
+ *
+ * A dead runner is not a louder alarm than a live one; it is the same alarm
+ * with the thing that could act on it removed. So the severity is WARN — which
+ * is what "the service is degraded and still serving" means — and the LOUDNESS
+ * moves to a channel that reaches a person: one page to the queue owner per
+ * announcement, on the escalating schedule below. The finding also still
+ * reaches service health through `habitantQueueProgress`, unchanged.
  *
  * `conditions` is optional and caller-owned — the same seam
  * `refreshTrackedQueueRevisions`'s `observation` backoff below uses — so a
@@ -12417,8 +12443,19 @@ export async function habitantRecoverySweep(
  * `progress.state`, so a `conditions` reporter also learns the moment the
  * queue recovers and flushes any pending per-base tallies then.
  */
-export function logQueueLivenessWedge(app: YrdCliApp, now: string, conditions?: ConditionReporter): void {
-  const progress = habitantQueueProgress(app, now)
+export async function logQueueLivenessWedge(
+  app: YrdCliApp,
+  now: string,
+  conditions?: ConditionReporter,
+  options: ResidentLivenessOptions = {},
+): Promise<void> {
+  // A STOPPED clock has no reading. While a pass is inside an attempt the
+  // runner is draining as hard as it can, so the honest answer is "not
+  // measured", not "not draining" — and it is emphatically not `resolve`,
+  // which would claim the wedge cleared and flush a closing summary for a
+  // condition that may still hold the moment the attempt ends.
+  if (options.clock?.paused() === true) return
+  const progress = habitantQueueProgress(app, now, options.clock?.epoch())
   if (progress.state !== "stalled") {
     conditions?.flush()
     return
@@ -12432,12 +12469,37 @@ export function logQueueLivenessWedge(app: YrdCliApp, now: string, conditions?: 
       ...(finding.since === undefined ? {} : { since: finding.since }),
     }
     if (conditions === undefined) {
-      app.log.error?.(finding.message, props)
+      app.log.warn?.(finding.message, props)
       continue
     }
     const key = `liveness:${finding.specimen ?? `${finding.pr ?? "unknown"}:${finding.since ?? "unknown"}`}`
-    conditions.report(key, "error", finding.message, props)
+    // The reporter owns the escalating schedule; the page rides ITS answer
+    // rather than a second copy of the doubling arithmetic beside it, so the
+    // log and the page can never disagree about how loud this condition is.
+    if (conditions.report(key, "warn", finding.message, props) !== "announced") continue
+    if (options.page === undefined) continue
+    const generation = (options.generations?.get(key) ?? 0) + 1
+    options.generations?.set(key, generation)
+    await options.page({
+      base: wedgedQueueBase(finding.specimen),
+      message: finding.message,
+      ...(finding.pr === undefined ? {} : { pr: finding.pr }),
+      ...(finding.blockedMs === undefined ? {} : { blockedMs: finding.blockedMs }),
+      generation,
+    })
   }
+}
+
+/** The queue a liveness specimen (`queue:<base>:liveness-wedged`) is about.
+ * Falls back to the specimen itself rather than inventing a base name: a page
+ * that names the wrong queue is worse than one that quotes an opaque id. */
+function wedgedQueueBase(specimen: string | undefined): string {
+  if (specimen === undefined) return "unknown"
+  const prefix = "queue:"
+  const suffix = ":liveness-wedged"
+  return specimen.startsWith(prefix) && specimen.endsWith(suffix)
+    ? specimen.slice(prefix.length, -suffix.length)
+    : specimen
 }
 
 /**
@@ -12506,6 +12568,14 @@ export async function followQueueRuns(
   const habitant = io.runner?.startsWith("yrd-cli:") === true
   const base = baseIdentity(services.base ?? "main")
   const recoveryReporter = createHabitantRecoveryReporter(app.log)
+  // This runner's own no-progress clock (@i/10-yrd/liveness-is-health).
+  // Process-scoped for the same reason as every observation window further
+  // down: a wedge is a claim about what THIS process has stopped draining, and
+  // the journal it booted into belongs to its predecessors. Declared HERE,
+  // above the heartbeat, because the heartbeat's `queueProgress` callback
+  // closes over it and `startHabitantRunnerHeartbeat` may publish its first
+  // sample before returning — a later `const` would be read in its dead zone.
+  const livenessClock = createResidentLivenessClock(io.now?.() ?? Date.now())
   // Reclaim a prior habitant's leases BEFORE the heartbeat overwrites status.json —
   // once it writes, the departed pid is lost. The exclusive habitant lock guarantees
   // that prior habitant is not concurrently running as a habitant.
@@ -12519,7 +12589,10 @@ export async function followQueueRuns(
     : 0
   const heartbeat = habitant
     ? await startHabitantRunnerHeartbeat(io, {
-        queueProgress: (now) => habitantQueueProgress(app, now),
+        // Through THIS runner's clock, so the service health a supervisor
+        // reads cannot report a wedge older than the process reporting it —
+        // the same epoch the tick above measures against, never a second one.
+        queueProgress: (now) => habitantQueueProgress(app, now, livenessClock.epoch()),
         uncarried: createStrandedSweeper(app, io, base, app.log).observe,
         staleDrafts: (now) => staleDraftFindings(app, now, draftThresholdMs),
         needsPerson: (now) => needsPersonFindings(app, now),
@@ -12558,6 +12631,24 @@ export async function followQueueRuns(
   // memory each tick re-logs the identical line — measured 16 identical rows
   // over one wedged hour. Callers namespace their own keys.
   const conditions = createConditionReporter(app.log)
+  const wedgeGenerations: WedgeGenerations = new Map()
+  const outcomes = services.outcomes
+  const livenessOptions: ResidentLivenessOptions = {
+    clock: livenessClock,
+    generations: wedgeGenerations,
+    ...(outcomes === undefined
+      ? {}
+      : {
+          page: async (page) => {
+            // A NEW attempt id per generation, so the notifier's own
+            // journal-keyed idempotency suppresses a re-send of the SAME
+            // notice (a restarted escalation, a replayed tick) without ever
+            // suppressing the next one. Advisory: a notifier that fails here
+            // warns and the runner keeps running — see `notifyQueueWedged`.
+            await outcomes.notifyQueueWedged(page, `wedge:${page.base}:${String(page.generation)}`)
+          },
+        }),
+  }
   // Consecutive all-candidate-refusal cycles against an unchanged world (22474
   // specimen 3). Also process-scoped: it is a claim about THIS process.
   let stall: HabitantRefusalStall | undefined
@@ -12625,7 +12716,7 @@ export async function followQueueRuns(
         // "is the queue draining" — 22928's own distinction — computed from
         // the identical shared predicate `habitantQueueProgress` already
         // feeds service health with, never a second reader.
-        logQueueLivenessWedge(app, new Date(cycleNow).toISOString(), conditions)
+        await logQueueLivenessWedge(app, new Date(cycleNow).toISOString(), conditions, livenessOptions)
         // Level trigger (@i/10-yrd/quiet-path-starves-standing-submit-facts,
         // shapes 1 and 5): the maintenance tick ALWAYS runs the queue. The
         // edge flags above only accelerate; whether actionable work exists is
@@ -12683,7 +12774,20 @@ export async function followQueueRuns(
         heartbeat?.check()
         return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null
       }
-      const runs = await runQueues(app, selectors, options, io)
+      // The attempt bracket (@i/10-yrd/liveness-is-health). Everything between
+      // these two calls is the runner draining, so none of it counts as time
+      // the runner failed to drain — a 90-minute affected-tests turn used to
+      // read as 90 minutes of no progress and trip the very alarm that says
+      // the runner has stopped trying. `finally`, because a throw on this path
+      // is the one case where leaving the clock stopped would silence the
+      // alarm permanently.
+      livenessClock.attemptStarted(io.now?.() ?? Date.now())
+      let runs: Awaited<ReturnType<typeof runQueues>>
+      try {
+        runs = await runQueues(app, selectors, options, io)
+      } finally {
+        livenessClock.attemptEnded(io.now?.() ?? Date.now())
+      }
       recoveryReporter.flush()
       heartbeat?.check()
       // The runner is a service; its stdout is a log stream. Human output is
