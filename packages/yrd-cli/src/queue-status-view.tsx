@@ -1696,6 +1696,65 @@ function revisionDetail(pr: Change, runs: readonly Run[]): string {
 }
 
 /**
+ * One row per admission this queue REFUSED before any run existed.
+ *
+ * A refusal at the checks-before-queueing gate mints no run, so no run row
+ * carries it; and the change is not in a pre-run band either, so
+ * `timelineNonIntegratedRows` emits nothing for it. Both send-backs and
+ * yrd-broken refusals were therefore invisible on `queue status` and `yrd
+ * watch`: the stats box read FAILS 1 on 2026-09-02 while eight carriers had
+ * been turned back.
+ *
+ * A pure projection over `queues.admissionRefusals`, which the state already
+ * holds — nothing new is stored. The row is anchored on the streak's LAST
+ * refusal, and `count` is shown when the same revision has been turned back
+ * more than once, because a carrier refused nine times is a different fact
+ * from one refused once.
+ */
+function timelineRefusedAdmissionRows(
+  result: QueueStatusResult,
+  nowIso: string,
+  shown: ReadonlySet<string>,
+): QueueTimelineProjectedRow[] {
+  const changes = new Map(result.prs.map((pr) => [pr.id, pr] as const))
+  return (result.admissionRefusals ?? []).flatMap((refusal): QueueTimelineProjectedRow[] => {
+    const pr = changes.get(refusal.pr)
+    const revision = refusal.revision ?? (pr === undefined ? undefined : currentChangeRev(pr).n)
+    const headSha = refusal.headSha ?? (pr === undefined ? undefined : currentChangeRev(pr).head)
+    // A refusal whose exact revision is unreadable names no revision to render.
+    if (revision === undefined || headSha === undefined) return []
+    // Already on the timeline through its own band or run row: one fact, one row.
+    if (shown.has(queueRevisionKey({ id: refusal.pr, revision, headSha }))) return []
+    const repeats = refusal.count > 1 ? ` (refused ${String(refusal.count)}x since ${refusal.firstAt})` : ""
+    return [
+      {
+        id: `${result.base}:refused:${refusal.pr}:${String(revision)}:${headSha}`,
+        base: result.base,
+        group: "completed" as const,
+        status: "rejected" as const,
+        glyph: statusGlyph("rejected"),
+        timestamp: refusal.lastAt,
+        timestampMs: parsedTimelineTimestamp(refusal.lastAt, `change '${refusal.pr}' refusal time`),
+        pr: refusal.pr,
+        revision,
+        headSha,
+        branch: pr?.branch ?? refusal.pr,
+        subject: boundedQueue(pr?.title ?? pr?.name ?? pr?.branch ?? refusal.pr, 80),
+        detail: `refused at admission [${refusal.code}] — ${refusal.reason}${repeats}`,
+        whyMessage: refusal.reason,
+        failure: { code: refusal.code, message: refusal.reason },
+        revisionLineage: pr === undefined ? [] : [timelineRevisionLineage(pr)],
+        ageMs: timelineAge(refusal.lastAt, nowIso, `change '${refusal.pr}' refusal age`),
+        totalMs: null,
+        activeMs: null,
+        waitMs: null,
+        queueWaitMs: null,
+      },
+    ]
+  })
+}
+
+/**
  * One row per non-integrated change that is not currently a run member, each carrying
  * a derived, display-only status (`queueDisplayState().preRun`): `draft`/`rev` for
  * a registered-but-unsubmitted PR (bay status `pushed`) and `ready` for one
@@ -2006,21 +2065,29 @@ function buildQueueTimelineProjection(
     options.runnerAlive === undefined
       ? leaseOnlyLivenessProbe(options.now)
       : { now: options.now, runnerAlive: options.runnerAlive }
-  const rawRows = results.flatMap((result) => [
-    ...timelineNonIntegratedRows(result, nowIso, options.submissionTimes, options.state),
-    ...[...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
-      timelineRunMemberRows(
-        result,
-        run,
-        nowIso,
-        liveness,
-        options.submissionTimes,
-        options.state,
-        attemptsByRun.get(run.id) ?? NO_ATTEMPTS,
-        options.strict === true,
+  const rawRows = results.flatMap((result) => {
+    const rows = [
+      ...timelineNonIntegratedRows(result, nowIso, options.submissionTimes, options.state),
+      ...[...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
+        timelineRunMemberRows(
+          result,
+          run,
+          nowIso,
+          liveness,
+          options.submissionTimes,
+          options.state,
+          attemptsByRun.get(run.id) ?? NO_ATTEMPTS,
+          options.strict === true,
+        ),
       ),
-    ),
-  ])
+    ]
+    // Refusals last: they render only for a revision no row above already
+    // carries, so a change visible through its band or its run stays one row.
+    const shown = new Set(
+      rows.map((row) => queueRevisionKey({ id: row.pr, revision: row.revision, headSha: row.headSha })),
+    )
+    return [...rows, ...timelineRefusedAdmissionRows(result, nowIso, shown)]
+  })
   // Status + window + term filtering, then the optional latest-per-PR fold.
   // Shared by the display window and the (possibly wider) metrics window so
   // both apply identical criteria and only the window bound differs.

@@ -8146,6 +8146,12 @@ async function queueStatusSnapshots(
         candidate.revs.some((revision) => prIds.has(revision.pr)),
       ),
       eligibilities: prs.map((pr) => app.queue.eligibility(pr.id)),
+      // A refusal before any run has no run row and no pre-run band to sit on,
+      // so nothing rendered it: eight carriers were turned back on 2026-09-02
+      // while the stats box read FAILS 1.
+      admissionRefusals: Object.values(state.queues.admissionRefusals).filter((refusal) =>
+        groupChangeIds.has(refusal.pr),
+      ),
     })
   }
   return { results }
@@ -9337,6 +9343,9 @@ async function logRuns(
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
       prs: groupPrs.filter((pr) => target.selected.size === 0 || target.selected.has(pr.id)),
       admissionOrder: admissionOrder.filter((pr) => groupChangeIds.has(pr)),
+      admissionRefusals: Object.values(state.queues.admissionRefusals).filter((refusal) =>
+        groupChangeIds.has(refusal.pr),
+      ),
     })
   }
   const changeStatusById = new Map<string, ChangeDeliveryState>(

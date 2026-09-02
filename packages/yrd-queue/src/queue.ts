@@ -185,7 +185,7 @@ import {
 } from "./projection-index.ts"
 import { candidateRefFor } from "./candidate-refs.ts"
 import { compactQueuesState, queueRetentionRoot } from "./retention.ts"
-import { queueSnapshot, runProvesMerge } from "./queue-status-projection.ts"
+import { queueSnapshot } from "./queue-status-projection.ts"
 
 /**
  * A queue command refused to compose because a peer's Queue run already holds
@@ -5000,41 +5000,6 @@ function createQueue<Shape extends ChangeShape>(
             runs: retiredBatches.map((batch) => batch.run),
           })
         }
-        // Converge the store behind a run that merged and never got to stamp
-        // its members: re-apply `pr/integrated` for every completed, merged run
-        // whose member records are still open. Without this the landing lives
-        // only in the run record: 240ea10f's `queueSnapshot` fold derives the
-        // stale `ready` row away, but the record itself stays open forever, its
-        // submit fact stands, and every stale-submit surface keeps reporting it.
-        // One INFO line per stamp; idempotent, so a second pass says nothing.
-        for (const stamp of recoverableIntegrationStamps(runtime(), reader)) {
-          await actions.reconcileMerge({
-            pr: stamp.pr,
-            revision: stamp.revision,
-            headSha: stamp.headSha,
-            run: stamp.run,
-            changeId: stamp.changeId,
-            commit: stamp.commit,
-            landingSha: stamp.commit,
-            baseSha: stamp.baseSha,
-          })
-          affected.add(stamp.run)
-          log.info?.(
-            `recovered the integration stamp for ${stamp.pr} rev ${stamp.revision} from run ${stamp.run} ` +
-              `(merged ${stamp.commit.slice(0, 8)} at ${stamp.mergedAt})`,
-            {
-              action: "recover-integration-stamp",
-              reason: "unstamped-merge",
-              run: stamp.run,
-              pr: stamp.pr,
-              revision: stamp.revision,
-              headSha: stamp.headSha,
-              commit: stamp.commit,
-              baseSha: stamp.baseSha,
-              mergedAt: stamp.mergedAt,
-            },
-          )
-        }
         for (const id of await cleanupSettledRoots(reader)) affected.add(id)
         // The disclosure half of the quarantine, and the reason this reader is
         // not a silent fallback: every record recovery could not read is named
@@ -9790,99 +9755,6 @@ function orphanedJoblessRuns(
     orphans.push({ run: record.id, step: step.name, since })
   }
   return orphans
-}
-
-/** One landed change whose record never absorbed its own `pr/integrated`. */
-type RecoverableIntegrationStamp = Readonly<{
-  run: RunId
-  pr: string
-  revision: number
-  headSha: string
-  changeId: string
-  commit: string
-  baseSha: string
-  mergedAt: string
-}>
-
-/**
- * Every completed, merged run whose member records are still open — the split
- * a process death leaves between a run's own settle and the `pr/integrated`
- * write that stamps its members.
- *
- * Observed on 2026-09-02: PR3216 rev 1 merged in run R3766 at 06:36 (b2e0dc9a)
- * and the resident restarted at 06:39, so the record kept `submitted` /
- * `checks: queued` and `queue status` printed a ready row for it two hours
- * later. Recovery ran and re-settled nothing (`queue:recover succeeded …
- * runs: []`) because every phase it had walks JOBS and RUNS — nothing walked
- * from a finished run back to the records it should have closed. PR2462 and
- * PR2145 had been stranded the same way since 2026-08-28.
- *
- * The run record carries the merge proof (`stampRunIntegration`), so the repair
- * needs no repository read. `reconcileMerge` applies each stamp: it is exactly
- * idempotent on a record already stamped with the same proof, and it raises
- * rather than overwriting when the record disagrees — so a second recovery pass
- * over the same journal emits nothing.
- */
-function recoverableIntegrationStamps(
-  state: DeepReadonly<RuntimeState>,
-  reader: TolerantQueueReader,
-): readonly RecoverableIntegrationStamp[] {
-  const stamps: RecoverableIntegrationStamp[] = []
-  for (const record of Queues.values(state.queues)) {
-    const run = reader.read(record, state.jobs)
-    // Quarantined: its integration proof is part of what could not be read.
-    if (run === undefined) continue
-    // {@link runProvesMerge} — the same rule `queueSnapshot` folds eligibility
-    // on, so the surface that HIDES a landed row and this pass, which CLOSES
-    // its record, can never disagree about which revisions landed.
-    if (!runProvesMerge(run)) continue
-    if (run.status !== "completed" || run.conclusion !== "success") continue
-    // A run the ordinary resume path still owns is not stranded — its own
-    // advance emits `pr/integrated` the moment the next pass reaches it, and
-    // stamping it here would race that path and swallow the resume. Recovery
-    // repairs only what nothing else will finish, which is exactly the pair
-    // `resumableQueueRoots` excludes on: unsettled AND not yet released.
-    if (
-      needsSettlement(state, run) &&
-      projectionLookupGet(state.queues.authority.runs, record.id)?.released === undefined
-    ) {
-      continue
-    }
-    const integration = run.integration
-    // A run can succeed with nothing to merge; only a proof names a landing.
-    if (integration === undefined) continue
-    // An already-landed proof settles through `pr/already-landed`, a different
-    // event carrying evidence this record does not hold. Out of scope here.
-    if (integration.alreadyLanded !== undefined) continue
-    for (const member of run.prs) {
-      const pr = getChangeRecord(state.bays, member.id)
-      if (pr === undefined) continue
-      const delivery = changeDeliveryState(pr)
-      // Only an OPEN, un-settled record is missing a stamp. `integrated` and
-      // `already-landed` are the repaired state; every other state is a
-      // different fact (withdrawn, rejected, re-pushed) that this pass must
-      // not overwrite — `reconcileMerge` refuses those loudly anyway.
-      if (delivery !== "submitted" && delivery !== "ready") continue
-      const revision = currentChangeRev(pr)
-      // The run merged the revision it pinned. A record that has since moved on
-      // to a new revision is not stranded — it is legitimately open again.
-      if (revision.n !== member.revision || revision.head !== member.headSha) continue
-      // Pre-identity records prove only the identity they name (same rule the
-      // merge-step emitter applies): never infer a merge without a changeId.
-      if (revision.changeId === undefined) continue
-      stamps.push({
-        run: record.id,
-        pr: pr.id,
-        revision: revision.n,
-        headSha: revision.head,
-        changeId: revision.changeId,
-        commit: integration.commit,
-        baseSha: integration.baseSha,
-        mergedAt: run.finishedAt ?? record.startedAt,
-      })
-    }
-  }
-  return stamps
 }
 
 function unisolableStalePlanBatches(
