@@ -3389,7 +3389,13 @@ describe("runYrd", () => {
           attempt: 2,
           runner: "second-runner",
           outcome: "lost",
-          result: { status: "lost", reason: "runner disappeared" },
+          // The derived orphan description is the fact of record and a caller
+          // reason only prefixes it (24030, yrd main aef6050c): the holder and
+          // the lease it let lapse survive whatever the sweep said about itself.
+          result: {
+            status: "lost",
+            reason: "runner disappeared; orphaned: lease expired 2026-07-09T12:00:01.000Z, holder second-runner",
+          },
         },
       ],
     })
