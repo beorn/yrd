@@ -28,12 +28,13 @@ import {
   createYrdHost as createYrdHostRaw,
   habitantOwnsSettlementDrain,
   runYrdProcess,
+  withScratchTmp,
 } from "../src/host.ts"
 import { HABITANT_EXIT } from "../src/habitant-exit.ts"
 import { checkpointBumpGateViolations, SHIPPED_CHECKPOINT_IDENTITIES } from "../src/checkpoint-bump-gate.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
 import { sourceRepositoryFor, takeImplementationSourceAttestation } from "../src/implementation-source.ts"
-import type { ResolvedYrdProjectConfig } from "../src/config.ts"
+import type { ResolvedYrdProjectConfig, YrdStepConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
@@ -1497,6 +1498,96 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(result.stderr).toBe("")
     expect(result.exitCode).toBe(0)
     expect(await readdir(join(stateDir, "pre-submit-worktrees"))).toEqual([])
+  })
+
+  /**
+   * @i/10-yrd/24031 row 5: with `scratch:` declared, the pre-submit checkout
+   * root and the check's TMPDIR both move under it — nothing is created under
+   * the queue state dir, and nothing falls back to the inherited tmpfs.
+   */
+  it("materializes pre-submit scratch and the check TMPDIR under a configured scratch: root, not the state dir", async () => {
+    const { repo } = await repository()
+    const scratchParent = await mkdtemp(join(tmpdir(), "yrd-scratch-"))
+    roots.push(scratchParent)
+    // The leaf is what `ensureScratchRoot` creates; its parent must already exist.
+    const scratch = join(scratchParent, "yrd")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["tmp-probe"],
+      requires: [],
+      scratch,
+      definitions: {
+        "tmp-probe": {
+          run:
+            'test "$TMPDIR" != "/inherited-tmpfs-probe" && ' +
+            `case "$TMPDIR" in "${scratch}"/pre-submit-worktrees/check-tmp-*) touch "$TMPDIR/probe.txt";; ` +
+            '*) printf "unexpected TMPDIR %s\\n" "$TMPDIR" >&2; exit 1;; esac',
+          runner: "local",
+        },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["tmp-probe"] },
+    }
+    await using process = createProcess({ cwd: repo })
+    const stateDir = join(repo, ".git", "yrd")
+    const checks = configuredChecks(process, stateDir, config, {
+      PATH: globalThis.process.env.PATH,
+      TMPDIR: "/inherited-tmpfs-probe",
+    })
+
+    const result = await checks.run("tmp-probe", repo, {})
+
+    expect(result.stderr).toBe("")
+    expect(result.exitCode).toBe(0)
+    expect(existsSync(join(stateDir, "pre-submit-worktrees"))).toBe(false)
+    expect(await readdir(join(scratch, "pre-submit-worktrees"))).toEqual([])
+    // Laid out for the queue's check children at the same time.
+    expect(existsSync(join(scratch, "tmp"))).toBe(true)
+  })
+
+  it("refuses a scratch: root whose parent is absent, naming the key and the path, before any checkout is attempted", async () => {
+    const { repo } = await repository()
+    const scratch = join(repo, "missing-parent", "yrd")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["tmp-probe"],
+      requires: [],
+      scratch,
+      definitions: { "tmp-probe": { run: "true", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["tmp-probe"] },
+    }
+    await using process = createProcess({ cwd: repo })
+    const stateDir = join(repo, ".git", "yrd")
+    const checks = configuredChecks(process, stateDir, config, { PATH: globalThis.process.env.PATH })
+
+    await expect(checks.run("tmp-probe", repo, {})).rejects.toThrow(
+      `yrd: config scratch '${scratch}' cannot be created: its parent directory does not exist`,
+    )
+
+    expect(existsSync(join(repo, "missing-parent"))).toBe(false)
+    expect(existsSync(join(stateDir, "pre-submit-worktrees"))).toBe(false)
+  })
+
+  /**
+   * The queue side of the same rule. The queue's child environment passes the
+   * runner's TMPDIR through, so the step definition is where the override has
+   * to live; a declared env.TMPDIR keeps winning, and no scratch: leaves the
+   * definition — and therefore every existing evidence hash — untouched.
+   */
+  it("withScratchTmp points a step's child TMPDIR under the scratch root, lets a declared env.TMPDIR win, and leaves an unconfigured step untouched", () => {
+    const step: YrdStepConfig = { run: "bun run test", runner: "local" }
+
+    expect(withScratchTmp(step, undefined)).toBe(step)
+    expect(withScratchTmp(step, "/srv/scratch/yrd")).toEqual({
+      run: "bun run test",
+      runner: "local",
+      env: { TMPDIR: "/srv/scratch/yrd/tmp" },
+    })
+    expect(withScratchTmp({ ...step, env: { TMPDIR: "/declared", CI: "1" } }, "/srv/scratch/yrd").env).toEqual({
+      TMPDIR: "/declared",
+      CI: "1",
+    })
   })
 
   it("composes the operator's own stale branch before an explicit local check reads the tree", async () => {

@@ -4,10 +4,15 @@
  * @level l1
  * @consumer @yrd/cli configuration
  */
-import { describe, expect, it } from "vitest"
+import { existsSync } from "node:fs"
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it } from "vitest"
 import { DEFAULT_QUEUE_BATCH_SIZE, DEFAULT_QUEUE_PROGRESS_POLICY } from "@yrd/queue"
 import {
   DEFAULT_DRAFT_PAGE_AFTER_HOURS,
+  ensureScratchRoot,
   loadYrdConfig,
   mergedTruthExceptions,
   parseYrdConfig,
@@ -403,5 +408,89 @@ describe("mergedTruthExceptions config", () => {
 
     expect(loaded.config.mergedTruthExceptions).toEqual([])
     expect(mergedTruthExceptions(loaded.config).size).toBe(0)
+  })
+})
+
+/**
+ * `scratch:` — where check scratch is materialized (@i/10-yrd/24031 row 5).
+ * The default has to stay absent (not `/tmp`, not `.bays` spelled out) so an
+ * unconfigured repository keeps every built-in root byte-identical, and a
+ * declared root has to be usable or refuse naming the key: a check child that
+ * lands on a quota-shared tmpfs because its root silently fell back is the
+ * failure this key exists to end.
+ */
+describe("scratch: — the configured check-scratch root", () => {
+  const roots: string[] = []
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  })
+  async function parentDir(): Promise<string> {
+    const parent = await mkdtemp(join(tmpdir(), "yrd-scratch-config-"))
+    roots.push(parent)
+    return parent
+  }
+
+  it("keeps an absolute declaration, resolves a relative one against the repository root, and stays absent when undeclared", async () => {
+    const load = (yaml: string) =>
+      loadYrdConfig({ repo: "/repo", defaultBase: "main", read: async () => `checks: [typecheck]\n${yaml}` })
+
+    expect((await load("scratch: /srv/scratch/yrd\n")).config.scratch).toBe("/srv/scratch/yrd")
+    expect((await load("scratch: .scratch/yrd\n")).config.scratch).toBe("/repo/.scratch/yrd")
+    expect((await load("scratch: ../beside/yrd\n")).config.scratch).toBe("/beside/yrd")
+    const undeclared = await load("")
+    expect(undeclared.config.scratch).toBeUndefined()
+    expect("scratch" in undeclared.config).toBe(false)
+    expect(parseYrdConfig({ checks: [], scratch: " /padded " }).scratch).toBe("/padded")
+  })
+
+  it("refuses a non-string or blank declaration loudly, naming the key — at parse time and at the push gate", () => {
+    const refusal = "yrd: config scratch must be a non-empty path — absolute, or relative to the repository root"
+    expect(() => parseYrdConfig({ checks: [], scratch: 5 })).toThrow(refusal)
+    expect(() => parseYrdConfig({ checks: [], scratch: "" })).toThrow(refusal)
+    expect(() => parseYrdConfig({ checks: [], scratch: "   " })).toThrow(refusal)
+    expect(() => parseYrdConfig({ checks: [], scratch: { path: "/x" } })).toThrow(refusal)
+    expect(() => parseYrdConfig({ checks: [], scratch: null })).toThrow(refusal)
+    expect(() => validatePushedYrdConfig("checks: [typecheck]\nscratch: [/x]\n")).toThrow(refusal)
+    expect(() => validatePushedYrdConfig("checks: [typecheck]\nscratch: /x\n")).not.toThrow()
+  })
+
+  it("ensureScratchRoot creates a missing root under an existing parent, and accepts one that already exists", async () => {
+    const scratch = join(await parentDir(), "yrd")
+    expect(existsSync(scratch)).toBe(false)
+
+    await expect(ensureScratchRoot(scratch)).resolves.toBe(scratch)
+
+    expect((await stat(scratch)).isDirectory()).toBe(true)
+    await expect(ensureScratchRoot(scratch)).resolves.toBe(scratch)
+  })
+
+  it("ensureScratchRoot refuses an absent parent — naming the key and the path — instead of growing a tree in the wrong place", async () => {
+    const parent = await parentDir()
+    const scratch = join(parent, "typo", "yrd")
+
+    await expect(ensureScratchRoot(scratch)).rejects.toThrow(
+      `yrd: config scratch '${scratch}' cannot be created: its parent directory does not exist`,
+    )
+
+    expect(existsSync(join(parent, "typo"))).toBe(false)
+  })
+
+  it("ensureScratchRoot refuses a root that is a file", async () => {
+    const file = join(await parentDir(), "file")
+    await writeFile(file, "")
+
+    await expect(ensureScratchRoot(file)).rejects.toThrow(`yrd: config scratch '${file}' is not a directory`)
+  })
+
+  // Mode bits do not bind root, so the probe cannot observe a refusal there.
+  it.skipIf(process.getuid?.() === 0)("ensureScratchRoot refuses a root this process cannot write", async () => {
+    const sealed = join(await parentDir(), "sealed")
+    await mkdir(sealed)
+    await chmod(sealed, 0o500)
+    try {
+      await expect(ensureScratchRoot(sealed)).rejects.toThrow(`yrd: config scratch '${sealed}' is not writable`)
+    } finally {
+      await chmod(sealed, 0o700)
+    }
   })
 })

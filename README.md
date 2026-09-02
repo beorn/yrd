@@ -1616,6 +1616,37 @@ yrd pr ready task/release-fix
 yrd queue --base release/2.0
 ```
 
+### Scratch — where checks materialize
+
+Top-level `scratch` in `.yrd.yml` is the root under which Yrd materializes
+check scratch:
+
+```yaml
+scratch: /home/hh/scratch/yrd
+```
+
+Under it go the queue's candidate worktrees (the warm pool's `yrd-warm-*`
+entries and the cold `yrd-queue-*` checkouts), `yrd check`'s pre-submit
+checkouts (`pre-submit-worktrees/check-*`), and `tmp/`, which every configured
+step's child process receives as `TMPDIR`. A relative path resolves against the
+repository root. The directory is created when missing, but its parent must
+already exist and it must be writable: either failure refuses at startup naming
+the key and the path, and nothing falls back to `/tmp`. A step's own
+`env: { TMPDIR: ... }` still wins for that step.
+
+Absent, the built-in roots stay: candidates under `<repo>/.bays`, pre-submit
+checkouts under the queue state dir (`<git-common-dir>/yrd/pre-submit-worktrees`),
+and — the one that matters — check children inherit the runner's `TMPDIR`, which
+is `/tmp` when unset. On a host whose `/tmp` is a small, quota-shared tmpfs, a
+check that writes fixture trees or unit clones there fails on `EDQUOT` mid-run
+for reasons that have nothing to do with the candidate (measured 2026-09-01);
+declare `scratch` on a filesystem with room. The queue's non-checkout scratch
+(source rebases, union proofs, component-main clones) always lives under
+`<git-common-dir>/yrd/scratch` on the repository's own disk and is not moved
+by this key. Declaring or changing `scratch` changes every check step's derived
+revision, so the running habitant reinstalls its plan on the next base change,
+as it does for any other config edit.
+
 ## State and Recovery
 
 Yrd stores local authority under the primary worktree's common Git directory:

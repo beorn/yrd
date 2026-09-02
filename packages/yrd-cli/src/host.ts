@@ -173,6 +173,7 @@ import {
   parseYrdConfig,
   stepGateMode,
   validatePushedYrdConfig,
+  ensureScratchRoot,
   type ResolvedYrdProjectConfig,
   type YrdStepConfig,
 } from "./config.ts"
@@ -724,6 +725,46 @@ export async function reapAbandonedPreSubmitCheckouts(
   }
 }
 
+/** Subdirectory of a configured `scratch:` root handed to every step child as `TMPDIR`. */
+const CHECK_TMP_DIR = "tmp"
+
+/**
+ * Where candidate worktrees are materialized — the warm pool's entries, the
+ * cold `withScratch` checkouts, and the contest evaluators' pins: the
+ * configured `scratch:` root when the repository declares one, else the Bays
+ * root. The default is today's value, byte-identical, so every existing
+ * installation's step revisions (which fold this path in) stand unchanged.
+ */
+function checkScratchParent(config: Pick<ResolvedYrdProjectConfig, "scratch">, baysRoot: string): string {
+  return config.scratch ?? baysRoot
+}
+
+/**
+ * The step definition with its child `TMPDIR` pointed under the configured
+ * `scratch:` root.
+ *
+ * The queue's child environment passes the runner's own `TMPDIR` through
+ * (`COMMAND_ENVIRONMENT_BASE` in `@yrd/queue`), so without this override a
+ * check writes its fixture trees and unit clones wherever the habitant was
+ * launched — `/tmp` when the variable is unset, which on 2026-09-01 was a
+ * quota-shared tmpfs that hit EDQUOT mid-check. The pre-submit run already
+ * scopes `TMPDIR` for the same reason (`configuredChecks`); this is the queue
+ * side of that rule. A declared `env.TMPDIR` still wins, as it does there. No
+ * `scratch:` returns the definition untouched: the default stays inherited.
+ */
+export function withScratchTmp(config: YrdStepConfig, scratch: string | undefined): YrdStepConfig {
+  if (scratch === undefined) return config
+  return { ...config, env: { TMPDIR: join(scratch, CHECK_TMP_DIR), ...config.env } }
+}
+
+/** Verify a configured `scratch:` root (loud on an absent parent or an
+ * unwritable root) and lay out the child `TMPDIR` under it. */
+async function ensureCheckScratch(scratch: string): Promise<string> {
+  await ensureScratchRoot(scratch)
+  mkdirSync(join(scratch, CHECK_TMP_DIR), { recursive: true })
+  return scratch
+}
+
 export function configuredChecks(
   process: Pick<Process, "run">,
   stateDir: string,
@@ -860,7 +901,12 @@ export function configuredChecks(
     // It always executes in a materialized checkout, where the declared paths
     // are overlaid with the base's version before the command starts.
     const pinnedScripts = definition.scripts ?? []
-    const parent = join(stateDir, "pre-submit-worktrees")
+    // Under the configured `scratch:` root when the repository declares one;
+    // the queue state dir (the repository's own disk) otherwise.
+    const parent = join(
+      config.scratch === undefined ? stateDir : await ensureCheckScratch(config.scratch),
+      "pre-submit-worktrees",
+    )
     mkdirSync(parent, { recursive: true })
     // The backstop for entries no `finally` ever reached, run before this
     // invocation adds one of its own. `GIT_TIMEOUT_MS` because the only git
@@ -1661,7 +1707,7 @@ function configuredStepDescriptors(
           timeoutMs,
           noProgressMs,
           toolchain,
-          checkoutParent: fixed.baysRoot,
+          checkoutParent: checkScratchParent(config, fixed.baysRoot),
           ...(scripts === undefined ? {} : { scripts }),
         }),
         kind,
@@ -1851,7 +1897,7 @@ function configuredQueueSteps(
     (descriptor, index) => descriptor.kind === "check" && (mergeIndex === -1 || index < mergeIndex),
   )
   return options.config.steps.map((name, index) => {
-    const config = options.config.definitions[name] ?? { runner: "local" as const }
+    const config = withScratchTmp(options.config.definitions[name] ?? { runner: "local" as const }, options.config.scratch)
     const descriptor = descriptors[index]
     if (descriptor === undefined) throw new Error(`yrd: missing derived descriptor for queue step '${name}'`)
     const revision = descriptor.revision
@@ -1902,7 +1948,7 @@ function configuredQueueSteps(
         options.process,
         options.repo,
         options.stateDir,
-        options.baysRoot,
+        checkScratchParent(options.config, options.baysRoot),
         name,
         config,
         revision,
@@ -2214,7 +2260,7 @@ function contestAdapters(options: DefaultYrdDefinitionOptions): {
         revision: contestEvaluatorRevision(
           options.repo,
           options.stateDir,
-          options.baysRoot,
+          checkScratchParent(options.config, options.baysRoot),
           id,
           step,
           options.config.contest.timeoutMs,
@@ -2223,7 +2269,7 @@ function contestAdapters(options: DefaultYrdDefinitionOptions): {
         timeoutMs: options.config.contest.timeoutMs,
         runner: step.runner,
         ...(step.environment === undefined ? {} : { targetEnvironment: step.environment }),
-        checkoutParent: options.baysRoot,
+        checkoutParent: checkScratchParent(options.config, options.baysRoot),
         artifactRoot: join(options.stateDir, "artifacts"),
         resolveBayPath: (bay) => bayPath(options.baysRoot, bay),
         inject: { process: options.process },
@@ -2338,7 +2384,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     prepareCandidate: gitCandidatePreparer({
       inject: { process: options.process },
       repo: options.repo,
-      checkoutParent: options.baysRoot,
+      checkoutParent: checkScratchParent(options.config, options.baysRoot),
       artifactRoot: join(options.stateDir, "artifacts"),
       provisionPinIntent: createPinIntentProvisioner({
         process: options.process,
@@ -2354,7 +2400,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     runner: (jobs) => {
       const contexts = worktreeContexts({
         repo: options.repo,
-        parent: options.baysRoot,
+        parent: checkScratchParent(options.config, options.baysRoot),
         size: 2,
         submodules: "isolated",
         git: createCandidatePoolGit(options.process),
@@ -2649,6 +2695,9 @@ function targetCheckpointMigrationAttestor(
 }
 
 async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions): Promise<YrdCliApp> {
+  // Every runtime app — the active host, a viewer, a reload — verifies the
+  // declared scratch root before it can hand a child a `TMPDIR` under it.
+  if (options.config.scratch !== undefined) await ensureCheckScratch(options.config.scratch)
   const checkpoint = { identity: undefined as string | undefined }
   const attestCandidate = targetCheckpointMigrationAttestor(options)
   const checkpointMigrationCertification =
@@ -4160,6 +4209,10 @@ async function createYrdRuntimeHost(
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
+    // Before the candidate pool or any check child can touch it: a declared
+    // root that cannot be used refuses HERE, naming the key, rather than as a
+    // bare ENOENT inside the first check.
+    if (loaded.config.scratch !== undefined) await ensureCheckScratch(loaded.config.scratch)
     const runner =
       runnerSeed === undefined
         ? undefined
@@ -4220,7 +4273,7 @@ async function createYrdRuntimeHost(
     if (mode === "active") {
       candidatePool = createCandidatePool({
         repo: repository.repo,
-        parent: repository.baysRoot,
+        parent: checkScratchParent(loaded.config, repository.baysRoot),
         git: createCandidatePoolGit(process, env),
         log,
       })

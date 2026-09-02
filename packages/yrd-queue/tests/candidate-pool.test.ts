@@ -252,6 +252,36 @@ describe("warm candidate pool", () => {
     ).rejects.toThrow("candidateRef")
   })
 
+  /**
+   * @i/10-yrd/24031 row 5: the host may point `parent` at a configured
+   * `scratch:` root on another filesystem entirely. Every byte the pool writes
+   * — the warm entry, its worktree, the per-run scratch handed to the check —
+   * has to land under that parent, and a parent outside the repository must
+   * not be written into the repository's exclude file (git never scans it).
+   */
+  it("materializes warm worktrees and per-run scratch under the configured parent, even outside the repository", async () => {
+    const { repo, baseSha } = await repository()
+    const scratch = await mkdtemp(join(tmpdir(), "yrd-scratch-root-"))
+    roots.push(scratch)
+    const root = await realpath(scratch)
+    const { log } = capturingLog()
+    const pool = makePool(repo, scratch, 1, log)
+
+    const seen = await pool.withCandidate(baseSha, async (path, runScratch) => {
+      expect(runScratch.startsWith(`${root}${sep}yrd-warm-`)).toBe(true)
+      expect(existsSync(runScratch)).toBe(true)
+      return { path, runScratch }
+    })
+
+    expect(seen.path.startsWith(`${root}${sep}yrd-warm-`)).toBe(true)
+    expect(seen.path.endsWith(`${sep}worktree`)).toBe(true)
+    expect(await readFile(join(seen.path, "README.md"), "utf8")).toBe("main\n")
+    expect(existsSync(seen.runScratch)).toBe(false)
+    expect(existsSync(join(repo, ".bays"))).toBe(false)
+    const exclude = join(repo, ".git", "info", "exclude")
+    expect(existsSync(exclude) ? await readFile(exclude, "utf8") : "").not.toContain("yrd-scratch-root-")
+  })
+
   it("reuses one warm worktree across candidate cycles and resets dirt between runs", async () => {
     const { repo, baseSha, baysRoot } = await repository()
     const { log, events } = capturingLog()

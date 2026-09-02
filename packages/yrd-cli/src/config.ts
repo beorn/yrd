@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises"
+import { constants } from "node:fs"
+import { access, mkdir, readFile, stat } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { defineStepPlan, withActionStep, withCheckStep, withMergeStep, type StepDef } from "@yrd/config"
 import { asFailure, createFailure } from "@yrd/core"
@@ -341,12 +342,36 @@ const MergedTruthExceptionsSchema = z
  */
 const MergeSchema = z.enum(["expected", "none"]).optional()
 
+/**
+ * Where this repository's check scratch is materialized: the queue's candidate
+ * worktrees (warm pool and cold checkouts), `yrd check`'s pre-submit checkouts,
+ * and the `TMPDIR` every configured step's child process is handed.
+ *
+ * Absent keeps the built-in roots — `<repo>/.bays` for candidates, the queue
+ * state dir's `pre-submit-worktrees` for pre-submit checkouts, and the runner's
+ * inherited `TMPDIR` for check children. That last default is the one this key
+ * exists to override: a check child inherits the host's `TMPDIR` (or `/tmp` when
+ * unset), and on a host whose `/tmp` is a small, quota-shared tmpfs every
+ * fixture tree and unit clone the check writes lands there. Measured
+ * 2026-09-01 22:24: a 61G tmpfs with a ~42G per-user quota shared by every
+ * agent hit EDQUOT mid-check, and the queue retired two standing changes over
+ * an infrastructure failure. `scratch:` points all of it at a filesystem with
+ * room, on the repository's terms rather than the host's.
+ *
+ * A relative path resolves against the repository root; the directory itself
+ * is created when missing, but its parent must already exist and the result
+ * must be writable — either failure refuses loudly, naming this key and the
+ * path, and nothing falls back to `/tmp`. See {@link ensureScratchRoot}.
+ */
+const ScratchSchema = TextSchema.optional()
+
 const ProjectFields = {
   base: TextSchema.optional(),
   batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
   checks: ChecksSchema,
   guards: GuardsSchema,
   merge: MergeSchema,
+  scratch: ScratchSchema,
   /** Renamed to `merge:` 2026-08-18 (same values, same `expected` default) --
    * the merge-queue record noun is "change", not "PR", and `landing:` named
    * the killed vocabulary. Read-only compatibility: still parsed so existing
@@ -373,6 +398,8 @@ export type YrdProjectConfig = Readonly<{
   checks: readonly z.infer<typeof CheckEntrySchema>[]
   guards: readonly z.infer<typeof GuardEntrySchema>[]
   merge?: "expected" | "none"
+  /** As declared: absolute, or relative to the repository root. */
+  scratch?: string
   requires?: readonly "review"[]
   contest: Readonly<z.infer<typeof ContestSchema>>
   progress: Readonly<z.infer<typeof ProgressSchema>>
@@ -397,6 +424,11 @@ export type ResolvedYrdProjectConfig = Readonly<{
   /** Declared, never inferred — see MergeSchema. `loadYrdConfig` always sets
    * it; absent (hand-built configs) reads as "expected", same as an unset key. */
   merge?: "expected" | "none"
+  /** The configured check-scratch root, ABSOLUTE (a relative declaration is
+   * resolved against the repository root by `loadYrdConfig`). Absent means the
+   * built-in roots — see the `scratch:` schema comment — never a `/tmp`
+   * fallback. */
+  scratch?: string
   requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
@@ -489,6 +521,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       guards,
       merge,
       landing,
+      scratch,
       requires,
       contest,
       progress,
@@ -510,6 +543,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       checks,
       guards,
       ...(resolvedMerge === undefined ? {} : { merge: resolvedMerge }),
+      ...(scratch === undefined ? {} : { scratch }),
       ...(requires === undefined ? {} : { requires }),
       contest,
       progress,
@@ -573,7 +607,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "checks", "requires", "contest", "progress", "drafts"].includes(path)
+    !["base", "batch", "checks", "requires", "contest", "progress", "drafts", "scratch"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -583,6 +617,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   }
   const known = new Map<string, string>([
     ["batch", "must be an integer >= 0"],
+    ["scratch", "must be a non-empty path — absolute, or relative to the repository root"],
     ["contest.concurrency", "must be an integer >= 1"],
     ["contest.timeoutMs", "must be an integer >= 1"],
     ["progress.noLandingMs", "must be an integer >= 1"],
@@ -678,6 +713,10 @@ export async function loadYrdConfig(options: {
       guardDefinitions: Object.fromEntries(parsed.guards.map(resolveGuard)),
       steps,
       merge: parsed.merge ?? "expected",
+      // Resolved here, once, so every consumer — the candidate pool, the
+      // pre-submit checkout, the step environment — reads one absolute path
+      // and none of them re-derives it against a different cwd.
+      ...(parsed.scratch === undefined ? {} : { scratch: resolve(repo, parsed.scratch) }),
       requires: parsed.requires ?? [],
       definitions: resolvedDefinitions,
       contest: {
@@ -699,6 +738,44 @@ export async function loadYrdConfig(options: {
       mergedTruthExceptions: parsed.mergedTruthExceptions,
     },
   }
+}
+
+/**
+ * Make the configured `scratch:` root usable, or refuse naming the key and the
+ * path.
+ *
+ * The leaf is created when missing; its PARENT is not. A recursive create
+ * would turn a typo'd declaration into a fresh directory tree in the wrong
+ * place — silently, on the next run, on whatever filesystem the typo landed
+ * on — which is the failure this key exists to end. And every check-child
+ * primitive downstream (`mkdtemp`, the pool's own `mkdir`) would otherwise
+ * report the same broken root as an ENOENT with no key attached, one run at a
+ * time. Returns the path it verified so a caller can bind it in one expression.
+ */
+export async function ensureScratchRoot(scratch: string): Promise<string> {
+  const refuse = (detail: string): never => {
+    throw createFailure({
+      kind: "configuration",
+      code: "scratch-root-unusable",
+      message: `yrd: config scratch '${scratch}' ${detail}`,
+    })
+  }
+  try {
+    await mkdir(scratch)
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined
+    if (code === "ENOENT") refuse("cannot be created: its parent directory does not exist")
+    if (code !== "EEXIST") {
+      refuse(`cannot be created: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (!(await stat(scratch)).isDirectory()) refuse("is not a directory")
+  try {
+    await access(scratch, constants.W_OK)
+  } catch {
+    refuse("is not writable")
+  }
+  return scratch
 }
 
 function authorityPath(repo: string, requested: string): string {
