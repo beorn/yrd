@@ -11000,6 +11000,14 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // composition against the current base is the whole remedy.
     "merge-unauthored-deletion",
     "scratch-cleanup-failed",
+    // ENOSPC while PREPARING scratch (scratch-storage.ts, the 2026-08-14
+    // inode outage): nothing about the candidate is wrong and the same
+    // candidate merges first try once the filesystem has room — the
+    // preparation-side twin of `scratch-cleanup-failed`. Emitted only through
+    // the `WORKTREE_STORAGE_EXHAUSTED` constant, so the literal-only census
+    // never saw it and it fell through to the author default until the
+    // constant-following census caught it (2026-09-01).
+    "worktree-storage-exhausted",
     "wrapper-generation",
     // This Yrd HOST has no verdict-message resolver wired up, or cannot
     // compute a patch-bound authorization identity (no immutable base SHA, no
@@ -11160,6 +11168,11 @@ export const YRD_REFUSAL_CODES = [
   "dropped-parent-contribution",
   "evaluator-missing-result",
   "exclusive-busy",
+  // A bounded writer-lock wait pulled by the host's `interrupt()` (lock.ts,
+  // bead 24019): a recoverable infrastructure failure naming the lock's holder
+  // and the interrupt's reason — never a verdict on the change. Landed
+  // unregistered on 2026-09-01; the census caught it.
+  "exclusive-interrupted",
   "gate-script-diff-failed",
   "gate-script-missing-at-base",
   "gate-script-overlay-failed",
@@ -11387,6 +11400,9 @@ export const YRD_REFUSAL_CODES = [
   "viewer-read-only",
   // Same TEST-FIXTURE-ONLY narrative family as "mock-mismatch" above.
   "visual-rejected",
+  // scratch-storage.ts `storageExhaustionError` — a JobError.code, bucketed
+  // `infra-retry` above.
+  "worktree-storage-exhausted",
   "wrapper-generation",
   "wrapper-mismatch",
 ] as const

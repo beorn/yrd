@@ -57,7 +57,8 @@ const REFUSAL_CODE_LITERAL = /^[a-z0-9-]+$/u
 
 /**
  * String-literal constants the scanned sources declare, by identifier:
- * `const NAME = "…"` / `export const NAME = "…"`. A SCREAMING_CASE name declared
+ * `const NAME = "…"` / `export const NAME = "…"` / `const NAME: Type = "…"`
+ * (a type annotation is skipped over). A SCREAMING_CASE name declared
  * with anything other than a string literal (a number, a regex) is recorded as
  * `null`, so a `code: NAME` that resolves to it is known to be NOT a refusal
  * code rather than an unfollowable one.
@@ -66,7 +67,7 @@ function declaredConstants(sources: ReadonlyMap<string, string>): ReadonlyMap<st
   const declared = new Map<string, string | null>()
   for (const source of sources.values()) {
     for (const match of source.matchAll(
-      /(?:^|\n)\s*(?:export\s+)?const\s+([A-Z][A-Z0-9_]*)\s*=\s*(?:"([^"\n]*)"|([^\s;]))/gu,
+      /(?:^|\n)\s*(?:export\s+)?const\s+([A-Z][A-Z0-9_]*)(?:\s*:\s*[^=\n]+?)?\s*=\s*(?:"([^"\n]*)"|([^\s;]))/gu,
     )) {
       const [, name, literal] = match
       if (name === undefined) continue
@@ -233,19 +234,34 @@ describe("the refusal-code vocabulary is closed — every emitted code resolves"
     expect(canonicalRefusalCode("census-probe-unregistered")).toBeUndefined()
   })
 
-  it("follows a constant declared in ANOTHER scanned source, and ignores constants that are not refusal codes", () => {
+  it("follows a constant declared in ANOTHER scanned source — type-annotated or not, through any emit shape — and ignores constants that are not refusal codes", () => {
     const sources = new Map([
       [
         "fake/src/codes.ts",
-        'export const SHARED_CODE = "shared-constant-code"\nconst EXIT_CODE = 126\nconst ERRNO = "ETIMEDOUT"\n',
+        [
+          'export const SHARED_CODE = "shared-constant-code"',
+          'export const TYPED_CODE: RefusalCode = "typed-constant-code"',
+          'export const CANDIDATE_CODE = "candidate-constant-code"',
+          "const EXIT_CODE = 126",
+          'const ERRNO = "ETIMEDOUT"',
+          "",
+        ].join("\n"),
       ],
       [
         "fake/src/emit.ts",
-        'import { SHARED_CODE } from "./codes.ts"\nrefuse({ code: SHARED_CODE })\nreturn { code: EXIT_CODE }\nObject.assign(error, { code: ERRNO })\n',
+        [
+          'import { CANDIDATE_CODE, SHARED_CODE, TYPED_CODE } from "./codes.ts"',
+          "refuse({ code: SHARED_CODE })",
+          'return failed(TYPED_CODE, "typed")',
+          "return candidateFailure(CANDIDATE_CODE, candidate)",
+          "return { code: EXIT_CODE }",
+          "Object.assign(error, { code: ERRNO })",
+          "",
+        ].join("\n"),
       ],
     ])
     const census = emittedCodesFromSources(sources)
-    expect(census.codes).toEqual(["shared-constant-code"])
+    expect(census.codes).toEqual(["candidate-constant-code", "shared-constant-code", "typed-constant-code"])
     expect(census.unfollowable).toEqual([])
   })
 
