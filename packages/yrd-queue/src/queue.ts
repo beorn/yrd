@@ -1101,6 +1101,27 @@ function permanentRefusalReason(pr: string, code: string, reason: string): strin
 }
 
 /**
+ * The cure an INFRASTRUCTURE-disposed admission refusal carries, per lane.
+ *
+ * Operator ruling (2026-09-01): within ten minutes of a merge attempt the
+ * decision is either "yrd is broken => fix yrd" or "PR is broken => send it
+ * back", and an ENOSPC/EDQUOT is the first, never the second. So the remedy
+ * never says "push new content". On the DERIVED lane the author's fact stands
+ * and the failed Job is re-driven, so the next pass admits the member again on
+ * its own. On the RECORD lane a refused admission still spends one check
+ * authority whatever its kind (`consumedCheckAuthorities` counts verdicts, not
+ * dispositions), so that lane's honest cure is one more check request at the
+ * same head, not a new revision.
+ */
+function infrastructureRefusalRemedy(pr: DeepReadonly<Change>, lane: "derived" | "record"): string {
+  return lane === "derived"
+    ? `no re-push needed: the submit fact for '${pr.branch}' stands at ${changeHead(pr)}; repair the environment ` +
+        "and the next pass admits this member again"
+    : "no change to the branch is needed: repair the environment, then request checks again for " +
+        `'${pr.id}' at this head (yrd pr submit ${pr.branch})`
+}
+
+/**
  * Refusals `queue audit` must report on the FIRST cycle instead of waiting out
  * {@link ADMISSION_REFUSAL_LOOP_THRESHOLD}: a verdict on the CONTENT, which no
  * retry can change.
@@ -3015,17 +3036,26 @@ function createQueue<Shape extends ChangeShape>(
     // demand a re-push to recover from a condition the re-push does not even
     // address.
     //
-    // Infrastructure is excluded on top: an infra fault says nothing about the
-    // content and clears on its own. Those already propagate rather than refuse
-    // on the derived path, so this is a belt on a brace — kept because the cost
-    // of being wrong is a healthy submission the queue never said it dropped.
-    if (options.candidate !== undefined && kind !== "infrastructure") {
-      await retireDerivedSubmitFact(pr, changeHead(pr as Change), result, options.conflicts)
+    // Infrastructure never retires — and that decision is NOT taken here. The
+    // retirement reads the refusal's DISPOSITION itself and returns without
+    // retiring on "infrastructure", so no caller can reach a retirement by
+    // forgetting a guard at this funnel. Until 2026-09-01 a `kind !==
+    // "infrastructure"` gate on this line was the only thing between a full
+    // `/tmp` and a consumed submission, and the step-failure site fed it a
+    // flag that is never set for a `failure` conclusion (@i/10-yrd/24031).
+    if (options.candidate !== undefined) {
+      await retireDerivedSubmitFact(pr, changeHead(pr as Change), { ...result, kind }, options.conflicts)
     }
     return {
       code: result.code,
       kind,
-      reason: result.message,
+      // The refusal ledger's row is the one a reader reaches, and for an
+      // environment fault it must say the cure is NOT a re-push: the ruling is
+      // "yrd broken => fix yrd", never "PR broken => send it back".
+      reason:
+        kind === "infrastructure"
+          ? `${result.message}; remedy: ${infrastructureRefusalRemedy(pr, hasChangeRecord(runtime().bays, pr.id) ? "record" : "derived")}`
+          : result.message,
       ...(options.retryablePrecondition === true ? { retryablePrecondition: true } : {}),
     }
   }
@@ -3278,8 +3308,9 @@ function createQueue<Shape extends ChangeShape>(
           // next pass the moment a re-drive or a base move hands it a job that
           // can reach a verdict. Deliberately NOT a retirement of the author's
           // submit fact either: an infrastructure failure must never consume a
-          // submission, which is why `refuseRevisionAdmission` — the one funnel
-          // that retires facts — is not on this path at all.
+          // submission — `retireDerivedSubmitFact` refuses that by disposition
+          // on the refusal path, and this path has no verdict to ledger at all,
+          // so it skips `refuseRevisionAdmission` altogether.
           return {
             processed: false,
             ejected: {
@@ -3322,11 +3353,39 @@ function createQueue<Shape extends ChangeShape>(
           ...("output" in job && job.output !== undefined ? { output: job.output } : {}),
           receipt: result,
         }
+        const kind = admissionFailureKind(result, job.conclusion !== "failure")
         const refusal = await refuseRevisionAdmission(pr, baseSha, step.name, result, {
           candidate: candidate.id,
-          kind: admissionFailureKind(result, job.conclusion !== "failure"),
+          kind,
           steps: [...evidence, failed],
         })
+        // An environment fault on the DERIVED lane re-drives the Job it struck,
+        // so the next pass holds a Job that can reach a verdict. Without this
+        // the kept submit fact alone changes nothing: the failed Job is keyed by
+        // (member, revision, base, step) and reused by key above, `freshRetry`
+        // re-drives only behind a stored refused admission — which a derived
+        // member never has (`recordRevisionAdmission` skips it) — and
+        // `admissionQueue` drops a derived member whose check is terminal, so
+        // the member would sit `submitted` under `required-check-failed` and
+        // its "push new content" cure until a re-push the environment fault
+        // never called for. One attempt per pass: the refusal above releases
+        // this pass's line, and the retry is the `infra-retry` bucket's own
+        // remedy. The record lane keeps its authority-counted retry path.
+        if (kind === "infrastructure" && !hasChangeRecord(runtime().bays, pr.id)) {
+          await jobs.retry(job.id)
+          log.info?.(
+            `queue re-queued required check '${step.name}' Job '${job.id}' for ${pr.id} (${pr.branch}) after an ` +
+              `environment fault (${result.code}); the next pass runs it again`,
+            {
+              action: "admission-job-redriven",
+              pr: pr.id,
+              branch: pr.branch,
+              step: step.name,
+              job: job.id,
+              code: result.code,
+            },
+          )
+        }
         return { processed: true, refusal }
       }
       evidence.push({
@@ -3488,25 +3547,57 @@ function createQueue<Shape extends ChangeShape>(
    * re-checks the same thing against committed state, so a race between the
    * read here and the write there resolves to no-op rather than to dropping
    * live work.
+   *
+   * Gated on the refusal's DISPOSITION, read here and nowhere else: only an
+   * author-owned verdict ("refusal", "failure") consumes the author's
+   * submission. An "infrastructure" refusal — a full filesystem, an
+   * unreachable submodule origin — judged the environment, not the content,
+   * so the fact is KEPT, said so in one row that names the cure, and the
+   * member is admitted again on the next pass. `submit-fact-retired` can
+   * therefore only ever follow an author disposition, by construction rather
+   * than by a guard at each caller (@i/10-yrd/24031: on 2026-09-01 22:24 an
+   * EDQUOT inside `affected-tests` retired PR3159 and PR3175).
    */
   const retireDerivedSubmitFact = async (
     pr: DeepReadonly<Change>,
     headSha: string,
-    result: Readonly<{ code: string; message: string }>,
+    refusal: Readonly<{
+      code: string
+      message: string
+      kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
+    }>,
     paths: readonly string[] | undefined,
   ): Promise<void> => {
     const snapshot = runtime()
     if (hasChangeRecord(snapshot.bays, pr.id)) return
     const submit = snapshot.bays.submits[pr.branch]
     if (submit === undefined || submit.sha !== headSha) return
+    if (refusal.kind === "infrastructure") {
+      log.warn?.(
+        `queue kept the standing submit fact for ${pr.id} (${pr.branch}): its refusal '${refusal.code}' is an ` +
+          "environment fault, not a verdict about the content, so the submission is not consumed — " +
+          infrastructureRefusalRemedy(pr, "derived"),
+        {
+          action: "submit-fact-kept",
+          branch: pr.branch,
+          sha: headSha,
+          pr: pr.id,
+          code: refusal.code,
+          kind: refusal.kind,
+          reason: refusal.message,
+          remedy: infrastructureRefusalRemedy(pr, "derived"),
+        },
+      )
+      return
+    }
     try {
       await actions.retireSubmitFact({
         branch: pr.branch,
         sha: headSha,
         base: submit.base,
         pr: pr.id,
-        code: result.code,
-        reason: result.message,
+        code: refusal.code,
+        reason: refusal.message,
         ...(paths === undefined || paths.length === 0 ? {} : { paths: [...paths] }),
       })
     } catch (error) {
@@ -3522,7 +3613,7 @@ function createQueue<Shape extends ChangeShape>(
           branch: pr.branch,
           sha: headSha,
           pr: pr.id,
-          code: result.code,
+          code: refusal.code,
           reason: error instanceof Error ? error.message : String(error),
         },
       )
@@ -3536,7 +3627,8 @@ function createQueue<Shape extends ChangeShape>(
         branch: pr.branch,
         sha: headSha,
         pr: pr.id,
-        code: result.code,
+        code: refusal.code,
+        kind: refusal.kind,
         ...(paths === undefined || paths.length === 0 ? {} : { paths: [...paths] }),
       },
     )
@@ -11250,6 +11342,15 @@ export const COMPOSITION_FAILURE_BUCKETS = {
   ]),
   "infra-retry": new Set<string>([
     "carrier-inspection",
+    // EDQUOT/ENOSPC stated in a required check's OWN output, or hit by the
+    // command runner's own artifact writes (command.ts): the check's child ran
+    // out of quota or space, and nothing about the candidate is wrong. PR3159
+    // (2026-09-01 22:24 PDT): `fatal: unable to write loose object file: Disk
+    // quota exceeded` on a quota'd `/tmp`, filed as `affected-tests-failed`,
+    // and the standing submit fact retired for it. Operator ruling: an
+    // ENOSPC/EDQUOT is "yrd is broken, fix yrd", never "PR broken, send
+    // back". Emitted only through the `CHECK_STORAGE_EXHAUSTED` constant.
+    "check-storage-exhausted",
     // The composition-time fill-in could not resolve a submodule's main —
     // a fetch/probe blip, cured by retrying, exactly as the same code is
     // treated on the merge path's release ladder.
@@ -11392,6 +11493,10 @@ export const YRD_REFUSAL_CODES = [
   // no bucket of its own, always the plain default disposition. Load-bearing
   // for status-presentation.test.ts.
   "check-failed",
+  // scratch-storage.ts `CHECK_STORAGE_EXHAUSTED` — the command runner's own
+  // storage verdict (a check's output stated EDQUOT/ENOSPC, or the runner's
+  // own writes hit it), bucketed `infra-retry` above.
+  "check-storage-exhausted",
   "checking",
   "checkpoint-migration-certificate-missing",
   "checkpoint-migration-certificate-stale",
@@ -11749,11 +11854,44 @@ export function canonicalRefusalCode(code: string, options: CanonicalRefusalCode
   return DYNAMIC_STEP_FAILURE_CODE.test(code) ? "check-failed" : undefined
 }
 
+/**
+ * The disposition of one admission failure: WHO owns the cure.
+ *
+ * `infrastructure` is derived from the CODE as well as from the caller's flag.
+ * A step that ran to a `failure` conclusion carrying an `infra-retry` bucket
+ * member — `worktree-storage-exhausted`, `scratch-cleanup-failed`, a
+ * component-main probe that could not fetch — judged the ENVIRONMENT, not the
+ * content; the bucket's own contract is "the cure is always another
+ * composition, so the retry is the remedy". Read only from the flag, this
+ * function named every such failure "failure" — author-owned — and the one
+ * funnel downstream retired the author's submit fact on it: measured
+ * 2026-09-01 22:24, `/tmp` hit its quota, the `affected-tests` step of PR3159
+ * and PR3175 exited on `Disk quota exceeded`, and two standing submissions were
+ * consumed for a full filesystem (@i/10-yrd/24031). Deriving the kind from the
+ * bucket here makes that impossible by construction for every code in the
+ * bucket, including the ones added after this comment was written.
+ */
+/**
+ * Every failure code the ENVIRONMENT owns: the `infra-retry` bucket plus the
+ * two env-disposed codes that live outside it — `queue-environment-refused` (a
+ * host precondition) and `orphaned-run` (a runner that vanished). One set, read
+ * by {@link admissionFailureKind} here and by `failureDisposition` in the CLI,
+ * so the queue's retire decision and the operator's status column can never
+ * disagree about who owns a cure. Folded from the third case of @dev/2's
+ * 24031 suite, where a `queue-environment-refused` check failure still retired
+ * the submit fact because only the bucket was consulted.
+ */
+export const ENVIRONMENT_OWNED_FAILURE_CODES: ReadonlySet<string> = new Set<string>([
+  ...COMPOSITION_FAILURE_BUCKETS["infra-retry"],
+  "queue-environment-refused",
+  "orphaned-run",
+])
+
 function admissionFailureKind(
   result: DeepReadonly<JobErrorFact>,
   infrastructure: boolean,
 ): Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"] {
-  if (infrastructure) return "infrastructure"
+  if (infrastructure || ENVIRONMENT_OWNED_FAILURE_CODES.has(result.code)) return "infrastructure"
   return NEEDS_AUTHOR_CODES.has(result.code) ? "refusal" : "failure"
 }
 

@@ -1,4 +1,4 @@
-import { canonicalRefusalCode, COMPOSITION_FAILURE_BUCKETS } from "@yrd/queue"
+import { canonicalRefusalCode, COMPOSITION_FAILURE_BUCKETS, ENVIRONMENT_OWNED_FAILURE_CODES } from "@yrd/queue"
 
 export type StatusPresentationState =
   | "queued"
@@ -221,11 +221,7 @@ export function failureDisposition(code: string): FailureDisposition {
     return { state: "stale", automation: "auto-requeue", owner: "queue" }
   }
   if (canonical === "stale-pr") return { state: "stale", automation: "none", owner: "queue" }
-  if (
-    canonical === "queue-environment-refused" ||
-    canonical === "orphaned-run" ||
-    INFRA_RETRY_FAILURE_CODES.has(canonical)
-  ) {
+  if (ENVIRONMENT_OWNED_FAILURE_CODES.has(canonical) || INFRA_RETRY_FAILURE_CODES.has(canonical)) {
     return { state: "env", automation: "auto-requeue", owner: "queue" }
   }
   if (canonical === "job-lost" || canonical === "job-lease-expired") {
