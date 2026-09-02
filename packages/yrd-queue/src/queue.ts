@@ -4175,7 +4175,18 @@ function createQueue<Shape extends ChangeShape>(
     pr: string,
     refusal: NonNullable<RevisionAdmissionOutcome["refusal"]>,
   ): Promise<void> => {
-    log.warn?.(`queue admit skipped ${pr}, which failed its required checks`, {
+    // This row said "queue admit skipped <pr>, which failed its required
+    // checks" and then repeated the refusal's whole `reason` — the same
+    // sentence the check Job's own failure row had printed a moment earlier,
+    // verbatim, including the artifact path. That repetition is gone.
+    //
+    // The ROW is not, and the difference is worth stating because it is easy
+    // to read this as one duplicate. The Job's row says what the CHECK did;
+    // this one says what the QUEUE decided about the change, and it carries
+    // `kind` — whether the author was billed — which appears nowhere else in
+    // the human log. A reader asking "who pays for this" has exactly one row
+    // to read, so the reason is dropped and the decision is kept.
+    log.warn?.(`queue admit skipped ${pr} [${refusal.code}], billed to ${refusal.kind === "infrastructure" ? "the queue" : "the submitter"}`, {
       action: "compose-candidate-skip",
       pr,
       ...refusal,
@@ -12126,10 +12137,31 @@ function implicitSelectionAccounting(
       if (eligibility.reason === undefined) {
         throw new Error(`yrd: change '${pr.id}' is not runnable and carries no eligibility reason`)
       }
+      // A STUCK change is held by the QUEUE's own fault, and this row used to
+      // tell its author to "amend or rebase the branch and push it again" and
+      // that "eligibility is the author's to clear" — directly contradicting
+      // the stuck message printed above it, which says nobody is billed. The
+      // remedy is addressed to the queue's owner instead, because that is who
+      // can act; the author is told nothing, because there is nothing they can
+      // do. A FAILED change keeps the original advice: for that one it is true
+      // and it names the cure.
+      //
+      // The HOLD itself stays either way, and that is the point of changing
+      // the remedy rather than dropping the row: a change with no holds is
+      // RUNNABLE (see the return below), so suppressing this one would have
+      // handed a stuck change back to the queue as work to take.
+      const standing = state.queues.admissionRefusals[pr.id]
       held.push({
-        code: eligibility.reason.code,
-        reason: eligibility.reason.message,
-        remedy: "read the reason: eligibility is the author's to clear, not the queue's",
+        code: standing?.kind === "infrastructure" ? standing.code : eligibility.reason.code,
+        // The eligibility sentence is the author's ("checks re-run on new
+        // content only — amend or rebase the branch and push it again"), and
+        // it is false for a stuck change. The refusal's OWN reason says what
+        // actually happened, so it is what a stuck row carries.
+        reason: standing?.kind === "infrastructure" ? standing.reason : eligibility.reason.message,
+        remedy:
+          standing?.kind === "infrastructure"
+            ? "nothing is asked of the submitter: the queue could not judge this change, and the next pass takes it again once the queue is repaired"
+            : "read the reason: eligibility is the author's to clear, not the queue's",
       })
     }
     return { pr, eligibility, holds: held }
