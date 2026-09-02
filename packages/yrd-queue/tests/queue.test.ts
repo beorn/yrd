@@ -4774,7 +4774,7 @@ describe("Queue", () => {
     expect(app.queue.get("R1")?.prs).toMatchObject([{ baseSha: UPDATED }])
   })
 
-  it("resolves each queue base once per cycle instead of once per change", async () => {
+  it("resolves each queue base once per drain turn, never once per change", async () => {
     const resolvedBases: string[] = []
     await using app = await createQueueApp({
       batch: 4,
@@ -4793,7 +4793,13 @@ describe("Queue", () => {
 
     await app.queue.run({ prs: prs.map((pr) => pr.id) }, runtime)
 
-    expect(resolvedBases).toEqual(["main", "release"])
+    // Four changes on two bases, six reads, none of them per change: the top
+    // of the pass resolves each base once, and each of the drain's two turns
+    // (the one that dispatches the whole batch-4 order, and the one that
+    // finds the order empty) re-reads each base from the ref once, so a base
+    // that moved between turns is seen before the next member is checked at
+    // it (base-per-turn.test.ts). Within a turn the memo dedupes every read.
+    expect(resolvedBases).toEqual(["main", "release", "main", "release", "main", "release"])
   })
 
   it("refuses integration when a clear main-health admission turns green then same-base red", async () => {

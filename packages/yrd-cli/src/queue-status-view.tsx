@@ -660,6 +660,14 @@ export type QueueTimelineProjection = Readonly<{
   filters: Readonly<{
     windowMs: number
     since: string
+    /**
+     * Whether `windowMs` is the DEFAULT bound (7d of finished history, open
+     * rows always shown) or an explicit `--since`. Present so a reader of the
+     * JSON never mistakes a bounded read for the whole history.
+     */
+    windowSource?: "default" | "explicit"
+    /** The window that applied, in words — the same sentence the footer prints. */
+    windowLabel?: string
     statuses: readonly QueueTimelineStatusFilter[]
     terms: readonly string[]
     latest: boolean
@@ -690,6 +698,12 @@ export type QueueTimelineProjection = Readonly<{
 export type QueueTimelineProjectionOptions = Readonly<{
   now: number
   windowMs: number
+  /**
+   * Whether `windowMs` is the DEFAULT bound or an explicit `--since`. Carried
+   * into `filters.windowSource`/`windowLabel`. Omitted (fixtures, older
+   * callers) reads as explicit: only the CLI can say a window was defaulted.
+   */
+  windowSource?: "default" | "explicit"
   /**
    * Window for the flow-metrics aggregate. Defaults to `windowMs` when omitted,
    * so a caller can widen the metrics horizon (e.g. 24h) while the listing rows
@@ -1369,6 +1383,45 @@ function terminalOutcome(status: QueueTimelineStatus): QueueTerminalOutcome {
   return status
 }
 
+/**
+ * The window bounds FINISHED history only. An open row — pending or running —
+ * is the queue's live state and shows whatever its age: a change submitted
+ * 120 hours ago and still waiting is exactly what a reader of `queue list`
+ * must never lose to the 7-day default (2026-09-01, the ruling that bounded
+ * the default window named open work as always shown in the same breath). A
+ * row with no timestamp at all has nothing to bound and is kept, as before.
+ */
+export function timelineRowWithinWindow(row: QueueTimelineProjectedRow, sinceMs: number, nowMs: number): boolean {
+  if (row.timestampMs === null) return true
+  const status = timelineStatusFilter(row.status)
+  if (status === "pending" || status === "running") return true
+  return row.timestampMs >= sinceMs && row.timestampMs <= nowMs
+}
+
+/** `7d`, `36h`, `90m` — the window as an operator would type it to `--since`. */
+function timelineWindowDuration(windowMs: number): string {
+  const day = 24 * 60 * 60 * 1_000
+  const hour = 60 * 60 * 1_000
+  const minute = 60 * 1_000
+  if (windowMs % day === 0) return `${String(windowMs / day)}d`
+  if (windowMs % hour === 0) return `${String(windowMs / hour)}h`
+  if (windowMs % minute === 0) return `${String(windowMs / minute)}m`
+  return `${String(Math.round(windowMs / 1_000))}s`
+}
+
+/**
+ * The window that applied, in words, for the footer and `filters.windowLabel`:
+ * a reader must be able to tell a bounded default from an explicit `--since`
+ * and either from the whole history, without arithmetic on `windowMs`.
+ */
+export function timelineWindowLabel(windowMs: number, source: "default" | "explicit"): string {
+  if (windowMs >= QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS) return "everything retained (--since)"
+  const duration = timelineWindowDuration(windowMs)
+  return source === "default"
+    ? `last ${duration} (default; open changes always shown; --since widens)`
+    : `last ${duration} (--since; open changes always shown)`
+}
+
 function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusFilter {
   // Every pre-run status (draft/rev/ready) filters with `pending`/`todo`:
   // they surface under the default view and the todo bucket, without minting new
@@ -1789,11 +1842,8 @@ function terminalMemberFact(
   const totalMs =
     totalStart === undefined
       ? null
-      : (elapsedMs(
-          totalStart,
-          currentAdmissionFinish(totalStart, terminalAt),
-          `change '${row.pr}' total duration`,
-        ) ?? null)
+      : (elapsedMs(totalStart, currentAdmissionFinish(totalStart, terminalAt), `change '${row.pr}' total duration`) ??
+        null)
   return {
     pr: row.pr,
     revision: row.revision,
@@ -1927,7 +1977,7 @@ function buildQueueTimelineProjection(
   const selectRows = (windowStartMs: number): QueueTimelineProjectedRow[] => {
     const filtered = rawRows
       .filter((row) => selectedStatuses.has(timelineStatusFilter(row.status)))
-      .filter((row) => row.timestampMs === null || (row.timestampMs >= windowStartMs && row.timestampMs <= options.now))
+      .filter((row) => timelineRowWithinWindow(row, windowStartMs, options.now))
       .filter((row) => timelineMatches(row, terms))
     return options.latest ? latestTimelineRows(filtered) : filtered
   }
@@ -2005,6 +2055,7 @@ function buildQueueTimelineProjection(
       if (row.ageMs === null) return oldest
       return oldest === null ? row.ageMs : Math.max(oldest, row.ageMs)
     }, null)
+  const windowSource = options.windowSource ?? "explicit"
   const projection: QueueTimelineProjection = {
     now: nowIso,
     base,
@@ -2014,7 +2065,15 @@ function buildQueueTimelineProjection(
     ...(options.runner != null || options.runnerAbsence === undefined ? {} : { runnerAbsence: options.runnerAbsence }),
     ...(pause === undefined ? {} : { pause }),
     oldestOpenMs,
-    filters: { windowMs: options.windowMs, since, statuses, terms, latest: options.latest },
+    filters: {
+      windowMs: options.windowMs,
+      since,
+      windowSource,
+      windowLabel: timelineWindowLabel(options.windowMs, windowSource),
+      statuses,
+      terms,
+      latest: options.latest,
+    },
     coverage: {
       requestedSince: since,
       ...(retainedSince === undefined ? {} : { retainedSince }),
@@ -2103,7 +2162,7 @@ function reclockQueueTimelineProjection(
   const requestedSince = new Date(sinceMs).toISOString()
   const rows = projection.rows
     .map((row) => reclockTimelineRow(row, nowIso))
-    .filter((row) => row.timestampMs === null || (row.timestampMs >= sinceMs && row.timestampMs <= now))
+    .filter((row) => timelineRowWithinWindow(row, sinceMs, now))
   const retainedRuns = new Set(rows.flatMap((row) => (row.run === undefined ? [] : [row.run])))
   const retainedDetails = projection.details.filter((detail) => retainedRuns.has(detail.run))
   const details = retainedDetails.length === projection.details.length ? projection.details : retainedDetails
@@ -5446,6 +5505,15 @@ function ProjectedQueueTimeline({
             fill pane suppresses both (rows virtualize, nothing is hidden). */}
         <Box height={1} flexDirection="row" minWidth={0} overflow="hidden">
           <Box flexGrow={1} flexBasis={0} flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
+            {/* The window that applied, in the one-shot print: a 7-day default
+                is a bounded read, and a reader must never take it for the
+                whole history (2026-09-01). The fill pane carries the same fact
+                as the `since=` pill on the right. */}
+            {fillHeight || projection.filters.windowLabel === undefined ? null : (
+              <Text color="$fg-muted" wrap="truncate">
+                window {projection.filters.windowLabel}
+              </Text>
+            )}
             {fillHeight || hiddenDisplayRows === 0 ? null : (
               <Text color="$fg-muted" wrap="truncate">
                 ... {hiddenDisplayRows} more
