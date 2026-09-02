@@ -11347,7 +11347,7 @@ const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["nee
  */
 export const YRD_REFUSAL_CODES = [
   // The three `admissionWithholding` codes (8816f274; this one renamed from
-  // `admission-line-held` by ef98406f without a registry row): why THIS pass
+  // "admission line held" by ef98406f without a registry row): why THIS pass
   // will not admit a member, carried on the `admission-withheld` row. Never a
   // persisted Run/Job failure and never a verdict — the member is admitted on
   // a later turn once the condition clears — so no dedicated
