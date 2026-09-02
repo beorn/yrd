@@ -1950,10 +1950,15 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   type CycleBaseResolver = (base: string) => Promise<string>
-  const createBaseResolutionCycle = (): CycleBaseResolver | undefined => {
+  /** The pass's base memo, plus the one act that invalidates it: a merge this
+   * pass landed MOVES the base, and the member behind the merged head must be
+   * checked at the moved base, not admitted against the sha the pass started
+   * on (`forget`). Callers that only resolve see the plain resolver type. */
+  type CycleBaseCycle = CycleBaseResolver & Readonly<{ forget: (base: string) => void }>
+  const createBaseResolutionCycle = (): CycleBaseCycle | undefined => {
     if (resolveBaseSha === undefined) return undefined
     const resolved = new Map<string, Promise<string>>()
-    return (selector) => {
+    const resolve: CycleBaseResolver = (selector) => {
       const base = baseIdentity(selector)
       let result = resolved.get(base)
       if (result === undefined) {
@@ -1962,6 +1967,11 @@ function createQueue<Shape extends ChangeShape>(
       }
       return result
     }
+    return Object.assign(resolve, {
+      forget: (selector: string): void => {
+        resolved.delete(baseIdentity(selector))
+      },
+    })
   }
 
   type CyclePlanResolver = (baseSha: string) => Promise<DeclaredStepPlan>
@@ -2886,6 +2896,10 @@ function createQueue<Shape extends ChangeShape>(
 
   type RevisionAdmissionOutcome = Readonly<{
     processed: boolean
+    /** Every required-check Job for this revision at the dispatched base is
+     * complete/success — the member is GREEN, distinct from `processed`, which
+     * a turn that merely requested a still-pending Job also reports. */
+    passed?: true
     refusal?: Readonly<{
       code: string
       kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
@@ -3169,7 +3183,7 @@ function createQueue<Shape extends ChangeShape>(
       candidate: candidate.id,
       steps: evidence,
     })
-    return { processed: true }
+    return { processed: true, passed: true }
   }
 
   const waitingRevisionAdmission = (selector: string, requestedStep?: string): WaitingAdmissionStep | undefined => {
@@ -3379,10 +3393,25 @@ function createQueue<Shape extends ChangeShape>(
    * names the ones this turn dropped from its candidate set for an unusable
    * Job — no verdict, so no refusal either — and releases the line for the
    * same reason. */
+  /** How a green head's merge Job ended, as the drain needs to act on it. */
+  type HeadMergeOutcome =
+    | Readonly<{ outcome: "merged"; run: RunId }>
+    | Readonly<{ outcome: "failed"; run: RunId; code: string; reason: string }>
+    | Readonly<{ outcome: "deferred"; run: RunId; state: string }>
+    | Readonly<{ outcome: "skipped"; reason: string }>
+  /** The compose's merge actuator handed to {@link drainAdmissions}. */
+  type HeadMerger = (pr: DeepReadonly<Change>, baseSha: string) => Promise<HeadMergeOutcome>
+
   type AdmissionDispatch = Readonly<{
     admitted: string[]
     refused: readonly string[]
     ejected: readonly string[]
+    /** The DERIVED member this turn admitted GREEN — every required-check Job
+     * complete/success at `baseSha` — at which point the turn stopped: no
+     * selector behind it was dispatched. Set only when the caller asked for it
+     * (`stopAtGreenDerivedHead`); the caller merges this head before any other
+     * member is admitted. */
+    green?: Readonly<{ pr: DeepReadonly<Change>; baseSha: string }>
   }>
 
   const dispatchAdmissions = async (
@@ -3391,6 +3420,14 @@ function createQueue<Shape extends ChangeShape>(
     selection?: "explicit",
     runOptions?: RunJobOptions,
     derived: readonly DeepReadonly<Change>[] = [],
+    // Merge-when-green (batch 1): stop the turn at the first derived member
+    // whose required checks all pass at the cycle base, so its merge is
+    // enqueued BEFORE the next member's first check starts. Off, a one-shot
+    // turn runs every member's every check first — measured 2026-09-01,
+    // pass-181838: PR3153 green on all four checks at 18:22:47, next row
+    // `typecheck started PR3160`, no merge row; a later pass ran 50 minutes
+    // with zero merges.
+    stopAtGreenDerivedHead = false,
   ): Promise<AdmissionDispatch> => {
     const admitted: string[] = []
     const refused: string[] = []
@@ -3500,6 +3537,19 @@ function createQueue<Shape extends ChangeShape>(
           await noteRevisionAdmissionRefusal(pr.id, outcome.refusal)
           refused.push(pr.id)
         }
+        // A derived head just went green: the Jobs ARE its admission record
+        // (a derived member never gets a stored one), so nothing downstream
+        // will turn this verdict into a merge until the drain does. Hand it
+        // back NOW, ahead of every selector behind it. The record lane keeps
+        // its stored-admission path and is deliberately not stopped on.
+        if (
+          stopAtGreenDerivedHead &&
+          outcome.passed === true &&
+          outcome.refusal === undefined &&
+          !hasChangeRecord(runtime().bays, pr.id)
+        ) {
+          return { admitted, refused, ejected, green: { pr, baseSha } }
+        }
       } catch (error) {
         const fact = failureFact(error)
         const checkability = error instanceof ChangeCheckabilityConflict
@@ -3574,12 +3624,51 @@ function createQueue<Shape extends ChangeShape>(
     raiseFailure("infrastructure", "admission-drain-no-progress", `yrd: ${message}`)
   }
 
+  /**
+   * The first DERIVED member, in queue order, whose required-check Jobs are all
+   * complete/success at THIS pass's base and for which no merge Job exists yet
+   * — not merged, not held by a live run, not judged by a failed one. The
+   * shape a killed pass leaves behind: pass-181838 had PR3153 green on all
+   * four checks with no merge row, and the next pass admitted every other
+   * member before it reached the selection that would finally merge it.
+   * Judged at the CYCLE base on purpose: Jobs green at a base this pass no
+   * longer merges onto are not a verdict for this pass.
+   */
+  const greenDerivedHead = async (
+    snapshot: DeepReadonly<RuntimeState>,
+    derived: readonly DeepReadonly<Change>[],
+    released: ReadonlySet<string>,
+    resolveCycleBase: CycleBaseResolver | undefined,
+  ): Promise<Readonly<{ pr: DeepReadonly<Change>; baseSha: string }> | undefined> => {
+    const ordered = derived
+      .filter((pr) => !released.has(pr.id) && !hasChangeRecord(snapshot.bays, pr.id))
+      .toSorted(
+        (left, right) =>
+          queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
+      )
+    for (const pr of ordered) {
+      const delivery = changeDeliveryState(pr as Change)
+      if (delivery !== "submitted" && delivery !== "ready") continue
+      if (blockingQueuePause(snapshot, pr) !== undefined) continue
+      if (derivedIntegration(snapshot.queues, { branch: pr.branch, headSha: changeHead(pr) }) !== undefined) continue
+      if (runningQueue(snapshot.queues, snapshot.jobs, pr.base) !== undefined) continue
+      if (checkEligibility(snapshot, pr, steps).status !== "passed") continue
+      const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
+      if (!revisionAdmissionGreen(snapshot, pr, steps, baseSha)) continue
+      return { pr, baseSha }
+    }
+    return undefined
+  }
+
   const drainAdmissions = async (
     selectors: readonly string[],
     options: QueueRunOptions,
-    resolveCycleBase: CycleBaseResolver | undefined,
+    resolveCycleBase: CycleBaseCycle | undefined,
     selection?: "explicit",
     derived: readonly DeepReadonly<Change>[] = [],
+    // Merge-when-green: the compose's actuator for merging a green derived
+    // head in place. Absent (the `admit` path), the drain only admits.
+    mergeHead?: HeadMerger,
   ): Promise<string[]> => {
     const targets = new Set(selectors)
     const admitted = new Set<string>()
@@ -3606,6 +3695,113 @@ function createQueue<Shape extends ChangeShape>(
     }
     let stalledSignature: string | undefined
     let stalledTurns = 0
+    // Merge-when-green is a BATCH-1 rule (@cto design, 2026-09-01): with one
+    // member per candidate there is nothing to wait for once the head is green,
+    // so its merge Job is enqueued before any other member is admitted and IS
+    // the turn's progress. A wider batch still admits the whole order first,
+    // because merging the head alone would defeat the batch it was configured
+    // for. A derived member never gets a stored admission record — the Jobs
+    // ARE the facts — which is exactly why nothing downstream of the drain can
+    // do this for it: the record lane's stored verdict feeds selection; a
+    // derived head's green Jobs feed nothing until the drain acts on them.
+    const mergeWhenGreen = mergeHead !== undefined && runtime().queues.batchSize === 1
+    /** The base moved under the rest of the order: re-point the RECORD-lane
+     * members still queued at the moved base, exactly as the top of a pass
+     * does, so the next member is checked at the new base rather than admitted
+     * against a base no check request of its own names
+     * (@yrd/core/refresh-coverage-gap). Derived members pin the cycle base at
+     * dispatch and need nothing. The landing-window carve-out is the same one
+     * the compose applies: a spendable verdict outside the window is kept. */
+    const repointAfterBaseMove = async (): Promise<void> => {
+      if (resolveCycleBase === undefined) return
+      const snapshot = runtime()
+      const records = admissionQueue(snapshot, steps, undefined, derived).filter((pr) =>
+        hasChangeRecord(snapshot.bays, pr.id),
+      )
+      if (records.length === 0) return
+      const landable = landingWindow(snapshot, steps, needsPersonOwner)
+      const plan = admissionSteps(steps)
+      await refreshCheckIdentities(
+        records.filter((pr) => landable.has(pr.id) || !spendableAdmission(pr, plan)),
+        resolveCycleBase,
+      )
+    }
+    /** Merge one green derived head in place and account for how it ended.
+     * Whatever came of it, the head has had its turn: it is released so the
+     * drain never re-picks it, which is also this branch's termination
+     * argument (`released` grows by one per green head, `derived` is finite). */
+    const mergeGreenHead = async (pr: DeepReadonly<Change>, baseSha: string): Promise<void> => {
+      if (mergeHead === undefined) throw new Error(`yrd: no merge actuator to merge green head '${pr.id}'`)
+      log.info?.(
+        `queue admission: change '${pr.id}' (${pr.branch}) passed every required check at ${baseSha}; ` +
+          "merging it before the next member is admitted (batch 1)",
+        { action: "admission-head-green", pr: pr.id, branch: pr.branch, baseSha },
+      )
+      const result = await mergeHead(pr, baseSha)
+      released.add(pr.id)
+      switch (result.outcome) {
+        case "merged": {
+          admitted.add(pr.id)
+          // The base moved: the memo that pinned this pass's base is stale for
+          // every member behind the merged head.
+          resolveCycleBase?.forget(pr.base)
+          await repointAfterBaseMove()
+          log.info?.(
+            `queue admission: merged change '${pr.id}' (${pr.branch}) in run '${result.run}'; ` +
+              `base '${baseIdentity(pr.base)}' moved — the next member is checked at the new base`,
+            { action: "admission-head-merged", pr: pr.id, branch: pr.branch, run: result.run, baseSha },
+          )
+          return
+        }
+        case "failed": {
+          // The run record holds the verdict (a failed merge run is durable
+          // and audit-visible on its own); this row names the reason so the
+          // pass log says WHY the next member got the turn.
+          log.warn?.(
+            `queue admission: refused change '${pr.id}' (${pr.branch}): merge run '${result.run}' failed ` +
+              `[${result.code}] ${result.reason} — the next member takes the turn; ` +
+              "checks re-run on new content only, push new content to submit again",
+            {
+              action: "admission-head-merge-failed",
+              pr: pr.id,
+              branch: pr.branch,
+              run: result.run,
+              code: result.code,
+              reason: result.reason,
+              baseSha,
+            },
+          )
+          return
+        }
+        case "deferred": {
+          // A remote Runner may hold the merge Job open. The run is live on
+          // this base, so every member behind it is withheld `queue-run-active`
+          // until it settles — say so once, here, rather than only per member.
+          admitted.add(pr.id)
+          log.warn?.(
+            `queue admission: change '${pr.id}' (${pr.branch}) merge run '${result.run}' is ${result.state}; ` +
+              "this pass leaves it to its runner and the members behind it wait for the run to settle",
+            {
+              action: "admission-head-merge-pending",
+              pr: pr.id,
+              branch: pr.branch,
+              run: result.run,
+              state: result.state,
+              baseSha,
+            },
+          )
+          return
+        }
+        case "skipped": {
+          log.warn?.(
+            `queue admission: change '${pr.id}' (${pr.branch}) is green at ${baseSha} but ${result.reason}; ` +
+              "the next member takes the turn",
+            { action: "admission-head-merge-skipped", pr: pr.id, branch: pr.branch, reason: result.reason, baseSha },
+          )
+          return
+        }
+      }
+    }
 
     while (targets.size > 0) {
       if (options.continueAdmissions?.() === false) break
@@ -3631,12 +3827,28 @@ function createQueue<Shape extends ChangeShape>(
         continue
       }
 
+      // Merge-when-green, the already-green shape: a derived head whose Jobs
+      // went green in an EARLIER pass (one killed between its last check and
+      // its merge) is not in the admission order at all — its checks are
+      // attempted — so no dispatch below would ever reach it. It merges FIRST,
+      // before this turn admits anyone, and that merge is the turn's progress.
+      if (mergeWhenGreen) {
+        const head = await greenDerivedHead(snapshot, derived, released, resolveCycleBase)
+        if (head !== undefined) {
+          await mergeGreenHead(head.pr, head.baseSha)
+          continue
+        }
+      }
+
       const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined, derived).filter(
         (pr) => !released.has(pr.id),
       )
       // A habitant (`continueAdmissions` installed) admits one change per turn so a
       // drain signal can interrupt between admissions; a one-shot dispatches the
-      // whole queue in a single turn and needs no release.
+      // whole queue in a single turn and needs no release — except that at
+      // batch 1 the turn STOPS at the first derived member that goes green
+      // (`stopAtGreenDerivedHead`), so its merge lands before the next member's
+      // first check starts.
       const turn = options.continueAdmissions === undefined ? queued : queued.slice(0, 1)
       const dispatched = await dispatchAdmissions(
         turn.map((pr) => pr.id),
@@ -3644,6 +3856,7 @@ function createQueue<Shape extends ChangeShape>(
         selection,
         options,
         derived,
+        mergeWhenGreen,
       )
       for (const pr of dispatched.admitted) admitted.add(pr)
       for (const pr of dispatched.refused) released.add(pr)
@@ -3652,6 +3865,15 @@ function createQueue<Shape extends ChangeShape>(
       // verdict, so it must not be re-picked as the head on the next turn
       // either.
       for (const pr of dispatched.ejected) released.add(pr)
+      // Merge-when-green, the just-turned-green shape: the turn stopped at a
+      // derived head whose required checks all passed at the cycle base. Merge
+      // it now; merged, failed or deferred, that is this turn's progress, and
+      // the members the turn did not reach are dispatched on the next one — at
+      // the moved base if the merge landed.
+      if (dispatched.green !== undefined) {
+        await mergeGreenHead(dispatched.green.pr, dispatched.green.baseSha)
+        continue
+      }
       // Head-of-line release: the turn admitted nothing because it was refused
       // or ejected, and PRs behind it have not been tried yet. Take the next
       // one. `released` grows by at least one whenever this branch is taken, so
@@ -4246,6 +4468,249 @@ function createQueue<Shape extends ChangeShape>(
             landable === undefined
               ? everyRefreshable
               : everyRefreshable.filter((pr) => landable.has(pr.id) || !spendableAdmission(pr, admissionPlan))
+          /**
+           * ONE candidate's compose — resolve its base, prepare the Candidate,
+           * start the run, settle it — and the id of the root run it started,
+           * or `undefined` when the candidate was skipped, abandoned or ejected
+           * (every such exit has already logged and ledgered its own reason).
+           *
+           * Shared by the post-drain merge loop below and by the drain's
+           * merge-when-green rule ({@link drainAdmissions}): at batch 1 a derived
+           * head whose required checks are all green is merged HERE, from inside
+           * the drain, before the next member's first check starts — the same
+           * prepare/start/settle every candidate takes, one call site earlier.
+           */
+          const composeCandidate = async (candidate: readonly Change[]): Promise<RunId | undefined> => {
+            // 22306 residual: wrap the FULL per-candidate admission (base resolve,
+            // prepare, start, settle) so a recut-certificate / command-refused /
+            // candidate-ref-refused on ONE partition cannot exit the selectorless
+            // drain. Explicit PR targeting still fails loud.
+            // The members still in this partition. A refusal attributable to ONE
+            // member ejects that member and retries the survivors rather than
+            // failing the whole partition: an 8-PR candidate must not be zeroed
+            // by one poisoned carrier, and the seven innocents must not inherit
+            // its refusal record — that record is what `queue audit` reads, so a
+            // stain replays as a finding every cycle until someone reads the
+            // carrier by hand.
+            // Records first, derived after (order preserved within each class):
+            // the dispatch below carries record ids in `prs` and derived
+            // entries in `derived`, and apply re-selects them in exactly that
+            // concatenation — the Candidate's rev order must match it.
+            let members = [
+              ...candidate.filter((pr) => derivedEntry(pr.id) === undefined),
+              ...candidate.filter((pr) => derivedEntry(pr.id) !== undefined),
+            ]
+            try {
+              const baseSha = await resolveCandidateBaseSha(candidate, resolveCycleBase)
+              let facts: z.infer<typeof CandidateCreatedSchema> | undefined
+              let prepared = false
+              let abandoned = false
+              // Bounded by construction: every pass either settles, abandons, or
+              // removes at least one member, so it cannot outlive the partition.
+              for (let pass = 0; pass < candidate.length; pass += 1) {
+                try {
+                  facts = await candidateFacts(members, baseSha)
+                  prepared = true
+                  break
+                } catch (error) {
+                  const fact = failureFact(error)
+                  if (
+                    !selectorless ||
+                    fact === undefined ||
+                    (fact.kind !== "refusal" && fact.kind !== "infrastructure")
+                  ) {
+                    throw error
+                  }
+                  const guilty = attributableMember(fact, members)
+                  if (guilty === undefined || members.length === 1) {
+                    // Unattributable, or nothing left to isolate: the refusal is
+                    // the partition's, exactly as it was before isolation.
+                    composeLog.warn?.(
+                      `skipped Candidate ${members.map((pr) => pr.id).join(",")} [${fact.code}]: could not be prepared`,
+                      {
+                        action: "compose-candidate-skip",
+                        ...(members.length === 1 ? { pr: members[0]?.id } : { prs: members.map((pr) => pr.id) }),
+                        code: fact.code,
+                        kind: fact.kind,
+                        reason: fact.message,
+                      },
+                    )
+                    await noteCandidateRefusal(
+                      members.map((pr) => pr.id),
+                      { code: fact.code, kind: fact.kind, reason: fact.message },
+                    )
+                    abandoned = true
+                    break
+                  }
+                  composeLog.warn?.(`ejected ${guilty} [${fact.code}], the member that refused Candidate preparation`, {
+                    action: "compose-candidate-skip",
+                    pr: guilty,
+                    code: fact.code,
+                    kind: fact.kind,
+                    reason: fact.message,
+                    remedy:
+                      "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
+                  })
+                  // Only the member that actually refused earns the durable record.
+                  await noteCandidateRefusal([guilty], {
+                    code: fact.code,
+                    kind: fact.kind,
+                    reason: fact.message,
+                  })
+                  members = members.filter((pr) => pr.id !== guilty)
+                }
+              }
+              if (abandoned) return undefined
+              // Never proceed on an unsettled preparation: `facts` is legitimately
+              // undefined when no preparer is installed, so absence alone cannot
+              // stand in for success.
+              if (!prepared) {
+                throw new Error(
+                  `yrd: Candidate preparation did not settle for '${members.map((pr) => pr.id).join(", ")}'`,
+                )
+              }
+              // Git is read HERE, at the exact base sha this candidate was
+              // prepared against — so a run re-prepared after the base moved
+              // picks up the config that moved with it, and `apply` stays a
+              // pure reducer over the plan it is handed.
+              const declaredPlan = await resolveCyclePlan?.(baseSha)
+              const derivedInRun = members.flatMap((pr) => {
+                const entry = derivedEntry(pr.id)
+                return entry === undefined ? [] : [entry]
+              })
+              const started = await actions.run({
+                prs: members.filter((pr) => derivedEntry(pr.id) === undefined).map((pr) => pr.id),
+                ...(derivedInRun.length === 0 ? {} : { derived: derivedInRun }),
+                ...(args.steps === undefined ? {} : { steps: args.steps }),
+                baseSha,
+                ...(declaredPlan === undefined
+                  ? {}
+                  : { declaredPlan: { ...declaredPlan, steps: [...declaredPlan.steps] } }),
+                ...(facts === undefined ? {} : { candidate: facts }),
+              })
+              const ejected = started.events.find((applied) => applied.name === "pr/needs-author")
+              if (ejected !== undefined) {
+                const refusal = ChangeNeedsAuthorFactSchema.parse(ejected.data)
+                if (!selectorless) raiseFailure("refusal", refusal.receipt.code, refusal.receipt.message)
+                // WARN — same reasoning as the other no-runnable-authority site
+                // above: per-change, recurring, remedy printed, and a durable
+                // `pr/needs-author` result already carries the verdict. An
+                // ERROR row ends the pass (2026-09-01), which one unrunnable
+                // change must not do to every change behind it.
+                composeConditions.report(
+                  `compose-candidate-skip-authority:${refusal.pr}:${refusal.receipt.code}`,
+                  "warn",
+                  `ejected ${refusal.pr} [${refusal.receipt.code}] no runnable authority`,
+                  {
+                    action: "compose-candidate-skip",
+                    pr: refusal.pr,
+                    code: refusal.receipt.code,
+                    reason: refusal.receipt.message,
+                    remedy:
+                      "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
+                  },
+                )
+                return undefined
+              }
+              const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
+              // A submitted PR whose configured plan is entirely admission work can
+              // already be satisfied by a retained successful Run. The command is
+              // then an intentional idempotent no-op; keep draining later candidates
+              // instead of terminating a habitant runner at the first cached PR.
+              if (
+                startedEvent === undefined &&
+                started.events.every((event) => event.name === "queue/candidate/created")
+              ) {
+                reportZeroEventRun(started.value)
+                return undefined
+              }
+              if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
+              const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
+              roots.push(id)
+              const root = current(id)
+              if (Queues.terminal(root)) await reportFreshTerminal(root)
+              else await settleCandidate(id)
+              return id
+            } catch (error) {
+              const fact = failureFact(error)
+              if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
+                throw error
+              }
+              // The installed set and the base-declared plan disagree (23192):
+              // a PROCESS fault every candidate of this compose shares, not a
+              // fact about this candidate — skipped, it drains the whole queue
+              // to a clean [] with the disagreement recorded nowhere, while the
+              // explicit path rejects. Same by-code carve-out shape as
+              // settleCandidate's stale-plan above.
+              if (fact.code === "declared-step-not-installed") throw error
+              // Same attribution rule as preparation: a failure that names one
+              // member is that member's alone. `members`, not `candidate`, so a
+              // member already ejected above is not stained a second time.
+              const guilty = attributableMember(fact, members)
+              const blamed = guilty === undefined ? members.map((pr) => pr.id) : [guilty]
+              composeLog.warn?.(`skipped ${blamed.join(",")} [${fact.code}], lost to a losable failure`, {
+                action: "compose-candidate-skip",
+                ...(blamed.length === 1 ? { pr: blamed[0] } : { prs: blamed }),
+                code: fact.code,
+                kind: fact.kind,
+                reason: fact.message,
+              })
+              await noteCandidateRefusal(blamed, { code: fact.code, kind: fact.kind, reason: fact.message })
+            }
+            return undefined
+          }
+          /**
+           * The drain's merge-when-green actuator: compose exactly this green
+           * derived head as a one-member candidate and report how its merge Job
+           * ended, so the drain can move the base (merged), release the line
+           * with the Job's reason (failed), or leave a still-running merge to
+           * its runner (deferred). `skipped` means the compose started no run —
+           * its own rows above say why.
+           */
+          /** Members whose merge the drain drove to a VERDICT this pass —
+           * merged or failed. The post-drain selection below must NOT see
+           * them again: a merged head reads `integrated`, which `requestedPRs`
+           * admits so a record with steps still to run after its merge (a
+           * deploy follow-on) can resume, but a head the drain just composed
+           * ran its WHOLE plan, and re-selecting it only buys a
+           * `command-refused` (merge after integration) plus a refusal-ledger
+           * row against a change that merged fine; a head whose merge FAILED
+           * blamelessly (a stale-check loss releases its authority) would be
+           * re-driven a second time in the same pass at the same memoized
+           * base, when the rule is one turn per pass and the next pass
+           * re-drives it against the moved base. */
+          const judgedByDrain = new Set<string>()
+          /** Merge runs the drain started that a remote Runner still holds
+           * open, by member: live runs `resumable` above could not have seen,
+           * folded into the selection's exclusions below exactly as it was. */
+          const deferredByDrain = new Map<string, RunId>()
+          const mergeGreenHead: HeadMerger = async (pr) => {
+            const id = await composeCandidate([pr as Change])
+            if (id === undefined) {
+              return {
+                outcome: "skipped",
+                reason: "the compose started no run for it; the compose-candidate-skip or queue-run rows above say why",
+              }
+            }
+            const run = current(id)
+            if (Queues.succeeded(run)) {
+              judgedByDrain.add(pr.id)
+              return { outcome: "merged", run: id }
+            }
+            if (Queues.failed(run)) {
+              judgedByDrain.add(pr.id)
+              const merge = run.steps.find((step) => step.kind === "merge")?.job
+              const failure = merge !== undefined && jobFailed(merge) ? jobFailure(merge) : run.error
+              return {
+                outcome: "failed",
+                run: id,
+                code: failure?.code ?? "queue-run-failed",
+                reason: failure?.message ?? `queue run '${id}' failed without a recorded reason`,
+              }
+            }
+            deferredByDrain.set(pr.id, id)
+            return { outcome: "deferred", run: id, state: describeRunState(run) }
+          }
           // Admission is revision-owned evidence, not a Queue Run. Revalidate
           // each requested revision against this cycle's base before selecting
           // merge work. The driver still settles any historical active
@@ -4276,6 +4741,7 @@ function createQueue<Shape extends ChangeShape>(
               resolveCycleBase,
               selection,
               enteringDerived,
+              mergeGreenHead,
             )
           } catch (error) {
             const fact = failureFact(error)
@@ -4306,6 +4772,22 @@ function createQueue<Shape extends ChangeShape>(
           }
           snapshot = runtime()
           const settledDerived = materializedDerived(snapshot)
+          // The drain may have STARTED runs of its own (merge-when-green): a
+          // merge a remote Runner still holds open is a live run on its base,
+          // and `consumedBy`/`activeBaseRuns` were taken before the drain, so
+          // fold THOSE runs in the way `resumable` was — or selection would
+          // pick a second candidate for a base one run already holds and buy a
+          // `queue-running` refusal for it. Only the drain's own runs: every
+          // other live run was already judged by `resumableQueueRoots` under
+          // this pass's selection, and widening to all of them would hide an
+          // explicit target behind a stuck run the caller asked to see refused.
+          for (const [member, runId] of deferredByDrain) {
+            const run = current(runId)
+            if (Queues.terminal(run)) continue
+            const base = baseIdentity(run.base)
+            if (!activeBaseRuns.has(base)) activeBaseRuns.set(base, runId)
+            if (!consumedBy.has(member)) consumedBy.set(member, runId)
+          }
           const currentChecked = checked.flatMap((pr) => {
             const current = resolveChange(snapshot.bays, pr.id) ?? settledDerived.find((member) => member.id === pr.id)
             return current === undefined ? [] : [current]
@@ -4328,13 +4810,20 @@ function createQueue<Shape extends ChangeShape>(
           // Exclude them from merge selection without aborting the whole phase,
           // so unrelated ready PRs can integrate while targeted one-PR drains
           // return their admission result instead of a checks-running refusal.
-          const unavailable = new Set([...consumed, ...pendingIds, ...authorityGaps.map((gap) => gap.pr)])
+          const unavailable = new Set([
+            ...consumedBy.keys(),
+            ...pendingIds,
+            ...authorityGaps.map((gap) => gap.pr),
+            ...judgedByDrain,
+          ])
           // Re-prune the derived entries against the post-admission state so a
           // member whose fact vanished mid-cycle drops out of merge selection
           // instead of failing the drain (the dispatch below still CAS-refuses
-          // loudly if a fact vanishes between here and apply).
-          cycleDerived = cycleDerived.filter((member) =>
-            settledDerived.some((materialized) => materialized.id === member.id),
+          // loudly if a fact vanishes between here and apply). A member the
+          // drain merged is done: it leaves the pass here.
+          cycleDerived = cycleDerived.filter(
+            (member) =>
+              !judgedByDrain.has(member.id) && settledDerived.some((materialized) => materialized.id === member.id),
           )
           cycleArgs = cycleDerived.length === 0 ? { ...args, derived: undefined } : { ...args, derived: cycleDerived }
           const selectionOptions = {
@@ -4444,181 +4933,7 @@ function createQueue<Shape extends ChangeShape>(
           }
           for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize, snapshot.queues)) {
             if (runOptions.continueAdmissions?.() === false) break
-            // 22306 residual: wrap the FULL per-candidate admission (base resolve,
-            // prepare, start, settle) so a recut-certificate / command-refused /
-            // candidate-ref-refused on ONE partition cannot exit the selectorless
-            // drain. Explicit PR targeting still fails loud.
-            // The members still in this partition. A refusal attributable to ONE
-            // member ejects that member and retries the survivors rather than
-            // failing the whole partition: an 8-PR candidate must not be zeroed
-            // by one poisoned carrier, and the seven innocents must not inherit
-            // its refusal record — that record is what `queue audit` reads, so a
-            // stain replays as a finding every cycle until someone reads the
-            // carrier by hand.
-            // Records first, derived after (order preserved within each class):
-            // the dispatch below carries record ids in `prs` and derived
-            // entries in `derived`, and apply re-selects them in exactly that
-            // concatenation — the Candidate's rev order must match it.
-            let members = [
-              ...candidate.filter((pr) => derivedEntry(pr.id) === undefined),
-              ...candidate.filter((pr) => derivedEntry(pr.id) !== undefined),
-            ]
-            try {
-              const baseSha = await resolveCandidateBaseSha(candidate, resolveCycleBase)
-              let facts: z.infer<typeof CandidateCreatedSchema> | undefined
-              let prepared = false
-              let abandoned = false
-              // Bounded by construction: every pass either settles, abandons, or
-              // removes at least one member, so it cannot outlive the partition.
-              for (let pass = 0; pass < candidate.length; pass += 1) {
-                try {
-                  facts = await candidateFacts(members, baseSha)
-                  prepared = true
-                  break
-                } catch (error) {
-                  const fact = failureFact(error)
-                  if (
-                    !selectorless ||
-                    fact === undefined ||
-                    (fact.kind !== "refusal" && fact.kind !== "infrastructure")
-                  ) {
-                    throw error
-                  }
-                  const guilty = attributableMember(fact, members)
-                  if (guilty === undefined || members.length === 1) {
-                    // Unattributable, or nothing left to isolate: the refusal is
-                    // the partition's, exactly as it was before isolation.
-                    composeLog.warn?.(
-                      `skipped Candidate ${members.map((pr) => pr.id).join(",")} [${fact.code}]: could not be prepared`,
-                      {
-                        action: "compose-candidate-skip",
-                        ...(members.length === 1 ? { pr: members[0]?.id } : { prs: members.map((pr) => pr.id) }),
-                        code: fact.code,
-                        kind: fact.kind,
-                        reason: fact.message,
-                      },
-                    )
-                    await noteCandidateRefusal(
-                      members.map((pr) => pr.id),
-                      { code: fact.code, kind: fact.kind, reason: fact.message },
-                    )
-                    abandoned = true
-                    break
-                  }
-                  composeLog.warn?.(`ejected ${guilty} [${fact.code}], the member that refused Candidate preparation`, {
-                    action: "compose-candidate-skip",
-                    pr: guilty,
-                    code: fact.code,
-                    kind: fact.kind,
-                    reason: fact.message,
-                    remedy:
-                      "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
-                  })
-                  // Only the member that actually refused earns the durable record.
-                  await noteCandidateRefusal([guilty], {
-                    code: fact.code,
-                    kind: fact.kind,
-                    reason: fact.message,
-                  })
-                  members = members.filter((pr) => pr.id !== guilty)
-                }
-              }
-              if (abandoned) continue
-              // Never proceed on an unsettled preparation: `facts` is legitimately
-              // undefined when no preparer is installed, so absence alone cannot
-              // stand in for success.
-              if (!prepared) {
-                throw new Error(
-                  `yrd: Candidate preparation did not settle for '${members.map((pr) => pr.id).join(", ")}'`,
-                )
-              }
-              // Git is read HERE, at the exact base sha this candidate was
-              // prepared against — so a run re-prepared after the base moved
-              // picks up the config that moved with it, and `apply` stays a
-              // pure reducer over the plan it is handed.
-              const declaredPlan = await resolveCyclePlan?.(baseSha)
-              const derivedInRun = members.flatMap((pr) => {
-                const entry = derivedEntry(pr.id)
-                return entry === undefined ? [] : [entry]
-              })
-              const started = await actions.run({
-                prs: members.filter((pr) => derivedEntry(pr.id) === undefined).map((pr) => pr.id),
-                ...(derivedInRun.length === 0 ? {} : { derived: derivedInRun }),
-                ...(args.steps === undefined ? {} : { steps: args.steps }),
-                baseSha,
-                ...(declaredPlan === undefined
-                  ? {}
-                  : { declaredPlan: { ...declaredPlan, steps: [...declaredPlan.steps] } }),
-                ...(facts === undefined ? {} : { candidate: facts }),
-              })
-              const ejected = started.events.find((applied) => applied.name === "pr/needs-author")
-              if (ejected !== undefined) {
-                const refusal = ChangeNeedsAuthorFactSchema.parse(ejected.data)
-                if (!selectorless) raiseFailure("refusal", refusal.receipt.code, refusal.receipt.message)
-                // WARN — same reasoning as the other no-runnable-authority site
-                // above: per-change, recurring, remedy printed, and a durable
-                // `pr/needs-author` result already carries the verdict. An
-                // ERROR row ends the pass (2026-09-01), which one unrunnable
-                // change must not do to every change behind it.
-                composeConditions.report(
-                  `compose-candidate-skip-authority:${refusal.pr}:${refusal.receipt.code}`,
-                  "warn",
-                  `ejected ${refusal.pr} [${refusal.receipt.code}] no runnable authority`,
-                  {
-                    action: "compose-candidate-skip",
-                    pr: refusal.pr,
-                    code: refusal.receipt.code,
-                    reason: refusal.receipt.message,
-                    remedy:
-                      "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
-                  },
-                )
-                continue
-              }
-              const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
-              // A submitted PR whose configured plan is entirely admission work can
-              // already be satisfied by a retained successful Run. The command is
-              // then an intentional idempotent no-op; keep draining later candidates
-              // instead of terminating a habitant runner at the first cached PR.
-              if (
-                startedEvent === undefined &&
-                started.events.every((event) => event.name === "queue/candidate/created")
-              ) {
-                reportZeroEventRun(started.value)
-                continue
-              }
-              if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
-              const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
-              roots.push(id)
-              const root = current(id)
-              if (Queues.terminal(root)) await reportFreshTerminal(root)
-              else await settleCandidate(id)
-            } catch (error) {
-              const fact = failureFact(error)
-              if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
-                throw error
-              }
-              // The installed set and the base-declared plan disagree (23192):
-              // a PROCESS fault every candidate of this compose shares, not a
-              // fact about this candidate — skipped, it drains the whole queue
-              // to a clean [] with the disagreement recorded nowhere, while the
-              // explicit path rejects. Same by-code carve-out shape as
-              // settleCandidate's stale-plan above.
-              if (fact.code === "declared-step-not-installed") throw error
-              // Same attribution rule as preparation: a failure that names one
-              // member is that member's alone. `members`, not `candidate`, so a
-              // member already ejected above is not stained a second time.
-              const guilty = attributableMember(fact, members)
-              const blamed = guilty === undefined ? members.map((pr) => pr.id) : [guilty]
-              composeLog.warn?.(`skipped ${blamed.join(",")} [${fact.code}], lost to a losable failure`, {
-                action: "compose-candidate-skip",
-                ...(blamed.length === 1 ? { pr: blamed[0] } : { prs: blamed }),
-                code: fact.code,
-                kind: fact.kind,
-                reason: fact.message,
-              })
-              await noteCandidateRefusal(blamed, { code: fact.code, kind: fact.kind, reason: fact.message })
-            }
+            await composeCandidate(candidate)
           }
           const final = runtime()
           return [...new Set(roots)].flatMap((root) => queueTree(final.queues, final.jobs, root))
@@ -10050,6 +10365,41 @@ function projectRevisionAdmissionJobs(
  * leased, waiting or finished Job the runner, lease, token or conclusion that
  * explains it — so "waiting on a Job" never has to be followed by a journal
  * read to learn which kind of waiting. */
+/** A run's live state in one phrase, for the merge-when-green rows. */
+function describeRunState(run: Run): string {
+  const active = run.steps[run.cursor]
+  if (active?.job === undefined) return run.status
+  return `${run.status} at step '${active.name}' (${describeJobState(active.job)})`
+}
+
+/**
+ * Is this revision GREEN at `baseSha` — every required-check Job keyed for it
+ * at exactly that base complete/success? The merge-when-green condition, read
+ * from the Jobs and nothing else: a derived member never gets a stored
+ * admission record (`recordRevisionAdmission` skips it by design), so the Jobs
+ * ARE its admission facts. Keyed at the CYCLE base deliberately, never at
+ * `derivedAdmissionBaseSha`'s newest dispatch: Jobs green at a base this pass
+ * no longer merges onto are not a verdict for this pass.
+ */
+function revisionAdmissionGreen(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<Change>,
+  steps: readonly RuntimeStep[],
+  baseSha: string,
+): boolean {
+  const selected = admissionSteps(steps)
+  if (selected.length === 0) return false
+  const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
+  if (snapshot === undefined) return false
+  return selected.every((step, index) => {
+    const id =
+      state.jobs.byKey[admissionJobKey(snapshot, baseSha, index, step.revision)] ??
+      state.jobs.byKey[admissionJobKey(snapshot, baseSha, index)]
+    const job = id === undefined ? undefined : state.jobs.byId[id]
+    return job !== undefined && jobSucceeded(job)
+  })
+}
+
 function describeJobState(job: DeepReadonly<Job>): string {
   switch (job.status) {
     case "queued":
