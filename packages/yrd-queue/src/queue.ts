@@ -73,6 +73,7 @@ import {
   JobErrorFactSchema,
   JobErrorSchema,
   localRunner,
+  thrownJobFailure,
   type HasJobs,
   type HasRunner,
   type JobDef,
@@ -1138,17 +1139,20 @@ function permanentRefusalReason(pr: string, code: string, reason: string): strin
  * back", and an ENOSPC/EDQUOT is the first, never the second. So the remedy
  * never says "push new content". On the DERIVED lane the author's fact stands
  * and the failed Job is re-driven, so the next pass admits the member again on
- * its own. On the RECORD lane a refused admission still spends one check
- * authority whatever its kind (`consumedCheckAuthorities` counts verdicts, not
- * dispositions), so that lane's honest cure is one more check request at the
- * same head, not a new revision.
+ * its own. The RECORD lane's retry stays authority-counted and bounded — a
+ * refused member waits for one more check request rather than re-running itself
+ * every pass — but the refusal no longer BILLS that authority: an
+ * infrastructure verdict records `requestCount: 0`, so every request the author
+ * already granted is still there to spend (@i/10-yrd/24038). The cure names
+ * that, because "request checks again" reads very differently when the outage
+ * just ate the requests you had.
  */
 function infrastructureRefusalRemedy(pr: DeepReadonly<Change>, lane: "derived" | "record"): string {
   return lane === "derived"
     ? `no re-push needed: the submit fact for '${pr.branch}' stands at ${changeHead(pr)}; repair the environment ` +
         "and the next pass admits this member again"
-    : "no change to the branch is needed: repair the environment, then request checks again for " +
-        `'${pr.id}' at this head (yrd pr submit ${pr.branch})`
+    : "no change to the branch is needed and this refusal spent no check authority: repair the environment, then " +
+        `request checks again for '${pr.id}' at this head (yrd pr submit ${pr.branch})`
 }
 
 /**
@@ -3273,7 +3277,12 @@ function createQueue<Shape extends ChangeShape>(
       status: "refused",
       kind,
       baseSha,
-      requestCount: verdictRequestCount(pr, baseSha),
+      // An environment fault is not a verdict, so it consumes none of the
+      // author's authority to have this tree checked. Zero is a real count here
+      // and stays distinct from absent, which reads as one legacy authority
+      // (`consumedCheckAuthorities`) — recording it by omission would assert
+      // the very spend this line exists to refuse (@i/10-yrd/24038).
+      requestCount: kind === "infrastructure" ? 0 : verdictRequestCount(pr, baseSha),
       ...(options.candidate === undefined ? {} : { candidate: options.candidate }),
       steps: [...(options.steps ?? [])],
       step,
@@ -3542,7 +3551,7 @@ function createQueue<Shape extends ChangeShape>(
         const result = JobErrorSchema.parse(jobFailure(job))
         // Machinery failure, not a check verdict: a lost/canceled Job (the
         // classes admissionFailureKind marks "infrastructure") or a THROWN
-        // callback (the job layer's registered `runner-error`). The record lane
+        // callback (the job layer's structural marker). The record lane
         // absorbs these into a durable admission-refused record; a DERIVED
         // member has no record to carry that verdict (recordRevisionAdmission
         // deliberately skips it) and no run exists yet to attribute a ledger
@@ -3601,7 +3610,13 @@ function createQueue<Shape extends ChangeShape>(
         // breaks the same way. It needs a human, not a retry loop — and unlike
         // a lost Job it is not per-member, which is exactly why ejecting it
         // would be wrong.
-        if (!hasChangeRecord(runtime().bays, pr.id) && result.code === "runner-error") {
+        //
+        // Read the MARKER, never `runner-error`: a typed throw now keeps its
+        // own code, so the slug this line used to match no longer identifies
+        // the class it was written for (@i/10-yrd/24038). The row names that
+        // typed code, which is what tells the human whose fault it is.
+        const thrown = thrownJobFailure(result)
+        if (!hasChangeRecord(runtime().bays, pr.id) && thrown !== undefined) {
           raiseFailure(
             "infrastructure",
             result.code,
@@ -3617,7 +3632,12 @@ function createQueue<Shape extends ChangeShape>(
           ...("output" in job && job.output !== undefined ? { output: job.output } : {}),
           receipt: result,
         }
-        const kind = admissionFailureKind(result, job.conclusion !== "failure")
+        // A throw that typed itself `infrastructure` says so structurally, and
+        // that answer outranks any bucket lookup — the same read
+        // `admitChangeRevision`'s candidate-preparation catch already makes of
+        // `failureFact(error).kind`. Without it a record-lane member is billed
+        // for a host fault its own step named (@i/10-yrd/24038).
+        const kind = admissionFailureKind(result, job.conclusion !== "failure" || thrown?.kind === "infrastructure")
         const refusal = await refuseRevisionAdmission(pr, baseSha, step.name, result, {
           candidate: candidate.id,
           kind,

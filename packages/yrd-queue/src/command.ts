@@ -858,13 +858,15 @@ async function checkStorageExhaustion(
  * The runner's own writes — the artifact sink under `artifactRoot`, the
  * terminal record, the spawn itself — sit on the same host as the check's
  * child, and an EDQUOT/ENOSPC there used to escape as a thrown, untyped error.
- * The job layer files a throw as `runner-error` (yrd-job `jobs.ts`), which
- * queue.ts raises as a pass-stopping infrastructure failure for a derived
- * member and records as a plain `failure` — the author's kind — for a
- * record-lane one. Same filesystem, same verdict: typed here, once, at the one
- * seam every write in the step shares; anything that is not storage
+ * An UNTYPED throw is still filed `runner-error` by the job layer (yrd-job
+ * `jobs.ts`), which queue.ts raises as a pass-stopping infrastructure failure
+ * for a derived member and records as a plain `failure` — the author's kind —
+ * for a record-lane one. Same filesystem, same verdict: typed here, once, at
+ * the one seam every write in the step shares; anything that is not storage
  * exhaustion is rethrown untouched. A cause a scratch primitive already typed
- * keeps that answer — it was taken while the exhausted directory still existed.
+ * keeps that answer — it was taken while the exhausted directory still existed,
+ * and since 24038 a typed throw carries that answer all the way through the
+ * terminal record instead of collapsing to `runner-error`.
  */
 async function driverStorageExhaustion(
   purpose: string,
