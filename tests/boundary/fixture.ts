@@ -54,6 +54,11 @@ export type FakeCheckPlan = Readonly<{
   timeoutMs?: number
   /** Run this instead of the fake check — for the case where the check is not there. */
   command?: string
+  /** Declare a notifier, so the messages the queue run sends have somewhere to go.
+   * Default off, so every case that predates this knob writes the same
+   * `.yrd.yml` it always did. On, the target declares a notifier that appends
+   * each message to `notifyLog` and answers with a ball id. */
+  notify?: boolean
 }>
 
 /** The `run:` string for a plan: the knobs travel as environment assignments
@@ -75,6 +80,16 @@ function checkStep(plan: FakeCheckPlan, log: string): string {
   return `checks: [{check: {${run}${bound}}}]`
 }
 
+/** The `notify:` line for a plan, or nothing when the case did not ask for one.
+ * The notifier is what `.yrd.yml` documents: a command that reads the message
+ * as JSON on stdin and answers with a ball id. This one keeps the message so a
+ * test can count what was sent, and to whom. */
+function notifyStep(plan: FakeCheckPlan, log: string): string {
+  if (plan.notify !== true) return ""
+  const command = `cat >>${log}; echo '{"ball_id":"b1"}'`
+  return `notify: ${JSON.stringify(command)}\n`
+}
+
 export type BoundaryRepository = Readonly<{
   /** The working repository the queue runs against. */
   repo: string
@@ -82,6 +97,8 @@ export type BoundaryRepository = Readonly<{
   origin: string
   /** One line per fake-check execution. */
   checkLog: string
+  /** One line per message the notifier was handed, when `notify` was asked for. */
+  notifyLog: string
 }>
 
 /**
@@ -94,6 +111,7 @@ export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryR
   const repoPath = join(root, "repo")
   const origin = join(root, "origin.git")
   const checkLog = join(root, "fake-check.log")
+  const notifyLog = join(root, "notify.log")
 
   await git(root, "init", "-q", "--bare", origin)
   await git(root, "init", "-q", "-b", "main", repoPath)
@@ -103,11 +121,14 @@ export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryR
   await git(repo, "remote", "add", "origin", origin)
   await installDeclaredYrdEntry(repo)
   await writeFile(join(repo, "README.md"), "main\n")
-  await writeFile(join(repo, ".yrd.yml"), `base: main\nbatch: 1\n${checkStep(plan, checkLog)}\n`)
+  await writeFile(
+    join(repo, ".yrd.yml"),
+    `base: main\nbatch: 1\n${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
+  )
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "main")
   await git(repo, "push", "-q", "-u", "origin", "main")
-  return { repo, origin, checkLog }
+  return { repo, origin, checkLog, notifyLog }
 }
 
 /** A branch at one head, submitted to the queue. */
