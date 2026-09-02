@@ -109,15 +109,19 @@ export type HabitantSourceStall = Readonly<{
 export type HabitantSourceRecycle = Readonly<{
   /** Which designed exit wrote this record. Absent on records written before
    * this field existed, which were all `"source-stale"`. */
-  reason?: "source-stale" | "installed-plan-stale"
+  reason?: "source-stale" | "installed-plan-stale" | "root-pin-moved"
   /** The sha the previous process was running when it gave up. For
    * `"installed-plan-stale"`, the sha this process booted from
    * (`habitantBootedSha`) — the analogous "what this process was running"
-   * fact, read the same way the source-staleness check already reads it. */
+   * fact, read the same way the source-staleness check already reads it. For
+   * `"root-pin-moved"`, the queue repository's RECORDED Yrd pin as this
+   * process found it at boot — the same "what this process was serving under"
+   * fact, named in the units that condition compares in (24047). */
   bootedSha: string
   /** The sha it expected to come back as. For `"installed-plan-stale"`, the
    * base tip sha whose declared plan disagreed with what this process
-   * installed. */
+   * installed. For `"root-pin-moved"`, the recorded pin the queue repository
+   * carries now. */
   headSha: string
   attemptedAt: string
   /** Step names whose declaration differs between what this process installed

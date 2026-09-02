@@ -72,6 +72,7 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
   const warnings: HabitantWarnCall[] = []
   const errors: HabitantWarnCall[] = []
   const debugs: HabitantWarnCall[] = []
+  const infos: HabitantWarnCall[] = []
   const stderr: string[] = []
   const stdout: string[] = []
   const stateFactory = options.state ?? emptyState
@@ -119,6 +120,15 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
        * nothing would again read identically.
        */
       debug: (message: string, props: Record<string, unknown>) => debugs.push({ message, props }),
+      /**
+       * The INFO stream, the same hole once more. The resident says which
+       * recorded Yrd pin it is watching (or that there is none to watch) at
+       * `log.info?.()`, so without this a runner that armed the pin check and
+       * one that silently declined to would produce identical transcripts —
+       * and "the check disabled itself" is precisely the failure that row
+       * exists to make visible.
+       */
+      info: (message: string, props: Record<string, unknown>) => infos.push({ message, props }),
     },
     ...(options.bays === undefined ? {} : { bays: options.bays }),
     queue: {
@@ -159,6 +169,7 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
     warnings,
     errors,
     debugs,
+    infos,
     stderr,
     stdout,
     refreshCalls: () => refreshCalls,

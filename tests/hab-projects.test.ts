@@ -65,10 +65,12 @@ describe("Yrd Hab runner declarations", () => {
 
 describe("Yrd Hab runner declarations — who is paged when a runner stays down", () => {
   it("names @cto, not the runtime-health default", () => {
-    // `restart: "never"` is the andon policy: a crashed runner stays exited and
-    // pages ONCE. With no declared owner that page resolves to the fleet-wide
-    // default (@chief). This queue's owner is @cto, and a page that reaches the
-    // wrong seat is a page that arrives as news to someone who cannot act on it.
+    // With no declared owner the page resolves to the fleet-wide default
+    // (@chief). This queue's owner is @cto, and a page that reaches the wrong
+    // seat is a page that arrives as news to someone who cannot act on it.
+    // Still required under `on-failure`: the page moves from "the runner
+    // crashed" to "the runner exhausted its restart budget", and it is the
+    // same seat that has to answer it.
     expect(yrdQueueRunnerDeclarations.map(({ serviceName, owner }) => [serviceName, owner])).toEqual([
       ["yrd-runner", "@cto"],
     ])
@@ -85,6 +87,37 @@ describe("Yrd Hab runner declarations — who is paged when a runner stays down"
     // back to the fleet-wide @chief default.
     for (const service of Object.values(hab.services)) {
       expect(service).toMatchObject({ owner: "@cto" })
+    }
+  })
+})
+
+describe("Yrd Hab runner declarations — the restart policy that makes the exit codes mean something", () => {
+  it("supervises the runner, so a designed restart-exit actually relaunches it", () => {
+    // The exit taxonomy in packages/yrd-cli/src/habitant-exit.ts dispositions
+    // `source-stale` (11), `installed-plan-stale` (13) and `root-pin-moved`
+    // (18) `restart-immediately`. Under `restart: "never"` every one of them
+    // was inert: the runner left correctly and nothing brought it back. 13
+    // fired twice on 2026-09-02 and the queue stayed down both times until a
+    // person ran `hab up`.
+    for (const service of Object.values(hab.services)) {
+      expect(service).toMatchObject({ restart: "on-failure" })
+    }
+  })
+
+  it("declares NO key hab-config does not accept — an unknown one takes the whole composition down", () => {
+    // This is the guard on a specific near-miss, not a style rule. The obvious
+    // way to keep the two `stand-down` codes (16, 17) down while 11/13/18
+    // restart is `permanentExitCodes`, and it reads as declarable because
+    // hab-core's restart taxonomy implements exactly that policy. It is not:
+    // the key is absent from `SERVICE_KEYS` in ag/packages/hab-config
+    // (src/index.ts), `validateServiceKeys` pushes `unknown key '<key>'` onto
+    // `diagnostics.errors`, and `checkHabConfig` then returns NO habplan —
+    // so the mistake does not disable this service, it disables every service
+    // Hab supervises. Adding the key to hab-config is the prerequisite, and
+    // it is a change in ag.
+    const allowed = new Set(["command", "env", "health", "restart", "owner"])
+    for (const service of Object.values(hab.services)) {
+      expect(Object.keys(service).filter((key) => !allowed.has(key))).toEqual([])
     }
   })
 })

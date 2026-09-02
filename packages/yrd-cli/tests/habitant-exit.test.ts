@@ -29,10 +29,10 @@ describe("habitant exit taxonomy — one code per condition", () => {
   it("gives every condition a DISTINCT code", () => {
     const codes = CONDITIONS.map((condition) => HABITANT_EXIT[condition])
     expect(new Set(codes).size).toBe(codes.length)
-    expect(codes.length).toBe(7)
+    expect(codes.length).toBe(8)
   })
 
-  it("names the nine conditions the supervisor has to tell apart", () => {
+  it("names the eight conditions the supervisor has to tell apart", () => {
     expect(CONDITIONS.toSorted()).toEqual([
       "drained",
       "fatal-error",
@@ -40,6 +40,7 @@ describe("habitant exit taxonomy — one code per condition", () => {
       "interrupted",
       "memory-cap",
       "poisoned",
+      "root-pin-moved",
       "source-stale",
     ])
   })
@@ -73,6 +74,9 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
     expect(HABITANT_EXIT_DISPOSITION.poisoned).toBe("restart-immediately")
     expect(HABITANT_EXIT_DISPOSITION["source-stale"]).toBe("restart-immediately")
     expect(HABITANT_EXIT_DISPOSITION["installed-plan-stale"]).toBe("restart-immediately")
+    // The pin moving under a serving runner is cured the same way: a fresh
+    // process reads the pin as it now stands (24047).
+    expect(HABITANT_EXIT_DISPOSITION["root-pin-moved"]).toBe("restart-immediately")
     expect(HABITANT_EXIT_DISPOSITION.interrupted).toBe("restart-immediately")
   })
 
