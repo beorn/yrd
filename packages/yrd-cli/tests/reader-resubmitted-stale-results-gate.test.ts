@@ -210,7 +210,9 @@ describe("reader resubmitted-stale-results gate — one rule, every listing", ()
 
     expect(rows).toHaveLength(2)
     const row = rows?.find((candidate) => candidate.pr === CHANGE)
-    expect(row?.state).toBe("submitted")
+    // Pending, in the five words: submitted, its on-submit checks not yet
+    // passed. The stale settle decides nothing, so it does not end the change.
+    expect(row?.state).toBe("queued")
     expect(row?.why).not.toBe("clock-unreadable")
     expect(row?.age).not.toBe("-")
     // The stale fact is still on the record; it simply decides nothing.
