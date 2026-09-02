@@ -277,9 +277,19 @@ async function fileHash(path: string): Promise<string> {
     .digest("hex")
 }
 
+/**
+ * The package entry by file URL, for a child that runs with no cwd and no
+ * workspace: `@yrd/persistence` resolves only where `bun install` has linked
+ * `node_modules/@yrd`, so a bare specifier died in any standalone clone with
+ * "Cannot find module '@yrd/persistence' from '[eval]'" (exit 1) before the
+ * phase hook could ever exit 77. Same shape as sqlite.ts's own `bun --eval`
+ * verification child, which imports itself by `import.meta.url`.
+ */
+const PERSISTENCE_ENTRY_URL = new URL("../src/index.ts", import.meta.url).href
+
 async function hardExitMigration(dir: string, phase: string): Promise<Readonly<{ code: number; stderr: string }>> {
   const source = `
-    import { createJournal } from "@yrd/persistence"
+    import { createJournal } from ${JSON.stringify(PERSISTENCE_ENTRY_URL)}
     const journal = createJournal({
       dir: ${JSON.stringify(dir)},
       inject: {

@@ -155,7 +155,7 @@ import {
   queuePauseWarnings,
   queueRunRevisionReads,
   queueTimelineAdmissionTimes,
-  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
+  QUEUE_TIMELINE_DEFAULT_WINDOW_MS,
   RUNNER_STALE_MS,
   runRevisionClock,
   type QueueAttempt,
@@ -2571,8 +2571,15 @@ function parseDurationMs(value: string, option: string, positive = false): numbe
   return milliseconds
 }
 
-function queueTimelineWindow(value: string | undefined): number {
-  return value === undefined ? QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS : parseDurationMs(value, "--since")
+/**
+ * The timeline window `queue list` and `watch` read with: `--since` verbatim,
+ * else the 7-day DEFAULT (`QUEUE_TIMELINE_DEFAULT_WINDOW_MS`, open rows
+ * always shown). Exported so the default is a tested fact: it used to be a
+ * hundred years, and `queue list --json` with no flags dumped 88 MB over 25 s
+ * (2026-09-01) before anyone measured it.
+ */
+export function queueTimelineWindow(value: string | undefined): number {
+  return value === undefined ? QUEUE_TIMELINE_DEFAULT_WINDOW_MS : parseDurationMs(value, "--since")
 }
 
 // The flow-metrics window: 24h by default, but an explicit --since wins so the
@@ -8544,6 +8551,7 @@ async function buildQueueListSnapshot(
   const clock = createQueueTimelineProjectionClock(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
+    windowSource: options.since === undefined ? "default" : "explicit",
     metricsWindowMs: queueMetricsWindow(options.since),
     statuses: queueTimelineStatuses(options.status),
     terms: filters,
@@ -13653,7 +13661,10 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope watch to one change")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
+    .option(
+      "--since <duration>",
+      "window for finished rows (default 7d; open changes always shown; flow metrics default 24h)",
+    )
     .option("--latest", "show only the latest Run for each change")
     .option("--json", "emit stable JSON")
     .option("--strict", "fail loud (exit 3) on the first unreadable run member instead of marking its row")
@@ -13778,7 +13789,10 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one change")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
+    .option(
+      "--since <duration>",
+      "window for finished rows (default 7d; open changes always shown; flow metrics default 24h)",
+    )
     .option("--latest", "show only the latest Run for each change")
     .option("--watch", "keep this projection live and interactive")
     .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
@@ -13792,7 +13806,10 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one change")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
+    .option(
+      "--since <duration>",
+      "window for finished rows (default 7d; open changes always shown; flow metrics default 24h)",
+    )
     .option("--latest", "show only the latest Run for each change")
     .option("--watch", "keep this projection live and interactive")
     .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")

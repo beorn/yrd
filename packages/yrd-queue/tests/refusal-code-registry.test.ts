@@ -38,14 +38,8 @@ function walk(dir: string, out: string[]): void {
   }
 }
 
-/** Grep-derive every code this codebase actually EMITS, straight from source
- * — never a hand-maintained list — so a new one turns this test red until it
- * is registered. Same three producer shapes YRD_REFUSAL_CODES was built from:
- * object-literal `code: "..."`, `candidateFailure("...", …)`, and
- * `failed("...", …)` / `failedWithEvidence("...", …)` (both direct
- * `JobResult.error.code` constructors — `stale-base` and `check-failed` exist
- * ONLY through this last shape, never as a `code:` literal). */
-function derivedEmittedCodes(): readonly string[] {
+/** Every `src/` TypeScript source under `packages/`, path -> text, read once. */
+function scannedSources(): ReadonlyMap<string, string> {
   const files: string[] = []
   for (const pkgDir of readdirSync(packagesRoot)) {
     const src = join(packagesRoot, pkgDir, "src")
@@ -55,9 +49,79 @@ function derivedEmittedCodes(): readonly string[] {
       continue
     }
   }
+  return new Map(files.map((file) => [file, readFileSync(file, "utf8")]))
+}
+
+/** The literal shape a refusal code has — the same one the `code: "..."` census matches. */
+const REFUSAL_CODE_LITERAL = /^[a-z0-9-]+$/u
+
+/**
+ * String-literal constants the scanned sources declare, by identifier:
+ * `const NAME = "…"` / `export const NAME = "…"` / `const NAME: Type = "…"`
+ * (a type annotation is skipped over). A SCREAMING_CASE name declared
+ * with anything other than a string literal (a number, a regex) is recorded as
+ * `null`, so a `code: NAME` that resolves to it is known to be NOT a refusal
+ * code rather than an unfollowable one.
+ */
+function declaredConstants(sources: ReadonlyMap<string, string>): ReadonlyMap<string, string | null> {
+  const declared = new Map<string, string | null>()
+  for (const source of sources.values()) {
+    for (const match of source.matchAll(
+      /(?:^|\n)\s*(?:export\s+)?const\s+([A-Z][A-Z0-9_]*)(?:\s*:\s*[^=\n]+?)?\s*=\s*(?:"([^"\n]*)"|([^\s;]))/gu,
+    )) {
+      const [, name, literal] = match
+      if (name === undefined) continue
+      const value = literal ?? null
+      const existing = declared.get(name)
+      // Two declarations of one name with two different literals cannot be
+      // followed honestly; keep the first and let the unfollowable check say so
+      // if the ambiguity ever matters (none exists today).
+      if (existing === undefined) declared.set(name, value)
+    }
+  }
+  return declared
+}
+
+type EmittedCodeCensus = Readonly<{
+  /** Every refusal code the sources emit, literal or constant-referenced, sorted. */
+  codes: readonly string[]
+  /**
+   * SCREAMING_CASE identifiers used where a code is emitted that resolve to
+   * NO declaration in the scanned sources. A code the census cannot follow is
+   * exactly the blind spot the constant shape opened, so these are reported —
+   * never skipped.
+   */
+  unfollowable: readonly string[]
+}>
+
+/** Grep-derive every code this codebase actually EMITS, straight from source
+ * — never a hand-maintained list — so a new one turns this test red until it
+ * is registered. The three producer shapes YRD_REFUSAL_CODES was built from:
+ * object-literal `code: "..."`, `candidateFailure("...", …)`, and
+ * `failed("...", …)` / `failedWithEvidence("...", …)` (both direct
+ * `JobResult.error.code` constructors — `stale-base` and `check-failed` exist
+ * ONLY through this last shape, never as a `code:` literal) — plus the SAME
+ * three shapes with a CONSTANT in place of the literal (`code: SOME_CODE`),
+ * followed to the constant's `const SOME_CODE = "…"` declaration in any scanned
+ * source. A code emitted through an identifier is emitted all the same: the
+ * receiver's `receiver-ref-nesting` (2026-09-01) was registered by hand only
+ * because its author knew this census could not see it. Pure over `sources`,
+ * so the blind spot itself has a test. */
+function emittedCodesFromSources(sources: ReadonlyMap<string, string>): EmittedCodeCensus {
+  const constants = declaredConstants(sources)
   const codes = new Set<string>()
-  for (const file of files) {
-    const source = readFileSync(file, "utf8")
+  const unfollowable = new Set<string>()
+  const emitConstant = (name: string): void => {
+    const value = constants.get(name)
+    if (value === undefined) {
+      unfollowable.add(name)
+      return
+    }
+    // Declared, but not as a refusal-code literal (a git exit code, an errno
+    // string, a regex): not a code, not a blind spot.
+    if (value !== null && REFUSAL_CODE_LITERAL.test(value)) codes.add(value)
+  }
+  for (const source of sources.values()) {
     for (const match of source.matchAll(/code:\s*"([a-z0-9-]+)"/g)) {
       if (match[1] !== undefined && match[1] !== "custom") codes.add(match[1]) // "custom" is Zod's ZodIssueCode, not ours
     }
@@ -67,8 +131,24 @@ function derivedEmittedCodes(): readonly string[] {
     for (const match of source.matchAll(/\bfailed(?:WithEvidence)?\(\s*"([a-z][a-z0-9._-]*)"/g)) {
       if (match[1] !== undefined) codes.add(match[1])
     }
+    // The constant shapes. `(?![.\w(\[])` keeps `code: fact.code` / `code:
+    // result.code` (a member read, dynamic by nature) out of the identifier
+    // census; only a bare SCREAMING_CASE name is a constant reference.
+    for (const match of source.matchAll(/code:\s*([A-Z][A-Z0-9_]*)\b(?![.\w(\[])/g)) {
+      if (match[1] !== undefined) emitConstant(match[1])
+    }
+    for (const match of source.matchAll(/candidateFailure\(\s*([A-Z][A-Z0-9_]*)\b(?![.\w(\[])/g)) {
+      if (match[1] !== undefined) emitConstant(match[1])
+    }
+    for (const match of source.matchAll(/\bfailed(?:WithEvidence)?\(\s*([A-Z][A-Z0-9_]*)\b(?![.\w(\[])/g)) {
+      if (match[1] !== undefined) emitConstant(match[1])
+    }
   }
-  return [...codes].toSorted()
+  return { codes: [...codes].toSorted(), unfollowable: [...unfollowable].toSorted() }
+}
+
+function derivedEmittedCodes(): readonly string[] {
+  return emittedCodesFromSources(scannedSources()).codes
 }
 
 /**
@@ -131,6 +211,71 @@ describe("the refusal-code vocabulary is closed — every emitted code resolves"
         `'${code}' is emitted but not registered in YRD_REFUSAL_CODES or YRD_REFUSAL_CODE_ALIASES`,
       ).toBeDefined()
     }
+  })
+
+  it("follows a code emitted through a CONSTANT to its literal — and would refuse an unregistered one", () => {
+    // A source that emits a refusal code only as an identifier. Before the
+    // constant shapes existed the census matched `code: "..."` alone, so this
+    // emitted nothing, resolved nothing, and stayed green while unregistered.
+    const sources = new Map([
+      [
+        "fake/src/emit.ts",
+        [
+          'export const PROBE_REFUSAL_CODE = "census-probe-unregistered"',
+          'throw createFailure({ kind: "refusal", code: PROBE_REFUSAL_CODE, message: "probe" })',
+          "",
+        ].join("\n"),
+      ],
+    ])
+    const census = emittedCodesFromSources(sources)
+    expect(census.codes).toEqual(["census-probe-unregistered"])
+    expect(census.unfollowable).toEqual([])
+    // …and the registry gate above would go red on it, which is the whole point.
+    expect(canonicalRefusalCode("census-probe-unregistered")).toBeUndefined()
+  })
+
+  it("follows a constant declared in ANOTHER scanned source — type-annotated or not, through any emit shape — and ignores constants that are not refusal codes", () => {
+    const sources = new Map([
+      [
+        "fake/src/codes.ts",
+        [
+          'export const SHARED_CODE = "shared-constant-code"',
+          'export const TYPED_CODE: RefusalCode = "typed-constant-code"',
+          'export const CANDIDATE_CODE = "candidate-constant-code"',
+          "const EXIT_CODE = 126",
+          'const ERRNO = "ETIMEDOUT"',
+          "",
+        ].join("\n"),
+      ],
+      [
+        "fake/src/emit.ts",
+        [
+          'import { CANDIDATE_CODE, SHARED_CODE, TYPED_CODE } from "./codes.ts"',
+          "refuse({ code: SHARED_CODE })",
+          'return failed(TYPED_CODE, "typed")',
+          "return candidateFailure(CANDIDATE_CODE, candidate)",
+          "return { code: EXIT_CODE }",
+          "Object.assign(error, { code: ERRNO })",
+          "",
+        ].join("\n"),
+      ],
+    ])
+    const census = emittedCodesFromSources(sources)
+    expect(census.codes).toEqual(["candidate-constant-code", "shared-constant-code", "typed-constant-code"])
+    expect(census.unfollowable).toEqual([])
+  })
+
+  it("reports a constant it cannot follow instead of skipping it", () => {
+    const sources = new Map([["fake/src/emit.ts", "raise({ code: MYSTERY_CODE })\nconst other = fact.code\n"]])
+    expect(emittedCodesFromSources(sources).unfollowable).toEqual(["MYSTERY_CODE"])
+  })
+
+  it("sees the receiver's constant-referenced code in the real tree — the blind spot measured 2026-09-01", () => {
+    // `receiver-ref-nesting` is emitted ONLY as `code: RECEIVER_REF_NESTING_CODE`
+    // (packages/yrd-bay/src/receiver.ts). On the literal-only census this line
+    // fails: the code is registered, but nothing proved the census could see it.
+    expect(derivedEmittedCodes()).toContain("receiver-ref-nesting")
+    expect(emittedCodesFromSources(scannedSources()).unfollowable).toEqual([])
   })
 
   it("resolves every COMPOSITION_FAILURE_BUCKETS member — all four buckets, not just the two failureDisposition special-cases", () => {
