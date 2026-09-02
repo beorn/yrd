@@ -1125,6 +1125,11 @@ export const BranchSubmitSchema = z
     branch: GitRefSchema,
     sha: GitShaSchema,
     base: GitRefSchema,
+    /** The seat that hears how this submission ends (`pr submit --notify`,
+     * else the launch-env identity). A refs/for push records none: its
+     * outcome routes to the queue owner as "submitter unknown" — nobody
+     * invents an identity for it (@i/10-yrd/24028). */
+    notify: z.string().trim().min(1).optional(),
   })
   .strict()
 export type BranchSubmit = z.infer<typeof BranchSubmitSchema>
@@ -1174,6 +1179,8 @@ export type ProjectedBranchSubmit = Readonly<{
   sha: string
   base: string
   at: string
+  /** The seat that hears how this submission ends, when the submit recorded one. */
+  notify?: string
 }>
 
 export type BaysState = Readonly<{

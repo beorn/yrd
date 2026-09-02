@@ -421,6 +421,21 @@ describe("withBays", () => {
     expect(app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ n: 1, head: HEAD_1, submitter: "@agent/7" })])
   })
 
+  it("threads the submit selection's `submitter` seat onto the record lane's submit facts and the derived lane's submit fact as `notify` (@i/10-yrd/24028)", async () => {
+    await using app = (await createHarness()).app
+    const derived = await app.bays.submitSelection("topic/notify-derived", {
+      resolveRevision: async () => HEAD_1,
+      run: runtime,
+      base: "main",
+      submitter: "@dev/9",
+    })
+    expect(derived).toMatchObject({ lane: "derived", branch: "topic/notify-derived", sha: HEAD_1 })
+    expect(app.bays.state().submits["topic/notify-derived"]).toMatchObject({ sha: HEAD_1, notify: "@dev/9" })
+    // A refs/for push records no seat: the fact carries none, nobody invents one.
+    await app.bays.recordBranchSubmit({ branch: "topic/notify-none", sha: HEAD_2, base: "main" })
+    expect(app.bays.state().submits["topic/notify-none"]).not.toHaveProperty("notify")
+  })
+
   it("resolves Bay, PR, and base selectors without changing canonical identity", async () => {
     await using app = (await createHarness()).app
     await app.bays.submit({ branch: "Topic/One", headSha: HEAD_1 })

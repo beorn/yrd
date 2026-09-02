@@ -4,7 +4,7 @@
 
 **Sovereign software delivery for agent teams.**
 
-*Normative sources for the delivery model, in precedence order over this file: `@yrd/core/22991-branch-is-change-delete-the-pr-record` (the change model), `@i/10-yrd/plan.md` (§§ Words · Principles · Rulings in force), `@i/10-yrd/shaset-model.md` (how a merge settles across submodules), and `about/glossary.md` (the ratified words) — all in the `/hh` superproject that develops yrd. Where this README disagrees with them, they win and this file is the bug.*
+_Normative sources for the delivery model, in precedence order over this file: `@yrd/core/22991-branch-is-change-delete-the-pr-record` (the change model), `@i/10-yrd/plan.md` (§§ Words · Principles · Rulings in force), `@i/10-yrd/shaset-model.md` (how a merge settles across submodules), and `about/glossary.md` (the ratified words) — all in the `/hh` superproject that develops yrd. Where this README disagrees with them, they win and this file is the bug._
 
 **Agents are fast!** Unleash 100 on one machine. What could go wrong?
 
@@ -108,10 +108,10 @@ branch deleted .............. abandoned; there is no withdrawn state
   you approve to merge; **pushing that ref is the API**. One push does both:
   `git push --no-recurse-submodules <yrd remote> HEAD:refs/for/main/<issue>` pushes the branch and
   submits that exact tip in the same act.
-- **draft / submitted / merged** — **derived from git, never stored.** *Draft*
-  is a non-empty diff with no live submit. *Submitted* is a live submit — its
+- **draft / submitted / merged** — **derived from git, never stored.** _Draft_
+  is a non-empty diff with no live submit. _Submitted_ is a live submit — its
   sha reachable from the branch tip and not yet an ancestor of main; newest
-  write wins, so a branch has at most one. *Merged* is that submitted sha being
+  write wins, so a branch has at most one. _Merged_ is that submitted sha being
   an ancestor of main — a history fact, so a revert does not un-merge it, and
   getting the content back on main means new commits and a new submit.
 - **delete** — abandoning a change is deleting its branch. There is no
@@ -178,7 +178,7 @@ neighbours, never synonyms. How runs are ordered, batched, and executed is
 model.
 
 > **Flagged, not rewritten — no current design document covers this.** The CLI
-> still carries the older *tracked-by-default* machinery, in which the queue
+> still carries the older _tracked-by-default_ machinery, in which the queue
 > observes the live branch and records a moved head as a new revision by
 > itself: `yrd pr submit --no-track`, `yrd pr edit <PR> --track|--untrack`,
 > and the habitant runner's pre-cycle branch observation all still exist, and
@@ -292,13 +292,13 @@ completely standard git.
 
 ### Compared with other systems
 
-|                        | Object tested                                     | Object merged                                                     | Branch moved →                                               | History on main                                                             | Trace main → change                                              | Superproject                                                  |
-| ---------------------- | ------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------- |
-| **Yrd**                | merge of target + authored tip (+ shaset)         | the same commit, CAS ref update                                   | no submit moves; a `refs/for` push re-submits the new tip     | merge-shaped; first-parent spine                                            | authored tip is a parent; `Change-Id` trailer                    | queued and tested as one object; submodules stay standard     |
-| **GitHub merge queue** | speculative merge group, strategy already applied | the group result                                                  | leaves the queue; re-queue                                   | linear (squash/rebase) or merge                                             | PR number in message; squash/rebase drop authored shas from main | none                                                          |
-| **Gerrit**             | the patch set (one amended commit)                | per submit strategy — rebase/cherry-pick mint a new sha at submit | new patch set: amend + `push refs/for/…` ceremony            | per-project strategy; the default mints merge commits when the target moved | `Change-Id` trailer (Yrd adopts this)                            | subscription can bump gitlinks after merge, outside the queue |
-| **Zuul**               | speculative merge of the whole train ahead        | whatever the backing forge then merges                            | new patch set restarts the gate                              | backend-dependent                                                           | via the backend                                                  | many repos per change via `Depends-On`, not gitlinks          |
-| **bors (bors-ng)**     | staging merge of the batch                        | the exact staging sha, fast-forwarded                             | approval invalidated; re-approve                             | merge-shaped                                                                | merge commit names the PR                                        | none                                                          |
+|                        | Object tested                                     | Object merged                                                     | Branch moved →                                            | History on main                                                             | Trace main → change                                              | Superproject                                                  |
+| ---------------------- | ------------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------- |
+| **Yrd**                | merge of target + authored tip (+ shaset)         | the same commit, CAS ref update                                   | no submit moves; a `refs/for` push re-submits the new tip | merge-shaped; first-parent spine                                            | authored tip is a parent; `Change-Id` trailer                    | queued and tested as one object; submodules stay standard     |
+| **GitHub merge queue** | speculative merge group, strategy already applied | the group result                                                  | leaves the queue; re-queue                                | linear (squash/rebase) or merge                                             | PR number in message; squash/rebase drop authored shas from main | none                                                          |
+| **Gerrit**             | the patch set (one amended commit)                | per submit strategy — rebase/cherry-pick mint a new sha at submit | new patch set: amend + `push refs/for/…` ceremony         | per-project strategy; the default mints merge commits when the target moved | `Change-Id` trailer (Yrd adopts this)                            | subscription can bump gitlinks after merge, outside the queue |
+| **Zuul**               | speculative merge of the whole train ahead        | whatever the backing forge then merges                            | new patch set restarts the gate                           | backend-dependent                                                           | via the backend                                                  | many repos per change via `Depends-On`, not gitlinks          |
+| **bors (bors-ng)**     | staging merge of the batch                        | the exact staging sha, fast-forwarded                             | approval invalidated; re-approve                          | merge-shaped                                                                | merge commit names the PR                                        | none                                                          |
 
 Trade-offs, in both directions:
 
@@ -1491,6 +1491,37 @@ regardless.
 
 `yrd admin init` writes that exact one-liner and the managed pre-submit hook. It
 refuses to overwrite an existing repository config.
+
+### Owner and notify — every queue outcome ends in exactly one ball
+
+Top-level `owner` names the queue owner seat and `notify` the notifier command:
+
+```yaml
+owner: "@cto"
+notify: bun tools/yrd-notify.ts
+```
+
+When a queue turn ends an attempt — a merge that landed or failed, a revision
+refused at admission — or a pass ends on an ERROR row, Yrd hands ONE outcome
+record to the `notify` command on stdin (`{kind, attempt_id, pr, revision,
+branch, sha, code, disposition, attributable_test_ids, log_path, recipient,
+fallback, command}`) and expects `{ball_id}` on stdout. The recipient follows
+the refusal-code registry's own disposition: an author-disposition refusal and
+a landing go to the submitter — the seat recorded by `pr submit --notify`
+(default: the launch-env identity; never argv, cwd or the git author) — and
+everything else, a pass-ending ERROR included, goes to `owner` (`queue run
+--owner` overrides it per process; unset means `@chief`). The returned ball id
+is journaled on the attempt's own row, which is the idempotency key: a re-run
+of the same attempt never sends twice, and `queue list` shows who holds it.
+
+With `notify` absent, every pass WARNs `notify-unconfigured` once and journals
+its outcomes without a ball. A notifier that fails — non-zero exit, no ball id,
+or 30 s without an answer — is the ERROR row `notify-failed`, which ends the
+pass: a dead notifier halts merges until it is back, on purpose. Yrd itself
+stays tribe-free; the command owns membership and fallback. `queue run --once`
+exits `0` when every attempt landed or nothing was to do, `1` when at least one
+change was sent back, and `17` when the pass ended on a Yrd/infrastructure
+ERROR; `17` wins over `1`.
 Deleted or unknown repository keys—including unknown keys nested under
 `progress`—fail config load loudly.
 

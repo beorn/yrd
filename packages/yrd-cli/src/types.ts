@@ -26,6 +26,7 @@ import type { QueueReadModel } from "./queue-read-model.ts"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 import type { RetainedWorkspace } from "./workspace-retention.ts"
 import type { HabitantExitCode } from "./habitant-exit.ts"
+import type { OutcomeNotifier } from "./outcome-notify.ts"
 
 /**
  * Every code a Yrd command may exit with: the generic verb alphabet, plus the
@@ -227,6 +228,8 @@ export type YrdCliServices = Readonly<{
   /** Exact host environment inherited by Bay child processes. */
   environment?: NodeJS.ProcessEnv
   submoduleModelChangeAuthorizer?: SubmoduleModelChangeAuthorizer
+  /** The outcome-notifier seam: every ended attempt's one ball (@i/10-yrd/24028). */
+  outcomes?: OutcomeNotifier
 }>
 
 /** Read-only Git facts `pr prune` proves its superseded verdicts with. The

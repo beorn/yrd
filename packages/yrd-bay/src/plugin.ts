@@ -251,6 +251,12 @@ export type SubmitSelectionOptions = Readonly<{
    * gates that run between staging and submit see an unsubmitted change. */
   stage?: boolean
   props?: ChangeProps
+  /** The seat this submission's outcome ball is addressed to
+   * (@i/10-yrd/24028): recorded as the revision's `submitter` on the record
+   * lane and as `notify` on the derived lane's submit fact. Never argv, cwd
+   * or the git author — the CLI resolves it from `--notify`, else the
+   * launch-env identity the host reads, else the literal `unknown`. */
+  submitter?: string
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
   /** Caller-owned advisory-warning sink for a submission that SUCCEEDS with a
@@ -1112,6 +1118,7 @@ export function createBays(
           ...(options.base === undefined ? {} : { base: options.base }),
           ...(options.issue === undefined ? {} : { issue: options.issue }),
           ...(composition === undefined ? {} : { composition }),
+          ...(options.submitter === undefined ? {} : { submitter: options.submitter }),
         })
         pr = changeForBay(state(), bay.id) ?? resolveChange(state(), bay.branch)
       }
@@ -1153,6 +1160,7 @@ export function createBays(
             ...resolved,
             ...(options.issue === undefined ? {} : { issue: options.issue }),
             ...(composition === undefined ? {} : { composition }),
+            ...(options.submitter === undefined ? {} : { submitter: options.submitter }),
           })
           pr = resolveChange(state(), pr.id)
           if (pr === undefined) {
@@ -1185,7 +1193,7 @@ export function createBays(
       // revision (intake above, draft semantics) but must never run the real
       // submit — that write reopened the pre-gate mutation window (PR1128).
       if (options.draft === true || options.stage === true) return pr
-      await submitOperation({ pr: pr.id })
+      await submitOperation({ pr: pr.id, ...(options.submitter === undefined ? {} : { submitter: options.submitter }) })
       const submitted = resolveChange(state(), pr.id)
       if (submitted === undefined) {
         raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${pr.id}' disappeared after submit`)
@@ -1215,7 +1223,10 @@ export function createBays(
           return correlated
         }
         if (options.draft === true || options.stage === true) return correlated
-        await submitOperation({ pr: correlated.id })
+        await submitOperation({
+          pr: correlated.id,
+          ...(options.submitter === undefined ? {} : { submitter: options.submitter }),
+        })
         const submitted = resolveChange(state(), live.id)
         if (submitted === undefined) {
           raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${live.id}' disappeared after submit`)
@@ -1261,7 +1272,12 @@ export function createBays(
           dropped: recordOnly,
         })
       }
-      await actions.recordBranchSubmit({ branch: selector, sha: headSha, base: resolved.base })
+      await actions.recordBranchSubmit({
+        branch: selector,
+        sha: headSha,
+        base: resolved.base,
+        ...(options.submitter === undefined ? {} : { notify: options.submitter }),
+      })
       log?.info?.("submit routed to the derived lane; the fact is the submission, no record minted", {
         action: "submit-derived-routed",
         branch: selector,
@@ -1434,7 +1450,10 @@ export function withBays(options: WithBaysOptions) {
         // submit-ref push exactly as it intakes refs/for (record created, ref
         // already there); never a second bridge teaching `pr submit` to write
         // the ref. These two events are what make that a small write.
-        "branch/submitted": journalEvent(1, BranchSubmitSchema),
+        // `notify` (the seat that hears how the submission ends, @i/10-yrd/24028)
+        // grew on the v1 fact and is readable from v2: a writer pinned below
+        // v2 refuses to emit it rather than write a row a v1 reader rejects.
+        "branch/submitted": journalEvent(1, BranchSubmitSchema, { notify: 2 }),
         "branch/unsubmitted": journalEvent(1, BranchUnsubmitFactSchema, { landedReason: 4 }),
       },
       replayEvents: {
@@ -2932,7 +2951,12 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ...current,
         submits: {
           ...current.submits,
-          [submitted.branch]: { sha: submitted.sha, base: baseIdentity(submitted.base), at: applied.ts },
+          [submitted.branch]: {
+            sha: submitted.sha,
+            base: baseIdentity(submitted.base),
+            at: applied.ts,
+            ...(submitted.notify === undefined ? {} : { notify: submitted.notify }),
+          },
         },
       })
     }

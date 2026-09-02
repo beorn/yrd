@@ -286,6 +286,15 @@ import {
 import { HABITANT_EXIT } from "./habitant-exit.ts"
 import { QUEUE_FATAL_EXIT, fatalQueueDrain } from "./queue-drain.ts"
 import {
+  QUEUE_OUTCOME_EXIT,
+  resolveSubmitterSeat,
+  UNKNOWN_SUBMITTER,
+  YRD_DEFAULT_SUBMITTER_ENV,
+} from "./outcome-notify.ts"
+
+/** How many outcome-ledger rows `queue list` prints beneath the timeline. */
+const QUEUE_LIST_NOTIFICATION_ROWS = 20
+import {
   decideHabitantMemory,
   foldMemoryCap,
   HABITANT_RSS_CAP_DEFAULT_MB,
@@ -6236,6 +6245,8 @@ type ChangeSelectionOptions = {
   reviewer?: readonly string[]
   track?: boolean
   keepOnFailure?: boolean
+  /** `pr submit --notify <seat>`: where this submission's outcome ball goes. */
+  notify?: string
   json?: boolean
 }
 
@@ -6323,9 +6334,16 @@ async function applyChangeSelection(
       }
     }
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
+    // The seat this submission's outcome ball goes to (@i/10-yrd/24028): the
+    // explicit --notify, else the launch-env identity the host already reads
+    // (YRD_DEFAULT_SUBMITTER), else the literal `unknown` — never argv, cwd
+    // or the git author. Recorded IN THE JOURNAL as the revision's submitter
+    // (record lane) or the submit fact's notify seat (derived lane).
+    const submitter = resolveSubmitterSeat(options.notify, process.env)
     // Internal compatibility seam: `draft` means emit `pr/pushed` without
     // `pr/submitted`; it is deliberately not part of either submit CLI.
     const submission = await app.bays.submitSelection(selector, {
+      submitter: submitter.seat,
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(metadata.title === undefined ? {} : { title: metadata.title }),
@@ -6341,6 +6359,15 @@ async function applyChangeSelection(
       run: runtimeOptions(io),
       warnings,
     })
+    // No identity reached this submit: say so on the real submit (the staging
+    // pass previews), naming both cures — the ball for this revision goes to
+    // the queue owner, and nobody invents a seat to spare it that.
+    if (!stageAsDraft && submitter.seat === UNKNOWN_SUBMITTER) {
+      warnings.push(
+        `no submitter seat is recorded for this submission (pass --notify <seat>, or launch with ${YRD_DEFAULT_SUBMITTER_ENV}=<seat>); ` +
+          "its outcome ball goes to the queue owner as submitter unknown",
+      )
+    }
     if ("lane" in submission) {
       // Routed to the derived lane: the fact is the submission. Record-lane
       // aftercare (supersede-cancel, reviewers, check requests) does not apply.
@@ -8815,6 +8842,20 @@ async function listQueues(
   services: YrdCliServices,
 ): Promise<void> {
   const snapshot = await createQueueListSnapshotLoader(app, filters, options, io, services, false).load()
+  // The balls the outcome seam opened (@i/10-yrd/24028): the most recent
+  // attempt rows the journal projects (`queues.outcomes`), newest last, so a
+  // reader of the timeline sees WHO holds the ball for each ended attempt.
+  // Bounded, never filtered by the timeline's own selection — a ball for an
+  // attempt the filter hid is still a fact worth one line.
+  const notifications = (services.outcomes?.ledger.rows() ?? []).slice(-QUEUE_LIST_NOTIFICATION_ROWS)
+  const timeline = createElement(QueueTimelineView, {
+    repositoryRoot: snapshot.repositoryRoot,
+    projection: snapshot.projection,
+    runnerRefusal: snapshot.runnerRefusal,
+    results: snapshot.results,
+    state: snapshot.state,
+    columns: io.columns ?? 120,
+  })
   await printResultWithWarnings(
     io,
     jsonEnabled(options),
@@ -8823,15 +8864,27 @@ async function listQueues(
       projection: snapshot.projection,
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
       ...(snapshot.readFailure === undefined ? {} : { readFailure: snapshot.readFailure }),
+      ...(notifications.length === 0 ? {} : { notifications }),
     },
-    createElement(QueueTimelineView, {
-      repositoryRoot: snapshot.repositoryRoot,
-      projection: snapshot.projection,
-      runnerRefusal: snapshot.runnerRefusal,
-      results: snapshot.results,
-      state: snapshot.state,
-      columns: io.columns ?? 120,
-    }),
+    notifications.length === 0
+      ? timeline
+      : createElement(
+          Fragment,
+          null,
+          timeline,
+          "\n",
+          [
+            "balls opened for ended attempts (newest last):",
+            ...notifications.map(
+              (row) =>
+                `  ${row.attempt}  ${row.kind}` +
+                (row.ball === undefined
+                  ? `  journaled without a ball (no notifier configured; ${row.recipient} was not told)`
+                  : `  ball ${row.ball} held by ${row.recipient}`) +
+                `  ${row.at}`,
+            ),
+          ].join("\n"),
+        ),
     [
       ...queuePauseWarnings(snapshot.state, snapshot.results),
       ...staleDraftWarnings(snapshot.staleDrafts ?? []),
@@ -13892,7 +13945,14 @@ function buildProgram(
     .command("run [selector...]")
     .description("drain the queue — habitant follow by default; --once or change selectors for a single pass")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
-    .option("--once", "drain the default queue exactly once, then exit")
+    .option(
+      "--once",
+      "drain the default queue exactly once, then exit " +
+        `(exit ${String(QUEUE_OUTCOME_EXIT.next)}: every attempt landed or nothing to do; ` +
+        `${String(QUEUE_OUTCOME_EXIT.changeRefused)}: a change was refused and sent back to its submitter, the pass continued; ` +
+        `${String(QUEUE_OUTCOME_EXIT.yrdFailed)}: yrd broke — an infra/env/timeout outcome went to the queue owner or the pass ended on an ERROR row; ${String(QUEUE_OUTCOME_EXIT.yrdFailed)} wins over ${String(QUEUE_OUTCOME_EXIT.changeRefused)})`,
+    )
+    .option("--owner <seat>", "the queue owner every yrd-fault ball routes to (default: .yrd.yml owner:, then @chief)")
     .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
@@ -13929,6 +13989,9 @@ function buildProgram(
       const draining = () => io.drainSignal?.aborted === true
       const publications = draining() ? [] : await preparePublicationQueueCycle(app, installedServices(), io)
       if (publications.length > 0) await gate()
+      const outcomes = installedServices().outcomes
+      outcomes?.setOwner(typeof options.owner === "string" ? options.owner : undefined)
+      outcomes?.beginPass()
       const runs = draining() ? [] : await runQueues(app, selectors, options, io)
       const selectedChangeIds =
         selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
@@ -13959,7 +14022,14 @@ function buildProgram(
         human,
       )
       const publicationFailed = publications.some((job) => job.status !== "completed" || job.conclusion !== "success")
-      setExit(publicationFailed || runs.some(Queues.failed) ? 1 : 0)
+      // The three-way verdict (@i/10-yrd/24028): computed from the outcomes
+      // this pass handed to the notifier seam, on the registry's disposition,
+      // never from a second reading of the runs. A failed publication is the
+      // queue's own fault. A pass-ending ERROR row outranks this at the host
+      // boundary (`drainedQueuePassExit`), landing on the same code.
+      const verdict =
+        outcomes?.exitCode() ?? (runs.some(Queues.failed) ? QUEUE_OUTCOME_EXIT.changeRefused : QUEUE_OUTCOME_EXIT.next)
+      setExit(publicationFailed ? QUEUE_OUTCOME_EXIT.yrdFailed : verdict)
     })
   queue
     .command("cancel <run>")
@@ -14087,6 +14157,10 @@ function buildProgram(
     .option("--track", TRACK_OPTION_DESCRIPTION)
     .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
     .option("--keep-on-failure", "retain a failed client-side required-check workspace for inspection")
+    .option(
+      "--notify <seat>",
+      `the seat that hears how this submission ends, recorded in the journal as the revision's submitter (default: the launch-env ${YRD_DEFAULT_SUBMITTER_ENV}; unknown routes to the queue owner)`,
+    )
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>
       setExit(await applyChangeSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),

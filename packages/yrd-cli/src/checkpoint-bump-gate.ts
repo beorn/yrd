@@ -142,8 +142,18 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // the predecessor replays after its stored cursor unchanged. An interim
   // identity f800b079 existed on this branch only while the fact's who-field
   // was still spelled with the retired role noun; no deployment ever stored it,
-  // so it is deliberately not retained. Current.
+  // so it is deliberately not retained. Retained predecessor.
   "7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074",
+  // 2026-09-01 — every queue outcome ends in exactly one ball
+  // (@i/10-yrd/24028). The queue registers ONE new event,
+  // `queue/attempt/notified`, projected into a NEW `queues.outcomes` record
+  // keyed by attempt id (queues-v14), and the derived submit fact
+  // (`branch/submitted`) gains an optional `notify` seat. A registered event
+  // and a widened accepted shape both move the identity; a checkpoint at the
+  // predecessor simply lacks the empty `queues.outcomes` record, which
+  // `fillMissingStateFromInitial` supplies before replay resumes after its
+  // stored cursor. Current.
+  "ca7e3d9577514291a125a9b003182b400f8495f79c2187f9aefea318d457ba56",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

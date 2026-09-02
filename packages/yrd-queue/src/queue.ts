@@ -986,6 +986,24 @@ const RetireRevisionSchema = z
   })
   .strict()
 export type RetireRevisionArgs = Readonly<z.infer<typeof RetireRevisionSchema>>
+/**
+ * The notification of one ENDED attempt (@i/10-yrd/24028): who was told how it
+ * ended and the ball that carries it, journaled on the attempt's own row
+ * ({@link QueueAttemptOutcome}) AFTER the notifier answered — a fact, never a
+ * forecast. The journaled ball is the idempotency key: the notifier looks
+ * this row up before it sends, so a re-run of the same attempt id never
+ * opens a second ball. `ball` is absent only when no notifier was configured.
+ */
+const AttemptNotifiedSchema = z
+  .object({
+    attempt: z.string().trim().min(1),
+    kind: z.enum(["landed", "send-back", "yrd-broken"]),
+    recipient: z.string().trim().min(1),
+    disposition: z.string().trim().min(1),
+    ball: z.string().trim().min(1).optional(),
+  })
+  .strict()
+export type AttemptNotifiedArgs = Readonly<z.infer<typeof AttemptNotifiedSchema>>
 /** The `QueueRetiredSubmit.code` every operator retirement projects under. */
 export const REVISION_RETIRED_CODE = "revision-retired"
 /** Consecutive refusals before `queue audit` calls a change wedged. One skip is a
@@ -1425,6 +1443,51 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
    * (@i/10-merge-queue/22918-needs-person-unowned).
    */
   needsPersonOwner?: string
+  /**
+   * The outcome seam (@i/10-yrd/24028): every ENDED attempt — a merge run
+   * that landed or failed, a revision refused at admission — is handed here
+   * exactly once per pass, so a notifier outside this package can open ONE
+   * ball for it. Queue stays tribe-free: it hands over facts, never sends.
+   * The hook must not throw; a throw is caught and logged as an ERROR row
+   * (`notify-failed`), which ends the pass under the any-ERROR rule.
+   */
+  onOutcome?: (outcome: QueueOutcome) => Promise<void>
+}>
+
+/**
+ * One ended attempt, as the notifier seam receives it. `attemptId` is the
+ * idempotency key: a merge run's id (`R123`, or `R123/PR7` for one member of
+ * a wider batch), or `<pr>@<revision>:admission@<baseSha>` for a revision
+ * refused before any run existed. Re-running the same attempt id must never
+ * open a second ball; the consumer keys its ledger on it.
+ */
+export type QueueOutcome = Readonly<{
+  /** `landed`: merged onto the base. `failed`: a merge run ended without a
+   * merge. `refused`: the revision was refused at admission (a failed
+   * required check, a conflicting candidate, a typed preparation refusal). */
+  kind: "landed" | "failed" | "refused"
+  attemptId: string
+  pr: string
+  revision: number
+  branch: string
+  sha: string
+  base: string
+  baseSha?: string
+  /** The identity the revision records as its submitter, when it records one. */
+  submitter?: string
+  run?: RunId
+  /** The failure/refusal code, resolvable through the refusal-code registry. */
+  code?: string
+  reason?: string
+  /** How admission classified a refusal: `refusal` (a verdict on the content),
+   * `failure` (a required check failed), `infrastructure` (a host fault). */
+  failureKind?: "refusal" | "failure" | "infrastructure"
+  /** The landing, for a `landed` outcome. */
+  integration?: Readonly<{ commit: string; baseSha: string }>
+  /** Diagnostics attributed to THIS candidate (net-new against the exact
+   * base), rendered `file:line[:column] message`. Inherited base reds are
+   * deliberately absent: the send-back names only what the author owns. */
+  attributableFailures?: readonly string[]
 }>
 
 /** Built-in candidate width when a repository does not declare `batch`. */
@@ -1625,6 +1688,7 @@ export type QueueCommands = Readonly<{
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     retireSubmitFact: CommandHandler<RetireSubmitFactArgs, RuntimeState>
     retireRevision: CommandHandler<RetireRevisionArgs, RuntimeState>
+    noteAttemptOutcome: CommandHandler<AttemptNotifiedArgs, RuntimeState>
     reconcileMerge: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
   }>
 }>
@@ -1715,6 +1779,10 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
    * half of the act that deletes both receiver-store rows. See
    * {@link RetireRevisionArgs}. */
   retireRevision(args: RetireRevisionArgs): Promise<void>
+  /** Journal who was told how one ended attempt ended, and the ball that
+   * carries it (@i/10-yrd/24028). Idempotent per attempt id: the first row
+   * stands. See {@link AttemptNotifiedArgs}. */
+  noteAttemptOutcome(args: AttemptNotifiedArgs): Promise<void>
   get(run: RunId): Run | undefined
   retentionDiagnostics(): Readonly<{
     retainedRuns: number
@@ -1845,6 +1913,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/admission/settled": journalEvent(1, SettleAdmissionRefusalSchema),
         "queue/submit/retired": journalEvent(1, RetireSubmitFactSchema),
         "queue/revision/retired": journalEvent(1, RetireRevisionSchema),
+        "queue/attempt/notified": journalEvent(1, AttemptNotifiedSchema),
       },
       replayEvents: {
         "queue/paused": ReplayPauseQueueArgsSchema,
@@ -1854,7 +1923,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v13-journal-v4-markers",
+      projectionVersion: "queues-v14-attempt-outcomes",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -1902,6 +1971,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               retireSubmitFact: (args) => yrd.dispatch(commands.queue.retireSubmitFact, args),
               retireRevision: (args) => yrd.dispatch(commands.queue.retireRevision, args),
+              noteAttemptOutcome: (args) => yrd.dispatch(commands.queue.noteAttemptOutcome, args),
               bindDerivedIdentity: (args) => yrd.dispatch(commands.queue.bindDerivedIdentity, args),
               reconcileMerge: (args) => yrd.dispatch(commands.queue.reconcileMerge, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
@@ -1925,6 +1995,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             yrd.log.child("queue"),
             yrd.history,
             async () => (await yrd.historySnapshot()).state as unknown as DeepReadonly<RuntimeState>,
+            options.onOutcome,
           ),
         }
       },
@@ -1962,6 +2033,7 @@ type QueueActions = Readonly<{
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
   retireRevision(args: RetireRevisionArgs): Promise<CommandResult>
+  noteAttemptOutcome(args: AttemptNotifiedArgs): Promise<CommandResult>
   bindDerivedIdentity(args: DerivedIdentityBound): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecorded): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
@@ -1990,8 +2062,116 @@ function createQueue<Shape extends ChangeShape>(
   log: ConditionalLogger,
   history: JournalHistory<unknown> | undefined,
   historicalState: () => Promise<DeepReadonly<RuntimeState>>,
+  onOutcome: QueueOptions<readonly AnyStepDef[]>["onOutcome"],
 ): Queue<Shape> {
   const current = (id: RunId): Run => materializeRun(Queues.record(state(), id), runtime().jobs)
+  /** Hand one ENDED attempt to the outcome seam. Never throws into the pass:
+   * a hook fault is its own ERROR row, which ends the pass under the
+   * any-ERROR rule — loud, and never a silently skipped ball. */
+  const reportOutcome = async (outcome: QueueOutcome): Promise<void> => {
+    if (onOutcome === undefined) return
+    try {
+      await onOutcome(outcome)
+    } catch (error) {
+      log.error?.(
+        `queue outcome hook failed for ${outcome.kind} attempt '${outcome.attemptId}' (${outcome.pr}): ` +
+          (error instanceof Error ? error.message : String(error)),
+        {
+          action: "queue-outcome-hook-failed",
+          code: "notify-failed",
+          attempt: outcome.attemptId,
+          pr: outcome.pr,
+          kind: outcome.kind,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      )
+    }
+  }
+  /** The diagnostics attributed to the candidate itself, as lines. Absent
+   * evidence (an opaque red, an inherited-only failure) yields none: the
+   * send-back must not bill the author for the base. */
+  const attributableFailureLines = (result: DeepReadonly<JobErrorFact> | undefined): readonly string[] => {
+    if (result === undefined) return []
+    const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
+    if (!attributed.success) return []
+    return attributed.data.failures.map(
+      (failure) =>
+        `${failure.file}:${failure.line}${failure.column === undefined ? "" : `:${failure.column}`} ${failure.message}`,
+    )
+  }
+  /** One outcome per member of a terminal run. A run that is not terminal
+   * yields none — a deferred merge held open by a remote runner has not
+   * ended, and its outcome belongs to the pass that settles it. */
+  /** The seat a submission asked to hear its outcome. A record's current
+   * revision carries it as `submitter` (set from `pr submit --notify`, else the
+   * launch-env identity, else `unknown`); a recordless derived member carries
+   * it as `notify` on its standing submit fact, when that fact is still the
+   * exact sha this attempt ran. A refs/for push records neither — that is
+   * `undefined`, which the notifier routes to the queue owner as unknown. */
+  const outcomeSubmitter = (pr: string, branch: string, sha: string): string | undefined => {
+    const record = resolveChange(runtime().bays, pr)
+    if (record !== undefined) return currentChangeRev(record).submitter
+    const submit = runtime().bays.submits[branch]
+    return submit !== undefined && submit.sha === sha ? submit.notify : undefined
+  }
+  const runOutcomes = (run: Run): readonly QueueOutcome[] => {
+    if (!Queues.terminal(run)) return []
+    const landed = Queues.succeeded(run)
+    if (!landed && !Queues.failed(run)) return []
+    const failure = landed ? undefined : (run.error ?? authorAttributionResult(run))
+    const candidate = state().candidates[run.candidateId]
+    return run.prs.map((member) => {
+      const submitter = outcomeSubmitter(member.id, member.branch, member.headSha)
+      const baseSha = run.integration?.baseSha ?? member.baseSha ?? candidate?.baseSha
+      return {
+        kind: landed ? "landed" : "failed",
+        attemptId: run.prs.length === 1 ? run.id : `${run.id}/${member.id}`,
+        pr: member.id,
+        revision: member.revision,
+        branch: member.branch,
+        sha: member.headSha,
+        base: run.base,
+        ...(baseSha === undefined ? {} : { baseSha }),
+        ...(submitter === undefined ? {} : { submitter }),
+        run: run.id,
+        ...(landed || failure === undefined ? {} : { code: failure.code, reason: failure.message }),
+        ...(landed && run.integration !== undefined
+          ? { integration: { commit: run.integration.commit, baseSha: run.integration.baseSha } }
+          : {}),
+        ...(landed ? {} : { attributableFailures: attributableFailureLines(failure) }),
+      } satisfies QueueOutcome
+    })
+  }
+  const reportRunOutcomes = async (run: Run): Promise<void> => {
+    for (const outcome of runOutcomes(run)) await reportOutcome(outcome)
+  }
+  /** Is root `id` fully settled — terminal, advanced, and (for a bisected
+   * batch) its whole tree settled? That is the durable, effectively monotonic
+   * "this attempt is over" fact `resumableQueueRoots` and the settled command
+   * already key on, so reading it before and after a settle is the store-free
+   * "did THIS call end the attempt" discriminator: no ledger, no flag. */
+  const fullySettled = (id: RunId): boolean => !needsSettlement(runtime(), current(id))
+  /** Run `operation` over root `id` and, if it is what fully settled the
+   * root, hand every member's outcome to the seam — the ONE emission point
+   * for merge runs (@i/10-yrd/24028 ruling 3). A run that ends inside its
+   * own pass settles here in that pass. A merge a remote Runner holds open is
+   * NOT terminal when its pass ends, so it settles on whichever later pass
+   * observes its Job complete: none before, one then. A root already settled
+   * reads settled on both sides and emits nothing, so re-running a settled
+   * attempt never opens a second ball. A bisection parent settles only once
+   * its whole tree has, so its members are reported exactly once, on that
+   * pass. `fresh`: the root was born by this compose, so it cannot have been
+   * reported before — it is reported now if it is settled now, else by the
+   * later pass that settles it. */
+  const settleReporting = async (
+    id: RunId,
+    operation: () => Promise<unknown>,
+    options: Readonly<{ fresh?: boolean }> = {},
+  ): Promise<void> => {
+    const settledBefore = options.fresh !== true && fullySettled(id)
+    await operation()
+    if (!settledBefore && fullySettled(id)) await reportRunOutcomes(current(id))
+  }
   const byName = new Map(steps.map((step) => [step.name, step] as const))
   // Read ONCE from this process's configuration: every surface that reports why
   // a standing submit fact has not been admitted answers from the same two
@@ -2204,7 +2384,14 @@ function createQueue<Shape extends ChangeShape>(
       if (run === undefined) continue
       if (record.parent !== undefined || needsSettlement(snapshot, run)) continue
       const result = await actions.settled(id)
-      if (result.events.length > 0) cleaned.push(id)
+      if (result.events.length === 0) continue
+      cleaned.push(id)
+      // A root that reaches here ENDED without the pass that ended it settling
+      // it (the process died between its terminal advance and its settled
+      // fact, before `settleReporting` could run). This cleanup is the pass
+      // that settles it, so this is where its outcome is handed over; the
+      // fresh settled events above are what make that once per root.
+      await reportRunOutcomes(run)
     }
     return cleaned
   }
@@ -3802,6 +3989,29 @@ function createQueue<Shape extends ChangeShape>(
         if (outcome.refusal !== undefined) {
           await noteRevisionAdmissionRefusal(pr.id, outcome.refusal)
           refused.push(pr.id)
+          // The revision's attempt ENDED here — no run will ever exist for it
+          // at this base — so this is where its one outcome is handed over.
+          const refusedRecord = resolveChange(runtime().bays, pr.id)
+          const revision = currentChangeRev(refusedRecord ?? pr)
+          const receipt = refusedRecord === undefined ? undefined : changeNeedsAuthor(refusedRecord)?.receipt
+          await reportOutcome({
+            kind: "refused",
+            attemptId: `${pr.id}@${String(revision.n)}:admission@${baseSha}`,
+            pr: pr.id,
+            revision: revision.n,
+            branch: pr.branch,
+            sha: revision.head,
+            base: pr.base,
+            baseSha,
+            ...(() => {
+              const submitter = outcomeSubmitter(pr.id, pr.branch, revision.head)
+              return submitter === undefined ? {} : { submitter }
+            })(),
+            ...(outcome.refusal.code === undefined ? {} : { code: outcome.refusal.code }),
+            reason: outcome.refusal.reason,
+            failureKind: outcome.refusal.kind,
+            attributableFailures: attributableFailureLines(receipt),
+          })
         }
         // A derived head just went green: the Jobs ARE its admission record
         // (a derived member never gets a stored one), so nothing downstream
@@ -4397,6 +4607,9 @@ function createQueue<Shape extends ChangeShape>(
     async retireRevision(args) {
       await actions.retireRevision(args)
     },
+    async noteAttemptOutcome(args) {
+      await actions.noteAttemptOutcome(args)
+    },
     waitingAdmission(selector, step) {
       return waitingRevisionAdmission(selector, step)
     },
@@ -4458,35 +4671,44 @@ function createQueue<Shape extends ChangeShape>(
           // other candidate to fall through to, so it stays fail-loud, and a
           // non-refusal (a real bug) always propagates.
           const selectorless = args.prs === undefined || args.prs.length === 0
-          const settleCandidate = async (candidateId: RunId): Promise<void> => {
-            try {
-              await settle(candidateId, runOptions)
-            } catch (error) {
-              const fact = failureFact(error)
-              if (!selectorless || fact?.kind !== "refusal") throw error
-              // A stale-plan batch can never isolate under the installed catalog.
-              // Retire it once so it cannot poison every future habitant cycle.
-              if (fact.code === "stale-plan") {
-                await actions.retireStalePlan(candidateId)
-                log.warn?.(`Skipped outdated batch ${candidateId} because its PRs can no longer be tested together.`, {
-                  action: "compose-stale-plan-retire",
+          // Every settle the compose drives — a run started this pass, a run
+          // resumed from an earlier one (a merge a remote Runner held open, a
+          // bisection still isolating) — goes through `settleReporting`, so the
+          // pass that fully settles a root is the pass that hands its outcome
+          // over, and no other pass does.
+          const settleCandidate = (candidateId: RunId): Promise<void> =>
+            settleReporting(candidateId, async () => {
+              try {
+                await settle(candidateId, runOptions)
+              } catch (error) {
+                const fact = failureFact(error)
+                if (!selectorless || fact?.kind !== "refusal") throw error
+                // A stale-plan batch can never isolate under the installed catalog.
+                // Retire it once so it cannot poison every future habitant cycle.
+                if (fact.code === "stale-plan") {
+                  await actions.retireStalePlan(candidateId)
+                  log.warn?.(
+                    `Skipped outdated batch ${candidateId} because its PRs can no longer be tested together.`,
+                    {
+                      action: "compose-stale-plan-retire",
+                      run: candidateId,
+                      code: fact.code,
+                      reason: error instanceof Error ? error.message : String(error),
+                    },
+                  )
+                  return
+                }
+                // Not ledgered: this skip is run-scoped, and a run record already
+                // exists — the record walk in `auditQueues` can see it. The ledger
+                // covers only the skips that never mint a record.
+                composeLog.warn?.(`skipped a change that moved while batch ${candidateId} was being prepared`, {
+                  action: "compose-candidate-skip",
                   run: candidateId,
                   code: fact.code,
                   reason: error instanceof Error ? error.message : String(error),
                 })
-                return
               }
-              // Not ledgered: this skip is run-scoped, and a run record already
-              // exists — the record walk in `auditQueues` can see it. The ledger
-              // covers only the skips that never mint a record.
-              composeLog.warn?.(`skipped a change that moved while batch ${candidateId} was being prepared`, {
-                action: "compose-candidate-skip",
-                run: candidateId,
-                code: fact.code,
-                reason: error instanceof Error ? error.message : String(error),
-              })
-            }
-          }
+            })
           const resolveCycleBase = createBaseResolutionCycle()
           const resolveCyclePlan = createDeclaredPlanCycle()
           await actions.refresh()
@@ -5019,8 +5241,14 @@ function createQueue<Shape extends ChangeShape>(
               if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
               const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
               roots.push(id)
+              // The one place both merge paths — the drain's merge-when-green
+              // head and the post-drain selection — pass through. A run that
+              // ENDS in this pass settles here and hands over its outcome
+              // exactly once; one a remote Runner still holds open does not
+              // settle, and its outcome belongs to the later pass that does
+              // (the resumable-roots settle above, through the same wrapper).
               const root = current(id)
-              if (Queues.terminal(root)) await reportFreshTerminal(root)
+              if (Queues.terminal(root)) await settleReporting(id, () => reportFreshTerminal(root), { fresh: true })
               else await settleCandidate(id)
               return id
             } catch (error) {
@@ -6717,6 +6945,18 @@ function createQueueCommands(
     },
   })
 
+  const noteAttemptOutcome = command({
+    title: "Journal who was told how one ended attempt ended, and the ball that carries it",
+    params: AttemptNotifiedSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: AttemptNotifiedArgs) {
+      // The first row stands: the journaled ball is the idempotency key, and
+      // a second notification of the same attempt is exactly the double ball
+      // this seam exists to make impossible.
+      if (state.queues.outcomes[args.attempt] !== undefined) return { events: [] }
+      return { events: [event("queue/attempt/notified", args)] }
+    },
+  })
+
   const settleAdmissionRefusal = command({
     title: "Settle one exact required-check refusal as needing a person",
     params: SettleAdmissionRefusalSchema,
@@ -6836,6 +7076,7 @@ function createQueueCommands(
       settleAdmissionRefusal,
       retireSubmitFact,
       retireRevision,
+      noteAttemptOutcome,
       reconcileMerge,
     },
   }
@@ -7818,6 +8059,26 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             reason:
               `revision ${retired.revision} of change '${retired.changeId}' retired by ${retired.by}` +
               (retired.reason === undefined ? "" : `: ${retired.reason}`),
+            at: applied.ts,
+          },
+        },
+      },
+    }
+  }
+  if (applied.name === "queue/attempt/notified") {
+    const notified = AttemptNotifiedSchema.parse(applied.data)
+    if (state.queues.outcomes[notified.attempt] !== undefined) return state
+    return {
+      queues: {
+        ...state.queues,
+        outcomes: {
+          ...state.queues.outcomes,
+          [notified.attempt]: {
+            attempt: notified.attempt,
+            kind: notified.kind,
+            recipient: notified.recipient,
+            disposition: notified.disposition,
+            ...(notified.ball === undefined ? {} : { ball: notified.ball }),
             at: applied.ts,
           },
         },
@@ -11610,6 +11871,17 @@ export const YRD_REFUSAL_CODES = [
   "mock-mismatch",
   "needs-author",
   "no-merge-authority",
+  // The outcome-notifier seam (@i/10-yrd/24028). `notify-failed`: the
+  // configured notifier exited non-zero, timed out, or printed no ball id —
+  // an ERROR row, which ends the pass (NO SILENT ERRORS: an outcome that
+  // reached nobody must not read as delivered). `notify-unconfigured`: no
+  // `notify:` command is declared, so the outcome was journaled without a
+  // ball — one WARN per pass. Both are infrastructure-owned (the queue
+  // owner's), never the author's: registered so the census resolves them to
+  // themselves rather than through the `-failed` dynamic family to
+  // `check-failed`.
+  "notify-failed",
+  "notify-unconfigured",
   "orphaned-requested-job",
   "orphaned-run",
   "payload-certificate",

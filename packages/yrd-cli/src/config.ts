@@ -13,6 +13,7 @@ import {
   type TrailerAbsentException,
 } from "@yrd/queue"
 import * as z from "zod"
+import { DEFAULT_QUEUE_OWNER } from "./outcome-notify.ts"
 
 const TextSchema = z.string().trim().min(1)
 const StepNameSchema = TextSchema.regex(/^[a-z][a-z0-9_-]*$/iu)
@@ -369,6 +370,15 @@ const ProjectFields = {
    * directory before each spawn and refuses — as an infrastructure fact —
    * when it cannot. A step's own `env.TMPDIR` still wins. */
   scratch: TextSchema.optional(),
+  /** The queue owner: who hears about a yrd fault (an infra/env/timeout
+   * outcome, a pass-ending ERROR row) and takes every ball whose recipient is
+   * unknown or not live. `queue run --owner` overrides it per process; unset
+   * keeps {@link DEFAULT_QUEUE_OWNER} (@i/10-yrd/24028). */
+  owner: TextSchema.optional(),
+  /** The notifier command: reads one outcome JSON on stdin, opens one ball,
+   * prints `{ball_id}`. Absent, every pass WARNs `notify-unconfigured` once and
+   * journals its outcomes without a ball. */
+  notify: TextSchema.optional(),
 } as const
 
 const ProjectSchema = z.object(ProjectFields).strict()
@@ -390,6 +400,8 @@ export type YrdProjectConfig = Readonly<{
   mergedTruthExceptions: readonly z.infer<typeof MergedTruthExceptionSchema>[]
   /** As declared: absolute, or relative to the repository root. */
   scratch?: string
+  owner?: string
+  notify?: string
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -436,6 +448,12 @@ export type ResolvedYrdProjectConfig = Readonly<{
    * existed. Threaded config -> step plan -> command runner, the path a
    * step's own `env` takes. */
   scratch?: string
+  /** The queue owner every yrd-fault ball routes to. Optional for the same
+   * hand-built-fixture reason as `needsPerson`; `loadYrdConfig` always sets
+   * it. Absent means {@link DEFAULT_QUEUE_OWNER}. */
+  owner?: string
+  /** The outcome notifier command (`.yrd.yml` `notify:`), when one is declared. */
+  notify?: string
 }>
 
 export type MergedTruthExceptionConfig = Readonly<z.infer<typeof MergedTruthExceptionSchema>>
@@ -514,6 +532,8 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       needsPerson,
       mergedTruthExceptions,
       scratch,
+      owner,
+      notify,
     } = parsed.data
     if (merge !== undefined && landing !== undefined && merge !== landing) {
       throw createFailure({
@@ -536,6 +556,8 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       needsPerson,
       mergedTruthExceptions,
       ...(scratch === undefined ? {} : { scratch }),
+      ...(owner === undefined ? {} : { owner }),
+      ...(notify === undefined ? {} : { notify }),
     }
   }
   const issue = mostSpecificConfigIssue(parsed.error.issues[0])
@@ -593,7 +615,9 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "checks", "requires", "contest", "progress", "drafts", "scratch"].includes(path)
+    !["base", "batch", "checks", "requires", "contest", "progress", "drafts", "scratch", "owner", "notify"].includes(
+      path,
+    )
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -722,6 +746,8 @@ export async function loadYrdConfig(options: {
       // from wherever it was launched, and a relative root must name the same
       // directory from every cwd that reads this config.
       ...(parsed.scratch === undefined ? {} : { scratch: resolve(repo, parsed.scratch) }),
+      owner: parsed.owner?.trim() === "" || parsed.owner === undefined ? DEFAULT_QUEUE_OWNER : parsed.owner.trim(),
+      ...(parsed.notify === undefined || parsed.notify.trim() === "" ? {} : { notify: parsed.notify.trim() }),
     },
   }
 }

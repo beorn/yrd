@@ -164,8 +164,10 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
   // "merge" was a deleted key here once (an unrelated, older feature); it is
   // now the live key name for the merge-authority setting (formerly
   // `merge:`), so it no longer belongs in this deleted-keys list -- see
-  // the `merge`/`merge` read-both coverage below instead.
-  it.each(["steps", "journal", "refuse", "do", "notify", "shared-main", "typecheck-admission"])(
+  // the `merge`/`merge` read-both coverage below instead. "notify" left this
+  // list the same way on 2026-09-02: it is the live outcome-notifier command
+  // key (@i/10-yrd/24028) -- see the owner/notify acceptance case below.
+  it.each(["steps", "journal", "refuse", "do", "shared-main", "typecheck-admission"])(
     "refuses deleted config key '%s' loudly",
     (key) => {
       const value =
@@ -181,6 +183,15 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
       expect(() => parseYrdConfig(value)).toThrow(`yrd: config ${key} is not supported`)
     },
   )
+
+  it("accepts 'owner:' and 'notify:' as live keys -- the queue owner seat and the outcome notifier command (@i/10-yrd/24028)", () => {
+    const parsed = parseYrdConfig({ owner: "@cto", notify: "bun tools/yrd-notify.ts" })
+    expect(parsed.owner).toBe("@cto")
+    expect(parsed.notify).toBe("bun tools/yrd-notify.ts")
+    // Unset stays unset at the parse layer; loadYrdConfig applies the owner default.
+    expect(parseYrdConfig({}).owner).toBeUndefined()
+    expect(parseYrdConfig({}).notify).toBeUndefined()
+  })
 
   it("accepts 'merge:' as the live key and 'landing:' as its deprecated read-only alias, identically", () => {
     const viaMerge = parseYrdConfig({ merge: "none" })

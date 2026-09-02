@@ -16,17 +16,17 @@ function per implementation detail.
 
 ## Domain Objects
 
-| Object          | Created by                                   | Responsibility                                                                             | Main surface                                                                                                                              |
-| --------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `YrdDef`        | `createYrdDef()`                             | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()`                                                                                                                                |
-| `Yrd`           | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `journalSnapshot()`, `historySnapshot()`, `retentionDiagnostics()`, `dispatch()`, `events()`, `close()`              |
-| `Journal`       | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency and optional immutable history   | `read()`, `append()`, optional `checkpoint`/`history`                                                                                      |
-| `Process`       | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                        |
-| `Jobs`          | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()`         |
-| `Issues`        | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                           |
-| `Bays`          | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, check requests, lifecycle mutations |
-| `Queue`         | `withQueue()`                                | Run required checks and integrate eligible PRs through one scheduler                        | `state`, check/eligibility projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`                              |
-| `Contests`      | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`                  |
+| Object     | Created by                                   | Responsibility                                                                             | Main surface                                                                                                                      |
+| ---------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `YrdDef`   | `createYrdDef()`                             | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()`                                                                                                                        |
+| `Yrd`      | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `journalSnapshot()`, `historySnapshot()`, `retentionDiagnostics()`, `dispatch()`, `events()`, `close()`     |
+| `Journal`  | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency and optional immutable history   | `read()`, `append()`, optional `checkpoint`/`history`                                                                             |
+| `Process`  | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                |
+| `Jobs`     | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()` |
+| `Issues`   | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                   |
+| `Bays`     | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, check requests, lifecycle mutations             |
+| `Queue`    | `withQueue()`                                | Run required checks and integrate eligible PRs through one scheduler                       | `state`, check/eligibility projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`                        |
+| `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`          |
 
 `Process`, `Git`, issue sources, workspaces, runners, evaluators, clocks, ids,
 loggers, and scopes are injected capabilities. A capability may be one
@@ -288,6 +288,29 @@ Expected failures cross package boundaries as one serializable `FailureFact`
 with `kind`, stable `code`, and `message`. The CLI has one pure projection from
 that fact to its exit verdict. It never infers machine behavior from error
 text; an untyped exception is an infrastructure failure.
+
+Every queue outcome ends in exactly one ball. The queue hands each ENDED
+attempt — a merge run that landed or failed, a revision refused at admission —
+to the `onOutcome` seam exactly once; the CLI routes it on the refusal-code
+registry's own disposition (author → the submitter as a send-back; landed → the
+submitter; everything else, a pass-ending ERROR included → the queue owner,
+`.yrd.yml` `owner:`, default `@chief`) and spawns the configured notifier
+(`.yrd.yml` `notify:`) with the outcome JSON on stdin, expecting `{ball_id}` on
+stdout. The returned ball id is journaled on the attempt's own row
+(`queue/attempt/notified` → `queues.outcomes[attempt]`) and is the idempotency
+key: a re-run of the same attempt never sends twice. The recipient is the
+revision's recorded `submitter` (record lane) or the submit fact's `notify`
+seat (derived lane), both set by `pr submit --notify <seat>`, else the
+launch-env `YRD_DEFAULT_SUBMITTER`, else `unknown`, which routes to the owner.
+yrd stays tribe-free: a notifier that fails is an ERROR row (`notify-failed`)
+that ends the pass; no notifier configured is one WARN (`notify-unconfigured`)
+per pass and the outcome journaled without a ball.
+
+`queue run --once` exits with a three-way verdict: `0` — every attempt landed
+or there was nothing to do; `1` — at least one change was refused and sent
+back to its submitter (author disposition), the pass continued; `17`
+(`fatal-error`) — yrd itself failed: an infra/env/timeout outcome went to the
+queue owner, or the pass ended on an ERROR row. `17` wins over `1`.
 
 ## Design Tests
 
