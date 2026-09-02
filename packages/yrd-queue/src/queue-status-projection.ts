@@ -1335,11 +1335,27 @@ export const TIMELINE_STATUS_ORDER: readonly QueueTimelineStatusFilter[] = [
 ]
 
 /**
- * The default timeline window is unbounded — show everything, no `since=`
- * filter, unless the operator passes `--since` (user directive 2026-07-16).
- * 100 years dwarfs any real queue history while keeping `now - window` inside
- * the valid `Date` range (unlike `MAX_SAFE_INTEGER`, which overflows it). The
- * FILTER row hides `since=` and coverage reads complete at this window.
+ * The DEFAULT timeline window: seven days of FINISHED history. Open rows —
+ * pending and running — are the queue's live state and are always shown,
+ * whatever their age (`timelineRowWithinWindow` in the view): a change
+ * submitted 120 hours ago and still waiting is exactly what a reader of
+ * `queue list` must never lose to a bound.
+ *
+ * This supersedes the 2026-07-16 "show everything" default for the DEFAULT
+ * only. Measured 2026-09-01: `yrd queue list --json` with no flags dumped 88 MB
+ * and ran past a 25 s timeout (rc 124) because its window reached back to
+ * 1926 — 1638 rows and 1626 details of history nobody asked for. `--since`
+ * remains the explicit override in either direction, and both the printed
+ * footer and `filters.windowLabel` in the JSON name the window that applied,
+ * so a bounded read is never mistaken for the whole history.
+ */
+export const QUEUE_TIMELINE_DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000
+/**
+ * The unbounded window — every retained row, no `since=` filter. Reachable
+ * only through an explicit `--since` now (see the default above). 100 years
+ * dwarfs any real queue history while keeping `now - window` inside the valid
+ * `Date` range (unlike `MAX_SAFE_INTEGER`, which overflows it). The FILTER row
+ * hides `since=` and coverage reads complete at this window.
  */
 export const QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS = 100 * 365 * 24 * 60 * 60 * 1_000
 

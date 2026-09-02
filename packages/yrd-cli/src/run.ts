@@ -155,7 +155,7 @@ import {
   queuePauseWarnings,
   queueRunRevisionReads,
   queueTimelineAdmissionTimes,
-  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
+  QUEUE_TIMELINE_DEFAULT_WINDOW_MS,
   RUNNER_STALE_MS,
   runRevisionClock,
   type QueueAttempt,
@@ -201,6 +201,7 @@ import {
   type RemergePreflightResult,
   type RemergePreflightVerdict,
 } from "./pr-withdraw.ts"
+import { optionalReceiverStorePath, orphanRevisionWarnings, retirePr, scanReceiverRevisions } from "./pr-retire.ts"
 import {
   foldRefusalStall,
   formatRemedyCommand,
@@ -2575,8 +2576,15 @@ function parseDurationMs(value: string, option: string, positive = false): numbe
   return milliseconds
 }
 
-function queueTimelineWindow(value: string | undefined): number {
-  return value === undefined ? QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS : parseDurationMs(value, "--since")
+/**
+ * The timeline window `queue list` and `watch` read with: `--since` verbatim,
+ * else the 7-day DEFAULT (`QUEUE_TIMELINE_DEFAULT_WINDOW_MS`, open rows
+ * always shown). Exported so the default is a tested fact: it used to be a
+ * hundred years, and `queue list --json` with no flags dumped 88 MB over 25 s
+ * (2026-09-01) before anyone measured it.
+ */
+export function queueTimelineWindow(value: string | undefined): number {
+  return value === undefined ? QUEUE_TIMELINE_DEFAULT_WINDOW_MS : parseDurationMs(value, "--since")
 }
 
 // The flow-metrics window: 24h by default, but an explicit --since wins so the
@@ -8573,6 +8581,7 @@ async function buildQueueListSnapshot(
   const clock = createQueueTimelineProjectionClock(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
+    windowSource: options.since === undefined ? "default" : "explicit",
     metricsWindowMs: queueMetricsWindow(options.since),
     statuses: queueTimelineStatuses(options.status),
     terms: filters,
@@ -8881,8 +8890,33 @@ async function listQueues(
       ...staleDraftWarnings(snapshot.staleDrafts ?? []),
       ...needsPersonWarnings(snapshot.needsPerson ?? []),
       ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure)]),
+      ...(await orphanRefsForWarnings(io, services)),
     ],
   )
+}
+
+/**
+ * One WARN row per superseded refs/for-only row in the receiver store — a
+ * landing request with no submit fact whose Change-Id has a newer submitted
+ * revision. The class the 2026-09-01 audit found 13 of by hand; each row
+ * names `yrd pr retire` as its cure. No store, no rows; a store that cannot
+ * be scanned is one loud row, never a silent zero.
+ */
+async function orphanRefsForWarnings(io: YrdCliIO, services: YrdCliServices): Promise<readonly string[]> {
+  const store = optionalReceiverStorePath(io)
+  if (store === undefined) return []
+  try {
+    if (services.process !== undefined) {
+      return orphanRevisionWarnings(await scanReceiverRevisions(services.process, store))
+    }
+    await using process = createProcess()
+    return orphanRevisionWarnings(await scanReceiverRevisions(process, store))
+  } catch (error) {
+    return [
+      `WARN could not scan the receiver store '${store}' for superseded landing-request rows: ` +
+        (error instanceof Error ? error.message : String(error)),
+    ]
+  }
 }
 
 async function dashboard(
@@ -13706,7 +13740,10 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope watch to one change")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
+    .option(
+      "--since <duration>",
+      "window for finished rows (default 7d; open changes always shown; flow metrics default 24h)",
+    )
     .option("--latest", "show only the latest Run for each change")
     .option("--json", "emit stable JSON")
     .option("--strict", "fail loud (exit 3) on the first unreadable run member instead of marking its row")
@@ -13831,7 +13868,10 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one change")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
+    .option(
+      "--since <duration>",
+      "window for finished rows (default 7d; open changes always shown; flow metrics default 24h)",
+    )
     .option("--latest", "show only the latest Run for each change")
     .option("--watch", "keep this projection live and interactive")
     .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
@@ -13845,7 +13885,10 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one change")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
+    .option(
+      "--since <duration>",
+      "window for finished rows (default 7d; open changes always shown; flow metrics default 24h)",
+    )
     .option("--latest", "show only the latest Run for each change")
     .option("--watch", "keep this projection live and interactive")
     .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
@@ -14201,6 +14244,24 @@ function buildProgram(
     .option("--burn-payload", "acknowledge that closing spends the payload identity permanently")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io, "pr.close"))
+  // `close` spends a RECORD's payload; a derived revision has no record, and
+  // its two receiver-store rows (submit fact + landing request) outlive every
+  // other disposal verb. This is the one verb that retires both in one act.
+  pr.command("retire <selector>")
+    .description("retire one revision of a change: delete its submit fact and landing request together, journaled")
+    .option(
+      "--revision <n>",
+      "which revision of the change (its -rN branch marker; a bare branch is revision 1)",
+      (value: string) => Number.parseInt(value, 10),
+    )
+    .option("--reason <text>", "retirement rationale recorded on the queue/revision/retired fact")
+    .option("--by <identity>", "who retires it (defaults to the invoking runner identity)")
+    .option(
+      "--burn-payload",
+      "acknowledge retiring a revision with no live successor — the payload is spent permanently",
+    )
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => retirePr(installed(), installedServices(), selector, options, io))
   // Hidden ruled alias of `close` — one act, two spellings (I23); the envelope
   // keeps its stable pr.withdraw name for journal consumers.
   pr.command("withdraw <selector...>", { hidden: true })

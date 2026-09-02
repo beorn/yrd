@@ -952,6 +952,42 @@ const RetireSubmitFactSchema = z
   })
   .strict()
 export type RetireSubmitFactArgs = Readonly<z.infer<typeof RetireSubmitFactSchema>>
+/**
+ * One REVISION of a change retired by an operator (`yrd pr retire`): the exact
+ * receiver-store rows that carried it — the submit fact `refs/yrd/submit/<branch>`
+ * (absent when only the landing request survived) and the landing-request row
+ * `refs/for/<base>/<branch>` — with the identity that names the revision and
+ * who retired it.
+ *
+ * A superseded revision lives in TWO rows of the receiver store, and retiring
+ * only the submit fact does not remove it: the `refs/for` row is what a drain
+ * re-projects the fact from, at the row's own sha, and the next compose
+ * derives it again (PR3186, 2026-09-01, composed ten minutes after its submit
+ * fact was retired by hand). This fact is the durable half of the one act that
+ * retires both rows: it projects into {@link QueueRetiredSubmit} at the row's
+ * sha, so a re-projection of the same row can never derive, and it retires the
+ * standing `bays.submits` projection in the same journal frame.
+ */
+const RetireRevisionSchema = z
+  .object({
+    branch: GitRefSchema,
+    base: z.string().trim().min(1),
+    changeId: z.string().trim().min(1),
+    revision: z.number().int().positive(),
+    /** The submit fact's sha, when the row still existed at retirement. */
+    submitSha: GitShaSchema.optional(),
+    /** The landing-request row — `refs/for/<base>/<branch>` — and its sha. */
+    forRef: z.string().trim().min(1),
+    forSha: GitShaSchema,
+    by: z.string().trim().min(1),
+    /** The derived change id the row already produced, when one was minted. */
+    pr: z.string().trim().min(1).optional(),
+    reason: z.string().trim().min(1).optional(),
+  })
+  .strict()
+export type RetireRevisionArgs = Readonly<z.infer<typeof RetireRevisionSchema>>
+/** The `QueueRetiredSubmit.code` every operator retirement projects under. */
+export const REVISION_RETIRED_CODE = "revision-retired"
 /** Consecutive refusals before `queue audit` calls a change wedged. One skip is a
  * normal losable race in a selectorless drain; a third identical cycle is not.
  *
@@ -1612,6 +1648,7 @@ export type QueueCommands = Readonly<{
     admissionRefused: CommandHandler<RecordAdmissionRefusalArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     retireSubmitFact: CommandHandler<RetireSubmitFactArgs, RuntimeState>
+    retireRevision: CommandHandler<RetireRevisionArgs, RuntimeState>
     reconcileMerge: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
   }>
 }>
@@ -1698,6 +1735,10 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   /** Stop selecting one exact refused revision after its automated remedy has
    * reached a durable needs-person outcome. A new revision clears the fact. */
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<void>
+  /** Journal one operator revision retirement (`yrd pr retire`): the durable
+   * half of the act that deletes both receiver-store rows. See
+   * {@link RetireRevisionArgs}. */
+  retireRevision(args: RetireRevisionArgs): Promise<void>
   get(run: RunId): Run | undefined
   retentionDiagnostics(): Readonly<{
     retainedRuns: number
@@ -1827,6 +1868,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         }),
         "queue/admission/settled": journalEvent(1, SettleAdmissionRefusalSchema),
         "queue/submit/retired": journalEvent(1, RetireSubmitFactSchema),
+        "queue/revision/retired": journalEvent(1, RetireRevisionSchema),
       },
       replayEvents: {
         "queue/paused": ReplayPauseQueueArgsSchema,
@@ -1883,6 +1925,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               retireSubmitFact: (args) => yrd.dispatch(commands.queue.retireSubmitFact, args),
+              retireRevision: (args) => yrd.dispatch(commands.queue.retireRevision, args),
               bindDerivedIdentity: (args) => yrd.dispatch(commands.queue.bindDerivedIdentity, args),
               reconcileMerge: (args) => yrd.dispatch(commands.queue.reconcileMerge, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
@@ -1943,6 +1986,7 @@ type QueueActions = Readonly<{
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
+  retireRevision(args: RetireRevisionArgs): Promise<CommandResult>
   bindDerivedIdentity(args: DerivedIdentityBound): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecorded): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
@@ -2126,11 +2170,29 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   type CycleBaseResolver = (base: string) => Promise<string>
-  /** The pass's base memo, plus the one act that invalidates it: a merge this
+  /** A memoised base that no longer matches the ref: what it was memoised as
+   * (`from`, the sha every member so far was checked at) and where the ref
+   * points now (`to`). */
+  type CycleBaseMove = Readonly<{ base: string; from: string; to: string }>
+  /** The pass's base memo, plus the two acts that invalidate it. A merge this
    * pass landed MOVES the base, and the member behind the merged head must be
    * checked at the moved base, not admitted against the sha the pass started
-   * on (`forget`). Callers that only resolve see the plain resolver type. */
-  type CycleBaseCycle = CycleBaseResolver & Readonly<{ forget: (base: string) => void }>
+   * on (`forget`). And main moves for reasons that are nobody's merge in this
+   * pass — a direct root push, a merge by a previous pass this one composed
+   * against, a foreign carrier — so a drain turn re-reads the ref and replaces
+   * the memo where it moved (`refresh`), instead of checking every remaining
+   * member at a base the merge step will refuse (`stale-check`, measured
+   * 2026-09-01: two members' full check sets lost to one pin push). Callers
+   * that only resolve see the plain resolver type. */
+  type CycleBaseCycle = CycleBaseResolver &
+    Readonly<{
+      forget: (base: string) => void
+      /** Re-read the memoised base(s) from the ref — the same read the top of
+       * a pass takes — replacing the memo where it moved, and answer every
+       * move. Only bases this pass has already resolved are read: a base with
+       * no memo is resolved fresh at its first use anyway. */
+      refresh: (base?: string) => Promise<readonly CycleBaseMove[]>
+    }>
   const createBaseResolutionCycle = (): CycleBaseCycle | undefined => {
     if (resolveBaseSha === undefined) return undefined
     const resolved = new Map<string, Promise<string>>()
@@ -2146,6 +2208,19 @@ function createQueue<Shape extends ChangeShape>(
     return Object.assign(resolve, {
       forget: (selector: string): void => {
         resolved.delete(baseIdentity(selector))
+      },
+      refresh: async (selector?: string): Promise<readonly CycleBaseMove[]> => {
+        const only = selector === undefined ? undefined : baseIdentity(selector)
+        const moves: CycleBaseMove[] = []
+        for (const [base, memo] of [...resolved]) {
+          if (only !== undefined && base !== only) continue
+          const from = await memo
+          const to = await resolveBaseSha(base)
+          if (to === from) continue
+          resolved.set(base, Promise.resolve(to))
+          moves.push({ base, from, to })
+        }
+        return moves
       },
     })
   }
@@ -2392,11 +2467,18 @@ function createQueue<Shape extends ChangeShape>(
       conditions.report(
         `compose-derived-fact-retired:${branch}:${row.sha}`,
         "warn",
-        "queue compose will not derive a change for a submit fact it retired: change '" +
-          row.pr +
-          "' could not progress (" +
-          row.code +
-          ") and no further change derives for this sha — push a rebased head to submit again",
+        row.code === REVISION_RETIRED_CODE
+          ? // An operator retired this exact row (`yrd pr retire`); a standing
+            // projection at its sha is a re-projection of the retired refs/for
+            // row, never new work, and derives nothing (PR3186, 2026-09-01).
+            "queue compose will not derive a change for a revision an operator retired: " +
+              row.reason +
+              " — no further change derives for this sha; push a rebased head to submit again"
+          : "queue compose will not derive a change for a submit fact it retired: change '" +
+              row.pr +
+              "' could not progress (" +
+              row.code +
+              ") and no further change derives for this sha — push a rebased head to submit again",
         {
           action: "compose-derived-fact-retired",
           branch,
@@ -3629,6 +3711,12 @@ function createQueue<Shape extends ChangeShape>(
     // `typecheck started PR3160`, no merge row; a later pass ran 50 minutes
     // with zero merges.
     stopAtGreenDerivedHead = false,
+    // Members the drain re-points at a base that moved under their green
+    // verdict and dispatches FIRST, at their own position: the admission
+    // order reads such a member as already checked (its Jobs at the old base
+    // are green) and so lists everyone behind it as ahead of it. It holds the
+    // line; the line does not hold it.
+    rechecking?: ReadonlySet<string>,
   ): Promise<AdmissionDispatch> => {
     const admitted: string[] = []
     const refused: string[] = []
@@ -3676,7 +3764,8 @@ function createQueue<Shape extends ChangeShape>(
         // clears it; the reporter's dedup memo collapses the steady-state
         // repeats into one summary.
         const withheld = admissionWithholding(snapshot, steps, pr, selection, derived, ejected)
-        if (withheld !== undefined) {
+        const holdsTheLine = withheld?.code === "admission-order-held" && rechecking?.has(pr.id) === true
+        if (withheld !== undefined && !holdsTheLine) {
           composeConditions.report(
             `admission-withheld:${pr.id}:${withheld.code}`,
             "warn",
@@ -3957,6 +4046,73 @@ function createQueue<Shape extends ChangeShape>(
         resolveCycleBase,
       )
     }
+    /** The settled merge run in this journal whose integration commit IS
+     * `sha` — the mover of a base that moved to `sha`, when the journal knows
+     * it. `undefined` is an honest "no run in this journal merged that
+     * commit": a direct root push, a foreign carrier, or a merge some other
+     * journal recorded. */
+    const mergedBy = (
+      snapshot: DeepReadonly<RuntimeState>,
+      sha: string,
+    ): Readonly<{ run: RunId; prs: readonly string[] }> | undefined => {
+      let mover: Readonly<{ run: RunId; prs: readonly string[] }> | undefined
+      for (const record of Queues.values(snapshot.queues)) {
+        if (record.parent !== undefined || record.integration?.commit !== sha) continue
+        if (mover === undefined || compareNatural(record.id, mover.run) > 0) {
+          mover = { run: record.id, prs: record.prs.map((pr) => pr.id) }
+        }
+      }
+      return mover
+    }
+    /** THE L4 for the 2026-09-01 18:41 pass: a pass must not need main to hold
+     * still between its turns. Re-read every base this pass has memoised from
+     * the ref itself — the read the top of a pass takes — and when one moved
+     * for a reason that is not this drain's own merge (a direct root push, a
+     * merge by a previous pass this one composed against, a foreign carrier),
+     * replace the memo, re-point the members not yet dispatched exactly as an
+     * own merge does, and say so ONCE, naming old, new and the mover when this
+     * journal knows it. An own merge never reaches here: `mergeGreenHead`
+     * forgets the memo before the next turn, so there is nothing to compare. */
+    const reresolveBaseBetweenTurns = async (): Promise<void> => {
+      if (resolveCycleBase === undefined) return
+      const moves = await resolveCycleBase.refresh()
+      if (moves.length === 0) return
+      const snapshot = runtime()
+      for (const move of moves) {
+        const mover = mergedBy(snapshot, move.to)
+        log.info?.(
+          `queue base '${move.base}' moved from ${move.from} to ${move.to} between drain turns` +
+            (mover === undefined
+              ? " (external: no run in this journal merged that commit)"
+              : ` (run '${mover.run}' merged ${mover.prs.join(", ")})`) +
+            "; the members not yet dispatched are checked at the new base",
+          {
+            action: "base-moved-between-turns",
+            base: move.base,
+            from: move.from,
+            to: move.to,
+            movedBy: mover === undefined ? "external" : mover.prs.join(","),
+            ...(mover === undefined ? {} : { run: mover.run }),
+          },
+        )
+      }
+      await repointAfterBaseMove()
+    }
+    /** Did the base this head was green at move? Re-read the ref now, for
+     * exactly this head's base, replacing the memo when it did. */
+    const movedUnder = async (pr: DeepReadonly<Change>): Promise<CycleBaseMove | undefined> => {
+      if (resolveCycleBase === undefined) return undefined
+      const base = baseIdentity(pr.base)
+      return (await resolveCycleBase.refresh(base)).find((move) => move.base === base)
+    }
+    /** Heads re-pointed at a base that moved under their green verdict, in
+     * the order it happened; the next turn dispatches the first of them
+     * before it reads the admission order, so a head keeps its position. */
+    const recheckLine: string[] = []
+    /** How many times this pass has re-checked each head at a moved base:
+     * the bound that keeps a base moving under one head from spinning the
+     * pass, after which the ordinary refusal path takes the head. */
+    const rechecksAtMovedBase = new Map<string, number>()
     /** Merge one green derived head in place and account for how it ended.
      * Whatever came of it, the head has had its turn: it is released so the
      * drain never re-picks it, which is also this branch's termination
@@ -3985,6 +4141,42 @@ function createQueue<Shape extends ChangeShape>(
           return
         }
         case "failed": {
+          // The base moved UNDER a green head: main is no longer where its
+          // checks were taken, so the merge step refused `stale-check` — a
+          // fact about the world, not about the head's content. Its verdict
+          // at X is spent and a verdict at Y is what its merge needs, so
+          // re-point it there and let the NEXT TURN re-check it first, at its
+          // own position — not the next pass, post-drain, behind every other
+          // member's checks, which is where its released authority used to
+          // land it (PR3153 on 2026-09-01: 28 minutes of checks lost to a pin
+          // pushed between passes, then the member behind it lost the same
+          // way at the same stale base). Green Jobs at Y are reused by key,
+          // never re-run. Bounded per head per pass: a base that keeps moving
+          // under one head is the no-progress shape, and beyond the bound the
+          // refusal below takes it, so `released` still grows and the drain
+          // still terminates.
+          const moved = result.code === "stale-check" ? await movedUnder(pr) : undefined
+          const rechecks = rechecksAtMovedBase.get(pr.id) ?? 0
+          if (moved !== undefined && rechecks < ADMISSION_DRAIN_NO_PROGRESS_TURNS) {
+            rechecksAtMovedBase.set(pr.id, rechecks + 1)
+            released.delete(pr.id)
+            recheckLine.push(pr.id)
+            await repointAfterBaseMove()
+            log.info?.(
+              `queue admission: change '${pr.id}' (${pr.branch}) passed every required check at ${baseSha} but ` +
+                `its merge run '${result.run}' found '${moved.base}' at ${moved.to}; re-pointed at ${moved.to} ` +
+                "and re-checked on the next turn, keeping its position",
+              {
+                action: "rechecked-at-moved-base",
+                pr: pr.id,
+                branch: pr.branch,
+                run: result.run,
+                from: baseSha,
+                to: moved.to,
+              },
+            )
+            return
+          }
           // The run record holds the verdict (a failed merge run is durable
           // and audit-visible on its own); this row names the reason so the
           // pass log says WHY the next member got the turn.
@@ -4037,6 +4229,9 @@ function createQueue<Shape extends ChangeShape>(
     while (targets.size > 0) {
       if (options.continueAdmissions?.() === false) break
       await actions.refresh()
+      // Every turn starts from the base the ref points at NOW, never from the
+      // one this pass happened to start on.
+      await reresolveBaseBetweenTurns()
       const snapshot = runtime()
       const selected = admissionSteps(steps)
       // Admission verdicts no longer mint Runs, but replay can still contain an
@@ -4080,14 +4275,20 @@ function createQueue<Shape extends ChangeShape>(
       // single turn and needs no release. At batch 1 the dispatch also hands
       // back the head the moment it goes green (`stopAtGreenDerivedHead`), so
       // its merge lands before the next member's first check starts.
-      const turn = onePerTurn ? queued.slice(0, 1) : queued
+      // A head re-pointed at a moved base takes the turn FIRST, at its own
+      // position: the admission order reads its green Jobs at the old base
+      // as checked and would not list it, and the member behind it must not
+      // overtake a head that lost nothing but the ground under it.
+      const recheck = recheckLine.shift()
+      const turn = recheck === undefined ? (onePerTurn ? queued.slice(0, 1) : queued).map((pr) => pr.id) : [recheck]
       const dispatched = await dispatchAdmissions(
-        turn.map((pr) => pr.id),
+        turn,
         resolveCycleBase,
         selection,
         options,
         derived,
         mergeWhenGreen,
+        recheck === undefined ? undefined : new Set([recheck]),
       )
       for (const pr of dispatched.admitted) admitted.add(pr)
       for (const pr of dispatched.refused) released.add(pr)
@@ -4109,7 +4310,8 @@ function createQueue<Shape extends ChangeShape>(
       // or ejected, and PRs behind it have not been tried yet. Take the next
       // one. `released` grows by at least one whenever this branch is taken, so
       // `queued` strictly shrinks and the loop still terminates.
-      if (dispatched.refused.length + dispatched.ejected.length > 0 && queued.length > turn.length) continue
+      const untried = queued.filter((pr) => !turn.includes(pr.id))
+      if (dispatched.refused.length + dispatched.ejected.length > 0 && untried.length > 0) continue
       if (dispatched.admitted.length > 0 && dispatched.refused.length === 0) {
         // "Admitted" is progress only if the next turn sees a different queue.
         // Measured 2026-09-01 (PR3152): a derived head whose four required-check
@@ -4235,6 +4437,9 @@ function createQueue<Shape extends ChangeShape>(
     },
     async settleAdmissionRefusal(args) {
       await actions.settleAdmissionRefusal(args)
+    },
+    async retireRevision(args) {
+      await actions.retireRevision(args)
     },
     waitingAdmission(selector, step) {
       return waitingRevisionAdmission(selector, step)
@@ -6526,6 +6731,40 @@ function createQueueCommands(
     },
   })
 
+  const retireRevision = command({
+    title: "Retire one revision of a change: journal the retirement and drop its standing submit fact",
+    params: RetireRevisionSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: RetireRevisionArgs) {
+      const rowSha = args.submitSha ?? args.forSha
+      const submit = state.bays.submits[args.branch]
+      // The expected-old-value guard, projection side. A standing fact at a
+      // sha this retirement never examined is a re-push — newer consent for
+      // different content — and must stay derivable; retiring it on the
+      // strength of a verdict about an older row would drop live work.
+      if (submit !== undefined && submit.sha !== args.submitSha && submit.sha !== args.forSha) {
+        raiseFailure(
+          "refusal",
+          "derived-submit-moved",
+          `yrd: revision ${args.revision} of change '${args.changeId}' on '${args.branch}' stands at ${rowSha} ` +
+            `in the receiver store, but the projected submit fact reads ${submit.sha} — the branch was re-pushed ` +
+            `since this retirement was read; re-read the rows and retire the revision that is actually standing`,
+        )
+      }
+      const held = state.queues.retiredSubmits[args.branch]
+      const alreadyRetired = held?.sha === rowSha && held.code === REVISION_RETIRED_CODE
+      if (alreadyRetired && submit === undefined) return { events: [] }
+      return {
+        events: [
+          ...(alreadyRetired ? [] : [event("queue/revision/retired", args)]),
+          // The standing projection retires in the SAME frame: the physical
+          // ref leaves the store on the caller's side, and a projection that
+          // outlived its ref is exactly the state that composed PR3186.
+          ...(submit === undefined ? [] : [event("branch/unsubmitted", { branch: args.branch, reason: "deleted" })]),
+        ],
+      }
+    },
+  })
+
   const settleAdmissionRefusal = command({
     title: "Settle one exact required-check refusal as needing a person",
     params: SettleAdmissionRefusalSchema,
@@ -6644,6 +6883,7 @@ function createQueueCommands(
       admissionRefused,
       settleAdmissionRefusal,
       retireSubmitFact,
+      retireRevision,
       reconcileMerge,
     },
   }
@@ -7600,6 +7840,32 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             code: retired.code,
             reason: retired.reason,
             ...(retired.paths === undefined ? {} : { paths: [...retired.paths] }),
+            at: applied.ts,
+          },
+        },
+      },
+    }
+  }
+  if (applied.name === "queue/revision/retired") {
+    const retired = RetireRevisionSchema.parse(applied.data)
+    // Projected into the SAME row the queue's own retirements use, at the
+    // row's sha, so `retiredSubmitBranches` excludes a re-projection of this
+    // exact refs/for row from the derived lane with no second exclusion path.
+    // Last write wins per branch, exactly as `queue/submit/retired` does.
+    return {
+      queues: {
+        ...state.queues,
+        retiredSubmits: {
+          ...state.queues.retiredSubmits,
+          [retired.branch]: {
+            branch: retired.branch,
+            sha: retired.submitSha ?? retired.forSha,
+            base: retired.base,
+            pr: retired.pr ?? retired.changeId,
+            code: REVISION_RETIRED_CODE,
+            reason:
+              `revision ${retired.revision} of change '${retired.changeId}' retired by ${retired.by}` +
+              (retired.reason === undefined ? "" : `: ${retired.reason}`),
             at: applied.ts,
           },
         },
@@ -11140,6 +11406,14 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // composition against the current base is the whole remedy.
     "merge-unauthored-deletion",
     "scratch-cleanup-failed",
+    // ENOSPC while PREPARING scratch (scratch-storage.ts, the 2026-08-14
+    // inode outage): nothing about the candidate is wrong and the same
+    // candidate merges first try once the filesystem has room — the
+    // preparation-side twin of `scratch-cleanup-failed`. Emitted only through
+    // the `WORKTREE_STORAGE_EXHAUSTED` constant, so the literal-only census
+    // never saw it and it fell through to the author default until the
+    // constant-following census caught it (2026-09-01).
+    "worktree-storage-exhausted",
     "wrapper-generation",
     // This Yrd HOST has no verdict-message resolver wired up, or cannot
     // compute a patch-bound authorization identity (no immutable base SHA, no
@@ -11300,6 +11574,11 @@ export const YRD_REFUSAL_CODES = [
   "dropped-parent-contribution",
   "evaluator-missing-result",
   "exclusive-busy",
+  // A bounded writer-lock wait pulled by the host's `interrupt()` (lock.ts,
+  // bead 24019): a recoverable infrastructure failure naming the lock's holder
+  // and the interrupt's reason — never a verdict on the change. Landed
+  // unregistered on 2026-09-01; the census caught it.
+  "exclusive-interrupted",
   "gate-script-diff-failed",
   "gate-script-missing-at-base",
   "gate-script-overlay-failed",
@@ -11481,8 +11760,24 @@ export const YRD_REFUSAL_CODES = [
   "repository-corrupt",
   "required-check-failed",
   "retired-command",
+  // `yrd pr retire` — one verb retiring one revision's two receiver-store rows
+  // (the submit fact and the landing request) in one journaled act.
+  "retire-no-successor",
+  "retire-refs-moved",
+  "retire-revision-ambiguous",
+  "retire-store-missing",
+  "retire-target-missing",
   "review-rejected",
   "review-required",
+  // `QueueRetiredSubmit.code` for an OPERATOR retirement (`yrd pr retire`,
+  // emitted as REVISION_RETIRED_CODE): the projection code a retired
+  // revision's row carries, beside the queue's own `candidate-conflicting` /
+  // `required-check-failed` retirements — never a candidate failure. Registered
+  // exactly as those siblings are: in this vocabulary only, in NO
+  // COMPOSITION_FAILURE_BUCKETS set, so `failureDisposition` classifies it as
+  // the default failed / owner author — the row is a verdict on one exact
+  // sha, and only the author pushing new content derives anything again.
+  "revision-retired",
   "run-canceled",
   "run-lease-expired",
   "run-plan-mismatch",
@@ -11538,6 +11833,9 @@ export const YRD_REFUSAL_CODES = [
   "viewer-read-only",
   // Same TEST-FIXTURE-ONLY narrative family as "mock-mismatch" above.
   "visual-rejected",
+  // scratch-storage.ts `storageExhaustionError` — a JobError.code, bucketed
+  // `infra-retry` above.
+  "worktree-storage-exhausted",
   "wrapper-generation",
   "wrapper-mismatch",
 ] as const

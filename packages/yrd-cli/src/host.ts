@@ -428,6 +428,13 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // every new domain field is optional, and the shared callback preserves the
   // checkpoint before replay resumes at its cursor.
   "3f8a2627fde94c410a98beaed80e2198298baea1fb8a5b533f3e71231e8faafa",
+  // The composition immediately before `yrd pr retire` registered the
+  // `queue/revision/retired` event (2026-09-01). This is the ledger's own
+  // superseded last entry — what deployments were asked to store. Nothing in
+  // a stored checkpoint changes: the fact projects into the existing
+  // `queues.retiredSubmits` row, so replay resumes after the stored cursor
+  // with the checkpoint preserved verbatim.
+  "2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
