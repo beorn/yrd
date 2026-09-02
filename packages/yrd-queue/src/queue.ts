@@ -30,6 +30,7 @@ import {
   getChangeRecord,
   isNonCheckableChangeState,
   type BaysState,
+  type BranchUnsubmit,
   type HasBays,
   type Change,
   type ChangeAdmission,
@@ -2071,6 +2072,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               retireSubmitFact: (args) => yrd.dispatch(commands.queue.retireSubmitFact, args),
+              retireDeadSubmitFact: (args) => yrd.bays.recordBranchUnsubmit(args),
               retireRevision: (args) => yrd.dispatch(commands.queue.retireRevision, args),
               noteAttemptOutcome: (args) => yrd.dispatch(commands.queue.noteAttemptOutcome, args),
               bindDerivedIdentity: (args) => yrd.dispatch(commands.queue.bindDerivedIdentity, args),
@@ -2137,6 +2139,10 @@ type QueueActions = Readonly<{
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
+  /** Drop one dead mirror fact from `bays.submits`, so nothing reads it again.
+   * The bays plugin's own projection verb — a missing fact no-ops, so a
+   * replayed or repeated retirement converges. */
+  retireDeadSubmitFact(args: BranchUnsubmit): Promise<CommandResult>
   retireRevision(args: RetireRevisionArgs): Promise<CommandResult>
   noteAttemptOutcome(args: AttemptNotifiedArgs): Promise<CommandResult>
   bindDerivedIdentity(args: DerivedIdentityBound): Promise<CommandResult>
@@ -2554,6 +2560,58 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   /**
+   * Retire one dead mirror fact, once and for good.
+   *
+   * A fact is dead when its content is already on the target, when the queue
+   * has already retired it, or when the receiver store holds no ref behind
+   * it. Every one of those was a WARN row before this, re-derived from the
+   * same standing `bays.submits` row on every pass — and a queue run is one
+   * process, so the condition reporter's per-process dedup never reached the
+   * next run. Fifty-four rows an idle run printed again every run, telling
+   * nobody anything new: by the plan's own rule, defects.
+   *
+   * The cure is the one the journal already has a shape for: drop the mirror
+   * row (`branch/unsubmitted`, the same verb the record lane's merge uses
+   * through `submitFactRetirement`). Nothing reads the fact afterwards, so
+   * the derivation that produced the row has no input and the row cannot
+   * come back. No suppression flag and no in-memory seen-set: both would die
+   * with the process, which is exactly how these rows survived.
+   *
+   * A re-push still cures everything, with no clearing verb: it writes a new
+   * fact at a new sha, and the branch derives again.
+   */
+  const retireDeadFact = async (
+    branch: string,
+    sha: string,
+    said: string,
+    props: Readonly<Record<string, unknown>>,
+  ): Promise<void> => {
+    try {
+      await actions.retireDeadSubmitFact({ branch, reason: "superseded" })
+    } catch (error) {
+      // Loud, and the same level the sibling retirement at the merge seam
+      // uses: an unrecorded retirement means the fact stands and this pass
+      // learned nothing. The fact stays readable either way, so the next
+      // pass tries again.
+      log.error?.(`queue compose could not retire the dead submit fact for '${branch}' at ${sha}: ` + said, {
+        action: "compose-dead-fact-retire-failed",
+        code: "journal-write-failed",
+        branch,
+        sha,
+        reason: error instanceof Error ? error.message : String(error),
+        ...props,
+      })
+      return
+    }
+    log.info?.(`queue compose retired the submit fact for '${branch}': ` + said, {
+      action: "compose-dead-fact-retired",
+      branch,
+      sha,
+      ...props,
+    })
+  }
+
+  /**
    * Retire every mirror fact the receiver store holds no ref for, and name the
    * branches this pass must not admit.
    *
@@ -2692,21 +2750,11 @@ function createQueue<Shape extends ChangeShape>(
       // (materializeDerivedRunMembers), so the derived lane can never supply
       // one. Making that field optional moves the composition checkpoint
       // identity, which this change has no business spending.)
-      composeConditions.report(
-        `compose-derived-fact-receiver-ref-gone:${fact.branch}:${fact.sha}`,
-        "warn",
-        "queue compose will not derive a change for a submit fact with no ref behind it: " +
-          reason +
-          " — the projection outlived the ref it mirrors (a store-side ref delete journals nothing), so no " +
-          "change derives for this sha; push the branch again to submit it",
-        {
-          action: "compose-derived-fact-receiver-ref-gone",
-          branch: fact.branch,
-          sha: fact.sha,
-          base: fact.base,
-          store: scan.store,
-          ref: `${SUBMIT_REF_PREFIX}${fact.branch}`,
-        },
+      await retireDeadFact(
+        fact.branch,
+        fact.sha,
+        reason + " — push the branch again to submit it",
+        { base: fact.base, store: scan.store, ref: `${SUBMIT_REF_PREFIX}${fact.branch}` },
       )
     }
     return gone
@@ -2775,23 +2823,17 @@ function createQueue<Shape extends ChangeShape>(
     const landedScan = (await landing.scan(snapshot.bays)) ?? NO_LANDED_SUBMIT_SCAN
     for (const stale of landedScan.landed) {
       if (skip.has(stale.branch)) continue
-      conditions.report(
-        `compose-derived-fact-already-landed:${stale.branch}:${stale.sha}`,
-        "warn",
-        "queue compose will not derive an admission for a submit fact pointing at already-landed content; " +
-          `the fact is stale — retire it (${submitRefRetirementCommand(stale.branch)})`,
-        {
-          action: "compose-derived-fact-already-landed",
-          branch: stale.branch,
-          sha: stale.sha,
-          // WHICH proof: `ancestry` is this fact's own commit on the base;
-          // `change-id` is a superseded revision of a change that landed under
-          // a different commit — benign when abandoned, an author error when
-          // the fact carries new work. One word, and they stop reading alike.
-          via: stale.via,
-          ...(stale.mergeCommit === undefined ? {} : { mergeCommit: stale.mergeCommit }),
-        },
-      )
+      // Merged and done. Nobody has to retire this by hand, and no later pass
+      // says it again: the queue run that sees the content on the target
+      // retires the fact here.
+      await retireDeadFact(stale.branch, stale.sha, "its content is already on the target", {
+        // WHICH proof: `ancestry` is this fact's own commit on the base;
+        // `change-id` is a superseded revision of a change that landed under a
+        // different commit — benign when abandoned, an author error when the
+        // fact carries new work. One word, and they stop reading alike.
+        via: stale.via,
+        ...(stale.mergeCommit === undefined ? {} : { mergeCommit: stale.mergeCommit }),
+      })
     }
     // An unanswerable fact is neither landed nor live work, and it is never
     // folded into either count: it gets its own line naming what git could not
@@ -2826,29 +2868,20 @@ function createQueue<Shape extends ChangeShape>(
       if (skip.has(branch)) continue
       const row = snapshot.queues.retiredSubmits[branch]
       if (row === undefined) continue
-      conditions.report(
-        `compose-derived-fact-retired:${branch}:${row.sha}`,
-        "warn",
+      // The retirement is already durable in `retiredSubmits`, which keeps the
+      // reason an operator reads later. Only the mirror row was left standing,
+      // so the same retirement was re-announced every pass. Dropping it here
+      // says the retirement once and leaves the durable trace where it is.
+      await retireDeadFact(
+        branch,
+        row.sha,
         row.code === REVISION_RETIRED_CODE
           ? // An operator retired this exact row (`yrd pr retire`); a standing
             // projection at its sha is a re-projection of the retired refs/for
-            // row, never new work, and derives nothing (PR3186, 2026-09-01).
-            "queue compose will not derive a change for a revision an operator retired: " +
-              row.reason +
-              " — no further change derives for this sha; push a rebased head to submit again"
-          : "queue compose will not derive a change for a submit fact it retired: change '" +
-              row.pr +
-              "' could not progress (" +
-              row.code +
-              ") and no further change derives for this sha — push a rebased head to submit again",
-        {
-          action: "compose-derived-fact-retired",
-          branch,
-          sha: row.sha,
-          pr: row.pr,
-          code: row.code,
-          ...(row.paths === undefined ? {} : { paths: [...row.paths] }),
-        },
+            // row, never new work (PR3186, 2026-09-01).
+            "the queue retired it — " + row.reason + "; push a rebased head to submit again"
+          : `change '${row.pr}' could not progress (${row.code}); push a rebased head to submit again`,
+        { pr: row.pr, code: row.code, ...(row.paths === undefined ? {} : { paths: [...row.paths] }) },
       )
     }
     // GIT IS THE TRUTH, applied to the compose's own selection universe.
