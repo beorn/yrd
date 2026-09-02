@@ -1,4 +1,4 @@
-import { changeDeliveryState, changeNeedsAuthor, type Change } from "@yrd/bay"
+import { changeAdmission, changeDeliveryState, changeNeedsAuthor, type Change } from "@yrd/bay"
 import { canonicalRefusalCode } from "@yrd/queue"
 import { failureDisposition } from "./status-presentation.ts"
 
@@ -86,21 +86,29 @@ export function deriveChangeState(pr: Change, facts: DerivedChangeStateFacts = {
     return { state: "failed", check: submitterEnded, owner: SUBMITTERS_OWN, code: delivery }
   }
 
-  if (delivery === "rejected" || delivery === "needs-author") {
+  // A refused on-submit check ended the change whatever the delivery label
+  // says. Only the `refusal` kind reaches `changeDeliveryState` as
+  // `needs-author`; the `failure` and `infrastructure` kinds leave the change
+  // reading `submitted`, which is the exact conflation this surface is here to
+  // end — a check that ran out of disk looked like a change waiting its turn.
+  const admission = changeAdmission(pr)
+  const refused = admission?.status === "refused" ? admission : undefined
+  if (refused !== undefined || delivery === "rejected" || delivery === "needs-author") {
     const author = changeNeedsAuthor(pr)
-    const code = facts.result?.code ?? author?.receipt.code ?? facts.reason?.code
-    const check = facts.result?.check ?? author?.step
+    const code = facts.result?.code ?? refused?.receipt.code ?? author?.receipt.code ?? facts.reason?.code
+    const check = facts.result?.check ?? refused?.step ?? author?.step
+    const stuck = { state: "stuck", owner: QUEUES_OWN, ...(code === undefined ? {} : { code }) } as const
+    // The queue said so itself: the check could not do its job.
+    if (refused?.kind === "infrastructure") return stuck
     // An ending whose code is outside the queue's own closed vocabulary cannot
     // be attributed, so it is the queue's — the same default an unproven check
     // failure takes. The code rides along rather than being swallowed.
-    if (code === undefined || canonicalRefusalCode(code) === undefined) {
-      return { state: "stuck", owner: QUEUES_OWN, ...(code === undefined ? {} : { code }) }
-    }
+    if (code === undefined || canonicalRefusalCode(code) === undefined) return stuck
     if (failureDisposition(code).owner === "queue") return { state: "stuck", owner: QUEUES_OWN, code }
     return { state: "failed", owner: SUBMITTERS_OWN, code, ...(check === undefined ? {} : { check }) }
   }
 
-  if (delivery === "ready") return { state: "checked", owner: "" }
+  if (delivery === "ready" || admission?.status === "passed") return { state: "checked", owner: "" }
   if (delivery === "pushed") return { state: "queued", owner: "", code: "not-submitted" }
   return { state: "queued", owner: "" }
 }
