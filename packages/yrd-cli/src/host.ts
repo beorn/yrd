@@ -156,6 +156,7 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import { createLogger, type ConditionalLogger, type Event as LoggilyEvent } from "loggily"
 import { run } from "silvery/runtime"
 import { guardScopedPaths } from "./pre-submit-guard-scope.ts"
+import { reportReceiverDrainOutcome } from "./receiver-drain-refusal.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import { observeFreshRemoteBranch, observeOriginBranchAdvertisement, observeOriginRemote } from "./remote-branch.ts"
 import {
@@ -4244,11 +4245,28 @@ async function createYrdRuntimeHost(
         intake: (result) => intakeResult(runtimeApp, result, process, repository.repo, receiverLog),
         lockTimeoutMs: 30_000,
       })
-      if (result.failed.length > 0 || result.ambiguous.length > 0) {
-        throw new Error(
-          `yrd: receiver inbox did not drain cleanly: ${JSON.stringify({ failed: result.failed, ambiguous: result.ambiguous })}`,
-        )
-      }
+      // Two dispositions, because the inbox holds two different things.
+      //
+      // A FAILED entry is wreckage — a result that would not parse, or whose
+      // stored authorization no longer matches the push it claims. Refusing is
+      // right there: it is an integrity signal about this inbox.
+      //
+      // An AMBIGUOUS entry is not. `pre-receive` writes the `.prepared.json`
+      // BEFORE Git decides whether to accept the update, so a ref that does not
+      // carry the head means only "this push did not complete" — in flight,
+      // rejected downstream, or abandoned, three events with byte-identical
+      // files. It is the same class as `deferred`, which this drain has always
+      // skipped, and `recoverPrepared` retries it on every pass, so an entry
+      // that becomes resolvable is delivered later under the same id.
+      //
+      // Refusing the whole inbox on one of those made one submitter's
+      // interruption stop the queue for everybody: measured 2026-09-01 17:29:57
+      // PDT, an orphaned entry left every later pass exiting 3 while eight
+      // eligible changes waited behind a row none of them had anything to do
+      // with. So it is skipped and reported, never fatal — and reported with
+      // the per-entry rows, because an operator cannot clear what nobody named.
+      const refusal = reportReceiverDrainOutcome(receiverLog, result, Date.now())
+      if (refusal !== undefined) throw refusal
     }
     if (mode === "active") await drain()
     const checks = configuredChecks(process, repository.stateDir, loaded.config, env)

@@ -680,7 +680,24 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
           throw new Error("must not run before ref acceptance")
         },
       }),
-    ).toEqual({ delivered: [], failed: [], ambiguous: [result!.id], deferred: [] })
+    ).toEqual({
+      delivered: [],
+      failed: [],
+      // Not an opaque id: the drain hands back every fact the prepared entry
+      // carries, so the runtime's refusal can name the branch, ref, head, age
+      // and the file an operator has to retire.
+      ambiguous: [
+        {
+          id: result!.id,
+          path: join(f.receiver.inboxDir, `${result!.id}.prepared.json`),
+          ref: "refs/heads/issue/recover",
+          branch: "issue/recover",
+          headSha,
+          receivedAt: result!.receivedAt,
+        },
+      ],
+      deferred: [],
+    })
     expect(await inboxFiles(f.receiver)).toEqual([`${result!.id}.prepared.json`])
     await git(f.receiver.receiverPath, "update-ref", "refs/heads/issue/recover", headSha, zero)
 

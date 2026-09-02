@@ -3009,7 +3009,37 @@ function createQueue<Shape extends ChangeShape>(
         // A remote Runner may yield durable waiting work. The revision remains
         // submitted until a later observation calls this idempotent path again;
         // the standalone Job is the live progress fact, never a Queue Run.
-        return { processed: requestedJob !== undefined || beforeRun?.status === "queued" }
+        const processed = requestedJob !== undefined || beforeRun?.status === "queued"
+        // NO SILENT ERRORS. This return used to leave nothing behind, so a member
+        // whose required check never reached a verdict was invisible: no row said
+        // which Job it waited on, in what state, under whose lease, or that this
+        // turn had changed nothing. Say all four; the reporter's memo folds the
+        // steady-state repeats into one notice.
+        composeConditions.report(
+          `admission-job-pending:${pr.id}:${job.id}:${job.status}`,
+          "warn",
+          `queue admission of change '${pr.id}' (${pr.branch}) is waiting on required check '${step.name}' ` +
+            `Job '${job.id}', which is ${describeJobState(job)}; this turn ` +
+            (requestedJob !== undefined
+              ? "requested it"
+              : processed
+                ? "found it queued and left it to its runner"
+                : "changed nothing") +
+            " — the member stays submitted until that Job reaches a verdict",
+          {
+            action: "admission-job-pending",
+            pr: pr.id,
+            branch: pr.branch,
+            step: step.name,
+            job: job.id,
+            jobStatus: job.status,
+            ...("runner" in job ? { runner: job.runner } : {}),
+            ...("leaseExpiresAt" in job ? { leaseExpiresAt: job.leaseExpiresAt } : {}),
+            requestedThisTurn: requestedJob !== undefined,
+            processed,
+          },
+        )
+        return { processed }
       }
       if (job.conclusion !== "success") {
         const result = jobFailure(job)
@@ -3466,6 +3496,57 @@ function createQueue<Shape extends ChangeShape>(
     return { admitted, refused, ejected }
   }
 
+  /** The drain turn loop refuses after this many consecutive turns that admit
+   * the same members over the same queue: identical inputs to identical
+   * outputs is a spin, not work, and a pass that spins until its timeout says
+   * nothing about why. Three, not one — a turn that admits a member whose
+   * Jobs settle asynchronously legitimately sees it once more. */
+  const ADMISSION_DRAIN_NO_PROGRESS_TURNS = 3
+
+  /** Stop a drain that is making no progress, LOUDLY: one ERROR row and a
+   * typed refusal that both name the head, its lane, whether an admission is
+   * recorded for it, and the state of every required-check Job — the facts a
+   * fix needs and the facts the 2026-09-01 pass log did not have. */
+  const refuseStalledAdmissionDrain = (
+    snapshot: DeepReadonly<RuntimeState>,
+    admittedThisTurn: readonly string[],
+    queued: readonly DeepReadonly<Change>[],
+    turns: number,
+    derived: readonly DeepReadonly<Change>[],
+  ): never => {
+    const head = admittedThisTurn[0] ?? "<none>"
+    const pr = resolveChange(snapshot.bays, head) ?? derived.find((member) => member.id === head)
+    const stepNames = admissionSteps(steps).map((step) => step.name)
+    const jobs = pr === undefined ? undefined : currentRevisionAdmissionJobs(snapshot, pr, steps)
+    const evidence = stepNames.map((name, index) => {
+      const job = jobs?.[index]
+      return job === undefined ? `${name}: no job` : `${name}: ${describeJobState(job)}`
+    })
+    const lane = pr === undefined ? "unresolvable" : hasChangeRecord(snapshot.bays, pr.id) ? "record" : "derived"
+    const recorded = pr === undefined ? undefined : changeAdmission(pr)?.status
+    const behind = queued
+      .filter((candidate) => !admittedThisTurn.includes(candidate.id))
+      .map((candidate) => candidate.id)
+    const message =
+      `queue admission drain made no progress for ${String(turns)} consecutive turns: change '${head}'` +
+      `${pr === undefined ? "" : ` (${pr.branch})`} is reported admitted on every turn but never leaves the ` +
+      `admission order, and ${String(behind.length)} change(s) behind it stay withheld; lane ${lane}, recorded ` +
+      `admission ${recorded ?? "none"}, required-check jobs [${evidence.join("; ")}] — this pass stops here instead ` +
+      `of spinning until its timeout; no push clears it, the queue itself cannot turn this member's admission into a ` +
+      `Run and needs a fix that reads these facts`
+    log.error?.(message, {
+      action: "admission-drain-no-progress",
+      pr: head,
+      ...(pr === undefined ? {} : { branch: pr.branch }),
+      turns,
+      lane,
+      recordedAdmission: recorded ?? "none",
+      jobs: evidence,
+      withheld: behind,
+    })
+    raiseFailure("infrastructure", "admission-drain-no-progress", `yrd: ${message}`)
+  }
+
   const drainAdmissions = async (
     selectors: readonly string[],
     options: QueueRunOptions,
@@ -3496,6 +3577,8 @@ function createQueue<Shape extends ChangeShape>(
         if (targets.has(pr.id)) admitted.add(pr.id)
       }
     }
+    let stalledSignature: string | undefined
+    let stalledTurns = 0
 
     while (targets.size > 0) {
       if (options.continueAdmissions?.() === false) break
@@ -3547,7 +3630,23 @@ function createQueue<Shape extends ChangeShape>(
       // one. `released` grows by at least one whenever this branch is taken, so
       // `queued` strictly shrinks and the loop still terminates.
       if (dispatched.refused.length + dispatched.ejected.length > 0 && queued.length > turn.length) continue
-      if (dispatched.admitted.length > 0 && dispatched.refused.length === 0) continue
+      if (dispatched.admitted.length > 0 && dispatched.refused.length === 0) {
+        // "Admitted" is progress only if the next turn sees a different queue.
+        // Measured 2026-09-01 (PR3152): a derived head whose four required-check
+        // Jobs had ALL passed at the cycle base was reported admitted on every
+        // turn, never left the admission order, and this branch re-dispatched it
+        // every ~2.5 s at full CPU for 11m44s — 224 withheld-repeat rows for the
+        // fourteen changes behind it, not one row about the head — until a
+        // SIGTERM ended the pass. The loop's own termination argument covers
+        // the refused/ejected branch (`released` grows); this one had none.
+        const signature = `${dispatched.admitted.join(",")}|${queued.map((pr) => pr.id).join(",")}`
+        stalledTurns = signature === stalledSignature ? stalledTurns + 1 : 1
+        stalledSignature = signature
+        if (stalledTurns >= ADMISSION_DRAIN_NO_PROGRESS_TURNS) {
+          refuseStalledAdmissionDrain(snapshot, dispatched.admitted, queued, stalledTurns, derived)
+        }
+        continue
+      }
 
       for (const selector of targets) {
         const pr = resolveChange(snapshot.bays, selector) ?? derived.find((member) => member.id === selector)
@@ -9914,6 +10013,23 @@ function projectRevisionAdmissionJobs(
       ...(error === undefined ? {} : { error }),
     }
   })
+}
+
+/** One phrase for a Job's state in a row a human reads: the status, and for a
+ * leased, waiting or finished Job the runner, lease, token or conclusion that
+ * explains it — so "waiting on a Job" never has to be followed by a journal
+ * read to learn which kind of waiting. */
+function describeJobState(job: DeepReadonly<Job>): string {
+  switch (job.status) {
+    case "queued":
+      return "queued and unclaimed (no runner has executed it)"
+    case "in_progress":
+      return `in progress under runner '${job.runner}' (started ${job.startedAt}, lease until ${job.leaseExpiresAt})`
+    case "waiting":
+      return `waiting on a durable token under runner '${job.runner}' (started ${job.startedAt})`
+    case "completed":
+      return `completed/${job.conclusion} at ${job.finishedAt}${"runner" in job ? ` under runner '${job.runner}'` : ""}`
+  }
 }
 
 function currentRevisionAdmissionJobs(
