@@ -73,9 +73,9 @@ const SUBMITTER_ENDED: Readonly<Record<string, string>> = {
  *   the target, so an ending carrying no such proof is the queue's.
  * - `checked` — its on-submit checks passed and it waits its turn.
  * - `queued` — still live: submitted, on-submit checks not yet passed. A
- *   record pushed but never submitted reads `queued` too, carrying
- *   `not-submitted` as its code; it is the one shape the five words cannot
- *   spell, and `yrd submit` is its whole cure.
+ *   record pushed but never submitted reads `queued` too, with no code: the
+ *   plan opens a bare push at the next queue run, and the refusal vocabulary
+ *   is closed to codes that are not refusals.
  */
 export function deriveChangeState(pr: Change, facts: DerivedChangeStateFacts = {}): DerivedChangeStateReading {
   const delivery = changeDeliveryState(pr)
@@ -109,7 +109,6 @@ export function deriveChangeState(pr: Change, facts: DerivedChangeStateFacts = {
   }
 
   if (delivery === "ready" || admission?.status === "passed") return { state: "checked", owner: "" }
-  if (delivery === "pushed") return { state: "queued", owner: "", code: "not-submitted" }
   return { state: "queued", owner: "" }
 }
 
