@@ -20,7 +20,7 @@ import type { Scope } from "@silvery/scope"
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
-import { deriveRunLiveness, describeOrphanedRun, type RunnerLivenessProbe } from "./run-liveness.ts"
+import { deriveRunLiveness, describeOrphanedRun, type RunLiveness, type RunnerLivenessProbe } from "./run-liveness.ts"
 import {
   JobRequestSchema,
   JobWaitingSchema,
@@ -1379,17 +1379,14 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         const expired =
           liveness !== undefined ? liveness.state === "orphaned" : Date.parse(job.changedAt) + waitBoundMs <= cutoff
         if (!named && !expired) continue
+        // The caller's assertion applies ONLY to the runner it named: another
+        // holder's job was reclaimed for its own lapsed lease, and an assertion
+        // that was never about it must not describe it.
+        const context = named || deadRunner === undefined ? parsed.reason : undefined
         const reason =
           job.status === "waiting"
             ? waitEndedReason(job, named ? (parsed.reason ?? "runner disappeared") : undefined, waitBoundMs)
-            : named || deadRunner === undefined
-              ? (parsed.reason ??
-                (named
-                  ? "runner disappeared"
-                  : liveness?.state === "orphaned" && liveness.cause === "holder-dead"
-                    ? describeOrphanedRun(liveness)
-                    : "runner lease expired"))
-              : "runner lease expired"
+            : orphanReason(liveness, context)
         const fence = job.status === "in_progress" ? { leaseExpiresAt: job.leaseExpiresAt } : { token: job.token }
         try {
           await observeYrdLifecycle(
@@ -1789,6 +1786,30 @@ function sameHold(left: Job, right: Extract<Job, { status: "in_progress" | "wait
   return right.status === "in_progress"
     ? left.status === "in_progress" && left.leaseExpiresAt === right.leaseExpiresAt
     : left.status === "waiting" && left.token === right.token
+}
+
+/**
+ * Why a RUNNING job was reclaimed: the derived orphan description is the fact of
+ * record, and a caller's `context` at most prefixes it.
+ *
+ * A caller-supplied reason is an assertion about the SWEEP — "habitant
+ * lease-expiry sweep", "habitant restart" — and it knows nothing about the row
+ * it settles. While it could REPLACE the derived text, a settled job's stored
+ * reason named neither the holder nor the lease whenever a sweep passed one,
+ * which is precisely the pair an operator reading a `job-lost` refusal needs:
+ * {@link describeOrphanedRun} names the holder, its pid, the lease expiry and
+ * the cause. So the derived fact is unconditional and the caller's text is
+ * context in front of it — the same shape {@link waitEndedReason} already gives
+ * the waiting arm, where the caller's assertion prefixes held-since evidence it
+ * could not have known.
+ *
+ * `liveness` is `orphaned` for every running row that reaches here (a named
+ * runner is probed dead, an unnamed one arrives only by lapsed lease), so the
+ * fallback stands for the unreachable case alone and never for a settled row.
+ */
+function orphanReason(liveness: RunLiveness | undefined, context: string | undefined): string {
+  const derived = liveness?.state === "orphaned" ? describeOrphanedRun(liveness) : "runner lease expired"
+  return context === undefined ? derived : `${context}; ${derived}`
 }
 
 /**

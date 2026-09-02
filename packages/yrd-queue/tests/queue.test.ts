@@ -3341,6 +3341,11 @@ describe("Queue", () => {
       status: "completed",
       conclusion: "timed_out",
       runner: "yrd-cli:31337",
+      // The sweep's own reason is context, never the whole record: the settled
+      // ghost still names the holder that left it and the lease that lapsed,
+      // which is all anyone gets once the habitant that held it is gone.
+      lostReason:
+        "habitant lease-expiry sweep; orphaned: lease expired 2026-01-01T00:00:01.000Z, holder yrd-cli:31337 (pid 31337)",
     })
     expect(checkCalls).toBe(0)
 
