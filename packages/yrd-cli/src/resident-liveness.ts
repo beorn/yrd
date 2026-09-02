@@ -24,6 +24,11 @@
  *    fails every five minutes forever still accumulates blocked time between
  *    attempts and still pages. Resetting would have made an endlessly retrying
  *    wedge — the exact specimen the finding exists for — permanently silent.
+ *    The attempt IN FLIGHT counts too, measured to the sampling instant: the
+ *    maintenance tick abstains while paused, but the 5s heartbeat samples
+ *    regardless, so a floor frozen at the attempt's start let blocked time
+ *    outrun the threshold 30 minutes into every long attempt. See
+ *    {@link ResidentLivenessClock.epoch}.
  *
  * Process-scoped, like every other `followQueueRuns` observation window: it is
  * a claim about THIS process, and a fresh one starts its own clock.
@@ -32,9 +37,26 @@ export type ResidentLivenessClock = Readonly<{
   /**
    * The instant the liveness finding may measure "no merge" from: this
    * runner's first tick, pushed forward by every millisecond it has spent
-   * inside an attempt. Handed to the audit as `livenessEpoch`.
+   * inside an attempt INCLUDING THE ONE IN FLIGHT. Handed to the audit as
+   * `livenessEpoch`, so it takes the sampling instant.
+   *
+   * Counting the attempt in flight is what makes a MID-ATTEMPT sample read
+   * "paused" rather than "wedged". A reader that only folded in FINISHED
+   * attempts left the epoch frozen at the current attempt's start, so blocked
+   * time kept growing for the whole attempt: 30 minutes into any attempt the
+   * audit's threshold was crossed and the heartbeat published
+   * `queue-liveness-wedged` into service health, making a 90-minute
+   * affected-tests turn read as 60 minutes of no progress on the health probe
+   * and the deck. The maintenance tick never had this bug — it returns early
+   * while {@link paused} — but the heartbeat samples every 5s regardless.
+   *
+   * Still PAUSED, never CLEARED: `attemptEnded` folds in exactly the same
+   * span this already counted, so the epoch is continuous across the end of
+   * an attempt (no jump), and idle time between attempts still accumulates
+   * blocked time. A queue that attempts and fails every five minutes forever
+   * still pages.
    */
-  epoch(): string
+  epoch(nowMs: number): string
   /**
    * True while an attempt is in flight. The clock is stopped, so no liveness
    * observation taken right now is meaningful — the caller reports nothing
@@ -91,7 +113,17 @@ export function createResidentLivenessClock(firstTickMs: number): ResidentLivene
   let insideAttemptSinceMs: number | undefined
   let attemptedMs = 0
   return Object.freeze({
-    epoch: () => new Date(startedAtMs + attemptedMs).toISOString(),
+    epoch: (nowMs) =>
+      new Date(
+        startedAtMs +
+          attemptedMs +
+          // The attempt IN FLIGHT, measured to the sampling instant, so a
+          // sample taken mid-attempt sees the clock stopped rather than a
+          // frozen floor the audit can outrun. `Math.max(0, …)` for the same
+          // reason `attemptEnded` uses it: a clock that ran backwards must
+          // never make the epoch older than it already was.
+          (insideAttemptSinceMs === undefined ? 0 : Math.max(0, nowMs - insideAttemptSinceMs)),
+      ).toISOString(),
     paused: () => insideAttemptSinceMs !== undefined,
     attemptStarted: (nowMs) => {
       // Already inside one: keep the OUTER start, so nesting cannot lose time.
