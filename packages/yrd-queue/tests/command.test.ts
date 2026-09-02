@@ -5912,6 +5912,7 @@ describe("Queue command adapters", () => {
         environmentOverrides?: Readonly<Record<string, string>>
         environmentPassthrough?: readonly string[]
         variables?: () => Readonly<Record<string, string | undefined>>
+        scratch?: string
       }>,
       context = jobContext(),
     ) => {
@@ -5991,6 +5992,109 @@ describe("Queue command adapters", () => {
       expect(env.GIT_DIR).toBeUndefined()
       expect(env.YRD_ENVIRONMENT).toBeUndefined()
       expect(env.SNEAKED).toBeUndefined()
+    })
+
+    describe("scratch — the repository-declared TMPDIR root (@i/10-yrd/24031)", () => {
+      // A root that does NOT exist yet, two levels below a fresh temp dir, so
+      // the runner's own `mkdir -p` is what brings it into being.
+      const missingScratchRoot = async (): Promise<string> => {
+        const parent = await mkdtemp(join(tmpdir(), "yrd-scratch-"))
+        roots.push(parent)
+        return join(parent, "nested", "check-scratch")
+      }
+      const stepWith = (process: Pick<Process, "run">, scratch: string, artifactRoot: string) =>
+        configuredCommandStep<ChangeShape>({
+          inject: { process },
+          command: ["check-env"],
+          cwd: ".",
+          purpose: "check",
+          artifactRoot,
+          env: ambient,
+          scratch,
+        })
+
+      it("spawns the child with TMPDIR set to the declared root, created before the spawn", async () => {
+        const scratch = await missingScratchRoot()
+        const existedAtSpawn: boolean[] = []
+        const { requests, process } = capturingProcess()
+        const observing: Pick<Process, "run"> = {
+          run(request) {
+            existedAtSpawn.push(existsSync(request.env?.TMPDIR ?? ""))
+            return process.run(request)
+          },
+        }
+        const artifactRoot = await mkdtemp(join(tmpdir(), "yrd-env-artifacts-"))
+        roots.push(artifactRoot)
+        const result = await stepWith(observing, scratch, artifactRoot)(execution(), jobContext())
+        if (result.status !== "completed" || result.conclusion !== "success") {
+          throw new Error(`configured command was ${result.status}`)
+        }
+        expect(requests[0]?.env?.TMPDIR).toBe(scratch)
+        expect(existedAtSpawn).toEqual([true])
+        // The root is applied configuration, so it is part of the environment
+        // identity — and the SAME root across a retry keeps that identity stable.
+        const retried = await runCapture({ env: ambient, scratch }, jobContext({ id: "J2", attempt: 2 }))
+        expect(retried.env.TMPDIR).toBe(scratch)
+        expect(retried.evidence.environmentHash).toBe(result.output.environmentHash)
+      })
+
+      it("lets a step's own declared env.TMPDIR win, and then leaves the root alone", async () => {
+        const scratch = await missingScratchRoot()
+        const { env } = await runCapture({
+          env: ambient,
+          scratch,
+          environmentOverrides: { TMPDIR: "/declared/step/tmp" },
+        })
+        expect(env.TMPDIR).toBe("/declared/step/tmp")
+        expect(existsSync(scratch)).toBe(false)
+      })
+
+      it("inherits the runner's TMPDIR when no scratch root is declared — today's behaviour, unchanged", async () => {
+        const { env } = await runCapture({ env: ambient })
+        expect(env.TMPDIR).toBe("/deterministic/tmp")
+      })
+
+      it("refuses loudly, before any child is spawned, when the root cannot be created", async () => {
+        const parent = await mkdtemp(join(tmpdir(), "yrd-scratch-"))
+        roots.push(parent)
+        // A regular file where a directory must be: `mkdir -p` cannot get past it.
+        await writeFile(join(parent, "not-a-directory"), "")
+        const scratch = join(parent, "not-a-directory", "check-scratch")
+        const { requests, process } = capturingProcess()
+        const artifactRoot = await mkdtemp(join(tmpdir(), "yrd-env-artifacts-"))
+        roots.push(artifactRoot)
+        let thrown: unknown
+        try {
+          await stepWith(process, scratch, artifactRoot)(execution(), jobContext())
+        } catch (cause) {
+          thrown = cause
+        }
+        expect(failureFact(thrown)).toMatchObject({ kind: "infrastructure", code: "scratch-root-unavailable" })
+        expect((thrown as Error).message).toContain(scratch)
+        expect((thrown as Error).message).toContain("scratch:")
+        expect(requests).toHaveLength(0)
+      })
+
+      it("refuses loudly when the root exists but is not writable", async () => {
+        // Mode bits do not bind root; the probe below proves nothing there.
+        if (globalThis.process.getuid?.() === 0) return
+        const parent = await mkdtemp(join(tmpdir(), "yrd-scratch-"))
+        roots.push(parent)
+        const scratch = join(parent, "read-only")
+        await mkdir(scratch)
+        await chmod(scratch, 0o500)
+        try {
+          const { requests, process } = capturingProcess()
+          const artifactRoot = await mkdtemp(join(tmpdir(), "yrd-env-artifacts-"))
+          roots.push(artifactRoot)
+          await expect(stepWith(process, scratch, artifactRoot)(execution(), jobContext())).rejects.toMatchObject({
+            failure: { kind: "infrastructure", code: "scratch-root-unavailable" },
+          })
+          expect(requests).toHaveLength(0)
+        } finally {
+          await chmod(scratch, 0o700)
+        }
+      })
     })
 
     it("copies only declared passthrough names from the ambient environment", async () => {
