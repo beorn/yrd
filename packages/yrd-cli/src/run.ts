@@ -6377,26 +6377,28 @@ function bayBindingRefusal(
  * and that a branch selector is the way past it (B94, 2026-08-19: two bare
  * `pr create` refusals named only the finished PR).
  *
- * The BARE path needs a different cure, and reusing the Bay path's would be
- * worse than silence: it fires only when no Bay resolved, which means the
- * caller ALREADY named a branch. "Pass a branch" sends that reader in a circle.
- * What is past the refusal depends on whether the change is still live —
- * `redeliveryRefusedByDelivery` is the same discriminator the remedy planner
- * uses, so both answers cannot drift apart. Spelled as quoted `yrd ...`
- * commands because the renderer lifts those onto `resolve:` and discards the
- * prose around them (actionable-error.ts `embeddedYrdCommands`).
+ * Both paths now carry the SAME remedy, and that is the fix rather than a
+ * simplification. The Bay path used to say "pass a branch — yrd pr create
+ * <branch>", which stopped being true when the legacy record mint retired
+ * (72c0282e): passing a branch to `pr create` is exactly what refuses now, so
+ * the cure prescribed the wall. What is past the refusal depends only on
+ * whether the change is still live — `redeliveryRefusedByDelivery` is the same
+ * discriminator the remedy planner uses, so no two answers can drift apart.
+ * Spelled as quoted `yrd ...` commands because the renderer lifts those onto
+ * `resolve:` and discards the prose around them (actionable-error.ts
+ * `embeddedYrdCommands`).
  */
 function createOnlyRefusal(
   bay: Readonly<{ id: string }> | undefined,
   pr: Readonly<{ id: string }>,
   delivery: string,
 ): never {
-  if (bay !== undefined) {
-    bayBindingRefusal(bay, pr, delivery, "pass a branch — yrd pr create <branch>")
-  }
   const remedy = redeliveryRefusedByDelivery(delivery as ChangeDeliveryState)
-    ? `'${delivery}' is terminal and its branch is spent — move the work onto a fresh ref, then 'yrd pr create <new-branch>'`
-    : `add a revision to the live change instead — 'yrd pr submit <branch>'`
+    ? `'${delivery}' is terminal and its branch is spent — move the work onto a fresh ref, then 'yrd pr submit <new-branch>'`
+    : `add to the live change instead — 'yrd pr submit <branch>'`
+  if (bay !== undefined) {
+    bayBindingRefusal(bay, pr, delivery, remedy)
+  }
   refusal(`change '${pr.id}' is already ${delivery}; create is only for a draft change; ${remedy}`)
 }
 
@@ -14942,7 +14944,10 @@ function commanderErrorMessage(command: CliCommand | undefined, error: Commander
     command?.name() === "submit" &&
     error.code === "commander.unknownOption" &&
     error.message.includes("unknown option '--draft'")
-  return removedDraftSubmit ? `${error.message}; draft PRs are created with 'yrd pr create'` : error.message
+  // Not "draft PRs are created with 'yrd pr create'": drafts went away with the
+  // legacy record mint (72c0282e), so that cure named a command that refuses.
+  // A branch with no change is delivered by submitting it plainly.
+  return removedDraftSubmit ? `${error.message}; drafts are retired, submit it with 'yrd pr submit <branch>'` : error.message
 }
 
 function commandPath(command: CliCommand | undefined, fallback: string): string {

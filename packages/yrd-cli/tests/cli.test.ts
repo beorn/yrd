@@ -975,13 +975,14 @@ describe("runYrd", () => {
     { name: "yrd pr", argv: yrd("pr", "submit", "topic/draft", "--draft", "--json") },
     { name: "yrd bay", argv: yrd("bay", "submit", "topic/draft", "--draft", "--json") },
     { name: "yrd bay", argv: yrdBay("submit", "topic/draft", "--draft", "--json") },
-  ])("rejects the deleted --draft flag through $name and teaches pr create", async ({ argv }) => {
+  ])("rejects the deleted --draft flag through $name and teaches the plain submit", async ({ argv }) => {
     const app = await createApp()
     const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
     expect(await runYrd(app, argv, output.io)).toBe(2)
     expect(output.stderr()).toContain("unknown option '--draft'")
-    expect(output.stderr()).toContain("yrd pr create")
+    expect(output.stderr()).toContain("drafts are retired")
+    expect(output.stderr()).toContain("yrd pr submit <branch>")
     expect(app.bays.prs()).toEqual([])
   })
 
@@ -1032,8 +1033,8 @@ describe("runYrd", () => {
     ).toBe(2)
     expect(JSON.parse(prefixed.stderr())).toMatchObject({
       failure: {
-        cause: "unknown option '--draft'",
-        resolution: ["yrd pr create"],
+        cause: "unknown option '--draft'; drafts are retired",
+        resolution: ["yrd pr submit <branch>"],
       },
     })
 
@@ -1042,7 +1043,7 @@ describe("runYrd", () => {
       2,
     )
     expect(optionValue.stderr()).toContain("unknown option '--bogus'")
-    expect(optionValue.stderr()).not.toContain("yrd pr create")
+    expect(optionValue.stderr()).not.toContain("drafts are retired")
   })
 
   it("uses concise layered help with examples on the root and queue surfaces", async () => {
@@ -4627,7 +4628,7 @@ describe("runYrd", () => {
     expect(app.jobs.get(checkJob!.id)).toMatchObject({ status: "queued" })
   })
 
-  it("names the bay binding and the branch remedy when bare create resolves a finished PR", async () => {
+  it("names the bay binding and the fresh-ref remedy when bare create resolves a finished PR", async () => {
     const checkRuns: string[] = []
     const mergeRuns: string[] = []
     const app = await createApp({ checkRuns, mergeRuns })
@@ -4646,7 +4647,8 @@ describe("runYrd", () => {
     const create = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "create"), create.io)).toBe(1)
     expect(create.stderr()).toContain("bay 'B1' is bound to change 'PR1' (integrated)")
-    expect(create.stderr()).toContain("pass a branch — yrd pr create <branch>")
+    expect(create.stderr()).toContain("its branch is spent — move the work onto a fresh ref")
+    expect(create.stderr()).toContain("yrd pr submit <new-branch>")
   })
 
   it("refuses a stale implicit Bay binding before gates and names the explicit submit escape", async () => {

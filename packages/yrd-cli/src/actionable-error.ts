@@ -65,7 +65,11 @@ function oneLineCause(message: string): string {
     .replace(/\s+/gu, " ")
     .trim()
   const withoutRemedy = normalized.replace(
-    /\s*[;,.]?\s*(?:(?:then\s+)?run|retry(?:\s+it)?\s+with|submit(?:\s+it)?\s+with|draft\s+PRs\s+are\s+created\s+with)\s+['"`]yrd\s+[^'"`]+['"`].*$/iu,
+    // `draft PRs are created with` was a fourth alternative here, carried for
+    // one message that named `yrd pr create` — retired with the legacy record
+    // mint (72c0282e). Its message now ends in `submit it with 'yrd ...'`, so
+    // the general lead-in covers it and the message-specific literal is gone.
+    /\s*[;,.]?\s*(?:(?:then\s+)?run|retry(?:\s+it)?\s+with|submit(?:\s+it)?\s+with)\s+['"`]yrd\s+[^'"`]+['"`].*$/iu,
     "",
   )
   const [cause = withoutRemedy] = withoutRemedy.split(/\s+hint:\s*/iu, 1)
