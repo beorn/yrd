@@ -219,10 +219,9 @@ describe("noun cutover ratchet", () => {
       new RegExp(`\\b${retiredRoleNoun}\\b`, "iu"),
       new RegExp(runnerNoun, "iu"),
       new RegExp(waitOption, "u"),
-      new RegExp(
-        `\\bqueue\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb}|${statusVerb}|${showVerb}|${logVerb})\\b`,
-        "iu",
-      ),
+      // `queue show` left this list on 2026-09-02: it is one of the seven
+      // commands (plan § Commands), so it is no longer a retired route.
+      new RegExp(`\\bqueue\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb}|${statusVerb}|${logVerb})\\b`, "iu"),
       new RegExp(`\\byrd\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb})\\b`, "iu"),
       new RegExp(`\\bcontest\\s+(?:${evaluateVerb}|${showVerb})\\b`, "iu"),
       new RegExp(`\\bissue\\s+${competeVerb}\\b`, "iu"),

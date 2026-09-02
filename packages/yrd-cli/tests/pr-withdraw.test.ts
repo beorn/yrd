@@ -614,7 +614,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
     const help = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("mr"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).not.toMatch(/^\s{2}withdraw/mu)
-    expect(help.stdout()).toMatch(/^\s{2}close.*--reason|close \[options\]/mu)
+    expect(help.stdout()).toMatch(/^\s{2}close \[selector\.\.\.\]/mu)
 
     const output = outputIO()
     expect(

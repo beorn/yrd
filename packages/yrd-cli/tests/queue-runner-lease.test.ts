@@ -70,11 +70,7 @@ type Invocation = Readonly<{ exitCode: number; stdout: string; stderr: string }>
 /** One real `yrd` invocation through the process host — the same posture
  * resolution, the same host construction, and therefore the same lease
  * acquisition a spawned `bin/yrd.ts` goes through. */
-async function invoke(
-  repo: string,
-  args: readonly string[],
-  onStdout?: (text: string) => void,
-): Promise<Invocation> {
+async function invoke(repo: string, args: readonly string[], onStdout?: (text: string) => void): Promise<Invocation> {
   let stdout = ""
   let stderr = ""
   const exitCode = await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, ...args], {
@@ -146,7 +142,7 @@ describe("the queue runner lease — one lease, taken by every driver, for the w
     // lease acquired before the pass ended, and the free probe below is it
     // coming back afterwards.
     let duringPass: ReturnType<typeof lockBody> | undefined
-    const run = await invoke(repo, ["queue", "run", "--once", "--json"], () => {
+    const run = await invoke(repo, ["queue", "run", "--json"], () => {
       duringPass ??= lockBody(repo)
     })
 
@@ -166,7 +162,7 @@ describe("the queue runner lease — one lease, taken by every driver, for the w
     // process found nothing to refuse against, drained the same queue, and
     // cancelled the first's run.
     let second: Readonly<{ exitCode: number | null; stderr: string }> | undefined
-    const first = await invoke(repo, ["queue", "run", "--once", "--json"], () => {
+    const first = await invoke(repo, ["queue", "run", "--json"], () => {
       if (second !== undefined) return
       const child = Bun.spawnSync(
         [
@@ -176,7 +172,6 @@ describe("the queue runner lease — one lease, taken by every driver, for the w
           repo,
           "queue",
           "run",
-          "--once",
           "--json",
         ],
         { cwd: repo, env: process.env, stdout: "pipe", stderr: "pipe" },
@@ -196,7 +191,7 @@ describe("the queue runner lease — one lease, taken by every driver, for the w
     const repo = await repository()
     const holder = await holdLease(repo, "once")
     try {
-      const run = await invoke(repo, ["queue", "run", "--once", "--json"])
+      const run = await invoke(repo, ["queue", "run", "--json"])
       expect(run.exitCode).not.toBe(0)
       expect(run.stderr).toContain("resident-runner-active")
       // The three identity fields, together: what is holding it, which process,
@@ -218,7 +213,7 @@ describe("the queue runner lease — one lease, taken by every driver, for the w
     const repo = await repository()
     const holder = await holdLease(repo, "once")
     try {
-      const run = await invoke(repo, ["queue", "run", "--interval", "1", "--json"])
+      const run = await invoke(repo, ["queue", "up", "--interval", "1", "--json"])
       expect(run.exitCode).not.toBe(0)
       expect(run.stderr).toContain("resident-runner-active")
       expect(run.stderr).toContain("mode=once")
@@ -232,7 +227,7 @@ describe("the queue runner lease — one lease, taken by every driver, for the w
     const repo = await repository()
     const holder = await holdLease(repo, "resident")
     try {
-      const run = await invoke(repo, ["queue", "run", "--once", "--json"])
+      const run = await invoke(repo, ["queue", "run", "--json"])
       expect(run.exitCode).not.toBe(0)
       expect(run.stderr).toContain("resident-runner-active")
       expect(run.stderr).toContain("mode=resident")
@@ -250,7 +245,7 @@ describe("the queue runner lease — one lease, taken by every driver, for the w
     expect(await leaseIsFree(repo)).toBe(false)
     await holder.kill()
 
-    const run = await invoke(repo, ["queue", "run", "--once", "--json"])
+    const run = await invoke(repo, ["queue", "run", "--json"])
     expect(run.stderr).not.toContain("resident-runner-active")
     expect(run.exitCode, run.stderr).toBe(0)
     expect(await leaseIsFree(repo)).toBe(true)

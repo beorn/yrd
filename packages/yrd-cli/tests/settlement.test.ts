@@ -494,7 +494,8 @@ describe("isQueueRunInvocation", () => {
   it.each([
     { args: ["queue", "run"], expected: true },
     { args: ["--repo", "/x", "queue", "run", "PR1"], expected: true },
-    { args: ["queue", "run", "--once"], expected: true },
+    { args: ["queue", "up"], expected: true },
+    { args: ["--repo", "/x", "queue", "up", "--interval", "1"], expected: true },
     { args: ["queue", "list"], expected: false },
     { args: ["run"], expected: false },
     { args: ["pr", "run"], expected: false },

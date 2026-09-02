@@ -183,7 +183,7 @@ export type QueueRunResult = Readonly<{
 /** One `yrd queue run --once`, end to end. */
 export async function queueRunOnce(repo: string): Promise<QueueRunResult> {
   const run = capture(repo)
-  const exitCode = await yrd(repo, run.io, "queue", "run", "--once", "--json")
+  const exitCode = await yrd(repo, run.io, "queue", "run", "--json")
   return {
     exitCode,
     stdout: run.stdout(),

@@ -844,11 +844,11 @@ export function settlementNoticePath(noticeDir: string): string {
   return join(noticeDir, `${Date.now()}-${process.pid}-${randomUUID()}.json`)
 }
 
-/** A `queue run` keeps a worker alive beside it; every other command drains
- * once and stops. Both spellings of `run` count — a `--once` drain commits the
- * same terminal facts a follow runner does. */
+/** A queue run keeps a worker alive beside it; every other command drains
+ * once and stops. Both `queue run` (one round) and `queue up` (the service)
+ * count — one round commits the same terminal facts the loop does. */
 export function isQueueRunInvocation(args: readonly string[]): boolean {
-  return args.some((arg, index) => arg === "queue" && args[index + 1] === "run")
+  return args.some((arg, index) => arg === "queue" && (args[index + 1] === "run" || args[index + 1] === "up"))
 }
 
 export type YrdSettlementLaunch = Readonly<{

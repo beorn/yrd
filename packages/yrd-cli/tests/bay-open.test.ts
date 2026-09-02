@@ -132,7 +132,7 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     expect(rootHelp.stdout()).not.toMatch(/^\s+do(?:\s|$)/mu)
     const issueHelp = output(repo)
     expect(await yrd(repo, issueHelp.io, "issue", "--help"), issueHelp.stderr()).toBe(0)
-    expect(issueHelp.stdout()).toContain("ensure [options] <issue>")
+    expect(issueHelp.stdout()).toContain("ensure <issue>")
   })
 
   it("ensures one issue-owned Bay and one tracked draft change idempotently", async () => {

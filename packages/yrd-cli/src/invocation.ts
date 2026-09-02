@@ -64,11 +64,24 @@ export function configureYrdGlobalOptions(program: CliCommand): CliCommand {
 
 const ROOT_COMMAND_ALIASES = {
   bays: "bay",
+  // `env` is the printed name (plan § Commands); `bay` is the same command's
+  // accepted alias until flag day. The canonical argv word stays `bay` so every
+  // posture and read-only table below, and the launcher's own bay protections,
+  // keep one spelling to match.
+  env: "bay",
   contests: "contest",
   issues: "issue",
   prs: "pr",
   queues: "queue",
 } as const
+
+/**
+ * The three root spellings that are the same command objects as their `queue`
+ * subcommand (plan § Commands): `yrd submit` is `yrd queue submit`, `yrd up` is
+ * `yrd queue up`, `yrd show` is `yrd queue show`. Rewritten here, before
+ * Commander sees them, exactly as `watch` is — one registration, no copy.
+ */
+const ROOT_QUEUE_ALIASES = new Set(["submit", "up", "show"])
 
 const LIST_COMMAND_PARENTS = new Set(["bay", "pr", "queue"])
 
@@ -85,7 +98,11 @@ const LIST_COMMAND_PARENTS = new Set(["bay", "pr", "queue"])
  */
 const QUEUE_SUBCOMMANDS = new Set([
   "_list",
+  "submit",
+  "run",
+  "up",
   "list",
+  "show",
   "audit",
   // Retired verb (5e cut 7). Recognized here so both operand positions still
   // normalize `candidate-refs` to the hidden tombstone's loud refusal instead
@@ -98,10 +115,18 @@ const QUEUE_SUBCOMMANDS = new Set([
   // normalize `recover` to the hidden tombstone's loud refusal instead of
   // silently becoming a timeline filter term.
   "recover",
-  "run",
   "cancel",
   "finish",
 ])
+
+/**
+ * Writes whose FIRST operand is not a repository: `queue submit <branch>` names
+ * a branch where every other write names its repository. Under a composition
+ * host the branch operand therefore falls back to the sole declared repository
+ * (the same rule an omitted repository already follows) instead of being read
+ * as an unknown repository name.
+ */
+const OPERAND_FIRST_WRITES = new Set(["submit"])
 
 /**
  * Every spelling that names a queue subcommand, mapped to the canonical argv it
@@ -166,6 +191,10 @@ function canonicalizeYrdCommandSpellings(args: string[], commandIndex: number): 
   if (args[commandIndex] === "watch") {
     args.splice(commandIndex, 1, "queue", "list", "--watch")
   }
+  const rootQueueAlias = args[commandIndex]
+  if (rootQueueAlias !== undefined && ROOT_QUEUE_ALIASES.has(rootQueueAlias)) {
+    args.splice(commandIndex, 1, "queue", rootQueueAlias)
+  }
   if (LIST_COMMAND_PARENTS.has(args[commandIndex] ?? "") && args[commandIndex + 1] === "ls") {
     args[commandIndex + 1] = "list"
   }
@@ -198,7 +227,7 @@ const READ_ONLY_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
   // `uncarried` reads refs and queue state and writes nothing, so a viewer
   // runtime must be able to run it — the rail is least useful exactly where
   // mutation is not allowed.
-  queue: new Set(["_list", "list", "audit", "uncarried"]),
+  queue: new Set(["_list", "list", "show", "audit", "uncarried"]),
   change: new Set(["list", "view", "runs", "diff", "status", "checks"]),
   pr: new Set(["list", "view", "runs", "diff", "status", "checks"]),
   mr: new Set(["list", "view", "runs", "diff", "status", "checks"]),
@@ -206,21 +235,14 @@ const READ_ONLY_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
   contest: new Set(["_list", "list", "view"]),
 }
 
+/**
+ * `queue run` is one round of queue work and `queue up` is the same round on a
+ * loop (plan § Commands). The spelling decides the mode; no flag does. The
+ * retired `--once` flag made a bare `queue run` mean the loop and the flag
+ * mean one round, so the command's own description could not be true.
+ */
 function queueRunMode(args: readonly string[], queueIndex: number): QueueRunMode {
-  const tail = args.slice(queueIndex + 2)
-  if (tail.includes("--once")) return "once"
-  const stepsIndex = tail.indexOf("--steps")
-  const selectorRegion = stepsIndex < 0 ? tail : tail.slice(0, stepsIndex)
-  for (let index = 0; index < selectorRegion.length; index += 1) {
-    const argument = selectorRegion[index]
-    if (argument === "--interval") {
-      index += 1
-      continue
-    }
-    if (argument?.startsWith("-")) continue
-    return "once"
-  }
-  return "follow"
+  return args[queueIndex + 1] === "up" ? "follow" : "once"
 }
 
 function invocationPosture(args: readonly string[], commandIndex: number | undefined): RuntimePosture {
@@ -241,7 +263,7 @@ function invocationPosture(args: readonly string[], commandIndex: number | undef
     return "bracketed-bay-open"
   }
   if (command === "doctor" && args.includes("--rebuild-views")) return "journal-view-repair"
-  if (command === "queue" && subcommand === "run") {
+  if (command === "queue" && (subcommand === "run" || subcommand === "up")) {
     return queueRunMode(args, commandIndex) === "follow" ? "habitant-queue-run" : "one-shot-queue-run"
   }
   return "active"
@@ -260,7 +282,9 @@ export function normalizeYrdInvocation(argv: readonly string[]): NormalizedYrdIn
   const args = canonicalizeYrdCommandAliases(invocation.args)
   const commandIndex = rootCommandIndex(args)
   const mode =
-    commandIndex !== undefined && args[commandIndex] === "queue" && args[commandIndex + 1] === "run"
+    commandIndex !== undefined &&
+    args[commandIndex] === "queue" &&
+    (args[commandIndex + 1] === "run" || args[commandIndex + 1] === "up")
       ? queueRunMode(args, commandIndex)
       : undefined
   return Object.freeze({
@@ -457,9 +481,18 @@ function resolveQueueOperands(
     return { command: next, declaration, tail: args.slice(queueIndex + 3), typed }
   }
   if (!readOnly(spelling[0] ?? "list")) {
+    const named = args[queueIndex + 2]
+    if (OPERAND_FIRST_WRITES.has(first) && named !== undefined && !byName.has(named)) {
+      return {
+        command: spelling,
+        declaration: requiredRepository(undefined, first),
+        tail: args.slice(queueIndex + 2),
+        typed: first,
+      }
+    }
     return {
       command: spelling,
-      declaration: requiredRepository(args[queueIndex + 2], first),
+      declaration: requiredRepository(named, first),
       tail: args.slice(queueIndex + 3),
       typed: first,
     }

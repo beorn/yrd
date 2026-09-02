@@ -85,7 +85,7 @@ describe("a change submitted from a Bay", { timeout: 60_000 }, () => {
 
     const baseBefore = await git(repo, "rev-parse", "origin/main")
     const run = output(repo)
-    expect(await yrd(repo, run.io, "queue", "run", "--once", "--json"), run.stderr()).toBe(0)
+    expect(await yrd(repo, run.io, "queue", "run", "--json"), run.stderr()).toBe(0)
     const result = JSON.parse(run.stdout()) as {
       command: string
       results: readonly {

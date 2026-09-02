@@ -58,6 +58,9 @@ function row(id: number, overrides: Partial<ChangeListRow> = {}): ChangeListRow 
     why: "terminal",
     age: "1m",
     touched: "1h",
+    branch: `topic/${id}`,
+    head: "c".repeat(12),
+    result: "pass",
     ...overrides,
   }
 }

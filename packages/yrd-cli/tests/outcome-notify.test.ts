@@ -132,14 +132,14 @@ describe("routeOutcome — the registry's disposition IS the switch", () => {
     expect(routed.body).toContain("yrd pr submit task/thing")
   })
 
-  it("infra-retry disposition → the queue owner as yrd broken, with the code, the log and the --once command", () => {
+  it("infra-retry disposition → the queue owner as yrd broken, with the code, the log and the queue run command", () => {
     const routed = routeOutcome(outcome({ code: "merge-gitlink-regression", failureKind: "refusal" }), routing)
     expect(routed.kind).toBe("yrd-broken")
     expect(routed.recipient).toBe("@cto")
     expect(routed.disposition).toBe("env")
     expect(routed.body).toContain("[merge-gitlink-regression]")
     expect(routed.body).toContain(routing.logPath)
-    expect(routed.command).toBe("yrd queue run --once")
+    expect(routed.command).toBe("yrd queue run")
   })
 
   it("a check TIMEOUT → the owner, and the body says yrd is broken until the owner proves otherwise", () => {
@@ -447,7 +447,7 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
   })
 })
 
-describe("the three-way result of `queue run --once`", () => {
+describe("the three-way result of `queue run`", () => {
   it("0 = landed or nothing; 1 = a change sent back; 2 = stuck, and it wins over 1", () => {
     expect(outcomeExitCode([])).toBe(0)
     expect(outcomeExitCode(["landed"])).toBe(0)

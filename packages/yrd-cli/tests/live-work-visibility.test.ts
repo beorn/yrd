@@ -258,12 +258,13 @@ describe("root yrd submit", () => {
     expect(pushes).toEqual([["push", "--atomic", "origin", "topic/root-verb:refs/yrd/submit/topic/root-verb"]])
   })
 
-  it("root submit help speaks the branch-state words", async () => {
+  it("root submit is queue submit, and its help speaks the plan's words", async () => {
     const app = await createCliApp()
     const out = outputIO()
     await runYrd(app as CliApp, yrd("submit", "--help"), out.io)
     const help = out.stdout() + out.stderr()
-    expect(help.toLowerCase()).toContain("approve")
+    expect(help).toContain("Usage: yrd queue submit")
+    expect(help).toContain("push the branch and open its change")
     expect(help).toContain("--dry-run")
     // The merge-request vocabulary moved with the act, to `yrd pr submit`.
     expect(help.toLowerCase()).not.toContain("merge request")

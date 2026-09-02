@@ -254,7 +254,13 @@ import {
   TaskStatusGlyph,
   TaskStatusValue,
 } from "./status-view.tsx"
-import { changeStateColor, changeStateGlyph, changeStateLabel, deriveChangeState } from "./derived-change-state.ts"
+import {
+  changeStateColor,
+  changeStateGlyph,
+  changeStateLabel,
+  deriveChangeState,
+  type DerivedChangeStateReading,
+} from "./derived-change-state.ts"
 import {
   failureBreakdownClass,
   failureDisposition,
@@ -2714,7 +2720,42 @@ export type ChangeListRow = Readonly<{
   whyMessage?: string
   age: string
   touched: string
+  /** The change's branch and its head, the two halves of its identity (plan § The change). */
+  branch: string
+  head: string
+  /** The work item the change names, when it names one. */
+  workItem?: string
+  /** The last result, in the plan's words — pass, fail or stuck — with the check that judged it. */
+  result: string
+  /** Where the last check wrote its log, when the record names one. */
+  log?: string
+  /** Clocks for ordering, as epoch milliseconds when the record has them. */
+  submittedAtMs?: number
+  touchedAtMs?: number
 }>
+
+/** A change-list row with the position the queue publishes for a change in line. */
+export type QueueChangeRow = ChangeListRow & Readonly<{ position?: number }>
+
+/**
+ * The last result a row prints (plan § Commands: pass, fail or stuck, and its
+ * log path). A change in line has none yet; a checked change passed its
+ * on-submit checks; a merged change passed everything. `fail` and `stuck` name
+ * the check that judged, or the reason the submitter ended it themselves.
+ */
+export function changeResultLabel(reading: DerivedChangeStateReading): string {
+  switch (reading.state) {
+    case "merged":
+    case "checked":
+      return "pass"
+    case "failed":
+      return reading.check === undefined ? "fail" : `fail ${reading.check}`
+    case "stuck":
+      return reading.check === undefined ? "stuck" : `stuck ${reading.check}`
+    default:
+      return "-"
+  }
+}
 
 const checkLabels = {
   "not-requested": "n/a",
@@ -2791,6 +2832,10 @@ function unreadableChangeListRow(pr: Change, revision: number, error: unknown): 
     whyMessage: `${cause} — this change's recorded clocks cannot be projected, so its row is marked instead of dropped; read its admission history with \`yrd log --pr ${pr.id}\``,
     age: "-",
     touched: "-",
+    branch: pr.branch,
+    head: changeHead(pr).slice(0, 12),
+    ...(pr.issue === undefined ? {} : { workItem: pr.issue }),
+    result: "?",
   }
 }
 
@@ -2873,8 +2918,176 @@ export function changeListRows(
         : {}),
       age: projected.age,
       touched: projected.touched,
+      branch: pr.branch,
+      head: changeHead(pr).slice(0, 12),
+      ...(pr.issue === undefined ? {} : { workItem: pr.issue }),
+      result: changeResultLabel(reading),
+      ...(projected.log === undefined ? {} : { log: projected.log }),
+      ...(projected.submittedAt === undefined ? {} : { submittedAtMs: Date.parse(projected.submittedAt) }),
+      ...(projected.touchedAt === undefined ? {} : { touchedAtMs: Date.parse(projected.touchedAt) }),
     }
   })
+}
+
+const LIVE_CHANGE_STATES: ReadonlySet<string> = new Set(["queued", "checked", "stuck", "unreadable"])
+
+/**
+ * The order `yrd queue list` prints: the changes in line first, by the
+ * position the queue publishes (a change with no position yet, a bare push
+ * the next queue run opens, after them, oldest first); then the failed, then
+ * the merged, newest first, and only inside the window. A stuck change keeps
+ * its place in line (plan § The change).
+ */
+export function queueChangeRowsInOrder(
+  rows: readonly QueueChangeRow[],
+  now: number,
+  windowMs: number,
+): QueueChangeRow[] {
+  const inWindow = (row: QueueChangeRow): boolean => row.touchedAtMs === undefined || now - row.touchedAtMs <= windowMs
+  const newestFirst = (left: QueueChangeRow, right: QueueChangeRow): number =>
+    (right.touchedAtMs ?? 0) - (left.touchedAtMs ?? 0) || compareNatural(right.pr, left.pr)
+  const live = rows
+    .filter((row) => LIVE_CHANGE_STATES.has(row.state))
+    .toSorted(
+      (left, right) =>
+        (left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER) ||
+        (left.submittedAtMs ?? 0) - (right.submittedAtMs ?? 0) ||
+        compareNatural(left.pr, right.pr),
+    )
+  const failed = rows.filter((row) => row.state === "failed" && inWindow(row)).toSorted(newestFirst)
+  const merged = rows.filter((row) => row.state === "merged" && inWindow(row)).toSorted(newestFirst)
+  return [...live, ...failed, ...merged]
+}
+
+/** The machine-readable row `yrd queue list --json` emits for one change. */
+export function projectQueueChangeRow(row: QueueChangeRow) {
+  return {
+    branch: row.branch,
+    head: row.head,
+    state: row.state,
+    ...(row.position === undefined ? {} : { position: row.position }),
+    result: row.result,
+    ...(row.check === undefined ? {} : { check: row.check }),
+    ...(row.log === undefined ? {} : { log: row.log }),
+    ...(row.workItem === undefined ? {} : { workItem: row.workItem }),
+    ...(row.stateCode === undefined ? {} : { code: row.stateCode }),
+    change: row.pr,
+    revision: row.revision,
+  }
+}
+
+/**
+ * The queue pills the one-shot print and the live frame both lead with. A
+ * projection that predates the loader threading the repository root falls
+ * back to the submodule-level root for its path and address.
+ */
+export function queuePrintQueues(
+  projection: QueueTimelineProjection,
+  repositoryRoot: string | undefined,
+): QueueTimelineQueue[] {
+  return projection.queues.map((queue) =>
+    queue.path === undefined && repositoryRoot !== undefined
+      ? { ...queue, path: repositoryRoot, address: queueFullName({ path: repositoryRoot, base: queue.base }) }
+      : queue,
+  )
+}
+
+/**
+ * The one page `yrd queue list` prints: the queue pills and their addresses,
+ * the service's own rail, the window, and the table — STATE, POSITION, RESULT
+ * (with the log path), WORK ITEM, BRANCH, HEAD. Every cell keeps the
+ * single-line contract `ChangeStateValue` explains above; RESULT and BRANCH
+ * take the width that is left.
+ */
+export function QueueChangesView({
+  rows,
+  columns: terminalColumns,
+  window: listWindow,
+  snapshot,
+}: {
+  rows: readonly QueueChangeRow[]
+  columns: number
+  window: Readonly<{ sinceMs: number; since?: string; hidden: number }>
+  snapshot: Readonly<{
+    projection: QueueTimelineProjection
+    runnerRefusal?: QueueRunnerRefusal
+    results: readonly QueueStatusResult[]
+    state: BaysState
+    repositoryRoot?: string
+  }>
+}) {
+  const stateWidth = Math.min(
+    28,
+    rows.reduce((width, row) => Math.max(width, row.stateLabel.length + 2), 12),
+  )
+  const columns: TableColumn<QueueChangeRow>[] = [
+    {
+      header: "STATE",
+      key: "stateLabel",
+      minWidth: stateWidth,
+      maxWidth: stateWidth,
+      render: (row: QueueChangeRow) => <ChangeStateValue row={row} />,
+    },
+    {
+      header: "POSITION",
+      key: "position",
+      minWidth: 10,
+      maxWidth: 10,
+      align: "right",
+      render: (row: QueueChangeRow) => <Text>{row.position === undefined ? "-" : String(row.position)}</Text>,
+    },
+    {
+      header: "RESULT",
+      key: "result",
+      minWidth: 6,
+      grow: true,
+      render: (row: QueueChangeRow) => (
+        <Text minWidth={0} maxWidth="100%" wrap="truncate">
+          {row.result}
+          {row.log === undefined ? "" : <Text color="$fg-muted"> {row.log}</Text>}
+        </Text>
+      ),
+    },
+    {
+      header: "WORK ITEM",
+      key: "workItem",
+      minWidth: 9,
+      maxWidth: terminalColumns >= 120 ? 40 : 24,
+      render: (row: QueueChangeRow) => (
+        <Text minWidth={0} maxWidth="100%" wrap="truncate">
+          {row.workItem ?? "-"}
+        </Text>
+      ),
+    },
+    { header: "BRANCH", key: "branch", minWidth: 8, grow: true },
+    { header: "HEAD", key: "head", minWidth: 12, maxWidth: 12 },
+  ]
+  const printQueues = queuePrintQueues(snapshot.projection, snapshot.repositoryRoot)
+  const span = formatDuration(listWindow.sinceMs)
+  const windowLine =
+    listWindow.since === undefined
+      ? `window last ${span} (default; changes in line always shown; --since widens)`
+      : `window last ${span} (--since; changes in line always shown)`
+  return (
+    <Box flexDirection="column" width="100%" minWidth={0}>
+      <QueueTopLine queues={printQueues} />
+      <QueueAddressRows queues={printQueues} />
+      <TimelineRunnerBox
+        projection={snapshot.projection}
+        runnerRefusal={snapshot.runnerRefusal}
+        results={snapshot.results}
+        state={snapshot.state}
+        columns={terminalColumns}
+      />
+      <Text color="$fg-muted">{windowLine}</Text>
+      {rows.length === 0 ? <Text color="$fg-muted">No changes.</Text> : <Table data={rows} columns={columns} />}
+      {listWindow.hidden <= 0 ? null : (
+        <Text color="$fg-muted">
+          {`${String(listWindow.hidden)} ended ${listWindow.hidden === 1 ? "row" : "rows"} older than ${span} hidden; --since widens the window.`}
+        </Text>
+      )}
+    </Box>
+  )
 }
 
 /** Table sizes its viewport by ROW count, so a cell that wraps to a second
@@ -4954,7 +5167,7 @@ const PAUSE_BANNER_MAX_ROWS = 8
  * is a pulsing `$` shell prompt. Border severity: down/stale/unmeasured red,
  * paused warning, measured healthy default.
  */
-function TimelineRunnerBox({
+export function TimelineRunnerBox({
   projection,
   runnerRefusal,
   results,
@@ -5494,11 +5707,7 @@ function ProjectedQueueTimeline({
   // The one-shot print's queue surfaces (pills + address rows) fall back to
   // the submodule-level repositoryRoot for queues whose projection predates
   // the loader threading it.
-  const printQueues = projection.queues.map((queue) =>
-    queue.path === undefined && repositoryRoot !== undefined
-      ? { ...queue, path: repositoryRoot, address: queueFullName({ path: repositoryRoot, base: queue.base }) }
-      : queue,
-  )
+  const printQueues = queuePrintQueues(projection, repositoryRoot)
   const { rows: viewportRows } = useWindowSize()
   return (
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
@@ -7467,8 +7676,9 @@ function RunAdmissionClockView({ run }: { run: QueueShowData }) {
   )
 }
 
-export function ChangeRunsView({ data }: { data: ChangeRunsData }) {
-  const clocks = changeRevisionClocks(data.pr)
+export function ChangeRunsView({ data, newestFirst = false }: { data: ChangeRunsData; newestFirst?: boolean }) {
+  // `queue show` reads newest first (plan § Commands); `pr runs` keeps its order.
+  const clocks = newestFirst ? [...changeRevisionClocks(data.pr)].reverse() : changeRevisionClocks(data.pr)
   if (clocks.length === 0) return <Text color="$fg-muted">No revision history recorded.</Text>
   const projectedStatus = projectedChangeStatus(data.pr, data.eligibility)
   const eligibilityRefusal = data.eligibility?.reason?.code === "needs-author" ? data.eligibility.reason : undefined

@@ -354,16 +354,13 @@ describe("a one-shot queue pass, end to end", () => {
     let stderr = ""
     let exitCode: number
     try {
-      exitCode = await runYrdProcess(
-        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "run", "--once", "--json"],
-        {
-          cwd: repo,
-          stdout: () => undefined,
-          stderr: (text) => {
-            stderr += text
-          },
+      exitCode = await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "run", "--json"], {
+        cwd: repo,
+        stdout: () => undefined,
+        stderr: (text) => {
+          stderr += text
         },
-      )
+      })
     } finally {
       await chmod(bays, 0o755)
     }

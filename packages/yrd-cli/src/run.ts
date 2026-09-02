@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
-import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
+import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { Fragment, createElement } from "react"
 import * as z from "zod"
 import {
@@ -192,6 +192,10 @@ import {
   ChangeResultView,
   queueLogRows,
   changeListRows,
+  projectQueueChangeRow,
+  queueChangeRowsInOrder,
+  QueueChangesView,
+  type QueueChangeRow,
   ChangeDetailData,
   createQueueTimelineProjectionClock,
   queueShowData,
@@ -7469,7 +7473,11 @@ async function viewChangeRuns(
   options: JsonOption,
   io: YrdCliIO,
   services: YrdCliServices,
+  command: "pr.runs" | "queue.show" = "pr.runs",
 ): Promise<void> {
+  // `queue show <branch>` reads the branch's changes newest first (plan §
+  // Commands); `pr runs` keeps its oldest-first order until flag day.
+  const newestFirst = command === "queue.show"
   for (let read = 0; read < 3; read += 1) {
     const snapshot = await app.journalSnapshot()
     let pr = resolveChange(snapshot.state.bays, selector)
@@ -7497,18 +7505,19 @@ async function viewChangeRuns(
       io,
       jsonEnabled(options),
       {
-        command: "pr.runs",
+        command,
         pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
         eligibility: projectEligibilityTaskStatus(eligibility),
-        runs: data.runs,
+        runs: newestFirst ? [...data.runs].reverse() : data.runs,
         ...trackerBridges(app, snapshot, ({ pr: id }) => id === pr.id),
       },
-      createElement(ChangeRunsView, { data }),
+      createElement(ChangeRunsView, { data, newestFirst }),
     )
     return
   }
+  const retry = command === "queue.show" ? "yrd queue show" : "yrd pr runs"
   refusal(
-    `journal changed while reading change '${selector}' runs; retry with 'yrd pr runs ${selector}${jsonEnabled(options) ? " --json" : ""}'`,
+    `journal changed while reading change '${selector}' runs; retry with '${retry} ${selector}${jsonEnabled(options) ? " --json" : ""}'`,
   )
 }
 
@@ -9002,7 +9011,20 @@ export function createQueueListSnapshotLoader(
   }
 }
 
-async function listQueues(
+/**
+ * `yrd queue list`: every change, in the five states, as one table (plan §
+ * Commands). Changes in line first, by position; then the failed and the
+ * merged, newest first, inside the window (`--since`, seven days by default).
+ *
+ * The rows are the same derivation `pr list` reads (`changeListRows` over both
+ * lanes, `derived-change-state.ts` for the word), plus the position the queue
+ * publishes and the last result with its log path. The service's own rail and
+ * the standing warnings ride on the snapshot the live view reads, so a stopped
+ * or stale service is visible on the same page as the line it is not moving.
+ * The snapshot's timeline projection is kept in `--json` for one flag-day
+ * cycle, beside the rows; it is derived, never authority.
+ */
+async function listChanges(
   app: YrdCliApp,
   filters: readonly string[],
   options: QueueListOptions,
@@ -9010,38 +9032,78 @@ async function listQueues(
   services: YrdCliServices,
 ): Promise<void> {
   const snapshot = await createQueueListSnapshotLoader(app, filters, options, io, services, false).load()
-  // The balls the outcome seam opened (@i/10-yrd/24028): the most recent
-  // attempt rows the journal projects (`queues.outcomes`), newest last, so a
-  // reader of the timeline sees WHO holds the ball for each ended attempt.
-  // Bounded, never filtered by the timeline's own selection — a ball for an
-  // attempt the filter hid is still a fact worth one line.
   const notifications = (services.outcomes?.ledger.rows() ?? []).slice(-QUEUE_LIST_NOTIFICATION_ROWS)
-  const timeline = createElement(QueueTimelineView, {
-    repositoryRoot: snapshot.repositoryRoot,
-    projection: snapshot.projection,
-    runnerRefusal: snapshot.runnerRefusal,
-    results: snapshot.results,
-    state: snapshot.state,
-    columns: io.columns ?? 120,
+  const state = stateOf(app)
+  const now = io.now?.() ?? Date.now()
+  const windowMs = queueTimelineWindow(options.since)
+  const base = options.base === undefined ? undefined : selectedBase(state, options.base)
+  const filterTerms = filters.map((term) => term.toLowerCase())
+  // Bounded BEFORE the merge proof: an ended change older than the window is
+  // never shown, so its ancestry is never asked for. A change still in line is
+  // always shown, whatever its age.
+  const population = queueChanges(state.bays, state.queues)
+    .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
+    .filter(
+      (pr) =>
+        filterTerms.length === 0 ||
+        filterTerms.some((term) => `${pr.id} ${pr.branch} ${pr.issue ?? ""}`.toLowerCase().includes(term)),
+    )
+  const candidates = population.filter((pr) => {
+    const endedAt = changeEndedAt(pr)
+    return endedAt === undefined || now - endedAt <= windowMs
   })
+  const entries = candidates.map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
+  const selected = new Set(candidates.map((pr) => pr.id))
+  const runs = allQueueRuns(app).filter((run) => run.prs.some((member) => selected.has(member.id)))
+  const { merges, warnings } = await reconcileChangeMerges(candidates, io)
+  const rows = changeListRows(entries, runs, now, merges, options.strict === true)
+  const positions = new Map<string, number>()
+  for (const target of new Set(candidates.map((pr) => pr.base))) {
+    for (const [id, position] of await queuedChangePositions(app, target, io)) positions.set(id, position)
+  }
+  const listed: QueueChangeRow[] = rows.map((row) => {
+    const position = positions.get(row.pr)
+    return position === undefined ? row : { ...row, position }
+  })
+  const ordered = queueChangeRowsInOrder(listed, now, windowMs)
+  // Every ended change the window left out, whichever clock said so: the
+  // record's own end, or the projection's last touch.
+  const hiddenEnded = population.length - candidates.length + (listed.length - ordered.length)
   await printResultWithWarnings(
     io,
     jsonEnabled(options),
     {
       command: "queue.list",
+      window: { sinceMs: windowMs, hidden: hiddenEnded },
+      changes: ordered.map(projectQueueChangeRow),
       projection: snapshot.projection,
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
       ...(snapshot.readFailure === undefined ? {} : { readFailure: snapshot.readFailure }),
       ...(notifications.length === 0 ? {} : { notifications }),
     },
-    notifications.length === 0
-      ? timeline
-      : createElement(
-          Fragment,
-          null,
-          timeline,
-          "\n",
-          [
+    createElement(
+      Fragment,
+      null,
+      createElement(QueueChangesView, {
+        rows: ordered,
+        columns: io.columns ?? 120,
+        window: {
+          sinceMs: windowMs,
+          ...(options.since === undefined ? {} : { since: options.since }),
+          hidden: hiddenEnded,
+        },
+        snapshot: {
+          projection: snapshot.projection,
+          runnerRefusal: snapshot.runnerRefusal,
+          results: snapshot.results,
+          state: snapshot.state,
+          repositoryRoot: snapshot.repositoryRoot,
+        },
+      }),
+      notifications.length === 0
+        ? null
+        : [
+            "",
             "balls opened for ended attempts (newest last):",
             ...notifications.map(
               (row) =>
@@ -9052,8 +9114,9 @@ async function listQueues(
                 `  ${row.at}`,
             ),
           ].join("\n"),
-        ),
+    ),
     [
+      ...warnings,
       ...queuePauseWarnings(snapshot.state, snapshot.results),
       ...staleDraftWarnings(snapshot.staleDrafts ?? []),
       ...needsPersonWarnings(snapshot.needsPerson ?? []),
@@ -9061,6 +9124,24 @@ async function listQueues(
       ...(await orphanRefsForWarnings(io, services)),
     ],
   )
+}
+
+/** When a change's record says it ended, for the listing window; undefined while it is live. */
+function changeEndedAt(pr: Change): number | undefined {
+  const delivery = changeDeliveryState(pr)
+  const at =
+    delivery === "integrated"
+      ? pr.integratedAt
+      : delivery === "already-landed"
+        ? pr.alreadyLandedAt
+        : delivery === "rejected"
+          ? pr.rejectedAt
+          : delivery === "withdrawn"
+            ? pr.withdrawnAt
+            : undefined
+  if (at === undefined) return undefined
+  const parsed = Date.parse(at)
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 /**
@@ -13156,7 +13237,7 @@ export async function followQueueRuns(
       // runner's log. (#undead: runner-loggily-only)
       if (jsonEnabled(options)) {
         for (const run of runs) {
-          io.stdout(stableJson({ command: "queue.run", mode: "follow", run: projectQueueRunTaskStatus(run) }))
+          io.stdout(stableJson({ command: "queue.up", run: projectQueueRunTaskStatus(run) }))
         }
       }
       // An ERROR row during that run ended the pass. The run it was inside has
@@ -13856,33 +13937,84 @@ function configureOutput(command: CliCommand, io: YrdCliIO, output: CommanderOut
   for (const child of command.commands) configureOutput(child as unknown as CliCommand, io, output)
 }
 
+/**
+ * The listing rules behind `yrd --help` and `yrd queue --help`.
+ *
+ * `rows` names, per command, exactly the commands its listing prints and in
+ * which order; a command with no entry lists its visible children in
+ * registration order, as Commander does. A listed command prints its full path
+ * from the listing being rendered (`queue submit [branch...]` on the root,
+ * `submit [branch...]` under `queue`), its arguments, and — for a group like
+ * `env` — its visible verbs joined by `|`, never `[options]`: the options are
+ * the command's own help page's to list.
+ */
+type HelpCommand = Parameters<Help["subcommandTerm"]>[0]
+
+function commandStripHelp(rows: ReadonlyMap<HelpCommand, readonly HelpCommand[]>): Partial<Help> {
+  let listing: HelpCommand | undefined
+  const hidden = (command: HelpCommand): boolean => (command as unknown as { _hidden?: boolean })._hidden === true
+  const visibleChildren = (command: HelpCommand): HelpCommand[] => command.commands.filter((child) => !hidden(child))
+  const argumentTerm = (argument: Readonly<{ name(): string; required: boolean; variadic: boolean }>): string => {
+    const name = `${argument.name()}${argument.variadic ? "..." : ""}`
+    return argument.required ? `<${name}>` : `[${name}]`
+  }
+  return {
+    formatHelp(command: HelpCommand, helper: Help): string {
+      listing = command
+      return Help.prototype.formatHelp.call(helper, command, helper)
+    },
+    visibleCommands(command: HelpCommand): HelpCommand[] {
+      return [...(rows.get(command) ?? visibleChildren(command))]
+    },
+    subcommandTerm(command: HelpCommand): string {
+      const path: string[] = []
+      for (
+        let cursor: HelpCommand | null | undefined = command;
+        cursor !== null && cursor !== undefined && cursor !== listing;
+        cursor = cursor.parent
+      ) {
+        path.unshift(cursor.name())
+      }
+      const verbs = visibleChildren(command)
+      const operands =
+        verbs.length > 0 ? [verbs.map((verb) => verb.name()).join("|")] : command.registeredArguments.map(argumentTerm)
+      return [...path, ...operands].join(" ")
+    },
+  }
+}
+
+/**
+ * The seven commands (plan § Commands), and nothing else, on the root help.
+ *
+ * The root lists the queue's five verbs by their full path rather than one
+ * `queue` row: the queue is the product, and a reader should see what it can
+ * be asked without opening a second help page. Every other command stays
+ * registered and hidden until flag day (M5) deletes it (M6).
+ */
 function addExamples(program: CliCommand, name: string): void {
-  const bay = `${name} bay`
-  const examples: [string, string][] = [
-    [`$ ${bay} open --bay fix`, "open and keep a scratch Bay"],
-    [`$ ${bay} run @km/test/fix -- make test`, "run one scoped command"],
-    [`$ ${bay} in fix`, "open a guest shell in one Bay"],
-    [`$ ${bay} submit`, "submit the current bay as a change"],
-  ]
-  examples.push(
-    [`$ ${name} pr list`, "inspect active PRs"],
-    [`$ ${name} submit`, "submit the current branch as a change"],
-    [`$ ${name} pr create topic/fix`, "create a draft before you submit"],
-    [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
-    [`$ ${name} contest open km:T1 --competitors '<json>'`, "compare implementations"],
-  )
-  program.addHelpSection("Examples:", examples)
+  program.addHelpSection("Aliases:", [
+    [`${name} submit`, `${name} queue submit`],
+    [`${name} up`, `${name} queue up`],
+    [`${name} show`, `${name} queue show`],
+    [`${name} bay`, `${name} env (today's word, kept until flag day)`],
+  ])
+  program.addHelpSection("Examples:", [
+    [`$ ${name} submit fix-login`, "push the branch and open its change"],
+    [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
+    [`$ ${name} show fix-login`, "the branch's changes, each check's result and log"],
+    [`$ ${name} queue run`, "one round of queue work, by hand"],
+    [`$ ${name} check affected-tests`, "run one of the queue's checks here, now"],
+    [`$ ${name} env open --bay fix`, "open an environment and keep it"],
+  ])
 }
 
 function addQueueExamples(queue: CliCommand, name: string): void {
-  const repository = `${name} --repo <repository>`
   queue.addHelpSection("Examples:", [
-    [`$ ${name} queue`, "list active queues"],
-    [`$ ${repository} queue run PR7 --steps check,merge`, "run selected steps for one change"],
-    [`$ ${name} log --base release/2.0`, "show completed work for a base"],
-    [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
-    [`$ ${repository} queue pause --reason maintenance --for 30m --allow PR7`, "pause all but selected PRs"],
-    [`$ ${repository} queue run`, "habitant follow-runner: keep the default queue moving"],
+    [`$ ${name} queue submit fix-login`, "push the branch and open its change"],
+    [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
+    [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
+    [`$ ${name} queue run`, "one round of queue work, by hand"],
+    [`$ ${name} queue up`, "the service: the same round on a loop"],
   ])
 }
 
@@ -13908,14 +14040,14 @@ function addRootBayCommands(
   setExit: (code: YrdCliExitCode) => void,
 ): void {
   program
-    .command("in [bay] [command...]")
+    .command("in [bay] [command...]", { hidden: true })
     .description("join an open Bay as a guest; defaults to $SHELL, or pass opaque argv after --")
     .action(async (bay, command) => {
       const request = bayInOperands(bay, command, io)
       setExit(await enterBay(installed(), installedServices(), request.selector, request.argv, io))
     })
   program
-    .command("sh [config]")
+    .command("sh [config]", { hidden: true })
     .description("run $SHELL in a scoped Bay")
     .option("--issue <ref>", "link an issue without a positional")
     .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
@@ -13934,7 +14066,7 @@ function addRootBayCommands(
         ),
       ),
     )
-  const run = program.command("run").description("act on individual queue runs")
+  const run = program.command("run", { hidden: true }).description("act on individual queue runs")
   run.helpCommand(false)
   run
     .command("cancel <selector>")
@@ -13963,7 +14095,15 @@ function buildProgram(
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
-  program.configureHelp({ ...program.configureHelp(), minWidthToWrap: 20 })
+  // Installed BEFORE any subcommand exists: Commander hands a new subcommand
+  // its parent's help configuration by reference at creation, so a listing
+  // rule set here reaches every command, and one set later reaches none.
+  const helpRows = new Map<HelpCommand, readonly HelpCommand[]>()
+  program.configureHelp({
+    ...program.configureHelp(),
+    minWidthToWrap: 20,
+    ...commandStripHelp(helpRows),
+  })
   if (app === undefined) {
     configureYrdGlobalOptions(program)
   }
@@ -14002,32 +14142,13 @@ function buildProgram(
     })
   }
   program.version(YRD_VERSION, "-V, --version")
-  program.addHelpSection(
-    "Model:",
-    "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nchanges queue per base -> a run verifies and merges each one ->\nmerged, or parked for the author with a typed result.",
-  )
-  program.addHelpSection(
-    "Loop:",
-    `1. ${name} pr submit\n2. ${name} pr status  (live bay, change, queue position, pause)\n3. ${name} pr runs <PR>\n4. fix the branch and push; the same PR resumes automatically.`,
-  )
-  program.addHelpSection("Objects:", [
-    ["issue", "tracker-owned intent; delivery lens plus Git-side ensure"],
-    ["bay", "isolated Git workspace managed through the yrd bay subtree"],
-    ["change", "the queue's unit; draft until submitted; mr and pr are taught aliases"],
-    ["contest", "competing implementations; winner promotes to a change"],
-    ["queue", "the merge queue: one per base; verifies and merges changes serially"],
-  ])
-  program.addHelpSection(
-    "Boundaries:",
-    "Runs, steps, jobs, attempts, and runners are records inside PRs and the log.\nThe queue is the only merger; pr merge only teaches the correct next command.\nThe tracker holds the pen; yrd never creates or edits issues.",
-  )
   program
     .command("_dashboard", { isDefault: true, hidden: true })
     .option("--base <branch>", "scope the dashboard to one base")
     .option("--json", "emit stable JSON")
     .action(async (options) => dashboard(installed(), options, io))
   program
-    .command("doctor")
+    .command("doctor", { hidden: true })
     .description("diagnose repository configuration and retention warnings")
     .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
     .option(
@@ -14045,7 +14166,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
   program
-    .command("why <selector>")
+    .command("why <selector>", { hidden: true })
     .description("prove one change merge from repository truth and its journal index")
     .option("--repair", "append a missing pr/integrated index row from repository proof")
     .option("--json", "emit stable JSON")
@@ -14064,27 +14185,15 @@ function buildProgram(
       ),
     )
 
-  const bay = program
-    .command("bay")
-    .description("manage work bays — a Git worktree plus a lease, an issue, and a managed lifecycle")
+  // `env` is the printed name (plan § Commands: an environment for one branch);
+  // `bay` is the same command's alias until flag day, and its internal name.
+  const bay = program.command("env").alias("bay").description("an environment for one branch")
   bay.helpCommand(false)
   bay
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
-    .option("--all", "include open and terminal Bays")
-    .option("--closed", "show terminal Bays only")
-    .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
-    .option(
-      "--landing",
-      "derive whether handoff-ready work landed and whether its certification is still fresh (fetches origin; may be slow)",
-    )
-    .action(async (options) => listBays(installed(), options, io))
-  bay
-    .command("list")
-    .description("list work bays")
-    .option("--json", "emit stable JSON")
-    .option("--all", "include open and terminal Bays")
-    .option("--closed", "show terminal Bays only")
+    .option("--all", "include open and closed environments")
+    .option("--closed", "closed environments only")
     .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
     .option(
       "--landing",
@@ -14093,11 +14202,11 @@ function buildProgram(
     .action(async (options) => listBays(installed(), options, io))
   bay
     .command("open")
-    .argument("[config]", "issue to link; omit for an anonymous Bay")
-    .description("open and keep a Bay")
-    .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
-    .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
+    .argument("[config]", "work item to link; omit for an environment with none")
+    .description("open an environment for one branch and keep it")
+    .option("--issue <ref>", "link a work item without a positional")
+    .option("--pr <selector>", "continue an existing change instead of opening a new one")
+    .option("--bay <name>", "name the environment")
     .action(async (config, options) => {
       if ((io as RuntimeInvocationIO)[RuntimeChildArgv] !== undefined) {
         usage("bay open does not run commands; use 'yrd bay run <config> -- <command>'")
@@ -14105,7 +14214,37 @@ function buildProgram(
       setExit(await openPersistentBay(installed(), installedServices(), config, options, io))
     })
   bay
-    .command("run [config] [command...]")
+    .command("close [selector...]")
+    .description("close environments; each is checked first, and --force overrides")
+    .option("--withdraw", "end the environment's live change before closing (it will not merge)")
+    .option("--force", "skip the safety check (needs the environment's name; prints what is destroyed)")
+    .option(
+      "--tolerate-unreadable <pids>",
+      "certify teardown despite census gaps caused by EXACTLY these unreadable pids (comma-separated; each waiver is printed)",
+    )
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => {
+      await closeBays(installed(), installedServices(), selectors, options, io)
+    })
+  bay
+    .command("list")
+    .description("list environments")
+    .option("--json", "emit stable JSON")
+    .option("--all", "include open and closed environments")
+    .option("--closed", "closed environments only")
+    .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
+    .option(
+      "--landing",
+      "derive whether handoff-ready work landed and whether its certification is still fresh (fetches origin; may be slow)",
+    )
+    .action(async (options) => listBays(installed(), options, io))
+  bay
+    .command("path <selector>")
+    .description("print an open environment's path")
+    .option("--json", "emit stable JSON")
+    .action((selector, options) => pathBay(installed(), selector, options, io))
+  bay
+    .command("run [config] [command...]", { hidden: true })
     .description("run one scoped command (defaults to $SHELL)")
     .option("--issue <ref>", "link an issue without a positional")
     .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
@@ -14120,24 +14259,19 @@ function buildProgram(
       )
     })
   bay
-    .command("in [bay] [command...]")
+    .command("in [bay] [command...]", { hidden: true })
     .description("join an open Bay as a guest; defaults to $SHELL, or pass opaque argv after --")
     .action(async (selector, command) => {
       const request = bayInOperands(selector, command, io)
       setExit(await enterBay(installed(), installedServices(), request.selector, request.argv, io))
     })
   bay
-    .command("path <selector>")
-    .description("print an active bay path")
-    .option("--json", "emit stable JSON")
-    .action((selector, options) => pathBay(installed(), selector, options, io))
-  bay
-    .command("refresh [selector...]")
+    .command("refresh [selector...]", { hidden: true })
     .description("refresh work bays")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => refreshBays(installed(), selectors, options, io))
   bay
-    .command("handoff <selector>")
+    .command("handoff <selector>", { hidden: true })
     .description("certify a materialized exact-head handoff")
     .requiredOption("--branch <branch>", "exact branch recorded in the handoff packet")
     .requiredOption("--head <sha>", "exact head recorded in the handoff packet")
@@ -14153,7 +14287,7 @@ function buildProgram(
       ),
     )
   bay
-    .command("submit [selector...]")
+    .command("submit [selector...]", { hidden: true })
     .description("submit bays or branches")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
@@ -14174,25 +14308,12 @@ function buildProgram(
       setExit(await applyChangeSelectionVerb(installed(), installedServices(), selectors, options, io, "bay.submit")),
     )
   bay
-    .command("close [selector...]")
-    .description("close work bays (checks bay status first; needs --force to override)")
-    .option("--withdraw", "withdraw a live change before closing")
-    .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
-    .option(
-      "--tolerate-unreadable <pids>",
-      "certify teardown despite census gaps caused by EXACTLY these unreadable pids (comma-separated; each waiver is printed)",
-    )
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => {
-      await closeBays(installed(), installedServices(), selectors, options, io)
-    })
-  bay
-    .command("status [selector...]")
+    .command("status [selector...]", { hidden: true })
     .description("safety oracle: is this bay safe to remove? (exit 0=safe 1=not-safe 2=unknown)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await bayStatusCommand(installed(), selectors, options, io)))
   program
-    .command("log")
+    .command("log", { hidden: true })
     .description("show queue history, newest first")
     .option("--base <branch>", "scope log to one base branch")
     .option("--pr <pr>", "scope log to one change")
@@ -14205,7 +14326,7 @@ function buildProgram(
     .action(async (options) => logRuns(installed(), [], options, io, installedServices()))
 
   program
-    .command("watch [filter...]")
+    .command("watch [filter...]", { hidden: true })
     .description("alias for queue ls --watch")
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope watch to one change")
@@ -14222,7 +14343,7 @@ function buildProgram(
     })
 
   program
-    .command("cancel <selector>")
+    .command("cancel <selector>", { hidden: true })
     .description(
       "stop the current attempt for a change or run — members re-queue and the change stays open; to stop delivering it, use `yrd mr close --reason <text> --burn-payload` (run both for both effects)",
     )
@@ -14247,9 +14368,9 @@ function buildProgram(
     ignore: "keep branches out of the queue's view without archiving them",
   } as const satisfies Record<ChangeState, string>
 
-  const registerChangeStateVerb = (target: CliCommand, state: ChangeState): void => {
+  const registerChangeStateVerb = (target: CliCommand, state: ChangeState, operand = "selector"): CliCommand => {
     const verb = target
-      .command(`${state} [selector...]`)
+      .command(`${state} [${operand}...]`, { hidden: true })
       .description(CHANGE_STATE_HELP[state])
       .option("--dry-run", "print the resolved branches and the exact git command without pushing")
     if (state === "archive") {
@@ -14269,16 +14390,20 @@ function buildProgram(
         ),
       ),
     )
+    return verb as unknown as CliCommand
   }
 
-  const branch = program.command("branch").description("move a branch into a delivery state")
+  const branch = program.command("branch", { hidden: true }).description("move a branch into a delivery state")
   branch.helpCommand(false)
   for (const state of ["draft", "submit", "archive", "ignore"] as const) {
     registerChangeStateVerb(branch, state)
-    registerChangeStateVerb(program, state)
+    // Root `submit` is `queue submit` (plan § Commands): invocation.ts rewrites
+    // the root spelling to the queue one before Commander sees it, so the
+    // three other states are the only bare verbs registered here.
+    if (state !== "submit") registerChangeStateVerb(program, state)
   }
 
-  const deployment = program.command("deployment").description("manage immutable runtime deployments")
+  const deployment = program.command("deployment", { hidden: true }).description("manage immutable runtime deployments")
   deployment.helpCommand(false)
   deployment
     .command("materialize <deployment> <generation> <sha>")
@@ -14311,7 +14436,7 @@ function buildProgram(
       releaseDeployment(installed(), deploymentResult, habReleaseResult, options, io),
     )
 
-  const queue = program.command("queue").description("manage integration queues")
+  const queue = program.command("queue").description("the line of changes for the target branch")
   queue.helpCommand(false)
   const listQueue = async (positional: string[], options: QueueListOptions): Promise<void> => {
     // A positional term spelled like a subcommand is the one shape this surface
@@ -14328,45 +14453,54 @@ function buildProgram(
       setExit(await watchQueue(installed(), filters, options, io, installedServices()))
       return
     }
-    await listQueues(installed(), filters, options, io, installedServices())
+    await listChanges(installed(), filters, options, io, installedServices())
   }
-  const TERM_OPTION_HELP = "filter the timeline by a literal word, including one spelled like a subcommand (repeatable)"
+  const TERM_OPTION_HELP =
+    "with --watch: filter the live view by a literal word, including one spelled like a subcommand (repeatable)"
   const collectTerm = (value: string, previous: readonly string[]): readonly string[] => [...previous, value]
+  const SINCE_OPTION_HELP =
+    "window for the ended rows, failed and merged (default 7d; changes in line are always shown)"
+  const queueSubmit = registerChangeStateVerb(queue, "submit", "branch")
+  queueSubmit.description("push the branch and open its change; at an unchanged head, retry")
+  ;(queueSubmit as unknown as { _hidden: boolean })._hidden = false
   queue
     .command("_list [filter...]", { isDefault: true, hidden: true })
     .option("--term <word>", TERM_OPTION_HELP, collectTerm, [] as readonly string[])
-    .option("--base <branch>", "select one base queue")
-    .option("--pr <pr>", "scope the queue timeline to one change")
-    .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option(
-      "--since <duration>",
-      "window for finished rows (default 7d; open changes always shown; flow metrics default 24h)",
-    )
-    .option("--latest", "show only the latest Run for each change")
-    .option("--watch", "keep this projection live and interactive")
-    .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
+    .option("--base <branch>", "one target branch's queue")
+    .option("--pr <pr>", "with --watch: one change")
+    .option("--status <statuses>", `with --watch: ${QUEUE_TIMELINE_STATUS_HELP}`)
+    .option("--since <duration>", SINCE_OPTION_HELP)
+    .option("--latest", "with --watch: only the latest run of each change")
+    .option("--watch", "keep the live view open and interactive")
+    .option("--check", "probe the service: its lease, heartbeat, declared checks and git distance")
     .option("--json", "emit stable JSON")
-    .option("--strict", "fail loud (exit 3) on the first unreadable run member instead of marking its row")
+    .option("--strict", "fail loud (exit 3) on the first unreadable change instead of marking its row")
     .action(listQueue)
-  queue
+  const queueList = queue
     .command("list [filter...]")
-    .description("show the queue timeline")
-    .option("--term <word>", TERM_OPTION_HELP, collectTerm, [] as readonly string[])
-    .option("--base <branch>", "select one base queue")
-    .option("--pr <pr>", "scope the queue timeline to one change")
-    .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option(
-      "--since <duration>",
-      "window for finished rows (default 7d; open changes always shown; flow metrics default 24h)",
+    .description(
+      "every change in line: state, position, last result and log path, work item; failed rows included, merged rows below (seven days by default)",
     )
-    .option("--latest", "show only the latest Run for each change")
-    .option("--watch", "keep this projection live and interactive")
-    .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
+    .option("--term <word>", TERM_OPTION_HELP, collectTerm, [] as readonly string[])
+    .option("--base <branch>", "one target branch's queue")
+    .option("--pr <pr>", "with --watch: one change")
+    .option("--status <statuses>", `with --watch: ${QUEUE_TIMELINE_STATUS_HELP}`)
+    .option("--since <duration>", SINCE_OPTION_HELP)
+    .option("--latest", "with --watch: only the latest run of each change")
+    .option("--watch", "keep the live view open and interactive")
+    .option("--check", "probe the service: its lease, heartbeat, declared checks and git distance")
     .option("--json", "emit stable JSON")
-    .option("--strict", "fail loud (exit 3) on the first unreadable run member instead of marking its row")
+    .option("--strict", "fail loud (exit 3) on the first unreadable change instead of marking its row")
     .action(listQueue)
+  const queueShow = queue
+    .command("show <branch>")
+    .description("its changes newest first, each check's result and log")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) =>
+      viewChangeRuns(installed(), selector, options, io, installedServices(), "queue.show"),
+    )
   queue
-    .command("audit")
+    .command("audit", { hidden: true })
     .description("check queue state")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await queueAudit(installed(), installedServices(), options, io)))
@@ -14381,14 +14515,14 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(() => refuseRetiredQueueCandidateRefs())
   queue
-    .command("uncarried")
+    .command("uncarried", { hidden: true })
     .description("find refs pushed to the remote that no change carries")
     .option("--base <branch>", "base branch the refs are judged against")
     .option("--namespace <ref>", "ref namespace to sweep")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await queueStranded(installed(), options, io)))
   queue
-    .command("pause [base]")
+    .command("pause [base]", { hidden: true })
     .description("pause new queue runs")
     .option("--reason <text>", "record the pause reason")
     .option("--for <duration>", "required hold TTL, such as 30m, 6h, or 1d")
@@ -14396,7 +14530,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (base, options) => pauseQueue(installed(), base, options, io))
   queue
-    .command("resume [base]")
+    .command("resume [base]", { hidden: true })
     .description("resume a paused queue")
     .option("--json", "emit stable JSON")
     .action(async (base, options) => resumeQueue(installed(), base, options, io))
@@ -14411,40 +14545,46 @@ function buildProgram(
     .option("--runner <id>", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
     .action(() => refuseRetiredQueueRecover())
-  queue
+  // The loop's gate reloads the process in place when the declared checks
+  // change under it; one round has no next round to reload for.
+  const declaredPlanGate = (loop: boolean) => {
+    // One lineage per process: the count this process was exec'd with, reset
+    // by a clean gate pass, carried forward by the next reload request.
+    const lineage = bootstrap === undefined ? undefined : runtimeReloadLineage(bootstrap.env)
+    return () =>
+      requireInstalledDeclaredPlan(
+        installedServices(),
+        loop
+          ? {
+              reloadInPlace:
+                bootstrap === undefined || lineage === undefined ? {} : { request: requestYrdRuntimeReload, lineage },
+            }
+          : {},
+      )
+  }
+  const queueUp = queue
+    .command("up")
+    .description("the service: the same round on a loop")
+    .option("--steps [step...]", "the checks to run, comma-separated or repeated (default: every declared check)")
+    .option("--interval <seconds>", "seconds between rounds (default 15)", int)
+    .option("--json", "emit stable JSON")
+    .action(async (options) => {
+      setExit(await followQueueRuns(installed(), [], options, io, declaredPlanGate(true), installedServices()))
+    })
+  const queueRun = queue
     .command("run [selector...]")
-    .description("drain the queue — habitant follow by default; --once or change selectors for a single pass")
-    .option("--steps [step...]", "registered step names, comma-separated or repeated")
-    .option(
-      "--once",
-      "drain the default queue exactly once, then exit " +
-        `(exit ${String(QUEUE_OUTCOME_EXIT.next)}: every attempt landed or nothing to do; ` +
-        `${String(QUEUE_OUTCOME_EXIT.changeRefused)}: a change was refused and sent back to its submitter, the pass continued; ` +
-        `${String(QUEUE_OUTCOME_EXIT.yrdFailed)}: yrd broke — an infra/env/timeout outcome went to the queue owner or the pass ended on an ERROR row; ${String(QUEUE_OUTCOME_EXIT.yrdFailed)} wins over ${String(QUEUE_OUTCOME_EXIT.changeRefused)})`,
+    .description("one round of queue work")
+    .addHelpText(
+      "after",
+      `\nExit ${String(QUEUE_OUTCOME_EXIT.next)}: pass — everything attempted passed, or there was nothing to do.\n` +
+        `Exit ${String(QUEUE_OUTCOME_EXIT.changeRefused)}: fail — a check judged a change's content and it was sent back to its submitter; the round went on.\n` +
+        `Exit ${String(QUEUE_OUTCOME_EXIT.yrdFailed)}: stuck — the queue could not do its job; the queue owner was told, and ${String(QUEUE_OUTCOME_EXIT.yrdFailed)} wins over ${String(QUEUE_OUTCOME_EXIT.changeRefused)}.`,
     )
-    .option("--owner <seat>", "the queue owner every yrd-fault ball routes to (default: .yrd.yml owner:, then @chief)")
-    .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
+    .option("--steps [step...]", "the checks to run, comma-separated or repeated (default: every declared check)")
+    .option("--owner <seat>", "the queue owner every stuck result goes to (default: .yrd.yml owner:, then @chief)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
-      const mode = invocation.queueRunMode
-      if (mode === undefined) throw new Error("yrd: normalized queue run mode is missing")
-      // One lineage per process: the count this process was exec'd with, reset
-      // by a clean gate pass, carried forward by the next reload request.
-      const lineage = bootstrap === undefined ? undefined : runtimeReloadLineage(bootstrap.env)
-      const gate = () =>
-        requireInstalledDeclaredPlan(
-          installedServices(),
-          mode === "follow"
-            ? {
-                reloadInPlace:
-                  bootstrap === undefined || lineage === undefined ? {} : { request: requestYrdRuntimeReload, lineage },
-              }
-            : {},
-        )
-      if (mode === "follow") {
-        setExit(await followQueueRuns(installed(), selectors, options, io, gate, installedServices()))
-        return
-      }
+      const gate = declaredPlanGate(false)
       // No admission pre-gate here: this process already holds the queue runner
       // lease (taken at host construction, before this action ran) or it never
       // got this far. See the note above `gitDistance` for the probe this
@@ -14568,13 +14708,13 @@ function buildProgram(
       setExit(publicationFailed ? QUEUE_OUTCOME_EXIT.yrdFailed : verdict)
     })
   queue
-    .command("cancel <run>")
+    .command("cancel <run>", { hidden: true })
     .description("cancel a running or waiting queue run and leave its PRs submitted")
     .option("--reason <text>", "record the cancellation reason")
     .option("--json", "emit stable JSON")
     .action(async (run, options) => setExit(await cancelQueueRun(installed(), run, options, io)))
   queue
-    .command("finish <selector>")
+    .command("finish <selector>", { hidden: true })
     .description("resume a waiting step")
     .option("--step <name>", "waiting step name")
     .option("--ok", "record a passing result")
@@ -14599,7 +14739,7 @@ function buildProgram(
   // ids keep printing as PRnnn (a pure label) and both spellings keep
   // working forever.
   const pr = program
-    .command("change")
+    .command("change", { hidden: true })
     .alias("mr")
     .alias("pr")
     .description(
@@ -14809,7 +14949,9 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await refuseChangeMerge(installed(), selector, options, io)))
 
-  const gitlink = program.command("gitlink").description("advance the submodule commits this repository records")
+  const gitlink = program
+    .command("gitlink", { hidden: true })
+    .description("advance the submodule commits this repository records")
   gitlink.helpCommand(false)
   gitlink
     .command("advance <submodule> [target]")
@@ -14826,19 +14968,21 @@ function buildProgram(
       setExit(await advanceSubmoduleGitlink(installed(), installedServices(), submodule, target, options, io)),
     )
 
-  program
+  const check = program
     .command("check <name...>")
-    .description("run configured required checks in the current working tree")
+    .description("run one of the queue's checks here, now")
     .option("--json", "emit stable JSON")
     .action(async (names, options) => checkRequired(installedServices(), names, options, io))
 
   program
-    .command("guard [name...]")
+    .command("guard [name...]", { hidden: true })
     .description("run configured pre-submit guards against the current head; omit names for all")
     .option("--json", "emit stable JSON")
     .action(async (names, options) => guardRequired(installedServices(), names, options, io))
 
-  const admin = program.command("admin").description("perform infrequent repository and state administration")
+  const admin = program
+    .command("admin", { hidden: true })
+    .description("perform infrequent repository and state administration")
   admin.helpCommand(false)
   admin
     .command("init")
@@ -14910,7 +15054,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await initSubmoduleTracking(options, io)))
 
-  const issue = program.command("issue").description("inspect tracker-neutral issue delivery")
+  const issue = program.command("issue", { hidden: true }).description("inspect tracker-neutral issue delivery")
   issue.helpCommand(false)
   issue
     .command("_list", { isDefault: true, hidden: true })
@@ -14927,7 +15071,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (issueId, options) => setExit(await ensureIssueDelivery(installed(), issueId, options, io)))
 
-  const contest = program.command("contest").description("inspect and select contest attempts")
+  const contest = program.command("contest", { hidden: true }).description("inspect and select contest attempts")
   contest.helpCommand(false)
   contest
     .command("_list", { isDefault: true, hidden: true })
@@ -14980,13 +15124,11 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
-  const order = new Map(
-    ["mr", "bay", "issue", "contest", "queue", "check", "doctor", "why", "admin", "log", "watch"].map(
-      (command, index) => [command, index],
-    ),
-  )
-  const orderedCommands = program.commands as unknown as CliCommand[]
-  orderedCommands.sort((left, right) => (order.get(left.name()) ?? 99) - (order.get(right.name()) ?? 99))
+  // The seven commands, in the plan's order (plan § Commands). The root lists
+  // the queue's verbs by their full path; `yrd queue --help` lists the five.
+  const queueVerbs = [queueSubmit, queueRun, queueUp, queueList, queueShow] as unknown as readonly HelpCommand[]
+  helpRows.set(program as unknown as HelpCommand, [...queueVerbs, check, bay] as unknown as readonly HelpCommand[])
+  helpRows.set(queue as unknown as HelpCommand, queueVerbs)
   addExamples(program, name)
   configureOutput(program, io, commanderOutput)
   return program

@@ -987,14 +987,12 @@ describe("runYrd", () => {
     const app = await createApp()
     const gitHelp = outputIO()
     expect(await runYrd(app, yrdBay("--help"), gitHelp.io)).toBe(0)
-    expect(gitHelp.stdout()).toContain("Usage: yrd bay")
-    expect(gitHelp.stdout()).toContain("list")
-    expect(gitHelp.stdout()).toContain("open")
-    expect(gitHelp.stdout()).toContain("in")
-    expect(gitHelp.stdout()).toContain("path")
-    expect(gitHelp.stdout()).toContain("refresh")
-    expect(gitHelp.stdout()).toContain("submit")
-    expect(gitHelp.stdout()).toContain("close")
+    expect(gitHelp.stdout()).toContain("Usage: yrd env|bay")
+    for (const verb of ["open", "close", "list", "path"]) {
+      expect(gitHelp.stdout()).toMatch(new RegExp(`^\\s{2}${verb}\\b`, "mu"))
+    }
+    // Hidden until flag day: routable, never advertised (plan § Commands).
+    expect(gitHelp.stdout()).not.toMatch(/^\s{2}(?:in|run|refresh|submit|status|handoff)\b/mu)
     expect(gitHelp.stdout()).not.toContain("--repo")
     expect(gitHelp.stdout()).not.toContain("--cwd")
     expect(gitHelp.stdout()).not.toMatch(/^\s+queue /mu)
@@ -1095,16 +1093,14 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("--help"), root.io)).toBe(0)
     const rootHelp = root.stdout()
     expect(rootHelp).toContain("yrd (shipyard) — agentic software delivery")
-    expect(rootHelp).toMatch(/^Model:\n\s+Pick an issue\b/mu)
-    expect(rootHelp).toMatch(/^Objects:\n\s+issue\b/mu)
-    expect(rootHelp).toMatch(/^Boundaries:\n\s+Runs\b/mu)
-    expect(rootHelp).toMatch(/^Examples:\n\s+\$ yrd bay open\b/mu)
+    expect(rootHelp).toMatch(/^Aliases:\n\s+yrd submit\b/mu)
+    expect(rootHelp).toMatch(/^Examples:\n\s+\$ yrd submit fix-login\b/mu)
     expect(rootHelp).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
 
     const queue = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("queue", "--help"), queue.io)).toBe(0)
     const queueHelp = queue.stdout()
-    expect(queueHelp).toContain("manage integration queues")
+    expect(queueHelp).toContain("the line of changes for the target branch")
     expect(queueHelp).toMatch(/^\s+list\b/mu)
     expect(queueHelp).not.toMatch(/^\s+ls\b/mu)
     expect(queueHelp).not.toMatch(/^\s+(?:init|deinit|provision|deprovision)\b/mu)
@@ -1257,8 +1253,7 @@ describe("runYrd", () => {
     const app = await createApp()
     const root = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("--help"), root.io)).toBe(0)
-    expect(root.stdout()).toContain("Pick an issue")
-    for (const command of ["pr", "bay", "issue", "contest", "deployment", "queue", "check", "admin", "log", "watch"]) {
+    for (const command of ["queue submit", "queue run", "queue up", "queue list", "queue show", "check", "env"]) {
       expect(root.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
     const retiredQueueNoun = ["li", "ne"].join("")
@@ -1270,9 +1265,11 @@ describe("runYrd", () => {
 
     const queue = outputIO()
     expect(await runYrd(app, yrd("queue", "--help"), queue.io)).toBe(0)
-    for (const command of ["run", "pause", "resume", "finish", "audit"]) {
+    for (const command of ["submit", "run", "up", "list", "show"]) {
       expect(queue.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
+    // Hidden until flag day: still routable, never advertised.
+    expect(queue.stdout()).not.toMatch(/^\s+(?:pause|resume|finish|audit|cancel|uncarried)\b/mu)
     const queueRun = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--help"), queueRun.io)).toBe(0)
     expect(queueRun.stdout()).not.toContain("--retry")
@@ -1694,7 +1691,7 @@ describe("runYrd", () => {
 
     const human = outputIO()
     expect(await runYrd(app, yrd("queue", "list"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain("window last 7d (default; open changes always shown; --since widens)")
+    expect(human.stdout()).toContain("window last 7d (default; changes in line always shown; --since widens)")
 
     const scoped = outputIO()
     expect(await runYrd(app, yrd("queue", "list", "--since", "3h", "--json"), scoped.io), scoped.stderr()).toBe(0)
@@ -1948,7 +1945,7 @@ describe("runYrd", () => {
     const help = outputIO({ columns: 80 })
     expect(await runYrd(app, yrd("pr"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).toContain("Usage: yrd change|mr [options] [command]")
-    expect(help.stdout()).toContain("list [options]")
+    expect(help.stdout()).toMatch(/^\s{2}list\s/mu)
     expect(help.stdout()).not.toMatch(/^PR\s+BRANCH/mu)
 
     for (const verb of ["list", "ls"]) {
@@ -2052,7 +2049,7 @@ describe("runYrd", () => {
     const app = await createApp()
     await openAndSubmit(app)
     // Drain PR1 to completion: R1 is terminal (passed/integrated), not cancelable.
-    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), outputIO().io)).toBe(0)
     const cancel = outputIO()
     expect(await runYrd(app, yrd("queue", "cancel", "R1"), cancel.io)).not.toBe(0)
     expect(cancel.stderr()).toContain("only a running or waiting run")
@@ -2730,7 +2727,7 @@ describe("runYrd", () => {
     // and a queue run that cannot execute the plan is stuck either way.
     const once = outputIO()
     const onceApp = await createApp()
-    expect(await runYrd(onceApp, yrd("queue", "run", "--once"), once.io, refuse)).toBe(2)
+    expect(await runYrd(onceApp, yrd("queue", "run"), once.io, refuse)).toBe(2)
     expect(once.stderr()).toContain("error: this process installed check→merge, but main tip declares")
     // The gate reads the installed leg only: a journal walk is `queue audit`'s
     // job, and a stale record is not something a restart fixes.
@@ -2749,7 +2746,7 @@ describe("runYrd", () => {
     }
     const tolerant = outputIO()
     const tolerantApp = await createApp()
-    expect(await runYrd(tolerantApp, yrd("queue", "run", "--once"), tolerant.io, mismatchOnly)).toBe(0)
+    expect(await runYrd(tolerantApp, yrd("queue", "run"), tolerant.io, mismatchOnly)).toBe(0)
   })
 
   it("recycles a TRUE habitant instead of refusing loud, when its installed plan goes stale", async () => {
@@ -5558,7 +5555,7 @@ describe("runYrd", () => {
     expect(await app.queue.history()).toEqual([])
 
     const drain = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), drain.io), drain.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), drain.io), drain.stderr()).toBe(0)
     expect(JSON.parse(drain.stdout())).toMatchObject({
       results: [
         {
@@ -5838,14 +5835,14 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
 
     const once = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once"), once.io), once.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run"), once.io), once.stderr()).toBe(0)
 
     expect(once.stdout()).not.toContain("Queue idle")
     expect(once.stdout()).toContain("carrier-drops-landed")
     expect(once.stdout()).toContain("push a new revision to re-enter")
 
     const json = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), json.io), json.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), json.io), json.stderr()).toBe(0)
     expect(JSON.parse(json.stdout())).toMatchObject({
       command: "queue.run",
       results: [],
@@ -5876,7 +5873,7 @@ describe("runYrd", () => {
     await app.bays.submit({ branch: "topic/also-progresses", headSha: "c".repeat(40), base: "main", baseSha: BASE_SHA })
     await app.bays.requestChecks({ pr: "PR3", baseSha: BASE_SHA })
     const mixed = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), mixed.io), mixed.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), mixed.io), mixed.stderr()).toBe(0)
     expect(JSON.parse(mixed.stdout())).toMatchObject({
       command: "queue.run",
       results: [{ prs: [{ id: "PR3" }] }],
@@ -5975,12 +5972,12 @@ describe("runYrd", () => {
     await openAndSubmit(app)
 
     const integrated = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once", "--steps", "--json"), integrated.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--steps", "--json"), integrated.io)).toBe(0)
     expect(JSON.parse(integrated.stdout())).toEqual({ command: "queue.run", publications: [], results: [] })
     expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
 
     const idle = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), idle.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), idle.io)).toBe(0)
     expect(JSON.parse(idle.stdout())).toMatchObject({
       command: "queue.run",
       results: [
@@ -5995,7 +5992,7 @@ describe("runYrd", () => {
     })
 
     const drained = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), drained.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), drained.io)).toBe(0)
     expect(JSON.parse(drained.stdout())).toEqual({ command: "queue.run", publications: [], results: [] })
   })
 
@@ -6133,7 +6130,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
 
     const integrated = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), integrated.io), integrated.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), integrated.io), integrated.stderr()).toBe(0)
     expect(JSON.parse(integrated.stdout())).toMatchObject({
       results: [
         {
@@ -6164,7 +6161,7 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "list"), output.io), output.stderr()).toBe(0)
     const frame = output.stdout()
-    expect(frame.indexOf("pr#2.1")).toBeLessThan(frame.indexOf("pr#1.1"))
+    expect(frame.indexOf("issue/submitted-first")).toBeLessThan(frame.indexOf("issue/created-first"))
   })
 
   it("uses read capabilities for the dashboard and contest view without appending events", async () => {
@@ -9394,7 +9391,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("accepts queue ls --latest as the canonical queue list lens", async () => {
+  it("accepts queue ls --latest, the live view's flag, on the five-state listing", async () => {
     const app = await createApp()
     await openAndSubmit(app)
 
@@ -9407,11 +9404,11 @@ describe("runYrd", () => {
       status
         .stdout()
         .split("\n")
-        .find((row) => row.includes("pr#1.1")),
-    ).toContain("ready")
+        .find((row) => row.includes("issue/one")),
+    ).toContain("queued")
   })
 
-  it("uses the queue timeline by default while --latest only changes row projection", async () => {
+  it("prints every change in line as one five-state row, whatever the live view's flags", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/one", headSha: "1".repeat(40), base: "main" })
     await app.bays.submit({ branch: "topic/two", headSha: "2".repeat(40), base: "main" })
@@ -9428,24 +9425,13 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), latest.io), latest.stderr()).toBe(0)
 
-    expect(
-      plain
-        .stdout()
-        .split("\n")
-        .find((row) => row.includes("pr#1.1")),
-    ).toContain("ready")
-    expect(
-      plain
-        .stdout()
-        .split("\n")
-        .find((row) => row.includes("pr#2.1")),
-    ).toContain("ready")
-    expect(latest.stdout()).toContain("pr#1.1")
-    expect(latest.stdout()).toContain("pr#2.1")
-    // Non-default-only FILTER row (user respec 2026-07-15): `latest` renders
-    // only when the collapse is on — no `latest=no` placeholder.
-    expect(plain.stdout()).not.toContain("latest")
-    expect(latest.stdout()).toContain("latest")
+    for (const frame of [plain.stdout(), latest.stdout()]) {
+      expect(frame).toMatch(/^STATE\s+POSITION\s+RESULT\s+WORK ITEM\s+BRANCH\s+HEAD/mu)
+      expect(frame.split("\n").find((row) => row.includes("topic/one"))).toContain("queued")
+      expect(frame.split("\n").find((row) => row.includes("topic/two"))).toContain("queued")
+    }
+    // In line, by the position the queue published: topic/one was submitted first.
+    expect(plain.stdout().indexOf("topic/one")).toBeLessThan(plain.stdout().indexOf("topic/two"))
   })
 
   it("renders queue --watch identically to root watch", async () => {
@@ -9552,13 +9538,19 @@ describe("runYrd", () => {
         scope: { signal: controller.signal, sleep: async () => controller.abort() },
       })
       expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(0)
-      expect(
-        output
-          .stdout()
-          .trimEnd()
-          .split("\n")
-          .map((row) => JSON.parse(row) as Record<string, unknown>),
-      ).toEqual([expected])
+      // The live view streams the same timeline projection the static listing
+      // carries beside its five-state rows.
+      const frames = output
+        .stdout()
+        .trimEnd()
+        .split("\n")
+        .map((row) => JSON.parse(row) as Record<string, unknown>)
+      expect(frames).toHaveLength(1)
+      expect(frames[0]).toMatchObject({
+        command: "queue.list",
+        projection: expected.projection as Record<string, unknown>,
+        results: expected.results as unknown[],
+      })
     }
 
     let mounted: ReactElement | undefined
@@ -10744,6 +10736,31 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("integrated")
   })
 
+  it("queue show reads a branch's changes, each check's result and log, under its own name", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(0)
+
+    // The branch is the selector (plan § Commands): the same view `pr runs`
+    // renders, addressed by what the submitter pushed rather than a minted id.
+    const human = outputIO({ columns: 200 })
+    expect(await runYrd(app, yrd("queue", "show", "issue/one"), human.io), human.stderr()).toBe(0)
+    expect(human.stdout()).toContain("STEP")
+    expect(human.stdout()).toContain("check")
+    expect(human.stdout()).toContain("MERGE")
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("queue", "show", "issue/one", "--json"), json.io), json.stderr()).toBe(0)
+    const parsed = JSON.parse(json.stdout()) as { command: string; runs: readonly { run: string }[] }
+    expect(parsed.command).toBe("queue.show")
+    expect(parsed.runs.map((run) => run.run)).toEqual(["R1"])
+
+    // `yrd show` is the same command object, rewritten before Commander sees it.
+    const alias = outputIO()
+    expect(await runYrd(app, yrd("show", "issue/one", "--json"), alias.io), alias.stderr()).toBe(0)
+    expect(JSON.parse(alias.stdout())).toEqual(parsed)
+  })
+
   it("shows run proof slices, revisions, timings, evidence, checkpoint, and merge proof", async () => {
     const app = await createApp()
     await openAndSubmit(app)
@@ -10914,8 +10931,8 @@ describe("runYrd", () => {
 
     const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
     expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    // The old ROWS "oldest=" cell has no place in the calendar STATS surface.
-    expect(laterQueue.stdout()).toContain("STATS")
+    // The five-state listing, not the retired ROWS "oldest=" cell.
+    expect(laterQueue.stdout()).toMatch(/^STATE\s+POSITION\s+RESULT/mu)
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)
@@ -12113,7 +12130,7 @@ describe("runYrd", () => {
       const punctuated = outputIO()
       expect(await runYrd(app, yrd("bay", operand), punctuated.io)).toBe(2)
       expect(punctuated.stderr()).toBe(
-        `error: unknown command '${operand}' (Run 'yrd bay --help' for available commands.)\n`,
+        `error: unknown command '${operand}' (Run 'yrd env --help' for available commands.)\n`,
       )
     }
 
@@ -12164,7 +12181,7 @@ describe("runYrd", () => {
     const usage = outputIO()
     expect(await runYrd(app, yrd("bay", "adopt", "old-branch"), usage.io)).toBe(2)
     expect(usage.stdout()).toBe("")
-    expect(usage.stderr()).toBe("error: unknown command 'adopt' (Run 'yrd bay --help' for available commands.)\n")
+    expect(usage.stderr()).toBe("error: unknown command 'adopt' (Run 'yrd env --help' for available commands.)\n")
 
     const refusal = outputIO()
     expect(await runYrd(app, yrd("bay", "close", "missing"), refusal.io)).toBe(1)
@@ -12318,7 +12335,7 @@ describe("runYrd", () => {
         },
       },
     })
-    expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), watch.io)).toBe(3)
+    expect(await runYrd(app, yrd("queue", "up", "--interval", "1"), watch.io)).toBe(3)
     expect(watch.stdout()).toBe("")
     expect(sleeps).toEqual([1_000])
   })
@@ -12347,7 +12364,7 @@ describe("runYrd", () => {
           },
         },
       })
-      expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), human.io), human.stderr()).toBe(3)
+      expect(await runYrd(app, yrd("queue", "up", "--interval", "1"), human.io), human.stderr()).toBe(3)
       expect(human.stdout()).toBe(presence)
       expect(sleeps).toEqual([1_000, 1_000])
 
@@ -12360,7 +12377,7 @@ describe("runYrd", () => {
           sleep: async () => jsonController.abort(),
         },
       })
-      expect(await runYrd(app, yrd("queue", "run", "--interval", "1", "--json"), json.io), json.stderr()).toBe(3)
+      expect(await runYrd(app, yrd("queue", "up", "--interval", "1", "--json"), json.io), json.stderr()).toBe(3)
       expect(json.stdout()).toBe("")
     } finally {
       safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
@@ -12399,7 +12416,7 @@ describe("runYrd", () => {
       // `--once` is a one-shot pass over the whole default queue — also no
       // presence banner, and the same interactive table projection.
       const onceHuman = outputIO({ cwd: repo, runner })
-      expect(await runYrd(await readyApp(), yrd("queue", "run", "--once"), onceHuman.io), onceHuman.stderr()).toBe(0)
+      expect(await runYrd(await readyApp(), yrd("queue", "run"), onceHuman.io), onceHuman.stderr()).toBe(0)
       expect(onceHuman.stdout()).not.toContain("Queue runner ")
       expect(onceHuman.stdout()).toContain("STATE")
 
@@ -12409,7 +12426,7 @@ describe("runYrd", () => {
       // follow-runner's.
       const automaticHuman = outputIO({ cwd: repo, runner, scope: onePassScope() })
       expect(
-        await runYrd(await readyApp(), yrd("queue", "run", "--interval", "1"), automaticHuman.io),
+        await runYrd(await readyApp(), yrd("queue", "up", "--interval", "1"), automaticHuman.io),
         automaticHuman.stderr(),
       ).toBe(3)
       expect(automaticHuman.stdout()).toBe(presence)
@@ -12418,11 +12435,11 @@ describe("runYrd", () => {
       // mode:"follow", with no presence banner in the JSON stream.
       const automaticJson = outputIO({ cwd: repo, runner, scope: onePassScope() })
       expect(
-        await runYrd(await readyApp(), yrd("queue", "run", "--interval", "1", "--json"), automaticJson.io),
+        await runYrd(await readyApp(), yrd("queue", "up", "--interval", "1", "--json"), automaticJson.io),
         automaticJson.stderr(),
       ).toBe(3)
       expect(automaticJson.stdout().trim().split("\n")).toHaveLength(1)
-      expect(JSON.parse(automaticJson.stdout())).toMatchObject({ command: "queue.run", mode: "follow" })
+      expect(JSON.parse(automaticJson.stdout())).toMatchObject({ command: "queue.up" })
       expect(automaticJson.stdout()).not.toContain("Queue runner ")
     } finally {
       safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
@@ -12658,7 +12675,7 @@ describe("runYrd", () => {
     await app.bays.submit({ branch: "issue/attested", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     const revision = currentChangeRev(app.bays.pr("PR1")!)
     if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
-    await runYrd(app, yrd("queue", "run", "--once"), outputIO().io)
+    await runYrd(app, yrd("queue", "run"), outputIO().io)
     const run = Queues.values(app.state().queues).at(0)
     if (run === undefined) throw new Error("expected a queue run in the journal")
     const pointer = {
@@ -12791,7 +12808,7 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     await openAndSubmit(app)
     const tracked = trackedScope()
     const run = outputIO({ scope: tracked.scope })
-    expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), run.io), run.stderr()).toBe(3)
+    expect(await runYrd(app, yrd("queue", "up", "--interval", "1"), run.io), run.stderr()).toBe(3)
     // Followed: the loop slept (and was aborted) rather than exiting one-shot.
     expect(tracked.sleeps).toEqual([1_000])
   })
@@ -12809,7 +12826,7 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     await openAndSubmit(app)
     const tracked = trackedScope()
     const run = outputIO({ scope: tracked.scope })
-    expect(await runYrd(app, yrd("queue", "run", "--once"), run.io), run.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run"), run.io), run.stderr()).toBe(0)
     // One-shot: never entered the follow loop, so it never slept.
     expect(tracked.sleeps).toEqual([])
     expect(run.stdout()).toContain("STATE")
@@ -13731,7 +13748,7 @@ describe("queue run — follow-runner output is loggily/JSON only (#undead runne
     const app = await createApp()
     await openAndSubmit(app)
     const runHuman = outputIO({ scope: onePassScope() })
-    expect(await runYrd(app, yrd("queue", "run"), runHuman.io), runHuman.stderr()).toBe(3)
+    expect(await runYrd(app, yrd("queue", "up"), runHuman.io), runHuman.stderr()).toBe(3)
     expect(runHuman.stdout()).not.toContain("STATE")
     expect(runHuman.stdout()).not.toContain("STEPS")
   })
@@ -13740,8 +13757,8 @@ describe("queue run — follow-runner output is loggily/JSON only (#undead runne
     const app = await createApp()
     await openAndSubmit(app)
     const runJson = outputIO({ scope: onePassScope() })
-    expect(await runYrd(app, yrd("queue", "run", "--json"), runJson.io), runJson.stderr()).toBe(3)
-    expect(runJson.stdout()).toContain("queue.run")
+    expect(await runYrd(app, yrd("queue", "up", "--json"), runJson.io), runJson.stderr()).toBe(3)
+    expect(runJson.stdout()).toContain("queue.up")
   })
 })
 

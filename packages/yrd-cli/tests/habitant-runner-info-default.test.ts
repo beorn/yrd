@@ -139,7 +139,7 @@ checks:
 
   it("prints each live step transition once at explicit INFO through the shipping process", async () => {
     const { repo } = await queuedRunnerRepo()
-    const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
+    const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "up", "--interval", "1"], {
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
@@ -188,7 +188,7 @@ checks:
     // though the concise human branch drops it.
     const { repo } = await runnerRepo()
     const logFile = join(repo, "habitant.jsonl")
-    const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
+    const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "up", "--interval", "1"], {
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
@@ -226,7 +226,7 @@ checks:
   it("keeps the human stream scannable: friendly-prefixed rows, roll-ups and journal chatter dropped", async () => {
     const { repo } = await runnerRepo()
     const logFile = join(repo, "timeline.jsonl")
-    const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
+    const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "up", "--interval", "1"], {
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",

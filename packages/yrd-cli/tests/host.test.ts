@@ -3644,54 +3644,26 @@ checks: [{check: {run: "true"}}]
     ).toBe(0)
     expect(stdout).toContain("Usage: yrd")
     expect(stdout).toContain("yrd (shipyard) — agentic software delivery")
-    expect(stdout).toContain("Model:")
-    expect(stdout).toContain("Objects:")
-    expect(stdout).toContain("Boundaries:")
+    expect(stdout).toContain("Aliases:")
     expect(stdout).toContain("--repo <path>")
     expect(stdout).toContain("--config <path>")
     expect(stdout).toContain("YRD_REPO")
     expect(stdout).not.toContain("--cwd")
     expect(stdout).not.toContain("YRD_CWD")
     expect(stdout).not.toContain("--root")
-    const commandBlock = stdout.match(/Commands:\n(?<commands>[\s\S]*?)\n\nModel:/u)?.groups?.commands ?? ""
+    const commandBlock = stdout.match(/Commands:\n(?<commands>[\s\S]*?)\n\nAliases:/u)?.groups?.commands ?? ""
+    // The seven commands (plan § Commands), by full path, and nothing else;
+    // every other command stays registered and hidden until flag day.
     expect(
-      commandBlock
-        .split("\n")
-        .flatMap(
-          (text) =>
-            text.match(/^\s{2}(?<command>[a-z]+(?:\|[a-z]+)?)(?:\s+(?:\[[^\]]+\]|<[^>]+>))*\s{2,}/u)?.groups?.command ??
-            [],
-        ),
+      commandBlock.split("\n").flatMap((text) => text.match(/^\s{2}(?<term>\S.*?)\s{2,}/u)?.groups?.term ?? []),
     ).toEqual([
-      "bay",
-      "issue",
-      "contest",
-      "queue",
-      "check",
-      "doctor",
-      "why",
-      "admin",
-      "log",
-      "watch",
-      "cancel",
-      // The branch-state quartet: `yrd branch <state>` is the complete set,
-      // and every state is also a bare verb. Root `submit` is one of them
-      // (@cto 2026-08-19, cliverbs ruling-a) — it used to alias the change path,
-      // which keeps its own spelling as `yrd pr submit`.
-      "branch",
-      "draft",
-      "submit",
-      "archive",
-      "ignore",
-      "deployment",
-      "in",
-      "sh",
-      "run",
-      "change|mr",
-      // `gitlink advance` — advancing a submodule's recorded commit is one verb, not the
-      // hand-built sequence all thirteen of them were on 2026-08-29/30.
-      "gitlink",
-      "guard",
+      "queue submit [branch...]",
+      "queue run [selector...]",
+      "queue up",
+      "queue list [filter...]",
+      "queue show <branch>",
+      "check <name...>",
+      "env open|close|list|path",
     ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
@@ -3709,7 +3681,7 @@ checks: [{check: {run: "true"}}]
         },
       }),
     ).toBe(0)
-    expect(stdout).toContain("Usage: yrd bay")
+    expect(stdout).toContain("Usage: yrd env|bay")
     expect(stdout).not.toContain("--repo <path>")
     expect(stdout).not.toContain("--cwd")
     expect(stderr).toBe("")
@@ -3893,11 +3865,10 @@ checks: [{check: {run: "true"}}]
       }),
     ).toBe(0)
     expect(stdout).toContain("Usage: yrd queue")
-    expect(stdout).toContain("yrd --repo <repository> queue run PR7 --steps check,merge")
-    expect(stdout).toContain("yrd --repo <repository> queue pause --reason maintenance --for 30m --allow PR7")
+    expect(stdout).toContain("$ yrd queue submit fix-login")
+    expect(stdout).toContain("$ yrd queue up")
     expect(stdout).not.toContain("queue recover")
-    expect(stdout).toContain("yrd --repo <repository> queue run")
-    expect(stdout).not.toMatch(/\$ yrd queue (?:run|pause|recover)(?:\s|$)/u)
+    expect(stdout).not.toMatch(/\$ yrd queue (?:pause|recover)(?:\s|$)/u)
     expect(stderr).toBe("")
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
   })
@@ -4106,7 +4077,7 @@ checks: [{check: {run: "true"}}]
     // exists — but that execution is NOT certificate authority: the run's own
     // check step stays not-selected and the merge still refuses uncertified.
     const exitCode = await runYrdProcess(
-      ["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "--once", "--steps", "merge", "--json"],
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "--steps", "merge", "--json"],
       {
         cwd: repo,
         stdout: (text) => {
@@ -4200,7 +4171,7 @@ checks: [{check: {run: "true"}}]
     // eligibility gate (the marker exists), but the merge-only run still holds
     // no certificate for either member and must refuse without one.
     const exitCode = await runYrdProcess(
-      ["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "--once", "--steps", "merge", "--json"],
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "--steps", "merge", "--json"],
       {
         cwd: repo,
         stdout: (text) => {
@@ -4284,7 +4255,7 @@ checks: [{check: {run: "true"}}]
     // NEITHER execution (pre-submit or admission) is certificate authority for
     // the merge-only run.
     const exitCode = await runYrdProcess(
-      ["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "--once", "--steps", "merge", "--json"],
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "--steps", "merge", "--json"],
       {
         cwd: repo,
         stdout: (text) => {
@@ -4988,7 +4959,7 @@ checks: [{check: {run: "true"}}]
     stdout = ""
     stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "run", "--once", "--json"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "run", "--json"], {
         cwd: repo,
         stdout: (text) => {
           stdout += text
@@ -5065,7 +5036,7 @@ checks: [{check: {run: "true"}}]
     let runOut = ""
     let runErr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "run", "--once", "--json"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "run", "--json"], {
         cwd: repo,
         stdout: (text) => {
           runOut += text
@@ -5203,7 +5174,7 @@ checks: [{check: {run: "true"}}]
     stderr = ""
     // An author-owned refusal sends the change back: exit 1, pass continued
     // (the three-way verdict, @i/10-yrd/24028).
-    expect(await invoke(["queue", "run", "--once", "--json"]), stderr).toBe(QUEUE_OUTCOME_EXIT.changeRefused)
+    expect(await invoke(["queue", "run", "--json"]), stderr).toBe(QUEUE_OUTCOME_EXIT.changeRefused)
     expect(JSON.parse(stdout)).toMatchObject({ command: "queue.run", publications: [], results: [] })
     expect(stderr).toContain("min-commit-unpublished")
     expect(stderr).toContain("push it to the submodule's own main first")
@@ -5215,7 +5186,7 @@ checks: [{check: {run: "true"}}]
 
     stdout = ""
     stderr = ""
-    expect(await invoke(["queue", "run", "--once", "--json"]), stderr).toBe(0)
+    expect(await invoke(["queue", "run", "--json"]), stderr).toBe(0)
     const integrated = JSON.parse(stdout) as {
       results: Array<{ integration?: { commit?: string } }>
     }
@@ -5307,7 +5278,7 @@ checks: [{check: {run: "true"}}]
     let runOutput = ""
     let runError = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "--once", "--json"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "--json"], {
         cwd: repo,
         stdout: (text) => {
           runOutput += text
@@ -5475,7 +5446,7 @@ checks: [{check: {run: "true"}}]
     await submitter.close()
 
     const cli = Bun.spawn(
-      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "--interval", "1", "--json"],
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "up", "--interval", "1", "--json"],
       { cwd: repo, stdout: "pipe", stderr: "pipe" },
     )
     const stdout = new Response(cli.stdout).text()
@@ -5548,7 +5519,7 @@ checks: [{check: {run: "true"}}]
     }
 
     const child = Bun.spawn(
-      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "--once", "--json"],
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "--json"],
       {
         cwd: repo,
         env: { ...process.env, LOGGILY_FILE: join(repo, "..", "one-shot.log") },
@@ -5625,7 +5596,7 @@ checks: [{check: {run: "true"}}]
           process.execPath,
           join(import.meta.dirname, "../../../bin/yrd.ts"),
           "queue",
-          "run",
+          "up",
           "--interval",
           "1",
           "--json",
@@ -5734,15 +5705,7 @@ checks: [{check: {run: "true"}}]
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
     const implementationSource = `git:${await git(repo, "rev-parse", "HEAD")}`
     const cli = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dirname, "../../../bin/yrd.ts"),
-        "queue",
-        "run",
-        "--interval",
-        "10",
-        "--json",
-      ],
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "up", "--interval", "10", "--json"],
       {
         cwd: repo,
         env: {
@@ -5816,15 +5779,7 @@ checks: [{check: {run: "true"}}]
     await git(repo, "commit", "-qm", "select release queue")
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
     const cli = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dirname, "../../../bin/yrd.ts"),
-        "queue",
-        "run",
-        "--interval",
-        "10",
-        "--json",
-      ],
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "up", "--interval", "10", "--json"],
       { cwd: repo, stdout: "pipe", stderr: "pipe" },
     )
     const stdout = new Response(cli.stdout).text()
@@ -5870,7 +5825,7 @@ checks: [{check: {run: "true"}}]
       process.execPath,
       join(import.meta.dirname, "../../../bin/yrd.ts"),
       "queue",
-      "run",
+      "up",
       "--interval",
       "1",
       "--json",

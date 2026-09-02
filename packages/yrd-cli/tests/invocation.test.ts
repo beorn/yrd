@@ -76,16 +76,36 @@ describe("resolveInvocation", () => {
 describe("normalizeYrdInvocation", () => {
   it.each([
     {
-      argv: ["/usr/bin/bun", "/repo/bin/yrd", "queue", "run"],
-      expected: { args: ["queue", "run"], posture: "habitant-queue-run", queueRunMode: "follow" },
+      argv: ["/usr/bin/bun", "/repo/bin/yrd", "queue", "up"],
+      expected: { args: ["queue", "up"], posture: "habitant-queue-run", queueRunMode: "follow" },
+    },
+    {
+      argv: ["yrd", "up", "--interval", "1"],
+      expected: { args: ["queue", "up", "--interval", "1"], posture: "habitant-queue-run", queueRunMode: "follow" },
     },
     {
       argv: ["yrd", "queue", "run", "PR7"],
       expected: { args: ["queue", "run", "PR7"], posture: "one-shot-queue-run", queueRunMode: "once" },
     },
     {
-      argv: ["yrd", "queue", "run", "--once"],
-      expected: { args: ["queue", "run", "--once"], posture: "one-shot-queue-run", queueRunMode: "once" },
+      argv: ["yrd", "queue", "run"],
+      expected: { args: ["queue", "run"], posture: "one-shot-queue-run", queueRunMode: "once" },
+    },
+    {
+      argv: ["yrd", "submit", "fix-login"],
+      expected: { args: ["queue", "submit", "fix-login"], posture: "active", queueRunnerCheck: false },
+    },
+    {
+      argv: ["yrd", "show", "fix-login"],
+      expected: { args: ["queue", "show", "fix-login"], posture: "viewer", queueRunnerCheck: false },
+    },
+    {
+      argv: ["yrd", "env", "ls"],
+      expected: { args: ["bay", "list"], posture: "viewer", queueRunnerCheck: false },
+    },
+    {
+      argv: ["yrd", "env", "open", "--bay", "fix"],
+      expected: { args: ["bay", "open", "--bay", "fix"], posture: "bracketed-bay-open", queueRunnerCheck: false },
     },
     {
       argv: ["yrd", "queue", "list", "--check", "--json"],
@@ -165,13 +185,37 @@ describe("repository aliases supplied by a composition host", () => {
       },
     },
     {
-      args: ["queue", "run", "beta", "--once"],
+      args: ["queue", "run", "beta"],
       expected: {
         kind: "repository-write",
         repository: { name: "beta", path: "/srv/beta" },
         queue: { base: "release" },
-        args: ["--repo", "/srv/beta", "queue", "run", "--once"],
+        args: ["--repo", "/srv/beta", "queue", "run"],
       },
+    },
+    {
+      args: ["queue", "up", "beta", "--interval", "1"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "up", "--interval", "1"],
+      },
+    },
+    {
+      // A write whose first operand is a branch, not a repository: the branch
+      // travels in the tail and the repository is the one named after it.
+      args: ["queue", "submit", "beta", "fix-login"],
+      expected: {
+        kind: "repository-write",
+        repository: { name: "beta", path: "/srv/beta" },
+        queue: { base: "release" },
+        args: ["--repo", "/srv/beta", "queue", "submit", "fix-login"],
+      },
+    },
+    {
+      args: ["queue", "show", "fix-login"],
+      expected: { kind: "bypass", args: ["queue", "show", "fix-login"] },
     },
     {
       args: ["queue", "pause", "beta", "--reason", "schema cutover", "--for", "30m"],
@@ -277,12 +321,12 @@ describe("repository aliases supplied by a composition host", () => {
       },
     },
     {
-      args: ["queue", "beta", "run", "--once"],
+      args: ["queue", "beta", "run"],
       expected: {
         kind: "repository-write",
         repository: { name: "beta", path: "/srv/beta" },
         queue: { base: "release" },
-        args: ["--repo", "/srv/beta", "queue", "run", "--once"],
+        args: ["--repo", "/srv/beta", "queue", "run"],
       },
     },
     {
