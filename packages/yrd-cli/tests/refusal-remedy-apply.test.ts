@@ -274,9 +274,13 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
       code: "composition-invalid",
       resolution: ["yrd pr submit <branch>"],
     })
-    // error, not warn (raised 2026-08-31): a remedy step refusing needs a
-    // person, no mechanical retry can help — queue-INTEGRITY, loud immediately.
-    expect(h.errors).toContainEqual(
+    // WARN (demoted 2026-09-01, when ERROR became fatal to the pass): this
+    // row is a settled needs-person outcome for one change, not a fault in
+    // the mechanism driving the pass, so it must never end the whole pass —
+    // raised to ERROR on 2026-08-31, then reverted by the source change
+    // (8a2055b3) that made ERROR fatal; this assertion was never brought
+    // back down with it.
+    expect(h.warns).toContainEqual(
       expect.objectContaining({ props: expect.objectContaining({ action: "queue-refusal-remedy-failed" }) }),
     )
     // The wedge is now a human's problem — but exactly once, not once per cycle.
@@ -307,10 +311,11 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
     // A restarted habitant has an empty process-local Set. The durable Queue
     // settlement remains authoritative and must still suppress re-selection.
     expect(await applyRefusalRemedies(h.app, h.services, h.io, new Set())).toEqual([])
-    // error, not warn (raised 2026-08-31): same queue-INTEGRITY reasoning —
-    // no mechanical remedy exists, so this line is the only record a person
-    // is needed.
-    expect(h.errors).toContainEqual(
+    // WARN (demoted 2026-09-01, when ERROR became fatal to the pass): same
+    // settled-needs-person reasoning as the remedy-failed case above — one
+    // change's work for a person is durably recorded but never a reason to
+    // end the whole pass.
+    expect(h.warns).toContainEqual(
       expect.objectContaining({ props: expect.objectContaining({ action: "queue-refusal-escalated" }) }),
     )
   })
