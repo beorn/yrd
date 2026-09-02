@@ -1425,10 +1425,14 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
       { id: "R1", status: "completed", conclusion: "success" },
     ])
 
-    // The merging run now carries the proof on its own record — the durable
-    // home, stamped beside `passedAt`, that outlives Job retention.
+    // The merging run now carries the proof and its own merge clock on the
+    // record — the durable home that outlives Job retention.
     const merging = Queues.get(app.state().queues, "R1")
-    expect(merging).toMatchObject({ passedAt: expect.any(String), integration: { commit: MERGED, baseSha: BASE } })
+    expect(merging).toMatchObject({
+      integrationAt: expect.any(String),
+      passedAt: expect.any(String),
+      integration: { commit: MERGED, baseSha: BASE },
+    })
 
     // ...and the member re-materializes closed+merged, carrying that proof.
     const afterMerge = materializeDerivedRunMembers(app.state().bays, app.state().queues, [entry])[0]

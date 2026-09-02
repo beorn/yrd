@@ -185,6 +185,7 @@ import {
 } from "./projection-index.ts"
 import { candidateRefFor } from "./candidate-refs.ts"
 import { compactQueuesState, queueRetentionRoot } from "./retention.ts"
+import { queueSnapshot } from "./queue-status-projection.ts"
 
 /**
  * A queue command refused to compose because a peer's Queue run already holds
@@ -1248,7 +1249,7 @@ const QuiesceLegacyRunArgsSchema = z
 export type QuiesceLegacyRunArgs = Readonly<z.infer<typeof QuiesceLegacyRunArgsSchema>>
 const SettleOrphanedRunArgsSchema = QuiesceLegacyRunArgsSchema.extend({
   /** The read's clock; without it an in_progress cursor Job cannot be judged. */
-  now: z.string().datetime({ offset: true }).optional(),
+  now: z.iso.datetime({ offset: true }).optional(),
   /** Holders the caller has proven dead; every other holder is judged by its lease alone. */
   deadRunners: z.array(z.string().trim().min(1)).optional(),
 }).strict()
@@ -2197,7 +2198,7 @@ function createQueue<Shape extends ChangeShape>(
     const record = resolveChange(runtime().bays, pr)
     if (record !== undefined) return currentChangeRev(record).submitter
     const submit = runtime().bays.submits[branch]
-    return submit !== undefined && submit.sha === sha ? submit.notify : undefined
+    return submit?.sha === sha ? submit.notify : undefined
   }
   const runOutcomes = (run: Run): readonly QueueOutcome[] => {
     if (!Queues.terminal(run)) return []
@@ -2382,7 +2383,7 @@ function createQueue<Shape extends ChangeShape>(
       refresh: async (selector?: string): Promise<readonly CycleBaseMove[]> => {
         const only = selector === undefined ? undefined : baseIdentity(selector)
         const moves: CycleBaseMove[] = []
-        for (const [base, memo] of [...resolved]) {
+        for (const [base, memo] of resolved) {
           if (only !== undefined && base !== only) continue
           const from = await memo
           const to = await resolveBaseSha(base)
@@ -4729,7 +4730,7 @@ function createQueue<Shape extends ChangeShape>(
       if (run === undefined || Queues.terminal(run)) continue
       const step = run.steps[run.cursor]
       const job = step?.job
-      if (step === undefined || job === undefined || job.status !== "in_progress") continue
+      if (step === undefined || job?.status !== "in_progress") continue
       const liveness = deriveRunLiveness({ runner: job.runner, leaseExpiresAt: job.leaseExpiresAt }, probe)
       if (liveness.state !== "orphaned") continue
       const landedMergeReader = step.kind !== "merge" ? undefined : landedMerge === undefined ? "absent" : "consulted"
@@ -7784,7 +7785,7 @@ const RunIntegrationFactSchema = z.object({
  * Write-once per run: the first terminal to name it wins, so the batch's later
  * members cannot rewrite a proof, and replay is idempotent.
  */
-function stampRunIntegration(queues: DeepReadonly<QueuesState>, data: unknown): QueuesState {
+function stampRunIntegration(queues: DeepReadonly<QueuesState>, data: unknown, terminalAt: string): QueuesState {
   const parsed = RunIntegrationFactSchema.safeParse(data)
   if (!parsed.success || parsed.data.run === undefined) return queues as QueuesState
   const record = Queues.get(queues, parsed.data.run)
@@ -7801,7 +7802,17 @@ function stampRunIntegration(queues: DeepReadonly<QueuesState>, data: unknown): 
     baseSha,
     ...(alreadyLanded === undefined ? {} : { alreadyLanded }),
   }
-  return { ...queues, records: Queues.set(queues.records, { ...record, integration }) }
+  return {
+    ...queues,
+    records: Queues.set(queues.records, {
+      ...record,
+      integration,
+      // The integration fact is itself the terminal fact. Stamping its clock
+      // here closes the window where the proof existed but eligibility still
+      // read the revision as live while waiting for queue/run/settled.
+      integrationAt: record.integrationAt ?? terminalAt,
+    }),
+  }
 }
 
 function projectSettledQueueRun(state: DeepReadonly<QueueState>, applied: Event): QueueState {
@@ -7859,18 +7870,54 @@ function markQueueTerminalRoot(queues: DeepReadonly<QueuesState>, root: RunId): 
   }
 }
 
+/**
+ * Repair the short-lived projection shape written before the integration fact
+ * also stamped `integrationAt`: the Run already has the proof, and its retained
+ * merge Job still owns the exact finish clock. A missing Job clock is not
+ * guessed from `startedAt`; that would turn an unknown merge time into a
+ * confident dead-man reading, so compaction fails with both consulted fields
+ * named instead.
+ */
+export function backfillIntegrationTimes(
+  queues: DeepReadonly<QueuesState>,
+  jobs: DeepReadonly<JobsState>,
+): QueuesState {
+  let records = queues.records
+  for (const record of Queues.values(queues)) {
+    if (record.integration === undefined || record.integrationAt !== undefined) continue
+    // Records projected before `integrationAt` already have only the later
+    // whole-run settlement clock once Job retention has pruned their merge
+    // Job. Preserve that honest legacy bound instead of refusing startup.
+    if (record.passedAt !== undefined) {
+      records = Queues.set(records, { ...record, integrationAt: record.passedAt })
+      continue
+    }
+    const run = materializeRun(record, jobs)
+    const merge = run.steps.find((step) => step.kind === "merge")?.job
+    if (merge?.status !== "completed" || merge.conclusion !== "success" || merge.finishedAt === undefined) {
+      throw new Error(
+        `yrd: queue run '${record.id}' proves it merged but has no merge time; ` +
+          "checked integrationAt, passedAt, and the retained merge Job",
+      )
+    }
+    records = Queues.set(records, { ...record, integrationAt: merge.finishedAt })
+  }
+  return records === queues.records ? (queues as QueuesState) : { ...queues, records }
+}
+
 function compactQueueProjection(
   queues: DeepReadonly<QueuesState>,
   jobs: DeepReadonly<JobsState>,
   bays: DeepReadonly<BaysState>,
 ): QueuesState {
-  const runtime = { queues, jobs, bays }
-  const terminalOrder = { ...queues.retention.terminalOrder }
+  const settledQueues = backfillIntegrationTimes(queues, jobs)
+  const runtime = { queues: settledQueues, jobs, bays }
+  const terminalOrder = { ...settledQueues.retention.terminalOrder }
   for (const root of Object.keys(terminalOrder)) {
     const order = jobs.retention.queueTerminalOrder[root]
     if (order !== undefined) terminalOrder[root] = order
   }
-  for (const record of Queues.values(queues)) {
+  for (const record of Queues.values(settledQueues)) {
     if (record.parent !== undefined || record.settlement !== undefined) continue
     if (needsSettlement(runtime, materializeRun(record, jobs))) continue
     const order = jobs.retention.queueTerminalOrder[record.id]
@@ -7891,7 +7938,7 @@ function compactQueueProjection(
   // the entries for PRs that left the bay or reached a terminal delivery state
   // so the ledger cannot grow without bound (or outlive the wedge it names).
   const admissionRefusals = Object.fromEntries(
-    Object.entries(queues.admissionRefusals).filter(([id]) => {
+    Object.entries(settledQueues.admissionRefusals).filter(([id]) => {
       const pr = getChangeRecord(bays, id)
       if (pr === undefined) return false
       const delivery = changeDeliveryState(pr)
@@ -7899,8 +7946,8 @@ function compactQueueProjection(
     }),
   )
   return compactQueuesState(
-    { ...queues, admissionRefusals, retention: { terminalOrder } },
-    queueDecisionRoots(queues, bays),
+    { ...settledQueues, admissionRefusals, retention: { terminalOrder } },
+    queueDecisionRoots(settledQueues, bays),
   )
 }
 
@@ -8061,7 +8108,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   }
   if (applied.name === "pr/integrated") {
     const integrated = QueueAuthorityTokenFactSchema.parse(applied.data)
-    const stamped = stampRunIntegration(state.queues, applied.data)
+    const stamped = stampRunIntegration(state.queues, applied.data, applied.ts)
     // S6 relaxation: a DERIVED member's terminal names no current token — its
     // authority was the submit fact, never a token, so there is nothing to
     // invalidate and nothing to require. Tolerant (never the old throw); the
@@ -8076,7 +8123,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   }
   if (applied.name === "pr/already-landed") {
     const alreadyMerged = ChangeAlreadyMergedSchema.parse(applied.data)
-    const stamped = stampRunIntegration(state.queues, applied.data)
+    const stamped = stampRunIntegration(state.queues, applied.data, applied.ts)
     // S6 relaxation — same rule as pr/integrated above.
     if (!terminalAuthorityMatches(stamped.authority, alreadyMerged, applied.name, false)) return { queues: stamped }
     return {
@@ -10120,13 +10167,12 @@ function auditQueues(
   const queued = admissionQueue(state, steps)
   const refusalFindings = admissionRefusalAuditFindings(state, queued, progress, needsPersonOwner)
   findings.push(...refusalFindings)
-  findings.push(
-    ...queueProgressAuditFindings(state, queueProgressQueue(state, steps), refusalFindings, progress, options),
-  )
+  const progressQueue = queueProgressQueue(state, steps)
+  findings.push(...queueProgressAuditFindings(state, progressQueue, refusalFindings, progress, options))
   // The (eligible, advanced-since-last-tick) pair (@i/10-yrd/queue-liveness-pair):
   // computed once here, independent of refusalFindings by construction, so it
   // can never inherit queueProgressAuditFindings' per-base suppression.
-  findings.push(...queueLivenessAuditFindings(state, steps, progress, options))
+  findings.push(...queueLivenessAuditFindings(state, progressQueue, progress, options))
   return { findings }
 }
 
@@ -10386,12 +10432,11 @@ function queueProgressAuditFindings(
  */
 function queueLivenessAuditFindings(
   state: DeepReadonly<RuntimeState>,
-  steps: readonly RuntimeStep[],
+  eligible: readonly DeepReadonly<Change>[],
   progress: QueueProgressPolicy,
   options: QueueAuditOptions,
 ): QueueAuditFindingEmission[] {
   if (options.now === undefined) return []
-  const eligible = queueProgressQueue(state, steps)
   if (eligible.length === 0) return []
   const nowMs = parseAuditTime(options.now, "now")
   // The observer's own floor, when it declared one. Clamping the START is what
@@ -10434,7 +10479,7 @@ function queueLivenessAuditFindings(
  * members: on 2026-08-31 the dead-man reported "no merge for 51m" while
  * PR2769 and PR2770 merged inside that window, because both landed through
  * the derived lane and left no record row. A derived member's merge time is
- * the run lane's own stamp (`derivedIntegration` → `passedAt`), which is the
+ * the run lane's own stamp (`derivedIntegration` → `integrationAt`), which is the
  * trustworthy source the record fields only mirror.
  *
  * Module-exported for progress-both-lanes.test.ts (relative import), off the
@@ -10446,12 +10491,8 @@ export function latestQueueMergeMs(
   state: DeepReadonly<Pick<RuntimeState, "bays" | "queues">>,
   base: string,
 ): number | undefined {
-  return queueChanges(state.bays, state.queues)
-    .filter((pr) => baseIdentity(pr.base) === base)
-    .flatMap((pr) => [pr.integratedAt, pr.alreadyLandedAt])
-    .filter((at): at is string => at !== undefined)
-    .map((at) => parseAuditTime(at, "merge time"))
-    .reduce<number | undefined>((latest, at) => (latest === undefined ? at : Math.max(latest, at)), undefined)
+  const lastMerge = queueSnapshot(queueChanges(state.bays, state.queues), Queues.values(state.queues), base).lastMerge
+  return lastMerge === null ? undefined : parseAuditTime(lastMerge.at, "merge time")
 }
 
 function validateQueueProgressPolicy(policy: QueueProgressPolicy): QueueProgressPolicy {
@@ -10926,12 +10967,8 @@ function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly R
   // derived members, or a queue of only derived work reads as empty and its
   // stall never fires — while a record-lane read beside a derived merge is
   // what froze the last-merge clock above.
-  return queueChanges(state.bays, state.queues)
-    .filter((pr) => {
-      const delivery = changeDeliveryState(pr)
-      return delivery === "submitted" || delivery === "ready" || (delivery === "pushed" && checksRequested(pr))
-    })
-    .filter((pr) => blockingQueuePause(state, pr) === undefined)
+  return queueSnapshot(queueChanges(state.bays, state.queues), Queues.values(state.queues))
+    .eligible.filter((pr) => blockingQueuePause(state, pr) === undefined)
     .toSorted(
       (left, right) =>
         queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),

@@ -941,6 +941,60 @@ describe("queue timeline 21106 contract", () => {
     })
   })
 
+  it("settles the eligibility row when the same revision has a merged Run — the PR3216 contradiction", () => {
+    const result = queueTimelineStories["contract-overview"].snapshot.results[0]
+    if (result === undefined) throw new Error("contract-overview is missing its queue result")
+    const integrated = result.prs.find((pr) => pr.integratedAt !== undefined)
+    if (integrated === undefined) throw new Error("contract fixture is missing an integrated change")
+    const current = integrated.revs.at(-1)
+    if (current === undefined) throw new Error("integrated fixture change has no revision")
+    const { terminal: _terminal, ...openRevision } = current
+    const {
+      integratedAt: _integratedAt,
+      integration: _integration,
+      terminalRun: _terminalRun,
+      ...withoutIntegration
+    } = integrated
+    const submittedAt = current.submittedAt ?? current.pushedAt
+    const staleOpenChange = {
+      ...withoutIntegration,
+      state: "open" as const,
+      merged: false,
+      submittedAt,
+      revs: [{ ...openRevision, submittedAt }],
+    }
+    const liveContradiction: QueueStatusResult = {
+      ...result,
+      prs: result.prs.map((pr) => (pr.id === integrated.id ? staleOpenChange : pr)),
+      admissionOrder: [...result.admissionOrder, integrated.id],
+      eligibilities: [
+        ...(result.eligibilities ?? []).filter((eligibility) => eligibility.pr !== integrated.id),
+        {
+          pr: integrated.id,
+          revision: current.n,
+          runnable: false,
+          reason: { code: "checks-pending", message: `change '${integrated.id}' checks are queued` },
+          review: { required: false, approved: false, stale: false },
+          checks: { status: "queued", queuedAt: submittedAt },
+        },
+      ],
+    }
+
+    const projection = queueTimelineProjection([liveContradiction], {
+      now: Date.parse("2026-07-13T12:00:00.000Z"),
+      windowMs: 6 * 60 * 60_000,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: queueTimelineAdmissionTimes([liveContradiction]),
+    })
+    const rows = projection.rows.filter((row) => row.pr === integrated.id)
+
+    expect(rows.map((row) => row.status)).toEqual(["integrated"])
+    expect(rows.some((row) => row.detail.includes("checks are queued"))).toBe(false)
+  })
+
   it("freezes AGE at the first terminal outcome while open rows keep aging", () => {
     const results = queueTimelineStories["contract-overview"].snapshot.results
     const now = Date.parse("2026-07-13T12:00:00.000Z")

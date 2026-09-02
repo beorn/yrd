@@ -159,7 +159,12 @@ export function derivedIntegration(
   let landed: Readonly<{ run: RunId; at: string; proof: IntegrationProof }> | undefined
   for (const record of Queues.values(queues as QueuesState) as readonly DeepReadonly<QueueRecord>[]) {
     if (record.parent !== undefined) continue
-    if (record.passedAt === undefined || record.integration === undefined) continue
+    if (record.integration === undefined) continue
+    // `passedAt` is the legacy clock for records projected before
+    // `integrationAt` existed. New records keep the merge clock separate from
+    // whole-run settlement because deploy/action steps can follow the merge.
+    const integratedAt = record.integrationAt ?? record.passedAt
+    if (integratedAt === undefined) continue
     if (!record.steps.some((step) => step.kind === "merge")) continue
     if (
       !record.prs.some((pr) => pr.intent === undefined && pr.branch === member.branch && pr.headSha === member.headSha)
@@ -169,7 +174,7 @@ export function derivedIntegration(
     // Latest run wins, matching `consumingRun`'s tie-break: a re-run over the
     // same sha supersedes the proof an earlier one left.
     if (landed === undefined || record.id.localeCompare(landed.run) > 0) {
-      landed = { run: record.id, at: record.passedAt, proof: record.integration as IntegrationProof }
+      landed = { run: record.id, at: integratedAt, proof: record.integration as IntegrationProof }
     }
   }
   return landed
@@ -711,15 +716,17 @@ export function derivedSubmitRetirements(bays: DeepReadonly<BaysState>, scan: La
 
   const authorErrorSuspects = lane
     .filter((row) => row.via === "change-id")
-    .map((row): DerivedSubmitAuthorErrorSuspect => ({
-      branch: row.branch,
-      sha: row.sha,
-      ...(row.mergeCommit === undefined ? {} : { mergeCommit: row.mergeCommit }),
-      remedy:
-        `the CHANGE landed under a different commit, so this fact's own content is unproven: if it carries ` +
-        `new work, resubmit it under a fresh Change-Id; if it is an abandoned revision, retire it explicitly ` +
-        `(${submitRefRetirementCommand(row.branch)})`,
-    }))
+    .map(
+      (row): DerivedSubmitAuthorErrorSuspect => ({
+        branch: row.branch,
+        sha: row.sha,
+        ...(row.mergeCommit === undefined ? {} : { mergeCommit: row.mergeCommit }),
+        remedy:
+          `the CHANGE landed under a different commit, so this fact's own content is unproven: if it carries ` +
+          `new work, resubmit it under a fresh Change-Id; if it is an abandoned revision, retire it explicitly ` +
+          `(${submitRefRetirementCommand(row.branch)})`,
+      }),
+    )
     .toSorted(byBranch)
 
   return { retirements, authorErrorSuspects }

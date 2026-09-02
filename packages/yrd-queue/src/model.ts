@@ -688,6 +688,10 @@ export type QueueRecord = Readonly<{
   // it, so QueueRecordSchema stays unchanged. Distinct from
   // `initialIntegration`, which is a proof the run was HANDED, not one it made.
   integration?: IntegrationProof
+  // When `integration` was proved. A merge can precede later deploy/action
+  // steps, so this is deliberately distinct from `passedAt`, which means the
+  // whole run settled successfully. Projection-only, like `integration`.
+  integrationAt?: string
 }>
 
 export type QueueStep = InstalledStep & Readonly<{ job?: Job }>

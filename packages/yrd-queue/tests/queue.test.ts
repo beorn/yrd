@@ -6153,6 +6153,14 @@ describe("Queue", () => {
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "deploy-failed" } })
     expect(deliveryOf(deployApp.state().bays.prs[deployed.id])).toBe("integrated")
     expect(deliveryOf(deployApp.state().bays.prs[companion.id])).toBe("integrated")
+    // The merge settles this exact revision's eligibility even though the
+    // later deploy fails; it must not falsely stamp the whole run as passed.
+    const failedRecord = Queues.get(deployApp.state().queues, run!.id)
+    expect(failedRecord).toMatchObject({
+      integrationAt: expect.any(String),
+      integration: { commit: MERGED, baseSha: BASE },
+    })
+    expect(failedRecord?.passedAt).toBeUndefined()
 
     const deployJob = run?.steps.find((step) => step.name === "deploy")?.job
     if (deployJob === undefined) throw new Error("expected failed post-merge action Job")

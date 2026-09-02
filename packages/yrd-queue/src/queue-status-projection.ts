@@ -9,6 +9,7 @@
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import {
+  baseIdentity,
   type BaysState,
   type Change,
   changeDeliveryState,
@@ -19,6 +20,7 @@ import {
   type ChangeRevClock,
   changeRevisionLineage,
   changeRevisionNumber,
+  checksRequested,
   type ChangeRevTerminal,
   currentAdmissionFinish,
   changeSourceReadyAt,
@@ -877,6 +879,114 @@ export function timestamp(value: string, subject: string): number {
   const parsed = Date.parse(value)
   if (!Number.isFinite(parsed)) throw new Error(`yrd: ${subject} has invalid timestamp '${value}'`)
   return parsed
+}
+
+export type QueueSnapshot = Readonly<{
+  /** Current revisions still eligible for queue work. */
+  eligible: readonly Change[]
+  /** Newest proven merge from the same revision-level fold. */
+  lastMerge: Readonly<{ at: string; commit?: string }> | null
+}>
+
+type QueueSnapshotRun = Pick<
+  Run,
+  "id" | "base" | "prs" | "steps" | "integration" | "integrationAt" | "passedAt" | "finishedAt"
+>
+
+/**
+ * Fold live submissions and terminal facts into the queue's two coupled
+ * answers: what is still eligible, and when this queue last merged. Here,
+ * eligible means submitted/ready or pushed with a check request. Merged,
+ * retired, and withdrawn are terminal outcomes for the exact revision they
+ * name; a newer revision remains eligible on its own facts.
+ *
+ * A merge terminal can live only on a retained Run for a derived member. The
+ * change record is deliberately absent on that lane, and older projected
+ * runs can carry the integration proof before their later settlement stamp.
+ * Reading only the Change therefore produced the live PR3216 contradiction:
+ * one `ready — checks are queued` row directly above its merged Run, while the
+ * dead-man ignored that same merge. This fold keys the Run terminal to the
+ * exact immutable revision, so every consumer sees both facts together. A Run
+ * proves a merge only when it has both a merge step and integration proof (an
+ * already-landed proof is not a new merge). Its merge clock prefers a matching
+ * Change's exact integratedAt, then the Run's integrationAt, legacy passedAt,
+ * or materialized finishedAt. This function throws rather than inventing a
+ * clock when a proven merge has no recorded time.
+ */
+export function queueSnapshot(
+  changes: readonly Change[],
+  queueRuns: readonly QueueSnapshotRun[],
+  baseBranch?: string,
+): QueueSnapshot {
+  const scopedChanges =
+    baseBranch === undefined
+      ? changes
+      : changes.filter((change) => baseIdentity(change.base) === baseIdentity(baseBranch))
+  const scopedRuns =
+    baseBranch === undefined
+      ? queueRuns
+      : queueRuns.filter((run) => baseIdentity(run.base) === baseIdentity(baseBranch))
+  const terminalRevisions = new Set<string>()
+  const merges: Array<Readonly<{ at: string; atMs: number; commit?: string }>> = []
+  const recordedMerges = new Map<string, Readonly<{ at: string; atMs: number; commit?: string }>>()
+
+  for (const change of scopedChanges) {
+    if (changeDeliveryState(change) !== "integrated") continue
+    if (change.integratedAt === undefined) {
+      throw new Error(`yrd: integrated change '${change.id}' has no merge time; checked integratedAt`)
+    }
+    const revision = currentChangeRev(change)
+    const key = queueRevisionKey({ id: change.id, revision: revision.n, headSha: revision.head })
+    recordedMerges.set(key, {
+      ...(change.integration === undefined ? {} : { commit: change.integration.commit }),
+      at: change.integratedAt,
+      atMs: timestamp(change.integratedAt, `integrated change '${change.id}' merge time`),
+    })
+  }
+
+  for (const run of scopedRuns) {
+    if (!run.steps.some((step) => step.kind === "merge")) continue
+    if (run.integration === undefined) continue
+    for (const member of run.prs) terminalRevisions.add(queueRevisionKey(member))
+    // Already-landed settles eligibility but is not a merge performed by this
+    // queue, so it cannot advance the last-merge clock.
+    if (run.integration.alreadyLanded !== undefined) continue
+    const recordedClock = run.prs
+      .map((member) => recordedMerges.get(queueRevisionKey(member)))
+      .filter((clock): clock is NonNullable<typeof clock> => clock !== undefined)
+      .toSorted((left, right) => left.atMs - right.atMs)[0]
+    const at = recordedClock?.at ?? run.integrationAt ?? run.passedAt ?? run.finishedAt
+    if (at === undefined) {
+      throw new Error(
+        `yrd: queue run '${run.id}' proves it merged but has no merge time; ` +
+          "checked integrationAt, passedAt, and finishedAt",
+      )
+    }
+    const atMs = timestamp(at, `queue run '${run.id}' merge time`)
+    merges.push({ commit: run.integration.commit, at, atMs })
+  }
+
+  const eligible = scopedChanges.filter((change) => {
+    const revision = currentChangeRev(change)
+    const key = queueRevisionKey({ id: change.id, revision: revision.n, headSha: revision.head })
+    if (terminalRevisions.has(key)) return false
+    const delivery = changeDeliveryState(change)
+    return delivery === "submitted" || delivery === "ready" || (delivery === "pushed" && checksRequested(change))
+  })
+
+  for (const [revision, merge] of recordedMerges) {
+    // A retained Run already contributed this merge above. Its clock prefers
+    // the exact record timestamp, so adding the record again would only create
+    // two candidates for one integration.
+    if (!terminalRevisions.has(revision)) merges.push(merge)
+  }
+
+  const latestMerge = merges.toSorted((left, right) => left.atMs - right.atMs).at(-1)
+  const lastMerge =
+    latestMerge === undefined
+      ? null
+      : { ...(latestMerge.commit === undefined ? {} : { commit: latestMerge.commit }), at: latestMerge.at }
+  return { eligible, lastMerge }
 }
 
 /**

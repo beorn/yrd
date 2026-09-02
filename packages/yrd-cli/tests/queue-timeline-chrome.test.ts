@@ -378,6 +378,7 @@ describe("queue timeline chrome 21106", () => {
     const app = createRenderer({ cols: 120, rows: 40 })(
       createElement(QueueTimelineView, {
         projection,
+        results: [],
         state: { byId: {}, prs: {}, receipts: {}, submits: {} },
         columns: 120,
       }),
@@ -387,6 +388,27 @@ describe("queue timeline chrome 21106", () => {
       expect(app.text).toContain("uptime 1:00:00 · no merge for 1:00:00")
       expect(app.text).not.toContain("no merge recorded")
       expect(app.text).toContain("progress measured 0:02 ago")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("renders merge age as unknown when authoritative queue results are unavailable", async () => {
+    const story = queueTimelineStories.idle.snapshot.projection
+    const projection: QueueTimelineProjection = {
+      ...story,
+      runner: {
+        pid: 342,
+        startedAt: new Date(NOW - 60 * 60_000).toISOString(),
+        lastTickAt: new Date(NOW - 2_000).toISOString(),
+        command: "habitant runner",
+      },
+    }
+    const app = createRenderer({ cols: 120, rows: 40 })(createElement(QueueTimelineView, { projection, columns: 120 }))
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("merge age unknown — queue source results unavailable")
+      expect(app.text).not.toContain("no merge for 1:00:00")
     } finally {
       app.unmount()
     }
@@ -539,7 +561,7 @@ describe("queue timeline chrome 21106", () => {
       submits: {},
     }
     const app = createRenderer({ cols: 120, rows: 40 })(
-      createElement(QueueTimelineView, { projection, state, nav: false, columns: 120 }),
+      createElement(QueueTimelineView, { projection, results: snapshot.results, state, nav: false, columns: 120 }),
     )
     try {
       await app.waitForLayoutStable()
@@ -549,6 +571,37 @@ describe("queue timeline chrome 21106", () => {
       )
       expect(app.text).toContain("no merge for 1:05:00")
       expect(app.text).toContain("PROGRESS STALE — last measured 2:00 ago")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("uses a derived-lane merge when the record store has no terminal row", async () => {
+    const snapshot = queueTimelineStories["contract-overview"].snapshot
+    const projection: QueueTimelineProjection = {
+      ...snapshot.projection,
+      runner: {
+        pid: 342,
+        startedAt: new Date(NOW - 2 * 60 * 60_000).toISOString(),
+        lastTickAt: new Date(NOW - 2_000).toISOString(),
+        command: "habitant runner",
+        queueProgress: { state: "healthy", observedAt: new Date(NOW - 2_000).toISOString() },
+      },
+    }
+    const state = { byId: {}, prs: {}, receipts: {}, submits: {} }
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      createElement(QueueTimelineView, {
+        projection,
+        results: snapshot.results,
+        state,
+        nav: false,
+        columns: 120,
+      }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("no merge for 1:05:00")
+      expect(app.text).not.toContain("no merge for 2:00:00")
     } finally {
       app.unmount()
     }

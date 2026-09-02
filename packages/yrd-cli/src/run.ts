@@ -112,6 +112,7 @@ import {
   carriedBranches,
   queueChangeNotFoundMessage,
   queueChanges,
+  queueSnapshot,
   resolveQueueChange,
 } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
@@ -1527,12 +1528,9 @@ function queueContentHealthError(
  * with a full queue reported `resident-runner-missing` never, and the dead-man
  * was skipped outright. One lane read, two directions of error: the merge
  * position freezes and fires falsely, the ready set empties and never fires. */
-function queuedDeliveryCount(app: YrdCliApp): number {
+function queuedDeliveryCount(app: YrdCliApp, base: string): number {
   const state = stateOf(app)
-  return queueChanges(state.bays, state.queues).filter((pr) => {
-    const delivery = changeDeliveryState(pr)
-    return delivery === "submitted" || delivery === "ready"
-  }).length
+  return queueSnapshot(queueChanges(state.bays, state.queues), Queues.values(state.queues), base).eligible.length
 }
 
 /** Both sides must be KNOWN: an unreported merge position is not comparable,
@@ -1742,21 +1740,15 @@ export function needsPersonWarnings(findings: readonly QueueAuditFinding[]): str
  * `queueChanges` was introduced to fix. */
 export function habitantDriverLastMerged(app: YrdCliApp, base: string): QueueDriverEpoch["lastMerged"] {
   const state = stateOf(app)
-  return (
-    queueChanges(state.bays, state.queues)
-      .flatMap((pr) => {
-        if (
-          baseIdentity(pr.base) !== baseIdentity(base) ||
-          pr.integratedAt === undefined ||
-          pr.integration === undefined
-        ) {
-          return []
-        }
-        return [{ commit: pr.integration.commit, at: pr.integratedAt }]
-      })
-      .toSorted((left, right) => left.at.localeCompare(right.at))
-      .at(-1) ?? null
-  )
+  const lastMerge = queueSnapshot(queueChanges(state.bays, state.queues), Queues.values(state.queues), base).lastMerge
+  if (lastMerge === null) return null
+  if (lastMerge.commit === undefined) {
+    throw new Error(
+      `yrd: latest merge for base '${base}' at ${lastMerge.at} cannot be matched to a commit, ` +
+        "so the driver heartbeat cannot report it",
+    )
+  }
+  return { commit: lastMerge.commit, at: lastMerge.at }
 }
 
 /** The probe's answer when the health read itself failed: always unhealthy,
@@ -1880,7 +1872,7 @@ async function queueRunnerHealth(
       }
     }
     if (!residentHeld) {
-      const hasQueuedWork = app !== undefined && queuedDeliveryCount(app) > 0
+      const hasQueuedWork = app !== undefined && queuedDeliveryCount(app, base) > 0
       if (hasQueuedWork) {
         // Name the one-shot when there is one: the queue IS being drained, just
         // not by a service, and an operator told only "no runner owns the lease"
@@ -2040,7 +2032,7 @@ async function queueRunnerHealth(
       )
     }
 
-    const hasQueuedWork = app !== undefined && queuedDeliveryCount(app) > 0
+    const hasQueuedWork = app !== undefined && queuedDeliveryCount(app, base) > 0
     if (runnerStatus === "fresh" && hasQueuedWork && runnerAgeMs !== undefined && runner !== null) {
       // OBSERVED start when published; `startedAt` (the caller's clock, not
       // this process's own) only for a record written before that field
@@ -2127,7 +2119,7 @@ async function runClientDeadMan(
   const runnerAgeMs = runner === null ? undefined : Math.max(0, nowMs - Date.parse(runner.lastTickAt))
   const runnerError =
     runner === null
-      ? queuedDeliveryCount(app) > 0
+      ? queuedDeliveryCount(app, base) > 0
         ? runnerHealthError(
             "resident-runner-missing",
             "the queue has work but no habitant runner owns the drain lease",

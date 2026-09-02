@@ -7404,7 +7404,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("runs an independent dead-man check before a normal process-runtime command", async () => {
+  it("counts checked pushed work in the independent dead-man before a normal command", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-client-dead-man-"))
     execFileSync("git", ["init", "-q", "-b", "main", repo])
     execFileSync("git", ["-C", repo, "config", "user.name", "Yrd Test"])
@@ -7413,7 +7413,15 @@ describe("runYrd", () => {
     execFileSync("git", ["-C", repo, "add", "README.md"])
     execFileSync("git", ["-C", repo, "commit", "-qm", "base"])
     const app = await createApp()
-    await openAndSubmit(app)
+    await app.bays.submit({
+      branch: "topic/checked-draft",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+      draft: true,
+    })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
     const output = outputIO({ cwd: repo, now: () => Date.parse("2026-07-13T12:30:00.000Z") })
     try {
       expect(

@@ -138,15 +138,15 @@ describe("the habitant driver's published merge position reads both admission la
 
       const merged = habitantDriverLastMerged(app as unknown as YrdCliApp, "main")
       expect(merged, "the derived merge is invisible to the record-lane read").toMatchObject({ commit: MERGED_SHA })
-      // The integration's own SETTLEMENT stamp, which is a tick or two after the
-      // run finished — not the run's `finishedAt`, and never the reader's clock.
-      // Named here because a dead-man subtracts `now` from exactly this field.
+      // The integration fact's own stamp, which is a tick or two after the
+      // merge Job finished — not the reader's clock. Named here because a
+      // dead-man subtracts `now` from exactly this field.
       const finishedAt = app.queue.get("R1")?.finishedAt
       expect(finishedAt).toBeDefined()
       expect(merged?.at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u)
       expect(
         Date.parse(merged?.at ?? ""),
-        "the position is stamped when the merge settled, never before the run that produced it finished",
+        "the position is stamped when the integration fact is applied, never before its merge Job finishes",
       ).toBeGreaterThanOrEqual(Date.parse(finishedAt ?? ""))
     } finally {
       await app.close()

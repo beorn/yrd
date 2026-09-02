@@ -35,6 +35,7 @@ import {
   isDerivedMemberId,
   leaseOnlyLivenessProbe,
   orphanedRunLiveness,
+  queueSnapshot,
   type RunnerLivenessProbe,
 } from "@yrd/queue"
 import type { HabitantSourceRecycle } from "./source-staleness.ts"
@@ -1716,6 +1717,7 @@ function timelineNonIntegratedRows(
   )
   const positions = queueAdmissionPositions(result.admissionOrder)
   const runs = [...result.running, ...result.waiting, ...result.finished]
+  const eligible = new Set(queueSnapshot(result.prs, runs, result.base).eligible.map((pr) => pr.id))
   return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
     const revision = currentChangeRev(pr)
     const revisionKey = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
@@ -1723,6 +1725,7 @@ function timelineNonIntegratedRows(
     const display = queueDisplayState(pr, { runs, eligibility })
     const status = display.preRun
     if (status === undefined) return []
+    if (status === "ready" && !eligible.has(pr.id)) return []
     if (status === "ready" && activeRevisions.has(revisionKey)) return []
     const timestamp = submissionTimes.get(revisionKey) ?? revision.submittedAt ?? pr.submittedAt ?? null
     const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `change '${pr.id}' submit time`)
@@ -4629,29 +4632,22 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
   return newest
 }
 
-/** Newest proven merge from authoritative Bays state, falling back to the
- * retained fact horizon when state is unavailable. Unlike the last-drained
- * clock, this ignores refusals/rejections and display filters. */
-function timelineLastMergeMs(projection: QueueTimelineProjection, state: BaysState | undefined): number | null {
-  if (state !== undefined) {
-    return Object.values(state.prs).reduce<number | null>((latest, pr) => {
-      if (baseIdentity(pr.base) !== baseIdentity(projection.base)) return latest
-      const terminal = currentChangeRev(pr).terminal
-      if (terminal?.kind !== "integrated") return latest
-      const at = Date.parse(terminal.at)
-      if (!Number.isFinite(at)) return latest
-      return latest === null ? at : Math.max(latest, at)
-    }, null)
-  }
-  return projection.timeStatsFacts.reduce<number | null>(
-    (latest, fact) =>
-      fact.outcome !== "integrated"
-        ? latest
-        : latest === null
-          ? fact.terminalAtMs
-          : Math.max(latest, fact.terminalAtMs),
-    null,
-  )
+/** Newest proven merge from authoritative Bays/Run state. Unlike the
+ * last-drained clock, this ignores refusals/rejections and display filters.
+ * Missing source results mean the answer is unknown, never an invitation to
+ * reconstruct a second merge clock from display rows. */
+function timelineLastMergeMs(
+  projection: QueueTimelineProjection,
+  results: readonly QueueStatusResult[] | undefined,
+): number | null | undefined {
+  if (results === undefined) return undefined
+  const scoped = results.filter((result) => baseIdentity(result.base) === baseIdentity(projection.base))
+  const lastMerge = queueSnapshot(
+    scoped.flatMap((result) => result.prs),
+    scoped.flatMap((result) => [...result.running, ...result.waiting, ...result.finished]),
+    projection.base,
+  ).lastMerge
+  return lastMerge === null ? null : Date.parse(lastMerge.at)
 }
 
 function queueHeadBlockDetails(
@@ -4962,7 +4958,7 @@ function TimelineRunnerBox({
   const pauseHealth = pause === undefined || state === undefined ? undefined : queuePauseHealth(state, pause)
   const pauseAllowed = pause === undefined ? "none" : queuePauseAllowedText(pause, pauseHealth)
   const drained = timelineLastDrainedMs(projection)
-  const lastMerge = timelineLastMergeMs(projection, state)
+  const lastMerge = timelineLastMergeMs(projection, results)
   const downMs =
     runner === null
       ? drained === null
@@ -4973,8 +4969,18 @@ function TimelineRunnerBox({
         : null
   const uptimeMs = timing?.uptimeMs ?? 0
   const runnerTimer = runnerBoxTimer(marker, downMs, uptimeMs)
-  const mergeTimer = runnerMergeTimer(lastMerge, now, uptimeMs, runner !== null)
-  const timer = runnerTimer === undefined ? mergeTimer : `${runnerTimer} · ${mergeTimer}`
+  const mergeTimer =
+    lastMerge === undefined
+      ? columns < 40
+        ? "merge?"
+        : "merge age unknown — queue source results unavailable"
+      : runnerMergeTimer(lastMerge, now, uptimeMs, runner !== null)
+  const timer =
+    lastMerge === undefined && columns < 40
+      ? mergeTimer
+      : runnerTimer === undefined
+        ? mergeTimer
+        : `${runnerTimer} · ${mergeTimer}`
   const headBlock = queueHeadBlockDetails(projection, state, results, now)
   const borderColor =
     marker.kind === "down" || marker.kind === "stalled" ? "$fg-error" : pause !== undefined ? "$fg-warning" : undefined
