@@ -38,6 +38,7 @@ import {
   type ChangeAdmissionStep,
   type PrNumberMint,
   recordChanges,
+  SUBMIT_REF_PREFIX,
 } from "@yrd/bay"
 import {
   command,
@@ -160,6 +161,7 @@ import {
   landedSubmitBranches,
   retiredSubmitBranches,
   NO_LANDED_SUBMIT_SCAN,
+  submitFactsWithoutReceiverRef,
   submitLandingReader,
   submitRefRetirementCommand,
   type DerivedAuthorityLookup,
@@ -167,6 +169,7 @@ import {
   type DerivedSubmitEnrichment,
   type LandedSubmitScan,
   type SubmitLandingReader,
+  type SubmitRefScan,
 } from "./derived-admission.ts"
 import {
   activeQueueRootIds,
@@ -1431,6 +1434,28 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   scanLandedSubmits?(input: Readonly<{ bays: DeepReadonly<BaysState> }>): Promise<LandedSubmitScan>
 
   /**
+   * Which `refs/yrd/submit/<branch>` refs the RECEIVER STORE actually holds.
+   *
+   * `BaysState.submits` is a MIRROR of those refs, and a mirror row can outlive
+   * its ref: a `git update-ref -d` inside the store journals nothing, so the
+   * projection stands with nothing behind it and the derived lane re-admits it
+   * on every pass, forever (PR2749, 2026-09-02). This layer is pure over
+   * `BaysState` and never opens git itself, so the host supplies the read — the
+   * same shape and reason as {@link QueueOptions.scanLandedSubmits} above.
+   *
+   * Absent, NOTHING in the process can tell a dead mirror row from a live
+   * approval. That is reported at WARN, once per pass, whenever the lane
+   * actually has something to admit — a handled condition, so the queue run
+   * continues and admits unchecked rather than dying (an ERROR row ends the
+   * pass; operator ruling 2026-09-01). It is never downgraded to a quiet empty
+   * scan, which would read as "no refs exist" and retire every standing
+   * approval in the store.
+   */
+  scanSubmitRefs?(
+    input: Readonly<{ facts: readonly Readonly<{ branch: string; sha: string }>[] }>,
+  ): Promise<SubmitRefScan>
+
+  /**
    * Has the base branch ALREADY delivered this standing fact's content?
    *
    * The SECOND reader of the same question {@link QueueOptions.scanLandedSubmits}
@@ -2069,6 +2094,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             landing,
             composes,
             options.isSubmitSuperseded,
+            options.scanSubmitRefs,
             configuredRunner,
             progress,
             needsPersonOwner,
@@ -2139,6 +2165,7 @@ function createQueue<Shape extends ChangeShape>(
   landing: SubmitLandingMemo,
   composes: ComposeObservations,
   isSubmitSuperseded: QueueOptions<readonly AnyStepDef[]>["isSubmitSuperseded"],
+  scanSubmitRefs: QueueOptions<readonly AnyStepDef[]>["scanSubmitRefs"],
   configuredRunner: Runner | undefined,
   progress: QueueProgressPolicy,
   needsPersonOwner: string,
@@ -2529,6 +2556,172 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   /**
+   * Retire every mirror fact the receiver store holds no ref for, and name the
+   * branches this pass must not admit.
+   *
+   * `bays.submits` is a PROJECTION of `refs/yrd/submit/*`, and it is the only
+   * thing the compose consulted before this: a fourth representation of one
+   * submission, standing in for the refs it mirrors. The two disagree in
+   * exactly one direction, and nothing else notices — a ref deleted with `git
+   * update-ref -d` inside the store journals nothing, because only the receive
+   * hook writes `branch/unsubmitted`. The projection then outlives its ref and
+   * the derived lane re-admits it every pass, forever (PR2749, 2026-09-02:
+   * `task/w28-silentsites` at b3e5141d, re-composed after every ref of it was
+   * deleted).
+   *
+   * The dead fact is excluded from THIS pass and retired through the same
+   * `queue/submit/retired` path every other terminal fact takes, so the durable
+   * trace an operator reads later says why. Under its OWN code
+   * ({@link RECEIVER_REF_GONE_CODE}), because this is a statement about the
+   * store rather than a verdict about content: every other retirement's cure is
+   * "rebase and push again", and there is nothing here for an author to do.
+   *
+   * Sha-matched like every other retirement, so it needs no clearing verb: a
+   * re-push re-projects the fact at a new sha, the row stops applying, and the
+   * branch derives again the moment its ref is back.
+   *
+   * NO SILENT ERRORS, in both directions that matter:
+   * - the reader ABSENT is an ERROR row, not an assumed-empty scan. An empty
+   *   scan reads as "no refs exist anywhere" and would retire every standing
+   *   approval in the store — the failure mode strictly worse than the defect.
+   * - the reader THROWING propagates and fails the compose. A read that failed
+   *   is not an answer, and neither degradation is safe: admitting everything
+   *   restores the re-admission loop silently, admitting nothing strands every
+   *   live approval.
+   */
+  const retireMirrorFactsWithoutRef = async (
+    snapshot: DeepReadonly<RuntimeState>,
+    /** The branches this pass would otherwise ADMIT — the exposure, and the
+     * only population whose refs anyone needs to ask about. A mirror row the
+     * derived lane never considers (a live record owns its branch, the content
+     * already landed, the fact is already retired) risks nothing by being
+     * unverified, so it earns neither a scan nor a complaint. */
+    candidateLane: readonly string[],
+    skip: ReadonlySet<string>,
+  ): Promise<ReadonlySet<string>> => {
+    // Nothing would be admitted, so nothing depends on the answer. Asking here
+    // would spend a subprocess per pass and, where no reader is wired, page
+    // about an unverified population that was never at risk.
+    if (candidateLane.length === 0) return new Set<string>()
+    if (scanSubmitRefs === undefined) {
+      // WARN, not ERROR, and the line is drawn by this repo's own rule: "WARN
+      // is where a handled condition lives (the pass records the verdict and
+      // continues); ERROR is reserved for what the queue cannot continue past"
+      // — the operator ruling of 2026-09-01, pinned by
+      // `error-is-fatal-levels.test.ts`, under which an ERROR row ENDS the
+      // pass. An unwired reader is a host defect the pass handles: it admits
+      // unchecked and says so. Making it fatal would convert one missing
+      // optional capability into a permanent no-drain outage — strictly worse
+      // than the re-admission loop it is warning about, and it would wedge
+      // every embedded host rather than the one that is misconfigured. The
+      // UNREADABLE-store case below is the other half of the same line, and it
+      // does propagate: there the queue genuinely cannot continue past it.
+      composeConditions.report(
+        "compose-submit-refs-unconfigured",
+        "warn",
+        "queue compose cannot ask the receiver store which submit refs exist: no scanSubmitRefs reader is " +
+          "configured for the queue plugin, so nothing in this process can tell a standing approval from a " +
+          `projection whose ref was deleted. All ${String(candidateLane.length)} branch(es) the derived lane ` +
+          "would admit are admitted unchecked on this pass — an empty scan is deliberately NOT assumed, " +
+          "because that reading would retire every approval in the store",
+        { action: "compose-submit-refs-unconfigured", exposed: candidateLane.length },
+      )
+      return new Set<string>()
+    }
+    // Only the exposed branches are asked about — the scan's object probe costs
+    // one git call per fact, and a fact nothing would admit buys nothing.
+    const scan = await scanSubmitRefs({
+      facts: candidateLane.flatMap((branch) => {
+        const submit = snapshot.bays.submits[branch]
+        return submit === undefined ? [] : [{ branch, sha: submit.sha }]
+      }),
+    })
+    if (!scan.answered) {
+      // A store that could not be asked is NOT a store with no refs, and the
+      // difference is everything: reading it as empty would declare every
+      // standing projection dead and retire the lot. Same handled-condition
+      // level as an unwired reader above, and for the same reason — the pass
+      // continues, unchecked, and says so.
+      composeConditions.report(
+        `compose-submit-refs-unavailable:${scan.store}`,
+        "warn",
+        `queue compose could not read the receiver store '${scan.store}' to see which submit refs exist: ` +
+          `${scan.reason}. All ${String(candidateLane.length)} branch(es) the derived lane would admit are ` +
+          "admitted unchecked on this pass — an unread store is deliberately NOT read as an empty one, " +
+          "because that reading would retire every approval it holds",
+        {
+          action: "compose-submit-refs-unavailable",
+          store: scan.store,
+          reason: scan.reason,
+          exposed: candidateLane.length,
+        },
+      )
+      return new Set<string>()
+    }
+    const missing = submitFactsWithoutReceiverRef(snapshot.bays, scan).filter((fact) =>
+      candidateLane.includes(fact.branch),
+    )
+    // The scan that found what it expected says so, at info: a zero here is a
+    // MEASURED zero, and it must not read the same as the pass where nobody
+    // looked. Both counts ride the row so a reader can tell "the store is
+    // empty" from "the store disagrees with the projection".
+    log.info?.("queue compose read the receiver store's standing submit refs", {
+      action: "compose-submit-refs-scanned",
+      store: scan.store,
+      refs: scan.refs.size,
+      facts: candidateLane.length,
+      missing: missing.length,
+    })
+    const gone = new Set<string>()
+    for (const fact of missing) {
+      // Excluded from admission whatever happens to the retirement below: the
+      // exclusion is this pass's correctness, the retirement is the durable
+      // trace, and a journal that refuses writes must not admit a dead fact.
+      gone.add(fact.branch)
+      if (skip.has(fact.branch)) continue
+      // Retiring at this sha is what makes this a ONE-TIME act: `retired` above
+      // is sha-matched, so the next pass's `candidateLane` no longer offers this
+      // branch, this loop never sees it again, and the row keeps saying why
+      // through `compose-derived-fact-retired`. There is no second suppression
+      // guard here on purpose — one mechanism, stated.
+      const reason =
+        `the receiver store '${scan.store}' holds no ${SUBMIT_REF_PREFIX}${fact.branch}, so the standing ` +
+        `projection at ${fact.sha} mirrors a ref that no longer exists`
+      // Reported, NOT journaled, and that is a decision rather than an
+      // omission. Every other retirement records a verdict git cannot answer
+      // again — "this candidate conflicts against this base" is gone the moment
+      // the candidate is — so it needs a durable row. This verdict is re-derived
+      // from the store on every pass, for free, by the scan above: a durable row
+      // would be a second copy of an answer git already holds, and keeping two
+      // is how the mirror this fix is about came to disagree with its refs in
+      // the first place.
+      //
+      // (`retireSubmitFact` cannot serve here in any case: its row requires a
+      // `pr`, and a derived member is BY DESIGN never written to `bays.prs`
+      // (materializeDerivedRunMembers), so the derived lane can never supply
+      // one. Making that field optional moves the composition checkpoint
+      // identity, which this change has no business spending.)
+      composeConditions.report(
+        `compose-derived-fact-receiver-ref-gone:${fact.branch}:${fact.sha}`,
+        "warn",
+        "queue compose will not derive a change for a submit fact with no ref behind it: " +
+          reason +
+          " — the projection outlived the ref it mirrors (a store-side ref delete journals nothing), so no " +
+          "change derives for this sha; push the branch again to submit it",
+        {
+          action: "compose-derived-fact-receiver-ref-gone",
+          branch: fact.branch,
+          sha: fact.sha,
+          base: fact.base,
+          store: scan.store,
+          ref: `${SUBMIT_REF_PREFIX}${fact.branch}`,
+        },
+      )
+    }
+    return gone
+  }
+
+  /**
    * S6 door — DERIVED admission of ref-only approvals, replacing the retired
    * 2b intake sweep (census #3): every live projected submit ref on a
    * RECORDLESS branch ({@link derivedLaneBranches} — one lane consumes one
@@ -2667,7 +2860,26 @@ function createQueue<Shape extends ChangeShape>(
         },
       )
     }
-    const lane = derivedLaneBranches(snapshot.bays, landedSubmitBranches(landedScan), retired)
+    // GIT IS THE TRUTH, applied to the compose's own selection universe.
+    // Everything above reasons over `bays.submits`, which is a MIRROR of the
+    // receiver store's submit refs — and a mirror row can outlive its ref,
+    // because a `git update-ref -d` inside the store journals nothing (only
+    // the receive hook writes `branch/unsubmitted`). The lane then re-admits a
+    // fact nothing stands behind, on every pass, forever. Measured 2026-09-02:
+    // `task/w28-silentsites` at b3e5141d (PR2749 r2) kept composing after
+    // every ref of it was deleted from the store.
+    //
+    // A journal fact with no ref behind it is dead: it is excluded from THIS
+    // pass and retired through the same `queue/submit/retired` path every
+    // other terminal fact uses, so the trace an operator reads later says why.
+    // What this pass would admit knowing everything EXCEPT the receiver's real
+    // refs. That set is the exposure, so it is what the ref check is asked
+    // about — and filtering it afterwards is exactly equivalent to passing the
+    // ref-gone branches to `derivedLaneBranches` as retired, since that
+    // parameter only ever removes members.
+    const candidateLane = derivedLaneBranches(snapshot.bays, landedSubmitBranches(landedScan), retired)
+    const refGone = await retireMirrorFactsWithoutRef(snapshot, candidateLane, skip)
+    const lane = refGone.size === 0 ? candidateLane : candidateLane.filter((branch) => !refGone.has(branch))
     const offered = lane.filter((branch) => !skip.has(branch))
     const branches: string[] = []
     let supersededCount = 0

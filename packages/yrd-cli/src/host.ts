@@ -2350,6 +2350,30 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     prNumberMint,
     readSubmitEnrichment: ({ sha }) => readDerivedSubmitEnrichment(options.process, options.repo, sha),
     scanLandedSubmits: landedSubmitScanner(mergedTruthReader),
+    // The repository-truth half of the compose's mirror-vs-ref comparison, over
+    // the SAME store the receiver writes (`<stateDir>/prs.git`) — read through
+    // the store reader `yrd pr retire` already owns, so the two surfaces can
+    // never disagree about which submit refs exist. Without this the compose
+    // trusts `bays.submits` alone, and a projection whose ref was deleted
+    // in-store re-admits itself on every pass (PR2749, 2026-09-02).
+    // NOT WIRED, deliberately, and this is the whole finding of PR2749's fix:
+    // `scanSubmitRefs` answers "which submit refs does the store hold", and
+    // that answer only decides anything if a fact without a ref is a fact whose
+    // ref was DELETED. It is not. Two producers write a standing submit fact
+    // and only one writes a ref — the receiver's `writeSubmitRefForCarrier`
+    // writes `refs/yrd/submit/<branch>` before journaling, while `yrd pr submit
+    // <branch>` on the derived lane journals the fact alone (yrd-bay/plugin.ts).
+    // Wiring this as-is retires every `yrd pr submit` submission on its first
+    // compose; measured 2026-09-02, it turned 7 host tests red on exactly that.
+    //
+    // Probing the store for the fact's commit does not separate them either:
+    // prs.git shares the repository's object database, so the probe answers
+    // "present" for a commit that was never pushed. The separation has to be
+    // RECORDED at submit time (a marker on the fact, or retiring the ref-less
+    // `pr submit` path in favour of the receiver push) — a design call, not a
+    // read. Until it is made, the compose reports that it cannot check rather
+    // than guessing, and this line stays commented.
+    // scanSubmitRefs: async ({ facts }) => …  // see scanReceiverSubmitRefs
     landedMerge: landedMergeResolver(mergedTruthReader, options.log),
     isSubmitSuperseded: ({ sha, base }) => isSubmitContentLanded(options.process, options.repo, sha, base),
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),

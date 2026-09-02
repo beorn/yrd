@@ -595,6 +595,96 @@ export function submitRefRetirementCommand(branch: string): string {
   )
 }
 
+/**
+ * Every `refs/yrd/submit/<branch>` the RECEIVER STORE actually holds, read
+ * from the store itself.
+ *
+ * `BaysState.submits` is a MIRROR of this ref set, not a second authority, and
+ * the two can disagree in exactly one direction that nothing else notices: a
+ * ref deleted with `git update-ref -d` inside the store journals nothing (only
+ * the receive hook writes `branch/unsubmitted`), so the mirror row survives its
+ * ref and the derived lane re-admits it on every pass, forever. Measured
+ * 2026-09-02: `task/w28-silentsites` at b3e5141d kept composing after every ref
+ * of it had been deleted from `/hh/dev/.git/yrd/prs.git`.
+ *
+ * GIT IS THE TRUTH (docs/@adr/0001). This is the read that lets the compose
+ * apply that rule to its own selection universe instead of trusting a fourth
+ * representation of one submission.
+ */
+export type SubmitRefScan =
+  | Readonly<{
+      /** The store was read, and these are its refs. */
+      answered: true
+      /** The receiver store this was read from — carried so every row about a
+       * missing ref can say WHERE it looked, which is the difference between a
+       * report an operator can act on and one they must go measure. */
+      store: string
+      /** Branch → sha, one entry per `refs/yrd/submit/<branch>` present. An
+       * EMPTY map is a real answer: the store exists and holds no approvals. */
+      refs: ReadonlyMap<string, string>
+    }>
+  | Readonly<{
+      /** No answer was obtained, and NO REF SET may be inferred from that.
+       *
+       * The distinction this exists for: a store that does not exist yet — the
+       * receiver has never run in this repository — is not a store with zero
+       * refs. Reading it as zero would declare every standing projection dead
+       * and retire the lot on a missing directory, which is the default-empty
+       * failure this whole path exists to refuse. A host answers `false` and
+       * the compose excludes nothing, loudly.
+       */
+      answered: false
+      store: string
+      /** What stopped the read, in one sentence a reader can act on. */
+      reason: string
+    }>
+
+/** One mirror fact with no ref behind it: dead by the repository's own
+ * account, and the population the compose must retire rather than admit. */
+export type SubmitFactWithoutRef = Readonly<{
+  branch: string
+  sha: string
+  base: string
+}>
+
+/**
+ * The mirror rows the receiver store PROVABLY has no ref for — the whole
+ * ref-gone decision, pure over `BaysState` plus one scan.
+ *
+ * CALLER BEWARE — this answers "no ref", which is NOT the same question as "no
+ * ref any more". Two producers write a standing submit fact and only one writes
+ * a ref: the receiver's `writeSubmitRefForCarrier` writes
+ * `refs/yrd/submit/<branch>` before journaling anything, while `yrd pr submit
+ * <branch>` on the derived lane journals the fact ALONE. A caller that retires
+ * on this answer alone therefore kills every `yrd pr submit` submission on its
+ * first compose. Nothing in the receiver store separates the two — the store
+ * shares its object database with the repository, so probing for the fact's
+ * commit answers "present" for both (measured 2026-09-02) — which is why the
+ * compose does NOT wire this today. See @yrd/queue's `scanSubmitRefs`.
+ *
+ * Only the NO-REF case is here. A ref standing at a DIFFERENT sha than the
+ * mirror's is a re-push whose projection has not caught up, and the existing
+ * re-push path already owns it: judging it here would retire live consent on
+ * the strength of a race, which is the one outcome worse than re-admitting a
+ * dead fact.
+ */
+export function submitFactsWithoutReceiverRef(
+  bays: DeepReadonly<Pick<BaysState, "submits">>,
+  /** An ANSWERED scan only. The unanswered variant is deliberately not
+   * accepted: there is no ref set to compare against, and every way of
+   * pretending otherwise ends in retiring live approvals. */
+  scan: Extract<SubmitRefScan, { answered: true }>,
+): SubmitFactWithoutRef[] {
+  const missing: SubmitFactWithoutRef[] = []
+  for (const branch of Object.keys(bays.submits).toSorted()) {
+    const submit = bays.submits[branch]
+    if (submit === undefined) continue
+    if (scan.refs.has(branch)) continue
+    missing.push({ branch, sha: submit.sha, base: submit.base })
+  }
+  return missing
+}
+
 /** One derived-lane submit ref this sweep has proven safe to physically
  * retire, with everything a caller needs to both act and explain the act. */
 export type DerivedSubmitRetirement = Readonly<{

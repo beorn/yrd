@@ -151,6 +151,46 @@ async function listRefs(git: GitRunner, patterns: readonly string[]): Promise<Ma
   return refs
 }
 
+/**
+ * Every `refs/yrd/submit/<branch>` the receiver store actually holds, branch →
+ * sha — the repository-truth half of the queue's mirror-vs-ref comparison.
+ *
+ * NO CALLER YET, and that is stated rather than left to be discovered: this is
+ * the reader `QueueOptions.scanSubmitRefs` needs, and the yrd-cli host's wiring
+ * site says in full why it stays commented out — a fact without a ref is not
+ * necessarily a fact whose ref was deleted, because `yrd pr submit <branch>`
+ * writes no ref at all. Wiring is one line the moment that is settled.
+ *
+ * Lives here because this is where the receiver store already has a reader:
+ * `storeGit` and `listRefs` are the same pair `scanReceiverRevisions` uses, so
+ * the queue's compose and `yrd pr retire` can never read two different ref sets
+ * out of one store.
+ *
+ * Every failure names the STORE. A caller looking at "could not list refs" has
+ * to go and find out which directory was meant; the compose row that quotes
+ * this message is read by someone who was not there when it ran.
+ */
+export async function scanReceiverSubmitRefs(
+  process: Pick<Process, "run">,
+  store: string,
+): Promise<Map<string, string>> {
+  const git = storeGit(process, store)
+  let listed: Map<string, string>
+  try {
+    listed = await listRefs(git, [SUBMIT_REF_PREFIX])
+  } catch (error) {
+    throw new Error(
+      `yrd: could not list receiver submit refs in '${store}': ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  const refs = new Map<string, string>()
+  for (const [ref, sha] of listed) {
+    if (!ref.startsWith(SUBMIT_REF_PREFIX)) continue
+    refs.set(ref.slice(SUBMIT_REF_PREFIX.length), sha)
+  }
+  return refs
+}
+
 /** Split `refs/for/<base>/<branch>`: the branch is the longest suffix the store
  * knows as a carrier (`refs/heads/<branch>`) or a submit fact; failing both,
  * the first segment is the base. Bases may carry slashes, so a fixed split
