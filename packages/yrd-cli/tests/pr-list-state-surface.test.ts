@@ -293,7 +293,9 @@ describe("pr list merge reconciliation (22376)", () => {
 
     const human = outputIO({ pruneGit: () => mergeGit(), columns: 200 })
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain("already-landed")
+    // The human column says `merged`; `already-landed` stays the JSON status
+    // asserted above, which is the word the journal and every v1 reader carry.
+    expect(human.stdout()).toContain("merged")
     expect(human.stdout()).toContain("withdrawn-after-landing")
   })
 

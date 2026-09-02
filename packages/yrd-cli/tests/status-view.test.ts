@@ -253,7 +253,10 @@ describe("ChangeStatusView eligibility reasons", () => {
       { width: 160, height: 100, plain: true },
     )
 
-    expect(output).toContain("needs-author")
+    // One of the five words, with the check that judged the content beside it.
+    // The retired `needs-author` label said neither, and this surface printed
+    // it identically to a change the queue itself could not carry.
+    expect(output).toContain("failed check")
     // The WHY the author must act on — without it the table names a state and
     // hides the reason (the message reaches JSON but no human surface).
     expect(output).toContain(detail)
@@ -266,7 +269,9 @@ describe("ChangeStatusView eligibility reasons", () => {
       plain: true,
     })
 
-    expect(output).toContain("submitted")
+    // A change in line, waiting for its on-submit checks: `queued`, the first
+    // of the five words. It read `submitted` until the states landed.
+    expect(output).toContain("queued")
     expect(output).not.toContain("WHY")
   })
 })
