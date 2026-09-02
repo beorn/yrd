@@ -173,12 +173,31 @@ export const HABITANT_BACKOFF_EXIT_CODES: readonly HabitantExitCode[] = Object.f
 /**
  * The codes that must never be restarted automatically, derived the same way.
  *
- * A service declared `restart: never` already stays down whatever it exits
- * with, so this list is not what keeps a wedged runner stopped. It exists so a
- * supervisor that DOES pace this process — a differently-declared host, or a
- * future policy keyed on the code rather than the service — cannot reach
- * "restart" for a condition whose whole meaning is that restarting is futile.
- * Derived rather than restated, for the same reason as the backoff list.
+ * NOT ENFORCED TODAY, and that gap is worth knowing before trusting this list.
+ * The Yrd runner is declared `restart: "on-failure"` (`hab.projects.ts`), which
+ * restarts on every non-zero exit — these two included — because the policy
+ * that would hold them, hab-core's `permanentExitCodes`, is unreachable from a
+ * project's service declaration: it is absent from `SERVICE_KEYS` in
+ * ag/packages/hab-config, and declaring it anyway is a FATAL unknown key that
+ * takes down the whole composition rather than just this service. Inhab's
+ * restart budget (three per 600s, then `stop-budget`) is what bounds them
+ * meanwhile, so a stand-down condition still ends stopped and paged, three
+ * attempts later than it should.
+ *
+ * The list stays derived and exported for the supervisor that CAN consume it:
+ * once hab-config accepts the key, `hab.projects.ts` declares exactly this
+ * list and the gap closes with no change here.
+ *
+ * THE RESTART CODES, named together because they are the ones a supervisor
+ * must never file under "stays down": `source-stale` (11) — the checkout moved
+ * under this process; `installed-plan-stale` (13) — the base tip declares a
+ * different step plan than this process installed, which fired twice on
+ * 2026-09-02 as gate-touching merges landed; and `root-pin-moved` (18) — the
+ * queue repository advanced its recorded Yrd pin. All three mean "the code
+ * moved under me", all three are taken at a pass boundary with nothing in
+ * flight, and all three are cured by the relaunch and by nothing else. Under
+ * the `restart: "never"` this replaced, every one of them was inert: the
+ * runner left correctly and nothing brought it back.
  */
 export const HABITANT_STAND_DOWN_EXIT_CODES: readonly HabitantExitCode[] = Object.freeze(
   (Object.keys(HABITANT_EXIT) as HabitantExitCondition[])

@@ -88,10 +88,49 @@ export default {
         // is tracked as its own defect. This number is a ceiling for runaway.
         env: { TRIBE_NAME: "@yrd", YRD_REPOSITORY_ALIASES, YRD_HABITANT_RSS_CAP_MB: "24576" },
         health: { command: `bun tools/yrd-runtime.mjs yrd queue ${repository.name} --check --json` },
-        // Andon policy (operator ruling 2026-09-01): a crashed runner stays
-        // exited and pages once; every restart is a deliberate operator/CTO
-        // act, never supervision. hab-config validates the value.
-        restart: "never" as const,
+        // The runner relaunches itself on the three conditions whose CURE is
+        // the relaunch, and only those: `source-stale` (11), the stale
+        // installed plan (13) and a moved root pin (18) all mean "the code
+        // moved under me", and all three are designed exits taken at a pass
+        // boundary with nothing in flight. See `habitant-exit.ts` for the
+        // whole table — both restart codes are documented together there, and
+        // this value is the half that makes them do anything.
+        //
+        // Was `restart: "never"` (andon ruling, operator 2026-09-01: a crashed
+        // runner stays exited and pages once). Under that value the entire
+        // exit taxonomy was INERT: 13 fired twice on 2026-09-02 alone, once at
+        // 08:06 and once before 08:42, each time as a merge changed the step
+        // definitions under a serving runner, and each time the queue stayed
+        // down until a person ran `hab up`. The pin advances cost the same
+        // ritual — stop the resident, advance the gitlink, start it again —
+        // between 2m43s and ~40 minutes each, on the fleet's critical path.
+        // Operator ruling 2026-09-02: "why isn't yrd fully automatic now? that
+        // is critical path and should be driven hard."
+        //
+        // WHAT THIS COSTS, stated rather than discovered later. `on-failure`
+        // restarts on EVERY non-zero exit, so it also restarts the two
+        // conditions the taxonomy dispositions `stand-down`: `drained` (16, a
+        // person asked this pass to stop) and `fatal-error` (17, an ERROR row
+        // no successor can fix). Inhab's default budget bounds both — three
+        // restarts per 600s with 1s→30s backoff, then `stop-budget` — so a
+        // genuine fault still ends stopped and paged to `owner` below, three
+        // attempts and at most ten minutes later than the andon ruling wants.
+        //
+        // The narrower policy that would hold those two exactly is hab-core's
+        // `permanentExitCodes`, and it is NOT reachable from here today: it
+        // lives on habd's runtime launch envelope
+        // (ag/packages/hab-core/src/habd-runtime.ts) with no production writer,
+        // and it is absent from `SERVICE_KEYS` in ag/packages/hab-config
+        // (src/index.ts). Declaring it here does not degrade — `validateServiceKeys`
+        // pushes `unknown key 'permanentExitCodes'` onto `diagnostics.errors`,
+        // and `checkHabConfig` then returns no habplan at all, taking down
+        // EVERY service in the composition rather than just this one. So it is
+        // deliberately not declared. Restoring full andon fidelity means adding
+        // the key to `SERVICE_KEYS`, threading it through `HabplanService` to
+        // the launch envelope, and then declaring
+        // `permanentExitCodes: [HABITANT_EXIT.drained, HABITANT_EXIT["fatal-error"]]`
+        // here — a change in ag, not in Yrd.
+        restart: "on-failure" as const,
         // Wired 2026-09-01: `HabServiceDefinition.owner` (ag/packages/hab-config,
         // src/index.ts) now lists "owner" in `SERVICE_KEYS`, and a resident with
         // `restart: "never"` and no owner is a WARNING there, not the FATAL
