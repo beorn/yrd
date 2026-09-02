@@ -7569,7 +7569,9 @@ describe("runYrd", () => {
         },
       )
       try {
-        const status = JSON.parse(readFileSync(statusPath, "utf8"))
+        const status = JSON.parse(readFileSync(statusPath, "utf8")) as {
+          queueProgress: { findings: { code: string }[] }
+        }
         const codes = status.queueProgress.findings.map((finding: { code: string }) => finding.code)
         expect(codes).toContain("queue-never-started")
         expect(codes).not.toContain("queue-liveness-wedged")
