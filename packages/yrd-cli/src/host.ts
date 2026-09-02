@@ -156,6 +156,7 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { guardScopedPaths } from "./pre-submit-guard-scope.ts"
+import { reportReceiverDrainRefusal } from "./receiver-drain-refusal.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import { observeFreshRemoteBranch, observeOriginBranchAdvertisement, observeOriginRemote } from "./remote-branch.ts"
 import {
@@ -4133,9 +4134,11 @@ async function createYrdRuntimeHost(
         lockTimeoutMs: 30_000,
       })
       if (result.failed.length > 0 || result.ambiguous.length > 0) {
-        throw new Error(
-          `yrd: receiver inbox did not drain cleanly: ${JSON.stringify({ failed: result.failed, ambiguous: result.ambiguous })}`,
-        )
+        // One ERROR row per entry BEFORE the refusal. The bare `error:` line the
+        // CLI dies with used to be the only trace, and it named an opaque id —
+        // no branch, ref, age or file, and no word that a re-push does not
+        // clear an ambiguous entry (measured 2026-09-01).
+        throw reportReceiverDrainRefusal(receiverLog, result, Date.now())
       }
     }
     if (mode === "active") await drain()
