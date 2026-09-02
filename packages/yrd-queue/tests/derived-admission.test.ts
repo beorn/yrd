@@ -30,6 +30,7 @@ import {
   type PrNumberMint,
 } from "@yrd/bay"
 import {
+  createFailure,
   createMemoryJournal,
   createYrd,
   createYrdDef,
@@ -160,6 +161,7 @@ async function createApp(
     log?: ReturnType<typeof createLogger>
     steps?: readonly ReturnType<typeof passingCheck | typeof passingMerge | typeof passingDeploy>[]
     defaultSteps?: readonly string[]
+    prepareCandidate?: CandidatePreparer
     /** Arms the door's compose self-derivation (S6): the durable mint derived
      * admission commits identities to, and the git-enrichment reader. */
     prNumberMint?: PrNumberMint
@@ -184,7 +186,7 @@ async function createApp(
     batch: false,
     defaultSteps: options.defaultSteps ?? ["check", "merge"],
     resolveBaseSha: () => BASE,
-    prepareCandidate: mergeableCandidate,
+    prepareCandidate: options.prepareCandidate ?? mergeableCandidate,
     ...(options.prNumberMint === undefined ? {} : { prNumberMint: options.prNumberMint }),
     ...(options.readSubmitEnrichment === undefined ? {} : { readSubmitEnrichment: options.readSubmitEnrichment }),
     ...(options.runner === undefined ? {} : { runner: options.runner }),
@@ -355,15 +357,41 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
   })
 
   it("a re-pushed derived branch reuses its retained snapshot identity through the real pipeline (A9 continuity)", async () => {
-    await using app = await createApp({ steps: [passingCheck()], defaultSteps: ["check"] })
+    const mint = volatilePrNumberMint()
+    const prepareCandidate: CandidatePreparer = (input) => {
+      if (input.prs.some((pr) => pr.headSha === RESUBMIT_SHA)) {
+        throw createFailure({
+          kind: "refusal",
+          code: "recut-certificate",
+          message: "the re-pushed revision is temporarily unreadable",
+        })
+      }
+      return mergeableCandidate(input)
+    }
+    await using app = await createApp({
+      steps: [passingCheck()],
+      defaultSteps: ["check"],
+      prepareCandidate,
+      prNumberMint: mint,
+      baysPrNumberMint: mint,
+      readSubmitEnrichment: () => ({ changeId: CHANGE_ID }),
+    })
     await strandDerivedBranch(app, "issue/derived")
-    const mint = volatilePrNumberMint(1)
-    await app.queue.run({ derived: [doorEntry(app, "issue/derived", { mint })] }, runtime)
+    await app.queue.run({}, runtime)
 
     // The author re-pushes the branch + submit ref at a new sha.
     await app.bays.recordBranchSubmit({ branch: "issue/derived", sha: RESUBMIT_SHA, base: "main" })
-    const again = doorEntry(app, "issue/derived", { mint })
-    expect(again).toMatchObject({ id: "PR2", revision: 3, headSha: RESUBMIT_SHA })
+    await app.queue.run({}, runtime)
+    expect(app.state().queues.derivedIdentities["issue/derived"]?.[RESUBMIT_SHA]).toMatchObject({
+      id: "PR2",
+      revision: 3,
+    })
+    expect(app.state().queues.admissionRefusals.PR2).toMatchObject({
+      revision: 3,
+      headSha: RESUBMIT_SHA,
+      count: 1,
+      sameCodeCount: 1,
+    })
     // Reused, never re-minted: the high-water did not move again.
     expect(mint.highWater()).toBe(2)
   })
@@ -741,6 +769,73 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     // churn underneath it was. `unrecordedSubmits` only retires once a Queue
     // run actually starts, and none has (the check never settles here).
     expect((await app.queue.unrecordedSubmits()).map((row) => row.branch)).toEqual(["issue/slow-checks"])
+  })
+
+  it("a retryable derived refusal reaches the repeat-admission bar on one identity while a genuinely new sibling still runs", async () => {
+    // Acceptance 2 for the stable-identity fix. A content verdict has a
+    // Candidate in hand and retires its submit fact on refusal one; this uses
+    // the retryable precondition arm instead, whose whole contract is to try
+    // the SAME immutable submission again when the environment can recover.
+    const refusedBranch = "issue/a-retryable-derived"
+    const healthyBranch = "issue/z-genuinely-new"
+    const mint = volatilePrNumberMint()
+    const prepareCandidate: CandidatePreparer = (input) => {
+      const refused = input.prs.find((pr) => pr.branch === refusedBranch)
+      if (refused !== undefined) {
+        throw createFailure({
+          kind: "refusal",
+          code: "recut-certificate",
+          message: `yrd: change '${refused.id}' has a certified base this repository cannot read`,
+        })
+      }
+      return mergeableCandidate(input)
+    }
+    await using app = await createApp({
+      steps: [passingCheck()],
+      defaultSteps: ["check"],
+      prepareCandidate,
+      prNumberMint: mint,
+      baysPrNumberMint: mint,
+    })
+    await app.bays.recordBranchSubmit({ branch: refusedBranch, sha: SHA, base: "main" })
+
+    let thirdRuns: Awaited<ReturnType<typeof app.queue.run>> = []
+    for (const pass of [1, 2, 3]) {
+      if (pass === 3) {
+        await app.bays.recordBranchSubmit({ branch: healthyBranch, sha: RESUBMIT_SHA, base: "main" })
+      }
+      const runs = await app.queue.run({}, runtime)
+      if (pass === 3) thirdRuns = runs
+
+      expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+        code: "recut-certificate",
+        count: pass,
+        sameCodeCount: pass,
+      })
+      if (pass === 2) {
+        expect(app.queue.audit().findings).not.toContainEqual(
+          expect.objectContaining({ code: "admission-refusal-loop", pr: "PR1" }),
+        )
+      }
+    }
+
+    expect(app.queue.audit().findings).toContainEqual(
+      expect.objectContaining({
+        code: "admission-refusal-loop",
+        pr: "PR1",
+        refusal: "recut-certificate",
+        count: 3,
+      }),
+    )
+    expect(app.state().bays.submits[refusedBranch]).toMatchObject({ sha: SHA })
+    expect(app.state().queues.admissionRefusals.PR2).toBeUndefined()
+    expect(thirdRuns).toMatchObject([
+      {
+        status: "completed",
+        conclusion: "success",
+        prs: [expect.objectContaining({ id: "PR2", branch: healthyBranch, headSha: RESUBMIT_SHA })],
+      },
+    ])
   })
 
   it("retires a legacy SHA-only Candidate loudly and binds a fresh identity to the exact branch+sha", async () => {

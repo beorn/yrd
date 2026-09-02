@@ -19,7 +19,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { failureFact } from "@yrd/core"
+import { failureFact, isRecoverableFailure } from "@yrd/core"
 import { createProcess, shellCommand } from "@yrd/process"
 import { assertSubmoduleModelAuthorizationsAvailable } from "../src/queue.ts"
 import {
@@ -322,6 +322,7 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
     // removed gitlink.
     expect(fact.code).toBe("min-commit-unpublished")
     expect(fact.message).toContain("dep")
+    expect(isRecoverableFailure(error), "publishing the same min commit makes this exact input retryable").toBe(true)
   })
 
   it("hands checks the filled tree: the sha a step judges is the shaset commit, never the author head", async () => {

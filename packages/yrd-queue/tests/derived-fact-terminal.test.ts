@@ -19,19 +19,19 @@
  * and judged, the fact is terminal with a finding — whatever the verdict was
  * called.
  *
- * It also pins the boundary, which matters as much as the rule: a refusal
- * raised while PREPARING the candidate never evaluated the content and is a
- * PARK, not a verdict. `min-commit-unpublished` names an arrangement around the
- * change; someone satisfies it and the same fact integrates with no resubmit.
- * "Any refusal retires the fact" would have broken that contract, which is why
- * the discriminator is a candidate in hand rather than a list of codes.
+ * It also pins the boundary, which matters as much as the rule: a Candidate in
+ * hand proves a verdict, while an absent Candidate is a PARK only when the
+ * producer marks its external precondition recoverable.
+ * `min-commit-unpublished` is that typed case: someone satisfies the
+ * arrangement and the same fact integrates with no resubmit. "Any refusal
+ * retires the fact" would have broken that contract.
  * @level l2
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, pipe, raiseFailure } from "@yrd/core"
+import { createFailure, createMemoryJournal, createYrd, createYrdDef, markRecoverable, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
@@ -303,16 +303,19 @@ describe("a standing submit fact derives at most ONE live change", () => {
     // is the live one: push the submodule's own main and the SAME fact
     // integrates on the next pass, no resubmit (contract-tested end-to-end in
     // yrd-cli's host suite). Retiring on it would demand a re-push to recover
-    // from a condition a re-push does not address, so the discriminator is
-    // whether a candidate was BUILT and judged — never the refusal's code.
+    // from a condition a re-push does not address. Candidate-in-hand proves a
+    // verdict; candidate absence is a park only when the producer marks this
+    // external precondition recoverable, as this fixture does below.
     const queueMint = volatilePrNumberMint()
     let arrangementMissing = true
     const prepare: CandidatePreparer = (input) => {
       if (arrangementMissing) {
-        raiseFailure(
-          "refusal",
-          "min-commit-unpublished",
-          "change cannot fill the shaset: push it to the submodule's own main first",
+        throw markRecoverable(
+          createFailure({
+            kind: "refusal",
+            code: "min-commit-unpublished",
+            message: "change cannot fill the shaset: push it to the submodule's own main first",
+          }),
         )
       }
       return mergeableCandidate(input)
