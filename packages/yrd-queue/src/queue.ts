@@ -2830,6 +2830,22 @@ function createQueue<Shape extends ChangeShape>(
     return { code: result.code, kind, reason: result.message }
   }
 
+  /** A member this pass drops from its own candidate set, with everything a
+   * reader needs to act: which change, which required check, the code of the
+   * job that reached no verdict, and what unsticks it. Carried out of
+   * {@link admitChangeRevision} rather than reported there because the ROW
+   * belongs to the pass — the same shape every other compose-side eject uses —
+   * while the decision belongs to the site that can see the Job. */
+  type RevisionAdmissionEjection = Readonly<{
+    pr: string
+    branch: string
+    step: string
+    job: string
+    code: string
+    reason: string
+    remedy: string
+  }>
+
   type RevisionAdmissionOutcome = Readonly<{
     processed: boolean
     refusal?: Readonly<{
@@ -2837,6 +2853,7 @@ function createQueue<Shape extends ChangeShape>(
       kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
       reason: string
     }>
+    ejected?: RevisionAdmissionEjection
   }>
 
   const admitChangeRevision = async (
@@ -2992,12 +3009,58 @@ function createQueue<Shape extends ChangeShape>(
         // member has no record to carry that verdict (recordRevisionAdmission
         // deliberately skips it) and no run exists yet to attribute a ledger
         // row to, so the same absorb would leave the failure recorded NOWHERE
-        // while the compose resolves clean. Propagate instead — the door's own
-        // policy for infrastructure: it needs a human, not a retry loop.
-        if (
-          !hasChangeRecord(runtime().bays, pr.id) &&
-          (job.conclusion !== "failure" || result.code === "runner-error")
-        ) {
+        // while the compose resolves clean.
+        //
+        // THE DISCRIMINATION, and the whole of it: a `failure` conclusion IS a
+        // verdict — the step ran and judged the content — so it falls through
+        // to `refuseRevisionAdmission` below exactly as it always has. Only the
+        // conclusions that judged NOTHING take the ejection arm.
+        if (!hasChangeRecord(runtime().bays, pr.id) && job.conclusion !== "failure") {
+          // An UNUSABLE job — the conclusions that carry no verdict about
+          // anything: lost, cancelled, killed, skipped — says nothing about
+          // this member and nothing whatever about the others. Raising here
+          // made ONE member's dead job the whole pass's outcome: measured
+          // 2026-09-01, a one-shot pass killed by SIGTERM at 16:30 left derived
+          // member PR3154's `affected-tests` job terminal with `job-lost`, and
+          // every pass after it died identically at compose (exit 3, ZERO
+          // merges, no drain attempted at all) while six unrelated eligible
+          // changes waited 1h23m behind it.
+          //
+          // EJECT instead: drop this member from THIS pass's candidate set,
+          // loudly and by name, and let compose continue for every other
+          // member. Nothing is written — no admission record (a derived member
+          // has none by design), no refusal ledger row, no memo — so the
+          // ejection is per-pass and stateless, and the member is judged afresh
+          // next pass the moment a re-drive or a base move hands it a job that
+          // can reach a verdict. Deliberately NOT a retirement of the author's
+          // submit fact either: an infrastructure failure must never consume a
+          // submission, which is why `refuseRevisionAdmission` — the one funnel
+          // that retires facts — is not on this path at all.
+          return {
+            processed: false,
+            ejected: {
+              pr: pr.id,
+              branch: pr.branch,
+              step: step.name,
+              job: job.id,
+              code: result.code,
+              reason:
+                `required check '${step.name}' holds Job '${job.id}', which reached no verdict ` +
+                `(${job.conclusion}): ${result.message}`,
+              remedy:
+                "no action if the check is re-driven or the base moves — the next pass admits this member " +
+                "again as soon as a job that can reach a verdict exists; to force one now, re-push " +
+                `refs/yrd/submit/${pr.branch} at this head`,
+            },
+          }
+        }
+        // A THROWN callback is the one machinery failure that still PROPAGATES,
+        // unchanged: the job layer reached the step and the STEP broke, so the
+        // machinery this process runs is wrong and every member behind this one
+        // breaks the same way. It needs a human, not a retry loop — and unlike
+        // a lost Job it is not per-member, which is exactly why ejecting it
+        // would be wrong.
+        if (!hasChangeRecord(runtime().bays, pr.id) && result.code === "runner-error") {
           raiseFailure(
             "infrastructure",
             result.code,
@@ -3239,8 +3302,15 @@ function createQueue<Shape extends ChangeShape>(
 
   /** One admission turn's outcome. `refused` names the selectors this turn
    * skipped with a typed per-PR refusal, so the drain can release the line
-   * instead of re-picking the same refused head forever (22474). */
-  type AdmissionDispatch = Readonly<{ admitted: string[]; refused: readonly string[] }>
+   * instead of re-picking the same refused head forever (22474). `ejected`
+   * names the ones this turn dropped from its candidate set for an unusable
+   * Job — no verdict, so no refusal either — and releases the line for the
+   * same reason. */
+  type AdmissionDispatch = Readonly<{
+    admitted: string[]
+    refused: readonly string[]
+    ejected: readonly string[]
+  }>
 
   const dispatchAdmissions = async (
     selectors: readonly string[],
@@ -3251,6 +3321,14 @@ function createQueue<Shape extends ChangeShape>(
   ): Promise<AdmissionDispatch> => {
     const admitted: string[] = []
     const refused: string[] = []
+    // Ejected THIS TURN, and the reason the set is local: an ejection writes
+    // nothing, so nothing downstream can see it — including
+    // `admissionLineHolder`, which reads the refusal ledger to decide who holds
+    // the admission order. Without this set the member just ejected would still
+    // be found "ahead with no refusal streak" by every member behind it, and
+    // the healthy ones would be withheld `admission-order-held` by a member the
+    // pass had already given up on — the head-of-line wedge, rebuilt.
+    const ejected: string[] = []
     // Implicit (selectorless) drains absorb per-PR terminal races; explicit
     // targeting stays fail-loud so a one-shot caller sees the real outcome.
     const selectorless = selection !== "explicit"
@@ -3286,7 +3364,7 @@ function createQueue<Shape extends ChangeShape>(
         // status.json never named it. Say WHICH guard withheld it, and what
         // clears it; the reporter's dedup memo collapses the steady-state
         // repeats into one summary.
-        const withheld = admissionWithholding(snapshot, steps, pr, selection, derived)
+        const withheld = admissionWithholding(snapshot, steps, pr, selection, derived, ejected)
         if (withheld !== undefined) {
           composeConditions.report(
             `admission-withheld:${pr.id}:${withheld.code}`,
@@ -3305,6 +3383,33 @@ function createQueue<Shape extends ChangeShape>(
         }
         const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
         const outcome = await admitChangeRevision(pr, baseSha, runOptions, selectorless)
+        if (outcome.ejected !== undefined) {
+          const ejection = outcome.ejected
+          // error, not warn, and the same row shape the authority-gap eject a
+          // few hundred lines down already uses: this is the ONLY trace the
+          // ejection leaves anywhere, by design, so it carries the change, the
+          // check, the Job, the code that made the Job unusable, and the cure.
+          // Keyed on (pr, code) so the reporter's memo folds a member stuck
+          // this way across passes into one announcement plus its escalation
+          // schedule, instead of one row per pass forever.
+          composeConditions.report(
+            `admission-ejected:${ejection.pr}:${ejection.code}`,
+            "error",
+            `ejected ${ejection.pr} (${ejection.branch}) [${ejection.code}] ${ejection.reason} — ${ejection.remedy}`,
+            {
+              action: "admission-ejected",
+              pr: ejection.pr,
+              branch: ejection.branch,
+              step: ejection.step,
+              job: ejection.job,
+              code: ejection.code,
+              reason: ejection.reason,
+              remedy: ejection.remedy,
+            },
+          )
+          ejected.push(pr.id)
+          continue
+        }
         if (outcome.processed) admitted.push(pr.id)
         if (outcome.refusal !== undefined) {
           await noteRevisionAdmissionRefusal(pr.id, outcome.refusal)
@@ -3330,7 +3435,7 @@ function createQueue<Shape extends ChangeShape>(
         refused.push(selector)
       }
     }
-    return { admitted, refused }
+    return { admitted, refused, ejected }
   }
 
   const drainAdmissions = async (
@@ -3404,11 +3509,16 @@ function createQueue<Shape extends ChangeShape>(
       )
       for (const pr of dispatched.admitted) admitted.add(pr)
       for (const pr of dispatched.refused) released.add(pr)
-      // Head-of-line release: the turn admitted nothing because it was refused,
-      // and PRs behind it have not been tried yet. Take the next one. `released`
-      // grows by at least one whenever this branch is taken, so `queued` strictly
-      // shrinks and the loop still terminates.
-      if (dispatched.refused.length > 0 && queued.length > turn.length) continue
+      // An ejected member releases the line exactly as a refused one does. It
+      // is the same fact — this drain will not admit it — reached without a
+      // verdict, so it must not be re-picked as the head on the next turn
+      // either.
+      for (const pr of dispatched.ejected) released.add(pr)
+      // Head-of-line release: the turn admitted nothing because it was refused
+      // or ejected, and PRs behind it have not been tried yet. Take the next
+      // one. `released` grows by at least one whenever this branch is taken, so
+      // `queued` strictly shrinks and the loop still terminates.
+      if (dispatched.refused.length + dispatched.ejected.length > 0 && queued.length > turn.length) continue
       if (dispatched.admitted.length > 0 && dispatched.refused.length === 0) continue
 
       for (const selector of targets) {
@@ -9383,11 +9493,18 @@ function admissionLineHolder(
   steps: readonly RuntimeStep[],
   pr: DeepReadonly<Change>,
   derived: readonly DeepReadonly<Change>[] = [],
+  // Members this pass already ejected. An ejection is stateless by design, so
+  // the refusal ledger below cannot know about it; without this list a member
+  // the pass has already given up on would hold the order for everyone behind
+  // it, which is precisely the wedge ejecting exists to end.
+  ejected: readonly string[] = [],
 ): DeepReadonly<Change> | undefined {
   const queued = admissionQueue(state, steps, undefined, derived)
   const position = queued.findIndex((candidate) => candidate.id === pr.id)
   const ahead = position < 0 ? queued : queued.slice(0, position)
-  return ahead.find((candidate) => state.queues.admissionRefusals[candidate.id] === undefined)
+  return ahead.find(
+    (candidate) => state.queues.admissionRefusals[candidate.id] === undefined && !ejected.includes(candidate.id),
+  )
 }
 
 /** Why this pass will not admit `pr`, or `undefined` when nothing withholds it.
@@ -9402,6 +9519,7 @@ function admissionWithholding(
   pr: DeepReadonly<Change>,
   selection: "explicit" | undefined,
   derived: readonly DeepReadonly<Change>[],
+  ejected: readonly string[] = [],
 ): Readonly<{ code: string; reason: string; remedy: string; holder?: string }> | undefined {
   const pause = blockingQueuePause(state, pr)
   if (pause !== undefined) {
@@ -9427,7 +9545,7 @@ function admissionWithholding(
     }
   }
   if (selection === "explicit") return undefined
-  const holder = admissionLineHolder(state, steps, pr, derived)
+  const holder = admissionLineHolder(state, steps, pr, derived, ejected)
   return holder === undefined
     ? undefined
     : {
