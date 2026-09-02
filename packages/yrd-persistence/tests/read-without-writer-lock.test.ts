@@ -12,10 +12,10 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
-import { CauseSchema, Command, EventSchema, type Cause, type Event } from "@yrd/core"
+import { CauseSchema, Command, EventSchema, type Cause, type Event, type Journal } from "@yrd/core"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { afterEach, describe, expect, it } from "vitest"
-import { createExclusive, createJournal, type Exclusive, type Journal } from "@yrd/persistence"
+import { createExclusive, createJournal, type Exclusive } from "@yrd/persistence"
 
 const SAFE_SQLITE = "3.53.0"
 const roots: string[] = []
@@ -153,8 +153,8 @@ describe("journal reads and the writer lock (24019)", () => {
       expect(message).toMatch(/journal-read maintenance/u)
 
       const waiting = events.filter(
-        (event) =>
-          event.level === "warn" && typeof event.message === "string" && /waiting up to \d+ms/u.test(event.message),
+        (event): event is Extract<LogEvent, { kind: "log" }> =>
+          event.kind === "log" && event.level === "warn" && /waiting up to \d+ms/u.test(event.message),
       )
       expect(waiting).toHaveLength(1)
       expect(waiting[0]?.props).toMatchObject({
