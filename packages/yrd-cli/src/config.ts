@@ -360,6 +360,15 @@ const ProjectFields = {
   drafts: DraftsSchema,
   needsPerson: NeedsPersonSchema,
   mergedTruthExceptions: MergedTruthExceptionsSchema,
+  /** The directory every check, action and configured-merge child receives
+   * as `TMPDIR` — absolute, or relative to the repository root
+   * (@i/10-yrd/24031). Absent, a child inherits the runner's own TMPDIR,
+   * which on a host whose `/tmp` is a quota'd tmpfs shared by every agent is
+   * exactly what filled mid-check on 2026-09-01 and retired two submissions
+   * as author failures. Parsing is pure: the command runner creates the
+   * directory before each spawn and refuses — as an infrastructure fact —
+   * when it cannot. A step's own `env.TMPDIR` still wins. */
+  scratch: TextSchema.optional(),
 } as const
 
 const ProjectSchema = z.object(ProjectFields).strict()
@@ -379,6 +388,8 @@ export type YrdProjectConfig = Readonly<{
   drafts: Readonly<z.infer<typeof DraftsSchema>>
   needsPerson: Readonly<z.infer<typeof NeedsPersonSchema>>
   mergedTruthExceptions: readonly z.infer<typeof MergedTruthExceptionSchema>[]
+  /** As declared: absolute, or relative to the repository root. */
+  scratch?: string
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -418,6 +429,13 @@ export type ResolvedYrdProjectConfig = Readonly<{
    * which leaves every specimen standing and every not-found lookup loudly
    * unknown; it never means "trust a not-found". */
   mergedTruthExceptions?: readonly MergedTruthExceptionConfig[]
+  /** The repository-declared TMPDIR root for every step child, ABSOLUTE —
+   * `loadYrdConfig` resolves a relative declaration against the repository
+   * root, never the process cwd. Absent (no key, or a hand-built fixture)
+   * means the runner's own TMPDIR is inherited, exactly as before the key
+   * existed. Threaded config -> step plan -> command runner, the path a
+   * step's own `env` takes. */
+  scratch?: string
 }>
 
 export type MergedTruthExceptionConfig = Readonly<z.infer<typeof MergedTruthExceptionSchema>>
@@ -495,6 +513,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       drafts,
       needsPerson,
       mergedTruthExceptions,
+      scratch,
     } = parsed.data
     if (merge !== undefined && landing !== undefined && merge !== landing) {
       throw createFailure({
@@ -516,6 +535,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       drafts,
       needsPerson,
       mergedTruthExceptions,
+      ...(scratch === undefined ? {} : { scratch }),
     }
   }
   const issue = mostSpecificConfigIssue(parsed.error.issues[0])
@@ -573,7 +593,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "checks", "requires", "contest", "progress", "drafts"].includes(path)
+    !["base", "batch", "checks", "requires", "contest", "progress", "drafts", "scratch"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -589,6 +609,7 @@ function configError(issue: z.core.$ZodIssue): Error {
     ["progress.refusalCount", "must be an integer >= 1"],
     ["progress.minAdmissionChecks", "must be an integer >= 1"],
     ["drafts.pageAfterHours", "must be a positive number"],
+    ["scratch", "must be a non-blank path (absolute, or relative to the repository root)"],
   ])
   const message =
     known.get(path) ??
@@ -697,6 +718,10 @@ export async function loadYrdConfig(options: {
         owner: parsed.needsPerson.owner ?? DEFAULT_NEEDS_PERSON_OWNER,
       },
       mergedTruthExceptions: parsed.mergedTruthExceptions,
+      // Against the repository root, never the process cwd: the habitant runs
+      // from wherever it was launched, and a relative root must name the same
+      // directory from every cwd that reads this config.
+      ...(parsed.scratch === undefined ? {} : { scratch: resolve(repo, parsed.scratch) }),
     },
   }
 }

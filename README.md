@@ -1462,6 +1462,33 @@ absolute path or through a wrapper on `PATH`; the guard's cwd is always
 `YRD_REPO`, so the candidate it must read and the tool that reads it need not
 share a checkout.
 
+### Scratch — where every step child writes its temporary files
+
+Top-level `scratch` names the directory every check, action and configured
+merge child receives as `TMPDIR` — absolute, or relative to the repository
+root:
+
+```yaml
+scratch: /home/hh/scratch/yrd-check-scratch
+```
+
+Yrd creates the directory before each spawn and refuses the step loudly —
+`scratch-root-unavailable`, an infrastructure failure naming the path and the
+kernel's reason, never a verdict on the content — when it cannot be created or
+is not writable, so no child ever starts with a `TMPDIR` it cannot use. A
+step's own `env.TMPDIR` still wins, and the root is then left alone. With the
+key absent, children inherit the runner's own `TMPDIR`, exactly as before.
+
+Set it on any host whose `/tmp` is a quota'd tmpfs. On 2026-09-01 the queue's
+`affected-tests` children inherited exactly that — a tmpfs `/tmp` with a
+per-user quota shared by every agent on the host — and filled it mid-check; git
+wrote `Disk quota exceeded`, and two submissions were retired for content that
+was never at fault. Point `scratch` at a path on the root filesystem instead
+(this host's value is `/home/hh/scratch/yrd-check-scratch`). Pre-submit checks
+already run with a run-scoped `TMPDIR` under the queue state directory and are
+not governed by this key; Yrd's own merge scratch lives under `.git/yrd/scratch`
+regardless.
+
 `yrd admin init` writes that exact one-liner and the managed pre-submit hook. It
 refuses to overwrite an existing repository config.
 Deleted or unknown repository keys—including unknown keys nested under
