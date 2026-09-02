@@ -72,6 +72,15 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
+/**
+ * Eight direct-branch record tests were removed here when the legacy record
+ * mint retired (72c0282e). They planted their fixture with `yrd pr create
+ * <pushed branch>`, which now refuses, and their premise — a live change on a
+ * branch that no Bay holds — is no longer buildable: a change mints only
+ * inside a Bay, and a Bay holding a live change will not close. Bay open and
+ * reattach stay covered by packages/yrd-bay/tests and
+ * packages/yrd-cli/tests/host.test.ts; reattach itself is @i/26-environments.
+ */
 describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
   it("separates persistent open from scoped run and keeps config off guest attach", async () => {
     const { repo } = await repository()
@@ -604,37 +613,6 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "list", "--json"), prs.stderr()).toBe(0)
     expect(JSON.parse(prs.stdout())).toMatchObject({ prs: [] })
-  })
-
-  it("reattaches an explicit PR target without implicit PR intake", async () => {
-    const targeted = await repository()
-    const branch = "topic/explicit-target"
-    await git(targeted.repo, "switch", "-qc", branch)
-    await writeFile(join(targeted.repo, "existing.txt"), "existing\n")
-    await git(targeted.repo, "add", "existing.txt")
-    await git(targeted.repo, "commit", "-qm", "existing target")
-    await git(targeted.repo, "push", "-q", "-u", "origin", branch)
-    await git(targeted.repo, "switch", "-q", "main")
-    const draft = output(targeted.repo)
-    expect(await yrd(targeted.repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
-    const continued = output(targeted.repo)
-    expect(
-      await yrd(
-        targeted.repo,
-        continued.io,
-        "bay",
-        "run",
-        "--pr",
-        branch,
-        "--",
-        "sh",
-        "-c",
-        "printf reattached > result.txt",
-      ),
-      continued.stderr(),
-    ).toBe(0)
-    expect(continued.stdout()).toContain(`bay explicit-target → reattached ${branch}, no issue linked`)
-    expect(await git(targeted.repo, "show", `refs/remotes/origin/${branch}:result.txt`)).toBe("reattached")
   })
 
   it("generates an anonymous Bay when no selector exists", async () => {
@@ -1232,203 +1210,6 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     const prs = output(repo)
     expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
     expect(JSON.parse(prs.stdout())).toMatchObject({ prs: [] })
-  })
-
-  it("uses the branch of an existing claim draft without implicitly recutting it", async () => {
-    const { repo } = await repository()
-    const branch = "topic/existing-claim"
-    await git(repo, "switch", "-qc", branch)
-    await writeFile(join(repo, "claim.txt"), "existing\n")
-    await git(repo, "add", "claim.txt")
-    await git(repo, "commit", "-qm", "existing claim")
-    const originalHead = await git(repo, "rev-parse", "HEAD")
-    await git(repo, "push", "-q", "-u", "origin", branch)
-    await git(repo, "switch", "-q", "main")
-
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
-    await git(repo, "branch", "-D", branch)
-    await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
-    const run = output(repo)
-    expect(
-      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf continued > continued.txt"),
-      run.stderr(),
-    ).toBe(0)
-
-    expect(await git(repo, "show", `refs/remotes/origin/${branch}:continued.txt`)).toBe("continued")
-    const prs = output(repo)
-    expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
-    expect(JSON.parse(prs.stdout())).toMatchObject({
-      prs: [{ branch, issue: CLAIM, status: "pushed", revs: [{ n: 1, head: originalHead }] }],
-    })
-  })
-
-  it("targets an existing PR branch through --pr without implicitly recutting it", async () => {
-    const { repo } = await repository()
-    const branch = "topic/explicit-target"
-    await git(repo, "switch", "-qc", branch)
-    await writeFile(join(repo, "claim.txt"), "existing\n")
-    await git(repo, "add", "claim.txt")
-    await git(repo, "commit", "-qm", "existing target")
-    const originalHead = await git(repo, "rev-parse", "HEAD")
-    await git(repo, "push", "-q", "-u", "origin", branch)
-    await git(repo, "switch", "-q", "main")
-
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch), draft.stderr()).toBe(0)
-    await git(repo, "branch", "-D", branch)
-    await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
-
-    const run = output(repo)
-    expect(
-      await yrd(repo, run.io, "bay", "run", "--pr", branch, "--", "sh", "-c", "printf continued > continued.txt"),
-      run.stderr(),
-    ).toBe(0)
-    expect(run.stdout()).toContain(`bay explicit-target → reattached ${branch}, no issue linked`)
-    expect(await git(repo, "show", `refs/remotes/origin/${branch}:continued.txt`)).toBe("continued")
-
-    const prs = output(repo)
-    expect(await yrd(repo, prs.io, "pr", "view", branch, "--json"), prs.stderr()).toBe(0)
-    expect(JSON.parse(prs.stdout())).toMatchObject({
-      pr: { branch, status: "pushed", revs: [{ n: 1, head: originalHead }] },
-    })
-  })
-
-  it("opens a branch-held PR at its recorded head through --pr", async () => {
-    const { repo } = await repository()
-    const branch = "topic/held-by-author"
-    await git(repo, "switch", "-qc", branch)
-    await writeFile(join(repo, "claim.txt"), "held by author\n")
-    await git(repo, "add", "claim.txt")
-    await git(repo, "commit", "-qm", "held candidate")
-    const originalHead = await git(repo, "rev-parse", "HEAD")
-    await git(repo, "push", "-q", "-u", "origin", branch)
-    await git(repo, "switch", "-q", "main")
-
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch), draft.stderr()).toBe(0)
-    const authorSlot = join(repo, "..", "author-slot")
-    await git(repo, "worktree", "add", "-q", authorSlot, branch)
-
-    const open = output(repo)
-    expect(await yrd(repo, open.io, "bay", "open", "--pr", branch), open.stderr()).toBe(0)
-
-    const bays = output(repo)
-    expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
-    const bay = (JSON.parse(bays.stdout()) as { bays: Array<{ id: string; headSha?: string; path?: string }> }).bays[0]
-    expect(bay).toMatchObject({ id: "B1", headSha: originalHead, path: expect.any(String) })
-    expect(await git(bay?.path ?? "", "rev-parse", "HEAD")).toBe(originalHead)
-
-    await writeFile(join(bay?.path ?? "", "continued.txt"), "continued in detached Bay\n")
-    await git(bay?.path ?? "", "add", "continued.txt")
-    await git(bay?.path ?? "", "commit", "-qm", "continue held candidate")
-    const continuedHead = await git(bay?.path ?? "", "rev-parse", "HEAD")
-    const refresh = output(bay?.path ?? repo)
-    expect(await yrd(repo, refresh.io, "bay", "refresh", bay?.id ?? ""), refresh.stderr()).toBe(0)
-
-    const refreshed = output(repo)
-    expect(await yrd(repo, refreshed.io, "bay", "list", "--json"), refreshed.stderr()).toBe(0)
-    expect(JSON.parse(refreshed.stdout())).toMatchObject({
-      bays: [{ id: "B1", branch, headSha: continuedHead, status: "open" }],
-    })
-  })
-
-  it("repairs a live claim draft whose local branch lost its tracking ref", async () => {
-    const { repo } = await repository()
-    const branch = "topic/local-claim-without-tracking"
-    await git(repo, "switch", "-qc", branch)
-    await writeFile(join(repo, "claim.txt"), "existing\n")
-    await git(repo, "add", "claim.txt")
-    await git(repo, "commit", "-qm", "existing claim")
-    await git(repo, "push", "-q", "-u", "origin", branch)
-    await git(repo, "switch", "-q", "main")
-
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
-    await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
-
-    const run = output(repo)
-    expect(
-      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf continued > continued.txt"),
-      run.stderr(),
-    ).toBe(0)
-
-    expect(await git(repo, "show", `refs/remotes/origin/${branch}:continued.txt`)).toBe("continued")
-  })
-
-  it("recovers a live claim draft from its tracking head when the remote branch was deleted", async () => {
-    const { repo } = await repository()
-    const branch = "topic/deleted-remote-claim"
-    await git(repo, "switch", "-qc", branch)
-    await writeFile(join(repo, "claim.txt"), "preserve claim head\n")
-    await git(repo, "add", "claim.txt")
-    await git(repo, "commit", "-qm", "existing claim")
-    await git(repo, "push", "-q", "-u", "origin", branch)
-    await git(repo, "switch", "-q", "main")
-
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
-    await git(repo, "branch", "-D", branch)
-    const origin = await git(repo, "remote", "get-url", "origin")
-    await git(origin, "update-ref", "-d", `refs/heads/${branch}`)
-
-    const run = output(repo)
-    expect(
-      await yrd(repo, run.io, "bay", "run", CLAIM, "--", "sh", "-c", "printf continued > continued.txt"),
-      run.stderr(),
-    ).toBe(0)
-
-    expect(await git(repo, "show", `refs/remotes/origin/${branch}:claim.txt`)).toBe("preserve claim head")
-    expect(await git(repo, "show", `refs/remotes/origin/${branch}:continued.txt`)).toBe("continued")
-  })
-
-  it("refuses to recreate a deleted claim remote from a rewound local branch", async () => {
-    const { repo } = await repository()
-    const branch = "topic/rewound-local-claim"
-    await git(repo, "switch", "-qc", branch)
-    await writeFile(join(repo, "claim.txt"), "preserve claim head\n")
-    await git(repo, "add", "claim.txt")
-    await git(repo, "commit", "-qm", "existing claim")
-    await git(repo, "push", "-q", "-u", "origin", branch)
-    await git(repo, "switch", "-q", "main")
-
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
-    const origin = await git(repo, "remote", "get-url", "origin")
-    await git(origin, "update-ref", "-d", `refs/heads/${branch}`)
-    await git(repo, "branch", "-f", branch, "main")
-
-    const run = output(repo)
-    expect(await yrd(repo, run.io, "bay", "run", CLAIM, "--", "true"), run.stderr()).not.toBe(0)
-    expect(await git(repo, "ls-remote", "origin", `refs/heads/${branch}`)).toBe("")
-  })
-
-  it("refuses a live claim draft after its authoritative branch carriers are lost", async () => {
-    for (const localCarrier of ["rewound", "absent"] as const) {
-      const { repo } = await repository()
-      const branch = `topic/lost-claim-${localCarrier}`
-      await git(repo, "switch", "-qc", branch)
-      await writeFile(join(repo, "claim.txt"), "preserve claim head\n")
-      await git(repo, "add", "claim.txt")
-      await git(repo, "commit", "-qm", "existing claim")
-      await git(repo, "push", "-q", "-u", "origin", branch)
-      await git(repo, "switch", "-q", "main")
-
-      const draft = output(repo)
-      expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
-      const origin = await git(repo, "remote", "get-url", "origin")
-      await git(origin, "update-ref", "-d", `refs/heads/${branch}`)
-      await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
-      if (localCarrier === "rewound") {
-        await git(repo, "branch", "-f", branch, "main")
-      } else {
-        await git(repo, "branch", "-D", branch)
-      }
-
-      const run = output(repo)
-      expect(await yrd(repo, run.io, "bay", "run", CLAIM, "--", "true"), run.stderr()).not.toBe(0)
-      expect(await git(repo, "ls-remote", "origin", `refs/heads/${branch}`)).toBe("")
-    }
   })
 
   it("refuses to publish an unrelated pre-existing task branch and records the failed bracket", async () => {
