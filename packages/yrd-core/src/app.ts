@@ -183,6 +183,15 @@ export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
   state: ReadSignal<DeepReadonly<State>>
   scope: Scope
   log: ConditionalLogger
+  /**
+   * The app's ONE clock as ISO-8601 — `inject.clock` when a caller froze it,
+   * the system clock otherwise; the `ts` every journal event carries. A plugin
+   * that needs "now" reads this, never `Date.now()`: a second clock beside the
+   * journal's is how a pass-start recovery read a run frozen at 2026-01-01 as
+   * eight months past its wait bound and settled it (measured 2026-09-02,
+   * five yrd-queue pins red on main).
+   */
+  clock(): string
   refresh(): Promise<DeepReadonly<State>>
   journalSnapshot(): Promise<JournalSnapshot<State>>
   historySnapshot(): Promise<JournalSnapshot<State>>
@@ -1322,6 +1331,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     state,
     scope,
     log,
+    clock,
     refresh: () => track(refresh),
     journalSnapshot: () => track(journalSnapshot),
     historySnapshot: () => track(historySnapshot),

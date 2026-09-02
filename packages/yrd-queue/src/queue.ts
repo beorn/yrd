@@ -2068,6 +2068,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             progress,
             needsPersonOwner,
             yrd.log.child("queue"),
+            yrd.clock,
             yrd.history,
             async () => (await yrd.historySnapshot()).state as unknown as DeepReadonly<RuntimeState>,
             options.onOutcome,
@@ -2137,6 +2138,9 @@ function createQueue<Shape extends ChangeShape>(
   progress: QueueProgressPolicy,
   needsPersonOwner: string,
   log: ConditionalLogger,
+  /** The app's one clock ({@link Yrd.clock}) — the journal's own `ts`, so a
+   * pass reads the same "now" its events were stamped with. */
+  clock: () => string,
   history: JournalHistory<unknown> | undefined,
   historicalState: () => Promise<DeepReadonly<RuntimeState>>,
   onOutcome: QueueOptions<readonly AnyStepDef[]>["onOutcome"],
@@ -3728,7 +3732,19 @@ function createQueue<Shape extends ChangeShape>(
         throw new Error(`yrd: malformed revision admission Job key '${job.key}'`)
       }
       const pr = getChangeRecord(snapshot.bays, prId)
-      if (pr === undefined || changeRevisionNumber(pr) !== Number(revisionText)) return true
+      if (pr === undefined) {
+        // A DERIVED member has no change record; its liveness is the exact
+        // branch+sha binding behind its standing submit fact — what the derived
+        // lane composes it from, and what 24031's re-drive hands the next pass.
+        // Reading "no record" as "no longer live" canceled every re-driven
+        // admission Job at the next recovery, pass-start settle (24030) and
+        // habitant sweep alike, so an infra-refused derived check never ran
+        // again and the compose read the canceled Job as a failed check
+        // (measured 2026-09-02: eight yrd-queue pins red from 32b4e6b6 on).
+        const bound = currentBoundDerivedChange(snapshot, prId)
+        return bound === undefined || currentChangeRev(bound).n !== Number(revisionText)
+      }
+      if (changeRevisionNumber(pr) !== Number(revisionText)) return true
       const delivery = changeDeliveryState(pr)
       return delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready"
     })
@@ -5197,7 +5213,15 @@ function createQueue<Shape extends ChangeShape>(
           // stays readable through `queue.get`/`history` until the next pass —
           // the same window a compose-time retirement always had.
           await cleanupSettledRoots()
-          await recoverQueueRuns({ recoveryTime: new Date(runOptions.now?.() ?? Date.now()).toISOString() })
+          // The pass's own clock, or the app's — never `Date.now()`. Recovery
+          // measures wait bounds, orphan grace and lease expiry against the
+          // journal's own timestamps, so its "now" must be the clock those were
+          // stamped with. Measured 2026-09-02: the wall clock here read a run
+          // journaled under a frozen 2026-01-01 clock as eight months past its
+          // wait bound and settled it before the compose could see it.
+          await recoverQueueRuns({
+            recoveryTime: runOptions.now === undefined ? clock() : new Date(runOptions.now()).toISOString(),
+          })
           if (args.steps?.length === 0) return []
           // Ref-only approvals derive their admission BEFORE any snapshot
           // feeds selection, so the same selectorless compose that admits them

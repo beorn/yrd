@@ -110,7 +110,7 @@ async function seedStalePlanBatch(journal: Journal<unknown>, id: () => string, l
 }
 
 describe("stale-plan retirement — an un-isolable drifted batch is retired, not refused forever", () => {
-  it("compose retires the batch with a typed stale-plan release and a loud result instead of re-refusing every cycle", async () => {
+  it("the pass retires the batch with a typed stale-plan release and a loud result instead of re-refusing every cycle — at pass start through recovery, else in the compose", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     const events: LogEvent[] = []
@@ -131,19 +131,31 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
       error: expect.objectContaining({ code: "stale-plan" }),
     })
 
-    const retire = events.find(
-      (event): event is Extract<LogEvent, { kind: "log" }> =>
-        event.kind === "log" && event.level === "warn" && event.props?.action === "compose-stale-plan-retire",
-    )
-    expect(retire, "expected a compose-stale-plan-retire result").toBeDefined()
-    expect(retire?.props).toMatchObject({ run: "R1", code: "stale-plan" })
+    // ONE settlement, typed and loud, whichever half of the pass reaches the
+    // batch first. Since 24030 every pass runs recovery BEFORE it composes, so
+    // the un-isolable batch is retired by the same walk `recover` runs (the
+    // sibling test below pins that path directly) and the row is recovery's;
+    // the compose-time retirement stays for a plan that drifts mid-pass.
+    const RETIRE_ACTIONS = ["compose-stale-plan-retire", "recover-stale-plan-retire"]
+    const retirements = (rows: readonly LogEvent[]) =>
+      rows.filter(
+        (event): event is Extract<LogEvent, { kind: "log" }> =>
+          event.kind === "log" && event.level === "warn" && RETIRE_ACTIONS.includes(String(event.props?.action)),
+      )
+    const retire = retirements(events)[0]
+    expect(retire, "expected a typed stale-plan retirement row").toBeDefined()
+    expect(
+      retire?.props?.action === "recover-stale-plan-retire"
+        ? { runs: retire.props.runs, code: retire.props.reason }
+        : { runs: [retire?.props?.run], code: retire?.props?.code },
+    ).toEqual({ runs: ["R1"], code: "stale-plan" })
 
-    // After retirement the audit is clean AND a second compose cycle does NOT
-    // re-touch R1 (authority released → excluded from the resumable set).
+    // After retirement the audit is clean AND a second pass does NOT re-touch
+    // R1 (authority released → excluded from the resumable set), on either path.
     expect(replayed.queue.audit().findings.some((f) => f.code === "unisolable-stale-plan")).toBe(false)
-    const before = events.filter((e) => e.kind === "log" && e.props?.action === "compose-stale-plan-retire").length
+    const before = retirements(events).length
     await replayed.queue.run({}, runtime)
-    const after = events.filter((e) => e.kind === "log" && e.props?.action === "compose-stale-plan-retire").length
+    const after = retirements(events).length
     expect(after).toBe(before)
     log.end()
   })
