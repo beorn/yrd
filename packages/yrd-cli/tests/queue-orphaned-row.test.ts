@@ -80,6 +80,7 @@ describe("an orphaned run row prints orphaned, never checking (24030)", () => {
     expect(projection.queue.map((row) => [row.pr, row.state])).toEqual([["PR42", "orphaned"]])
     expect(projection.queue[0]?.result).toContain("orphaned: lease expired")
     expect(projection.activeCount).toBe(0)
+    expect(projection.active).toBeUndefined()
     expect(watchQueueRows(state, result, NOW).map((row) => row.state)).toEqual(["orphaned"])
 
     const held = runningResult(HELD)

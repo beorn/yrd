@@ -2632,7 +2632,7 @@ export function humanQueueProjection(
     }),
   ]
   const queue = queueRows.slice(0, QUEUE_ROW_LIMIT)
-  const active = activeWatchRow(result, now, selected)
+  const active = activeWatchRow(result, now, selected, liveness)
   return {
     target: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
     open: queueRows.length,
@@ -3538,9 +3538,14 @@ export function activeWatchRow(
   result: QueueStatusResult,
   now: number,
   selected: ReadonlySet<string> = new Set<string>(),
+  /** The reader's process probe (24030); absent, the lease alone judges a running row. */
+  liveness: RunnerLivenessProbe = leaseOnlyLivenessProbe(now),
 ): WatchActiveRow | undefined {
   const run = [...result.running, ...result.waiting]
     .filter((candidate) => selected.size === 0 || candidate.prs.some((member) => selected.has(member.id)))
+    // An orphaned run is not ACTIVE: its holder is dead or its lease lapsed,
+    // and the next pass start settles it (24030).
+    .filter((candidate) => orphanedRunLiveness(candidate, liveness) === undefined)
     .toSorted(byRunStarted)
     .at(0)
   if (run === undefined) return undefined
