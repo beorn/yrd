@@ -111,6 +111,10 @@ const QUEUE_SUBCOMMANDS = new Set([
   "uncarried",
   "pause",
   "resume",
+  // The mechanic's verb group. Hidden from help, but recognized here like any
+  // other: an unrecognized operand becomes a timeline filter term, so leaving
+  // it out would make `yrd queue garage open` quietly list the queue.
+  "garage",
   // Retired verb (5e cut 6). Recognized here so both operand positions still
   // normalize `recover` to the hidden tombstone's loud refusal instead of
   // silently becoming a timeline filter term.

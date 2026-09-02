@@ -323,6 +323,16 @@ import {
   type QueueRunSourceCheck,
   queueRunOwnRuns,
 } from "./queue-run-log.ts"
+import {
+  closeGarage,
+  GARAGE_REF,
+  garageRefCommit,
+  garageSeat,
+  garageStatusLine,
+  GarageServiceRefusal,
+  openGarage,
+  readGarageDeclaration,
+} from "./garage.ts"
 
 /** How many outcome-ledger rows `queue list` prints beneath the timeline. */
 const QUEUE_LIST_NOTIFICATION_ROWS = 20
@@ -8709,6 +8719,7 @@ async function buildQueueListSnapshot(
   configuredBase: string | undefined,
 ): Promise<QueueListSnapshotBuild> {
   const { state, now, runner, runnerAbsence, attempts } = observed
+  const garage = readGarageDeclaration(io.cwd ?? process.cwd())
   // Nobody named a base, so the repository's own configured base is the primary
   // one — the same `options.base ?? services.base ?? "main"` order every other
   // base-reading command uses. A repository whose queue is `release` labels
@@ -8773,6 +8784,10 @@ async function buildQueueListSnapshot(
     state: state.bays,
     runner,
     ...(runnerAbsence === undefined ? {} : { runnerAbsence }),
+    // Read from the repository, on every projection, because that is the whole
+    // point of putting the garage in git: no cache to go stale, and no service
+    // that has to be running for the fact to exist.
+    ...(garage === undefined ? {} : { garage }),
     ...(io.repositoryRoot === undefined ? {} : { repositoryRoot: io.repositoryRoot }),
     // The composition host's declared handle names its configured base's
     // queue (`code`, `pm`); other bases in the same journal stay unnamed
@@ -14131,6 +14146,17 @@ function buildProgram(
         Object.assign(io, probed.io)
         return
       }
+      // The garage stops the SERVICE, and this is the last moment before it
+      // becomes one: `bootstrap.load` builds the host, and the host takes the
+      // queue-runner lease before it does anything else. Refusing here is what
+      // makes "no lease taken, nothing written" true rather than aspirational.
+      // Only `queue up` is refused. It is the service: the same round on a
+      // loop, and the loop is what a mechanic put down. `queue run` — one round
+      // by hand — goes through untouched, because that is what a garage is FOR.
+      if (invocation.posture === "habitant-queue-run") {
+        const garage = readGarageDeclaration(selected.repo)
+        if (garage !== undefined) throw new GarageServiceRefusal(garage)
+      }
       const loaded = await bootstrap.load(selected, invocation.posture)
       runtimeApp = loaded.app
       runtimeServices = loaded.services
@@ -14534,6 +14560,62 @@ function buildProgram(
     .description("resume a paused queue")
     .option("--json", "emit stable JSON")
     .action(async (base, options) => resumeQueue(installed(), base, options, io))
+  // The mechanic's own two verbs, hidden because the M3 strip lists seven
+  // commands and this is not one of them: putting the queue in the garage is
+  // something a mechanic is told to do by `/garage` and `/yrd`, never a verb an
+  // author browsing `yrd --help` should reach for.
+  const garage = queue
+    .command("garage", { hidden: true })
+    .description("declare that this queue is in the garage — worked by hand, its service down")
+  garage.helpCommand(false)
+  garage
+    .command("open")
+    .description("open the garage: write refs/yrd/garage with the reason")
+    .requiredOption("--reason <text>", "why the service is off and the queue is worked by hand")
+    .option("--json", "emit stable JSON")
+    .action(async (options: JsonOption & Readonly<{ reason?: unknown }>) => {
+      if (typeof options.reason !== "string" || options.reason.trim() === "") usage("--reason requires text")
+      const repo = io.cwd ?? process.cwd()
+      const open = readGarageDeclaration(repo)
+      if (open !== undefined) {
+        refusal(
+          `this queue is already in the garage — ${garageStatusLine(open)}. Close it with ` +
+            "'yrd queue garage close' before opening another; one mechanic per service.",
+        )
+      }
+      const { garage: declared, commit } = openGarage(repo, {
+        reason: options.reason,
+        by: garageSeat(bootstrap?.env ?? process.env),
+      })
+      await printResult(
+        io,
+        jsonEnabled(options),
+        { command: "queue.garage.open", ref: GARAGE_REF, commit, garage: declared },
+        garageStatusLine(declared),
+      )
+    })
+  garage
+    .command("close")
+    .description("close the garage: delete refs/yrd/garage")
+    .option("--json", "emit stable JSON")
+    .action(async (options: JsonOption) => {
+      const repo = io.cwd ?? process.cwd()
+      const open = readGarageDeclaration(repo)
+      const at = garageRefCommit(repo)
+      if (open === undefined || at === undefined) {
+        refusal(
+          `this queue is not in the garage: '${repo}' carries no ${GARAGE_REF}. Nothing to close; open one with ` +
+            "'yrd queue garage open --reason <text>'.",
+        )
+      }
+      closeGarage(repo, at)
+      await printResult(
+        io,
+        jsonEnabled(options),
+        { command: "queue.garage.close", ref: GARAGE_REF, closed: open },
+        `garage closed: ${open.reason}, open since ${open.since}`,
+      )
+    })
   // Retired verb (5e cut 6): stays registered, hidden, so an operator
   // following an old runbook gets the reason and the replacements, not a
   // silent timeline filter. Restart re-derives recovery; see
@@ -14615,6 +14697,9 @@ function buildProgram(
       // earlier one, and reporting it again would make every queue run look
       // like it redid the last one's work.
       const queueRun = openQueueRun()
+      // A round made by hand in the garage is the one kind the service does not
+      // make. Read here, once, from the repository this round runs against.
+      const garageRun = readGarageDeclaration(io.cwd ?? process.cwd())
       // A queue run that throws still owes its account of itself. Without this
       // the crash path — the one a reader most needs the log for — wrote
       // nothing at all, and the change it had in hand went unmentioned.
@@ -14678,6 +14763,10 @@ function buildProgram(
           // The queue run names its own log, and this is where it says so: the
           // one field a reader follows to find what this round did.
           ...(queueRunLog === undefined ? {} : { log: queueRunLog }),
+          // A round made by hand in the garage says so on its own result, not
+          // only in the file it wrote: the reason travels with the answer a
+          // caller already reads.
+          ...(garageRun === undefined ? {} : { garage: garageRun.reason }),
           publications: publications.map((job) => ({ ...job, projection: projectPublication(job) })),
           results: runs.map(projectQueueRunTaskStatus),
           ...(blocked.length === 0
@@ -15296,6 +15385,14 @@ async function executeYrd(
     await program.parseAsync(args, { from: "user" })
     return exit
   } catch (error) {
+    // The garage has already said everything there is to say, on the one line
+    // it owes: the reason, and that the service stays down. The ordinary
+    // diagnostic would print a second, longer account of the same fact on top
+    // of it. Exit 2 is the service's own "do not start" code.
+    if (error instanceof GarageServiceRefusal) {
+      runtimeIO.stderr(`${error.message}\n`)
+      return 2
+    }
     if (invocation.queueRunnerCheck) {
       return checkQueueRunner(
         undefined,
@@ -15457,12 +15554,16 @@ function writeQueueRunLog(
   const target = owned.own[0]?.base ?? input.blocked[0]?.pr.base ?? Object.values(changes)[0]?.base ?? "main"
   const authority = queueRunLogAuthority(input.cwd, target)
   const pin = queueRunLogPin(input.cwd)
+  // Read here, from the repository this queue run ran against, so the record
+  // and the run it describes cannot disagree about which garage they are in.
+  const garage = readGarageDeclaration(input.cwd)
   const records = queueRunLogRecords(
     {
       target,
       ...(pin === undefined ? {} : { pin }),
       ...(authority.base === undefined ? {} : { base: authority.base }),
       ...(authority.config === undefined ? {} : { config: authority.config }),
+      ...(garage === undefined ? {} : { garage: garage.reason }),
       runs: owned.own,
       ...(owned.recovered === 0 ? {} : { recovered: owned.recovered }),
       blocked: input.blocked,
