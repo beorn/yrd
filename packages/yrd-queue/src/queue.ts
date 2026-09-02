@@ -45,6 +45,7 @@ import {
   createConditionReporter,
   event,
   failureFact,
+  isRecoverableFailure,
   journalEvent,
   JsonSchema,
   observeYrdLifecycle,
@@ -146,6 +147,7 @@ import {
   DerivedRunMemberSchema,
   deriveRunMemberArgs,
   derivedAuthorityLookup,
+  derivedChange,
   derivedIntegration,
   derivedLaneBranches,
   isDerivedRunMember,
@@ -883,7 +885,7 @@ type DerivedIdentityBound = Readonly<z.infer<typeof DerivedIdentityBoundSchema>>
 /** One compose/admission cycle that skipped a change without producing a queue run.
  * The `compose-candidate-skip` warns that accompany it are loggily-only, so this
  * is the fact that makes a head-of-line refusal loop survive the process. */
-const AdmissionRefusedSchema = z
+const RecordAdmissionRefusalSchema = z
   .object({
     pr: PRIdSchema,
     code: z.string().trim().min(1),
@@ -897,9 +899,15 @@ const AdmissionRefusedSchema = z
     judgedFailure: z.literal(true).optional(),
   })
   .strict()
-type AdmissionRefusedArgs = Readonly<z.infer<typeof AdmissionRefusedSchema>>
-export type RecordAdmissionRefusalArgs = AdmissionRefusedArgs
-const AdmissionRefusedFactSchema = AdmissionRefusedSchema.extend({
+export type RecordAdmissionRefusalArgs = Readonly<z.infer<typeof RecordAdmissionRefusalSchema>>
+/** Command-only context: candidate preparation refused before any Candidate
+ * existed, so the same immutable revision can become admissible when the
+ * arrangement around it changes. Never persisted in the refusal fact. */
+const AdmissionRefusedCommandSchema = RecordAdmissionRefusalSchema.extend({
+  retryablePrecondition: z.literal(true).optional(),
+}).strict()
+type AdmissionRefusedArgs = Readonly<z.infer<typeof AdmissionRefusedCommandSchema>>
+const AdmissionRefusedFactSchema = RecordAdmissionRefusalSchema.extend({
   /** Optional only for replaying facts written before exact-revision refusal
    * identity was introduced by 22528. New commands always populate both. */
   revision: z.number().int().positive().optional(),
@@ -1480,6 +1488,57 @@ export type QueueRuntimeState = QueueHostState & QueueState
 type RuntimeState = QueueRuntimeState
 type QueueStart = Omit<QueueRecord, "startedAt" | "failure">
 
+/**
+ * A recordless identity that has escaped durably but has not reached a Queue
+ * run snapshot yet. The exact branch+sha binding is enough to reconstruct the
+ * same derived Change admission used; keeping this lookup internal avoids
+ * widening the user-facing change population before a run exists.
+ */
+function currentBoundDerivedChange(
+  state: DeepReadonly<Pick<RuntimeState, "bays" | "queues">>,
+  id: string,
+): Change | undefined {
+  for (const [branch, submit] of Object.entries(state.bays.submits)) {
+    const bound = state.queues.derivedIdentities[branch]?.[submit.sha]
+    if (bound?.id !== id) continue
+    return derivedChange(state.queues, {
+      id: bound.id,
+      branch,
+      base: submit.base,
+      revision: bound.revision,
+      headSha: submit.sha,
+      submittedAt: submit.at,
+      factStands: true,
+    })
+  }
+  return undefined
+}
+
+/**
+ * The exact member revision a new admission-refusal fact describes.
+ *
+ * Records remain authoritative for record-era ids. For a recordless id, the
+ * live branch+sha binding must beat retained run history: an A9 re-push keeps
+ * the same id while advancing revision/head, so choosing its older snapshot
+ * would append the new refusal to the revision it replaced. Only when neither
+ * current source exists may the newest retained snapshot answer.
+ */
+function currentAdmissionRefusalMember(
+  state: DeepReadonly<Pick<RuntimeState, "bays" | "queues">>,
+  selector: string,
+): Readonly<{ id: string; revision: Readonly<{ n: number; head: string }> }> | undefined {
+  const record = resolveChange(state.bays, selector)
+  if (record !== undefined) return { id: record.id, revision: currentChangeRev(record) }
+  const bound = currentBoundDerivedChange(state, selector)
+  if (bound !== undefined) return { id: bound.id, revision: currentChangeRev(bound) }
+  const retained = resolveMemberById(state.bays, state.queues, selector)
+  if (retained?.source !== "snapshot") return undefined
+  return {
+    id: retained.id,
+    revision: { n: retained.snapshot.revision, head: retained.snapshot.headSha },
+  }
+}
+
 function queueBase(state: DeepReadonly<RuntimeState>, selector: string): string {
   const known = [
     "main",
@@ -1505,7 +1564,7 @@ export type QueueCommands = Readonly<{
     cancelRun: CommandHandler<CancelRunArgs, RuntimeState>
     quiesceLegacyRun: CommandHandler<QuiesceLegacyRunArgs, RuntimeState>
     settleOrphanedRun: CommandHandler<SettleOrphanedRunArgs, RuntimeState>
-    admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
+    admissionRefused: CommandHandler<RecordAdmissionRefusalArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     retireSubmitFact: CommandHandler<RetireSubmitFactArgs, RuntimeState>
     reconcileMerge: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
@@ -1515,8 +1574,9 @@ export type QueueCommands = Readonly<{
 /** Commands the installed plugin uses internally but does not add to the
  * public QueueCommands contract. */
 type InstalledQueueCommands = Readonly<{
-  queue: QueueCommands["queue"] &
+  queue: Omit<QueueCommands["queue"], "admissionRefused"> &
     Readonly<{
+      admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
       bindDerivedIdentity: CommandHandler<DerivedIdentityBound, RuntimeState>
     }>
 }>
@@ -2829,9 +2889,17 @@ function createQueue<Shape extends ChangeShape>(
       /** The paths a conflicting candidate named, when it named any. Carried so
        * the retirement below can say WHAT conflicted. */
       conflicts?: readonly string[]
+      /** Candidate preparation raised a process-recoverable precondition. The
+       * refusal remains durable, but must not settle this immutable revision. */
+      retryablePrecondition?: true
     }> = {},
   ): Promise<
-    Readonly<{ code: string; kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]; reason: string }>
+    Readonly<{
+      code: string
+      kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
+      reason: string
+      retryablePrecondition?: true
+    }>
   > => {
     const kind = options.kind ?? admissionFailureKind(result, false)
     await recordRevisionAdmission(pr, {
@@ -2853,16 +2921,17 @@ function createQueue<Shape extends ChangeShape>(
     // at 6e4952c0 → PR2695, PR2696, PR2697 — three full check runs on one
     // identical sha).
     //
-    // A CANDIDATE IN HAND is what makes this a verdict rather than a park, and
-    // it is the whole discriminator. `options.candidate` is set exactly where
-    // one was BUILT and then judged — found conflicting, or carried through a
-    // required check that failed. A refusal raised while PREPARING the
-    // candidate carries none, because the content was never evaluated: it is a
-    // precondition the arrangement around the change can still satisfy.
-    // `min-commit-unpublished` is that case and it is contract-tested — the
-    // author pushes the submodule's own main and the SAME fact integrates on
-    // the next pass, with no resubmit. Retiring on it would demand a re-push to
-    // recover from a condition the re-push does not even address.
+    // A CANDIDATE IN HAND proves this is a verdict: it was built and judged —
+    // found conflicting, or carried through a required check that failed — so
+    // the derived submit fact retires below. Candidate absence alone does NOT
+    // prove a park: a preparer can still find a permanent content fault such
+    // as `authored-gitlink`. Only the producer's explicit recoverable marker
+    // makes a pre-candidate refusal retryable in the ledger.
+    // `min-commit-unpublished` is that marked case and it is contract-tested —
+    // the author publishes the submodule's own main and the SAME fact
+    // integrates on the next pass, with no resubmit. Retiring on it would
+    // demand a re-push to recover from a condition the re-push does not even
+    // address.
     //
     // Infrastructure is excluded on top: an infra fault says nothing about the
     // content and clears on its own. Those already propagate rather than refuse
@@ -2871,7 +2940,12 @@ function createQueue<Shape extends ChangeShape>(
     if (options.candidate !== undefined && kind !== "infrastructure") {
       await retireDerivedSubmitFact(pr, changeHead(pr as Change), result, options.conflicts)
     }
-    return { code: result.code, kind, reason: result.message }
+    return {
+      code: result.code,
+      kind,
+      reason: result.message,
+      ...(options.retryablePrecondition === true ? { retryablePrecondition: true } : {}),
+    }
   }
 
   /** A member this pass drops from its own candidate set, with everything a
@@ -2904,6 +2978,9 @@ function createQueue<Shape extends ChangeShape>(
       code: string
       kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
       reason: string
+      /** Candidate preparation never produced a Candidate, so this is a
+       * recoverable precondition rather than a verdict on the revision. */
+      retryablePrecondition?: true
     }>
     ejected?: RevisionAdmissionEjection
   }>
@@ -2966,7 +3043,10 @@ function createQueue<Shape extends ChangeShape>(
       // selectorless case, costs that distinction nothing. An explicit
       // one-shot target still sees the raw fact: that per-member rethrow is
       // deliberately unchanged, only the pass-level blast radius was the bug.
-      const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", result, { kind })
+      const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", result, {
+        kind,
+        ...(isRecoverableFailure(error) ? { retryablePrecondition: true } : {}),
+      })
       if (kind === "infrastructure" && !selectorless) throw error
       return { processed: true, refusal }
     }
@@ -3255,33 +3335,35 @@ function createQueue<Shape extends ChangeShape>(
    * ADMISSION never becomes a run record — so without this the whole class of
    * head-of-line wedge is invisible to `queue audit` (22395).
    */
-  const appendAdmissionRefusal = async (args: RecordAdmissionRefusalArgs): Promise<void> => {
+  const appendAdmissionRefusal = async (args: AdmissionRefusedArgs): Promise<void> => {
     await actions.admissionRefused(args)
   }
 
   const noteCandidateRefusal = async (
     selectors: readonly (string | undefined)[],
-    refusal: Readonly<{ code?: string; kind?: string; reason: string }>,
+    refusal: Readonly<{ code?: string; kind?: string; reason: string; retryablePrecondition?: true }>,
   ): Promise<void> => {
     for (const selector of selectors) {
       if (selector === undefined) continue
       const snapshot = runtime()
-      // Record first, retained snapshot second (the id-seam): a DERIVED member
-      // has no record but its refusal streak must still attribute — a wedge
-      // against a recordless member is exactly as invisible as 22395's. A
+      // One current-revision resolver owns record > exact live binding >
+      // retained-snapshot precedence. A DERIVED member has no record but its
+      // refusal streak must still attribute — a wedge against a recordless
+      // member is exactly as invisible as 22395's. A
       // selector neither resolves is the `pr-not-found` refusal itself: there
       // is nothing to attribute a streak to, and the caller already logged it
       // loud. Anything else would invent a wedge against a phantom id.
-      const pr = resolveMemberById(snapshot.bays, snapshot.queues, selector)
-      if (pr === undefined) continue
+      const member = currentAdmissionRefusalMember(snapshot, selector)
+      if (member === undefined) continue
       try {
         await appendAdmissionRefusal({
-          pr: pr.id,
+          pr: member.id,
           // A losable skip always carries a fact code; name the gap rather than
           // dropping the cycle silently if one ever does not.
           code: refusal.code ?? "unclassified-refusal",
           ...(refusal.kind === undefined ? {} : { kind: refusal.kind }),
           reason: refusal.reason,
+          ...(refusal.retryablePrecondition === true ? { retryablePrecondition: true } : {}),
         })
       } catch (error) {
         // Not thrown, so the refusal itself still settles; but ERROR, and an
@@ -3289,12 +3371,15 @@ function createQueue<Shape extends ChangeShape>(
         // refuses a ledger write is the system of record failing, and a pass
         // that carried on past it used to leave the wedge oracle blind while
         // reading as healthy — exactly the standing ERROR the ruling removes.
-        log.error?.(`queue could not journal ${pr.id}'s required-check failure; the wedge oracle will under-count`, {
-          action: "admission-refusal-unrecorded",
-          pr: pr.id,
-          code: refusal.code,
-          reason: error instanceof Error ? error.message : String(error),
-        })
+        log.error?.(
+          `queue could not journal ${member.id}'s required-check failure; the wedge oracle will under-count`,
+          {
+            action: "admission-refusal-unrecorded",
+            pr: member.id,
+            code: refusal.code,
+            reason: error instanceof Error ? error.message : String(error),
+          },
+        )
       }
     }
   }
@@ -6251,33 +6336,32 @@ function createQueueCommands(
 
   const admissionRefused = command({
     title: "Record a compose cycle that skipped a change without admitting it",
-    params: AdmissionRefusedSchema,
+    params: AdmissionRefusedCommandSchema,
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionRefusedArgs) {
       // Fail loud on an unattributable refusal: the ledger's whole job is to name
       // the wedged PR, so a phantom id must never become a phantom finding. A
-      // DERIVED member (S6) is attributable through the id-seam — its identity
-      // lives in retained run snapshots, never the record store.
-      const member = resolveMemberById(state.bays, state.queues, args.pr)
+      // DERIVED member (S6) is attributable through its exact live binding or,
+      // only when no current source exists, a retained run snapshot.
+      const member = currentAdmissionRefusalMember(state, args.pr)
       if (member === undefined) {
         raiseFailure("refusal", "pr-not-found", queueChangeNotFoundMessage(state.bays, state.queues, args.pr))
       }
-      const revision =
-        member.source === "record"
-          ? { n: currentChangeRev(member.record).n, head: currentChangeRev(member.record).head }
-          : { n: member.snapshot.revision, head: member.snapshot.headSha }
+      const { retryablePrecondition, ...fact } = args
       const refused = event("queue/admission/refused", {
-        ...args,
-        revision: revision.n,
-        headSha: revision.head,
+        ...fact,
+        revision: member.revision.n,
+        headSha: member.revision.head,
       })
-      if (!structurallyPermanentAdmissionRefusal(args.code, args)) return { events: [refused] }
+      if (retryablePrecondition === true || !structurallyPermanentAdmissionRefusal(fact.code, fact)) {
+        return { events: [refused] }
+      }
       return {
         events: [
           refused,
           event("queue/admission/settled", {
             pr: args.pr,
-            revision: revision.n,
-            headSha: revision.head,
+            revision: member.revision.n,
+            headSha: member.revision.head,
             disposition: "needs-person",
             reason: permanentRefusalReason(args.pr, args.code, args.reason),
           }),
@@ -9155,7 +9239,7 @@ function admissionRefusalAuditFindings(
   const findings: QueueAuditFindingEmission[] = []
   const refused = Object.entries(state.queues.admissionRefusals).flatMap(([id, refusal]) => {
     if (refusal.settlement !== undefined) return []
-    const pr = getChangeRecord(state.bays, id)
+    const pr = getChangeRecord(state.bays, id) ?? currentBoundDerivedChange(state, id)
     return pr === undefined ? [] : [pr]
   })
   const head = [...new Map([...queued, ...refused].map((pr) => [pr.id, pr])).values()].toSorted(

@@ -12,6 +12,7 @@ import {
   digestCommandOutput,
   failureFact,
   firstJudgedFailureLine,
+  markRecoverable,
   type CherryDragged,
   type JsonValue,
   type YrdFailure,
@@ -3195,12 +3196,13 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         options.authorizeSubmoduleModelChange,
       )
       if (candidate.status === "failed") {
-        throw createFailure({
+        const refusal = createFailure({
           kind: "refusal",
           code: candidate.error.code,
           message: candidate.error.message,
           ...(candidate.error.pr === undefined ? {} : { pr: candidate.error.pr }),
         })
+        throw candidate.retryable === true ? markRecoverable(refusal) : refusal
       }
       await proveCandidateSubmoduleReachability(
         git,
@@ -3865,6 +3867,9 @@ async function remergeDirectChangeByMerge(
 
 type CandidateFailure = Readonly<{
   status: "failed"
+  /** The process may retry this same immutable input after an external
+   * precondition changes. Runtime context only; never persisted evidence. */
+  retryable?: true
   /**
    * `pr` names the ONE member this failure is attributable to, when one is.
    * Stamped at the `prepareCandidate` loop boundary rather than at each return
@@ -4644,13 +4649,16 @@ async function fillAuthoredGitlinksFromMain(
         (entry) => `'${entry.path}' authored min commit '${entry.authored}' is not on submodule main '${entry.main}'`,
       )
       .join("; ")
-    return candidateFailure(
-      "min-commit-unpublished",
-      `change '${pr.id}' cannot fill the shaset: ${detail}; the author's gitlink is a min commit, never a value — ` +
-        "push it to the submodule's own main first, then resubmit",
-      ".",
-      paths,
-    )
+    return {
+      ...candidateFailure(
+        "min-commit-unpublished",
+        `change '${pr.id}' cannot fill the shaset: ${detail}; the author's gitlink is a min commit, never a value — ` +
+          "push it to the submodule's own main first; the standing submission retries on the next queue pass",
+        ".",
+        paths,
+      ),
+      retryable: true,
+    }
   }
   if (refused.length > 0) {
     const workflow = await intentSubmissionWorkflow(git, path, "HEAD", pr.headSha, refused, pr.issue)
