@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+  CHECK_STORAGE_EXHAUSTED,
   describeScratchReap,
   describeStorageState,
   isStorageExhaustion,
@@ -22,6 +23,8 @@ import {
   readStorageState,
   reapOrphanedScratch,
   storageExhaustionError,
+  storageExhaustionPath,
+  storageExhaustionStatement,
   WORKTREE_STORAGE_EXHAUSTED,
   writeScratchOwner,
 } from "../src/scratch-storage.ts"
@@ -79,6 +82,24 @@ const CONTENT_CONFLICT_STDERR = [
   "Auto-merging hab.yml",
   "CONFLICT (content): Merge conflict in hab.yml",
   "Automatic merge failed; fix conflicts and then commit the result.",
+].join("\n")
+
+/**
+ * The `affected-tests` check output for PR3159 (2026-09-01 22:24 PDT, root-pinned
+ * epoch 7fd4f79a), the lines as the check's output.log carried them — the
+ * elided path segments filled in — where `/tmp` is a quota'd tmpfs and the
+ * check's child hit the USER quota, not the device: EDQUOT, which the
+ * ENOSPC-only classifier did not know, so yrd retired the submission as
+ * `affected-tests-failed` for content that was never at fault.
+ */
+const PR3159_OUTPUT = [
+  "fatal: unable to write loose object file: Disk quota exceeded",
+  "error: copy-fd: write returned: Disk quota exceeded",
+  "fatal: cannot copy '/nix/store/9k2b7q1x-git-2.45.2/share/git-core/templates/info/exclude' to " +
+    "'/tmp/km-vitest-3001/run-0ab3e2db-7c1e/lint-bead-hygiene-delta-72eZkv/.git/info/exclude'",
+  "error: copy-fd: write returned: Disk quota exceeded",
+  "affected evidence kept: /tmp/tent-affected-fe8520e8ea72/attempt-YgSeTT — the check did not pass; inspect it, then remove it",
+  "EDQUOT: unknown error, write",
 ].join("\n")
 
 describe("queueScratchParent — scratch follows the repository, not the temp dir", () => {
@@ -208,6 +229,92 @@ describe("isStorageExhaustion — ENOSPC is not a merge conflict", () => {
     expect(isStorageExhaustion(new Error("fatal: not a valid object name"))).toBe(false)
     expect(isStorageExhaustion(undefined)).toBe(false)
     expect(isStorageExhaustion(null)).toBe(false)
+  })
+
+  // Quota exhaustion is a second errno for the same "no room" answer, and the
+  // one a quota'd tmpfs gives while `df` still shows the device half empty.
+  it("classifies a Node filesystem EDQUOT error by its code", () => {
+    expect(isStorageExhaustion(Object.assign(new Error("write failed"), { code: "EDQUOT" }))).toBe(true)
+  })
+
+  it("classifies git's quota stderr and Node's own EDQUOT message (PR3159)", () => {
+    expect(isStorageExhaustion(new Error("fatal: unable to write loose object file: Disk quota exceeded"))).toBe(true)
+    expect(isStorageExhaustion(new Error("EDQUOT: unknown error, write"))).toBe(true)
+    expect(isStorageExhaustion("error: copy-fd: write returned: disk quota exceeded")).toBe(true)
+  })
+
+  it("looks inside an AggregateError — the shape the command runner throws when process and artifact stream both fail", () => {
+    const member = Object.assign(new Error("write failed"), { code: "EDQUOT" })
+    expect(isStorageExhaustion(new AggregateError([new Error("spawn"), member], "both failed"))).toBe(true)
+    expect(isStorageExhaustion(new AggregateError([new Error("spawn")], "both failed"))).toBe(false)
+  })
+})
+
+describe("storageExhaustionStatement — the line in which a tool said the filesystem ran out", () => {
+  it("finds the first quota statement in the PR3159 output and names it a quota", () => {
+    expect(storageExhaustionStatement(PR3159_OUTPUT)).toEqual({
+      line: "fatal: unable to write loose object file: Disk quota exceeded",
+      kind: "quota",
+    })
+  })
+
+  it("names the R2233 device exhaustion a space exhaustion", () => {
+    expect(storageExhaustionStatement(R2233_STDERR)?.kind).toBe("space")
+  })
+
+  it("reads Node's own errno form even when it is the only line", () => {
+    expect(storageExhaustionStatement("EDQUOT: unknown error, write")).toEqual({
+      line: "EDQUOT: unknown error, write",
+      kind: "quota",
+    })
+  })
+
+  // The trap this shape exists to avoid: a check's output QUOTES things that are
+  // not its own failures. A vitest verdict row naming a test with the errno's
+  // name in it is a verdict on the author's content, and reading it as the
+  // filesystem's would re-admit a genuine red forever.
+  it("does NOT read a test-name mention of the errno as the filesystem's statement", () => {
+    expect(
+      storageExhaustionStatement(
+        [
+          " FAIL  packages/yrd-queue/tests/scratch-storage.test.ts > isStorageExhaustion — ENOSPC is not a merge conflict > classifies a Node filesystem ENOSPC error by its code",
+          "AssertionError: expected false to be true",
+        ].join("\n"),
+      ),
+    ).toBeUndefined()
+  })
+
+  it("finds nothing in a content merge conflict", () => {
+    expect(storageExhaustionStatement(CONTENT_CONFLICT_STDERR)).toBeUndefined()
+  })
+})
+
+describe("storageExhaustionPath — the path the output named as the write that failed", () => {
+  it("extracts the destination of git's `cannot copy … to '<path>'` line (PR3159)", () => {
+    expect(storageExhaustionPath(PR3159_OUTPUT)).toBe(
+      "/tmp/km-vitest-3001/run-0ab3e2db-7c1e/lint-bead-hygiene-delta-72eZkv/.git/info/exclude",
+    )
+  })
+
+  it("extracts an absolute path from the statement line itself", () => {
+    expect(storageExhaustionPath("write /tmp/yrd-scratch/blob: disk quota exceeded")).toBe("/tmp/yrd-scratch/blob")
+    expect(storageExhaustionPath("fatal: cannot create directory at '/tmp/x/docs': No space left on device")).toBe(
+      "/tmp/x/docs",
+    )
+  })
+
+  it("names no path when the output named none — never a guess", () => {
+    expect(storageExhaustionPath("fatal: unable to write loose object file: Disk quota exceeded")).toBeUndefined()
+    expect(storageExhaustionPath("EDQUOT: unknown error, write")).toBeUndefined()
+    // A relative path cannot be read for its filesystem, so it is not one.
+    expect(storageExhaustionPath(R2233_STDERR)).toBeUndefined()
+  })
+})
+
+describe("CHECK_STORAGE_EXHAUSTED — the check-output twin of the scratch code", () => {
+  it("is its own registered spelling, distinct from the scratch-preparation code", () => {
+    expect(CHECK_STORAGE_EXHAUSTED).toBe("check-storage-exhausted")
+    expect(CHECK_STORAGE_EXHAUSTED).not.toBe(WORKTREE_STORAGE_EXHAUSTED)
   })
 })
 

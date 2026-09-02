@@ -54,21 +54,100 @@ export async function queueScratchParent(git: Pick<Git, "run">, repo: string): P
 const commonDirs = new Map<string, string>()
 
 /**
- * ENOSPC reaches us two ways: as a Node filesystem error carrying `code`, and
- * — far more often — as the queue git helper's thrown `Error` whose message is
- * git's own stderr. Both must classify, because the outage surfaced through
- * `worktree add` stderr and through submodule checkout stderr alike.
+ * The two errno with which a filesystem answers "no room", as the kernel names
+ * them (`code`) and as libc's `strerror` prints them (the phrases): ENOSPC,
+ * the device itself is full — bytes or inodes — and EDQUOT, the device has
+ * room but THIS user's quota does not. EDQUOT is the shape a quota'd tmpfs
+ * gives while `df` still shows the device half empty (PR3159, 2026-09-01:
+ * `fatal: unable to write loose object file: Disk quota exceeded`, then Node's
+ * own `EDQUOT: unknown error, write`), and an ENOSPC-only classifier let it
+ * retire the submission as the author's `affected-tests-failed`.
+ */
+const STORAGE_EXHAUSTION_CODES: ReadonlySet<unknown> = new Set(["ENOSPC", "EDQUOT"])
+const STORAGE_EXHAUSTION_PHRASE = "no space left on device|disk quota exceeded"
+const STORAGE_EXHAUSTION_ERRNO = String.raw`\bE(?:NOSPC|DQUOT)\b`
+/** Any mention at all — the bar a THROWN cause is judged by. */
+const STORAGE_EXHAUSTION_MENTION = new RegExp(`${STORAGE_EXHAUSTION_PHRASE}|${STORAGE_EXHAUSTION_ERRNO}`, "iu")
+/**
+ * A line in which a tool STATED the errno: strerror's phrase, or the code in
+ * the position Node and Bun print it (`EDQUOT: unknown error, write`,
+ * `code: 'EDQUOT',`) — never the bare word. Free text is held to this
+ * stricter bar because a check's output quotes things that are not its own
+ * failures: a vitest `FAIL` row naming a test called "…ENOSPC error by its
+ * code" is the author's red, and reading it as the filesystem's would
+ * re-admit that red forever. A test NAME must therefore never quote the
+ * strerror phrase itself.
+ */
+const STORAGE_EXHAUSTION_STATEMENT = new RegExp(
+  `${STORAGE_EXHAUSTION_PHRASE}|${STORAGE_EXHAUSTION_ERRNO}['"]?\\s*[:,]`,
+  "iu",
+)
+
+/**
+ * Storage exhaustion reaches us three ways: as a Node filesystem error carrying
+ * `code`, as the queue git helper's thrown `Error` whose message is git's own
+ * stderr, and — the command runner throws one when the process and its
+ * artifact stream both fail — as an `AggregateError` whose members carry it.
+ * All must classify, because the outages surfaced through `worktree add`
+ * stderr, submodule checkout stderr and a check child's writes alike.
  */
 export function isStorageExhaustion(cause: unknown): boolean {
   if (cause === null || cause === undefined) return false
   if (typeof cause === "object") {
-    const code = (cause as Readonly<{ code?: unknown }>).code
-    if (code === "ENOSPC") return true
+    if (STORAGE_EXHAUSTION_CODES.has((cause as Readonly<{ code?: unknown }>).code)) return true
     const nested = (cause as Readonly<{ cause?: unknown }>).cause
     if (nested !== undefined && nested !== cause && isStorageExhaustion(nested)) return true
+    if (cause instanceof AggregateError && cause.errors.some((member) => isStorageExhaustion(member))) return true
   }
   const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : ""
-  return /no space left on device|ENOSPC/iu.test(message)
+  return STORAGE_EXHAUSTION_MENTION.test(message)
+}
+
+export type StorageExhaustionStatement = Readonly<{
+  /** The line, trimmed, exactly as the tool printed it. */
+  line: string
+  /** `quota`: the user's quota is spent (EDQUOT); `space`: the device is (ENOSPC). */
+  kind: "quota" | "space"
+}>
+
+/**
+ * The first line of `output` in which a tool stated that the filesystem ran
+ * out, or `undefined` when none did in a shape this recognizes. First in the
+ * text: the earliest statement started the failure and the later ones are its
+ * consequences. Reads the capture it is handed, so a statement that fell in
+ * the dropped middle of a head-and-tail truncated capture is not seen here.
+ */
+export function storageExhaustionStatement(output: string): StorageExhaustionStatement | undefined {
+  for (const raw of output.split("\n")) {
+    const line = raw.trim()
+    if (line === "" || !STORAGE_EXHAUSTION_STATEMENT.test(line)) continue
+    return { line, kind: /quota|EDQUOT/iu.test(line) ? "quota" : "space" }
+  }
+  return undefined
+}
+
+/**
+ * The first ABSOLUTE path the output named as the write that failed, or
+ * `undefined` when it named none — never a guess, and never a relative path,
+ * which cannot be read for its filesystem. Two shapes, both from PR3159:
+ * git's `cannot copy '<src>' to '<dst>'` (the dst is the failed write; that
+ * line carries no errno itself, the `copy-fd` line before it does), and a
+ * quoted or bare absolute path on a statement line (`cannot create directory
+ * at '/tmp/x': No space left on device`, `write /tmp/x: disk quota exceeded`).
+ * `fatal: unable to write loose object file: Disk quota exceeded` names
+ * nothing, so it yields nothing.
+ */
+export function storageExhaustionPath(output: string): string | undefined {
+  for (const raw of output.split("\n")) {
+    const line = raw.trim()
+    const copied = /cannot copy '[^']*' to '(\/[^']+)'/u.exec(line)
+    if (copied?.[1] !== undefined) return copied[1]
+    if (!STORAGE_EXHAUSTION_STATEMENT.test(line)) continue
+    const named = /'(\/[^']+)'|(?:^|[\s:])(\/[^\s'":]+)/u.exec(line)
+    const path = named?.[1] ?? named?.[2]
+    if (path !== undefined) return path
+  }
+  return undefined
 }
 
 export type StorageState = Readonly<{
@@ -144,36 +223,72 @@ export function describeStorageState(state: StorageState): string {
 export const WORKTREE_STORAGE_EXHAUSTED = "worktree-storage-exhausted"
 
 /**
+ * The typed code for storage exhaustion a check's own output stated, or that
+ * the command runner hit writing its own artifacts — the check-time twin of
+ * {@link WORKTREE_STORAGE_EXHAUSTED}. Registered in `YRD_REFUSAL_CODES` and
+ * bucketed `infra-retry` (queue.ts): the queue re-admits the submission on
+ * its next pass and never retires its submit fact (PR3159, 2026-09-01).
+ */
+export const CHECK_STORAGE_EXHAUSTED = "check-storage-exhausted"
+
+/** The machine-readable half of a storage-exhaustion failure: the filesystem's inode/byte split. */
+export type StorageExhaustionEvidence = Readonly<{
+  kind: "storage-exhaustion"
+  path: string
+  inodesTotal: number
+  inodesFree: number
+  inodesUsedPercent: number
+  bytesTotal: number
+  bytesFree: number
+  bytesUsedPercent: number
+}>
+
+/**
+ * The filesystem's own account of `path` — the sentence a failure message
+ * carries and the evidence beside it — or the sentence alone when no ancestor
+ * of `path` resolves. ONE reading for every storage-exhaustion failure, the
+ * scratch-preparation one and the check-output one alike, so the two cannot
+ * describe the same filesystem differently. Naming the inode/byte split is
+ * the whole point: the 2026-08-14 outage looked like bytes were fine (51%
+ * used) while inodes sat at 100%, so a byte-only report would have sent the
+ * reader looking in the wrong place. It reads the DEVICE: a spent per-user
+ * quota (EDQUOT) leaves these totals looking healthy, which is the caller's
+ * to say.
+ */
+export async function storageExhaustionReport(
+  path: string,
+): Promise<Readonly<{ detail: string; evidence?: StorageExhaustionEvidence }>> {
+  const state = await readStorageState(path)
+  if (state === undefined) return { detail: `filesystem backing '${path}' is exhausted` }
+  return {
+    detail: describeStorageState(state),
+    evidence: {
+      kind: "storage-exhaustion",
+      path: state.path,
+      inodesTotal: state.inodes.total,
+      inodesFree: state.inodes.free,
+      inodesUsedPercent: state.inodes.usedPercent,
+      bytesTotal: state.bytes.total,
+      bytesFree: state.bytes.free,
+      bytesUsedPercent: state.bytes.usedPercent,
+    },
+  }
+}
+
+/**
  * Build the typed failure for an ENOSPC that struck while preparing scratch.
  *
  * This must never be reported as a content merge conflict: nothing about the
  * candidate is wrong, no author can act on it, and the very same candidate
- * merges first try once the filesystem has room. Naming the filesystem and its
- * inode/byte split is the whole point — the 2026-08-14 outage looked like
- * bytes were fine (51% used) while inodes sat at 100%, so a byte-only report
- * would have sent the reader looking in the wrong place.
+ * merges first try once the filesystem has room.
  */
 export async function storageExhaustionError(path: string, cause: unknown): Promise<JobError> {
-  const state = await readStorageState(path)
-  const detail = state === undefined ? `filesystem backing '${path}' is exhausted` : describeStorageState(state)
+  const report = await storageExhaustionReport(path)
   const original = cause instanceof Error ? cause.message : String(cause)
   return {
     code: WORKTREE_STORAGE_EXHAUSTED,
-    message: `yrd: scratch preparation ran out of space — ${detail}. Underlying error: ${original}`,
-    ...(state === undefined
-      ? {}
-      : {
-          evidence: {
-            kind: "storage-exhaustion",
-            path: state.path,
-            inodesTotal: state.inodes.total,
-            inodesFree: state.inodes.free,
-            inodesUsedPercent: state.inodes.usedPercent,
-            bytesTotal: state.bytes.total,
-            bytesFree: state.bytes.free,
-            bytesUsedPercent: state.bytes.usedPercent,
-          },
-        }),
+    message: `yrd: scratch preparation ran out of space — ${report.detail}. Underlying error: ${original}`,
+    ...(report.evidence === undefined ? {} : { evidence: report.evidence }),
   }
 }
 

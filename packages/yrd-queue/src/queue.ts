@@ -11250,6 +11250,15 @@ export const COMPOSITION_FAILURE_BUCKETS = {
   ]),
   "infra-retry": new Set<string>([
     "carrier-inspection",
+    // EDQUOT/ENOSPC stated in a required check's OWN output, or hit by the
+    // command runner's own artifact writes (command.ts): the check's child ran
+    // out of quota or space, and nothing about the candidate is wrong. PR3159
+    // (2026-09-01 22:24 PDT): `fatal: unable to write loose object file: Disk
+    // quota exceeded` on a quota'd `/tmp`, filed as `affected-tests-failed`,
+    // and the standing submit fact retired for it. Operator ruling: an
+    // ENOSPC/EDQUOT is "yrd is broken, fix yrd", never "PR broken, send
+    // back". Emitted only through the `CHECK_STORAGE_EXHAUSTED` constant.
+    "check-storage-exhausted",
     // The composition-time fill-in could not resolve a submodule's main —
     // a fetch/probe blip, cured by retrying, exactly as the same code is
     // treated on the merge path's release ladder.
@@ -11392,6 +11401,10 @@ export const YRD_REFUSAL_CODES = [
   // no bucket of its own, always the plain default disposition. Load-bearing
   // for status-presentation.test.ts.
   "check-failed",
+  // scratch-storage.ts `CHECK_STORAGE_EXHAUSTED` — the command runner's own
+  // storage verdict (a check's output stated EDQUOT/ENOSPC, or the runner's
+  // own writes hit it), bucketed `infra-retry` above.
+  "check-storage-exhausted",
   "checking",
   "checkpoint-migration-certificate-missing",
   "checkpoint-migration-certificate-stale",
