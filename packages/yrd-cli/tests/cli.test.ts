@@ -5006,29 +5006,71 @@ describe("runYrd", () => {
     })
   })
 
-  it("refreshes an active bay before submit and warns while using the committed head for dirty work", async () => {
-    const refreshedHead = "2".repeat(40)
-    const clean = await createApp({ refreshedHead })
-    await openTestBay(clean, { name: "fresh-head" })
-    const submit = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(clean, yrd("bay", "submit"), submit.io)).toBe(0)
-    expect(clean.state().bays.prs.PR1).toMatchObject({
-      bay: "B1",
-      state: "open",
-      merged: false,
-      revs: [{ head: refreshedHead, submittedAt: expect.any(String) }],
-    })
+  /** Pin the submitter seat a submit records: run.ts resolves it from
+   * `process.env` (never from the injected io), so a case that asserts the
+   * exact warnings must declare the seat itself — one records a seat, one
+   * records none — instead of inheriting whatever shell runs the suite
+   * (@i/10-yrd/24028). */
+  async function withSubmitterEnv<T>(seat: string | undefined, run: () => Promise<T>): Promise<T> {
+    const prior = process.env.YRD_DEFAULT_SUBMITTER
+    if (seat === undefined) delete process.env.YRD_DEFAULT_SUBMITTER
+    else process.env.YRD_DEFAULT_SUBMITTER = seat
+    try {
+      return await run()
+    } finally {
+      if (prior === undefined) delete process.env.YRD_DEFAULT_SUBMITTER
+      else process.env.YRD_DEFAULT_SUBMITTER = prior
+    }
+  }
 
-    const dirty = await createApp({ dirtyBay: true })
-    await openTestBay(dirty, { name: "dirty" })
-    const warned = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(dirty, yrd("bay", "submit", "--json"), warned.io), warned.stderr()).toBe(0)
-    expect(JSON.parse(warned.stdout())).toMatchObject({
-      command: "bay.submit",
-      prs: [{ id: "PR1", revs: [{ head: HEAD_SHA }] }],
-      warnings: [expect.any(String)],
+  it("refreshes an active bay before submit and warns while using the committed head for dirty work", async () => {
+    await withSubmitterEnv("@dev/9", async () => {
+      const refreshedHead = "2".repeat(40)
+      const clean = await createApp({ refreshedHead })
+      await openTestBay(clean, { name: "fresh-head" })
+      const submit = outputIO({ cwd: "/repo/.bays/B1" })
+      expect(await runYrd(clean, yrd("bay", "submit"), submit.io)).toBe(0)
+      expect(clean.state().bays.prs.PR1).toMatchObject({
+        bay: "B1",
+        state: "open",
+        merged: false,
+        revs: [{ head: refreshedHead, submittedAt: expect.any(String) }],
+      })
+
+      const dirty = await createApp({ dirtyBay: true })
+      await openTestBay(dirty, { name: "dirty" })
+      const warned = outputIO({ cwd: "/repo/.bays/B1" })
+      expect(await runYrd(dirty, yrd("bay", "submit", "--json"), warned.io), warned.stderr()).toBe(0)
+      // With a seat recorded, the dirty-work line is the ONLY warning: the
+      // no-submitter warning below must not leak in from the ambient shell.
+      expect(JSON.parse(warned.stdout())).toMatchObject({
+        command: "bay.submit",
+        prs: [{ id: "PR1", revs: [{ head: HEAD_SHA }] }],
+        warnings: [expect.any(String)],
+      })
+      expect(dirty.state().bays.prs.PR1).toMatchObject({ revs: [{ head: HEAD_SHA }] })
     })
-    expect(dirty.state().bays.prs.PR1).toMatchObject({ revs: [{ head: HEAD_SHA }] })
+  })
+
+  it("warns naming both cures, --notify and YRD_DEFAULT_SUBMITTER, when no submitter seat reaches a real submit (@i/10-yrd/24028)", async () => {
+    await withSubmitterEnv(undefined, async () => {
+      const dirty = await createApp({ dirtyBay: true })
+      await openTestBay(dirty, { name: "dirty" })
+      const warned = outputIO({ cwd: "/repo/.bays/B1" })
+      expect(await runYrd(dirty, yrd("bay", "submit", "--json"), warned.io), warned.stderr()).toBe(0)
+      const parsed = JSON.parse(warned.stdout()) as { warnings: readonly string[] }
+      expect(parsed).toMatchObject({ command: "bay.submit", prs: [{ id: "PR1", revs: [{ head: HEAD_SHA }] }] })
+      // The dirty-work line plus exactly one submitter line, and that line
+      // carries both cures so the reader knows the next command.
+      expect(parsed.warnings).toHaveLength(2)
+      expect(parsed.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(
+            /no submitter seat is recorded for this submission \(pass --notify <seat>, or launch with YRD_DEFAULT_SUBMITTER=<seat>\); its outcome ball goes to the queue owner as submitter unknown/u,
+          ),
+        ]),
+      )
+    })
   })
 
   it("requests checks when bay submit hands off a carrier", async () => {
