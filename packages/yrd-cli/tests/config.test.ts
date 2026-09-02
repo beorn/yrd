@@ -405,3 +405,47 @@ describe("mergedTruthExceptions config", () => {
     expect(mergedTruthExceptions(loaded.config).size).toBe(0)
   })
 })
+
+/**
+ * `scratch:` — the repository-declared root every step child gets as its
+ * TMPDIR (@i/10-yrd/24031). The queue's check children inherited the runner's
+ * TMPDIR, unset on the host and therefore a tmpfs `/tmp` with a per-user
+ * quota shared by every agent; on 2026-09-01 it filled mid-check, git wrote
+ * `Disk quota exceeded`, and two standing submissions were retired as author
+ * failures. The key moves that scratch onto a filesystem the host owner
+ * chooses. Parsing is pure — writability is proved by the command runner at
+ * spawn time, where the failure is an infrastructure fact, not a config one.
+ */
+describe("scratch — the repository-declared TMPDIR root for every step child", () => {
+  const load = (yaml: string) =>
+    loadYrdConfig({ repo: "/repo", defaultBase: "main", read: async () => "checks: [typecheck]\n" + yaml })
+
+  it("resolves an absolute scratch path as declared", async () => {
+    const loaded = await load("scratch: /home/hh/scratch/yrd-check-scratch\n")
+    expect(loaded.config.scratch).toBe("/home/hh/scratch/yrd-check-scratch")
+  })
+
+  it("resolves a relative scratch path against the repository root, never the process cwd", async () => {
+    const loaded = await load("scratch: .git/yrd/check-scratch\n")
+    expect(loaded.config.scratch).toBe("/repo/.git/yrd/check-scratch")
+  })
+
+  it("reads an absent key as no scratch root, so the runner's TMPDIR is inherited exactly as before", async () => {
+    const loaded = await load("")
+    expect(loaded.config.scratch).toBeUndefined()
+    expect(parseYrdConfig({}).scratch).toBeUndefined()
+  })
+
+  it("refuses a blank or non-string scratch path loudly, naming the key", () => {
+    expect(() => parseYrdConfig({ scratch: "   " })).toThrow(
+      "yrd: config scratch must be a non-blank path (absolute, or relative to the repository root)",
+    )
+    expect(() => parseYrdConfig({ scratch: 5 })).toThrow(
+      "yrd: config scratch must be a non-blank path (absolute, or relative to the repository root)",
+    )
+  })
+
+  it("admits a pushed config declaring scratch through the receiver's admission gate", () => {
+    expect(() => validatePushedYrdConfig("checks: [typecheck]\nscratch: /srv/yrd-check-scratch\n")).not.toThrow()
+  })
+})
