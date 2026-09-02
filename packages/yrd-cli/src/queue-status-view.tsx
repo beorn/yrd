@@ -2686,7 +2686,9 @@ export function QueueRunsView({ runs }: { runs: readonly Run[] }) {
 
 export type ChangeListRow = Readonly<{
   pr: string
-  /** One of the five words a change is in (derived-change-state.ts). */
+  /** One of the five words a change is in (derived-change-state.ts). The
+   * `--json` envelope calls the same value `changeState`, because there
+   * `state` is already the change record's own open/closed field. */
   state: string
   stateLabel: string
   /** The word this column printed before the five states: kept off the surface

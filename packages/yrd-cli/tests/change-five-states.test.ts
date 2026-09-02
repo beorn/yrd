@@ -259,7 +259,7 @@ async function fiveStates(app: CliApp): Promise<Record<keyof typeof HEADS, Chang
   }
 }
 
-type ListedChange = Readonly<{ id: string; branch: string; state?: string; status: string; check?: string }>
+type ListedChange = Readonly<{ id: string; branch: string; changeState?: string; status: string; check?: string }>
 
 async function listed(app: CliApp): Promise<readonly ListedChange[]> {
   const json = outputIO({ pruneGit: () => mergeGit() })
@@ -281,7 +281,7 @@ describe("the five states a change is in", () => {
 
     expect(rows).toHaveLength(5)
     expect(
-      Object.fromEntries(rows.map((row) => [row.branch, row.state])),
+      Object.fromEntries(rows.map((row) => [row.branch, row.changeState])),
     ).toEqual({
       "topic/queued": "queued",
       "topic/checked": "checked",
@@ -291,7 +291,7 @@ describe("the five states a change is in", () => {
     })
     // The words the surface may print are closed. A sixth would mean a state
     // nobody agreed to, which is how the taxonomy this replaces grew.
-    expect(new Set(rows.map((row) => row.state))).toEqual(
+    expect(new Set(rows.map((row) => row.changeState))).toEqual(
       new Set(["queued", "checked", "stuck", "merged", "failed"]),
     )
   })
@@ -302,14 +302,14 @@ describe("the five states a change is in", () => {
     await fiveStates(app)
     const rows = await listed(app)
 
-    expect(byBranch(rows, "topic/stuck").state).toBe("stuck")
-    expect(byBranch(rows, "topic/failed").state).toBe("failed")
+    expect(byBranch(rows, "topic/stuck").changeState).toBe("stuck")
+    expect(byBranch(rows, "topic/failed").changeState).toBe("failed")
     // The specimen: the change whose check ran out of room carried the SAME
     // delivery word as a change simply waiting its turn, so the old surface
     // could not tell a broken queue from a healthy one. That word is still in
     // `--json` for one flag-day cycle, and it still cannot separate them.
     expect(byBranch(rows, "topic/stuck").status).toBe(byBranch(rows, "topic/queued").status)
-    expect(byBranch(rows, "topic/stuck").state).not.toBe(byBranch(rows, "topic/queued").state)
+    expect(byBranch(rows, "topic/stuck").changeState).not.toBe(byBranch(rows, "topic/queued").changeState)
   })
 
   it("names the check beside a failed change and says whose a stuck one is", async () => {

@@ -7319,12 +7319,13 @@ async function listPrs(
         const listedRow = stateById.get(pr.id)
         return {
           ...projectChangeTaskStatusWithEligibility(pr, eligibility, merges.get(pr.id)),
-          // The five words a change is in. `status` above keeps the retired
-          // delivery word for one flag-day cycle — nothing in this repository
-          // reads it except this CLI's own tests, but `yrd pr list --json` is
-          // a public surface and an unannounced removal would break a reader
-          // we cannot see.
-          ...(listedRow === undefined ? {} : { state: listedRow.state }),
+          // The five words a change is in, under a NEW key: `state` is already
+          // taken by the change record's own open/closed field, which
+          // `--state open|closed` filters and which this must not clobber.
+          // `status` keeps the retired delivery word for one flag-day cycle —
+          // `tools/dark-work.ts` reads it against a closed union and throws on
+          // a value it does not know, so it can only be retired deliberately.
+          ...(listedRow === undefined ? {} : { changeState: listedRow.state }),
           ...(listedRow?.check === undefined ? {} : { check: listedRow.check }),
           eligibility: projectEligibilityTaskStatus(eligibility),
           requestedReviewers: pr.requestedReviewers ?? [],

@@ -3139,18 +3139,21 @@ describe("runYrd", () => {
         why,
       })),
     ).toEqual([
-      { id: "PR1", state: "pushed", glyph: "▢", review: "n/a", checks: "n/a", why: "draft" },
-      { id: "PR2", state: "submitted", glyph: "▢", review: "need", checks: "n/a", why: "review-required" },
+      // The five words (derived-change-state.ts). `pushed` and `submitted`
+      // both read `queued` — neither has passed its on-submit checks, and the
+      // WHY column keeps the difference the column no longer spells.
+      { id: "PR1", state: "queued", glyph: "○", review: "n/a", checks: "n/a", why: "draft" },
+      { id: "PR2", state: "queued", glyph: "○", review: "need", checks: "n/a", why: "review-required" },
       {
         id: "PR3",
-        state: "pushed",
-        glyph: "▢",
+        state: "queued",
+        glyph: "○",
         review: "n/a",
         checks: "fail",
         why: "required-check-failed",
       },
-      { id: "PR4", state: "rejected", glyph: "⧗", review: "n/a", checks: "n/a", why: "rejected" },
-      { id: "PR5", state: "integrated", glyph: "✓", review: "ok", checks: "pass", why: "terminal" },
+      { id: "PR4", state: "failed", glyph: "×", review: "n/a", checks: "n/a", why: "rejected" },
+      { id: "PR5", state: "merged", glyph: "✓", review: "ok", checks: "pass", why: "terminal" },
     ])
     expect(rows[2]?.target).toBe("release/2.0")
 
@@ -3168,8 +3171,8 @@ describe("runYrd", () => {
       }
       expect(physical[0]).not.toContain("READY")
       expect(physical[0]).not.toMatch(/\sC$/u)
-      expect(human).toContain("⧗ rejected")
-      expect(human).toContain("✓ integrated")
+      expect(human).toContain("× failed")
+      expect(human).toContain("✓ merged")
       expect(human).not.toContain(entries[0]!.pr.branch)
       expect(physical[0]?.trim().split(/\s+/u).includes("AGE")).toBe(columns === 120)
       expect(physical[0]?.includes("BASE")).toBe(columns === 120)
