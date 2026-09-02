@@ -181,6 +181,44 @@ export const GATE_REPORT_TRAILER = "YRD-GATE-REPORT "
 export const CHECKPOINT_MIGRATION_TRAILER = "YRD-CHECKPOINT-MIGRATION "
 export const DIAGNOSTICS_COMPARISON_READY = "diagnostics-comparison-ready"
 
+/**
+ * A check that could not do its job, as one code: STUCK.
+ *
+ * The three results a check may reach are pass, fail and stuck, and only the
+ * first two are statements about the change. Stuck says the queue could not
+ * get an answer, so nobody is billed, the change stays where it was, and the
+ * queue run ends 2 (`QUEUE_OUTCOME_EXIT.yrdFailed`) instead of sending the
+ * author back to work they cannot do.
+ *
+ * A FIXED code, not the `<purpose>-stuck` a step name would build. The
+ * dynamic `<purpose>-failed` family exists because a repo's own step names are
+ * open, and it has a documented cost: it matches by suffix alone, so nineteen
+ * CLI codes acquired the check cure by ending in `-failed`, and five
+ * `-timeout` codes across this codebase are about no check at all. One
+ * registered spelling avoids that entirely, exactly as `CHECK_STORAGE_EXHAUSTED`
+ * does for the same runner's storage verdict; the step's name rides in the
+ * message, where a reader wants it.
+ */
+export const CHECK_STUCK = "check-stuck"
+
+/**
+ * Whether an exit status means the check could not do its job.
+ *
+ * The mapping, whole, and the only place it is decided: 0 is pass, 1 is fail,
+ * and EVERY other status is stuck — 2 by the check's own statement, 127 from a
+ * check script that is not there, 137 from a kill, and anything else a crash
+ * produced. Operator ruling 2026-09-02. Before it, a check that exited 2 and a
+ * check that did not exist both came back `check-failed`, and the queue told
+ * the author to amend and push again for a condition no revision of theirs can
+ * cure.
+ *
+ * SIGKILL keeps its own earlier branch, which names the signal — this is only
+ * reached once no watchdog and no signal explains the exit.
+ */
+export function stuckExit(exitCode: number): boolean {
+  return exitCode !== 0 && exitCode !== 1
+}
+
 /** Create the content-addressed, multiplicity-preserving residual report a
  * structured child emits for the host's admission certificate. */
 export function createGateReport(comparatorId: string, identities: readonly string[]): GateReport {
@@ -625,8 +663,15 @@ function configuredCommand<Shape extends ChangeShape>(
             statement: exhaustion,
             log: artifactSink.log,
           })
+    // A STUCK exit is read here too, for the same reason the storage statement
+    // is: a check that could not do its job judged nothing, whatever its output
+    // went on to print, and a judged red is structurally permanent
+    // (queue.ts `structurallyPermanentAdmissionRefusal`). A check that exits 2
+    // while printing a FAIL line would otherwise be recorded as having judged
+    // the change — the exact billing the stuck class exists to prevent.
     const judgedFailure =
       exhaustion === undefined &&
+      !stuckExit(result.exitCode) &&
       firstJudgedFailureLine(message) !== undefined &&
       progress.verdict !== "STALLED" &&
       progress.verdict !== "TIMED_OUT" &&
@@ -730,6 +775,18 @@ function configuredCommand<Shape extends ChangeShape>(
         // unconditionally, and is the cure in its own right for a check whose
         // verdict this cannot recognize.
         const judged = firstJudgedFailureLine(message)
+        if (stuckExit(result.exitCode)) {
+          return failed(
+            CHECK_STUCK,
+            `${options.purpose} ${action} exited ${result.exitCode}, which is no verdict on the change: a check ` +
+              "passes with 0 and fails with 1, and every other status says it could not do its job — a check script " +
+              "that is not there, a crash, or the check saying so itself with 2. Nobody is billed for this and the " +
+              "change stays where it was; fix the queue and run it again" +
+              (judged === undefined ? "" : `. It printed: ${judged}`) +
+              `. Full output: ${artifactSink.log}`,
+            evidence,
+          )
+        }
         return failed(
           `${options.purpose}${waiting ? "-launcher" : ""}-failed`,
           `${options.purpose} ${action} exited ${result.exitCode}` +

@@ -8,9 +8,11 @@
  *           the hh-dev notifier (`tools/yrd-notify.ts`)
  *
  * Operator rulings 2026-09-01 (@i/10-yrd/24028): "every failure should result
- * in a ball"; "0 => next / 1 => check failed / 2 => yrd failed" — the third
- * code lands on `fatal-error` (17) here, because 2 is the generic
- * usage/configuration exit of every verb; see QUEUE_OUTCOME_EXIT.
+ * in a ball"; "0 => next / 1 => check failed / 2 => yrd failed". The third code
+ * spent `fatal-error` (17) until 2026-09-02, on the reasoning that 2 is the
+ * generic usage/configuration exit of every verb; the ruling that day accepted
+ * the collision — a bad invocation of the queue run is itself a way to be stuck
+ * — and 2 is the number. See QUEUE_OUTCOME_EXIT.
  */
 import { describe, expect, it } from "vitest"
 import type { AttemptNotifiedArgs, QueueAttemptOutcome, QueueOutcome } from "@yrd/queue"
@@ -445,13 +447,16 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
   })
 })
 
-describe("the three-way verdict of `queue run --once`", () => {
-  it("0 = landed or nothing; 1 = a change sent back; yrd broken = fatal-error (17), and it wins over 1", () => {
+describe("the three-way result of `queue run --once`", () => {
+  it("0 = landed or nothing; 1 = a change sent back; 2 = stuck, and it wins over 1", () => {
     expect(outcomeExitCode([])).toBe(0)
     expect(outcomeExitCode(["landed"])).toBe(0)
     expect(outcomeExitCode(["landed", "send-back"])).toBe(1)
-    expect(outcomeExitCode(["send-back", "yrd-broken", "landed"])).toBe(HABITANT_EXIT["fatal-error"])
-    expect(QUEUE_OUTCOME_EXIT.yrdFailed).toBe(17)
+    expect(outcomeExitCode(["send-back", "yrd-broken", "landed"])).toBe(2)
+    expect(QUEUE_OUTCOME_EXIT.yrdFailed).toBe(2)
+    // 17 is retired from this contract and belongs to the habitant lifecycle
+    // condition alone (operator ruling 2026-09-02).
+    expect(QUEUE_OUTCOME_EXIT.yrdFailed).not.toBe(HABITANT_EXIT["fatal-error"])
   })
 
   it("the notifier accumulates the verdict per pass and beginPass resets it", async () => {

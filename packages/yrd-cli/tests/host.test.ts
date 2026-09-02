@@ -995,7 +995,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       requires: [],
       definitions: {
         lint: {
-          run: "printf 'src/shared.ts:1:1 - shared diagnostic\\n'; exit 17",
+          run: "printf 'src/shared.ts:1:1 - shared diagnostic\\n'; exit 1",
           runner: "local",
           comparison: "diagnostics",
         },
@@ -6091,7 +6091,7 @@ checks: [{check: {run: "true"}}]
     const { repo, featureSha } = await repository()
     await commitYrdConfig(
       repo,
-      "checks: [{check: {run: \"printf 'real stdout\\\\n'; printf 'real stderr\\\\n' >&2; exit 7\"}}]\n",
+      "checks: [{check: {run: \"printf 'real stdout\\\\n'; printf 'real stderr\\\\n' >&2; exit 1\"}}]\n",
     )
     const baseSha = await git(repo, "rev-parse", "main")
     const first = await createYrdHost({ cwd: repo })
@@ -6106,7 +6106,7 @@ checks: [{check: {run: "true"}}]
     }
     const evidence = GitCheckEvidenceSchema.parse(failedJob.output)
     expect(evidence).toMatchObject({
-      exitCode: 7,
+      exitCode: 1,
       baseSha,
       artifacts: [{ name: "stdout" }, { name: "stderr" }],
     })

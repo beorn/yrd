@@ -15,11 +15,9 @@
  * duration the test picks (`fake-check.sh`), so each case names one result and
  * the queue is never reached into to stage it.
  *
- * A queue run's result is pass, fail or stuck, as exit 0, 1 or 2. Pass and
- * fail are pinned as ordinary tests because the code already agrees. Stuck is
- * pinned with `test.fails`: the assertions state the design, the suite is
- * green today because they do not hold, and it turns red the day M2 makes them
- * hold — which is the reminder we want standing.
+ * A queue run's result is pass, fail or stuck, as exit 0, 1 or 2. All three
+ * are pinned as ordinary tests; the stuck cases stood as `test.fails` until M2
+ * made the design hold on 2026-09-02.
  */
 import { afterEach, describe, expect, it } from "vitest"
 import {
@@ -92,38 +90,26 @@ describe("the queue-run boundary", { timeout: 120_000 }, () => {
   })
 
   /**
-   * design-red — M2 of the garage plan turns each `it.fails` below back into a
-   * plain `it`. Until it lands, these are green BECAUSE the design does not
-   * hold; the day it holds they go red and get promoted.
-   *
-   * A stuck check is the queue's own fault, so the design says the queue run
-   * stops at exit 2, nobody is billed, and the change stays where it was until
-   * someone fixes the queue. Measured against 193e03f6 on 2026-09-02, the three
-   * triggers split into two distinct gaps:
+   * A stuck check is the queue's own fault, so the queue run stops at exit 2,
+   * nobody is billed, and the change stays where it was until someone fixes the
+   * queue. Landed by M2 on 2026-09-02; these three stood as `it.fails` from
+   * 9f1fff4e until then, because against 193e03f6 the triggers measured:
    *
    *   check exits 2         exit 1   check-failed    billed to the author
    *   check is not there    exit 1   check-failed    billed to the author
    *   check past its bound  exit 17  check-timeout   billed to yrd
    *
-   * 1. WHOSE FAULT. Only the bound is booked to the queue. A check that exits
-   *    2, and a check that is not there at all, are booked against the author's
-   *    content — the queue run declines the change and tells the author to
-   *    amend and push again, for a condition the author cannot fix.
-   * 2. THE NUMBER. Even the trigger that IS booked to the queue answers 17,
-   *    not 2. That one is deliberate: `packages/yrd-cli/src/outcome-notify.ts`
-   *    lines 95-109 define `QUEUE_OUTCOME_EXIT` as `{next: 0, changeRefused: 1,
-   *    yrdFailed: 17}` and record that "the design called this 2", spending 17
-   *    instead because 2 is already the generic usage exit of every Yrd verb.
+   * Two gaps, both now closed: WHOSE FAULT — a check that exits 2 and a check
+   * that is not there are stuck (`check-stuck`, environment-owned), never the
+   * author's content; and THE NUMBER — the queue's own fault answers 2, the
+   * 17 retired by operator ruling.
    *
-   * So M2 must rule on both: which conditions are the queue's fault, and what
-   * number that verdict carries.
-   *
-   * One more measured fact, which is why the standing assertion below cannot
-   * carry the "nobody is billed" clause on its own: `pr list` reports a stuck
-   * change and a failed change identically, both still `submitted`. Today the
-   * exit code is the ONLY place the two are told apart at this boundary.
+   * One measured fact, which is why the standing assertion below cannot carry
+   * the "nobody is billed" clause on its own: `pr list` reports a stuck change
+   * and a failed change identically, both still `submitted`. The exit code is
+   * the ONLY place the two are told apart at this boundary.
    */
-  describe("stuck — the queue's own fault [design-red, M2]", () => {
+  describe("stuck — the queue's own fault", () => {
     async function stuckCase(plan: FakeCheckPlan, bay: string): Promise<void> {
       const { repo, checkLog } = await boundaryRepository(plan)
       const { branch, headSha } = await submitOneCommit(repo, bay)
@@ -147,19 +133,16 @@ describe("the queue-run boundary", { timeout: 120_000 }, () => {
       for (const ref of refsBefore) expect(await refs(repo), run.report).toContain(ref)
     }
 
-    // Today: exit 1, `check-failed`, billed to the author.
-    it.fails("a check that exits 2 stops the queue run, and nobody is billed", async () => {
+    it("a check that exits 2 stops the queue run, and nobody is billed", async () => {
       await stuckCase({ exit: 2 }, "two")
     })
 
-    // Today: exit 1, `check-failed`, billed to the author — for a check the
-    // author never supplied and cannot supply.
-    it.fails("a check that is not there stops the queue run, and nobody is billed", async () => {
+    // A check the author never supplied and cannot supply: the shell's own 127.
+    it("a check that is not there stops the queue run, and nobody is billed", async () => {
       await stuckCase({ command: "/nonexistent/definitely-not-a-check.sh" }, "missing")
     })
 
-    // Today: exit 17, `check-timeout` — already the queue's fault, wrong number.
-    it.fails("a check that runs past its bound stops the queue run, and nobody is billed", async () => {
+    it("a check that runs past its bound stops the queue run, and nobody is billed", async () => {
       await stuckCase({ exit: 0, sleepSeconds: 5, timeoutMs: 1000 }, "slow")
     })
   })

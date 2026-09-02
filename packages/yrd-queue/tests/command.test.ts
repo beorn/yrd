@@ -26,9 +26,11 @@ import { createProcess, shellCommand, type Process, type ProcessRequest, type Pr
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import * as z from "zod"
 import {
+  CHECK_STUCK,
   CommandEvidenceSchema,
   CommandTerminalSchema,
   DIAGNOSTICS_COMPARISON_READY,
+  stuckExit,
   GitCheckEvidenceSchema,
   GitCheckResultEvidenceSchema,
   IntegrationProofSchema,
@@ -3752,7 +3754,7 @@ describe("Queue command adapters", () => {
     {
       name: "nonzero exit",
       process: {
-        exitCode: 17,
+        exitCode: 1,
         signal: null,
         stdout: "[yrd-base-health] base aaaaaaaaaaaa green\n",
         stderr: `src/index.ts(12,4): error TS2322: Type 'string' is not assignable\n M src/formatted.ts\n     ✓ indented reporter row must not read as porcelain  12ms\n${"x".repeat(2_100)}`,
@@ -3765,7 +3767,7 @@ describe("Queue command adapters", () => {
       // CONCISE, which is what this case fences — the bound below proves the
       // 2,100-character tail did not follow it into the message.
       error: { code: "check-failed" },
-      message: [/^check command exited 17: /u, /src\/index\.ts\(12,4\): error TS2322/u, /output\.log$/u],
+      message: [/^check command exited 1: /u, /src\/index\.ts\(12,4\): error TS2322/u, /output\.log$/u],
       verdict: undefined,
     },
     {
@@ -3859,6 +3861,92 @@ describe("Queue command adapters", () => {
       expect(withoutArtifact).not.toContain(cwd)
     },
   )
+
+  /**
+   * The whole exit mapping, in one table, at the seam that decides it.
+   *
+   * 0 is pass, 1 is fail, everything else is STUCK — the queue could not get an
+   * answer, so nobody is billed (operator ruling 2026-09-02). Until then a
+   * check that exited 2 and a check that was not there both came back
+   * `check-failed` and sent the author back to work they cannot do; the
+   * end-to-end proof of that is `tests/boundary/queue-run.test.ts`, and this is
+   * the unit that pins which code each status mints.
+   */
+  it.each([
+    { exitCode: 0, conclusion: "success", code: undefined, name: "0 passes" },
+    { exitCode: 1, conclusion: "failure", code: "check-failed", name: "1 fails, and it is the author's" },
+    { exitCode: 2, conclusion: "failure", code: CHECK_STUCK, name: "2 is stuck" },
+    { exitCode: 127, conclusion: "failure", code: CHECK_STUCK, name: "127 — no such check script — is stuck" },
+    { exitCode: 3, conclusion: "failure", code: CHECK_STUCK, name: "any other status is stuck" },
+  ])("$name", async ({ exitCode, conclusion, code }) => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-command-exit-map-"))
+    roots.push(cwd)
+    const step = configuredCommandStep<ChangeShape>({
+      inject: {
+        process: {
+          run: () =>
+            Promise.resolve({
+              exitCode,
+              signal: null,
+              // A judged-failure line in the output, deliberately: a check that
+              // could not do its job judged nothing, whatever it printed on the
+              // way out, and `judgedFailure` must not be recorded for it.
+              stdout: "FAIL src/model.test.ts > model rejects an empty name\n",
+              stderr: "",
+              durationMs: 12,
+              timedOut: false,
+            } satisfies ProcessResult),
+        },
+      },
+      command: ["false"],
+      cwd,
+      purpose: "check",
+      artifactRoot: join(cwd, "artifacts"),
+    })
+    const outcome = await step(
+      {
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: "a".repeat(40),
+          },
+        ],
+        shape: { results: {} },
+      },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({ status: "completed", conclusion })
+    if (outcome.status !== "completed") throw new Error(`configured command was ${outcome.status}`)
+    if (outcome.conclusion === "failure") {
+      expect(outcome.error.code).toBe(code)
+      // The record names the check, its exit and the log holding the rest.
+      expect(outcome.error.message).toContain("check")
+      expect(outcome.error.message).toContain(String(exitCode))
+      expect(outcome.error.message).toMatch(/output\.log/u)
+    }
+    // Only a check that ran to a pass or a fail may be recorded as having
+    // JUDGED the change — a judged red is structurally permanent, so a stuck
+    // one recorded that way would be un-retryable and billed to the author.
+    // (A pass stamps the flag too and the success branch ignores it; the fail
+    // is where it is read, and the stuck statuses are where it must be absent.)
+    const evidence = CommandEvidenceSchema.parse(outcome.output)
+    expect(evidence.exitCode).toBe(exitCode)
+    expect(evidence.judgedFailure).toBe(stuckExit(exitCode) ? undefined : true)
+  })
+
+  it("reads every status but pass and fail as stuck", () => {
+    expect(stuckExit(0)).toBe(false)
+    expect(stuckExit(1)).toBe(false)
+    for (const status of [2, 3, 42, 126, 127, 137, 255]) expect(stuckExit(status)).toBe(true)
+  })
 
   it("does not mint working-tree diagnostics from indented reporter rows", async () => {
     // Vitest's default reporter indents test rows by three-plus spaces, which
@@ -3991,7 +4079,7 @@ describe("Queue command adapters", () => {
         "i=1; while test $i -le 55; do " +
           'printf \'src/base-%s.ts:1:1 - inherited-%s\\n\' "$i" "$i"; i=$((i + 1)); done; ' +
           "if test -f feature.txt; then printf 'src/feature.ts:2:1 - net-new\\n'; fi; " +
-          "printf 'check stderr\\n' >&2; exit 17",
+          "printf 'check stderr\\n' >&2; exit 1",
       ),
       { comparison: "diagnostics" },
     )
@@ -4004,12 +4092,12 @@ describe("Queue command adapters", () => {
     if (job?.status !== "completed" || job.conclusion !== "failure") throw new Error("check did not fail")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence).toMatchObject({
-      exitCode: 17,
+      exitCode: 1,
       baseSha,
       candidateRef: expectedCandidateRef("R1", "check", job.id, job.attempt, evidence.candidateSha),
       artifacts: [{ name: "stdout" }, { name: "stderr" }],
       comparison: {
-        parent: { exitCode: 17 },
+        parent: { exitCode: 1 },
         netNewDiagnostics: [{ file: "src/feature.ts", [sourceRowKey]: 2, column: 1, message: "net-new" }],
         resolvedDiagnostics: [],
         unchangedDiagnosticCount: 55,
@@ -4074,7 +4162,7 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(
       observed,
       repo,
-      shellCommand("printf 'src/shared.ts:1:1 - shared diagnostic\\n'; exit 17"),
+      shellCommand("printf 'src/shared.ts:1:1 - shared diagnostic\\n'; exit 1"),
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
@@ -4099,7 +4187,7 @@ describe("Queue command adapters", () => {
       shellCommand(
         "if test -f feature.txt; then " +
           "printf '%s\\n' 'src/b.ts:2:1 - shared-b' 'src/a.ts:1:1 - shared-a' 'src/a.ts:1:1 - shared-a'; " +
-          "else printf '%s\\n' 'src/a.ts:1:1 - shared-a' 'src/b.ts:2:1 - shared-b'; fi; exit 17",
+          "else printf '%s\\n' 'src/a.ts:1:1 - shared-a' 'src/b.ts:2:1 - shared-b'; fi; exit 1",
       ),
       { comparison: "diagnostics" },
     )
@@ -4113,9 +4201,9 @@ describe("Queue command adapters", () => {
     }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
 
-    expect(evidence.exitCode).toBe(17)
+    expect(evidence.exitCode).toBe(1)
     expect(evidence.comparison).toMatchObject({
-      parent: { exitCode: 17 },
+      parent: { exitCode: 1 },
       netNewDiagnostics: [],
       resolvedDiagnostics: [],
     })
@@ -4159,7 +4247,7 @@ describe("Queue command adapters", () => {
         `printf '%s %s\\n' "$YRD_BASE_SHA" "$YRD_CANDIDATE_SHA" >> ${ledger}; ` +
           // Fails with comparable diagnostics, which is the only thing that
           // makes the base leg run at all.
-          "printf '%s\\n' 'src/a.ts:1:1 - shared-a'; exit 17",
+          "printf '%s\\n' 'src/a.ts:1:1 - shared-a'; exit 1",
       ),
       { comparison: "diagnostics" },
     )
@@ -4208,7 +4296,7 @@ describe("Queue command adapters", () => {
         // produced.
         command: shellCommand(
           "test -f dep/member.txt || { echo 'workspace member missing' >&2; exit 21; }; " +
-            "printf 'src/inherited.ts:1:1 - inherited\\n'; exit 17",
+            "printf 'src/inherited.ts:1:1 - inherited\\n'; exit 1",
         ),
         artifactRoot: join(repo, ".git", "yrd", "artifacts"),
         comparison: "diagnostics",
@@ -4238,9 +4326,9 @@ describe("Queue command adapters", () => {
         throw new Error("parent comparison did not pass")
       }
       const evidence = GitCheckEvidenceSchema.parse(outcome.output)
-      expect(evidence.exitCode).toBe(17)
+      expect(evidence.exitCode).toBe(1)
       expect(evidence.comparison).toMatchObject({
-        parent: { exitCode: 17 },
+        parent: { exitCode: 1 },
         netNewDiagnostics: [],
         resolvedDiagnostics: [],
         unchangedDiagnosticCount: 1,
@@ -4293,7 +4381,7 @@ describe("Queue command adapters", () => {
         repo,
         command: shellCommand(
           "test -f dep/member.txt || { echo 'workspace member missing' >&2; exit 21; }; " +
-            "printf 'src/inherited.ts:1:1 - inherited\\n'; exit 17",
+            "printf 'src/inherited.ts:1:1 - inherited\\n'; exit 1",
         ),
         artifactRoot: join(repo, ".git", "yrd", "artifacts"),
         comparison: "diagnostics",
@@ -4746,7 +4834,7 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(
       observed,
       repo,
-      shellCommand(`printf '%s\\n' '${report}' 'src/shared.ts:1:1 - child-owned failure'; exit 17`),
+      shellCommand(`printf '%s\\n' '${report}' 'src/shared.ts:1:1 - child-owned failure'; exit 1`),
       {
         comparison: "diagnostics",
         comparisonReady: DIAGNOSTICS_COMPARISON_READY,
@@ -4776,7 +4864,7 @@ describe("Queue command adapters", () => {
         `printf '%s\\n' '${report("bead-hygiene", 3, "a".repeat(64))}' ` +
           `'${report("affected-tests", 2, "b".repeat(64))}' ` +
           `'${report(DIAGNOSTICS_COMPARISON_READY, 0, "c".repeat(64))}' ` +
-          "'src/shared.ts:1:1 - inherited'; exit 17",
+          "'src/shared.ts:1:1 - inherited'; exit 1",
       ),
       {
         comparison: "diagnostics",
@@ -4814,7 +4902,7 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(
       observed,
       repo,
-      shellCommand("printf 'src/shared.ts:1:1 - inherited\\n'; exit 17"),
+      shellCommand("printf 'src/shared.ts:1:1 - inherited\\n'; exit 1"),
       {
         comparison: "diagnostics",
         comparisonReady: DIAGNOSTICS_COMPARISON_READY,
@@ -4892,7 +4980,7 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(
       observed,
       repo,
-      shellCommand("printf 'src/shared.ts:1:1 - inherited\\n'; exit 17"),
+      shellCommand("printf 'src/shared.ts:1:1 - inherited\\n'; exit 1"),
       { comparison: "diagnostics", mode: "strict" },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -4915,7 +5003,7 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(
       process,
       repo,
-      shellCommand("if test -f feature.txt; then exit 0; else printf 'src/base.ts:7:3 - existing\\n'; exit 17; fi"),
+      shellCommand("if test -f feature.txt; then exit 0; else printf 'src/base.ts:7:3 - existing\\n'; exit 1; fi"),
       { comparison: "diagnostics" },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -4940,7 +5028,7 @@ describe("Queue command adapters", () => {
       repo,
       shellCommand(
         "if test -f feature.txt; then printf 'src/feature.ts:2:1 - net-new\\n'; " +
-          "else printf 'opaque parent failure\\n'; fi; exit 17",
+          "else printf 'opaque parent failure\\n'; fi; exit 1",
       ),
       { comparison: "diagnostics" },
     )
@@ -4954,7 +5042,7 @@ describe("Queue command adapters", () => {
     }
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence).toMatchObject({
-      exitCode: 17,
+      exitCode: 1,
       diagnostics: [{ file: "src/feature.ts", [sourceRowKey]: 2, column: 1, message: "net-new" }],
     })
     expect(evidence.comparison).toBeUndefined()
@@ -4985,7 +5073,7 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(
       parentTimeout,
       repo,
-      shellCommand("printf 'src/feature.ts:2:1 - net-new\\n'; exit 17"),
+      shellCommand("printf 'src/feature.ts:2:1 - net-new\\n'; exit 1"),
       { comparison: "diagnostics" },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -5001,7 +5089,7 @@ describe("Queue command adapters", () => {
           phase: "parent",
           error: { code: "check-timeout" },
           parent: { exitCode: 124, timedOut: true },
-          candidateEvidence: { exitCode: 17 },
+          candidateEvidence: { exitCode: 1 },
           retryable: true,
         },
       },
@@ -5309,7 +5397,7 @@ describe("Queue command adapters", () => {
         'printf "[yrd-base-health] base aaaaaaaaaaaa is red: test:fast failed\\n"; ' +
           'printf "src/base.ts:1:1 - baseline guard failure\\n" >&2; ' +
           "if test -f feature.txt; then " +
-          'printf "src/model.ts:12:4 - error TS2322: type mismatch\\n" >&2; fi; exit 17',
+          'printf "src/model.ts:12:4 - error TS2322: type mismatch\\n" >&2; fi; exit 1',
       ),
       { classification: "base", comparison: "diagnostics" },
     )
@@ -5322,7 +5410,7 @@ describe("Queue command adapters", () => {
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(evidence).toMatchObject({
       command: ["sh", "-c", expect.stringContaining("test:fast failed")],
-      exitCode: 17,
+      exitCode: 1,
       classification: "base",
       diagnostics: [
         { file: "src/base.ts", [sourceRowKey]: 1, column: 1, message: "baseline guard failure" },
@@ -6346,7 +6434,7 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(
       process,
       repo,
-      shellCommand("printf 'candidate contract failed\\n' >&2; exit 17"),
+      shellCommand("printf 'candidate contract failed\\n' >&2; exit 1"),
       { prepareCandidate: true },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })

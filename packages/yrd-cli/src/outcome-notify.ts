@@ -34,7 +34,6 @@
  */
 import { spawn } from "node:child_process"
 import type { AttemptNotifiedArgs, QueueAttemptOutcome, QueueOutcome } from "@yrd/queue"
-import { HABITANT_EXIT } from "./habitant-exit.ts"
 import { failureDisposition } from "./status-presentation.ts"
 
 /** Who hears about a yrd fault when nobody configured `owner:`. */
@@ -91,21 +90,27 @@ export type OutcomeDisposition =
    */
   | "queue-wedged"
 
-/** The three-way verdict a `queue run --once` process exits with. */
+/** The three-way result a `queue run --once` process exits with: pass, fail, stuck. */
 export const QUEUE_OUTCOME_EXIT = Object.freeze({
   /** Every attempt landed, or nothing to do. */
   next: 0,
   /** At least one change was refused and sent back to its submitter; the pass continued. */
   changeRefused: 1,
   /**
-   * yrd broke: an infra/env/timeout outcome went to the queue owner, or the
-   * pass ended on an ERROR row. The design called this 2; `2` is already the
-   * generic usage/configuration exit of every Yrd verb (invocation.ts), and
-   * the pass-ending ERROR row already exits `fatal-error` (17) with Hab's
-   * stand-down disposition keyed on it, so this is that code — one number
-   * for "yrd broke", whichever way it broke. Wins over 1.
+   * STUCK: the queue could not do its job — a stuck check, an infra/env/timeout
+   * outcome that went to the queue owner, or a pass that ended on an ERROR row.
+   * Nobody is billed and the change stays where it was. Wins over 1.
+   *
+   * 2, by operator ruling 2026-09-02. This spent 17 until then, on the
+   * reasoning that `2` is already the generic usage/configuration exit of every
+   * Yrd verb (invocation.ts) and so could not also mean this. The ruling
+   * settles it the other way: a bad invocation of the queue run is ITSELF a way
+   * for the queue to be stuck, so the two readings agree and the collision is
+   * accepted. 17 is retired here; `HABITANT_EXIT["fatal-error"]` keeps it for
+   * the habitant lifecycle condition it names, which is a different contract
+   * with a different reader (Hab's stand-down disposition).
    */
-  yrdFailed: HABITANT_EXIT["fatal-error"],
+  yrdFailed: 2,
 } as const)
 export type QueueOutcomeExit = (typeof QUEUE_OUTCOME_EXIT)[keyof typeof QUEUE_OUTCOME_EXIT]
 
@@ -357,7 +362,7 @@ export function queueWedgedNotification(
   }
 }
 
-/** 17 wins over 1 wins over 0. */
+/** Stuck (2) wins over fail (1) wins over pass (0). */
 export function outcomeExitCode(kinds: readonly OutcomeNotification["kind"][]): QueueOutcomeExit {
   if (kinds.includes("yrd-broken")) return QUEUE_OUTCOME_EXIT.yrdFailed
   if (kinds.includes("send-back")) return QUEUE_OUTCOME_EXIT.changeRefused
@@ -456,7 +461,7 @@ export type OutcomeNotifier = Readonly<{
   owner(): string
   /** Start a pass: the per-pass WARN dedup and the verdict reset. */
   beginPass(): void
-  /** The three-way verdict for the outcomes THIS pass produced (17 > 1 > 0). */
+  /** The three-way result for the outcomes THIS pass produced (2 > 1 > 0). */
   exitCode(): QueueOutcomeExit
   ledger: OutcomeLedger
 }>

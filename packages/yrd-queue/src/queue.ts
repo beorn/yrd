@@ -12139,6 +12139,11 @@ export const YRD_REFUSAL_CODES = [
   // storage verdict (a check's output stated EDQUOT/ENOSPC, or the runner's
   // own writes hit it), bucketed `infra-retry` above.
   "check-storage-exhausted",
+  // command.ts `CHECK_STUCK` — the command runner's own STUCK verdict: the
+  // check exited on a status that is neither pass (0) nor fail (1), so it
+  // judged nothing and the change is not the author's to fix. Environment-owned
+  // below, never a composition failure (operator ruling 2026-09-02).
+  "check-stuck",
   "checking",
   "checkpoint-migration-certificate-missing",
   "checkpoint-migration-certificate-stale",
@@ -12540,6 +12545,15 @@ export const ENVIRONMENT_OWNED_FAILURE_CODES: ReadonlySet<string> = new Set<stri
   ...COMPOSITION_FAILURE_BUCKETS["infra-retry"],
   "queue-environment-refused",
   "orphaned-run",
+  // A STUCK check (command.ts `CHECK_STUCK`): the check exited on a status that
+  // is neither pass nor fail, so it never reached a verdict about the content.
+  // Here rather than in a composition bucket because nothing was composed — the
+  // runner could not get an answer out of the check itself. Membership is what
+  // makes the design rule true: `admissionFailureKind` reads it and records
+  // `infrastructure`, so no submit authority is spent and no "send it back"
+  // reaches the author, and `failureDisposition` reads it and routes the
+  // outcome to the queue owner (operator ruling 2026-09-02).
+  "check-stuck",
 ])
 
 function admissionFailureKind(
