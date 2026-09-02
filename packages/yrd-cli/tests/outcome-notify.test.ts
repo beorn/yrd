@@ -12,29 +12,46 @@
  * code lands on `fatal-error` (17) here, because 2 is the generic
  * usage/configuration exit of every verb; see QUEUE_OUTCOME_EXIT.
  */
-import { mkdtempSync, readFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import type { QueueOutcome } from "@yrd/queue"
+import type { AttemptNotifiedArgs, QueueAttemptOutcome, QueueOutcome } from "@yrd/queue"
 import { loadYrdConfig, parseYrdConfig } from "../src/config.ts"
 import { HABITANT_EXIT } from "../src/habitant-exit.ts"
 import {
-  createOutcomeLedger,
+  createJournalOutcomeLedger,
   createOutcomeNotifier,
   DEFAULT_QUEUE_OWNER,
-  lookupNotifySeat,
   NOTIFY_TIMEOUT_MS,
-  OUTCOME_LEDGER_FILE,
   outcomeExitCode,
   parseBallId,
   QUEUE_OUTCOME_EXIT,
-  recordNotifySeat,
+  resolveSubmitterSeat,
   routeOutcome,
   submitterSeatFromEnvironment,
+  UNKNOWN_SUBMITTER,
+  YRD_DEFAULT_SUBMITTER_ENV,
   type NotifierRun,
+  type OutcomeLedger,
   type OutcomeNotification,
 } from "../src/outcome-notify.ts"
+
+/** A journal stand-in with the queue's own semantics: `queue/attempt/notified`
+ * projects onto the attempt's row, the first row stands, `at` is the frame's
+ * timestamp. Shared across notifiers the way one journal is shared across
+ * processes. */
+function journal(): Readonly<{ rows: Record<string, QueueAttemptOutcome>; noted: AttemptNotifiedArgs[]; ledger: OutcomeLedger }> {
+  const rows: Record<string, QueueAttemptOutcome> = {}
+  const noted: AttemptNotifiedArgs[] = []
+  let tick = 0
+  const ledger = createJournalOutcomeLedger(() => ({
+    outcomes: () => rows,
+    noteAttemptOutcome: async (args) => {
+      noted.push(args)
+      if (rows[args.attempt] !== undefined) return
+      rows[args.attempt] = { ...args, at: `2026-09-01T00:00:0${String(tick++)}.000Z` }
+    },
+  }))
+  return { rows, noted, ledger }
+}
 
 const SHA = "a".repeat(40)
 const BASE_SHA = "b".repeat(40)
@@ -162,8 +179,8 @@ describe("routeOutcome — the registry's disposition IS the switch", () => {
     expect(routed.body).toContain("close your bead and retire its lane embed in the same write")
   })
 
-  it("no recorded submitter (or the bay plugin's `operator` default) → the owner, and the body says so", () => {
-    for (const submitter of [undefined, "operator", ""]) {
+  it("no recorded submitter (the literal `unknown`, or the bay plugin's `operator` default) → the owner, and the body says so", () => {
+    for (const submitter of [undefined, "operator", "", UNKNOWN_SUBMITTER]) {
       const routed = routeOutcome(outcome({ submitter }), routing)
       expect(routed.recipient).toBe("@cto")
       expect(routed.disposition).toBe("unknown-submitter")
@@ -171,8 +188,8 @@ describe("routeOutcome — the registry's disposition IS the switch", () => {
     }
   })
 
-  it("`--notify <seat>` recorded beside the submit overrides the revision's submitter", () => {
-    const routed = routeOutcome(outcome(), { ...routing, notifySeat: "@dev/9" })
+  it("the revision's journaled submitter IS the recipient — `pr submit --notify` sets it, no sidecar overrides it", () => {
+    const routed = routeOutcome(outcome({ submitter: "@dev/9" }), routing)
     expect(routed.recipient).toBe("@dev/9")
   })
 
@@ -184,12 +201,12 @@ describe("routeOutcome — the registry's disposition IS the switch", () => {
 })
 
 describe("createOutcomeNotifier — one ball per ended attempt", () => {
-  it("hands ONE outcome record to the configured command on stdin and journals the {ball_id} it prints", async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), "yrd-outcome-"))
+  it("hands ONE outcome record to the configured command on stdin and journals the {ball_id} it prints ON THE ATTEMPT ROW", async () => {
+    const { rows: attempts, noted, ledger } = journal()
     const { calls, commands, run } = fakeRun()
     const { rows, log } = collectingLog()
     const notifier = createOutcomeNotifier({
-      stateDir,
+      ledger,
       notifyCommand: "bun tools/yrd-notify.ts",
       owner: "@cto",
       logPath: "/log",
@@ -202,30 +219,40 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
     expect(calls[0]?.recipient).toBe("@dev/3")
     expect(calls[0]?.fallback).toBe("@cto")
     expect(row.ball).toBe("ball-1")
-    const journaled = readFileSync(join(stateDir, OUTCOME_LEDGER_FILE), "utf8").trim().split("\n").map((line) => JSON.parse(line))
-    expect(journaled).toHaveLength(1)
-    expect(journaled[0]).toMatchObject({ attempt: outcome().attemptId, ball: "ball-1", recipient: "@dev/3" })
+    // The journal, not a sidecar: one queue/attempt/notified for this attempt id.
+    expect(noted).toEqual([
+      { attempt: outcome().attemptId, kind: "send-back", recipient: "@dev/3", disposition: "author", ball: "ball-1" },
+    ])
+    expect(attempts[outcome().attemptId]).toMatchObject({ ball: "ball-1", recipient: "@dev/3" })
+    expect(row).toEqual(attempts[outcome().attemptId])
     expect(rows.some((entry) => entry.level === "error")).toBe(false)
   })
 
-  it("re-running the same attempt id never sends twice — the journaled ball id is the idempotency key", async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), "yrd-outcome-"))
+  it("re-running the same attempt id never sends twice — the journaled ball id on the attempt row is the idempotency key", async () => {
+    const { ledger } = journal()
     const { calls, run } = fakeRun()
     const { log } = collectingLog()
-    const make = () =>
-      createOutcomeNotifier({ stateDir, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const make = () => createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
     const first = await make().notify(outcome())
-    // A SECOND process (fresh notifier, same state dir) sees the journal.
+    // A SECOND process (fresh notifier, same journal) finds the row.
     const second = await make().notify(outcome())
     expect(calls).toHaveLength(1)
     expect(second.ball).toBe(first.ball)
   })
 
+  it("a row that did not project is a loud error, never a ball that reads as journaled (NO SILENT ERRORS)", async () => {
+    const dark = createJournalOutcomeLedger(() => ({ outcomes: () => ({}), noteAttemptOutcome: async () => undefined }))
+    const { run } = fakeRun()
+    const { log } = collectingLog()
+    const notifier = createOutcomeNotifier({ ledger: dark, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    await expect(notifier.notify(outcome())).rejects.toThrow(/did not project/u)
+  })
+
   it("no notify: command → one WARN per pass (notify-unconfigured) and the outcome journaled without a ball", async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), "yrd-outcome-"))
+    const { ledger } = journal()
     const { calls, run } = fakeRun()
     const { rows, log } = collectingLog()
-    const notifier = createOutcomeNotifier({ stateDir, owner: "@cto", logPath: "/log", log, run })
+    const notifier = createOutcomeNotifier({ ledger, owner: "@cto", logPath: "/log", log, run })
     notifier.beginPass()
     const a = await notifier.notify(outcome())
     const b = await notifier.notify(outcome({ attemptId: "R99", kind: "failed" }))
@@ -234,7 +261,8 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
     expect(b.ball).toBeUndefined()
     const warns = rows.filter((entry) => entry.level === "warn" && entry.props?.code === "notify-unconfigured")
     expect(warns).toHaveLength(1)
-    expect(createOutcomeLedger(stateDir).rows()).toHaveLength(2)
+    expect(ledger.rows()).toHaveLength(2)
+    expect(ledger.rows().map((row) => row.attempt)).toEqual([outcome().attemptId, "R99"])
     notifier.beginPass()
     await notifier.notify(outcome({ attemptId: "R100", kind: "failed" }))
     expect(rows.filter((entry) => entry.props?.code === "notify-unconfigured")).toHaveLength(2)
@@ -245,23 +273,23 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
     ["prints no ball id", { code: 0, stdout: "sent\n" }],
     ["times out", { code: null, stdout: "", timedOut: true }],
   ])("a notifier that %s → an ERROR row notify-failed, nothing journaled as sent, and a throw (NO SILENT ERRORS)", async (_, reply) => {
-    const stateDir = mkdtempSync(join(tmpdir(), "yrd-outcome-"))
+    const { ledger } = journal()
     const { run } = fakeRun(reply)
     const { rows, log } = collectingLog()
-    const notifier = createOutcomeNotifier({ stateDir, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const notifier = createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
     await expect(notifier.notify(outcome())).rejects.toThrow(/notifier/u)
     const errors = rows.filter((entry) => entry.level === "error")
     expect(errors).toHaveLength(1)
     expect(errors[0]?.props?.code).toBe("notify-failed")
     expect(errors[0]?.message).toContain("reached nobody")
-    expect(createOutcomeLedger(stateDir).lookup(outcome().attemptId)).toBeUndefined()
+    expect(ledger.lookup(outcome().attemptId)).toBeUndefined()
   })
 
   it("the pass's own ERROR row is the owner's ball", async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), "yrd-outcome-"))
+    const { ledger } = journal()
     const { calls, run } = fakeRun()
     const { log } = collectingLog()
-    const notifier = createOutcomeNotifier({ stateDir, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const notifier = createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
     const row = await notifier.notifyPassError({ namespace: "yrd:queue:compose", message: "boom" }, "pass:r1:t1")
     expect(row.ball).toBe("ball-1")
     expect(calls[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto", disposition: "pass-error" })
@@ -270,25 +298,13 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
   })
 
   it("`queue run --owner` overrides the configured owner for this process", async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), "yrd-outcome-"))
+    const { ledger } = journal()
     const { calls, run } = fakeRun()
     const { log } = collectingLog()
-    const notifier = createOutcomeNotifier({ stateDir, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const notifier = createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
     notifier.setOwner("@chief")
     await notifier.notify(outcome({ failureKind: "infrastructure" }))
     expect(calls[0]?.recipient).toBe("@chief")
-  })
-
-  it("the --notify seat recorded beside the exact (branch, sha) submitted wins the recipient", async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), "yrd-outcome-"))
-    recordNotifySeat(stateDir, { branch: "task/thing", sha: SHA, seat: "@dev/9", at: "t", source: "--notify" })
-    expect(lookupNotifySeat(stateDir, "task/thing", SHA)).toBe("@dev/9")
-    expect(lookupNotifySeat(stateDir, "task/thing", "f".repeat(40))).toBeUndefined()
-    const { calls, run } = fakeRun()
-    const { log } = collectingLog()
-    const notifier = createOutcomeNotifier({ stateDir, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
-    await notifier.notify(outcome())
-    expect(calls[0]?.recipient).toBe("@dev/9")
   })
 })
 
@@ -302,10 +318,10 @@ describe("the three-way verdict of `queue run --once`", () => {
   })
 
   it("the notifier accumulates the verdict per pass and beginPass resets it", async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), "yrd-outcome-"))
+    const { ledger } = journal()
     const { run } = fakeRun()
     const { log } = collectingLog()
-    const notifier = createOutcomeNotifier({ stateDir, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const notifier = createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
     notifier.beginPass()
     await notifier.notify(outcome())
     expect(notifier.exitCode()).toBe(QUEUE_OUTCOME_EXIT.changeRefused)
@@ -323,11 +339,25 @@ describe("the seam's small parsers", () => {
     expect(parseBallId("")).toBeUndefined()
   })
 
-  it("the submitter seat comes from the managed seat's launch environment, never argv", () => {
-    expect(submitterSeatFromEnvironment({ TRIBE_SESSION_NAME: "@dev/3" })).toEqual({ seat: "@dev/3", source: "env:TRIBE_SESSION_NAME" })
-    expect(submitterSeatFromEnvironment({ TRIBE_NAME: "@dev/4" })).toEqual({ seat: "@dev/4", source: "env:TRIBE_NAME" })
-    expect(submitterSeatFromEnvironment({ TRIBE_NAME: " " })).toBeUndefined()
+  it("the default submitter seat is the launch-env identity the host already reads (YRD_DEFAULT_SUBMITTER), never argv, cwd or the git author", () => {
+    expect(YRD_DEFAULT_SUBMITTER_ENV).toBe("YRD_DEFAULT_SUBMITTER")
+    expect(submitterSeatFromEnvironment({ YRD_DEFAULT_SUBMITTER: "@dev/3" })).toEqual({
+      seat: "@dev/3",
+      source: "env:YRD_DEFAULT_SUBMITTER",
+    })
+    expect(submitterSeatFromEnvironment({ YRD_DEFAULT_SUBMITTER: " " })).toBeUndefined()
+    expect(submitterSeatFromEnvironment({ TRIBE_SESSION_NAME: "@dev/3", TRIBE_NAME: "@dev/3" })).toBeUndefined()
     expect(submitterSeatFromEnvironment({})).toBeUndefined()
+  })
+
+  it("resolveSubmitterSeat: --notify first, else the launch-env identity, else the literal `unknown` with its source", () => {
+    expect(resolveSubmitterSeat("@dev/9", { YRD_DEFAULT_SUBMITTER: "@dev/3" })).toEqual({ seat: "@dev/9", source: "--notify" })
+    expect(resolveSubmitterSeat("  ", { YRD_DEFAULT_SUBMITTER: "@dev/3" })).toEqual({
+      seat: "@dev/3",
+      source: "env:YRD_DEFAULT_SUBMITTER",
+    })
+    expect(resolveSubmitterSeat(undefined, {})).toEqual({ seat: UNKNOWN_SUBMITTER, source: "none" })
+    expect(UNKNOWN_SUBMITTER).toBe("unknown")
   })
 
   it("the notifier bound is 30 s", () => {

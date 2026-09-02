@@ -173,6 +173,38 @@ describe("every ended attempt reaches the outcome seam exactly once", () => {
     expect(outcomes[0]?.reason).toContain("check 'check' failed")
   })
 
+  it("a derived member's outcome carries the submit fact's `notify` seat as its submitter; a refs/for fact with none carries none", async () => {
+    const outcomes: QueueOutcome[] = []
+    await using app = await createApp({ outcomes })
+    await app.bays.recordBranchSubmit({ branch: "issue/notified", sha: SHA, base: "main", notify: "@dev/9" })
+    expect(app.bays.state().submits["issue/notified"]).toMatchObject({ sha: SHA, notify: "@dev/9" })
+
+    await app.queue.run({}, runtime)
+
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({ kind: "landed", branch: "issue/notified", submitter: "@dev/9" })
+  })
+
+  it("the ball id is journaled ON THE ATTEMPT ROW (queue/attempt/notified → queues.outcomes[attempt]); the first row stands", async () => {
+    const outcomes: QueueOutcome[] = []
+    await using app = await createApp({ outcomes })
+    await app.bays.recordBranchSubmit({ branch: "issue/row", sha: SHA, base: "main" })
+    const runs = await app.queue.run({}, runtime)
+    const attempt = outcomes[0]?.attemptId
+    if (attempt === undefined) throw new Error("expected one ended attempt")
+    expect(attempt).toBe(runs[0]?.id)
+    expect(app.state().queues.outcomes).toEqual({})
+
+    await app.queue.noteAttemptOutcome({ attempt, kind: "landed", recipient: "@dev/9", disposition: "landed", ball: "ball-1" })
+    await app.queue.noteAttemptOutcome({ attempt, kind: "landed", recipient: "@cto", disposition: "landed", ball: "ball-2" })
+    await app.queue.noteAttemptOutcome({ attempt: "pass:r1:t1", kind: "yrd-broken", recipient: "@cto", disposition: "pass-error" })
+
+    expect(app.state().queues.outcomes).toEqual({
+      [attempt]: { attempt, kind: "landed", recipient: "@dev/9", disposition: "landed", ball: "ball-1", at: "2026-01-01T00:00:00.000Z" },
+      "pass:r1:t1": { attempt: "pass:r1:t1", kind: "yrd-broken", recipient: "@cto", disposition: "pass-error", at: "2026-01-01T00:00:00.000Z" },
+    })
+  })
+
   it("a hook that throws does not take the pass down: the outcome was attempted once and the compose still resolves", async () => {
     const outcomes: QueueOutcome[] = []
     await using app = await createApp({

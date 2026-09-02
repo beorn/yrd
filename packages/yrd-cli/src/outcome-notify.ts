@@ -4,8 +4,12 @@
  * The queue hands this module one {@link QueueOutcome} per ENDED attempt; this
  * module decides WHO hears about it and hands ONE outcome record to ONE
  * configured notifier command, which opens the ball and prints its id. The
- * ball id is journaled here, keyed by attempt id, so a re-run of the same
- * attempt never sends twice.
+ * ball id is journaled on the attempt's own row (`queue/attempt/notified` →
+ * `queues.outcomes[attempt]`), and that journaled ball IS the idempotency
+ * key: a re-run of the same attempt id finds the row and never sends twice.
+ * The recipient is the revision's recorded `submitter` (record lane) or the
+ * submit fact's `notify` seat (derived lane) — both set by `pr submit
+ * --notify`, else the launch-env identity the host reads, else `unknown`.
  *
  * Routing is the refusal-code registry's own disposition (`failureDisposition`,
  * read off `COMPOSITION_FAILURE_BUCKETS`), never a second classifier:
@@ -29,9 +33,7 @@
  * ends the pass under the any-ERROR rule. NO SILENT ERRORS.
  */
 import { spawn } from "node:child_process"
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
-import type { QueueOutcome } from "@yrd/queue"
+import type { AttemptNotifiedArgs, QueueAttemptOutcome, QueueOutcome } from "@yrd/queue"
 import { HABITANT_EXIT } from "./habitant-exit.ts"
 import { failureDisposition } from "./status-presentation.ts"
 
@@ -41,12 +43,10 @@ export const DEFAULT_QUEUE_OWNER = "@chief"
 export const UNKNOWN_SUBMITTER = "unknown"
 /** How long the notifier may take before its silence is a failure. */
 export const NOTIFY_TIMEOUT_MS = 30_000
-/** State-dir sidecar files. Beside journal.sqlite, OUTSIDE checkpoint-identity
- * state on purpose: a new journal event schema would invalidate every stored
- * checkpoint (see `withQueue`'s note on the checkpoint identity), and a ball
- * id is a fact about a notification, not about the queue's own verdict. */
-export const OUTCOME_LEDGER_FILE = "outcome-notifications.jsonl"
-export const NOTIFY_SEATS_FILE = "outcome-notify-seats.jsonl"
+/** The launch-environment identity the host already reads as the default
+ * submitter of every record it writes (`YRD_DEFAULT_SUBMITTER`). It is the
+ * one identity a submit may default to: never argv, cwd or the git author. */
+export const YRD_DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER" as const
 
 /** The seam that ends every attempt: the notifier command's stdin. */
 export type OutcomeNotification = Readonly<{
@@ -101,88 +101,68 @@ export const QUEUE_OUTCOME_EXIT = Object.freeze({
 } as const)
 export type QueueOutcomeExit = (typeof QUEUE_OUTCOME_EXIT)[keyof typeof QUEUE_OUTCOME_EXIT]
 
-/** One journaled notification: facts, never forecasts. `ball` is absent when
- * no notifier was configured — the outcome is still on record. */
-export type OutcomeLedgerRow = Readonly<{
-  attempt: string
-  kind: OutcomeNotification["kind"]
-  recipient: string
-  disposition: OutcomeDisposition
-  at: string
-  ball?: string
-}>
+/** One journaled notification, as the queue projects it: facts, never
+ * forecasts. `ball` is absent when no notifier was configured — the outcome is
+ * still on record, and nobody holds a ball for it. */
+export type OutcomeLedgerRow = QueueAttemptOutcome
 
+/** The attempt rows, read and written through the journal — never a sidecar.
+ * `lookup` reads the projection; `append` dispatches `queue/attempt/notified`,
+ * which the queue projects onto the attempt's row and refuses to duplicate. */
 export type OutcomeLedger = Readonly<{
   lookup(attempt: string): OutcomeLedgerRow | undefined
-  append(row: OutcomeLedgerRow): void
-  /** Every row, oldest first — what `queue list` prints beside a run. */
+  append(row: AttemptNotifiedArgs): Promise<void>
+  /** Every row, oldest first — what `queue list` prints beneath the timeline. */
   rows(): readonly OutcomeLedgerRow[]
 }>
 
-function readJsonl<T>(path: string): T[] {
-  if (!existsSync(path)) return []
-  const rows: T[] = []
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const trimmed = line.trim()
-    if (trimmed === "") continue
-    rows.push(JSON.parse(trimmed) as T)
-  }
-  return rows
-}
+/** What the ledger needs from the runtime app: the projected attempt rows and
+ * the command that journals one. Handed in lazily because the notifier is
+ * built before the app it reads (the queue's hook needs the notifier first). */
+export type OutcomeJournal = Readonly<{
+  outcomes(): Readonly<Record<string, QueueAttemptOutcome>>
+  noteAttemptOutcome(args: AttemptNotifiedArgs): Promise<unknown>
+}>
 
-/** Append-only JSONL beside the journal. Read on every lookup: the file is
- * tiny and another pass may have written since this process started. */
-export function createOutcomeLedger(stateDir: string): OutcomeLedger {
-  const path = join(stateDir, OUTCOME_LEDGER_FILE)
+export function createJournalOutcomeLedger(journal: () => OutcomeJournal): OutcomeLedger {
   return Object.freeze({
-    lookup: (attempt) => readJsonl<OutcomeLedgerRow>(path).findLast((row) => row.attempt === attempt),
-    append: (row) => {
-      mkdirSync(stateDir, { recursive: true })
-      appendFileSync(path, `${JSON.stringify(row)}\n`)
+    lookup: (attempt) => journal().outcomes()[attempt],
+    append: async (row) => {
+      await journal().noteAttemptOutcome(row)
     },
-    rows: () => readJsonl<OutcomeLedgerRow>(path),
+    rows: () => Object.values(journal().outcomes()).sort((left, right) => left.at.localeCompare(right.at)),
   })
 }
 
-/** `pr submit --notify <seat>`: the seat a submission wants its outcome ball
- * addressed to, keyed by the exact (branch, sha) it submitted. A sidecar, for
- * the same checkpoint-identity reason as the ledger — and because the derived
- * lane's submit fact (`branch/submitted`) records no submitter at all. */
-export type NotifySeatRow = Readonly<{ branch: string; sha: string; seat: string; at: string; source: string }>
-
-export function recordNotifySeat(stateDir: string, row: NotifySeatRow): void {
-  mkdirSync(stateDir, { recursive: true })
-  appendFileSync(join(stateDir, NOTIFY_SEATS_FILE), `${JSON.stringify(row)}\n`)
-}
-
-export function lookupNotifySeat(stateDir: string, branch: string, sha: string): string | undefined {
-  return readJsonl<NotifySeatRow>(join(stateDir, NOTIFY_SEATS_FILE)).findLast(
-    (row) => row.branch === branch && row.sha === sha,
-  )?.seat
-}
-
 /**
- * The seat a submit records when `--notify` is not passed: the managed seat's
- * own name from the environment the daemon/hab launched it with. NEVER argv,
- * cwd, or the git author (operator ruling: "argv is no identity"). A
- * daemon-VALIDATED identity is reachable only through a daemon call, which a
- * tribe-free yrd cannot make; the launch environment's name is the nearest
- * fact this process holds, and its source is recorded beside it.
+ * The seat a submit records when `--notify` is not passed: the launch-env
+ * identity the host already reads for every record it writes
+ * ({@link YRD_DEFAULT_SUBMITTER_ENV}). NEVER argv, cwd, or the git author
+ * (operator ruling: "argv is no identity"). Absent, the submit records the
+ * literal `unknown`, and unknown routes to the queue owner with "submitter
+ * unknown" in the ball body — nobody invents an identity.
  */
 export function submitterSeatFromEnvironment(
   env: NodeJS.ProcessEnv,
 ): Readonly<{ seat: string; source: string }> | undefined {
-  for (const name of ["TRIBE_SESSION_NAME", "TRIBE_NAME"] as const) {
-    const value = env[name]?.trim()
-    if (value !== undefined && value !== "") return { seat: value, source: `env:${name}` }
-  }
+  const value = env[YRD_DEFAULT_SUBMITTER_ENV]?.trim()
+  if (value !== undefined && value !== "") return { seat: value, source: `env:${YRD_DEFAULT_SUBMITTER_ENV}` }
   return undefined
+}
+
+/** The seat a submit records, and where it came from: `--notify` first, else
+ * the launch-env identity, else `unknown` (source `none`). */
+export function resolveSubmitterSeat(
+  notify: string | undefined,
+  env: NodeJS.ProcessEnv,
+): Readonly<{ seat: string; source: string }> {
+  const explicit = notify?.trim()
+  if (explicit !== undefined && explicit !== "") return { seat: explicit, source: "--notify" }
+  return submitterSeatFromEnvironment(env) ?? { seat: UNKNOWN_SUBMITTER, source: "none" }
 }
 
 export type OutcomeRoutingOptions = Readonly<{
   owner: string
-  /** The seat the submission asked to be notified; overrides the recorded submitter. */
-  notifySeat?: string
   logPath: string
 }>
 
@@ -191,8 +171,8 @@ const CLOSE_BEAD_INSTRUCTION = "close your bead and retire its lane embed in the
 /** The recorded submitter, or `unknown` when nothing recorded one. `operator`
  * is the bay plugin's built-in default when no identity reached it — the
  * absence of a seat, not a seat. */
-function submitterSeat(outcome: QueueOutcome, options: OutcomeRoutingOptions): string {
-  const seat = options.notifySeat ?? outcome.submitter
+function submitterSeat(outcome: QueueOutcome): string {
+  const seat = outcome.submitter
   if (seat === undefined || seat.trim() === "" || seat === "operator") return UNKNOWN_SUBMITTER
   return seat
 }
@@ -222,7 +202,7 @@ function classify(outcome: QueueOutcome): Readonly<{ disposition: OutcomeDisposi
 /** ONE routing decision per outcome — the design's switch, on the registry's bucket. */
 export function routeOutcome(outcome: QueueOutcome, options: OutcomeRoutingOptions): OutcomeNotification {
   const owner = options.owner.trim() === "" ? DEFAULT_QUEUE_OWNER : options.owner.trim()
-  const seat = submitterSeat(outcome, options)
+  const seat = submitterSeat(outcome)
   const classified = classify(outcome)
   const where = `${outcome.pr} rev ${String(outcome.revision)} (${outcome.branch} @ ${outcome.sha.slice(0, 12)}) on ${outcome.base}`
   const attributable = outcome.attributableFailures ?? []
@@ -384,7 +364,8 @@ type NotifierLog = Readonly<{
 }>
 
 export type OutcomeNotifierOptions = Readonly<{
-  stateDir: string
+  /** The attempt rows, through the journal (`createJournalOutcomeLedger`). */
+  ledger: OutcomeLedger
   /** `.yrd.yml` `notify:`; absent means journal-only with one WARN per pass. */
   notifyCommand?: string
   /** `.yrd.yml` `owner:` (default `@chief`); `queue run --owner` overrides per process. */
@@ -392,8 +373,6 @@ export type OutcomeNotifierOptions = Readonly<{
   logPath: string
   log: NotifierLog
   run: NotifierRun
-  now?: () => number
-  ledger?: OutcomeLedger
 }>
 
 export type OutcomeNotifier = Readonly<{
@@ -412,13 +391,25 @@ export type OutcomeNotifier = Readonly<{
 }>
 
 export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeNotifier {
-  const ledger = options.ledger ?? createOutcomeLedger(options.stateDir)
-  const now = options.now ?? (() => Date.now())
+  const ledger = options.ledger
   let owner = options.owner?.trim() === "" || options.owner === undefined ? DEFAULT_QUEUE_OWNER : options.owner.trim()
   let warnedUnconfigured = false
   const passKinds: OutcomeNotification["kind"][] = []
   const command = options.notifyCommand?.trim()
 
+  /** Journal the row on the attempt, then read it back: the projection is the
+   * fact of record, and a row that did not project is a loud error, never a
+   * ball that reads as journaled. */
+  const journalRow = async (args: AttemptNotifiedArgs): Promise<OutcomeLedgerRow> => {
+    await ledger.append(args)
+    const journaled = ledger.lookup(args.attempt)
+    if (journaled === undefined) {
+      throw new Error(
+        `yrd: attempt '${args.attempt}' was notified but its row did not project into the journal (queue/attempt/notified)`,
+      )
+    }
+    return journaled
+  }
   const deliver = async (notification: OutcomeNotification): Promise<OutcomeLedgerRow> => {
     const existing = ledger.lookup(notification.attempt_id)
     if (existing !== undefined) {
@@ -431,7 +422,6 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
       return existing
     }
     passKinds.push(notification.kind)
-    const at = new Date(now()).toISOString()
     if (command === undefined || command === "") {
       if (!warnedUnconfigured) {
         warnedUnconfigured = true
@@ -447,15 +437,12 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
           },
         )
       }
-      const row: OutcomeLedgerRow = {
+      return journalRow({
         attempt: notification.attempt_id,
         kind: notification.kind,
         recipient: notification.recipient,
         disposition: notification.disposition,
-        at,
-      }
-      ledger.append(row)
-      return row
+      })
     }
     const result = await options.run(command, `${JSON.stringify(notification)}\n`)
     const ball = result.code === 0 && !result.timedOut ? parseBallId(result.stdout) : undefined
@@ -481,15 +468,13 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
       )
       throw new Error(`yrd: notifier ${why} for attempt '${notification.attempt_id}'`)
     }
-    const row: OutcomeLedgerRow = {
+    const row = await journalRow({
       attempt: notification.attempt_id,
       kind: notification.kind,
       recipient: notification.recipient,
       disposition: notification.disposition,
-      at,
       ball,
-    }
-    ledger.append(row)
+    })
     options.log.info?.(
       `opened ball ${ball} for attempt '${notification.attempt_id}': ${notification.kind} → ${notification.recipient}`,
       {
@@ -504,17 +489,7 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
   }
 
   return Object.freeze({
-    notify: (outcome) =>
-      deliver(
-        routeOutcome(outcome, {
-          owner,
-          logPath: options.logPath,
-          ...(() => {
-            const seat = lookupNotifySeat(options.stateDir, outcome.branch, outcome.sha)
-            return seat === undefined ? {} : { notifySeat: seat }
-          })(),
-        }),
-      ),
+    notify: (outcome) => deliver(routeOutcome(outcome, { owner, logPath: options.logPath })),
     notifyPassError: (fatal, attemptId) =>
       deliver(passErrorNotification(fatal, { owner, logPath: options.logPath, attemptId })),
     setOwner: (seat) => {

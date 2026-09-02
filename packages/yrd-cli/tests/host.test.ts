@@ -30,6 +30,7 @@ import {
   runYrdProcess,
 } from "../src/host.ts"
 import { HABITANT_EXIT } from "../src/habitant-exit.ts"
+import { QUEUE_OUTCOME_EXIT } from "../src/outcome-notify.ts"
 import { checkpointBumpGateViolations, SHIPPED_CHECKPOINT_IDENTITIES } from "../src/checkpoint-bump-gate.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
 import { sourceRepositoryFor, takeImplementationSourceAttestation } from "../src/implementation-source.ts"
@@ -619,13 +620,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // v3. Existing checkpoint state needs no rewrite, but accepted schemas and
     // the projector versions move the identity, so former target 3f8a2627 is
     // retained.
-    // Conscious update 2026-09-01 (`yrd pr retire`): the queue registers one
-    // new event, `queue/revision/retired`, projected into the existing
-    // `queues.retiredSubmits` row — no new projection key, no stored record
-    // rewritten — and a registered event is an accepted input shape, so the
-    // identity moves; former target 2498f5d4 is retained.
-    const previousTargetIdentity ="36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074")
+    // Conscious update 2026-09-01 (@i/10-yrd/24028): the queue registers one
+    // new event, `queue/attempt/notified`, projected into a new
+    // `queues.outcomes` record (queues-v14), and the derived submit fact gains
+    // an optional `notify` seat — a registered event and a widened accepted
+    // shape both move the identity; former target 7ea283b8 is retained.
+    const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
+    expect(first.manifest.targetIdentity).toBe("ca7e3d9577514291a125a9b003182b400f8495f79c2187f9aefea318d457ba56")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -2108,7 +2109,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074")
+    expect(rewritten.checkpoint_identity).toBe("ca7e3d9577514291a125a9b003182b400f8495f79c2187f9aefea318d457ba56")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2197,7 +2198,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074")
+    expect(rewritten.checkpoint_identity).toBe("ca7e3d9577514291a125a9b003182b400f8495f79c2187f9aefea318d457ba56")
     redatabase.close()
   })
 
@@ -3856,6 +3857,9 @@ checks: [{check: {run: "true"}}]
       // asked to store since 2026-08-28 — retained across the submit-fact
       // retirement bump (@i/10-yrd/absent-branch-is-terminal, 2026-08-30).
       { from: "74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1", to: releasedHop },
+      // The ledger's superseded last entry before every queue outcome began
+      // ending in exactly one journaled ball (@i/10-yrd/24028, 2026-09-01).
+      { from: "7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074", to: releasedHop },
       { from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7", to: releasedHop },
       // Production journal stored identity, read read-only from /hh's live
       // journal 2026-08-26 at cursor 91511 (evictedThrough 27609, so rebuild
@@ -4114,7 +4118,10 @@ checks: [{check: {run: "true"}}]
       },
     )
     expect(await Bun.file(checkMarker).exists(), JSON.stringify({ exitCode, stdout, stderr })).toBe(true)
-    expect(exitCode, stderr).toBe(1)
+    // The three-way verdict (@i/10-yrd/24028): a merge refused on a
+    // yrd-owned code (`checkpoint-migration-certificate-missing`) is "yrd
+    // failed" — the queue owner's ball — never the author's 1.
+    expect(exitCode, stderr).toBe(QUEUE_OUTCOME_EXIT.yrdFailed)
     const result = JSON.parse(stdout) as { results: Array<{ id: string }> }
     expect(result).toMatchObject({
       command: "queue.run",
@@ -4205,7 +4212,10 @@ checks: [{check: {run: "true"}}]
       },
     )
     expect(await Bun.file(checkMarker).exists(), JSON.stringify({ exitCode, stdout, stderr })).toBe(true)
-    expect(exitCode, stderr).toBe(1)
+    // The three-way verdict (@i/10-yrd/24028): a merge refused on a
+    // yrd-owned code (`checkpoint-migration-certificate-missing`) is "yrd
+    // failed" — the queue owner's ball — never the author's 1.
+    expect(exitCode, stderr).toBe(QUEUE_OUTCOME_EXIT.yrdFailed)
     const result = JSON.parse(stdout) as { command: string; results: Record<string, unknown>[] }
     expect(result.command).toBe("queue.run")
     expect(result.results.length).toBeGreaterThanOrEqual(1)
@@ -4286,7 +4296,8 @@ checks: [{check: {run: "true"}}]
       },
     )
     expect(await readFile(checkMarker, "utf8")).toBe("checkcheck")
-    expect(exitCode, JSON.stringify({ stdout, stderr })).toBe(1)
+    // yrd-owned refusal code → yrd failed (17), the three-way verdict (@i/10-yrd/24028).
+    expect(exitCode, JSON.stringify({ stdout, stderr })).toBe(QUEUE_OUTCOME_EXIT.yrdFailed)
     const result = JSON.parse(stdout) as { results: Record<string, unknown>[] }
     expect(result).toMatchObject({
       results: [
@@ -4987,7 +4998,10 @@ checks: [{check: {run: "true"}}]
         },
       }),
       stderr,
-    ).toBe(0)
+      // The three-way verdict (@i/10-yrd/24028): the refusal is the author's
+      // (push the gitlink to the submodule's main first), so the pass sends
+      // it back and exits 1 — the pass itself continued.
+    ).toBe(QUEUE_OUTCOME_EXIT.changeRefused)
     expect(JSON.parse(stdout)).toMatchObject({ command: "queue.run", publications: [], results: [] })
     // The refusal is loud on the runner stream and names the exact pin and the
     // pipeline-routed cure: land the commit on the submodule's own main.
@@ -5187,7 +5201,9 @@ checks: [{check: {run: "true"}}]
     // cure — and integrates nothing. The submit fact is NOT consumed.
     stdout = ""
     stderr = ""
-    expect(await invoke(["queue", "run", "--once", "--json"]), stderr).toBe(0)
+    // An author-owned refusal sends the change back: exit 1, pass continued
+    // (the three-way verdict, @i/10-yrd/24028).
+    expect(await invoke(["queue", "run", "--once", "--json"]), stderr).toBe(QUEUE_OUTCOME_EXIT.changeRefused)
     expect(JSON.parse(stdout)).toMatchObject({ command: "queue.run", publications: [], results: [] })
     expect(stderr).toContain("min-commit-unpublished")
     expect(stderr).toContain("push it to the submodule's own main first")
@@ -5300,7 +5316,9 @@ checks: [{check: {run: "true"}}]
           runError += text
         },
       }),
-    ).toBe(0)
+      // A failed required check is the author's: sent back, exit 1, the pass
+      // continued (the three-way verdict, @i/10-yrd/24028).
+    ).toBe(QUEUE_OUTCOME_EXIT.changeRefused)
     // The failing check keeps the member out of the run — and the pass says
     // so on its own stream instead of composing or silently dropping it.
     expect(JSON.parse(runOutput)).toMatchObject({ command: "queue.run", publications: [], results: [] })
