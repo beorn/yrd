@@ -39,7 +39,7 @@ import {
   type Journal,
   type JournalFrame,
 } from "@yrd/core"
-import { withJobs, type JobResult } from "@yrd/job"
+import { withJobs, type Job, type JobResult, type Jobs, type Runner } from "@yrd/job"
 import * as z from "zod"
 import {
   advanceQueue,
@@ -172,6 +172,8 @@ async function createApp(
       props?: Record<string, string>
       issue?: string
     }
+    /** The queue's configured Runner, in place of the in-process local one. */
+    runner?: (jobs: Jobs) => Runner
   }> = {},
 ) {
   const steps = options.steps ?? ([passingCheck(), passingMerge()] as const)
@@ -185,6 +187,7 @@ async function createApp(
     prepareCandidate: mergeableCandidate,
     ...(options.prNumberMint === undefined ? {} : { prNumberMint: options.prNumberMint }),
     ...(options.readSubmitEnrichment === undefined ? {} : { readSubmitEnrichment: options.readSubmitEnrichment }),
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
   } as never as Parameters<typeof withQueue>[0])
   const bayJobs = createBayJobDefs(workspace())
   const base = pipe(
@@ -1629,5 +1632,87 @@ describe("S6 derived lane — a member unsubmitted mid-pass RETIRES, it never ki
     const retired = composeEvent(events, "compose-derived-retire")
     expect(retired?.props).toMatchObject({ pr: entry.id, branch: "issue/derived", code: "derived-record-lane" })
     expect(String(retired?.props?.remedy)).toMatch(/record lane owns/u)
+  })
+})
+
+describe("REGRESSION (2026-09-01, PR3152): a drain that admits the same head over the same queue, turn after turn, stops loudly instead of spinning", () => {
+  /** A configured Runner that claims nothing: every Job it is handed stays
+   * `queued` — the shape of a head whose required checks nobody executes,
+   * which `admitChangeRevision` reports as `processed` on every turn. */
+  const idleRunner = (jobs: Jobs): Runner => ({
+    maxInFlight: 1,
+    async submit({ job }) {
+      const observed = jobs.get(job)
+      if (observed === undefined) throw new Error(`no job '${job}'`)
+      return observed as Job
+    },
+    observe: (job) => jobs.get(job),
+    cancel() {
+      return Promise.reject(new Error("idleRunner.cancel is outside this test"))
+    },
+    recover() {
+      return Promise.resolve([])
+    },
+  })
+
+  it("refuses admission-drain-no-progress after three identical turns and names the head, its lane, its recorded admission, every required-check Job and the changes withheld behind it", async () => {
+    // Live shape (pass-180116.log, 18:01–18:13 PDT): PR3152 was reported
+    // admitted on every turn, never left the admission order, fourteen
+    // changes behind it were withheld `admission-order-held` 224 times, and
+    // not one row named the head's own state until a SIGTERM ended the pass.
+    // On the code before this test the run below never resolves.
+    const events: LogEvent[] = []
+    const mint = volatilePrNumberMint()
+    await using app = await createApp({
+      steps: [passingCheck()],
+      defaultSteps: ["check"],
+      prNumberMint: mint,
+      baysPrNumberMint: mint,
+      runner: idleRunner,
+      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]),
+    })
+    await app.bays.recordBranchSubmit({ branch: "issue/a-idle-head", sha: SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/b-behind", sha: "7".repeat(40), base: "main" })
+
+    const outcome = await app.queue.run({}, runtime).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+    expect(failureFact(outcome)).toMatchObject({ kind: "infrastructure", code: "admission-drain-no-progress" })
+
+    const rows = events.filter((event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log")
+    const stalled = rows.find((row) => row.level === "error" && row.props?.action === "admission-drain-no-progress")
+    expect(stalled?.props).toMatchObject({
+      pr: "PR1",
+      branch: "issue/a-idle-head",
+      turns: 3,
+      lane: "derived",
+      recordedAdmission: "none",
+      jobs: [expect.stringMatching(/^check: queued and unclaimed/u)],
+      withheld: ["PR2"],
+    })
+    const message = String(stalled?.message)
+    expect(message).toContain("no progress for 3 consecutive turns: change 'PR1' (issue/a-idle-head)")
+    expect(message).toContain("1 change(s) behind it stay withheld")
+    expect(message).toContain("required-check jobs [check: queued and unclaimed (no runner has executed it)]")
+    expect(message).not.toContain("\n")
+    expect(String(failureFact(outcome)?.message)).toContain(message)
+
+    // The turn that could not finish the head's check said which Job it was
+    // waiting on and in what state — before the drain gave up, not after.
+    const pending = rows.find((row) => row.props?.action === "admission-job-pending")
+    expect(pending?.level).toBe("warn")
+    expect(pending?.props).toMatchObject({
+      pr: "PR1",
+      branch: "issue/a-idle-head",
+      step: "check",
+      jobStatus: "queued",
+      requestedThisTurn: true,
+      processed: true,
+    })
+    expect(String(pending?.message)).toContain("waiting on required check 'check' Job '")
+    expect(String(pending?.message)).toContain(
+      "queued and unclaimed (no runner has executed it); this turn requested it",
+    )
   })
 })
