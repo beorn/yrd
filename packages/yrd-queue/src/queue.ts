@@ -3705,6 +3705,16 @@ function createQueue<Shape extends ChangeShape>(
     // do this for it: the record lane's stored verdict feeds selection; a
     // derived head's green Jobs feed nothing until the drain acts on them.
     const mergeWhenGreen = mergeHead !== undefined && runtime().queues.batchSize === 1
+    // ONE member per turn is the batch-1 contract for BOTH postures, resident
+    // and one-shot: the turn dispatches the head, the head-merges-when-green
+    // step is the turn's tail, and the next member gets the next turn — at the
+    // moved base if the head landed. `continueAdmissions` still means one per
+    // turn on its own (a resident draining a wider batch must stay
+    // interruptible between admissions); it is no longer the ONLY thing that
+    // does, so the one-shot needs no posture special case here. A wider batch
+    // without a drain signal keeps dispatching the whole order in one turn,
+    // because that order is the batch it composes.
+    const onePerTurn = options.continueAdmissions !== undefined || runtime().queues.batchSize === 1
     /** The base moved under the rest of the order: re-point the RECORD-lane
      * members still queued at the moved base, exactly as the top of a pass
      * does, so the next member is checked at the new base rather than admitted
@@ -3843,13 +3853,13 @@ function createQueue<Shape extends ChangeShape>(
       const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined, derived).filter(
         (pr) => !released.has(pr.id),
       )
-      // A habitant (`continueAdmissions` installed) admits one change per turn so a
-      // drain signal can interrupt between admissions; a one-shot dispatches the
-      // whole queue in a single turn and needs no release — except that at
-      // batch 1 the turn STOPS at the first derived member that goes green
-      // (`stopAtGreenDerivedHead`), so its merge lands before the next member's
-      // first check starts.
-      const turn = options.continueAdmissions === undefined ? queued : queued.slice(0, 1)
+      // One member per turn at batch 1 (either posture) and for a resident
+      // draining any batch (so its drain signal can interrupt between
+      // admissions); a wider one-shot batch dispatches the whole order in a
+      // single turn and needs no release. At batch 1 the dispatch also hands
+      // back the head the moment it goes green (`stopAtGreenDerivedHead`), so
+      // its merge lands before the next member's first check starts.
+      const turn = onePerTurn ? queued.slice(0, 1) : queued
       const dispatched = await dispatchAdmissions(
         turn.map((pr) => pr.id),
         resolveCycleBase,
