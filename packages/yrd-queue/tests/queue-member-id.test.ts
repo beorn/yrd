@@ -1,6 +1,6 @@
 /**
  * @failure `PRIdSchema` was `z.string().trim().min(1)`, so `QueueMemberIdSchema`'s union of PR ids and intent ids decided nothing: every intent id parsed as a change id, the intent arm was dead code as a parser, and a mis-kinded member id failed later — or never — instead of at the schema.
- * @level l1
+ * @level l0
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
@@ -20,6 +20,11 @@ const REAL_PR_IDS = ["PR1", "PR182", "PR908", "PR913", "PR943"] as const
 const REAL_LEGACY_INTENT_IDS = ["I1", "I7", "I148", "I163"] as const
 const REAL_PIN_INTENT_IDS = ["yrdpin#164", "yrdpin#170", "yrdpin#181"] as const
 const REAL_INTENT_IDS = [...REAL_LEGACY_INTENT_IDS, ...REAL_PIN_INTENT_IDS]
+const MINTED_MEMBER_ID_CASES = [
+  { kind: "change", ids: REAL_PR_IDS, asPR: true, asIntent: false },
+  { kind: "legacy intent", ids: REAL_LEGACY_INTENT_IDS, asPR: false, asIntent: true },
+  { kind: "pin intent", ids: REAL_PIN_INTENT_IDS, asPR: false, asIntent: true },
+] as const
 
 /** Forms Yrd renders or an operator types. None is an id, and the journal only
  * ever holds them in `command.args`, which is `TextSchema` on purpose. */
@@ -38,36 +43,15 @@ const SELECTORS_AND_DISPLAY_FORMS = [
 ] as const
 
 describe("queue member ids discriminate", () => {
-  it("accepts every change id shape the mint writes", () => {
-    for (const id of REAL_PR_IDS) {
-      expect(PRIdSchema.safeParse(id).success, `PR arm must accept the real id ${id}`).toBe(true)
-      expect(QueueMemberIdSchema.safeParse(id).success, `the union must accept the real id ${id}`).toBe(true)
-    }
-  })
-
-  it("accepts every intent id shape the mint writes, in both the legacy and yrdpin# forms", () => {
-    for (const id of REAL_INTENT_IDS) {
-      expect(IntentRecordIdSchema.safeParse(id).success, `intent arm must accept the real id ${id}`).toBe(true)
-      expect(QueueMemberIdSchema.safeParse(id).success, `the union must accept the real id ${id}`).toBe(true)
-    }
-  })
-
-  it("refuses an intent id at the change arm, which is what makes the union decide anything", () => {
-    // The defect: under `min(1)` every one of these parsed as a change id, so the
-    // right arm never ran and a mis-kinded member reached the rest of the system
-    // wearing the wrong kind.
-    for (const id of REAL_INTENT_IDS) {
-      expect(PRIdSchema.safeParse(id).success, `PR arm must refuse the intent id ${id}`).toBe(false)
-    }
-  })
-
-  it("keeps the two arms mutually exclusive over real data", () => {
+  it.each(MINTED_MEMBER_ID_CASES)("parses every minted $kind id through exactly its own arm", (idCase) => {
+    // Under the old `min(1)` change-id schema, both intent rows also parsed as
+    // PR ids, so the first union arm always won.
     // A union whose arms overlap still decides nothing useful: the first match
     // wins and the kind becomes an accident of arm order.
-    for (const id of [...REAL_PR_IDS, ...REAL_INTENT_IDS]) {
-      const asPR = PRIdSchema.safeParse(id).success
-      const asIntent = IntentRecordIdSchema.safeParse(id).success
-      expect(asPR !== asIntent, `${id} must parse as exactly one kind, not both and not neither`).toBe(true)
+    for (const id of idCase.ids) {
+      expect(PRIdSchema.safeParse(id).success, `${id} change arm`).toBe(idCase.asPR)
+      expect(IntentRecordIdSchema.safeParse(id).success, `${id} intent arm`).toBe(idCase.asIntent)
+      expect(QueueMemberIdSchema.safeParse(id).success, `${id} union`).toBe(true)
     }
   })
 
