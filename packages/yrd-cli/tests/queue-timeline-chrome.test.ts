@@ -624,7 +624,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("omits since= from the pills row when the window is unbounded (the new default)", async () => {
+  it("omits since= from the pills row when the window is unbounded (an explicit --since only, since the 7d default of 2026-09-01)", async () => {
     const base = queueTimelineStories["contract-overview"].snapshot.projection
     const unbounded: QueueTimelineProjection = {
       ...base,

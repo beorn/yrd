@@ -77,6 +77,7 @@ import {
   type SourceRewrite,
   type ChangeShape,
   type StepExecution,
+  QUEUE_TIMELINE_DEFAULT_WINDOW_MS,
 } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
 import { createElement, type ReactElement } from "react"
@@ -114,7 +115,6 @@ import {
   queueStatusRows,
   queueTimelineProjection,
   queueTimelineRows,
-  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   collapseRecomposedSources,
   watchQueueRows,
   type QueueLogCoverage,
@@ -1623,23 +1623,38 @@ describe("runYrd", () => {
     }
   })
 
-  // Composed defaults: item K keeps the LISTING window unbounded (show
-  // everything unless --since is given) while flow metrics (21089) keep their
-  // own bounded 24h horizon — unbounded rates would be meaningless.
-  it("defaults flow metrics to a 24h window while the listing window stays unbounded; --since wins both", async () => {
+  // Composed defaults: the LISTING window defaults to seven days of finished
+  // history (2026-09-01 — the unbounded default dumped 88 MB over 25 s; open
+  // changes are always shown) while flow metrics (21089) keep their own bounded
+  // 24h horizon — unbounded rates would be meaningless. Both the JSON and the
+  // one-shot print NAME the window that applied, so a bounded default read is
+  // never mistaken for the whole history.
+  it("defaults the listing window to 7d and names it; flow metrics default to 24h; --since wins both and reads as explicit", async () => {
     const app = await createApp()
     await openAndSubmit(app)
 
     const fresh = outputIO()
     expect(await runYrd(app, yrd("queue", "list", "--json"), fresh.io), fresh.stderr()).toBe(0)
     const defaults = (JSON.parse(fresh.stdout()) as { projection: QueueTimelineProjection }).projection
-    expect(defaults.filters.windowMs).toBe(QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS)
+    expect(defaults.filters.windowMs).toBe(QUEUE_TIMELINE_DEFAULT_WINDOW_MS)
+    expect(defaults.filters).toMatchObject({
+      windowSource: "default",
+      windowLabel: "last 7d (default; open changes always shown; --since widens)",
+    })
     expect(defaults.metrics.windowMs).toBe(24 * 60 * 60_000)
+
+    const human = outputIO()
+    expect(await runYrd(app, yrd("queue", "list"), human.io), human.stderr()).toBe(0)
+    expect(human.stdout()).toContain("window last 7d (default; open changes always shown; --since widens)")
 
     const scoped = outputIO()
     expect(await runYrd(app, yrd("queue", "list", "--since", "3h", "--json"), scoped.io), scoped.stderr()).toBe(0)
     const explicit = (JSON.parse(scoped.stdout()) as { projection: QueueTimelineProjection }).projection
     expect(explicit.filters.windowMs).toBe(3 * 60 * 60_000)
+    expect(explicit.filters).toMatchObject({
+      windowSource: "explicit",
+      windowLabel: "last 3h (--since; open changes always shown)",
+    })
     expect(explicit.metrics.windowMs).toBe(3 * 60 * 60_000)
   })
 
