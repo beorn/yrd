@@ -192,9 +192,7 @@ function rows(events: readonly LogEvent[], action: string): LogEvent[] {
 /** Every row an operator is meant to read and act on. An idle queue run prints
  * zero of these — a row it prints again every run tells nobody anything new. */
 function warnOrAbove(events: readonly LogEvent[]): LogEvent[] {
-  return events.filter(
-    (event) => event.kind === "log" && (event.level === "warn" || event.level === "error" || event.level === "fatal"),
-  )
+  return events.filter((event) => event.kind === "log" && (event.level === "warn" || event.level === "error"))
 }
 
 function actionsLogged(events: readonly LogEvent[]): string[] {
