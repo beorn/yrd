@@ -285,7 +285,12 @@ import {
 } from "./source-staleness.ts"
 import { HABITANT_EXIT } from "./habitant-exit.ts"
 import { QUEUE_FATAL_EXIT, fatalQueueDrain } from "./queue-drain.ts"
-import { QUEUE_OUTCOME_EXIT, resolveSubmitterSeat, UNKNOWN_SUBMITTER, YRD_DEFAULT_SUBMITTER_ENV } from "./outcome-notify.ts"
+import {
+  QUEUE_OUTCOME_EXIT,
+  resolveSubmitterSeat,
+  UNKNOWN_SUBMITTER,
+  YRD_DEFAULT_SUBMITTER_ENV,
+} from "./outcome-notify.ts"
 
 /** How many outcome-ledger rows `queue list` prints beneath the timeline. */
 const QUEUE_LIST_NOTIFICATION_ROWS = 20
@@ -13947,10 +13952,7 @@ function buildProgram(
         `${String(QUEUE_OUTCOME_EXIT.changeRefused)}: a change was refused and sent back to its submitter, the pass continued; ` +
         `${String(QUEUE_OUTCOME_EXIT.yrdFailed)}: yrd broke — an infra/env/timeout outcome went to the queue owner or the pass ended on an ERROR row; ${String(QUEUE_OUTCOME_EXIT.yrdFailed)} wins over ${String(QUEUE_OUTCOME_EXIT.changeRefused)})`,
     )
-    .option(
-      "--owner <seat>",
-      "the queue owner every yrd-fault ball routes to (default: .yrd.yml owner:, then @chief)",
-    )
+    .option("--owner <seat>", "the queue owner every yrd-fault ball routes to (default: .yrd.yml owner:, then @chief)")
     .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
@@ -14025,7 +14027,8 @@ function buildProgram(
       // never from a second reading of the runs. A failed publication is the
       // queue's own fault. A pass-ending ERROR row outranks this at the host
       // boundary (`drainedQueuePassExit`), landing on the same code.
-      const verdict = outcomes?.exitCode() ?? (runs.some(Queues.failed) ? QUEUE_OUTCOME_EXIT.changeRefused : QUEUE_OUTCOME_EXIT.next)
+      const verdict =
+        outcomes?.exitCode() ?? (runs.some(Queues.failed) ? QUEUE_OUTCOME_EXIT.changeRefused : QUEUE_OUTCOME_EXIT.next)
       setExit(publicationFailed ? QUEUE_OUTCOME_EXIT.yrdFailed : verdict)
     })
   queue

@@ -38,7 +38,11 @@ import {
  * projects onto the attempt's row, the first row stands, `at` is the frame's
  * timestamp. Shared across notifiers the way one journal is shared across
  * processes. */
-function journal(): Readonly<{ rows: Record<string, QueueAttemptOutcome>; noted: AttemptNotifiedArgs[]; ledger: OutcomeLedger }> {
+function journal(): Readonly<{
+  rows: Record<string, QueueAttemptOutcome>
+  noted: AttemptNotifiedArgs[]
+  ledger: OutcomeLedger
+}> {
   const rows: Record<string, QueueAttemptOutcome> = {}
   const noted: AttemptNotifiedArgs[] = []
   let tick = 0
@@ -232,7 +236,8 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
     const { ledger } = journal()
     const { calls, run } = fakeRun()
     const { log } = collectingLog()
-    const make = () => createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const make = () =>
+      createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
     const first = await make().notify(outcome())
     // A SECOND process (fresh notifier, same journal) finds the row.
     const second = await make().notify(outcome())
@@ -244,7 +249,14 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
     const dark = createJournalOutcomeLedger(() => ({ outcomes: () => ({}), noteAttemptOutcome: async () => undefined }))
     const { run } = fakeRun()
     const { log } = collectingLog()
-    const notifier = createOutcomeNotifier({ ledger: dark, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const notifier = createOutcomeNotifier({
+      ledger: dark,
+      notifyCommand: "notify",
+      owner: "@cto",
+      logPath: "/log",
+      log,
+      run,
+    })
     await expect(notifier.notify(outcome())).rejects.toThrow(/did not project/u)
   })
 
@@ -272,24 +284,41 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
     ["exits non-zero", { code: 3, stdout: "", stderr: "daemon down" }],
     ["prints no ball id", { code: 0, stdout: "sent\n" }],
     ["times out", { code: null, stdout: "", timedOut: true }],
-  ])("a notifier that %s → an ERROR row notify-failed, nothing journaled as sent, and a throw (NO SILENT ERRORS)", async (_, reply) => {
-    const { ledger } = journal()
-    const { run } = fakeRun(reply)
-    const { rows, log } = collectingLog()
-    const notifier = createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
-    await expect(notifier.notify(outcome())).rejects.toThrow(/notifier/u)
-    const errors = rows.filter((entry) => entry.level === "error")
-    expect(errors).toHaveLength(1)
-    expect(errors[0]?.props?.code).toBe("notify-failed")
-    expect(errors[0]?.message).toContain("reached nobody")
-    expect(ledger.lookup(outcome().attemptId)).toBeUndefined()
-  })
+  ])(
+    "a notifier that %s → an ERROR row notify-failed, nothing journaled as sent, and a throw (NO SILENT ERRORS)",
+    async (_, reply) => {
+      const { ledger } = journal()
+      const { run } = fakeRun(reply)
+      const { rows, log } = collectingLog()
+      const notifier = createOutcomeNotifier({
+        ledger,
+        notifyCommand: "notify",
+        owner: "@cto",
+        logPath: "/log",
+        log,
+        run,
+      })
+      await expect(notifier.notify(outcome())).rejects.toThrow(/notifier/u)
+      const errors = rows.filter((entry) => entry.level === "error")
+      expect(errors).toHaveLength(1)
+      expect(errors[0]?.props?.code).toBe("notify-failed")
+      expect(errors[0]?.message).toContain("reached nobody")
+      expect(ledger.lookup(outcome().attemptId)).toBeUndefined()
+    },
+  )
 
   it("the pass's own ERROR row is the owner's ball", async () => {
     const { ledger } = journal()
     const { calls, run } = fakeRun()
     const { log } = collectingLog()
-    const notifier = createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const notifier = createOutcomeNotifier({
+      ledger,
+      notifyCommand: "notify",
+      owner: "@cto",
+      logPath: "/log",
+      log,
+      run,
+    })
     const row = await notifier.notifyPassError({ namespace: "yrd:queue:compose", message: "boom" }, "pass:r1:t1")
     expect(row.ball).toBe("ball-1")
     expect(calls[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto", disposition: "pass-error" })
@@ -301,7 +330,14 @@ describe("createOutcomeNotifier — one ball per ended attempt", () => {
     const { ledger } = journal()
     const { calls, run } = fakeRun()
     const { log } = collectingLog()
-    const notifier = createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const notifier = createOutcomeNotifier({
+      ledger,
+      notifyCommand: "notify",
+      owner: "@cto",
+      logPath: "/log",
+      log,
+      run,
+    })
     notifier.setOwner("@chief")
     await notifier.notify(outcome({ failureKind: "infrastructure" }))
     expect(calls[0]?.recipient).toBe("@chief")
@@ -321,7 +357,14 @@ describe("the three-way verdict of `queue run --once`", () => {
     const { ledger } = journal()
     const { run } = fakeRun()
     const { log } = collectingLog()
-    const notifier = createOutcomeNotifier({ ledger, notifyCommand: "notify", owner: "@cto", logPath: "/log", log, run })
+    const notifier = createOutcomeNotifier({
+      ledger,
+      notifyCommand: "notify",
+      owner: "@cto",
+      logPath: "/log",
+      log,
+      run,
+    })
     notifier.beginPass()
     await notifier.notify(outcome())
     expect(notifier.exitCode()).toBe(QUEUE_OUTCOME_EXIT.changeRefused)
@@ -351,7 +394,10 @@ describe("the seam's small parsers", () => {
   })
 
   it("resolveSubmitterSeat: --notify first, else the launch-env identity, else the literal `unknown` with its source", () => {
-    expect(resolveSubmitterSeat("@dev/9", { YRD_DEFAULT_SUBMITTER: "@dev/3" })).toEqual({ seat: "@dev/9", source: "--notify" })
+    expect(resolveSubmitterSeat("@dev/9", { YRD_DEFAULT_SUBMITTER: "@dev/3" })).toEqual({
+      seat: "@dev/9",
+      source: "--notify",
+    })
     expect(resolveSubmitterSeat("  ", { YRD_DEFAULT_SUBMITTER: "@dev/3" })).toEqual({
       seat: "@dev/3",
       source: "env:YRD_DEFAULT_SUBMITTER",
