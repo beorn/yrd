@@ -154,6 +154,9 @@ describe("inspectPathHolders", () => {
       symlinkSync("/bin/sh", join(processRoot, "exe"))
       symlinkSync("/", join(processRoot, "root"))
       writeFileSync(join(processRoot, "maps"), "")
+      // A live entry always carries stat; without it the proc reads as exited
+      // between reads and clears itself, which is a different case below.
+      writeFileSync(join(processRoot, "stat"), "4242 (probe) S 1 0 0 0\n")
       chmodSync(join(processRoot, "maps"), 0o000)
 
       const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
@@ -185,11 +188,11 @@ describe("inspectPathHolders", () => {
       }
       expect(pathReapFailure(reap)).toBeUndefined()
       // The refusal names the pid — the discriminating fact, not only counts.
-      expect(pathReapDeletionFailure(reap)).toMatch(/census incomplete.*pid 4242 via maps/iu)
+      expect(pathReapDeletionFailure(reap)).toMatch(/census incomplete.*pid 4242 \(probe, ppid 1\) via maps/iu)
       expect(pathReapDeletionFailure(reap)).toMatch(/--tolerate-unreadable/u)
       // Waiving exactly the named pid certifies; waiving a different pid never does.
       expect(pathReapDeletionFailure(reap, new Set([4242]))).toBeUndefined()
-      expect(pathReapDeletionFailure(reap, new Set([9999]))).toMatch(/pid 4242 via maps/iu)
+      expect(pathReapDeletionFailure(reap, new Set([9999]))).toMatch(/pid 4242 \(probe, ppid 1\) via maps/iu)
     },
   )
 
@@ -247,6 +250,70 @@ describe("inspectPathHolders", () => {
       expect(pathReapDeletionFailure(reap, new Set([4243]))).toBeUndefined()
       // Naming only the zombie does not certify the live proc.
       expect(pathReapDeletionFailure(reap, new Set([4242]))).toMatch(/pid 4243 \(probe, ppid 1\) via maps/iu)
+    },
+  )
+
+  test.runIf(process.platform === "linux")(
+    "a gap whose proc exited between the denied read and the identity read clears itself",
+    async () => {
+      // Measured 2026-09-01 on five consecutive bay closes after zombies were
+      // already auto-cleared: /proc/N/fd answered EACCES while the process was
+      // dying, then /proc/N/stat was gone by the identity read, so the row was
+      // `pid N via fd` with no comm and no state — a different pid on every
+      // census, so no waiver could ever name it. An entry that is gone holds
+      // nothing; the control beside it, same denial but still alive, is named.
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-exited-between-reads-"))
+      scratch.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      mkdirSync(ownedPath)
+      const deniedFdTables: string[] = []
+      for (const [pid, stat] of [
+        [4242, undefined],
+        [4243, "4243 (probe) S 1 0 0 0\n"],
+      ] as const) {
+        const processRoot = join(procRoot, String(pid))
+        mkdirSync(join(processRoot, "fd"), { recursive: true })
+        symlinkSync("/", join(processRoot, "cwd"))
+        symlinkSync("/bin/sh", join(processRoot, "exe"))
+        symlinkSync("/", join(processRoot, "root"))
+        writeFileSync(join(processRoot, "maps"), "")
+        if (stat !== undefined) writeFileSync(join(processRoot, "stat"), stat)
+        // Deny the fd table itself, the way a dying process denies /proc/N/fd.
+        chmodSync(join(processRoot, "fd"), 0o000)
+        deniedFdTables.push(join(processRoot, "fd"))
+      }
+
+      try {
+        const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+        expect(census.holders).toEqual([])
+        expect(census.coverage).toMatchObject({
+          complete: false,
+          unreadable: [
+            { pid: 4242, exited: true, denied: ["fd"] },
+            { pid: 4243, comm: "probe", state: "S", denied: ["fd"] },
+          ],
+        })
+
+        const reap = {
+          targetedPids: [],
+          survivorPids: [],
+          survivorHolders: [],
+          survivorCoverage: census.coverage,
+          forcedKill: false,
+          signalFailures: [],
+        }
+        const refusal = pathReapDeletionFailure(reap)
+        expect(refusal).toMatch(/pid 4243 \(probe, ppid 1\) via fd/iu)
+        expect(refusal).not.toMatch(/pid 4242 via fd/iu)
+        expect(refusal).toMatch(/auto-cleared as provably empty: 4242/iu)
+        // Naming only the live proc certifies; the exited one is never asked for.
+        expect(pathReapDeletionFailure(reap, new Set([4243]))).toBeUndefined()
+        expect(pathReapDeletionFailure(reap, new Set([4242]))).toMatch(/pid 4243 \(probe, ppid 1\) via fd/iu)
+      } finally {
+        // A 000 directory cannot be recursed into by the afterEach cleanup.
+        for (const table of deniedFdTables) chmodSync(table, 0o755)
+      }
     },
   )
 

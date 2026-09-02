@@ -45,6 +45,12 @@ export type UnreadableProcess = Readonly<{
    * see isProvablyEmptyProcess.
    */
   state?: string
+  /**
+   * The proc entry was gone (ENOENT/ESRCH on `/proc/N/stat`) by the time its
+   * identity was read: it exited between the source read that was denied and
+   * this one. An exited process holds no path — see isProvablyEmptyProcess.
+   */
+  exited?: true
   denied: readonly ("process" | "cwd" | "exe" | "root" | "maps" | "fd")[]
 }>
 
@@ -58,9 +64,15 @@ export type UnreadableProcess = Readonly<{
  * name once, while transient zombies churn between one census and the next.
  * Measured 2026-09-01: naming the exact six pids of one refusal was answered by
  * a refusal naming a different set, with same-uid procs going 187 to 214.
+ *
+ * A process that exited between the denied source read and the identity read
+ * is the same gap one step later: `/proc/N/fd` answered EACCES while it was
+ * dying, then `/proc/N/stat` was gone. Measured 2026-09-01 on five consecutive
+ * bay closes after zombies were cleared: one to three such pids per census,
+ * never the same twice, each rendered as `pid N via fd` with no identity.
  */
 export function isProvablyEmptyProcess(proc: UnreadableProcess): boolean {
-  return proc.state === "Z"
+  return proc.state === "Z" || proc.exited === true
 }
 
 export type LinuxPathHolderCoverage = Readonly<{
@@ -584,8 +596,12 @@ async function observeProcessDescriptors(
 /** Identity from the world-readable `/proc/N/stat` (readable even for dumpable-0
  * procs): `pid (comm) state ppid …`, comm parsed by the LAST `)` because comm
  * may itself contain parentheses. Best-effort: identity failure never hides
- * the denial it decorates. */
-async function observeProcessIdentity(proc: string): Promise<{ comm?: string; ppid?: number; state?: string }> {
+ * the denial it decorates. One failure IS an identity: ENOENT/ESRCH on the stat
+ * read means the entry exited after the denied source read, which is recorded
+ * as `exited` so the gap clears itself instead of being named for a waiver. */
+async function observeProcessIdentity(
+  proc: string,
+): Promise<{ comm?: string; ppid?: number; state?: string; exited?: true }> {
   try {
     const contents = await readFile(`${proc}/stat`, "utf8")
     const open = contents.indexOf("(")
@@ -602,7 +618,8 @@ async function observeProcessIdentity(proc: string): Promise<{ comm?: string; pp
       ...(state === undefined || state === "" ? {} : { state }),
       ...(Number.isSafeInteger(ppid) ? { ppid } : {}),
     }
-  } catch {
+  } catch (error) {
+    if (processEntryUnavailability(error) === "exited") return { exited: true }
     return {}
   }
 }
