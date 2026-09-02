@@ -201,6 +201,7 @@ import {
   type RemergePreflightResult,
   type RemergePreflightVerdict,
 } from "./pr-withdraw.ts"
+import { optionalReceiverStorePath, orphanRevisionWarnings, retirePr, scanReceiverRevisions } from "./pr-retire.ts"
 import {
   foldRefusalStall,
   formatRemedyCommand,
@@ -8836,8 +8837,33 @@ async function listQueues(
       ...staleDraftWarnings(snapshot.staleDrafts ?? []),
       ...needsPersonWarnings(snapshot.needsPerson ?? []),
       ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure)]),
+      ...(await orphanRefsForWarnings(io, services)),
     ],
   )
+}
+
+/**
+ * One WARN row per superseded refs/for-only row in the receiver store — a
+ * landing request with no submit fact whose Change-Id has a newer submitted
+ * revision. The class the 2026-09-01 audit found 13 of by hand; each row
+ * names `yrd pr retire` as its cure. No store, no rows; a store that cannot
+ * be scanned is one loud row, never a silent zero.
+ */
+async function orphanRefsForWarnings(io: YrdCliIO, services: YrdCliServices): Promise<readonly string[]> {
+  const store = optionalReceiverStorePath(io)
+  if (store === undefined) return []
+  try {
+    if (services.process !== undefined) {
+      return orphanRevisionWarnings(await scanReceiverRevisions(services.process, store))
+    }
+    await using process = createProcess()
+    return orphanRevisionWarnings(await scanReceiverRevisions(process, store))
+  } catch (error) {
+    return [
+      `WARN could not scan the receiver store '${store}' for superseded landing-request rows: ` +
+        (error instanceof Error ? error.message : String(error)),
+    ]
+  }
 }
 
 async function dashboard(
@@ -14142,6 +14168,24 @@ function buildProgram(
     .option("--burn-payload", "acknowledge that closing spends the payload identity permanently")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io, "pr.close"))
+  // `close` spends a RECORD's payload; a derived revision has no record, and
+  // its two receiver-store rows (submit fact + landing request) outlive every
+  // other disposal verb. This is the one verb that retires both in one act.
+  pr.command("retire <selector>")
+    .description("retire one revision of a change: delete its submit fact and landing request together, journaled")
+    .option(
+      "--revision <n>",
+      "which revision of the change (its -rN branch marker; a bare branch is revision 1)",
+      (value: string) => Number.parseInt(value, 10),
+    )
+    .option("--reason <text>", "retirement rationale recorded on the queue/revision/retired fact")
+    .option("--by <identity>", "who retires it (defaults to the invoking runner identity)")
+    .option(
+      "--burn-payload",
+      "acknowledge retiring a revision with no live successor — the payload is spent permanently",
+    )
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => retirePr(installed(), installedServices(), selector, options, io))
   // Hidden ruled alias of `close` — one act, two spellings (I23); the envelope
   // keeps its stable pr.withdraw name for journal consumers.
   pr.command("withdraw <selector...>", { hidden: true })
