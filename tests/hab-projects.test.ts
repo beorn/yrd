@@ -74,21 +74,17 @@ describe("Yrd Hab runner declarations — who is paged when a runner stays down"
     ])
   })
 
-  it("does NOT yet spread the owner into the Hab service entry — the loader would reject it", () => {
-    // Deliberate, and this assertion is the breadcrumb rather than a preference.
+  it("spreads the owner into the Hab service entry so the andon page routes to it", () => {
     // `HabServiceDefinition.owner` exists in ag/packages/hab-config
     // (src/index.ts, "Tribe seat/mailbox paged when this service's restart
-    // budget exhausts") and is read all the way through to the page rail — but
-    // `SERVICE_KEYS` in that same file does not list "owner", and every key
-    // outside that allowlist is a FATAL config error, not an ignored one. So
-    // declaring it on the service today does not route the page; it stops
-    // yrd-runner from loading at all, which under `restart: "never"` is the
-    // merge queue down until someone reads a config diagnostic.
-    //
-    // Unblock: add "owner" to SERVICE_KEYS in ag/packages/hab-config. Then
-    // spread `owner` into the service entry below and delete this test.
+    // budget exhausts") and `SERVICE_KEYS` in that same file now lists
+    // "owner" among the allowed keys, with a missing owner on a
+    // `restart: "never"` resident demoted to a WARNING rather than a FATAL
+    // config error. So the service entry carries the registry row's owner
+    // directly, and a crashed runner's page reaches @cto instead of falling
+    // back to the fleet-wide @chief default.
     for (const service of Object.values(hab.services)) {
-      expect(service, "add 'owner' to SERVICE_KEYS in ag/packages/hab-config FIRST").not.toHaveProperty("owner")
+      expect(service).toMatchObject({ owner: "@cto" })
     }
   })
 })
