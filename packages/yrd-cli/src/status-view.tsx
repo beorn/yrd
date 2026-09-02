@@ -296,7 +296,7 @@ export function ChangeStatusView({
     })
     return {
       ...projectChangeTaskStatus(pr),
-      // The one display-state derivation (change-state.ts): the five words a
+      // The one display-state derivation (derived-change-state.ts): the five words a
       // change is in, so this surface stops printing `submitted` both for a
       // change the queue could not carry and for one a check judged.
       state: reading.state,

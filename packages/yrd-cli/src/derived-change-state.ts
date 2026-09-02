@@ -140,8 +140,16 @@ const CHANGE_STATE_GLYPHS: Readonly<Record<DerivedChangeState, string>> = {
   failed: "×",
 }
 
-export function changeStateColor(state: DerivedChangeState): string {
-  return CHANGE_STATE_COLORS[state]
+/**
+ * The color for a state word. Takes a string, not the union, because one row
+ * on the change list is not a change at all: `unreadableChangeListRow` renders
+ * a row whose own clocks could not be reconciled, so the table can say so
+ * instead of emptying itself. That row says `unreadable` in its own text and
+ * takes the muted color here — it is not a sixth state, and throwing would
+ * give back exactly the empty table the containment row exists to prevent.
+ */
+export function changeStateColor(state: string): string {
+  return CHANGE_STATE_COLORS[state as DerivedChangeState] ?? "$fg-muted"
 }
 
 export function changeStateGlyph(state: DerivedChangeState): string {

@@ -2686,7 +2686,7 @@ export function QueueRunsView({ runs }: { runs: readonly Run[] }) {
 
 export type ChangeListRow = Readonly<{
   pr: string
-  /** One of the five words a change is in (change-state.ts). */
+  /** One of the five words a change is in (derived-change-state.ts). */
   state: string
   stateLabel: string
   /** The word this column printed before the five states: kept off the surface
@@ -2834,14 +2834,16 @@ export function changeListRows(
     // Showing the later write as the whole truth sends the author back to
     // re-cut a branch that is already on the base branch (22376).
     const merge = merges.get(pr.id)
-    // The one derivation (change-state.ts). `delivery` keeps the retired
+    // The one derivation (derived-change-state.ts). `delivery` keeps the retired
     // word this column used to print, unshown, so `--json` readers have it
     // through one flag-day cycle.
+    const result = {
+      ...(projected.failure === undefined ? {} : { code: projected.failure.code }),
+      ...(projected.step === "-" ? {} : { check: projected.step }),
+    }
     const reading = deriveChangeState(pr, {
       ...(merge === undefined ? {} : { merged: true }),
-      ...(projected.failure === undefined && projected.step === "-"
-        ? {}
-        : { result: { ...(projected.failure === undefined ? {} : { code: projected.failure.code }), ...(projected.step === "-" ? {} : { check: projected.step }) } }),
+      ...(Object.keys(result).length === 0 ? {} : { result }),
       ...(eligibility.reason === undefined ? {} : { reason: { code: eligibility.reason.code } }),
     })
     const glyph = changeStateGlyph(reading.state)
@@ -2880,7 +2882,7 @@ export function changeListRows(
  * rather than wrapping. The live specimen is 22376 — two `already-landed`
  * labels one cell too wide for the STATE track hid the two NEWEST PRs. */
 function ChangeStateValue({ row }: { row: ChangeListRow }) {
-  const color = changeStateColor(row.state as Parameters<typeof changeStateColor>[0])
+  const color = changeStateColor(row.state)
   return (
     <Text bold color={color} minWidth={0} maxWidth="100%" wrap="truncate">
       {row.stateLabel}
