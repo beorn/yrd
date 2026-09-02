@@ -22,7 +22,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { createConditionReporter } from "@yrd/core"
-import { habitantQueueProgress, logQueueLivenessWedge } from "../src/run.ts"
+import { habitantQueueProgress, logQueueLivenessWedge, queueProgressFromFindings } from "../src/run.ts"
 import { createResidentLivenessClock, type ResidentWedgePage } from "../src/resident-liveness.ts"
 import type { YrdCliApp } from "../src/types.ts"
 import { createHabitantHarness } from "./support/habitant-harness.ts"
@@ -62,6 +62,40 @@ function appWithFindings(findings: readonly Record<string, unknown>[]): Readonly
   } as unknown as YrdCliApp
   return { app, warnings, errors, auditOptions }
 }
+
+describe("queueProgressFromFindings — the service-health projection of one audit read", () => {
+  type Findings = Parameters<typeof queueProgressFromFindings>[0]
+  const finding = (code: string): Findings[number] => ({ code, message: `${code} for the test` }) as Findings[number]
+
+  it("reads healthy when the audit found nothing the SERVICE can act on — an orphaned run is another reader's row", () => {
+    expect(queueProgressFromFindings([], NOW)).toEqual({ state: "healthy", observedAt: NOW })
+    expect(queueProgressFromFindings([finding("orphaned-run"), finding("admission-refusal-loop")], NOW)).toEqual({
+      state: "healthy",
+      observedAt: NOW,
+    })
+  })
+
+  it("reads stalled on exactly the service-health codes, carrying only those findings", () => {
+    const codes = [
+      "queue-progress-stalled",
+      "queue-never-started",
+      "queue-hold-ttl-missing",
+      "queue-hold-expired",
+      "queue-liveness-wedged",
+    ]
+    for (const code of codes) {
+      const progress = queueProgressFromFindings([finding("orphaned-run"), finding(code)], NOW)
+      expect(progress.state, code).toBe("stalled")
+      expect(progress.state === "stalled" ? progress.findings.map((row) => row.code) : []).toEqual([code])
+    }
+  })
+
+  it("is what habitantQueueProgress projects from its own audit — one projection, however many readers", () => {
+    const { app, auditOptions } = appWithFindings([finding("queue-never-started") as never])
+    expect(habitantQueueProgress(app, NOW)).toEqual(queueProgressFromFindings([finding("queue-never-started")], NOW))
+    expect(auditOptions).toHaveLength(1)
+  })
+})
 
 describe("logQueueLivenessWedge — the recover-cycle's half of the liveness pair", () => {
   it("logs nothing when the queue is idle or draining", async () => {
