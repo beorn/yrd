@@ -195,11 +195,22 @@ function gateImplicitHabitantLogger(logger: ConditionalLogger): ConditionalLogge
  * WARN/ERROR reaches the human sink, while DEBUG/INFO is admitted only from the
  * three lifecycle namespaces that form the narration. An explicitly selected
  * level/DEBUG filter keeps the ordinary single policy. A configured JSONL file
- * is an explicit request for the full structured DEBUG stream. */
+ * is an explicit request for the full structured DEBUG stream.
+ *
+ * `onError` sees every ERROR-level log row this tree emits, AFTER the sinks
+ * above it wrote the row. It is the one seam the queue pass's fatal-error rule
+ * hangs on (operator ruling 2026-09-01: any ERROR ends the pass): a last
+ * pipeline branch rather than a wrapper around `log.error`, because every
+ * child logger — `yrd:queue`, `yrd:jobs:<step>`, `yrd:storage:*`, a lifecycle's
+ * `emitLifecycle` — dispatches through this same pipeline, and a wrapper would
+ * have to be re-applied at every `child()` to see them all. The branch
+ * inherits the tree's level/namespace policy, so a row the operator's own
+ * filter drops never reaches it either: "no row, no death" is the contract. */
 export function createYrdLogger(
   config: YrdObservability,
   stderr: (text: string) => unknown,
   human?: (event: Event) => string | undefined,
+  onError?: (event: Extract<Event, { kind: "log" }>) => void,
 ): ConditionalLogger {
   enableContextPropagation()
   const scope = {
@@ -242,6 +253,20 @@ export function createYrdLogger(
           ]
         : { file: config.file, format: "json" },
     )
+  }
+  if (onError !== undefined) {
+    // LAST, so the row has already reached stderr (and the JSONL file) when the
+    // listener runs: "after the row is flushed" is the ordering the fatal rule
+    // specifies, and pipeline outputs run in declaration order.
+    pipeline.push([
+      { level: "error", spans: false },
+      {
+        write: (event: Event) => {
+          if (event.kind === "log" && event.level === "error") onError(event)
+        },
+        objectMode: true,
+      },
+    ])
   }
   // Every span this tree creates opens a stage, so the command's stage
   // breakdown is derived from the spans instead of a list maintained beside

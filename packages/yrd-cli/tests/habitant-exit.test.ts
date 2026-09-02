@@ -29,12 +29,13 @@ describe("habitant exit taxonomy — one code per condition", () => {
   it("gives every condition a DISTINCT code", () => {
     const codes = CONDITIONS.map((condition) => HABITANT_EXIT[condition])
     expect(new Set(codes).size).toBe(codes.length)
-    expect(codes.length).toBe(8)
+    expect(codes.length).toBe(9)
   })
 
-  it("names the eight conditions the supervisor has to tell apart", () => {
+  it("names the nine conditions the supervisor has to tell apart", () => {
     expect(CONDITIONS.toSorted()).toEqual([
       "drained",
+      "fatal-error",
       "installed-plan-stale",
       "interrupted",
       "memory-cap",
@@ -88,6 +89,9 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
     // And the third, for a different reason: a drain is a person's instruction,
     // so restarting the pass contradicts it rather than curing anything.
     expect(HABITANT_EXIT_DISPOSITION.drained).toBe("stand-down")
+    // And the fourth: ERROR is the abnormal-NOT-auto-fixable class, so a
+    // restart is by definition not the cure for a pass that died of one.
+    expect(HABITANT_EXIT_DISPOSITION["fatal-error"]).toBe("stand-down")
   })
 
   it("derives the backoff code list from the table rather than restating it", () => {
@@ -99,6 +103,7 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
       HABITANT_EXIT["queue-wedged"],
       HABITANT_EXIT["refusal-loop"],
       HABITANT_EXIT.drained,
+      HABITANT_EXIT["fatal-error"],
     ])
     const overlap = HABITANT_STAND_DOWN_EXIT_CODES.filter((code) => HABITANT_BACKOFF_EXIT_CODES.includes(code))
     expect(overlap).toEqual([])

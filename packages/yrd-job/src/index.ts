@@ -26,7 +26,9 @@ export type {
 } from "./job.ts"
 export {
   createJobs,
+  INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX,
   isConcurrentSettlementConflict,
+  isMachineryJobFailure,
   isTerminalJobStatus,
   Job,
   JobStateConflict,

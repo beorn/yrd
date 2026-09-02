@@ -151,6 +151,11 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
     gate,
     signal,
     drain: () => drainController.abort(),
+    /** What the host does when the pass's own ERROR row stops it: the drain
+     * signal is aborted with the fatal cause as its reason, and the loop reads
+     * that reason to exit `fatal-error` instead of calling the stop clean. */
+    stopForError: (cause: Readonly<{ kind: "fatal-error"; namespace: string; message: string }>) =>
+      drainController.abort(cause),
     warnings,
     errors,
     debugs,

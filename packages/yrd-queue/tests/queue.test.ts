@@ -987,15 +987,15 @@ describe("Queue", () => {
     )
     // A conflicting Candidate rejects before any step Job runs, so no step
     // owns the ERROR (queueRunFailureLevel's "no step to own it" branch): the
-    // run must own it, or the failure is silent -- a run-scoped ERROR, not the
+    // run must own it, or the failure is silent -- a run-scoped WARN (ERROR ends the pass since 2026-09-01), not the
     // quiet INFO a step-owned failure settles at (see the negative control in
-    // "surfaces a failed REQUIRED check at ERROR while run/compose settle
+    // "surfaces a failed REQUIRED check at WARN while run/compose settle
     // quietly at INFO").
     const runFailures = events.filter(
       (event) =>
         event.kind === "log" &&
         event.namespace === "yrd:queue:run" &&
-        event.level === "error" &&
+        event.level === "warn" &&
         event.props?.run === "R1",
     )
     expect(runFailures).toHaveLength(1)
@@ -2357,7 +2357,7 @@ describe("Queue", () => {
     ).toEqual({ artifacts: [remote] })
   })
 
-  it("surfaces a failed REQUIRED check at ERROR while run/compose settle quietly at INFO", async () => {
+  it("surfaces a failed REQUIRED check at WARN while run/compose settle quietly at INFO", async () => {
     // A required check's failure is a content verdict against the revision —
     // the change dies, not the process — so the deepest failing step owns the
     // one loud ERROR (packages/yrd-core/src/observability.ts's
@@ -2388,7 +2388,7 @@ describe("Queue", () => {
         (event): event is Extract<LogEvent, { kind: "log" }> =>
           event.kind === "log" && event.namespace === "yrd:jobs:check" && event.props?.outcome === "failed",
       ),
-    ).toMatchObject({ level: "error" })
+    ).toMatchObject({ level: "warn" })
 
     const run = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>

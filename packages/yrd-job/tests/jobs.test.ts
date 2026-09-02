@@ -988,7 +988,7 @@ describe("Jobs", () => {
       const terminal = events.find(
         (event) => event.kind === "log" && event.props?.outcome === "failed" && event.namespace.startsWith("yrd:jobs:"),
       )
-      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "error" })
+      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "warn" })
     } finally {
       await app.close()
       log.end()
@@ -1059,7 +1059,7 @@ describe("Jobs", () => {
       // The completion Job's own "run" lifecycle owns this namespace even when
       // reported through `finish` (a waiting Job has no second lifecycle name
       // of its own); `completion: true` is finish's own distinguishing marker.
-      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "error", props: { completion: true } })
+      expect(terminal).toMatchObject({ namespace: "yrd:jobs:run", level: "warn", props: { completion: true } })
     } finally {
       await app.close()
       log.end()

@@ -223,7 +223,7 @@ describe("one member's unusable Job is ejected from the pass, never the whole pa
     const rows = ejectionRows(events)
     expect(rows).toHaveLength(1)
     const row = rows[0]
-    expect(row?.level).toBe("error")
+    expect(row?.level).toBe("warn")
     expect(row?.props).toMatchObject({
       action: "admission-ejected",
       branch: UNUSABLE_BRANCH,

@@ -16,7 +16,15 @@ import {
   type JsonValue,
   type YrdFailure,
 } from "@yrd/core"
-import { JobErrorSchema, parseJobLaunch, type Job, type JobContext, type JobError, type JobResult } from "@yrd/job"
+import {
+  INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX,
+  JobErrorSchema,
+  parseJobLaunch,
+  type Job,
+  type JobContext,
+  type JobError,
+  type JobResult,
+} from "@yrd/job"
 import {
   adaptProcessGit,
   gitSuperFailureDetail,
@@ -662,7 +670,7 @@ function configuredCommand<Shape extends ChangeShape>(
       // evidence into a terminal check failure.
       if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
         return failed(
-          `${options.purpose}-infrastructure-signal`,
+          `${options.purpose}${INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX}`,
           `${options.purpose} command ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict`,
           evidence,
         )
@@ -6347,7 +6355,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
                 }),
               }
             }
-            if (outcome.error.code === `${purpose}-infrastructure-signal`) {
+            if (outcome.error.code === `${purpose}${INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX}`) {
               const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
                 ...candidate,
                 kind: "check-execution-refusal",
@@ -6426,7 +6434,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
             )
           }
 
-          if (outcome.error.code === `${purpose}-infrastructure-signal`) {
+          if (outcome.error.code === `${purpose}${INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX}`) {
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,
               kind: "check-execution-refusal",
@@ -6532,7 +6540,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
           if (
             parentOutcome.status === "completed" &&
             parentOutcome.conclusion === "failure" &&
-            parentOutcome.error.code === `${purpose}-infrastructure-signal`
+            parentOutcome.error.code === `${purpose}${INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX}`
           ) {
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,

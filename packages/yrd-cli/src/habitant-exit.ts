@@ -79,6 +79,20 @@ export const HABITANT_EXIT = {
    * a person asked this pass to stop, so restarting it is undoing their
    * request, not curing a fault. */
   drained: 16,
+  /** The pass reported an ERROR-level row and stopped for it: admissions
+   * closed, the job in flight settled with the coded reason
+   * `queue-pass-errored`, the lease released (`queue-drain.ts`), and the row
+   * that killed it named in a terminal ERROR line. Operator ruling 2026-09-01:
+   * "if the queue ERRORs without quitting we should fix that — any ERROR
+   * should result in it dying." Before this code a pass that logged an ERROR
+   * and carried on exited 0 or 1 like any other, so the log said one thing and
+   * the exit status another. Distinct from `drained` (a person asked) and
+   * `interrupted` (a signal took it): nobody asked for this stop, and the
+   * successor faces the same condition until a person reads the row.
+   * Dispositioned `stand-down` on the three-way failure model's own terms:
+   * ERROR is the abnormal-NOT-auto-fixable class, so a restart is by
+   * definition not the cure. */
+  "fatal-error": 17,
 } as const
 
 export type HabitantExitCondition = keyof typeof HABITANT_EXIT
@@ -117,6 +131,9 @@ export const HABITANT_EXIT_DISPOSITION: Readonly<Record<HabitantExitCondition, H
     // Not "no number of restarts can reach it" like the two above, but the
     // stronger case: restarting contradicts the instruction that produced it.
     drained: "stand-down",
+    // ERROR is the abnormal-not-auto-fixable class by definition; a successor
+    // meets the same row until a person acts on it.
+    "fatal-error": "stand-down",
   })
 
 /**

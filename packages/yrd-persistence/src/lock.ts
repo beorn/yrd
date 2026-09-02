@@ -1,6 +1,6 @@
 import { join } from "node:path"
 import { acquireExclusive, type ExclusiveOptions as GitExclusiveOptions, type WriterLock } from "git-super/exclusive"
-import { createFailure, observeYrdLifecycle } from "@yrd/core"
+import { createFailure, markRecoverable, observeYrdLifecycle } from "@yrd/core"
 import { createLogger, type ConditionalLogger } from "loggily"
 
 export type Exclusive = Readonly<{
@@ -44,7 +44,7 @@ export function createExclusive(
       if (runOptions === undefined || typeof runOptions.holder !== "string") {
         throw new TypeError(
           `yrd: exclusive run requires { holder } naming the operation taking ${join(dir, "writer.lock")}; ` +
-            "an unnamed holder renders as \"unknown operation\" in every starvation message, which is how a " +
+            'an unnamed holder renders as "unknown operation" in every starvation message, which is how a ' +
             "ninety-minute stall was observed with nothing to attribute it to",
         )
       }
@@ -52,30 +52,39 @@ export function createExclusive(
       if (holder === "" || /\r|\n/u.test(holder)) {
         throw new TypeError("yrd: exclusive holder must be a non-empty single line")
       }
-      let lock: WriterLock
-      try {
-        lock = await observeYrdLifecycle(
-          log,
-          {
-            lifecycle: "lock",
-            attributes: {
-              path: join(dir, "writer.lock"),
-              timeoutMs: options.timeoutMs ?? 30_000,
-              holder,
-            },
-            now: inject.now,
+      // The busy conversion happens INSIDE the observed operation, so the
+      // `lock` lifecycle reports the typed, recoverable `exclusive-busy` fact
+      // rather than git-super's bare error. Converting after the lifecycle had
+      // already logged the bare throw at ERROR, and an ERROR row now stops the
+      // pass — for the one contention every multi-writer journal is built to
+      // absorb.
+      const lock: WriterLock = await observeYrdLifecycle(
+        log,
+        {
+          lifecycle: "lock",
+          attributes: {
+            path: join(dir, "writer.lock"),
+            timeoutMs: options.timeoutMs ?? 30_000,
+            holder,
           },
-          () => acquireExclusive(dir, options, holder),
-        )
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        if (!message.includes("worktree mutation lock is busy")) throw error
-        throw createFailure({
-          kind: "infrastructure",
-          code: "exclusive-busy",
-          message: message.replace("git-super: worktree mutation lock is busy", "yrd: writer lock is busy"),
-        })
-      }
+          now: inject.now,
+        },
+        async () => {
+          try {
+            return await acquireExclusive(dir, options, holder)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            if (!message.includes("worktree mutation lock is busy")) throw error
+            throw markRecoverable(
+              createFailure({
+                kind: "infrastructure",
+                code: "exclusive-busy",
+                message: message.replace("git-super: worktree mutation lock is busy", "yrd: writer lock is busy"),
+              }),
+            )
+          }
+        },
+      )
       try {
         return await operation()
       } finally {
