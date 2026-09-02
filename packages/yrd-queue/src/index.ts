@@ -140,3 +140,6 @@ export * from "./stranded-facts.ts"
 export * from "./stranded-sweep.ts"
 export * from "./stranded-observation.ts"
 export * from "./submodule-composition-policy.ts"
+
+export { deriveRunLiveness, describeOrphanedRun, runnerPid } from "./run-liveness.ts"
+export type { RunLiveness, RunnerLivenessProbe, RunningJobIdentity } from "./run-liveness.ts"
