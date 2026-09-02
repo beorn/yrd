@@ -117,6 +117,31 @@ describe("leg c — this process against the base tip", () => {
     expect(finding?.message).toContain(
       "the commands they execute and the checks-before-queueing projections come from the step definitions this process built at startup",
     )
+    // The step LIST did not move, so the two arrows would have been identical.
+    // Printing both opened the live exit-3 notice with
+    // `installed A→B→C, but main tip … declares A→B→C` — a contradiction, with
+    // the real drift after the colon. It LEADS with what differs instead.
+    expect(finding?.message).toMatch(
+      /^yrd: step definitions changed on main tip bbbbbbbb \(config blob 22222222\): step 'typecheck' revision/u,
+    )
+    expect(finding?.message).toContain("this process installed the older ones at boot")
+    expect(finding?.message, "no plan arrow when the list is unchanged").not.toContain("typecheck→affected-tests→merge")
+  })
+
+  it("keeps both arrows when the step LIST is what moved — there the two plans differ on their face", () => {
+    const finding = installedPlanStale("main", TIP, {
+      batchSize: 1,
+      steps: [step("typecheck", "tc-v1"), step("merge", "merge-v1")],
+    })
+    expect(finding?.message).toMatch(/^yrd: this process installed typecheck→merge \(batch 1\), but main tip/u)
+    expect(finding?.message).not.toContain("step definitions changed on")
+  })
+
+  it("keeps both arrows when only the BATCH moved, so the number that changed is visible", () => {
+    const finding = installedPlanStale("main", TIP, { batchSize: 4, steps: TIP.steps })
+    expect(finding?.message).toContain("installed typecheck→affected-tests→merge (batch 4), but")
+    expect(finding?.message).toContain("declares typecheck→affected-tests→merge (batch 1)")
+    expect(finding?.message).not.toContain("step definitions changed on")
   })
 })
 

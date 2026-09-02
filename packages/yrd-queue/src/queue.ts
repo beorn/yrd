@@ -761,12 +761,19 @@ function unrecordedSubmit(
   // read like one it answered "still waiting" for. The reason travels in the
   // MESSAGE as well as the `landing` field, because the audit finding and the
   // empty-run diagnostic both print only the message.
-  const unresolved =
+  //
+  // It LEADS. The caveat used to trail 200-plus characters of confident prose
+  // — `… runs as a DERIVED member once the queue's next compose admits it` and
+  // only then a NOTE saying nobody had checked whether it had already merged.
+  // A reader who stops at the first clause, or a surface that truncates the
+  // row, gets the opposite of what the queue knows. Reading order is part of
+  // the claim: the qualifier goes first or it is not a qualifier.
+  const message = (body: string): string =>
     landing.state === "unresolved"
-      ? ` — NOTE: whether this fact's content already landed is UNVERIFIED here (${landing.reason}: ${landing.detail}), ` +
-        `so this row may be a fact that merged long ago; 'yrd queue audit' re-derives it against the repository`
-      : ""
-  const message = (body: string): string => body + unresolved
+      ? `UNVERIFIED — whether this fact's content already landed could not be read here ` +
+        `(${landing.reason}: ${landing.detail}), so it may have merged long ago and everything below is what ` +
+        `WOULD follow if it has not: ${body}. Re-derive it against the repository with 'yrd queue audit'`
+      : body
   return {
     branch,
     sha: submit.sha,
@@ -5988,7 +5995,10 @@ function createQueue<Shape extends ChangeShape>(
           })
           const unsettled = currentChecked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
           const pending = unsettled.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")
-          const pendingIds = new Set(pending.map((pr) => pr.id))
+          // The PHASE each pending change is in, not just its identity: a change
+          // whose checks are still `queued` never started, and the hold row that
+          // explains it must not claim an admission phase ran.
+          const pendingIds = new Map(pending.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status] as const))
           if (unsettled.length > 0) {
             const newlyFailed = unsettled.some(
               (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
@@ -6006,7 +6016,7 @@ function createQueue<Shape extends ChangeShape>(
           // return their admission result instead of a checks-running refusal.
           const unavailable = new Set([
             ...consumedBy.keys(),
-            ...pendingIds,
+            ...pendingIds.keys(),
             ...authorityGaps.map((gap) => gap.pr),
             ...judgedByDrain,
           ])
@@ -11934,8 +11944,10 @@ type ImplicitSelectionRow = Readonly<{
 type ImplicitSelectionHolds = Readonly<{
   /** Changes a still-settling queue run already holds, and the run holding each. */
   consumedBy: ReadonlyMap<string, RunId>
-  /** Changes whose admission checks this pass left unsettled and non-failed. */
-  pendingChecks: ReadonlySet<string>
+  /** Changes whose admission checks this pass left unsettled and non-failed,
+   * each with the phase its checks are actually in. `queued` means they never
+   * STARTED — see the hold's own comment in {@link implicitSelectionAccounting}. */
+  pendingChecks: ReadonlyMap<string, ChangeEligibility["checks"]["status"]>
   /** Changes ejected this pass for a missing/consumed authority, and the code that ejected them. */
   authorityGaps: ReadonlyMap<string, string>
   /** Base identity -> the non-terminal run holding it; batchSize serializes one candidate per base. */
@@ -12002,11 +12014,29 @@ function implicitSelectionAccounting(
         run: consumer,
       })
     }
-    if (holds.pendingChecks.has(pr.id)) {
+    const checks = holds.pendingChecks.get(pr.id)
+    if (checks !== undefined) {
+      // `queued` means the checks never STARTED — the pass reached its batch
+      // width on an earlier member and stopped. Saying "left its required
+      // checks unsettled" for that reads as an admission phase that ran and
+      // did not finish, which is the opposite of what happened: on 2026-09-02
+      // 08:05:58 four changes (PR2909, PR3147, PR3161, PR2749) carried this
+      // line while batch 1 was held by PR3221 and none of their checks had
+      // been dispatched at all. Name the batch holder when this pass has one,
+      // because that is the whole cause.
+      const startedReason =
+        "this pass's admission phase left its required checks unsettled, so it owns the change for this tick"
+      const notStartedReason =
+        baseHolder === undefined
+          ? "its required checks have not started this pass"
+          : `its required checks have not started: the batch for base '${base}' is held by run '${baseHolder}'`
       held.push({
         code: "checks-pending",
-        reason: "this pass's admission phase left its required checks unsettled, so it owns the change for this tick",
-        remedy: "no action: the next pass reconsiders it once its checks settle",
+        reason: checks === "queued" || checks === "not-requested" ? notStartedReason : startedReason,
+        remedy:
+          checks === "queued" || checks === "not-requested"
+            ? "no action: the next pass reconsiders it"
+            : "no action: the next pass reconsiders it once its checks settle",
       })
     }
     const gap = holds.authorityGaps.get(pr.id)
@@ -12133,6 +12163,18 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // composition against the current base is the whole remedy.
     "merge-unauthored-deletion",
     "scratch-cleanup-failed",
+    // A step's child produced no output for its configured `noProgressMs` and
+    // was killed to un-wedge the queue, or exited leaving a descendant holding
+    // its output pipe open past the drain grace. Both are emitted with the
+    // step's own name — `affected-tests-stalled` on PR3223, ball ff7ddf17,
+    // 2026-09-02 08:32 — and the dynamic-family resolver maps every such code
+    // onto these two canonical spellings. The cure is the environment's: raise
+    // the step's `noProgressMs`, or make the driver report progress. NEVER the
+    // author's — the candidate is untested, not judged, and a quiet stall used
+    // to reach the owner as `unregistered-code`, which says only that yrd does
+    // not know what happened.
+    "step-stalled",
+    "step-stalled-escaped-descendant",
     // The repository-declared scratch root (`.yrd.yml` `scratch:`) could not
     // be created or written when a step child was about to be spawned with it
     // as TMPDIR (scratch-storage.ts `SCRATCH_ROOT_UNAVAILABLE`, 24031). A host
@@ -12547,6 +12589,12 @@ export const YRD_REFUSAL_CODES = [
   "stale-steps",
   "step-revision-drift",
   "step-selection-superseded",
+  // The canonical spellings of the dynamic `<step>-stalled` family — see
+  // {@link DYNAMIC_STEP_STALL_CODE} and the `infra-retry` bucket, which both
+  // of these join. No producer emits these literals: every stall is filed
+  // under the step's own name, and the family resolver maps it here.
+  "step-stalled",
+  "step-stalled-escaped-descendant",
   "step-unavailable",
   // The interrupted-submit audit finding (auditQueues), registered for the
   // same reason as every other finding code here: it classifies through
@@ -12616,6 +12664,34 @@ export const YRD_REFUSAL_CODE_ALIASES: Readonly<Record<string, RefusalCode>> = {
  */
 const DYNAMIC_STEP_FAILURE_CODE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-failed$/u
 
+/**
+ * The OTHER dynamic step family: an output-progress stall, filed under the
+ * step's own name (`command.ts`, the `${options.purpose}-stalled` and
+ * `${options.purpose}-stalled-escaped-descendant` refusals).
+ *
+ * Unregistered, `affected-tests-stalled` reached the queue owner's ball as
+ * `unregistered-code` (ball ff7ddf17, PR3223, 2026-09-02 08:32) — a disposition
+ * whose whole meaning is "yrd does not know what this is", for a condition yrd
+ * names precisely. Mapped here, both spellings resolve into the `infra-retry`
+ * bucket: environment-owned, queue's to cure, never billed to the author, whose
+ * candidate was never judged.
+ *
+ * Two members and not one, because they are different cures: a plain stall is
+ * the step's `noProgressMs` or a silent driver, while an escaped descendant is
+ * a leaked process tree that outlived its command.
+ */
+const DYNAMIC_STEP_STALL_CODE = /^([a-z][a-z0-9]*(?:-[a-z0-9]+)*?)-stalled(-escaped-descendant)?$/u
+
+/** The canonical `step-stalled*` spelling for a dynamic stall code, or
+ * `undefined` when the code is not one. The step name is deliberately dropped:
+ * it is a repository's own configuration, so it can never be part of a closed
+ * vocabulary — the code carries it, and the message names it. */
+function canonicalStallCode(code: string): RefusalCode | undefined {
+  const match = DYNAMIC_STEP_STALL_CODE.exec(code)
+  if (match === null) return undefined
+  return match[2] === undefined ? "step-stalled" : "step-stalled-escaped-descendant"
+}
+
 /** Whether the {@link DYNAMIC_STEP_FAILURE_CODE} family may be consulted.
  *
  * It exists for ONE producer shape — a durable Job/Run error code built from a
@@ -12638,6 +12714,14 @@ export function canonicalRefusalCode(code: string, options: CanonicalRefusalCode
   if (YRD_REFUSAL_CODE_SET.has(code)) return code as RefusalCode
   const alias = YRD_REFUSAL_CODE_ALIASES[code]
   if (alias !== undefined) return alias
+  // Stalls resolve BEFORE the `dynamicStepFamily` gate, deliberately. That gate
+  // exists because `-failed` is a suffix CLI refusals share, so matching on it
+  // alone hands `issue-source-failed` the check cure. `-stalled` has no such
+  // collision — nothing but a step's output-progress watchdog emits it — so
+  // gating it would only hide it from every caller that knows the failure's
+  // kind, which is exactly the caller rendering the ball.
+  const stall = canonicalStallCode(code)
+  if (stall !== undefined) return stall
   if (options.dynamicStepFamily === false) return undefined
   return DYNAMIC_STEP_FAILURE_CODE.test(code) ? "check-failed" : undefined
 }

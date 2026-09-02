@@ -106,6 +106,17 @@ describe("composition failure buckets — the partition is total and disjoint", 
           expect(commandSource).toContain("ensureScratchRoot(")
           continue
         }
+        // The canonical spellings of the dynamic stall family. No producer
+        // emits these literals and none ever will: a stall is filed under the
+        // repository's own step name (`${options.purpose}-stalled`), which is
+        // configuration and can never be a closed-vocabulary member. The live
+        // producer is proved by the template, and the mapping onto these two by
+        // `canonicalStallCode` — see refusal-code-registry.test.ts, which
+        // exercises `affected-tests-stalled` end to end.
+        if (code === "step-stalled" || code === "step-stalled-escaped-descendant") {
+          expect(commandSource).toContain("-stalled")
+          continue
+        }
         expect(derived.has(code), `bucket '${name}' declares '${code}' which no candidateFailure() produces`).toBe(true)
       }
     }

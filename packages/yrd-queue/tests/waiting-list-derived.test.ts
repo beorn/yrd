@@ -237,6 +237,16 @@ describe("the waiting list derives pendingness from the repository (2026-08-28: 
     // diagnostic print only that, so a row unverified in the structured field
     // and confident in its prose would still read as a verdict.
     for (const row of waiting) expect(row.reason.message).toContain("UNVERIFIED")
+    // And it LEADS. `queue status` printed the confident clause first and the
+    // caveat 200-plus characters later, so the row opened by promising a run
+    // for content that may have merged long ago (observed 2026-09-02 08:12).
+    for (const row of waiting) {
+      expect(row.reason.message.startsWith("UNVERIFIED"), row.reason.message.slice(0, 80)).toBe(true)
+      expect(
+        row.reason.message.indexOf("UNVERIFIED"),
+        "the qualifier must precede the admission claim, not trail it",
+      ).toBeLessThan(row.reason.message.indexOf("runs as a DERIVED member"))
+    }
   })
 
   it("with NO repository reader, no row claims to be pending — every one says nobody asked", async () => {

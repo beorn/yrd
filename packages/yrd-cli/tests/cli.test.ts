@@ -7720,9 +7720,16 @@ describe("runYrd", () => {
       // projection those surfaces share — one projection, never a second read.
       const paged = runInternals.staleDraftFindings(app, "2026-07-09T13:00:00.000Z", 30 * 60 * 1000)
       expect(paged.map((finding) => finding.code)).toEqual(["unrecorded-submit"])
-      expect(runInternals.staleDraftWarnings(paged)).toEqual([
-        expect.stringContaining("[unrecorded-submit] branch 'issue/ref-only' is submitted in git"),
-      ])
+      // This fixture wires no landing scan, so the row is UNVERIFIED — and the
+      // qualifier LEADS. It used to trail 200-plus characters of confident
+      // prose, so the row opened by promising a run for content that may have
+      // merged long ago (observed on the live queue 2026-09-02 08:12).
+      const [warning, ...extraWarnings] = runInternals.staleDraftWarnings(paged)
+      expect(extraWarnings).toEqual([])
+      expect(warning).toMatch(
+        /^\[unrecorded-submit\] UNVERIFIED — whether this fact's content already landed could not be read here/u,
+      )
+      expect(warning).toContain("branch 'issue/ref-only' is submitted in git")
       // Below the page threshold it is a correct audit finding but not page-worthy yet.
       expect(runInternals.staleDraftFindings(app, "2026-07-09T12:20:00.000Z", 30 * 60 * 1000)).toEqual([])
 

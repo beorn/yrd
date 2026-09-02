@@ -172,9 +172,49 @@ export function resolveSubmitterSeat(
 export type OutcomeRoutingOptions = Readonly<{
   owner: string
   logPath: string
+  /**
+   * The resident runner following this queue, when one holds the lease — its
+   * identity, as the runner box prints it (`yrd-cli:<pid>`).
+   *
+   * It decides what a broken ball may tell the reader to DO. `yrd queue run
+   * --once` beside a resident is a second writer on the same journal, so the
+   * ball must not hand one out while a resident is following; the resident
+   * re-drives the change on its own next pass, and forcing it means giving the
+   * revision a fresh submission rather than starting a rival pass.
+   */
+  resident?: string
 }>
 
 const CLOSE_BEAD_INSTRUCTION = "close your bead and retire its lane embed in the same write"
+
+/**
+ * What to do about a change a broken pass left behind, and the command that
+ * does it — never `queue run --once` while a resident holds the lease.
+ *
+ * Every yrd-broken ball printed `do: yrd queue run --once` / `Re-run: yrd queue
+ * run --once` unconditionally (observed 2026-09-02, resident pid 2718014
+ * following the live queue). A reader who obeys starts a second journal writer
+ * beside the resident.
+ */
+function reDriveInstruction(
+  resident: string | undefined,
+  branch: string | undefined,
+): Readonly<{ command: string; sentence: string }> {
+  if (resident === undefined) {
+    const command = "yrd queue run --once"
+    return { command, sentence: `Re-run: ${command}` }
+  }
+  // With a resident there IS no second pass to start. Forcing means re-arming
+  // the change's own checks, which a fresh submission of the same head does.
+  const command = branch === undefined ? "yrd pr submit <branch>" : `yrd pr submit ${branch}`
+  return {
+    command,
+    sentence:
+      `The resident runner ${resident} is following this queue and re-drives it on its next pass — ` +
+      `do NOT run 'yrd queue run --once' beside it, that is a second writer on the same journal. ` +
+      `To force it now: ${command}`,
+  }
+}
 
 /** The recorded submitter, or `unknown` when nothing recorded one. `operator`
  * is the bay plugin's built-in default when no identity reached it — the
@@ -267,7 +307,7 @@ export function routeOutcome(outcome: QueueOutcome, options: OutcomeRoutingOptio
           : ""),
     }
   }
-  const command = "yrd queue run --once"
+  const reDrive = reDriveInstruction(options.resident, outcome.branch)
   const timeoutNote =
     classified.disposition === "timeout"
       ? " A check TIMEOUT routes here: yrd is broken until the owner proves otherwise."
@@ -277,21 +317,24 @@ export function routeOutcome(outcome: QueueOutcome, options: OutcomeRoutingOptio
     kind: "yrd-broken",
     disposition: classified.disposition,
     recipient: owner,
-    command,
+    command: reDrive.command,
     body:
       `yrd broken: ${where} ended [${outcome.code ?? "?"}] (${classified.disposition}) — ` +
       `${outcome.reason ?? "no reason recorded"}.${timeoutNote} Log: ${options.logPath}. ` +
-      `Re-run: ${command}`,
+      reDrive.sentence,
   }
 }
 
 /** A pass-ending ERROR row, as an outcome for the owner. */
 export function passErrorNotification(
   fatal: Readonly<{ namespace: string; message: string }>,
-  options: Readonly<{ owner: string; logPath: string; attemptId: string }>,
+  options: Readonly<{ owner: string; logPath: string; attemptId: string; resident?: string }>,
 ): OutcomeNotification {
   const owner = options.owner.trim() === "" ? DEFAULT_QUEUE_OWNER : options.owner.trim()
-  const command = "yrd queue run --once"
+  // A pass error belongs to no branch, so there is nothing to re-submit — with
+  // a resident the only true statement is that it re-drives on its next pass.
+  const reDrive = reDriveInstruction(options.resident, undefined)
+  const command = reDrive.command
   return {
     kind: "yrd-broken",
     attempt_id: options.attemptId,
@@ -308,7 +351,8 @@ export function passErrorNotification(
     command,
     body:
       `yrd broken: the queue pass stopped on an ERROR from ${fatal.namespace}: ${fatal.message}. ` +
-      `Log: ${options.logPath}. Re-run: ${command}`,
+      `Log: ${options.logPath}. ` +
+      reDrive.sentence,
   }
 }
 
@@ -434,6 +478,10 @@ export type OutcomeNotifierOptions = Readonly<{
   logPath: string
   log: NotifierLog
   run: NotifierRun
+  /** The resident runner following this queue, when one holds the lease. Decides
+   * whether a broken ball may hand out `queue run --once` — see
+   * {@link OutcomeRoutingOptions.resident}. */
+  resident?: string
 }>
 
 export type OutcomeNotifier = Readonly<{
@@ -645,9 +693,23 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
   }
 
   return Object.freeze({
-    notify: (outcome) => deliver(routeOutcome(outcome, { owner, logPath: options.logPath })),
+    notify: (outcome) =>
+      deliver(
+        routeOutcome(outcome, {
+          owner,
+          logPath: options.logPath,
+          ...(options.resident === undefined ? {} : { resident: options.resident }),
+        }),
+      ),
     notifyPassError: (fatal, attemptId) =>
-      deliver(passErrorNotification(fatal, { owner, logPath: options.logPath, attemptId })),
+      deliver(
+        passErrorNotification(fatal, {
+          owner,
+          logPath: options.logPath,
+          attemptId,
+          ...(options.resident === undefined ? {} : { resident: options.resident }),
+        }),
+      ),
     notifyQueueWedged: (wedge, attemptId) =>
       deliverAdvisory(queueWedgedNotification(wedge, { owner, logPath: options.logPath, attemptId })),
     setOwner: (seat) => {

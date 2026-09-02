@@ -4382,6 +4382,11 @@ async function createYrdRuntimeHost(
         `the runner's stderr (LOGGILY_FILE is unset; runner ${habitant?.id ?? String(globalThis.process.pid)})`,
       log: log.child("outcome"),
       run: spawnNotifier(repository.repo, env),
+      // A resident holding the lease is what makes `queue run --once` the wrong
+      // instruction to put in a ball: it would be a second writer on this
+      // journal. Same liveness verdict the runner box prints, so the ball and
+      // the box can never disagree about whether one is following.
+      ...(habitant?.id === undefined ? {} : { resident: habitant.id }),
     })
     if (mode === "active") {
       candidatePool = createCandidatePool({

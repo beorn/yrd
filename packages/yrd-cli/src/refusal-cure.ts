@@ -361,6 +361,29 @@ const CURE_CENSUS: Readonly<Partial<Record<RefusalCode, CureEntry>>> = {
     evidence: changeRunsEvidence(message),
     resolution: [],
   }),
+  // The dynamic `<step>-stalled` family, canonicalized (queue.ts
+  // `canonicalStallCode`). `affected-tests-stalled` reached the owner as
+  // `unregistered-code` on 2026-09-02 — a ball saying only that yrd did not
+  // recognize a condition yrd had just named. The step's own name and its
+  // configured bound are in the message; the cure is the environment's.
+  "step-stalled": (message) => ({
+    blocked:
+      "A step's child produced no output for its configured no-progress window and was killed to un-wedge the " +
+      "queue (see cause) — nothing was judged about this change. Raise that step's `noProgressMs` in .yrd.yml " +
+      "if the work legitimately goes quiet that long, or make the step report progress while it runs; then " +
+      "re-request its checks.",
+    evidence: changeRunsEvidence(message),
+    resolution: [],
+  }),
+  "step-stalled-escaped-descendant": (message) => ({
+    blocked:
+      "The step's command exited but a descendant it left behind held the output pipe open past the drain " +
+      "grace, so the drain was abandoned to un-wedge the queue (see cause) — nothing was judged about this " +
+      "change. Find and kill the leaked process tree, then make the step not outlive its own command; then " +
+      "re-request its checks.",
+    evidence: changeRunsEvidence(message),
+    resolution: [],
+  }),
   "wrapper-mismatch": (message) => ({
     blocked:
       "The queue's own generated gitlink-wrapper commit did not come out matching what this composition " +

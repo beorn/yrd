@@ -361,3 +361,43 @@ describe("the refusal-code vocabulary is closed — every emitted code resolves"
     expect(failureDisposition("lease-timeout")).toEqual(failureDisposition("job-lease-expired"))
   })
 })
+
+/**
+ * @failure `affected-tests-stalled` reached the queue owner's ball as
+ *          `unregistered-code` (ball ff7ddf17, PR3223, 2026-09-02 08:32) — the
+ *          disposition whose whole meaning is "yrd does not know what this is",
+ *          for a condition yrd had just named precisely. The stall family is
+ *          built from the repository's own step names, so it can never be
+ *          enumerated; it resolves structurally, like its `-failed` sibling.
+ */
+describe("a step's output-progress stall is a registered environment fault (L6)", () => {
+  it("resolves under the step's own name, for both stall spellings", () => {
+    expect(canonicalRefusalCode("affected-tests-stalled")).toBe("step-stalled")
+    expect(canonicalRefusalCode("merge-stalled")).toBe("step-stalled")
+    expect(canonicalRefusalCode("affected-tests-stalled-escaped-descendant")).toBe(
+      "step-stalled-escaped-descendant",
+    )
+  })
+
+  it("is environment-owned and queue-cured — never billed to the author", () => {
+    for (const code of ["affected-tests-stalled", "affected-tests-stalled-escaped-descendant"]) {
+      expect(failureDisposition(code), code).toEqual({ state: "env", automation: "auto-requeue", owner: "queue" })
+    }
+    expect(COMPOSITION_FAILURE_BUCKETS["infra-retry"].has("step-stalled")).toBe(true)
+    expect(COMPOSITION_FAILURE_BUCKETS["infra-retry"].has("step-stalled-escaped-descendant")).toBe(true)
+  })
+
+  it("names the cure the environment owns, not a check verdict", () => {
+    const rendered = formatHumanFailure(
+      actionableFailure({ kind: "infrastructure", code: "affected-tests-stalled", message: PROBE_MESSAGE }),
+    )
+    expect(rendered).toContain("noProgressMs")
+    expect(rendered).toContain("report progress")
+    expect(rendered).not.toContain("The check judged the WORK")
+  })
+
+  it("does not swallow a code that merely ends in a word containing 'stalled'", () => {
+    expect(canonicalRefusalCode("installed")).toBeUndefined()
+    expect(canonicalRefusalCode("declared-step-not-installed")).toBeUndefined()
+  })
+})

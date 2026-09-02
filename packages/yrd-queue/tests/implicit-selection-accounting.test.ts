@@ -69,13 +69,15 @@ function workspace() {
  */
 async function createStuckMergeApp(log?: ReturnType<typeof createLogger>) {
   const bayJobs = createBayJobDefs(workspace())
+  // `checks` counts admission arrivals, so a test can stop the admission loop
+  // after the FIRST turn and leave the change behind it never dispatched.
+  let checks = 0
   const check = withStep(
     "check",
-    (_input: StepExecution): JobResult<{ checked: boolean }> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { checked: true },
-    }),
+    (_input: StepExecution): JobResult<{ checked: boolean }> => {
+      checks += 1
+      return { status: "completed", conclusion: "success", output: { checked: true } }
+    },
     { revision: "check-v1", output: CheckResultSchema },
   )
   let merges = 0
@@ -100,7 +102,7 @@ async function createStuckMergeApp(log?: ReturnType<typeof createLogger>) {
       log: log ?? createLogger("test", [{ level: "silent" }]),
     },
   })
-  return { app, merges: () => merges }
+  return { app, merges: () => merges, checks: () => checks }
 }
 
 /**
@@ -256,6 +258,48 @@ describe("C5(1) — an implicit pass SELECTS a ready change or REFUSES it BY NAM
         event.kind === "log" && event.props?.action === "compose-implicit-not-selected" && event.props.pr === second,
     )
     expect(row?.kind === "log" ? row.props?.remedy : undefined).toContain("settles")
+  })
+
+  /**
+   * `checks-pending` read `this pass's admission phase left its required checks
+   * unsettled, so it owns the change for this tick` for members whose checks had
+   * never been dispatched at all — four of them at 08:05:58 on 2026-09-02
+   * (PR2909, PR3147, PR3161, PR2749) while batch 1 was held by PR3221. "Left
+   * unsettled" describes an admission phase that ran and did not finish, which
+   * is the opposite of what happened.
+   */
+  it("says checks have NOT STARTED, and names the batch holder, when the pass never dispatched them", async () => {
+    const { log, events } = capture()
+    const { app, merges } = await createStuckMergeApp(log)
+    await using scoped = app
+    await submitAndRequestChecks(scoped, "issue/head-of-line")
+
+    // Pass 1 takes the batch: its merge hangs, so the run holds base 'main'.
+    await scoped.queue.run({}, { ...runtime, continueAdmissions: () => merges() === 0 })
+    expect(merges()).toBe(1)
+
+    // The change that arrives with the batch already held. Its checks are
+    // REQUESTED and nothing has dispatched them — the live shape at 08:05:58.
+    const behind = await submitAndRequestChecks(scoped, "issue/right-behind-it")
+    expect(scoped.queue.eligibility(behind).checks.status).toBe("queued")
+
+    events.length = 0
+    // Admissions stop before this pass dispatches anything, so the change is
+    // considered and held without its checks ever starting.
+    await scoped.queue.run({}, { ...runtime, continueAdmissions: () => false })
+    expect(scoped.queue.eligibility(behind).checks.status, "still never started").toBe("queued")
+
+    const row = events.find(
+      (event) =>
+        event.kind === "log" && event.props?.action === "compose-implicit-not-selected" && event.props.pr === behind,
+    )
+    const message = row?.kind === "log" ? row.message : undefined
+    const codes = (row?.kind === "log" ? row.props?.codes : undefined) as readonly string[] | undefined
+    expect(codes, "the change carries a checks-pending hold").toContain("checks-pending")
+    // The reasons are the row's own prose — that is the only text a reader gets.
+    expect(message).toContain("its required checks have not started")
+    expect(message).toMatch(/the batch for base 'main' is held by run 'R\d+' \(checks-pending\)/u)
+    expect(message, "never the phase-ran wording").not.toContain("left its required checks unsettled")
   })
 
   it("reports the zero-event run as no-selected-prs when every considered change is eligible and none runs", async () => {
