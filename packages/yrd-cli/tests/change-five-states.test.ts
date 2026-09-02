@@ -1,7 +1,7 @@
 /**
- * @failure `yrd pr list` and `yrd queue status` say `submitted` both for a change the queue could not carry and for a change a check judged, so an operator cannot tell the queue's fault from the submitter's.
+ * @failure the change listing says `submitted` both for a change the queue could not carry and for a change a check judged, so an operator cannot tell the queue's fault from the submitter's.
  * @level l2
- * @consumer @yrd/cli pr list, queue status
+ * @consumer @yrd/cli pr list, ChangeStatusView
  *
  * One change is built in each of the five states through the queue's own
  * records — a submit, a passed on-submit check, a refusal the environment
