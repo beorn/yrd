@@ -12339,11 +12339,14 @@ export function habitantBootRootPin(app: Pick<YrdCliApp, "log">, io: YrdCliIO, h
   const cwd = io.cwd ?? process.cwd()
   const pin = recordedRootPin(io, cwd)
   if (!("state" in pin)) {
-    app.log.info?.(`yrd: watching the recorded Yrd pin ${pin.pinSha.slice(0, 10)} for advances while this runner serves.`, {
-      action: "resident-root-pin-watching",
-      pinSha: pin.pinSha,
-      submoduleRoot: pin.submoduleRoot,
-    })
+    app.log.info?.(
+      `yrd: watching the recorded Yrd pin ${pin.pinSha.slice(0, 10)} for advances while this runner serves.`,
+      {
+        action: "resident-root-pin-watching",
+        pinSha: pin.pinSha,
+        submoduleRoot: pin.submoduleRoot,
+      },
+    )
     return { state: "watching", pinSha: pin.pinSha }
   }
   if (pin.state === "unpinned") {

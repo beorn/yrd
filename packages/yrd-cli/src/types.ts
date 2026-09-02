@@ -349,7 +349,9 @@ export type YrdCliIO = {
    * Structurally the shape `queueRecordedYrdPin` answers with, spelled here
    * rather than imported so this module keeps no dependency on `run.ts`.
    */
-  recordedRootPin?(queueCwd: string):
+  recordedRootPin?(
+    queueCwd: string,
+  ):
     | Readonly<{ pinSha: string; submoduleRoot: string }>
     | Readonly<{ state: "unknown"; reason: string }>
     | Readonly<{ state: "unpinned" }>
