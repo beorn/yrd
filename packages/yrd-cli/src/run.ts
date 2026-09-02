@@ -286,6 +286,9 @@ import {
 import { HABITANT_EXIT } from "./habitant-exit.ts"
 import { QUEUE_FATAL_EXIT, fatalQueueDrain } from "./queue-drain.ts"
 import { QUEUE_OUTCOME_EXIT, recordNotifySeat, submitterSeatFromEnvironment } from "./outcome-notify.ts"
+
+/** How many outcome-ledger rows `queue list` prints beneath the timeline. */
+const QUEUE_LIST_NOTIFICATION_ROWS = 20
 import {
   decideHabitantMemory,
   foldMemoryCap,
@@ -8841,6 +8844,20 @@ async function listQueues(
   services: YrdCliServices,
 ): Promise<void> {
   const snapshot = await createQueueListSnapshotLoader(app, filters, options, io, services, false).load()
+  // The balls the outcome seam opened (@i/10-yrd/24028): the most recent
+  // rows of the state-dir ledger, newest last, so a reader of the timeline
+  // sees WHO was told how each attempt ended. Bounded, never filtered by the
+  // timeline's own selection — a ball for an attempt the filter hid is still
+  // a fact worth one line.
+  const notifications = (services.outcomes?.ledger.rows() ?? []).slice(-QUEUE_LIST_NOTIFICATION_ROWS)
+  const timeline = createElement(QueueTimelineView, {
+    repositoryRoot: snapshot.repositoryRoot,
+    projection: snapshot.projection,
+    runnerRefusal: snapshot.runnerRefusal,
+    results: snapshot.results,
+    state: snapshot.state,
+    columns: io.columns ?? 120,
+  })
   await printResultWithWarnings(
     io,
     jsonEnabled(options),
@@ -8849,15 +8866,25 @@ async function listQueues(
       projection: snapshot.projection,
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
       ...(snapshot.readFailure === undefined ? {} : { readFailure: snapshot.readFailure }),
+      ...(notifications.length === 0 ? {} : { notifications }),
     },
-    createElement(QueueTimelineView, {
-      repositoryRoot: snapshot.repositoryRoot,
-      projection: snapshot.projection,
-      runnerRefusal: snapshot.runnerRefusal,
-      results: snapshot.results,
-      state: snapshot.state,
-      columns: io.columns ?? 120,
-    }),
+    notifications.length === 0
+      ? timeline
+      : createElement(
+          Fragment,
+          null,
+          timeline,
+          "\n",
+          [
+            "balls opened for ended attempts (newest last):",
+            ...notifications.map(
+              (row) =>
+                `  ${row.attempt}  ${row.kind} → ${row.recipient}` +
+                (row.ball === undefined ? "  (journaled without a ball: no notifier configured)" : `  ball ${row.ball}`) +
+                `  ${row.at}`,
+            ),
+          ].join("\n"),
+        ),
     [
       ...queuePauseWarnings(snapshot.state, snapshot.results),
       ...staleDraftWarnings(snapshot.staleDrafts ?? []),
