@@ -73,7 +73,7 @@ export const YRD_REPOSITORY_ALIASES = JSON.stringify({
 export default {
   name: "yrd",
   services: Object.fromEntries(
-    yrdQueueRunnerDeclarations.map(({ serviceName, repository }) => [
+    yrdQueueRunnerDeclarations.map(({ serviceName, repository, owner }) => [
       serviceName,
       {
         command: `bun tools/yrd-runtime.mjs yrd queue run ${repository.name}`,
@@ -92,23 +92,13 @@ export default {
         // exited and pages once; every restart is a deliberate operator/CTO
         // act, never supervision. hab-config validates the value.
         restart: "never" as const,
-        // NO `owner` KEY HERE YET, and the omission is deliberate. The seat
-        // that page is FOR is declared above, on the registry row; what is
-        // missing is the wire, not the decision.
-        //
-        // `HabServiceDefinition.owner` exists in ag/packages/hab-config and is
-        // read through habplan lowering, the launch envelope and the page rail,
-        // where a declared owner wins and a blank one falls back to @chief. But
-        // `SERVICE_KEYS` in that same file does not list "owner", and any key
-        // outside that allowlist is a FATAL config diagnostic rather than an
-        // ignored one — the fail-loud guard that closed the silent-typo gap.
-        // So spreading `owner` in today would not route the page; it would stop
-        // yrd-runner from loading at all, and under `restart: "never"` that is
-        // the merge queue down behind a config error.
-        //
-        // Unblock, in this order: add "owner" to SERVICE_KEYS in
-        // ag/packages/hab-config, then `owner,` here, then delete the pin in
-        // tests/hab-projects.ts that asserts this absence.
+        // Wired 2026-09-01: `HabServiceDefinition.owner` (ag/packages/hab-config,
+        // src/index.ts) now lists "owner" in `SERVICE_KEYS`, and a resident with
+        // `restart: "never"` and no owner is a WARNING there, not the FATAL
+        // config diagnostic it used to be. Spreading the registry row's owner
+        // here is what makes the andon page reach @cto instead of falling back
+        // to the fleet-wide @chief default.
+        owner,
       },
     ]),
   ),
