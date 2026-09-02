@@ -1618,7 +1618,22 @@ export function habitantQueueProgress(
   // carries it in the WHY column, and delivering it to its named owner is
   // @i/10-yrd/needs-person-reaches-only-the-log. A refusing change needs an
   // OWNER, not a dead runner.
-  const findings = app.queue.audit({ now, ...(livenessEpoch === undefined ? {} : { livenessEpoch }) }).findings.filter(
+  return queueProgressFromFindings(
+    app.queue.audit({ now, ...(livenessEpoch === undefined ? {} : { livenessEpoch }) }).findings,
+    now,
+  )
+}
+
+/**
+ * The service-health projection of ONE audit read: the codes the SERVICE can
+ * act on (the list above) make it `stalled`; everything else the audit found —
+ * an orphaned run, a refusal loop, a stale draft — is another reader's business
+ * and never enters this record. Split out so a caller that already holds the
+ * findings (the client dead-man, which also wants the `orphaned-run` rows)
+ * projects them instead of auditing a second time.
+ */
+export function queueProgressFromFindings(findings: readonly QueueAuditFinding[], now: string): QueueRunnerProgress {
+  const stalling = findings.filter(
     (finding) =>
       finding.code === "queue-progress-stalled" ||
       finding.code === "queue-never-started" ||
@@ -1632,7 +1647,9 @@ export function habitantQueueProgress(
       // deadlock where the only fix was refused startup itself.
       finding.code === "queue-liveness-wedged",
   )
-  return findings.length === 0 ? { state: "healthy", observedAt: now } : { state: "stalled", observedAt: now, findings }
+  return stalling.length === 0
+    ? { state: "healthy", observedAt: now }
+    : { state: "stalled", observedAt: now, findings: stalling }
 }
 
 /** Hours to milliseconds for `.yrd.yml` `drafts.pageAfterHours`. Named rather
@@ -2101,7 +2118,11 @@ async function runClientDeadMan(
   const cwd = io.cwd ?? process.cwd()
   const base = baseIdentity(services.base ?? "main")
   const nowMs = io.now?.() ?? Date.now()
-  const queueProgress = habitantQueueProgress(app, new Date(nowMs).toISOString())
+  // ONE audit for this invocation, with this host's pid probe (24030): the
+  // service-health projection and the orphaned-run rows below are two reads of
+  // the same findings, never two audits that could disagree about a row.
+  const findings = queueAuditFindings(app, new Date(nowMs).toISOString())
+  const queueProgress = queueProgressFromFindings(findings, new Date(nowMs).toISOString())
   const runner = activeHabitantRunner(await habitantRunnerStatus(cwd))
   const runnerAgeMs = runner === null ? undefined : Math.max(0, nowMs - Date.parse(runner.lastTickAt))
   const runnerError =
@@ -2122,9 +2143,7 @@ async function runClientDeadMan(
   // here — run, holder, lease — rather than counted with the work above. The
   // audit derives it through the same liveness function every reader uses,
   // with this host's pid probe, so the line and `queue list` cannot disagree.
-  const orphanedRuns = app.queue
-    .audit({ now: new Date(nowMs).toISOString(), runnerAlive: hostRunnerAlive })
-    .findings.filter((finding) => finding.code === "orphaned-run")
+  const orphanedRuns = findings.filter((finding) => finding.code === "orphaned-run")
   const observations = [
     ...(queueProgress.state === "stalled"
       ? queueProgress.findings.map((finding) => ({ code: finding.code, cause: finding.message }))
@@ -7932,12 +7951,17 @@ async function pauseQueue(
   )
 }
 
-async function queueAuditFindings(
-  app: Pick<YrdCliApp, "queue">,
-  services: YrdCliServices,
-  now?: string,
-): Promise<readonly QueueAuditFinding[]> {
-  return (await queueAuditReport(app, services, now)).findings
+/**
+ * The ONE audit read a human invocation makes, with this host's pid probe, so
+ * every running row is judged through the same liveness derivation `queue
+ * list` prints (24030). The client dead-man projects service health AND the
+ * orphaned-run rows from these findings; it used to audit twice, once without
+ * the probe, and the two reads could disagree about the same row. The `queue
+ * audit` command keeps {@link queueAuditReport}: it also scans landing and
+ * asks the environment, which a dead-man line on every `list`/`watch` must not.
+ */
+function queueAuditFindings(app: Pick<YrdCliApp, "queue">, now: string): readonly QueueAuditFinding[] {
+  return app.queue.audit({ now, runnerAlive: hostRunnerAlive }).findings
 }
 
 /** The audit's findings AND what produced them. Splitting the denominator out
