@@ -29,7 +29,15 @@ import {
   resolveChange,
 } from "@yrd/bay"
 import { type Event, type JsonValue, stageAsync } from "@yrd/core"
-import { type Job, type JobErrorFact, JobRequestSchema, parseJobTransitionForReplay } from "@yrd/job"
+import {
+  deriveRunLiveness,
+  type Job,
+  type JobErrorFact,
+  JobRequestSchema,
+  parseJobTransitionForReplay,
+  type RunLiveness,
+  type RunnerLivenessProbe,
+} from "@yrd/job"
 import { GateCertificateSchema } from "./command.ts"
 import { isDerivedMemberId } from "./derived-admission.ts"
 import {
@@ -982,6 +990,8 @@ type JobDisplayStatus =
   | "queued"
   | "requested"
   | "running"
+  /** An `in_progress` Job whose lease lapsed or whose holder is dead — derived at read, never stored (24030). */
+  | "orphaned"
   | "waiting"
   | "passed"
   | "failed"
@@ -989,10 +999,42 @@ type JobDisplayStatus =
   | "canceled"
   | "skipped"
 
-function jobDisplayStatus(job: Job | undefined): JobDisplayStatus {
+/**
+ * A running row's liveness, DERIVED at read (@i/10-yrd/24030): the run's
+ * cursor step still holding an `in_progress` Job is judged through the ONE
+ * liveness derivation the pass-start settlement and the audit already use,
+ * against the caller's clock and process probe. `undefined` when no Job is in
+ * progress at the cursor — a queued, waiting or completed run has no lease to
+ * judge. The projection stays pure: the probe is an input, never a host call.
+ */
+export function runLiveness(run: Pick<Run, "steps" | "cursor">, probe: RunnerLivenessProbe): RunLiveness | undefined {
+  const job = run.steps[run.cursor]?.job
+  if (job?.status !== "in_progress") return undefined
+  return deriveRunLiveness({ runner: job.runner, leaseExpiresAt: job.leaseExpiresAt }, probe)
+}
+
+/** {@link runLiveness} narrowed to the orphaned verdict: the row every reader must print as `orphaned: …`, never `checking`. */
+export function orphanedRunLiveness(
+  run: Pick<Run, "steps" | "cursor">,
+  probe: RunnerLivenessProbe,
+): Extract<RunLiveness, { state: "orphaned" }> | undefined {
+  const liveness = runLiveness(run, probe)
+  return liveness?.state === "orphaned" ? liveness : undefined
+}
+
+/** A probe with a clock but no process answer: only the lease judges a row. */
+export function leaseOnlyLivenessProbe(now: number): RunnerLivenessProbe {
+  return { now, runnerAlive: () => undefined }
+}
+
+function jobDisplayStatus(job: Job | undefined, probe?: RunnerLivenessProbe): JobDisplayStatus {
   if (job === undefined) return "queued"
   if (job.status === "queued") return "requested"
-  if (job.status === "in_progress") return "running"
+  if (job.status === "in_progress") {
+    if (probe === undefined) return "running"
+    const liveness = deriveRunLiveness({ runner: job.runner, leaseExpiresAt: job.leaseExpiresAt }, probe)
+    return liveness.state === "orphaned" ? "orphaned" : "running"
+  }
   if (job.status === "waiting") return "waiting"
   if (job.conclusion === "success") return "passed"
   if (job.conclusion === "failure") return "failed"
@@ -1001,8 +1043,14 @@ function jobDisplayStatus(job: Job | undefined): JobDisplayStatus {
   return "skipped"
 }
 
-export function jobStatus(step: QueueStep): JobDisplayStatus {
-  return jobDisplayStatus(step.job)
+/**
+ * A step's display status. With a `probe` (clock + process answer) an
+ * `in_progress` Job reads `orphaned` once its lease lapsed or its holder is
+ * dead; without one it reads the stored `running`, which is only acceptable
+ * for readers that select a step rather than print its state.
+ */
+export function jobStatus(step: QueueStep, probe?: RunnerLivenessProbe): JobDisplayStatus {
+  return jobDisplayStatus(step.job, probe)
 }
 
 export function isObjectValue(value: unknown): value is Record<string, unknown> {

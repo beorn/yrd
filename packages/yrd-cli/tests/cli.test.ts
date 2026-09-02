@@ -756,6 +756,10 @@ function fakeJob(input: {
   output?: JsonValue
   artifacts?: readonly JsonValue[]
   lostReason?: string
+  /** A running job's lease. Readers derive liveness at read (24030): a lease
+   * that has lapsed at the fixture's clock reads `orphaned`, so a fixture that
+   * means "running" must hold its lease past the instant it is read at. */
+  leaseExpiresAt?: string
 }): Job {
   const base = {
     id: input.id,
@@ -784,7 +788,7 @@ function fakeJob(input: {
         ...base,
         ...execution,
         status: "in_progress",
-        leaseExpiresAt: "2026-07-09T12:00:10.000Z",
+        leaseExpiresAt: input.leaseExpiresAt ?? "2026-07-09T12:00:10.000Z",
       }
     case "waiting":
       return { ...base, ...execution, ...evidence, status: "waiting", token: "run-job" }
@@ -9484,7 +9488,13 @@ describe("runYrd", () => {
           pr: { id: "PR1", revision: 1, headSha: HEAD_SHA },
           subject: "Watch the queue",
           startedAt: "2026-07-09T12:09:00.000Z",
-          steps: [fakeStep("review", "running", fakeJob({ id: "watch-review", status: "running" }))],
+          steps: [
+            fakeStep(
+              "review",
+              "running",
+              fakeJob({ id: "watch-review", status: "running", leaseExpiresAt: "2026-07-09T12:20:00.000Z" }),
+            ),
+          ],
         }),
       ],
       waiting: [],
@@ -9509,7 +9519,13 @@ describe("runYrd", () => {
         status: "running",
         pr: { id: "PR1", revision: 1, headSha: HEAD_SHA },
         startedAt: "2026-07-09T12:09:00.000Z",
-        steps: [fakeStep("merge", "running", fakeJob({ id: "merge-only", status: "running" }))],
+        steps: [
+          fakeStep(
+            "merge",
+            "running",
+            fakeJob({ id: "merge-only", status: "running", leaseExpiresAt: "2026-07-09T12:20:00.000Z" }),
+          ),
+        ],
       }),
       stepSelection: {
         authority: "explicit",
