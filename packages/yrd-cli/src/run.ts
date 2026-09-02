@@ -6379,7 +6379,7 @@ function bayBindingRefusal(
  *
  * Both paths now carry the SAME remedy, and that is the fix rather than a
  * simplification. The Bay path used to say "pass a branch — yrd pr create
- * <branch>", which stopped being true when the legacy record mint retired
+ * <branch>", which stopped being true when the legacy mint for records was retired
  * (72c0282e): passing a branch to `pr create` is exactly what refuses now, so
  * the cure prescribed the wall. What is past the refusal depends only on
  * whether the change is still live — `redeliveryRefusedByDelivery` is the same
