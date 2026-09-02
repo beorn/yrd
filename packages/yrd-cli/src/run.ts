@@ -204,7 +204,13 @@ import {
   type RemergePreflightResult,
   type RemergePreflightVerdict,
 } from "./pr-withdraw.ts"
-import { optionalReceiverStorePath, orphanRevisionWarnings, retirePr, scanReceiverRevisions } from "./pr-retire.ts"
+import {
+  optionalReceiverStorePath,
+  orphanRevisionWarnings,
+  publishReceiverSubmitRef,
+  retirePr,
+  scanReceiverRevisions,
+} from "./pr-retire.ts"
 import {
   foldRefusalStall,
   formatRemedyCommand,
@@ -6175,6 +6181,38 @@ async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | und
   return io.resolveRevision?.(ref, cwd)
 }
 
+/**
+ * The derived lane's ref-first producer half: write this submission's
+ * `refs/yrd/submit/<branch>` into the receiver store BEFORE the fact is
+ * journaled ({@link BaySubmit.publishSubmitRef}).
+ *
+ * ONE PRODUCER CONTRACT. The receiver's carrier path has always written the ref
+ * first; `yrd pr submit <branch>` journaled a fact and wrote nothing, so the
+ * queue could not tell a live local submission from a projection whose ref had
+ * been deleted — both read as "fact, no ref" — and a dead fact re-admitted
+ * itself on every pass (PR2749).
+ *
+ * Absent when this invocation resolved no receiver store or no repository: the
+ * submission then behaves exactly as it did before, which is the pre-flag-day
+ * state rather than a silent skip — the queue's own scan is what reports an
+ * unverifiable fact, and it names the store it could not consult.
+ */
+function submitRefPublisher(
+  io: YrdCliIO,
+): ((input: Readonly<{ branch: string; sha: string; base: string }>) => Promise<void>) | undefined {
+  const store = optionalReceiverStorePath(io)
+  const repo = io.repositoryRoot
+  if (store === undefined || repo === undefined) return undefined
+  return async (fact) => {
+    // Own process, disposed with the call — the same fallback `retirePr` uses
+    // when no services runner is in scope, and this path has none: the submit
+    // selection is reached through `applyChangeSelection`, which carries `io`
+    // alone. One short-lived runner per submission, not per pass.
+    await using runner = createProcess()
+    await publishReceiverSubmitRef(runner, store, repo, fact)
+  }
+}
+
 async function optionalCommitMeta(
   ref: string,
   io: YrdCliIO,
@@ -6398,6 +6436,7 @@ async function applyChangeSelection(
     const submitter = resolveSubmitterSeat(options.notify, process.env)
     // Internal compatibility seam: `draft` means emit `pr/pushed` without
     // `pr/submitted`; it is deliberately not part of either submit CLI.
+    const publisher = submitRefPublisher(io)
     const submission = await app.bays.submitSelection(selector, {
       submitter: submitter.seat,
       ...(base === undefined ? {} : { base }),
@@ -6412,6 +6451,7 @@ async function applyChangeSelection(
       ...(props === undefined ? {} : { props }),
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
+      ...(publisher === undefined ? {} : { publishSubmitRef: publisher }),
       run: runtimeOptions(io),
       warnings,
     })
@@ -11822,9 +11862,11 @@ async function applyRedeliveryStep(
   io: YrdCliIO,
 ): Promise<void> {
   const warnings: string[] = []
+  const publisher = submitRefPublisher(io)
   const submitted = await app.bays.submitSelection(step.branch, {
     ...(step.verb === "create" ? { draft: true } : {}),
     resolveRevision: (ref) => optionalRevision(ref, io),
+    ...(publisher === undefined ? {} : { publishSubmitRef: publisher }),
     run: runtimeOptions(io),
     warnings,
   })

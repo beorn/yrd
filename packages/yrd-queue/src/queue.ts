@@ -1451,9 +1451,7 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
    * scan, which would read as "no refs exist" and retire every standing
    * approval in the store.
    */
-  scanSubmitRefs?(
-    input: Readonly<{ facts: readonly Readonly<{ branch: string; sha: string }>[] }>,
-  ): Promise<SubmitRefScan>
+  scanSubmitRefs?(): Promise<SubmitRefScan>
 
   /**
    * Has the base branch ALREADY delivered this standing fact's content?
@@ -2628,14 +2626,7 @@ function createQueue<Shape extends ChangeShape>(
       )
       return new Set<string>()
     }
-    // Only the exposed branches are asked about — the scan's object probe costs
-    // one git call per fact, and a fact nothing would admit buys nothing.
-    const scan = await scanSubmitRefs({
-      facts: candidateLane.flatMap((branch) => {
-        const submit = snapshot.bays.submits[branch]
-        return submit === undefined ? [] : [{ branch, sha: submit.sha }]
-      }),
-    })
+    const scan = await scanSubmitRefs()
     if (!scan.answered) {
       // A store that could not be asked is NOT a store with no refs, and the
       // difference is everything: reading it as empty would declare every

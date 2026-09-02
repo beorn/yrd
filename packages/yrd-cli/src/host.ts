@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { hostname } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
@@ -185,6 +185,7 @@ import { createYrdLogger, habitantObservability, resolveYrdObservability } from 
 import { formatHabitantLogLine, habitantArtifactHome } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
 import { createChangePublicationService } from "./pr-publication.ts"
+import { scanReceiverSubmitRefs } from "./pr-retire.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { repositoryGitDir } from "./repository-authority.ts"
 import {
@@ -2332,6 +2333,9 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
   // outside checkpoint-identity state: mint durability must survive the store
   // re-initialization class (22986).
   const prNumberMint = createDurablePrNumberMint({ dir: options.stateDir })
+  // The receiver store, named once — the same path `receiverStorePath` resolves
+  // for `yrd pr retire`, and the only place a standing submit ref can be.
+  const receiverSubmitStore = join(options.stateDir, "prs.git")
   // ONE merged-truth reader behind both of the queue's repository-truth
   // questions — the compose's landed-submit scan and the pass-start orphan
   // settlement (24030) — so the two cannot disagree about what the base carries.
@@ -2356,24 +2360,33 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     // never disagree about which submit refs exist. Without this the compose
     // trusts `bays.submits` alone, and a projection whose ref was deleted
     // in-store re-admits itself on every pass (PR2749, 2026-09-02).
-    // NOT WIRED, deliberately, and this is the whole finding of PR2749's fix:
-    // `scanSubmitRefs` answers "which submit refs does the store hold", and
-    // that answer only decides anything if a fact without a ref is a fact whose
-    // ref was DELETED. It is not. Two producers write a standing submit fact
-    // and only one writes a ref — the receiver's `writeSubmitRefForCarrier`
-    // writes `refs/yrd/submit/<branch>` before journaling, while `yrd pr submit
-    // <branch>` on the derived lane journals the fact alone (yrd-bay/plugin.ts).
-    // Wiring this as-is retires every `yrd pr submit` submission on its first
-    // compose; measured 2026-09-02, it turned 7 host tests red on exactly that.
+    // The repository-truth half of the compose's mirror-vs-ref comparison, over
+    // the SAME store the receiver writes. `bays.submits` is a MIRROR of those
+    // refs, and a mirror row can outlive its ref: a `git update-ref -d` inside
+    // the store journals nothing, so the projection stands with nothing behind
+    // it and the derived lane re-admits it forever (PR2749, 2026-09-02).
     //
-    // Probing the store for the fact's commit does not separate them either:
-    // prs.git shares the repository's object database, so the probe answers
-    // "present" for a commit that was never pushed. The separation has to be
-    // RECORDED at submit time (a marker on the fact, or retiring the ref-less
-    // `pr submit` path in favour of the receiver push) — a design call, not a
-    // read. Until it is made, the compose reports that it cannot check rather
-    // than guessing, and this line stays commented.
-    // scanSubmitRefs: async ({ facts }) => …  // see scanReceiverSubmitRefs
+    // Sound only because BOTH producers now write the ref first and journal
+    // second — the receiver's `writeSubmitRefForCarrier` always did, and `yrd
+    // pr submit` does now (`publishSubmitRef`). Before that a fact without a ref
+    // was ambiguous, since a local submission also had none.
+    //
+    // A store that does not exist yet is answered UNAVAILABLE, never as an
+    // empty ref set: the receiver has simply never run here, and reading that
+    // as "no approvals exist" would retire every standing projection on the
+    // strength of a missing directory.
+    scanSubmitRefs: async () =>
+      existsSync(receiverSubmitStore)
+        ? {
+            answered: true as const,
+            store: receiverSubmitStore,
+            refs: await scanReceiverSubmitRefs(options.process, receiverSubmitStore),
+          }
+        : {
+            answered: false as const,
+            store: receiverSubmitStore,
+            reason: "the receiver store does not exist, so no push has ever been drained in this repository",
+          },
     landedMerge: landedMergeResolver(mergedTruthReader, options.log),
     isSubmitSuperseded: ({ sha, base }) => isSubmitContentLanded(options.process, options.repo, sha, base),
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),

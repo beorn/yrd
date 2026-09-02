@@ -19,13 +19,13 @@
  * holds — which is how the mirror this fix is about came to disagree with its
  * refs in the first place.
  *
- * NOT YET WIRED, and the last case in this file is why. "No ref" is not the
- * same question as "ref deleted": the receiver writes a ref before journaling
- * its fact, but `yrd pr submit <branch>` journals a fact and writes no ref at
- * all, so this mechanism retires every local submission it is shown. Nothing
- * readable in the store separates the two producers. That case is pinned here
- * as a blocker, not a cure, and the yrd-cli host says the same at its
- * (commented-out) wiring site.
+ * SOUND ONLY BECAUSE BOTH PRODUCERS NOW WRITE THE REF FIRST. "No ref" would
+ * not otherwise mean "ref deleted": the receiver has always written its ref
+ * before journaling, but `yrd pr submit <branch>` journaled a fact and wrote
+ * none, so a live local submission read exactly like a dead projection. That is
+ * closed at the source (`BaySubmit.publishSubmitRef`, pinned by
+ * yrd-bay/tests/derived-submit-ref-first.test.ts), which is what makes this
+ * scan's answer decisive rather than ambiguous.
  *
  * The mandatory negative control rides every case: a fact WITH a ref, built
  * from the same fixture, must still compose. Dropping a live approval is the
@@ -51,9 +51,7 @@ import {
 } from "@yrd/queue"
 
 /** The capability's own shape, named once so every fixture matches it. */
-type ScanSubmitRefs = (
-  input: Readonly<{ facts: readonly Readonly<{ branch: string; sha: string }>[] }>,
-) => Promise<SubmitRefScan>
+type ScanSubmitRefs = () => Promise<SubmitRefScan>
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -350,42 +348,33 @@ describe("compose admits only mirror facts a receiver ref still stands behind", 
     ).toBe(1)
   })
 
-  it("THE BLOCKER, pinned: a `yrd pr submit` fact is indistinguishable here, and this mechanism retires it", async () => {
-    // Read this before wiring `scanSubmitRefs` into any host.
-    //
-    // TWO producers write a standing submit fact and only ONE writes a ref.
-    // The receiver's `writeSubmitRefForCarrier` writes
-    // `refs/yrd/submit/<branch>` and only then journals the fact; `yrd pr
-    // submit <branch>` on the derived lane journals the fact ALONE
-    // (yrd-bay/plugin.ts) because the commit was never pushed to the store.
-    // So "no ref" does not mean "ref deleted", and this mechanism cannot tell
-    // the two apart — it retires the local submission, exactly as shown here.
-    //
-    // Probing the store for the fact's commit does NOT separate them: prs.git
-    // shares the repository's object database, so the probe answers "present"
-    // for a commit that was never pushed (measured 2026-09-02, which is why
-    // the probe this file once carried was removed rather than kept as a
-    // safeguard that never fires).
-    //
-    // The separation has to be RECORDED at submit time — a marker on the fact,
-    // or retiring the ref-less `pr submit` path in favour of the receiver push.
-    // That is a design call. Until it is made, no host wires this, and the
-    // yrd-cli host says so at the wiring site.
+  it("a fact that never composed is held back too — the check is the ref, not the history", async () => {
+    // The one-producer contract is what makes this sound: every producer writes
+    // its receiver ref before journaling, so a fact the store has no ref for was
+    // never a live submission, whether or not it ever composed. Before that
+    // contract a local `yrd pr submit` journaled a fact and wrote no ref, and
+    // this exclusion would have killed every one of them — which is why the
+    // producer was fixed rather than this reader weakened.
     const events: LogEvent[] = []
+    const journal = createMemoryJournal()
     const queueMint = volatilePrNumberMint()
     await using app = await createApp({
       log: tracingLog(events),
+      journal,
       queueMint,
-      // A real, readable store that simply holds no ref for this branch —
-      // which is what a `yrd pr submit` submission looks like from here.
+      // A real, readable store that holds no ref for this branch.
       scanSubmitRefs: refScanner([]),
     })
 
     await app.bays.recordBranchSubmit({ branch: GONE_BRANCH, sha: GONE_SHA, base: "main" })
     await app.queue.run({}, runtime)
 
-    expect(queueMint.highWater(), "the local submission is held back instead of composing — THE BLOCKER").toBe(0)
+    expect(queueMint.highWater(), "a fact with no ref behind it derives nothing").toBe(0)
     expect(actionsLogged(events)).toContain("compose-derived-fact-receiver-ref-gone")
+    expect(
+      (await journaledEventNames(journal)).filter((name) => name === "queue/submit/retired"),
+      "and nothing durable is written for it",
+    ).toEqual([])
   })
 
   it("a store that does not exist yet is UNANSWERED, never an empty ref set", async () => {

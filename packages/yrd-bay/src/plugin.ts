@@ -258,6 +258,28 @@ export type SubmitSelectionOptions = Readonly<{
    * launch-env identity the host reads, else the literal `unknown`. */
   submitter?: string
   resolveRevision(ref: string): Promise<string | undefined>
+  /**
+   * Write this submission's `refs/yrd/submit/<branch>` into the RECEIVER STORE,
+   * bringing its objects there first.
+   *
+   * THE REF IS THE ADMISSION TOKEN, and there is exactly one contract for
+   * producing one: ref first, journal second. The receiver's carrier path has
+   * always done that (`writeSubmitRefForCarrier`); the derived lane's local
+   * `yrd pr submit` did not, and journaled a fact with no ref behind it. That
+   * left the queue unable to tell a submission from a projection whose ref had
+   * been deleted, because both read as "fact, no ref" (PR2749).
+   *
+   * Injected rather than done here for the usual reason: this layer is pure
+   * over state and never opens git. Measured 2026-09-02, the store REFUSES
+   * `update-ref` naming an object it does not hold ("trying to write ref … with
+   * nonexistent object"), and its object database is its own — a bare init plus
+   * one fetch of every head, no alternates — so the implementation must bring
+   * the objects across before it writes the ref.
+   *
+   * Throwing is the contract: a submission whose ref did not land is not a
+   * submission, and nothing may be journaled for it.
+   */
+  publishSubmitRef?(input: Readonly<{ branch: string; sha: string; base: string }>): Promise<void>
   run: RunJobOptions
   /** Caller-owned advisory-warning sink for a submission that SUCCEEDS with a
    * caveat (same `readonly string[]` shape the queue list/status envelope uses).
@@ -1272,6 +1294,13 @@ export function createBays(
           dropped: recordOnly,
         })
       }
+      // REF FIRST, THEN JOURNAL — the one producer contract, the same order
+      // the receiver's carrier path has always used. A journal fact with no ref
+      // behind it is indistinguishable from a projection whose ref was deleted,
+      // which is exactly what let a dead fact re-admit itself forever (PR2749).
+      // This throws rather than warning: a submission whose ref did not land is
+      // not a submission, and journaling one would recreate the ambiguity.
+      await options.publishSubmitRef?.({ branch: selector, sha: headSha, base: resolved.base })
       await actions.recordBranchSubmit({
         branch: selector,
         sha: headSha,

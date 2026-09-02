@@ -152,14 +152,58 @@ async function listRefs(git: GitRunner, patterns: readonly string[]): Promise<Ma
 }
 
 /**
+ * Publish one derived-lane submission's `refs/yrd/submit/<branch>` into the
+ * receiver store — the CLI half of the one-producer contract (`BaySubmit
+ * options.publishSubmitRef`).
+ *
+ * ONE STEP: a fetch whose refspec is `<sha>:refs/yrd/submit/<branch>`, so the
+ * objects and the ref that references them land together. Everything about that
+ * spelling was measured 2026-09-02 against a store built the way
+ * `createGitPushReceiver` builds one — bare `git init`, one fetch of every head,
+ * NO alternates:
+ *
+ * - the store's object database is its own, so `update-ref` alone REFUSES a
+ *   commit it does not hold ("trying to write ref … with nonexistent object",
+ *   exit non-zero, nothing written). The objects must come across first.
+ * - the refspec names the SHA, not `refs/heads/<branch>`: a submission need not
+ *   have a local branch of that name at all. An observer clone submits a head
+ *   it fetched from origin, where `refs/heads/<branch>` does not exist and a
+ *   branch-refspec fetch fails with "couldn't find remote ref".
+ * - a bare-sha fetch from a LOCAL source succeeds with
+ *   `uploadpack.allowAnySHA1InWant` unset, so no server-side config is implied.
+ * - fetching sha-into-ref rather than fetching then writing leaves no window in
+ *   which the objects sit unreferenced, and it is idempotent: re-running at the
+ *   same sha exits 0, and running at a new head moves the ref.
+ *
+ * By FETCH and not by push: a push into the store runs its pre-receive and
+ * post-receive hooks, which journal the fact themselves — a second producer,
+ * fired from inside a process that is about to journal the same fact. A fetch
+ * into a bare repository runs no hooks, and is the same mechanism receiver-init
+ * already uses to seed the store.
+ *
+ * Throws rather than warning. A submission whose ref did not land is not a
+ * submission, and the caller must journal nothing for it.
+ */
+export async function publishReceiverSubmitRef(
+  process: Pick<Process, "run">,
+  store: string,
+  repo: string,
+  fact: Readonly<{ branch: string; sha: string }>,
+): Promise<void> {
+  const git = storeGit(process, store)
+  const ref = `${SUBMIT_REF_PREFIX}${fact.branch}`
+  const fetched = await git(["fetch", "--quiet", "--no-tags", repo, `+${fact.sha}:${ref}`])
+  if (fetched.code !== 0) {
+    throw new Error(
+      `yrd: could not write ${ref} at ${fact.sha} in the receiver store '${store}' from '${repo}', so the ` +
+        `submission is not recorded: ${fetched.stderr.trim()}`,
+    )
+  }
+}
+
+/**
  * Every `refs/yrd/submit/<branch>` the receiver store actually holds, branch →
  * sha — the repository-truth half of the queue's mirror-vs-ref comparison.
- *
- * NO CALLER YET, and that is stated rather than left to be discovered: this is
- * the reader `QueueOptions.scanSubmitRefs` needs, and the yrd-cli host's wiring
- * site says in full why it stays commented out — a fact without a ref is not
- * necessarily a fact whose ref was deleted, because `yrd pr submit <branch>`
- * writes no ref at all. Wiring is one line the moment that is settled.
  *
  * Lives here because this is where the receiver store already has a reader:
  * `storeGit` and `listRefs` are the same pair `scanReceiverRevisions` uses, so
