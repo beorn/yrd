@@ -13,6 +13,7 @@
  */
 
 import type { Git } from "./facts.ts"
+import { refAt } from "./git.ts"
 import type { QueueCheck } from "./run.ts"
 
 export type QueueConfig = Readonly<{
@@ -31,9 +32,14 @@ export type QueueConfig = Readonly<{
   blob: string
 }>
 
-/** Read the declaration at one commit, or undefined when it does not name a remote (the incumbent's shape). */
+/**
+ * Read the declaration at one commit, or undefined when there is none or it
+ * does not name a remote (the incumbent's shape). A commit with no `.yrd.yml`
+ * is an honest "not this core", read as git's exit 1; any other failure throws.
+ */
 export async function readConfig(git: Git, commit: string): Promise<QueueConfig | undefined> {
-  const blob = (await git(["rev-parse", "--verify", `${commit}:.yrd.yml`])).trim()
+  const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
+  if (blob === undefined) return undefined
   const text = await git(["show", `${commit}:.yrd.yml`])
   const raw: unknown = Bun.YAML.parse(text)
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${commit.slice(0, 12)} is not a mapping`)

@@ -330,13 +330,26 @@ async function end(
 async function send(run: Run, entry: LaneEntry, endedFact: string, kind: "merged" | "failed" | "stuck", text: string): Promise<void> {
   const facts = await readFacts(run.git, entry.branch, entry.change.head)
   const opened = facts.find((fact) => fact.kind === "opened")
+  const ended = [...facts].reverse().find((fact) => fact.sha === endedFact)
   const recipient = kind === "stuck" ? run.options.owner : (trailerOf(opened, "Submitter") ?? run.options.owner)
+  // The record the configured notifier reads, unchanged from today's contract
+  // (kind, attempt_id, pr, recipient, command required; the rest optional): the
+  // plan's three messages map onto its three kinds, the branch stands where a
+  // PR number stood, and the ended fact's sha is the attempt id, so a resend
+  // after a crash is the same message.
   const record = {
+    attempt_id: endedFact,
+    base: run.options.target,
     branch: entry.branch,
+    code: kind === "merged" ? undefined : (trailerOf(ended, "Reason") ?? trailerOf(ended, "Why")),
+    command: text,
+    disposition: kind === "failed" ? "author" : undefined,
     head: entry.change.head,
     id: endedFact,
-    kind,
+    kind: kind === "merged" ? "landed" : kind === "failed" ? "send-back" : "yrd-broken",
+    pr: entry.branch,
     recipient,
+    sha: entry.change.head,
     text,
     workItem: trailerOf(opened, "Work-Item"),
   }

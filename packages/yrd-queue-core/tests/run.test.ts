@@ -154,7 +154,8 @@ describe("a queue run", () => {
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent"])
     const sent = messages(w)
     expect(sent).toHaveLength(1)
-    expect(sent[0]).toMatchObject({ branch: "task/one", head, kind: "merged", recipient: "@dev/2", workItem: "@i/10-yrd/1" })
+    // The record is the notifier's contract, unchanged: its kinds are landed, send-back and yrd-broken.
+    expect(sent[0]).toMatchObject({ branch: "task/one", head, kind: "landed", pr: "task/one", recipient: "@dev/2", workItem: "@i/10-yrd/1" })
     expect(sent[0]?.id).toBe(facts[2]?.sha)
     expect(readFileSync(outcome.log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line).kind)).toEqual(
       expect.arrayContaining(["run", "change", "check", "result", "merge", "message"]),
@@ -179,7 +180,7 @@ describe("a queue run", () => {
         ["Attribution", "submitter"],
       ]),
     )
-    expect(messages(w)[0]).toMatchObject({ kind: "failed", recipient: "@dev/2" })
+    expect(messages(w)[0]).toMatchObject({ code: "verify", disposition: "author", kind: "send-back", recipient: "@dev/2" })
   })
 
   it("stuck: a check that exits 2 stops the run, bills nobody, and tells the queue owner", async () => {
@@ -194,7 +195,7 @@ describe("a queue run", () => {
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
     const facts = await readFacts(w.git, "task/one", head)
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "stuck", "sent"])
-    expect(messages(w)[0]).toMatchObject({ kind: "stuck", recipient: "@cto" })
+    expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
   })
 
   it("inherited: a check that fails at the target too is the target's, so the change is stuck and nobody is billed", async () => {
@@ -210,7 +211,7 @@ describe("a queue run", () => {
     const facts = await readFacts(w.git, "task/one", head)
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "stuck", "sent"])
     expect(facts[2]?.trailers).toEqual(expect.arrayContaining([["Attribution", "inherited"]]))
-    expect(messages(w)[0]).toMatchObject({ kind: "stuck", recipient: "@cto" })
+    expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
     expect(messages(w)[0]?.text).toMatch(/the target is red, not the change/u)
   })
 

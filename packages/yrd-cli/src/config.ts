@@ -52,6 +52,9 @@ const GateScriptsSchema = z
 const StepObjectSchema = z
   .object({
     kind: z.enum(["check", "action", "merge"]).optional(),
+    /** The new core's phases for this check, submit and/or merge (plan § The
+     * queue run); accepted and ignored here for the same reason as `remote:`. */
+    on: z.union([z.enum(["submit", "merge"]), z.array(z.enum(["submit", "merge"]))]).optional(),
     run: TextSchema.optional(),
     runner: RunnerSchema.default("local"),
     classification: z.enum(["base", "carrier"]).optional(),
@@ -343,6 +346,12 @@ const MergedTruthExceptionsSchema = z
 const MergeSchema = z.enum(["expected", "none"]).optional()
 
 const ProjectFields = {
+  /** The new core's declaration (plan § The final design, Store): the queue's
+   * remote and its target branch. Their presence selects @yrd/queue-core for
+   * every `yrd queue …` command; this loader accepts and ignores them so one
+   * `.yrd.yml` can carry both cores across flag day. */
+  remote: TextSchema.optional(),
+  target: TextSchema.optional(),
   base: TextSchema.optional(),
   batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
   checks: ChecksSchema,

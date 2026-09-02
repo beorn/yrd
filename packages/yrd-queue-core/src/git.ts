@@ -41,10 +41,15 @@ export class GitExit extends Error {
   }
 }
 
-/** The commit a ref names, or undefined when the ref is absent. */
-export async function refAt(git: Git, ref: string): Promise<string | undefined> {
+/**
+ * The object a name resolves to, or undefined when absent. A ref is peeled to
+ * its commit; a `rev:path` names a blob already and git refuses a peel on it,
+ * so it is asked for as written.
+ */
+export async function refAt(git: Git, ref: string, kind: "commit" | "blob" = "commit"): Promise<string | undefined> {
   try {
-    const out = (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).trim()
+    const name = kind === "commit" ? `${ref}^{commit}` : ref
+    const out = (await git(["rev-parse", "--verify", "--quiet", name])).trim()
     return out === "" ? undefined : out
   } catch (error) {
     if (isExit(error, 1)) return undefined

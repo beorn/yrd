@@ -18,6 +18,7 @@
     "@yrd/job": "workspace:*",
     "@yrd/persistence": "workspace:*",
     "@yrd/process": "workspace:*",
+    "@yrd/queue-core": "workspace:*",
     "@yrd/queue": "workspace:*",
     "git-super": "^0.1.0",
     "loggily": "^0.10.2",

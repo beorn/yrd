@@ -323,6 +323,7 @@ import {
   type QueueRunSourceCheck,
   queueRunOwnRuns,
 } from "./queue-run-log.ts"
+import { coreQueueCommand } from "./queue-core-commands.ts"
 
 /** How many outcome-ledger rows `queue list` prints beneath the timeline. */
 const QUEUE_LIST_NOTIFICATION_ROWS = 20
@@ -14372,6 +14373,7 @@ function buildProgram(
     const verb = target
       .command(`${state} [${operand}...]`, { hidden: true })
       .description(CHANGE_STATE_HELP[state])
+      .option("--json", "emit stable JSON")
       .option("--dry-run", "print the resolved branches and the exact git command without pushing")
     if (state === "archive") {
       verb
@@ -14379,7 +14381,19 @@ function buildProgram(
         .option("-F, --file <path>", "read the message from a file, or from stdin with '-'")
     }
     type ChangeStateVerbOptions = Readonly<{ dryRun?: boolean; message?: string; file?: string }>
-    verb.action(async (selectors: readonly string[], options: ChangeStateVerbOptions) =>
+    verb.action(async (selectors: readonly string[], options: ChangeStateVerbOptions) => {
+      // The new core takes `submit` when the declaration names a remote.
+      if (state === "submit") {
+        const taken = await coreQueueCommand(invocationCwd(io), io, {
+          branch: selectors[0],
+          command: "submit",
+          submitter: globalThis.process.env.YRD_DEFAULT_SUBMITTER ?? "operator",
+        }, { json: (options as { json?: boolean }).json })
+        if (taken !== undefined) {
+          setExit(taken)
+          return
+        }
+      }
       setExit(
         await applyChangeState(
           state,
@@ -14388,8 +14402,8 @@ function buildProgram(
           io,
           changeStateDeps(io, () => currentGitBranch(invocationCwd(io), io), installedServices().process),
         ),
-      ),
-    )
+      )
+    })
     return verb as unknown as CliCommand
   }
 
@@ -14439,6 +14453,11 @@ function buildProgram(
   const queue = program.command("queue").description("the line of changes for the target branch")
   queue.helpCommand(false)
   const listQueue = async (positional: string[], options: QueueListOptions): Promise<void> => {
+    const taken = await coreQueueCommand(io.repositoryRoot ?? invocationCwd(io), io, { command: "list" }, { json: options.json })
+    if (taken !== undefined) {
+      setExit(taken)
+      return
+    }
     // A positional term spelled like a subcommand is the one shape this surface
     // cannot read: `queue list list` could be either. `--term` is the reading
     // that has to be asked for; everything else refuses rather than searching.
@@ -14496,9 +14515,14 @@ function buildProgram(
     .command("show <branch>")
     .description("its changes newest first, each check's result and log")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) =>
-      viewChangeRuns(installed(), selector, options, io, installedServices(), "queue.show"),
-    )
+    .action(async (selector, options) => {
+      const taken = await coreQueueCommand(io.repositoryRoot ?? invocationCwd(io), io, { branch: selector, command: "show" }, { json: options.json })
+      if (taken !== undefined) {
+        setExit(taken)
+        return
+      }
+      await viewChangeRuns(installed(), selector, options, io, installedServices(), "queue.show")
+    })
   queue
     .command("audit", { hidden: true })
     .description("check queue state")
@@ -14569,6 +14593,11 @@ function buildProgram(
     .option("--interval <seconds>", "seconds between rounds (default 15)", int)
     .option("--json", "emit stable JSON")
     .action(async (options) => {
+      const taken = await coreQueueCommand(io.repositoryRoot ?? invocationCwd(io), io, { command: "up", intervalSeconds: options.interval }, { json: options.json })
+      if (taken !== undefined) {
+        setExit(taken)
+        return
+      }
       setExit(await followQueueRuns(installed(), [], options, io, declaredPlanGate(true), installedServices()))
     })
   const queueRun = queue
@@ -14584,6 +14613,11 @@ function buildProgram(
     .option("--owner <seat>", "the queue owner every stuck result goes to (default: .yrd.yml owner:, then @chief)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
+      const taken = await coreQueueCommand(io.repositoryRoot ?? invocationCwd(io), io, { command: "run" }, { json: options.json })
+      if (taken !== undefined) {
+        setExit(taken)
+        return
+      }
       const gate = declaredPlanGate(false)
       // No admission pre-gate here: this process already holds the queue runner
       // lease (taken at host construction, before this action ran) or it never

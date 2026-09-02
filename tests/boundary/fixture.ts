@@ -121,9 +121,13 @@ export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryR
   await git(repo, "remote", "add", "origin", origin)
   await installDeclaredYrdEntry(repo)
   await writeFile(join(repo, "README.md"), "main\n")
+  // YRD_BOUNDARY_CORE=new declares the queue's remote, which is the one line
+  // that selects the new core (plan § Cutover): the same black-box cases then
+  // judge both cores, and the gate runs this suite once per core.
+  const core = process.env.YRD_BOUNDARY_CORE === "new" ? "remote: origin\n" : ""
   await writeFile(
     join(repo, ".yrd.yml"),
-    `base: main\nbatch: 1\n${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
+    `${core}base: main\nbatch: 1\n${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
   )
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "main")
@@ -161,6 +165,15 @@ export async function submitOneCommit(repo: string, bay: string): Promise<Change
 
   // Standing IN the Bay, exactly as an author does.
   const submitted = capture(bayPath)
+  if (process.env.YRD_BOUNDARY_CORE === "new") {
+    // The new core's one path in: one atomic push of the branch and its opened fact.
+    expectZero(await yrd(repo, submitted.io, "queue", "submit", "--json"), "queue submit", submitted)
+    const opened = JSON.parse(submitted.stdout()) as { branch: string; head: string; opened: string }
+    if (opened.branch !== branch || opened.head !== headSha) {
+      throw new Error(`queue submit did not record ${branch} at ${headSha}: ${submitted.stdout()}`)
+    }
+    return { branch, headSha, id: opened.opened }
+  }
   expectZero(await yrd(repo, submitted.io, "bay", "submit", "--json"), "bay submit", submitted)
   const parsed = JSON.parse(submitted.stdout()) as {
     prs: readonly { id: string; branch: string; status: string }[]
@@ -199,6 +212,12 @@ export async function queueRunOnce(repo: string): Promise<QueueRunResult> {
  */
 export async function changeStandings(repo: string): Promise<Readonly<Record<string, string>>> {
   const listed = capture(repo)
+  if (process.env.YRD_BOUNDARY_CORE === "new") {
+    // The new core's one table: every change keyed by branch and head, with its derived state.
+    expectZero(await yrd(repo, listed.io, "queue", "list", "--json"), "queue list", listed)
+    const parsed = JSON.parse(listed.stdout()) as { changes: readonly { branch: string; head: string; state: string }[] }
+    return Object.fromEntries(parsed.changes.map((change) => [`${change.branch}@${change.head}`, change.state]))
+  }
   expectZero(await yrd(repo, listed.io, "pr", "list", "--json"), "pr list", listed)
   const parsed = JSON.parse(listed.stdout()) as { prs: readonly { id: string; status: string }[] }
   return Object.fromEntries(parsed.prs.map((change) => [change.id, change.status]))
