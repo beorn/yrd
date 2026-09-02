@@ -615,7 +615,9 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "checks", "requires", "contest", "progress", "drafts", "scratch", "owner", "notify"].includes(path)
+    !["base", "batch", "checks", "requires", "contest", "progress", "drafts", "scratch", "owner", "notify"].includes(
+      path,
+    )
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
