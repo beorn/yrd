@@ -11,7 +11,7 @@ import { dirname, join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { currentChangeRev, changeBaseSha, changeDeliveryState, recordLaneOwnsBranch } from "@yrd/bay"
+import { currentChangeRev, changeBaseSha, changeDeliveryState, receiverInboxDir, recordLaneOwnsBranch } from "@yrd/bay"
 import { Command, createFailure, createMemoryJournal, parseJournalFrame } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
@@ -4680,6 +4680,97 @@ checks: [{check: {run: "true"}}]
       expect(stderr).toContain(`remove '${retiredWrapper}:'`)
       expect(stderr).toContain("configure the required checks as 'checks: [...]'")
       expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
+    }
+  })
+
+  it("skips a receiver inbox entry whose push never completed instead of refusing the whole drain", async () => {
+    // Measured 2026-09-01 17:29:57 PDT. A `pre-receive` hook writes its
+    // `.prepared.json` BEFORE Git decides whether to accept the update. One
+    // submitter's push was interrupted after the object landed but before any
+    // ref was created, so `recoverPrepared` could not confirm the push and
+    // reported the entry ambiguous — forever, because nothing else ever moves
+    // it. The host then turned that one entry into a refusal of the WHOLE
+    // inbox, and since this drain runs at host construction for every active
+    // command, every later pass exited 3 while eight eligible changes waited
+    // behind a row none of them had anything to do with.
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+
+    // One host to create the receiver and its inbox, exactly as a real
+    // repository would already have them.
+    const warm = await createYrdHost({ cwd: repo })
+    await warm.close()
+
+    // The orphan, in the shape the interrupted push left behind: a branch
+    // creation (`oldSha` all zeroes) naming a ref that does not exist. The id
+    // is the receiver's own content hash of the update, not a free-form name —
+    // an entry whose id does not rebuild from its fields is `failed`, not
+    // ambiguous, and would be refusing this drain for a different and correct
+    // reason.
+    const ref = "refs/heads/issue/interrupted-push"
+    const branch = "issue/interrupted-push"
+    const oldSha = "0".repeat(40)
+    const id = createHash("sha256").update(`${ref}\0${oldSha}\0${featureSha}`).digest("hex")
+    const receivedAt = new Date(Date.now() - 90_000).toISOString()
+    const orphan = {
+      version: 1,
+      id,
+      receivedAt,
+      ref,
+      branch,
+      oldSha,
+      headSha: featureSha,
+      intake: {
+        base: "main",
+        baseSha: await git(repo, "rev-parse", "main"),
+        branch,
+        headSha: featureSha,
+      },
+    }
+    const inbox = receiverInboxDir(stateDir)
+    await writeFile(join(inbox, `${id}.prepared.json`), `${JSON.stringify(orphan)}\n`)
+
+    const events: unknown[] = []
+    const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => events.push(value) }])
+    try {
+      // (a) On the code this replaces, THIS LINE THROWS
+      //     "receiver inbox did not drain cleanly" and there is no host at all —
+      //     no queue pass, no `pr submit`, no read-only status, for anyone.
+      const host = await createYrdHost({ cwd: repo, log })
+      try {
+        // (b) The rest of the inbox drained and the host is usable: work that
+        //     has nothing to do with the orphan proceeds.
+        await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+        expect(Object.keys(host.app.state().bays.prs)).toEqual(["PR1"])
+      } finally {
+        await host.close()
+      }
+
+      // Reported, never swallowed — by id, by the branch it belongs to, and
+      // with its AGE, which is the only thing separating a push happening right
+      // now from one that never finished. An operator cannot clear what nobody
+      // named.
+      const notices = events.filter(
+        (event): event is { props: { entries: { id: string; branch: string; ageMs?: number }[] } } =>
+          typeof event === "object" &&
+          event !== null &&
+          "props" in event &&
+          typeof event.props === "object" &&
+          event.props !== null &&
+          "action" in event.props &&
+          event.props.action === "receiver-inbox-ambiguous-skipped",
+      )
+      expect(notices).toHaveLength(1)
+      const entry = notices[0]!.props.entries[0]!
+      expect(entry).toMatchObject({ id, branch, receivedAt })
+      expect(entry.ageMs).toBeGreaterThanOrEqual(90_000)
+
+      // Skipped, not consumed: the entry is still on disk, so a push that was
+      // merely SLOW is still delivered by a later drain under the same id, and
+      // nothing has been destroyed on an unprovable guess about what happened.
+      expect(await Bun.file(join(inbox, `${id}.prepared.json`)).exists()).toBe(true)
+    } finally {
+      log.end()
     }
   })
 

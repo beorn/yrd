@@ -284,10 +284,35 @@ export type ReceiverHookOptions = {
    */
   drainDeferred?: (drained: Readonly<ReceiverDrainResult>) => void
 }
+/**
+ * A prepared result whose ref does not carry its head.
+ *
+ * The same class as {@link ReceiverDrainResult.deferred}, and emphatically NOT
+ * a failure: `pre-receive` writes the `.prepared.json` BEFORE Git decides
+ * whether to accept the update, so an absent ref is simply how "this push has
+ * not completed" is represented. That covers a push still in flight, a push a
+ * later hook rejected, and a client that hung up — three different events with
+ * byte-identical prepared files, which is exactly why the receiver may not act
+ * on one. `recoverPrepared` retries every drain, so an entry that becomes
+ * resolvable is delivered by the next pass under the same id.
+ *
+ * The FACTS ride along because a bare id cannot be reported usefully: whoever
+ * reports this has to tell an operator which change is affected, and
+ * `receivedAt` is the only thing separating a push happening right now from one
+ * that never finished.
+ */
+export type AmbiguousReceiverResult = Readonly<{
+  id: string
+  ref: string
+  branch: string
+  headSha: string
+  /** When `pre-receive` wrote the entry — an ISO datetime with offset. */
+  receivedAt: string
+}>
 export type ReceiverDrainResult = {
   delivered: string[]
   failed: Array<{ id: string; error: string }>
-  ambiguous: string[]
+  ambiguous: AmbiguousReceiverResult[]
   /**
    * Results this pass deliberately did not attempt — the lock was held, or the
    * budget ran out. NOT failures: each is still `pending` on disk and the next
@@ -2035,7 +2060,13 @@ async function recoverPrepared(
     try {
       const result = await readResult(path, id)
       if (!(await refContains(receiver, result.ref, result.headSha))) {
-        drain.ambiguous.push(id)
+        drain.ambiguous.push({
+          id,
+          ref: result.ref,
+          branch: result.branch,
+          headSha: result.headSha,
+          receivedAt: result.receivedAt,
+        })
         continue
       }
       await validateStored(receiver, result, options)
