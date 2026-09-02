@@ -59,6 +59,13 @@ export type FakeCheckPlan = Readonly<{
    * `.yrd.yml` it always did. On, the target declares a notifier that appends
    * each message to `notifyLog` and answers with a ball id. */
   notify?: boolean
+  /** Declare the `yrd` remote in `.yrd.yml`, so the submit path has somewhere
+   * to read it from when the repository has no such remote. Default off, so
+   * every case that predates this knob writes the same `.yrd.yml` it always
+   * did. The plan says the submit path "adds the `yrd` remote from `.yrd.yml`
+   * when missing" and does not name the key; `remote:` is this fixture's
+   * reading of it. */
+  yrdRemote?: boolean
 }>
 
 /** The `run:` string for a plan: the knobs travel as environment assignments
@@ -88,6 +95,13 @@ function notifyStep(plan: FakeCheckPlan, log: string): string {
   if (plan.notify !== true) return ""
   const command = `cat >>${log}; echo '{"ball_id":"b1"}'`
   return `notify: ${JSON.stringify(command)}\n`
+}
+
+/** The `remote:` line for a plan, naming the shared repository the branches and
+ * their changes are pushed to, or nothing when the case did not ask for one. */
+function remoteStep(plan: FakeCheckPlan, origin: string): string {
+  if (plan.yrdRemote !== true) return ""
+  return `remote: ${JSON.stringify(origin)}\n`
 }
 
 export type BoundaryRepository = Readonly<{
@@ -123,7 +137,7 @@ export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryR
   await writeFile(join(repo, "README.md"), "main\n")
   await writeFile(
     join(repo, ".yrd.yml"),
-    `base: main\nbatch: 1\n${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
+    `base: main\nbatch: 1\n${remoteStep(plan, origin)}${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
   )
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "main")
@@ -264,4 +278,147 @@ function expectZero(
   if (exitCode !== 0) {
     throw new Error(`${what} exited ${String(exitCode)}\n${output.stderr()}\n${output.stdout()}`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// The submit path — a branch at a head pushed to the `yrd` remote, and the
+// change ref that records it. Added for `submit-and-branch.test.ts`; every
+// helper above keeps the signature it had.
+// ---------------------------------------------------------------------------
+
+/** The remote the plan pushes branches and their changes to. */
+export const YRD_REMOTE = "yrd"
+
+/** The ref a change is: `refs/yrd/changes/<branch>/<head sha>`. */
+export function changeRef(branch: string, headSha: string): string {
+  return `refs/yrd/changes/${branch}/${headSha}`
+}
+
+/** A git command that is allowed to fail — for asking whether a ref is there. */
+export async function gitTry(
+  cwd: string,
+  ...args: string[]
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const child = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  return { exitCode, stdout: stdout.trim(), stderr: stderr.trim() }
+}
+
+/** Whether a repository carries a ref at exactly this name. */
+export async function refExists(dir: string, ref: string): Promise<boolean> {
+  return (await gitTry(dir, "show-ref", "--verify", "--quiet", ref)).exitCode === 0
+}
+
+/** What a ref points at, or undefined when the repository has no such ref. */
+export async function refSha(dir: string, ref: string): Promise<string | undefined> {
+  const read = await gitTry(dir, "rev-parse", "--verify", "--quiet", ref)
+  return read.exitCode === 0 && read.stdout !== "" ? read.stdout : undefined
+}
+
+/** The remotes a repository has, by name. */
+export async function remoteNames(repo: string): Promise<readonly string[]> {
+  const listed = await git(repo, "remote")
+  return listed === "" ? [] : listed.split("\n")
+}
+
+/** The submitter's own hand: a `yrd` remote added with plain git. */
+export async function addYrdRemote(repo: string, origin: string): Promise<void> {
+  await git(repo, "remote", "add", YRD_REMOTE, origin)
+}
+
+/** Who the next commits and submits in this repository are by. */
+export async function setSubmitter(repo: string, name: string, email: string): Promise<void> {
+  await git(repo, "config", "user.name", name)
+  await git(repo, "config", "user.email", email)
+}
+
+let commitCounter = 0
+
+/**
+ * One commit on `branch`, cut from the target the first time the branch is
+ * named, and the repository left standing on `main` afterwards so a queue run
+ * never reads the submitter's checkout as the target.
+ */
+export async function commitOnBranch(repo: string, branch: string, message?: string): Promise<string> {
+  if (await refExists(repo, `refs/heads/${branch}`)) await git(repo, "checkout", "-q", branch)
+  else await git(repo, "checkout", "-q", "-b", branch, "origin/main")
+
+  commitCounter += 1
+  const file = `${branch.replaceAll("/", "-")}-${String(commitCounter)}.txt`
+  await writeFile(join(repo, file), `${file}\n`)
+  await git(repo, "add", file)
+  await git(repo, "commit", "-qm", message ?? `${branch}: one commit`)
+  const head = await git(repo, "rev-parse", "HEAD")
+  await git(repo, "checkout", "-q", "main")
+  return head
+}
+
+/** The same work at a new sha that does not descend from the old one — what a
+ * rebase leaves behind, without needing a second base to rebase onto. */
+export async function amendHead(repo: string, branch: string, message: string): Promise<string> {
+  await git(repo, "checkout", "-q", branch)
+  await git(repo, "commit", "-q", "--amend", "-m", message)
+  const head = await git(repo, "rev-parse", "HEAD")
+  await git(repo, "checkout", "-q", "main")
+  return head
+}
+
+/** One `yrd <args>` in `repo`, whatever it exits with. A verb the CLI does not
+ * have comes back as a non-zero result whose report names it, which is the
+ * gate doing its job rather than an unhandled rejection. */
+export async function runYrd(repo: string, ...args: string[]): Promise<QueueRunResult> {
+  const run = capture(repo)
+  let exitCode: number
+  try {
+    exitCode = await yrd(repo, run.io, ...args)
+  } catch (error) {
+    exitCode = 70
+    run.io.stderr(`${String(error)}\n`)
+  }
+  return {
+    exitCode,
+    stdout: run.stdout(),
+    stderr: run.stderr(),
+    report: `yrd ${args.join(" ")} exited ${String(exitCode)}\n--- stdout ---\n${run.stdout()}\n--- stderr ---\n${run.stderr()}`,
+  }
+}
+
+/** The plan's one path in: `yrd queue submit <branch>`. */
+export function queueSubmit(repo: string, branch: string): Promise<QueueRunResult> {
+  return runYrd(repo, "queue", "submit", branch)
+}
+
+/** A change's facts, newest first, as their commit messages on the change ref. */
+export async function factMessages(dir: string, ref: string): Promise<readonly string[]> {
+  const log = await git(dir, "log", "--first-parent", "--format=%B%x00", ref)
+  return log
+    .split("\0")
+    .map((message) => message.trim())
+    .filter((message) => message !== "")
+}
+
+/** Everything the notifier was handed, as one blob; empty when nothing was sent. */
+export async function notifiedMessages(notifyLog: string): Promise<string> {
+  const file = Bun.file(notifyLog)
+  return (await file.exists()) ? await file.text() : ""
+}
+
+/**
+ * A second submitter: another working clone of the same shared repository,
+ * with its own identity and its own `yrd` remote. Its scratch root is cleaned
+ * up with every other.
+ */
+export async function secondWorkingRepo(origin: string, name: string, email: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-boundary-second-"))
+  roots.push(root)
+  const clonePath = join(root, "repo")
+  await git(root, "clone", "-q", origin, clonePath)
+  const repo = await realpath(clonePath)
+  await setSubmitter(repo, name, email)
+  await addYrdRemote(repo, origin)
+  return repo
 }
