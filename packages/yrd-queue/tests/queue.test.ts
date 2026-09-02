@@ -4515,12 +4515,21 @@ describe("Queue", () => {
     // A drain pass with NO new check-request: the tally still reads 1 against
     // this base. Re-polling the same generation must never silently mint a
     // second checking attempt from the stale terminal Job — it stays refused,
-    // on the SAME identity, at the SAME requestCount.
+    // on the SAME identity, and the attempt count alone bounds it.
+    //
+    // `requestCount: 0` because the runner vanishing is not a verdict, so it
+    // consumed none of the author's authority to have this tree checked
+    // (@i/10-yrd/24038; the same rule bills a thrown environment fault to
+    // nobody). It read 1 while every refusal spent one whatever its kind, which
+    // is what made an outage eat the requests an author had already granted.
+    // The bound this test is about is untouched: the terminal Job's own attempt
+    // still exceeds the single authority this tree holds, so no second check
+    // runs, and generation 2 below still has to earn its own.
     await app.queue.run({}, runtime)
     expect(changeAdmission(app.bays.pr(specimen.id)!)).toMatchObject({
       status: "refused",
       baseSha: BASE,
-      requestCount: 1,
+      requestCount: 0,
       kind: "infrastructure",
     })
     expect(app.state().jobs.byId[requested.id]).toMatchObject({ attempt: 1, conclusion: "timed_out" })

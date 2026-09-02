@@ -15,6 +15,9 @@ import {
   type JournalHistory,
   systemClock,
   markRecoverable,
+  failureFact,
+  FailureKindSchema,
+  type FailureKind,
 } from "@yrd/core"
 import type { Scope } from "@silvery/scope"
 import { computed, type ReadSignal } from "@silvery/signals"
@@ -219,13 +222,56 @@ export type Job =
 export const INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX = "-infrastructure-signal"
 
 /**
- * A failed Job whose failure is about the MACHINERY this pass runs on, not
- * about the revision it judged: the definition's callback threw
- * (`runner-error`), or the process was SIGKILLed before it produced a verdict.
- * Neither says anything about the content; both say the host is in trouble.
+ * The structural fact that a Job's failure came from a THROW, and the kind the
+ * thrower typed it with.
+ *
+ * Two facts used to ride on one string. `failed("runner-error", …)` was the
+ * only trace a throw left, so every reader downstream inferred "this was a
+ * throw" from that code — and a {@link YrdFailure}'s own `code` and `kind` were
+ * dropped on the floor to make room for it. `ensureScratchRoot` raises
+ * `scratch-root-unavailable`, kind `infrastructure`, before any check child is
+ * spawned; it reached the queue as `runner-error`, which sits in no
+ * environment-owned bucket, so a record-lane member was billed for a host fault
+ * and spent its author's check authority on it (@i/10-yrd/24038).
+ *
+ * Separating them: the typed code and message go where a code and a message
+ * belong, and thrown-ness rides here, in evidence, where a reader asks for it
+ * by name instead of pattern-matching a slug. `thrownKind` is deliberately not
+ * `kind` — `gitCheckStep` already writes `evidence.kind: "storage-exhaustion"`,
+ * a different vocabulary about a different thing, and one field cannot carry
+ * two.
  */
-export function isMachineryJobFailure(code: string): boolean {
-  return code === "runner-error" || code.endsWith(INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX)
+const ThrownJobFailureSchema = z.object({ thrown: z.literal(true), thrownKind: FailureKindSchema.optional() })
+
+/**
+ * A thrown Job failure's structural marker, or `undefined` when the failure was
+ * a VERDICT the step reached on purpose.
+ *
+ * A pre-24038 journal carries no marker at all, so the legacy code stays a
+ * reading of last resort: `runner-error` is minted by exactly one expression
+ * ({@link failed} on the throw path), which is what makes it safe to read as
+ * "thrown" for the rows written before the marker existed.
+ */
+export function thrownJobFailure(
+  error: Readonly<{ code: string; evidence?: DeepReadonly<JsonValue> }>,
+): Readonly<{ kind?: FailureKind }> | undefined {
+  const parsed = ThrownJobFailureSchema.safeParse(error.evidence)
+  if (parsed.success) return parsed.data.thrownKind === undefined ? {} : { kind: parsed.data.thrownKind }
+  return error.code === "runner-error" ? {} : undefined
+}
+
+/**
+ * A failed Job whose failure is about the MACHINERY this pass runs on, not
+ * about the revision it judged: the definition's callback threw, or the process
+ * was SIGKILLed before it produced a verdict. Neither says anything about the
+ * content; both say the host is in trouble.
+ *
+ * Reads the thrown MARKER, never the code: a typed throw now keeps its own code
+ * ({@link thrownJobFailure}), so a predicate keyed on `runner-error` would have
+ * quietly stopped recognising the very failures it was written for.
+ */
+export function isMachineryJobFailure(error: Readonly<{ code: string; evidence?: DeepReadonly<JsonValue> }>): boolean {
+  return thrownJobFailure(error) !== undefined || error.code.endsWith(INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX)
 }
 
 /**
@@ -243,7 +289,7 @@ export function isMachineryJobFailure(code: string): boolean {
  */
 function jobFailureLevel(result: Job): "warn" | "error" {
   if (result.status !== "completed" || result.conclusion !== "failure") return "warn"
-  return isMachineryJobFailure(result.error.code) ? "error" : "warn"
+  return isMachineryJobFailure(result.error) ? "error" : "warn"
 }
 
 function jobResultAttributes(definition: JobDef, result: Job, observed?: JobResult): Readonly<Record<string, unknown>> {
@@ -1691,7 +1737,7 @@ async function executeWithHeartbeat(
     result =
       settled.type === "result"
         ? settled.value
-        : failed("runner-error", settled.type === "error" ? settled.error : heartbeatError)
+        : failed("runner-error", settled.type === "error" ? settled.error : heartbeatError, "thrown")
   } finally {
     await scope[Symbol.asyncDispose]()
     await heartbeats
@@ -1707,11 +1753,29 @@ function settlement(id: string, attempt: number, runner: string, result: JobResu
   return { type: "finish", id, attempt, runner, result }
 }
 
-function failed(code: string, error: unknown): JobResult<never> {
+/**
+ * The terminal record for a Job the runner could not get a verdict out of.
+ *
+ * A THROWN failure that typed itself keeps its own code and message —
+ * `scratch-root-unavailable`, not `runner-error` — because the classification
+ * downstream is by code, and a code the thrower chose is the only one that
+ * carries what it knew. `fallback` is what an untyped throw still gets, so
+ * `throw new Error("boom")` records `runner-error` exactly as it always has.
+ * Either way the marker says a throw produced this, so no reader has to infer
+ * it from the code (@i/10-yrd/24038).
+ */
+function failed(fallback: string, error: unknown, thrown?: "thrown"): JobResult<never> {
+  const fact = thrown === undefined ? undefined : failureFact(error)
   return {
     status: "completed",
     conclusion: "failure",
-    error: { code, message: error instanceof Error ? error.message : String(error) },
+    error: {
+      code: fact?.code ?? fallback,
+      message: fact?.message ?? (error instanceof Error ? error.message : String(error)),
+      ...(thrown === undefined
+        ? {}
+        : { evidence: { thrown: true, ...(fact === undefined ? {} : { thrownKind: fact.kind }) } }),
+    },
   }
 }
 

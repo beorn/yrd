@@ -30,6 +30,7 @@ export {
   isConcurrentSettlementConflict,
   isMachineryJobFailure,
   isTerminalJobStatus,
+  thrownJobFailure,
   Job,
   JobStateConflict,
   JobTransitionSchema,
