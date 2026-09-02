@@ -18,7 +18,7 @@ describe("Yrd Hab runner declarations", () => {
     ])
     expect(hab.services).toMatchObject({
       "yrd-runner": {
-        command: "bun tools/yrd-runtime.mjs yrd queue run code",
+        command: "bun tools/yrd-runtime.mjs yrd queue up code",
         health: { command: "bun tools/yrd-runtime.mjs yrd queue code --check --json" },
       },
     })

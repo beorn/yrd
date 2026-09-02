@@ -122,7 +122,7 @@ describe("a check whose output says the filesystem ran out is an infrastructure 
     expect(message).toContain(PR3159_FAILING_PATH)
     expect(message).toContain("fatal: unable to write loose object file: Disk quota exceeded")
     expect(message).toContain(`free the filesystem backing ${PR3159_FAILING_PATH}`)
-    expect(message).toContain("`yrd queue run --once` (or the resident runner's next pass) re-admits this submission")
+    expect(message).toContain("`yrd queue run` (or the service's next queue run) takes this change again")
     expect(message).toContain("nothing about the submitted content is at fault")
     expect(message).toMatch(/full output: .*output\.log$/u)
   })

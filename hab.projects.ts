@@ -76,7 +76,9 @@ export default {
     yrdQueueRunnerDeclarations.map(({ serviceName, repository, owner }) => [
       serviceName,
       {
-        command: `bun tools/yrd-runtime.mjs yrd queue run ${repository.name}`,
+        // The service is `yrd queue up`: the same round `yrd queue run` does, on
+        // a loop (plan § Commands). `queue run` is one round and exits.
+        command: `bun tools/yrd-runtime.mjs yrd queue up ${repository.name}`,
         // The habitant stands down over this RSS (exit 12, memory-cap) instead of
         // waiting for the kernel; @cto ruling 2026-08-30 on
         // @i/10-yrd/runner-exits-and-respawns — one habitant per host. Raised

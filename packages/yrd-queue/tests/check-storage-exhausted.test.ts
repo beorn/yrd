@@ -148,7 +148,7 @@ describe("a check whose process ran out of storage reached no verdict on the cha
     // The cure, in the row itself: WHAT filled up, and the one command that re-runs the pass.
     expect(outcome.error.message).toContain(GIT_QUOTA_PATH)
     expect(outcome.error.message).toMatch(/free /u)
-    expect(outcome.error.message).toContain("yrd queue run --once")
+    expect(outcome.error.message).toContain("yrd queue run")
     expect(outcome.error.message).toContain("Disk quota exceeded")
     // A red the check never judged must not be certified as judged: that flag
     // is what settles a refusal needs-person on its first sighting.
@@ -165,7 +165,7 @@ describe("a check whose process ran out of storage reached no verdict on the cha
     })
     if (outcome.status !== "completed" || outcome.conclusion !== "failure") throw new Error("unreachable")
     expect(outcome.error.message).toContain(NODE_QUOTA_LINE)
-    expect(outcome.error.message).toContain("yrd queue run --once")
+    expect(outcome.error.message).toContain("yrd queue run")
   })
 
   it("still reads an ordinary red as the check's verdict (control)", async () => {
@@ -290,7 +290,7 @@ const environmentRefusal = (code: string): JobResult<CheckResult> => ({
   conclusion: "failure",
   error: {
     code,
-    message: `check ran out of storage and reached no verdict: ${GIT_QUOTA_LINE}. Cure: free the filesystem, then: yrd queue run --once`,
+    message: `check ran out of storage and reached no verdict: ${GIT_QUOTA_LINE}. Cure: free the filesystem, then: yrd queue run`,
   },
 })
 

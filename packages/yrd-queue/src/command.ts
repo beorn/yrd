@@ -817,11 +817,7 @@ function configuredCommand<Shape extends ChangeShape>(
         return failed(CHECK_GATE_REPORT_INVALID, `${options.purpose}: ${gateReports.error}`, evidence)
       }
       if (checkpointMigration.error !== undefined) {
-        return failed(
-          CHECK_CHECKPOINT_MIGRATION_INVALID,
-          `${options.purpose}: ${checkpointMigration.error}`,
-          evidence,
-        )
+        return failed(CHECK_CHECKPOINT_MIGRATION_INVALID, `${options.purpose}: ${checkpointMigration.error}`, evidence)
       }
       if (result.exitCode !== 0) {
         const action = waiting ? "launcher" : "command"
@@ -962,7 +958,7 @@ async function checkStorageExhaustion(
       (report === undefined ? "" : `; ${report.detail}`) +
       (kind === "quota" ? " (a spent per-user quota leaves the device's own totals looking healthy)" : "") +
       `. Cure: free the filesystem backing ${path ?? "the check's scratch"} (or point the repo's check scratch ` +
-      "elsewhere), then `yrd queue run --once` (or the resident runner's next pass) re-admits this submission — " +
+      "elsewhere), then `yrd queue run` (or the service's next queue run) takes this change again — " +
       "nothing about the submitted " +
       `content is at fault; full output: ${input.log}`,
     evidence: {
@@ -1006,7 +1002,7 @@ async function driverStorageExhaustion(
         `${purpose}: yrd could not write its own run artifacts under '${artifactRoot}' — the filesystem ran out ` +
         `of quota or space, not the submitted content — ${report.detail}; underlying error: ${messageOf(cause)}. ` +
         `Cure: free the filesystem backing '${artifactRoot}' (or point the repo's artifact root elsewhere), then ` +
-        "`yrd queue run --once` (or the resident runner's next pass) re-admits this submission — nothing about the " +
+        "`yrd queue run` (or the service's next queue run) takes this change again — nothing about the " +
         "submitted content is at fault",
       ...(report.evidence === undefined ? {} : { evidence: report.evidence }),
     },

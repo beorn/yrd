@@ -22,7 +22,7 @@
  * - everything else — infra/env disposition, a check TIMEOUT (yrd broken until
  *   the owner proves otherwise), an admission classified `infrastructure`, an
  *   unregistered code, a pass-ending ERROR row — → the queue owner: "yrd
- *   broken" — the code, the log path, the `queue run --once` command.
+ *   broken" — the code, the log path, the `queue run` command.
  * - a submitter nobody recorded routes to the owner too, and the body says so.
  *
  * Layering: yrd stays tribe-free. The notifier is a command named by
@@ -90,7 +90,7 @@ export type OutcomeDisposition =
    */
   | "queue-wedged"
 
-/** The three-way result a `queue run --once` process exits with: pass, fail, stuck. */
+/** The three-way result a `queue run` process exits with: pass, fail, stuck. */
 export const QUEUE_OUTCOME_EXIT = Object.freeze({
   /** Every attempt landed, or nothing to do. */
   next: 0,
@@ -268,7 +268,7 @@ export function routeOutcome(outcome: QueueOutcome, options: OutcomeRoutingOptio
           : ""),
     }
   }
-  const command = "yrd queue run --once"
+  const command = "yrd queue run"
   const timeoutNote =
     classified.disposition === "timeout"
       ? " A check TIMEOUT routes here: yrd is broken until the owner proves otherwise."
@@ -292,7 +292,7 @@ export function passErrorNotification(
   options: Readonly<{ owner: string; logPath: string; attemptId: string }>,
 ): OutcomeNotification {
   const owner = options.owner.trim() === "" ? DEFAULT_QUEUE_OWNER : options.owner.trim()
-  const command = "yrd queue run --once"
+  const command = "yrd queue run"
   return {
     kind: "yrd-broken",
     attempt_id: options.attemptId,
