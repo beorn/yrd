@@ -207,6 +207,10 @@ const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = new Set([
   // so the census resolves them without the author default.
   "notify-failed",
   "notify-unconfigured",
+  // The queue run log's own codes, same shape and same reason: the log failing
+  // to write is the queue's fault and never a verdict on anyone's change.
+  "queue-run-log-failed",
+  "queue-run-log-short",
 ])
 
 /**

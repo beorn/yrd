@@ -12547,6 +12547,12 @@ export const YRD_REFUSAL_CODES = [
   // a queue run is still live on the member's base; the next pass admits it
   // once that run settles.
   "queue-run-active",
+  // The queue run log's own two codes (run.ts / queue-run-log.ts). Never a
+  // persisted Run/Job failure — they are WARN props on a log line — and
+  // registered for the same reason `notify-failed` is: an unregistered code
+  // takes whatever default its reader has, and the default bills the author.
+  "queue-run-log-failed",
+  "queue-run-log-short",
   // The receiver-inbox census finding (receiver-inbox-audit.ts): a push git
   // ACCEPTED whose durable inbox result has not reached intake past its grace
   // window. Registered for the same reason as every other audit finding code

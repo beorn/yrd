@@ -175,6 +175,7 @@ import {
   strandedFloorCount,
   strandedObservation,
   type QueueStatusResult,
+  ENVIRONMENT_OWNED_FAILURE_CODES,
 } from "@yrd/queue"
 import {
   QueueLogView,
@@ -304,7 +305,15 @@ import {
   resolveSubmitterSeat,
   UNKNOWN_SUBMITTER,
   YRD_DEFAULT_SUBMITTER_ENV,
+  type QueuePassMessage,
 } from "./outcome-notify.ts"
+import type { ConditionalLogger } from "loggily"
+import {
+  createQueueRunLog,
+  queueRunLogDirectory,
+  queueRunLogRecords,
+  type QueueRunSourceCheck,
+} from "./queue-run-log.ts"
 
 /** How many outcome-ledger rows `queue list` prints beneath the timeline. */
 const QUEUE_LIST_NOTIFICATION_ROWS = 20
@@ -14401,6 +14410,12 @@ function buildProgram(
       const outcomes = installedServices().outcomes
       outcomes?.setOwner(typeof options.owner === "string" ? options.owner : undefined)
       outcomes?.beginPass()
+      // The pass window. Admission refusals and jobs are DURABLE rows that
+      // outlive one queue run, so the log filters them by this instant: a row
+      // last written before this queue run started belongs to an earlier one,
+      // and reporting it again would make every queue run look like it redid
+      // the last one's work.
+      const passStartedAt = new Date().toISOString()
       const runs = draining() ? [] : await runQueues(app, selectors, options, io)
       const selectedChangeIds =
         selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
@@ -14430,6 +14445,22 @@ function buildProgram(
         },
         human,
       )
+      // The queue run's log: one JSONL file per queue run, six kinds, written
+      // HERE because this is the one place that holds all six facts at once —
+      // the step selection the runs resolved (pin and check-config blob), the
+      // changes taken and held, every check's timing and log, each run's result
+      // and merge, and what the notifier told whom. Nothing above this line is
+      // changed by it, and an unset YRD_QUEUE_RUN_LOG writes nothing at all.
+      writeQueueRunLog({
+        env: bootstrap?.env ?? process.env,
+        cwd: io.cwd ?? process.cwd(),
+        app,
+        since: passStartedAt,
+        runs,
+        blocked,
+        messages: outcomes?.passMessages() ?? [],
+        log: app.log,
+      })
       const publicationFailed = publications.some((job) => job.status !== "completed" || job.conclusion !== "success")
       // The three-way verdict (@i/10-yrd/24028): computed from the outcomes
       // this pass handed to the notifier seam, on the registry's disposition,
@@ -15091,4 +15122,135 @@ export function runYrd(
   services: YrdCliServices = {},
 ): Promise<YrdCliExitCode> {
   return executeYrd(app, argv, io, services)
+}
+
+/**
+ * Write one queue run's JSONL log — the wiring, and the only caller of
+ * {@link createQueueRunLog}.
+ *
+ * It lives here, beside the queue run's own action, because this is the one
+ * scope that holds all six facts at once: the step selection the runs resolved,
+ * the changes taken and the changes held, every check's timing and artifact,
+ * each run's result and merge commit, and what the notifier told whom. Reading
+ * any of those from anywhere else would mean deriving a fact the queue run has
+ * already decided, and a log that disagrees with the run it describes is worse
+ * than no log.
+ *
+ * Never throws. A queue run's verdict is not the log's to change, and the
+ * writer reports its own failures through `log` (NO SILENT ERRORS).
+ */
+function writeQueueRunLog(
+  input: Readonly<{
+    env: NodeJS.ProcessEnv
+    cwd: string
+    app: YrdCliApp
+    /** The instant this queue run started; durable rows older than it belong to
+     * an earlier queue run and are not this one's to report. */
+    since: string
+    runs: readonly Run[]
+    blocked: readonly Readonly<{ pr: Change; eligibility: ChangeEligibility }>[]
+    messages: readonly QueuePassMessage[]
+    log: ConditionalLogger
+  }>,
+): void {
+  const directory = queueRunLogDirectory(input.env)
+  if (directory === undefined) return
+  const state = stateOf(input.app)
+  const changes = state.bays.prs
+  const refusals = Object.values(state.queues.admissionRefusals)
+    .filter((refusal) => refusal.lastAt >= input.since)
+    .map((refusal) => ({
+      pr: refusal.pr,
+      ...(changes[refusal.pr]?.branch === undefined ? {} : { branch: changes[refusal.pr]?.branch }),
+      ...(refusal.headSha === undefined ? {} : { headSha: refusal.headSha }),
+      code: refusal.code,
+      ...(refusal.kind === undefined ? {} : { kind: refusal.kind }),
+      reason: refusal.reason,
+      lastAt: refusal.lastAt,
+    }))
+  const checks = Object.values(state.jobs.byId)
+    .filter((job) => job.status === "completed" && "startedAt" in job && job.startedAt >= input.since)
+    .map((job) => queueRunLogCheck(job, changes))
+  const target =
+    input.runs[0]?.base ?? input.blocked[0]?.pr.base ?? Object.values(changes)[0]?.base ?? "main"
+  const pin = queueRecordedYrdPin(input.cwd)
+  const records = queueRunLogRecords(
+    {
+      target,
+      ...("pinSha" in pin ? { pin: pin.pinSha } : {}),
+      runs: input.runs,
+      blocked: input.blocked,
+      messages: input.messages,
+      refusals,
+      checks,
+    },
+    // The ONE definition of who owns a code, handed in rather than copied: the
+    // log's `result` must agree with the queue's own billing or one of them is
+    // lying and a reader cannot tell which.
+    (code) => ENVIRONMENT_OWNED_FAILURE_CODES.has(code),
+  )
+  const stream = createQueueRunLog({
+    directory,
+    run: queueRunLogId(input.runs, refusals.length > 0 || checks.length > 0),
+    onFailure: (message, props) => input.log.warn?.(message, props),
+  })
+  for (const record of records) stream.write(record)
+  const dropped = stream.dropped()
+  if (dropped !== undefined) {
+    input.log.warn?.(
+      `the queue run's log at '${stream.path}' is short by ${String(dropped.count)} of ` +
+        `${String(records.length)} records: ${dropped.reason}`,
+      { action: "queue-run-log-short", code: "queue-run-log-short", path: stream.path, dropped: dropped.count },
+    )
+  }
+}
+
+/**
+ * The queue run's own id, and so its file's name.
+ *
+ * The first run's id when this queue run drove one, because that is the name
+ * every other instrument already prints for the work; otherwise the clock and
+ * the pid, which is the only identity an idle queue run has. Deliberately not a
+ * fresh uuid per queue run when a run id exists: a reader holding a run id must
+ * be able to find its log without a lookup table.
+ */
+function queueRunLogId(runs: readonly Run[], worked: boolean): string {
+  if (runs[0]?.id !== undefined) return runs[0].id
+  // `idle` is a CLAIM, and it was wrong for every fail and every stuck: those
+  // queue runs did a full check and refused a change without ever building a
+  // run, so a file called `idle-…` named the one thing the queue run was not
+  // (measured 2026-09-02).
+  return `${worked ? "run" : "idle"}-${String(Date.now())}-${String(globalThis.process.pid)}`
+}
+
+/**
+ * One completed job as a `check` record: its start, its end, its duration and
+ * the file holding its output (plan § Log).
+ *
+ * Reads the job rather than the run, because most checks never belong to a run
+ * — the on-submit checks run at admission, and a change that fails one never
+ * becomes a run at all. `queue.step.<name>` is the definition every queue check
+ * carries; the step's own name is what a reader knows it by.
+ */
+function queueRunLogCheck(
+  job: DeepReadonly<Job>,
+  changes: Readonly<Record<string, DeepReadonly<Change>>>,
+): QueueRunSourceCheck {
+  const input = job.input as Readonly<{ step?: unknown; prs?: readonly Readonly<{ id?: unknown }>[] }> | undefined
+  const first = Array.isArray(input?.prs) ? input.prs[0] : undefined
+  const change = typeof first?.id === "string" ? changes[first.id] : undefined
+  const output = job.status === "completed" && "output" in job ? job.output : undefined
+  const evidence = output as Readonly<{ exitCode?: unknown; durationMs?: unknown }> | undefined
+  const artifacts = (job as Readonly<{ artifacts?: readonly Readonly<{ name?: unknown; path?: unknown }>[] }>).artifacts
+  const stdout = Array.isArray(artifacts) ? artifacts.find((artifact) => artifact.name === "stdout") : undefined
+  return {
+    ...(change?.branch === undefined ? {} : { branch: change.branch }),
+    ...(change === undefined ? {} : { head: changeHead(change) }),
+    ...(typeof input?.step === "string" ? { name: input.step } : {}),
+    ...("startedAt" in job && typeof job.startedAt === "string" ? { startedAt: job.startedAt } : {}),
+    ...("finishedAt" in job && typeof job.finishedAt === "string" ? { finishedAt: job.finishedAt } : {}),
+    ...(typeof evidence?.durationMs === "number" ? { durationMs: evidence.durationMs } : {}),
+    ...(typeof evidence?.exitCode === "number" ? { exit: evidence.exitCode } : {}),
+    ...(typeof stdout?.path === "string" ? { log: stdout.path } : {}),
+  }
 }

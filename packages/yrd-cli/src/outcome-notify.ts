@@ -369,6 +369,17 @@ export function outcomeExitCode(kinds: readonly OutcomeNotification["kind"][]): 
   return QUEUE_OUTCOME_EXIT.next
 }
 
+/** One message this pass sent: who heard it, and what it said. The ball id is
+ * added when the notifier opened one; absent means the outcome was journaled
+ * with nobody holding it, which the WARN above already says out loud. */
+export type QueuePassMessage = Readonly<{
+  attempt: string
+  kind: OutcomeNotification["kind"]
+  recipient: string
+  disposition: OutcomeDisposition
+  ball?: string
+}>
+
 export type NotifierRun = (
   command: string,
   input: string,
@@ -463,6 +474,8 @@ export type OutcomeNotifier = Readonly<{
   beginPass(): void
   /** The three-way result for the outcomes THIS pass produced (2 > 1 > 0). */
   exitCode(): QueueOutcomeExit
+  /** What THIS pass told whom, in order — the queue run log's `message` records. */
+  passMessages(): readonly QueuePassMessage[]
   ledger: OutcomeLedger
 }>
 
@@ -471,6 +484,11 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
   let owner = options.owner?.trim() === "" || options.owner === undefined ? DEFAULT_QUEUE_OWNER : options.owner.trim()
   let warnedUnconfigured = false
   const passKinds: OutcomeNotification["kind"][] = []
+  /** What this pass told whom, in order — the `message` records of the queue
+   * run's log (@i/10-yrd/plan.md § Log). Collected HERE because this is the one
+   * place a message is sent, so the log can never name a recipient the notifier
+   * did not write to. Reset by `beginPass` with the kinds. */
+  const passMessages: QueuePassMessage[] = []
   const command = options.notifyCommand?.trim()
 
   /** Journal the row on the attempt, then read it back: the projection is the
@@ -579,6 +597,12 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
       return existing
     }
     passKinds.push(notification.kind)
+    passMessages.push({
+      attempt: notification.attempt_id,
+      kind: notification.kind,
+      recipient: notification.recipient,
+      disposition: notification.disposition,
+    })
     if (command === undefined || command === "") {
       if (!warnedUnconfigured) {
         warnedUnconfigured = true
@@ -632,6 +656,10 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
       disposition: notification.disposition,
       ball,
     })
+    // The ball is known only now, so the message row this pass already recorded
+    // is completed here rather than re-pushed: one message sent is one row.
+    const pending = passMessages.findIndex((message) => message.attempt === notification.attempt_id)
+    if (pending >= 0) passMessages[pending] = { ...passMessages[pending]!, ball }
     options.log.info?.(
       `opened ball ${ball} for attempt '${notification.attempt_id}': ${notification.kind} → ${notification.recipient}`,
       {
@@ -659,8 +687,10 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
     beginPass: () => {
       warnedUnconfigured = false
       passKinds.length = 0
+      passMessages.length = 0
     },
     exitCode: () => outcomeExitCode(passKinds),
+    passMessages: () => [...passMessages],
     ledger,
   })
 }
