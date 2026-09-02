@@ -3368,7 +3368,23 @@ type HabitantRunnerSeed = Readonly<{
   pane?: string
 }>
 
-type HabitantRunnerIdentity = HabitantRunnerSeed & Readonly<{ queueId: string }>
+/**
+ * Which kind of pass is driving admission for this queue. BOTH kinds take the
+ * one runner lease for the whole of their pass — that is the entire mechanism
+ * that keeps them off each other. Only a `resident` additionally publishes a
+ * heartbeat, sweeps, and follows; a `once` pass drains and exits.
+ *
+ * Measured 2026-09-01, 15:11 PDT: two `yrd queue run code --once` processes ran
+ * at once against one repository. Only the resident took the lease, so a
+ * one-shot refused beside a resident and NOTHING refused beside another
+ * one-shot; the second pass cancelled the first's run ("entry checks no longer
+ * belong to a live change revision") and the first exited 3 on PR2916.
+ */
+type QueueRunnerLeaseMode = "resident" | "once"
+
+type QueueRunnerSeed = HabitantRunnerSeed & Readonly<{ leaseMode: QueueRunnerLeaseMode }>
+
+type HabitantRunnerIdentity = QueueRunnerSeed & Readonly<{ queueId: string }>
 
 type HabitantRunnerLease = Readonly<{ close(): Promise<void> }>
 
@@ -3394,15 +3410,29 @@ function habitantRunnerLog(log: ConditionalLogger, identity: HabitantRunnerSeed,
   })
 }
 
-function habitantRunnerLockOwnerPid(stateDir: string): number | undefined {
+/** The three identity fields the lock body carries about whoever holds it:
+ * `pid` and `startedAt` are written by git-super's `acquireExclusive`, and the
+ * mode rides in the `holder` string this file composes. One reader, so a
+ * refusal cannot name a pid from one read and a mode from another. */
+type QueueRunnerLockOwner = Readonly<{ pid?: number; startedAt?: string; holder?: string }>
+
+function queueRunnerLockOwner(stateDir: string): QueueRunnerLockOwner {
   try {
     const value = JSON.parse(readFileSync(join(stateDir, "resident-runner", "writer.lock"), "utf8")) as {
       pid?: unknown
+      startedAt?: unknown
+      holder?: unknown
     }
-    return typeof value.pid === "number" && Number.isSafeInteger(value.pid) && value.pid > 0 ? value.pid : undefined
+    return {
+      ...(typeof value.pid === "number" && Number.isSafeInteger(value.pid) && value.pid > 0 ? { pid: value.pid } : {}),
+      ...(typeof value.startedAt === "string" && value.startedAt !== "" ? { startedAt: value.startedAt } : {}),
+      ...(typeof value.holder === "string" && value.holder.trim() !== "" ? { holder: value.holder } : {}),
+    }
   } catch {
     // silent-fallback-allow: unreadable advisory owner metadata means the lock owner is unknown.
-    return undefined
+    // This only ENRICHES a refusal that is already being raised from the lock's own
+    // answer — it never decides ownership, and an empty read costs detail, not safety.
+    return {}
   }
 }
 
@@ -3458,7 +3488,30 @@ function assertHabitantSupportsJournalVersion(stateDir: string, target: number):
   }
 }
 
-async function acquireHabitantRunner(
+/** The lease body's holder line. `mode` is the field that makes one-shot-beside-
+ * one-shot expressible at all: pid and start time already ride in the lock body,
+ * but nothing said WHAT was holding it, so the two kinds of pass could not name
+ * each other. Appended after `epoch` so every existing reader of the
+ * `queue=… epoch=…` prefix keeps parsing. */
+function queueRunnerLeaseHolder(identity: HabitantRunnerIdentity): string {
+  return `queue=${identity.queueId} epoch=${identity.epoch} mode=${identity.leaseMode}`
+}
+
+/**
+ * Take the ONE admission lease for this queue, for the whole of this pass.
+ *
+ * Every driver takes it — a resident follow-runner and a one-shot `queue run`
+ * alike — because they contend for exactly the same git state, and a lease only
+ * one of them takes cannot keep two of the other off each other. The refusal
+ * names the holder's mode, pid and start time, so an operator learns which kind
+ * of pass is in the way without reading a status file.
+ *
+ * Nothing here proves liveness: the lock is a real `flock(2)` (git-super ->
+ * @bearly/flock), so the kernel releases it when its holder dies and a stale
+ * lease cannot exist. The dead-pid retry below is not a liveness heuristic —
+ * it only absorbs the beat between a hard death and the kernel's release.
+ */
+async function acquireQueueRunnerLease(
   stateDir: string,
   identity: HabitantRunnerIdentity,
   log: ConditionalLogger,
@@ -3477,24 +3530,31 @@ async function acquireHabitantRunner(
         acquired.resolve()
         await released.promise
       },
-      { holder: `queue=${identity.queueId} epoch=${identity.epoch}` },
+      { holder: queueRunnerLeaseHolder(identity) },
     )
     try {
       await Promise.race([acquired.promise, held])
-      runnerLog.debug?.("Habitant runner lease acquired", { runner: identity.id, stateDir })
+      runnerLog.debug?.("Queue runner lease acquired", { runner: identity.id, mode: identity.leaseMode, stateDir })
       let closePromise: Promise<void> | undefined
       return Object.freeze({
+        // Release is a `finally` inside `createExclusive`, so `await held`
+        // rethrows anything the release threw: a lease that fails to come off
+        // reaches the caller as a failure, never a swallowed one.
         close: () =>
           (closePromise ??= (async () => {
             released.resolve()
             await held
-            runnerLog.debug?.("Habitant runner lease released", { runner: identity.id, stateDir })
+            runnerLog.debug?.("Queue runner lease released", {
+              runner: identity.id,
+              mode: identity.leaseMode,
+              stateDir,
+            })
           })()),
       })
     } catch (error) {
       lastError = error
       if (failureFact(error)?.code !== "exclusive-busy") throw error
-      const ownerPid = habitantRunnerLockOwnerPid(stateDir)
+      const ownerPid = queueRunnerLockOwner(stateDir).pid
       const ownerDead = ownerPid !== undefined && !processAlive(ownerPid)
       if (!ownerDead || attempt === attempts - 1) break
       // info, not warn: a dead owner pid is a confirmed-safe reclaim, and this
@@ -3512,18 +3572,59 @@ async function acquireHabitantRunner(
   const error = lastError
   if (failureFact(error)?.code === "exclusive-busy") {
     const detail = error instanceof Error ? error.message.replace(/^yrd:\s*/u, "") : String(error)
-    const ownerPid = habitantRunnerLockOwnerPid(stateDir)
+    const owner = queueRunnerLockOwner(stateDir)
+    const ownerPid = owner.pid
     const deadHint =
       ownerPid !== undefined && !processAlive(ownerPid)
         ? ` Owner pid ${ownerPid} is dead — if re-arm keeps failing, inspect \`lsof ${join(stateDir, "resident-runner", "writer.lock")}\` for a live holder.`
         : ""
+    // The three identity fields of whoever is in the way, printed together and
+    // in the same order for every combination of holder and contender: a
+    // refusal read at 2am must answer "what is holding it, since when, and as
+    // what" without a second command.
+    const holderFacts = [
+      `mode=${queueRunnerHolderMode(owner.holder) ?? "unknown"}`,
+      `pid=${ownerPid ?? "unknown"}`,
+      `started=${owner.startedAt ?? "unknown"}`,
+    ].join(" ")
     raiseFailure(
       "refusal",
       "resident-runner-active",
-      `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run' before starting another.${deadHint}`,
+      `yrd: resident-runner-active: ${detail}. Holder: ${holderFacts}. ` +
+        `${queueRunnerContentionCure(queueRunnerHolderMode(owner.holder), identity.leaseMode, ownerPid)}${deadHint}`,
     )
   }
   throw error
+}
+
+/** The holder's mode as the lock body records it, or undefined when the body is
+ * unreadable or was written by a Yrd that did not record one. Undefined is a
+ * real answer and prints as `unknown` — never guessed into "resident". */
+function queueRunnerHolderMode(holder: string | undefined): QueueRunnerLeaseMode | undefined {
+  const mode = holder === undefined ? undefined : /\bmode=(resident|once)\b/u.exec(holder)?.[1]
+  return mode === "resident" || mode === "once" ? mode : undefined
+}
+
+/** What to actually DO, chosen by who holds the lease — not by who is refused.
+ * A resident holder is a service to submit work to; a one-shot holder is a pass
+ * that ends on its own, and telling an operator to "stop the runner" there
+ * sends them hunting for a service that does not exist. */
+function queueRunnerContentionCure(
+  holder: QueueRunnerLeaseMode | undefined,
+  contender: QueueRunnerLeaseMode,
+  ownerPid: number | undefined,
+): string {
+  if (holder === "once") {
+    const who = ownerPid === undefined ? "that one-shot pass" : `that one-shot pass (pid ${ownerPid})`
+    return `Wait for ${who} to finish, or stop it, before starting another 'yrd queue run'.`
+  }
+  if (holder === "resident" && contender === "once") {
+    return (
+      "A one-shot 'yrd queue run' cannot run beside the resident runner. Submit with 'yrd pr submit <branch>' and " +
+      "let the resident runner drain it; if the resident is dead, 'hab --hab-dir <root> restart yrd-runner'."
+    )
+  }
+  return "Stop the active 'yrd queue run' before starting another."
 }
 
 async function closeRuntime(
@@ -3892,7 +3993,9 @@ async function createViewerReceiver(repository: YrdRepository, process: Process)
 
 async function createYrdRuntimeHost(
   options: YrdRuntimeHostOptions,
-  habitantSeed: HabitantRunnerSeed | undefined,
+  /** Every queue-run driver, resident or one-shot; undefined for every other
+   * command, which takes no admission lease at all. */
+  runnerSeed: QueueRunnerSeed | undefined,
   mode: "active" | "viewer",
 ): Promise<YrdHost & Readonly<{ habitant?: HabitantRunnerIdentity }>> {
   const scope = createScope("yrd-host")
@@ -3919,23 +4022,30 @@ async function createYrdRuntimeHost(
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
-    const habitant =
-      habitantSeed === undefined
+    const runner =
+      runnerSeed === undefined
         ? undefined
         : Object.freeze({
-            ...habitantSeed,
+            ...runnerSeed,
             // The canonical id and the historical `resolve(repo)#base` agree
             // for a habitant started in the main worktree — which every
             // production habitant is — so recorded heartbeats stay comparable.
             queueId: canonicalQueueId(repository.repo, baseIdentity(loaded.config.base)),
           })
-    if (habitant !== undefined) {
-      habitantLease = await acquireHabitantRunner(
+    // BOTH modes take it, and before anything else this host does: the lease is
+    // what keeps two admission drivers apart, so it is taken before the receiver
+    // is opened, before the queue is read, and before any compose or step work.
+    if (runner !== undefined) {
+      habitantLease = await acquireQueueRunnerLease(
         repository.stateDir,
-        habitant,
-        habitantRunnerLog(log, habitant, habitant.queueId),
+        runner,
+        habitantRunnerLog(log, runner, runner.queueId),
       )
     }
+    // A one-shot holds the lease but is not a SERVICE: no heartbeat, no driver
+    // epoch, no retention attestation. Everything downstream that means "the
+    // resident runner" keeps reading undefined for a one-shot pass.
+    const habitant = runner?.leaseMode === "resident" ? runner : undefined
     using _setupSpan = log.span?.("setup", { phase: "pre-worktree", repo: repository.repo })
     const discoveredImplementationSource = sourceRepositoryFor(import.meta.url)
     const receiver =
@@ -4478,9 +4588,14 @@ async function runYrdProcessHost(
           }
         : {}),
       async load(context, posture) {
-        const runner =
-          posture === "habitant-queue-run" || posture === "one-shot-queue-run" ? habitantRunnerSeed(env) : undefined
-        const habitantSeed = posture === "habitant-queue-run" ? runner : undefined
+        // One seed for both queue-run postures, carrying which kind of pass it
+        // is. The lease is taken for either; only `habitant-queue-run` goes on
+        // to be a resident (heartbeat, follow loop, drain signal).
+        const runner: QueueRunnerSeed | undefined =
+          posture === "habitant-queue-run" || posture === "one-shot-queue-run"
+            ? { ...habitantRunnerSeed(env), leaseMode: posture === "habitant-queue-run" ? "resident" : "once" }
+            : undefined
+        const habitantSeed = runner?.leaseMode === "resident" ? runner : undefined
         // The habitant follow-runner logs at DEBUG-by-default (see
         // habitantObservability) so run/step starts and successful completions
         // reach its concise human formatter; one-shot commands keep WARN.
@@ -4527,7 +4642,7 @@ async function runYrdProcessHost(
               ? {}
               : { testPathHolderCensus: options.testPathHolderCensus }),
           },
-          habitantSeed,
+          runner,
           posture === "viewer" ? "viewer" : "active",
         )
         const habitant = activeHost.habitant

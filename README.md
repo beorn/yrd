@@ -1190,10 +1190,13 @@ both the same under `restart=on-failure`.) A runner killed by an uncatchable sig
 is covered separately: it leaves its heartbeat behind, and its successor reclaims
 the leases (see below).
 
-A resident acquires one OS-held lease in the repository's common Yrd state
-before receiver intake or required-check execution. A second resident exits with the
-typed `resident-runner-active` refusal and identifies the active
-`yrd-cli:<pid>` runner. Job events retain that runner id; trace logs add
+Every `queue run` — a resident follow-runner and a one-shot pass alike — acquires
+one OS-held lease in the repository's common Yrd state before receiver intake or
+required-check execution, and holds it for the whole of that pass. A second
+driver of either kind exits with the typed `resident-runner-active` refusal,
+which names the holder's mode (`resident` or `once`), pid and start time, and the
+cure that fits it: submit and let a resident drain it, or wait for a one-shot to
+finish. Job events retain the `yrd-cli:<pid>` runner id; trace logs add
 host and, where a terminal multiplexer exposes it, pane provenance. Normal exit and graceful
 shutdown release the lease, while the OS releases it if the owner dies.
 

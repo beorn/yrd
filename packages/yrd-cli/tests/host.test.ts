@@ -5403,9 +5403,13 @@ checks: [{check: {run: "true"}}]
         Bun.sleep(2_000).then(() => ({ exitCode: "still-running" as const })),
       ])
       expect(outcome).toEqual({ exitCode: 1 })
+      // `mode=resident` is part of the holder line: a one-shot pass takes the
+      // same lease, so the holder must say which kind of pass it is
+      // (queue-runner-lease.test.ts owns the rest of that matrix).
       expect(await second.stderr).toMatch(
         new RegExp(
-          `resident-runner-active: writer lock is busy \\(holder=queue=.*#main epoch=[0-9a-f-]{36}; owner=pid:${first.child.pid}; contender=pid:${second.child.pid}`,
+          `resident-runner-active: writer lock is busy \\(holder=queue=.*#main epoch=[0-9a-f-]{36} mode=resident; ` +
+            `owner=pid:${first.child.pid}; contender=pid:${second.child.pid}`,
           "u",
         ),
       )
