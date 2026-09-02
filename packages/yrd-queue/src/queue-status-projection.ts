@@ -113,6 +113,21 @@ export function queueDisplayState(
   // filtering `nativeStatus` integrated/already-landed/withdrawn, ~:3862).
   // Callers that DO have a word for a closed record read `delivery`.
   if (pr.state === "closed") return { kind, terminal: true, native, delivery: native, preRun: undefined }
+  // An OPEN record whose current revision already landed. The record is the
+  // slower of the two facts: `pr/integrated` is applied in a SEPARATE write from
+  // the run's own settle, so a process death between them leaves a merged change
+  // reading `submitted` with `checks: queued` forever — PR3216 rev 1 merged in
+  // run #3766 at 06:36 on 2026-09-02 and was still printing
+  // `○ ready … (change 'PR3216' checks are queued)` two hours later, because the
+  // resident restarted at 06:39 in that window. The run record carries the merge
+  // proof (`stampRunIntegration`), so the landing is derivable without the
+  // record's stamp — and a derivation that reads the run can never show a landed
+  // change as ready, whatever the store lost. `queue recover` converges the store
+  // behind this (`recoverableIntegrationStamps`); this is the L4 guard that makes
+  // the untruthful row impossible in the first place.
+  if (landedRunForCurrentRevision(pr, options.runs ?? []) !== undefined) {
+    return { kind, terminal: true, native, delivery: "integrated", preRun: undefined }
+  }
   const delivery = options.eligibility?.reason?.code === "needs-author" ? "needs-author" : native
   return {
     kind,
@@ -121,6 +136,32 @@ export function queueDisplayState(
     delivery,
     preRun: preRunBand(pr, native, options.runs ?? [], options.eligibility),
   }
+}
+
+/**
+ * The completed, succeeded run that MERGED this change's current revision, or
+ * `undefined` when no run proves it landed.
+ *
+ * The ONE predicate for "this open record is really integrated", shared by the
+ * display projection above and by `queue recover`'s re-stamping pass, so the
+ * surface a human reads and the pass that repairs the store can never disagree
+ * about which records are stale (docs/lessons/no-parallel-derivation.md).
+ *
+ * Three conjuncts, all required: the run reached `completed`/`success`, it
+ * carries an integration proof (a run can succeed with nothing to merge), and
+ * the change's CURRENT revision — not an older one — was one of its members. A
+ * superseded revision that landed says nothing about the revision now open.
+ */
+export function landedRunForCurrentRevision(pr: Change, runs: readonly Run[]): Run | undefined {
+  const revision = currentChangeRev(pr)
+  const key = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
+  return runs.find(
+    (run) =>
+      run.status === "completed" &&
+      run.conclusion === "success" &&
+      run.integration !== undefined &&
+      run.prs.some((member) => queueRevisionKey(member) === key),
+  )
 }
 
 /**
