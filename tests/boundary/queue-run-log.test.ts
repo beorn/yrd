@@ -327,6 +327,43 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     }
   })
 
+  /**
+   * The M2 row's own measure: "git chatter at trace; a real log under 200
+   * lines". Read at DEBUG, because that is the level a mechanic runs a garage
+   * queue run at.
+   *
+   * Measured before the change, on this exact case: 537 rows, 405 of them the
+   * git command wrapper's finish line and span, two per invocation across ~200
+   * git calls. The bound below is the plan's number, and the git assertion is
+   * why the number holds — a bound alone would pass again the moment something
+   * else grew to fill the space.
+   */
+  it("reads as the queue's own decisions at debug, not a git transcript", async () => {
+    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    await submitOneCommit(repo, "green")
+
+    process.env.LOG_LEVEL = "debug"
+    let run: QueueRunResult
+    try {
+      run = await queueRunOnce(repo)
+    } finally {
+      delete process.env.LOG_LEVEL
+    }
+
+    expect(run.exitCode, run.report).toBe(0)
+    // A log ROW starts with a timestamp; the rest of a line is one row's
+    // payload, so counting physical lines counts JSON, not log lines.
+    const rows = run.stderr.split("\n").filter((row) => /^\d\d:\d\d:\d\d /u.test(row))
+    // A positive control: a debug log that says nothing at all would satisfy
+    // every bound below and tell a reader nothing.
+    expect(rows.length, run.report).toBeGreaterThan(20)
+    expect(rows.length, run.report).toBeLessThan(200)
+
+    // No git invocation and no git span, at any level above trace.
+    const chatter = rows.filter((row) => / git | git$|"argv":\["git"/u.test(row))
+    expect(chatter, `git chatter at debug:\n${chatter.slice(0, 5).join("\n")}`).toEqual([])
+  })
+
   describe("a queue run with nothing submitted", () => {
     /** Nothing happened, so the log says only that the queue run looked. */
     it("writes exactly the run line", async () => {

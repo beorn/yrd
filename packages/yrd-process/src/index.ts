@@ -166,6 +166,21 @@ export type ProcessResult = ProcessResultBase &
  * thousand otherwise-identical process rows can see WHICH command each one is
  * about without parsing JSON. Bounded here and only here — the payload keeps
  * every word. */
+/**
+ * Whether this command is git — the plumbing whose transcript belongs at TRACE.
+ *
+ * Read off argv[0]'s own name, so an absolute path to a git binary counts and a
+ * check script that merely mentions git does not. Deliberately not a substring
+ * match: `git-super` and a repository's own `bin/git-yrd` are OUR commands, and
+ * a reader at debug should see them run.
+ */
+export function isGitInvocation(argv: readonly string[]): boolean {
+  const executable = argv[0]
+  if (executable === undefined) return false
+  const name = executable.slice(executable.lastIndexOf("/") + 1)
+  return name === "git"
+}
+
 function commandText(argv: readonly string[]): string {
   const text = argv.map((word) => (word === "" || /[\s"'`$\\]/u.test(word) ? JSON.stringify(word) : word)).join(" ")
   return text.length <= 160 ? text : `${text.slice(0, 159)}…`
@@ -448,7 +463,18 @@ export function createProcess(
       let cancelReap: (() => void) | undefined
       let cancelDrainGrace: (() => void) | undefined
       let untrackGroup: (() => void) | undefined
-      using span = log.span?.("run", { argv, cwd: request.cwd ?? cwd })
+      // GIT CHATTER LIVES AT TRACE (plan of record, M2). One queue run spawns
+      // ~200 git commands, and at DEBUG each one printed a finish line AND a
+      // span row: 405 of a merging queue run's 537 rows were git transcript,
+      // and the six kinds a reader actually wants were 2% of the file
+      // (measured 2026-09-02). Both rows are decided HERE, in the one wrapper
+      // every command goes through, because a per-call-site rule would be
+      // wrong the moment someone adds a call site.
+      //
+      // `log.trace` is the level probe: loggily leaves a level's method
+      // undefined when that level is off, so its presence IS "trace is on".
+      const chatter = isGitInvocation(argv)
+      using span = chatter && log.trace === undefined ? undefined : log.span?.("run", { argv, cwd: request.cwd ?? cwd })
       try {
         const interactive = request.interactive === true
         const child = spawn(
@@ -699,7 +725,10 @@ export function createProcess(
           ...(escapedDescendant ? { escapedDescendant: true } : {}),
           ...(outputTruncation.length === 0 ? {} : { outputTruncation: Object.freeze(outputTruncation) }),
         } as ProcessResult
-        log.debug?.(
+        // The check's own commands stay at DEBUG: they are the work, not the
+        // plumbing, and a reader at debug wants to see a check run.
+        const finished = chatter ? log.trace : log.debug
+        finished?.(
           `Command finished ${String(Math.round(result.durationMs))}ms ` +
             `[${result.signal ?? String(result.exitCode)}] ${commandText(argv)}`,
           {
