@@ -1,19 +1,19 @@
 /**
- * The queue-run boundary: scratch repositories, a fake check whose exit code
- * and duration the test chooses, and one `queue run --once` process.
+ * The queue-run boundary: scratch repositories, a fake check whose result and
+ * duration the test chooses, and one `yrd queue run --once`.
  *
  * Everything here is black box on purpose. A test built on this fixture may
  * look at the queue run's exit code, at the refs the repositories carry
- * afterwards, and at the tip of the base branch — nothing else. No journal
- * reads, no internal imports beyond the process entry point, no log parsing
+ * afterwards, at the tip of the target, and at where the CLI says each change
+ * stands — nothing else. No journal reads, no internals, no log parsing
  * except to print on failure.
  *
  * The scratch-repository shape is the one `packages/yrd-cli/tests/
- * bay-submit-selected.test.ts` proves end to end: a bare receiver plus a
- * working repository whose `origin` is that receiver, work committed in a real
- * Bay worktree, and `yrd bay submit` as the submit form. The base the queue
- * lands on is the RECEIVER's `main`, never the local ref, so every assertion
- * about "main moved" reads `origin/main`.
+ * bay-submit-selected.test.ts` proves end to end: a bare shared repository
+ * plus a working repository whose `origin` is that bare one, work committed
+ * in a real Bay, and `yrd bay submit` as the submit form. The target the
+ * queue lands on is the shared repository's `main`, never the local ref, so
+ * every assertion about the target reads `origin/main`.
  */
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -52,7 +52,7 @@ export type FakeCheckPlan = Readonly<{
   sleepSeconds?: number
   /** The bound the queue gives the check, when the case is about running past one. */
   timeoutMs?: number
-  /** Run this instead of the fake check — for the case where the check is missing. */
+  /** Run this instead of the fake check — for the case where the check is not there. */
   command?: string
 }>
 
@@ -68,7 +68,7 @@ function fakeCheckCommand(plan: FakeCheckPlan, log: string): string {
   ].join(" ")
 }
 
-/** The check step as `.yrd.yml` declares it, bound included when the case sets one. */
+/** The check as `.yrd.yml` declares it, bound included when the case sets one. */
 function checkStep(plan: FakeCheckPlan, log: string): string {
   const run = `run: ${JSON.stringify(fakeCheckCommand(plan, log))}`
   const bound = plan.timeoutMs === undefined ? "" : `, timeoutMs: ${String(plan.timeoutMs)}`
@@ -78,7 +78,7 @@ function checkStep(plan: FakeCheckPlan, log: string): string {
 export type BoundaryRepository = Readonly<{
   /** The working repository the queue runs against. */
   repo: string
-  /** The bare receiver `repo`'s `origin` points at — the base the queue lands on. */
+  /** The bare repository `repo`'s `origin` names — where the target lives. */
   origin: string
   /** One line per fake-check execution. */
   checkLog: string
@@ -86,7 +86,7 @@ export type BoundaryRepository = Readonly<{
 
 /**
  * A scratch repository whose only check is the fake check, on a fresh bare
- * receiver holding one commit of `main`.
+ * repository holding one commit of `main`.
  */
 export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryRepository> {
   const root = await mkdtemp(join(tmpdir(), "yrd-boundary-"))
@@ -110,23 +110,24 @@ export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryR
   return { repo, origin, checkLog }
 }
 
-export type Submission = Readonly<{
+/** A branch at one head, submitted to the queue. */
+export type Change = Readonly<{
   /** The branch the Bay opened, `task/<bay>`. */
   branch: string
-  /** The one commit this submission put on top of `main`. */
+  /** The head this change is the branch at — one commit on top of the target. */
   headSha: string
-  /** The change id the submit recorded. */
-  pr: string
+  /** The id the CLI gave it. */
+  id: string
 }>
 
 /**
- * One commit on top of `main`, submitted the way the current receiver wants
- * it: committed inside a real Bay worktree and delivered with `yrd bay
- * submit` from that worktree. The Bay's own commit needs no `Change-Id`
- * trailer — `bay submit` records the change, and the trailer is only what a
- * recordless `refs/for` tip must carry.
+ * One commit on top of the target, submitted the way the queue wants it:
+ * committed inside a real Bay and delivered with `yrd bay submit` from that
+ * Bay. The Bay's own commit needs no `Change-Id` trailer — `bay submit`
+ * records the change, and the trailer is only what a recordless `refs/for`
+ * tip must carry.
  */
-export async function submitOneCommit(repo: string, bay: string): Promise<Submission> {
+export async function submitOneCommit(repo: string, bay: string): Promise<Change> {
   const opened = capture(repo)
   expectZero(await yrd(repo, opened.io, "bay", "open", "--bay", bay), "bay open", opened)
   const bayPath = opened.stdout().trim()
@@ -140,17 +141,17 @@ export async function submitOneCommit(repo: string, bay: string): Promise<Submis
   // Standing IN the Bay, exactly as an author does.
   const submitted = capture(bayPath)
   expectZero(await yrd(repo, submitted.io, "bay", "submit", "--json"), "bay submit", submitted)
-  const submission = JSON.parse(submitted.stdout()) as {
+  const parsed = JSON.parse(submitted.stdout()) as {
     prs: readonly { id: string; branch: string; status: string }[]
   }
-  const pr = submission.prs[0]?.id
-  if (pr === undefined || submission.prs[0]?.branch !== branch) {
+  const id = parsed.prs[0]?.id
+  if (id === undefined || parsed.prs[0]?.branch !== branch) {
     throw new Error(`bay submit did not record ${branch}: ${submitted.stdout()}`)
   }
-  return { branch, headSha, pr }
+  return { branch, headSha, id }
 }
 
-export type QueueRunOutcome = Readonly<{
+export type QueueRunResult = Readonly<{
   exitCode: number
   stdout: string
   stderr: string
@@ -158,8 +159,8 @@ export type QueueRunOutcome = Readonly<{
   report: string
 }>
 
-/** One `queue run --once` process, end to end. */
-export async function queueRunOnce(repo: string): Promise<QueueRunOutcome> {
+/** One `yrd queue run --once`, end to end. */
+export async function queueRunOnce(repo: string): Promise<QueueRunResult> {
   const run = capture(repo)
   const exitCode = await yrd(repo, run.io, "queue", "run", "--once", "--json")
   return {
@@ -170,8 +171,20 @@ export async function queueRunOnce(repo: string): Promise<QueueRunOutcome> {
   }
 }
 
-/** The tip of the base the queue lands on — the receiver's, not the local ref. */
-export function baseTip(repo: string): Promise<string> {
+/**
+ * Where each change stands, as the CLI itself reports it — the surface an
+ * author reads. Still black box: another process, its own declared JSON, no
+ * journal and no internals.
+ */
+export async function changeStandings(repo: string): Promise<Readonly<Record<string, string>>> {
+  const listed = capture(repo)
+  expectZero(await yrd(repo, listed.io, "pr", "list", "--json"), "pr list", listed)
+  const parsed = JSON.parse(listed.stdout()) as { prs: readonly { id: string; status: string }[] }
+  return Object.fromEntries(parsed.prs.map((change) => [change.id, change.status]))
+}
+
+/** The tip of the target the queue lands on — the shared one, not the local ref. */
+export function targetTip(repo: string): Promise<string> {
   return git(repo, "rev-parse", "origin/main")
 }
 
@@ -181,7 +194,7 @@ export async function parentsOf(repo: string, sha: string): Promise<readonly str
   return parents === "" ? [] : parents.split(" ")
 }
 
-/** How many commits the base advanced along its own first-parent line. */
+/** How many commits the target advanced along its own first-parent line. */
 export async function firstParentDistance(repo: string, from: string, to: string): Promise<number> {
   return Number(await git(repo, "rev-list", "--count", "--first-parent", `${from}..${to}`))
 }
@@ -190,6 +203,13 @@ export async function firstParentDistance(repo: string, from: string, to: string
 export async function refs(repo: string): Promise<readonly string[]> {
   const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)")
   return listed === "" ? [] : listed.split("\n")
+}
+
+/** How many times the fake check ran. */
+export async function checkAttempts(checkLog: string): Promise<number> {
+  const file = Bun.file(checkLog)
+  if (!(await file.exists())) return 0
+  return (await file.text()).trimEnd().split("\n").filter(Boolean).length
 }
 
 function capture(cwd: string): { io: YrdCliIO; stdout(): string; stderr(): string } {

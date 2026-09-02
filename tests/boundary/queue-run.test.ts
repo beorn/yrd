@@ -1,132 +1,166 @@
 /**
  * @failure The queue-run boundary is described in prose and pinned nowhere, so
- *          a rebuild of the queue can change what one pass tells its caller —
- *          the exit code, whether the base moved, whether a refused change's
- *          refs survive — and every existing test still passes. Those three
- *          facts are the entire contract a supervisor, a CI wrapper and an
- *          author read; nothing else about a pass is observable from outside.
+ *          a rebuild of the queue can change what one queue run tells its
+ *          caller — the exit code, whether the target moved, whether a failed
+ *          change's refs survive — and every existing test still passes. Those
+ *          facts are the whole contract a supervisor, a CI wrapper and an
+ *          author read; nothing else about a queue run is observable from
+ *          outside.
  * @level   l3
  * @consumer `yrd queue run --once` · Hab supervision · any caller of the CLI
  *
- * Black box, deliberately. A test here may read the process exit code, the
- * refs the repositories carry afterwards, and the tip of the base — and
- * nothing else. The check itself is a fake whose exit code and duration the
- * test picks (`fake-check.sh`), so each case names one outcome and the queue
- * is never reached into to stage it.
+ * Black box, deliberately. A test here may read the exit code, the refs the
+ * repositories carry afterwards, the tip of the target, and where the CLI says
+ * each change stands — nothing else. The check is a fake whose result and
+ * duration the test picks (`fake-check.sh`), so each case names one result and
+ * the queue is never reached into to stage it.
  *
- * This file encodes the DESIGN the queue is being rebuilt to, not today's
- * behaviour. Where the two disagree the test stays red and says so in its
- * name; see the `design-red` case below.
+ * A queue run's result is pass, fail or stuck, as exit 0, 1 or 2. Pass and
+ * fail are pinned as ordinary tests because the code already agrees. Stuck is
+ * pinned with `test.fails`: the assertions state the design, the suite is
+ * green today because they do not hold, and it turns red the day M2 makes them
+ * hold — which is the reminder we want standing.
  */
 import { afterEach, describe, expect, it } from "vitest"
 import {
-  baseTip,
   boundaryRepository,
+  changeStandings,
+  checkAttempts,
+  type FakeCheckPlan,
   firstParentDistance,
   parentsOf,
   queueRunOnce,
   refs,
   removeScratchRoots,
   submitOneCommit,
+  targetTip,
 } from "./fixture.ts"
 
 afterEach(removeScratchRoots)
 
-describe("the queue-run boundary: one pass, three observable facts", { timeout: 120_000 }, () => {
-  it("exit 0 — a passing check lands the branch, and the base moves by exactly one merge commit", async () => {
+describe("the queue-run boundary", { timeout: 120_000 }, () => {
+  it("pass — a check that passes merges the change, and the target moves by one merge commit", async () => {
     const { repo, checkLog } = await boundaryRepository({ exit: 0 })
     const { branch, headSha } = await submitOneCommit(repo, "green")
-    const before = await baseTip(repo)
+    const before = await targetTip(repo)
 
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).toBe(0)
 
     // The check really ran — an exit 0 that skipped the work would satisfy
-    // every assertion below on an empty pass.
-    expect(await Bun.file(checkLog).text(), run.report).toContain("fake-check exit=0")
+    // every assertion below on an empty queue.
+    expect(await checkAttempts(checkLog), run.report).toBe(1)
 
-    const after = await baseTip(repo)
+    const after = await targetTip(repo)
     expect(after, run.report).not.toBe(before)
-    // Exactly one merge commit, and its second parent is the branch head: the
-    // base advanced by one first-parent step, and that step is the merge.
+    // Exactly one merge commit, and its second parent is the change's head:
+    // the target advanced by one first-parent step, and that step is the merge.
     expect(await firstParentDistance(repo, before, after), run.report).toBe(1)
     expect(await parentsOf(repo, after), run.report).toEqual([before, headSha])
     expect(branch).toBe("task/green")
   })
 
-  it("exit 0 — an empty queue is nothing to do, and the base stands still", async () => {
+  it("pass — an empty queue is nothing to do, and the target stands still", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
-    const before = await baseTip(repo)
+    const before = await targetTip(repo)
 
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).toBe(0)
-    expect(await baseTip(repo), run.report).toBe(before)
+    expect(await targetTip(repo), run.report).toBe(before)
   })
 
-  it("exit 1 — a failing check leaves the base where it was and the branch's refs standing", async () => {
+  it("fail — a check that fails leaves the target where it was and the change's refs standing", async () => {
     const { repo, checkLog } = await boundaryRepository({ exit: 1 })
     const { branch, headSha } = await submitOneCommit(repo, "red")
-    const before = await baseTip(repo)
+    const before = await targetTip(repo)
     const refsBefore = await refs(repo)
 
     const run = await queueRunOnce(repo)
 
-    // The submitter's content is what failed, so the change is refused and
-    // sent back — the pass itself did its job.
+    // The submitter's content is what failed, so the failure is theirs and the
+    // queue run itself did its job.
     expect(run.exitCode, run.report).toBe(1)
-    expect(await Bun.file(checkLog).text(), run.report).toContain("fake-check exit=1")
+    expect(await checkAttempts(checkLog), run.report).toBe(1)
 
-    expect(await baseTip(repo), run.report).toBe(before)
-    // The author's work survives a refusal: the branch still names the commit
-    // that was checked, and no ref the submit created was destroyed.
+    expect(await targetTip(repo), run.report).toBe(before)
+    // The author's work survives: the branch still names the head that was
+    // checked, and no ref the submit created was destroyed.
     expect(await refs(repo), run.report).toEqual(expect.arrayContaining([`${headSha} refs/heads/${branch}`]))
     for (const ref of refsBefore) expect(await refs(repo), run.report).toContain(ref)
   })
 
-  // design-red — M2 of the garage plan moves this from today's code to the
-  // design. The design says an ERROR is the queue failing at its own job, so
-  // it gets its own code, 2: distinct from 0 (every attempted check passed)
-  // and from 1 (the submitter's content was refused).
-  //
-  // The gap M2 closes is TWO gaps, and measuring the three triggers the design
-  // names separates them (this harness, 2026-09-02, against 193e03f6):
-  //
-  //   check exits 2        exit 1   code check-failed     — send-back
-  //   check missing        exit 1   code check-failed     — send-back
-  //   check past its bound exit 17  code check-timeout    — yrd-broken
-  //
-  // 1. CLASSIFICATION. Only the bound reaches the queue's own failure class.
-  //    A check that exits 2, and a check that is not there at all, are booked
-  //    against the author's content — the pass refuses the change and tells
-  //    the author to amend it, for a condition the author cannot fix.
-  // 2. THE NUMBER. Even the trigger that IS classified as yrd's own failure
-  //    answers 17, not 2. That one is deliberate, not an oversight:
-  //    `outcome-notify.ts` records that "the design called this 2" and spends
-  //    17 instead, because 2 is already the generic usage/configuration exit
-  //    of every Yrd verb.
-  //
-  // So M2 must rule on both: which conditions are the queue's fault, and what
-  // number that verdict carries. Until it does, this stays red and visible
-  // rather than skipped.
-  it("exit 2 — a check that ERRORs stops the pass, base unchanged, branch untouched [design-red]", async () => {
-    const { repo, checkLog } = await boundaryRepository({ exit: 2 })
-    const { branch, headSha } = await submitOneCommit(repo, "error")
-    const before = await baseTip(repo)
-    const refsBefore = await refs(repo)
+  /**
+   * design-red — M2 of the garage plan turns each `it.fails` below back into a
+   * plain `it`. Until it lands, these are green BECAUSE the design does not
+   * hold; the day it holds they go red and get promoted.
+   *
+   * A stuck check is the queue's own fault, so the design says the queue run
+   * stops at exit 2, nobody is billed, and the change stays where it was until
+   * someone fixes the queue. Measured against 193e03f6 on 2026-09-02, the three
+   * triggers split into two distinct gaps:
+   *
+   *   check exits 2         exit 1   check-failed    billed to the author
+   *   check is not there    exit 1   check-failed    billed to the author
+   *   check past its bound  exit 17  check-timeout   billed to yrd
+   *
+   * 1. WHOSE FAULT. Only the bound is booked to the queue. A check that exits
+   *    2, and a check that is not there at all, are booked against the author's
+   *    content — the queue run declines the change and tells the author to
+   *    amend and push again, for a condition the author cannot fix.
+   * 2. THE NUMBER. Even the trigger that IS booked to the queue answers 17,
+   *    not 2. That one is deliberate: `packages/yrd-cli/src/outcome-notify.ts`
+   *    lines 95-109 define `QUEUE_OUTCOME_EXIT` as `{next: 0, changeRefused: 1,
+   *    yrdFailed: 17}` and record that "the design called this 2", spending 17
+   *    instead because 2 is already the generic usage exit of every Yrd verb.
+   *
+   * So M2 must rule on both: which conditions are the queue's fault, and what
+   * number that verdict carries.
+   *
+   * One more measured fact, which is why the standing assertion below cannot
+   * carry the "nobody is billed" clause on its own: `pr list` reports a stuck
+   * change and a failed change identically, both still `submitted`. Today the
+   * exit code is the ONLY place the two are told apart at this boundary.
+   */
+  describe("stuck — the queue's own fault [design-red, M2]", () => {
+    async function stuckCase(plan: FakeCheckPlan, bay: string): Promise<void> {
+      const { repo, checkLog } = await boundaryRepository(plan)
+      const { branch, headSha } = await submitOneCommit(repo, bay)
+      const before = await targetTip(repo)
+      const refsBefore = await refs(repo)
+      const standingBefore = await changeStandings(repo)
 
-    const run = await queueRunOnce(repo)
+      const run = await queueRunOnce(repo)
 
-    expect(run.exitCode, run.report).toBe(2)
+      // Exit 2 is the whole billing statement: fail is the submitter's, stuck
+      // is the queue's, and nothing else at this boundary separates them.
+      expect(run.exitCode, run.report).toBe(2)
 
-    // Nothing retried inside the run: the ERROR stopped the pass, so the check
-    // ran once and no more.
-    const attempts = (await Bun.file(checkLog).text()).trimEnd().split("\n").filter(Boolean)
-    expect(attempts, run.report).toHaveLength(1)
+      // The queue run STOPS: the check is not retried inside it.
+      expect(await checkAttempts(checkLog), run.report).toBeLessThanOrEqual(1)
 
-    expect(await baseTip(repo), run.report).toBe(before)
-    expect(await refs(repo), run.report).toEqual(expect.arrayContaining([`${headSha} refs/heads/${branch}`]))
-    for (const ref of refsBefore) expect(await refs(repo), run.report).toContain(ref)
+      // The change stays where it was until someone fixes the queue.
+      expect(await targetTip(repo), run.report).toBe(before)
+      expect(await changeStandings(repo), run.report).toEqual(standingBefore)
+      expect(await refs(repo), run.report).toEqual(expect.arrayContaining([`${headSha} refs/heads/${branch}`]))
+      for (const ref of refsBefore) expect(await refs(repo), run.report).toContain(ref)
+    }
+
+    // Today: exit 1, `check-failed`, billed to the author.
+    it.fails("a check that exits 2 stops the queue run, and nobody is billed", async () => {
+      await stuckCase({ exit: 2 }, "two")
+    })
+
+    // Today: exit 1, `check-failed`, billed to the author — for a check the
+    // author never supplied and cannot supply.
+    it.fails("a check that is not there stops the queue run, and nobody is billed", async () => {
+      await stuckCase({ command: "/nonexistent/definitely-not-a-check.sh" }, "missing")
+    })
+
+    // Today: exit 17, `check-timeout` — already the queue's fault, wrong number.
+    it.fails("a check that runs past its bound stops the queue run, and nobody is billed", async () => {
+      await stuckCase({ exit: 0, sleepSeconds: 5, timeoutMs: 1000 }, "slow")
+    })
   })
 })

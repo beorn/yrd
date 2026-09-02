@@ -1,11 +1,11 @@
 #!/bin/sh
-# A check whose verdict the TEST chooses, not the code under test.
+# A check whose result the TEST chooses, not the code under test.
 #
-# The queue-run boundary harness configures this as the repository's only
-# check, so one script covers the whole ladder — pass, fail, error, slow —
-# without the harness ever reaching inside the queue to stage an outcome.
-# Every knob is an environment variable, set inline in the `run:` command the
-# fixture writes into `.yrd.yml`, so two tests in one file never share state.
+# The queue-run boundary harness configures this as the target's only check,
+# so one script covers the whole ladder — pass, fail, stuck, slow — without
+# the harness ever reaching inside the queue to stage a result. Every knob is
+# an environment variable, set inline in the `run:` command the fixture writes
+# into `.yrd.yml`, so two tests in one file never share state.
 #
 #   FAKE_CHECK_EXIT   status to exit with (default 0)
 #   FAKE_CHECK_SLEEP  seconds to sleep before exiting (default 0)
