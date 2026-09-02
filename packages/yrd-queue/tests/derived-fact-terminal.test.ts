@@ -219,7 +219,11 @@ describe("a standing submit fact derives at most ONE live change", () => {
     // this change is recorded, which is why it has to exist.
     expect(retainedRuns(app), "a conflicting candidate never reaches a run").toEqual([])
     expect(actionsLogged(events)).toContain("submit-fact-retired")
-    expect(actionsLogged(events)).toContain("compose-derived-fact-retired")
+    // The compose drops the mirror row in the same breath, so the retirement is
+    // said once. Before that it was a WARN row every pass restated, and a queue
+    // run is one process, so an idle run printed it again every run.
+    expect(actionsLogged(events)).toContain("compose-dead-fact-retired")
+    expect(actionsLogged(events)).not.toContain("compose-derived-fact-retired")
   })
 
   it("the retirement survives a fresh projection over the same journal", async () => {

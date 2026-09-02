@@ -234,9 +234,12 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     )
     expect(doubled, "no derived run may exist beside the record lane's merge").toEqual([])
 
-    // NO SILENT ERRORS: the exclusion says so, names the branch, and names the
-    // cure — the fact is stale landed content, retire it.
-    expect(actionsLogged(events)).toContain("compose-derived-fact-already-landed")
+    // NO SILENT ERRORS: the exclusion says so and names the branch. It also
+    // acts: content already on the target is a dead fact, so the queue run
+    // retires it here rather than telling a reader to retire it by hand every
+    // run for the rest of the repository's life.
+    expect(actionsLogged(events)).toContain("compose-dead-fact-retired")
+    expect(actionsLogged(events)).not.toContain("compose-derived-fact-already-landed")
   })
 
   it("the record lane's merge retires the branch's submit fact in the same journal write (reason: superseded)", async () => {

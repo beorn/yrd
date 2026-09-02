@@ -2879,7 +2879,7 @@ function createQueue<Shape extends ChangeShape>(
           ? // An operator retired this exact row (`yrd pr retire`); a standing
             // projection at its sha is a re-projection of the retired refs/for
             // row, never new work (PR3186, 2026-09-01).
-            "the queue retired it — " + row.reason + "; push a rebased head to submit again"
+            "it is a revision an operator retired: " + row.reason + "; push a rebased head to submit again"
           : `change '${row.pr}' could not progress (${row.code}); push a rebased head to submit again`,
         { pr: row.pr, code: row.code, ...(row.paths === undefined ? {} : { paths: [...row.paths] }) },
       )

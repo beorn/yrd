@@ -13,11 +13,14 @@
  * rule: the compose asks the receiver store which submit refs exist, and never
  * admits a mirror fact the store has no ref for, saying so loudly.
  *
- * Reported, not journaled, and deliberately so. Every other retirement records
- * a verdict git cannot answer again; this one is re-derived from the store on
- * every pass, so a durable row would be a second copy of an answer git already
- * holds — which is how the mirror this fix is about came to disagree with its
- * refs in the first place.
+ * Retired once, and the mirror row goes with it. Reporting alone was the first
+ * shape of this, and it left a WARN row an idle queue run printed again every
+ * run: the condition reporter dedups by branch and sha, but a queue run is one
+ * process, so that memory never reached the next run. The fact is dropped from
+ * `bays.submits` through `branch/unsubmitted` — the record lane's own verb —
+ * so nothing reads it again and the row has no input to come back from. No
+ * `queue/submit/retired` row: that one holds a verdict about content git
+ * cannot answer again, and this verdict is re-derived from the store for free.
  *
  * SOUND ONLY BECAUSE BOTH PRODUCERS NOW WRITE THE REF FIRST. "No ref" would
  * not otherwise mean "ref deleted": the receiver has always written its ref
@@ -35,8 +38,15 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
+import {
+  createBayJobDefs,
+  withBays,
+  volatilePrNumberMint,
+  type BaysState,
+  type BayWorkspace,
+  type PrNumberMint,
+} from "@yrd/bay"
+import { createMemoryJournal, createYrd, createYrdDef, pipe, type DeepReadonly } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
@@ -151,6 +161,12 @@ async function createApp(
     prepareCandidate: mergeableCandidate,
     prNumberMint: options.queueMint ?? volatilePrNumberMint(),
     readSubmitEnrichment: () => ({ changeId: CHANGE_ID }),
+    // Wired, and it answers that nothing landed — the host's real shape, so a
+    // case here can say "this pass printed nothing at WARN or above" and mean
+    // it. Unwired, the compose correctly pages about a reader it has not got,
+    // and that row would stand in for the ones this file is about.
+    scanLandedSubmits: ({ bays }: Readonly<{ bays: DeepReadonly<BaysState> }>) =>
+      Promise.resolve({ landed: [], unresolved: [], facts: Object.keys(bays.submits).length }),
     ...(options.scanSubmitRefs === undefined ? {} : { scanSubmitRefs: options.scanSubmitRefs }),
   })
   const bayJobs = createBayJobDefs(workspace())
@@ -171,6 +187,14 @@ async function createApp(
 
 function rows(events: readonly LogEvent[], action: string): LogEvent[] {
   return events.filter((event) => event.kind === "log" && event.props?.action === action)
+}
+
+/** Every row an operator is meant to read and act on. An idle queue run prints
+ * zero of these — a row it prints again every run tells nobody anything new. */
+function warnOrAbove(events: readonly LogEvent[]): LogEvent[] {
+  return events.filter(
+    (event) => event.kind === "log" && (event.level === "warn" || event.level === "error" || event.level === "fatal"),
+  )
 }
 
 function actionsLogged(events: readonly LogEvent[]): string[] {
@@ -232,19 +256,33 @@ describe("compose admits only mirror facts a receiver ref still stands behind", 
     const admitted = rows(events, "compose-derived-admitted").map((row) => row.props?.branch)
     expect(admitted, "a mirror fact with no ref behind it must never be admitted again").not.toContain(GONE_BRANCH)
 
-    // Exactly one WARN record, naming everything an operator needs to act on
-    // without going and measuring it by hand.
-    const warned = rows(events, "compose-derived-fact-receiver-ref-gone")
-    expect(warned).toHaveLength(1)
-    expect(warned[0]?.kind === "log" ? warned[0].level : undefined).toBe("warn")
-    expect(warned[0]?.props).toMatchObject({ branch: GONE_BRANCH, sha: GONE_SHA, store: STORE })
-    expect(warned[0]?.kind === "log" ? warned[0].message : "").toContain(STORE)
+    // Exactly one record, at INFO, naming everything an operator needs to act
+    // on without going and measuring it by hand. INFO, not WARN: the queue run
+    // that says this has already dealt with it, so there is nothing here for
+    // anyone to do.
+    const said = rows(events, "compose-dead-fact-retired")
+    expect(said).toHaveLength(1)
+    expect(said[0]?.kind === "log" ? said[0].level : undefined).toBe("info")
+    expect(said[0]?.props).toMatchObject({ branch: GONE_BRANCH, sha: GONE_SHA, store: STORE })
+    expect(said[0]?.kind === "log" ? said[0].message : "").toContain(STORE)
+    expect(
+      rows(events, "compose-derived-fact-receiver-ref-gone"),
+      "and no standing WARN row, which is what an idle run printed again every run",
+    ).toEqual([])
 
-    // Nothing journaled: the verdict is re-derived from the store every pass,
-    // so there is no second copy of it to fall out of step with the refs.
+    // The mirror row is GONE, which is what stops the next pass reading it.
+    expect(app.state().bays.submits[GONE_BRANCH], "the dead mirror fact is dropped").toBeUndefined()
+    expect(app.state().bays.submits[LIVE_BRANCH], "the live fact is untouched").toBeDefined()
+    expect(
+      (await journaledEventNames(journal)).filter((name) => name === "branch/unsubmitted"),
+      "through the record lane's own retirement verb, once",
+    ).toEqual(["branch/unsubmitted"])
+
+    // No second copy of the verdict: it is re-derived from the store for free,
+    // and keeping two is how the mirror this fix is about fell out of step.
     expect(
       (await journaledEventNames(journal)).filter((name) => name === "queue/submit/retired"),
-      "the exclusion writes no durable row",
+      "the exclusion writes no verdict row",
     ).toEqual([])
     expect(app.state().queues.retiredSubmits[GONE_BRANCH]).toBeUndefined()
     expect(app.state().queues.retiredSubmits[LIVE_BRANCH], "the live fact is untouched").toBeUndefined()
@@ -256,37 +294,59 @@ describe("compose admits only mirror facts a receiver ref still stands behind", 
     expect(found[0]?.props).toMatchObject({ store: STORE, refs: 1, missing: 1 })
   })
 
-  it("the retirement is idempotent: a later pass re-warns nothing and re-retires nothing", async () => {
+  it("the dead fact is announced once and is silent on every later run, this process or the next", async () => {
+    // THE STANDING-ROW REPRODUCTION. A queue run is one process, so the
+    // condition reporter's per-process dedup never reaches the next run: on the
+    // reported-only shape an idle run printed the same row again every run,
+    // fifty-four of them on the pin measured 2026-09-02. The second app below
+    // replays the same journal, which is exactly what `yrd queue run --once`
+    // does to the store, and is where a per-process suppression cannot help.
     const events: LogEvent[] = []
     const journal = createMemoryJournal()
     let present = [GONE_BRANCH]
-    await using app = await createApp({
-      log: tracingLog(events),
-      journal,
-      scanSubmitRefs: () =>
-        Promise.resolve({
-          answered: true as const,
-          store: STORE,
-          refs: new Map(present.map((branch) => [branch, GONE_SHA])),
-        }),
-    })
+    const scan = () =>
+      Promise.resolve({
+        answered: true as const,
+        store: STORE,
+        refs: new Map(present.map((branch) => [branch, GONE_SHA])),
+      })
+    {
+      await using app = await createApp({ log: tracingLog(events), journal, scanSubmitRefs: scan })
 
-    await app.bays.recordBranchSubmit({ branch: GONE_BRANCH, sha: GONE_SHA, base: "main" })
-    await app.queue.run({}, runtime)
-    present = []
+      await app.bays.recordBranchSubmit({ branch: GONE_BRANCH, sha: GONE_SHA, base: "main" })
+      await app.queue.run({}, runtime)
+      present = []
+      events.length = 0
+      await app.queue.run({}, runtime)
+
+      expect(rows(events, "compose-dead-fact-retired"), "the pass that finds it dead retires it, once").toHaveLength(1)
+      expect(app.state().bays.submits[GONE_BRANCH], "and the mirror fact is gone").toBeUndefined()
+
+      events.length = 0
+      await app.queue.run({}, runtime)
+      expect(actionsLogged(events), "a later pass says nothing about it").not.toContain("compose-dead-fact-retired")
+      expect(warnOrAbove(events), "and nothing at WARN or above").toEqual([])
+    }
+
+    // The next queue run, as a queue run really is: a new process over the same
+    // journal. The retirement is durable, so it is still gone.
     events.length = 0
-    await app.queue.run({}, runtime)
-    await app.queue.run({}, runtime)
+    await using next = await createApp({ log: tracingLog(events), journal, scanSubmitRefs: scan })
+    await next.queue.run({}, runtime)
+    expect(next.state().bays.submits[GONE_BRANCH], "the retirement survives the process").toBeUndefined()
+    expect(actionsLogged(events), "and the next run says nothing about it either").not.toContain(
+      "compose-dead-fact-retired",
+    )
+    expect(warnOrAbove(events), "an idle queue run prints no row at WARN or above").toEqual([])
 
-    // The condition reporter dedups by key (branch + sha), so a standing dead
-    // fact announces once and is suppressed after — not one row per pass.
+    // The retirement is the mirror row leaving, not a second verdict beside it.
     expect(
-      rows(events, "compose-derived-fact-receiver-ref-gone"),
-      "one announcement per dead fact, not one per pass",
-    ).toHaveLength(1)
+      (await journaledEventNames(journal)).filter((name) => name === "branch/unsubmitted"),
+      "written once, however many passes run",
+    ).toEqual(["branch/unsubmitted"])
     expect(
       (await journaledEventNames(journal)).filter((name) => name === "queue/submit/retired"),
-      "and nothing durable is written on any pass",
+      "and no verdict row on any pass",
     ).toEqual([])
   })
 
@@ -370,10 +430,11 @@ describe("compose admits only mirror facts a receiver ref still stands behind", 
     await app.queue.run({}, runtime)
 
     expect(queueMint.highWater(), "a fact with no ref behind it derives nothing").toBe(0)
-    expect(actionsLogged(events)).toContain("compose-derived-fact-receiver-ref-gone")
+    expect(actionsLogged(events)).toContain("compose-dead-fact-retired")
+    expect(app.state().bays.submits[GONE_BRANCH], "and it is retired, not merely skipped").toBeUndefined()
     expect(
       (await journaledEventNames(journal)).filter((name) => name === "queue/submit/retired"),
-      "and nothing durable is written for it",
+      "and no verdict row is written for it",
     ).toEqual([])
   })
 

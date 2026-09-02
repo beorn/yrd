@@ -181,9 +181,9 @@ describe("compose treats a refs/for row whose revision was journaled as retired 
 
     expect(queueMint.highWater(), "compose must derive nothing for a retired revision").toBe(0)
     expect(actionsLogged(events)).not.toContain("compose-derived-admitted")
-    expect(actionsLogged(events)).toContain("compose-derived-fact-retired")
+    expect(actionsLogged(events)).toContain("compose-dead-fact-retired")
     const retiredRow = events.find(
-      (event) => event.kind === "log" && event.props?.action === "compose-derived-fact-retired",
+      (event) => event.kind === "log" && event.props?.action === "compose-dead-fact-retired",
     )
     expect(retiredRow?.kind === "log" ? retiredRow.message : "").toContain("a revision an operator retired")
   })
@@ -199,7 +199,7 @@ describe("compose treats a refs/for row whose revision was journaled as retired 
 
     expect(queueMint.highWater(), "an unretired git-only submission derives exactly one change").toBe(1)
     expect(actionsLogged(events)).toContain("compose-derived-admitted")
-    expect(actionsLogged(events)).not.toContain("compose-derived-fact-retired")
+    expect(actionsLogged(events)).not.toContain("compose-dead-fact-retired")
   })
 
   it("the retirement survives a fresh projection over the same journal", async () => {

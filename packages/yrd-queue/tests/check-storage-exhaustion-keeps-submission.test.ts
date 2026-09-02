@@ -382,7 +382,7 @@ describe("an infrastructure failure inside a check never retires a submission", 
       rowsWith(secondPass, "compose-derived-admitted").map((row) => row.props?.branch),
       "the fact must be derived again, not skipped as retired",
     ).toEqual([BRANCH])
-    expect(rowsWith(secondPass, "compose-derived-fact-retired")).toEqual([])
+    expect(rowsWith(secondPass, "compose-dead-fact-retired")).toEqual([])
     expect(await invocations(), "the check is re-run, not re-read from the first pass's terminal Job").toBe(2)
     expect(runs, "the SAME fact integrates with no re-push").toMatchObject([
       { status: "completed", conclusion: "success", prs: [{ headSha: SHA }] },
@@ -413,7 +413,7 @@ describe("an infrastructure failure inside a check never retires a submission", 
     // would pass now: the cure is the author's re-push, never a retry.
     const seen = events.length
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
-    expect(rowsWith(events.slice(seen), "compose-derived-fact-retired").map((row) => row.props?.branch)).toEqual([
+    expect(rowsWith(events.slice(seen), "compose-dead-fact-retired").map((row) => row.props?.branch)).toEqual([
       BRANCH,
     ])
     expect(await invocations(), "a retired fact is never checked again").toBe(1)
