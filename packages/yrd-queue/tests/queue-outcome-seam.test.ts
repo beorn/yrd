@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
 import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
-import { withJobs, type JobResult } from "@yrd/job"
+import { localRunner, withJobs, type Job, type JobResult, type Jobs, type Runner } from "@yrd/job"
 import * as z from "zod"
 import {
   candidateRefFor,
@@ -69,6 +69,9 @@ async function createApp(
   options: Readonly<{
     outcomes: QueueOutcome[]
     checkRun?: () => JobResult<z.infer<typeof CheckResultSchema>>
+    mergeRun?: () => Promise<JobResult<IntegrationProof>>
+    /** The Runner the queue submits its step Jobs to; absent, the built-in local one. */
+    runner?: (jobs: Jobs) => Runner
     hook?: (outcome: QueueOutcome) => Promise<void>
   }>,
 ) {
@@ -81,11 +84,10 @@ async function createApp(
     { revision: "check-v1", output: CheckResultSchema },
   )
   const merge = withMerge(
-    async (): Promise<JobResult<IntegrationProof>> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { commit: MERGED, baseSha: BASE },
-    }),
+    async (): Promise<JobResult<IntegrationProof>> =>
+      options.mergeRun === undefined
+        ? { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
+        : options.mergeRun(),
     { revision: "merge-v1" },
   )
   const queue = withQueue({
@@ -96,6 +98,7 @@ async function createApp(
     prepareCandidate: mergeableCandidate,
     prNumberMint: volatilePrNumberMint(),
     readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
     onOutcome: async (outcome) => {
       options.outcomes.push(outcome)
       await options.hook?.(outcome)
@@ -203,6 +206,106 @@ describe("every ended attempt reaches the outcome seam exactly once", () => {
       [attempt]: { attempt, kind: "landed", recipient: "@dev/9", disposition: "landed", ball: "ball-1", at: "2026-01-01T00:00:00.000Z" },
       "pass:r1:t1": { attempt: "pass:r1:t1", kind: "yrd-broken", recipient: "@cto", disposition: "pass-error", at: "2026-01-01T00:00:00.000Z" },
     })
+  })
+
+  /** Drive one merge a remote Runner holds open across three passes and
+   * count what reaches the seam on each. `submit` picks the member's lane:
+   * a stored record (`bays.submit`) or a derived, recordless branch fact
+   * (`recordBranchSubmit`, the shape every refs/for push takes). */
+  async function deferredMerge(
+    submit: (app: Awaited<ReturnType<typeof createApp>>) => Promise<unknown>,
+  ): Promise<void> {
+    const outcomes: QueueOutcome[] = []
+    const mergeEntered = Promise.withResolvers<void>()
+    const mergeReleased = Promise.withResolvers<void>()
+    let heldMerge: Promise<Job> | undefined
+    await using app = await createApp({
+      outcomes,
+      mergeRun: async () => {
+        mergeEntered.resolve()
+        await mergeReleased.promise
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
+      },
+      runner: (jobs) => {
+        const local = localRunner({ id: "remote", jobs, leaseMs: 60_000, maxInFlight: 2 })
+        return {
+          ...local,
+          submit: (input) => {
+            const running = local.submit(input)
+            // The check is an admission Job and runs to completion inline; the
+            // merge Job is answered the moment it is STARTED, and held open.
+            if (jobs.get(input.job)?.definition !== "queue.step.merge") return running
+            heldMerge = running
+            return mergeEntered.promise.then((): Job => {
+              const observed = jobs.get(input.job)
+              if (observed === undefined) throw new Error(`yrd: no job '${input.job}'`)
+              return observed as Job
+            })
+          },
+        }
+      },
+    })
+    try {
+      await submit(app)
+
+      const deferring = await app.queue.run({}, runtime)
+
+      const runId = deferring[0]?.id
+      if (runId === undefined) throw new Error("expected the deferring pass to start the merge run")
+      expect(app.queue.get(runId)).toMatchObject({ status: "in_progress" })
+      expect(app.queue.get(runId)?.steps.find((step) => step.kind === "merge")?.job).toMatchObject({
+        status: "in_progress",
+        runner: "remote",
+      })
+      expect(outcomes, "a run a remote Runner still holds open has not ended").toHaveLength(0)
+
+      // The remote Runner finishes the merge Job between passes.
+      mergeReleased.resolve()
+      if (heldMerge === undefined) throw new Error("expected the remote Runner to hold the merge Job")
+      expect(await heldMerge).toMatchObject({ status: "completed", conclusion: "success" })
+      expect(outcomes, "a Job completing is not a settled run").toHaveLength(0)
+
+      await app.queue.run({}, runtime)
+
+      expect(app.queue.get(runId)).toMatchObject({ status: "completed", conclusion: "success" })
+      expect(outcomes, "the pass that settles the deferred run hands over its one outcome").toHaveLength(1)
+      expect(outcomes[0]).toMatchObject({
+        kind: "landed",
+        attemptId: runId,
+        run: runId,
+        branch: "issue/deferred",
+        sha: SHA,
+        base: "main",
+        integration: { commit: MERGED, baseSha: BASE },
+      })
+
+      await app.queue.run({}, runtime)
+      expect(outcomes, "a settled attempt re-run opens nothing").toHaveLength(1)
+    } finally {
+      // Never leave the merge Job held open: disposal waits for it.
+      mergeReleased.resolve()
+    }
+  }
+
+  it("a merge a remote Runner holds open hands over NO outcome on the pass that deferred it, ONE `landed` outcome on the pass that settles it, and none on the pass after", async () => {
+    // Ruling 3 (@i/10-yrd/24028): a deferred merge is settled by a LATER pass,
+    // and that pass — not the one that started the run, not the one after — is
+    // the one that hands its outcome over. A remote Runner answers a submit as
+    // soon as the merge Job is started, so the run is live but not terminal
+    // when its pass ends; the Job completes on its own clock, and the next
+    // pass observes that and settles the run.
+    await deferredMerge((app) => app.bays.submit({ branch: "issue/deferred", headSha: SHA, base: "main", baseSha: BASE }))
+  })
+
+  it.fails("KNOWN GAP — a DERIVED member's deferred merge is never resumed: no claim names its run, so no later selectorless pass settles it, and its outcome never sends", async () => {
+    // Measured 2026-09-01 while closing ruling 3: with a recordless branch fact
+    // the journal after the second pass holds only derived-identity/bound,
+    // candidate/created, run/started and an admission/refused — no run/settled,
+    // no pr/integrated. `pendingQueueRoots` lists claim-consuming roots only,
+    // and a derived member consumes no `authority.claims` token. The settle
+    // path, and with it the outcome, is unreachable for this lane until root
+    // discovery covers derived runs. Flip this to `it` when it does.
+    await deferredMerge((app) => app.bays.recordBranchSubmit({ branch: "issue/deferred", sha: SHA, base: "main" }))
   })
 
   it("a hook that throws does not take the pass down: the outcome was attempted once and the compose still resolves", async () => {
