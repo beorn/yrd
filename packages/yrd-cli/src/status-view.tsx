@@ -13,6 +13,7 @@ import {
   type ActionableFailure,
 } from "./actionable-error.ts"
 import { formatDuration } from "./runner-timeline.ts"
+import { changeStateColor, changeStateGlyph, changeStateLabel, deriveChangeState } from "./derived-change-state.ts"
 import { hasStatusPresentation, lifecyclePresentation, statusPresentation } from "./status-presentation.ts"
 import { projectChangeTaskStatus, taskStatusGlyph, type TaskStatus, type TaskStatusFields } from "./task-status.ts"
 
@@ -290,14 +291,19 @@ export function ChangeStatusView({
   const rows = prs.map((pr) => {
     const revision = changeRevisionNumber(pr)
     const eligibility = eligibilities?.find((candidate) => candidate.pr === pr.id && candidate.revision === revision)
+    const reading = deriveChangeState(pr, {
+      ...(eligibility?.reason === undefined ? {} : { reason: { code: eligibility.reason.code } }),
+    })
     return {
       ...projectChangeTaskStatus(pr),
-      // The one display-state derivation (@yrd/queue). The inline overlay this
-      // replaces consulted `changeNeedsAuthor` ahead of terminality, so a
-      // closed change whose stored refusal outlived its close rendered
-      // `needs-author` here while every sibling surface said
-      // withdrawn/integrated/canceled.
-      status: projectedChangeStatus(pr, eligibility),
+      // The one display-state derivation (change-state.ts): the five words a
+      // change is in, so this surface stops printing `submitted` both for a
+      // change the queue could not carry and for one a check judged.
+      state: reading.state,
+      stateLabel: `${changeStateGlyph(reading.state)} ${changeStateLabel(reading)}`,
+      // The word this column printed before the five states, unshown, so
+      // nothing that reads a row loses it during the flag-day cycle.
+      delivery: projectedChangeStatus(pr, eligibility),
       revision,
       head: changeHead(pr).slice(0, 12),
       why: eligibility?.reason?.message ?? "",
@@ -313,10 +319,15 @@ export function ChangeStatusView({
       columns={[
         { header: "PR", key: "id" },
         {
-          header: "STATUS",
-          key: "status",
+          header: "STATE",
+          key: "stateLabel",
           minWidth: 15,
-          render: (pr) => <TaskStatusValue taskStatus={pr.taskStatus} value={pr.status} compact />,
+          maxWidth: 28,
+          render: (pr) => (
+            <Text bold color={changeStateColor(pr.state)} minWidth={0} maxWidth="100%" wrap="truncate">
+              {pr.stateLabel}
+            </Text>
+          ),
         },
         { header: "BRANCH", key: "branch", grow: true },
         { header: "BASE", key: "base", grow: true },

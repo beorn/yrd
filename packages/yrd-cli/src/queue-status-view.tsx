@@ -254,6 +254,7 @@ import {
   TaskStatusGlyph,
   TaskStatusValue,
 } from "./status-view.tsx"
+import { changeStateColor, changeStateGlyph, changeStateLabel, deriveChangeState } from "./derived-change-state.ts"
 import {
   failureBreakdownClass,
   failureDisposition,
@@ -2685,8 +2686,16 @@ export function QueueRunsView({ runs }: { runs: readonly Run[] }) {
 
 export type ChangeListRow = Readonly<{
   pr: string
+  /** One of the five words a change is in (change-state.ts). */
   state: string
   stateLabel: string
+  /** The word this column printed before the five states: kept off the surface
+   * and carried in `--json` for one flag-day cycle. */
+  delivery?: string
+  /** The check that judged a `failed` change, when the record names one. */
+  check?: string
+  /** The recorded code the state was derived from. */
+  stateCode?: string
   glyph: string
   revision: number
   lineage: string
@@ -2825,12 +2834,24 @@ export function changeListRows(
     // Showing the later write as the whole truth sends the author back to
     // re-cut a branch that is already on the base branch (22376).
     const merge = merges.get(pr.id)
-    const state = merge === undefined ? projectedChangeStatus(pr, eligibility) : "already-landed"
-    const glyph = merge === undefined ? taskStatusGlyph(projected.taskStatus) : "✓"
+    // The one derivation (change-state.ts). `delivery` keeps the retired
+    // word this column used to print, unshown, so `--json` readers have it
+    // through one flag-day cycle.
+    const reading = deriveChangeState(pr, {
+      ...(merge === undefined ? {} : { merged: true }),
+      ...(projected.failure === undefined && projected.step === "-"
+        ? {}
+        : { result: { ...(projected.failure === undefined ? {} : { code: projected.failure.code }), ...(projected.step === "-" ? {} : { check: projected.step }) } }),
+      ...(eligibility.reason === undefined ? {} : { reason: { code: eligibility.reason.code } }),
+    })
+    const glyph = changeStateGlyph(reading.state)
     return {
       pr: projected.pr,
-      state,
-      stateLabel: `${glyph} ${state}`,
+      state: reading.state,
+      stateLabel: `${glyph} ${changeStateLabel(reading)}`,
+      delivery: merge === undefined ? projectedChangeStatus(pr, eligibility) : "already-landed",
+      ...(reading.check === undefined ? {} : { check: reading.check }),
+      ...(reading.code === undefined ? {} : { stateCode: reading.code }),
       glyph,
       revision,
       lineage: projected.revisionLineage.join("→"),
@@ -2859,9 +2880,9 @@ export function changeListRows(
  * rather than wrapping. The live specimen is 22376 — two `already-landed`
  * labels one cell too wide for the STATE track hid the two NEWEST PRs. */
 function ChangeStateValue({ row }: { row: ChangeListRow }) {
-  const variant = statusVariant(row.state)
+  const color = changeStateColor(row.state as Parameters<typeof changeStateColor>[0])
   return (
-    <Text bold color={variant === "default" ? "$fg" : `$fg-${variant}`} minWidth={0} maxWidth="100%" wrap="truncate">
+    <Text bold color={color} minWidth={0} maxWidth="100%" wrap="truncate">
       {row.stateLabel}
     </Text>
   )
@@ -2889,7 +2910,7 @@ export function ChangeListView({
   // keeps every state readable in full; the truncation contract in ChangeStateValue
   // is the guarantee, not the plan.
   const stateWidth = Math.min(
-    20,
+    28,
     rows.reduce((width, row) => Math.max(width, row.stateLabel.length + 2), 15),
   )
   // WHY holds typed reason codes. It keeps its historical 18 unless a row

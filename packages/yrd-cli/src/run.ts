@@ -7304,6 +7304,11 @@ async function listPrs(
       ? []
       : [`${pr.id} ${publication.status}: ${publication.detail} (Job ${publication.job})`]
   })
+  // ONE derivation for both shapes: the machine-readable rows read the state
+  // off the same rows the table renders, so `--json` and the column can never
+  // disagree about what a change is in.
+  const listRows = changeListRows(rows, runs, io.now?.() ?? Date.now(), merges, options.strict === true)
+  const stateById = new Map(listRows.map((row) => [row.pr, row]))
   await printResultWithWarnings(
     io,
     json,
@@ -7311,8 +7316,16 @@ async function listPrs(
       command: "pr.list",
       prs: rows.map(({ pr, eligibility, needsReview }) => {
         const publication = projectPublication(publicationJob(app, pr))
+        const listedRow = stateById.get(pr.id)
         return {
           ...projectChangeTaskStatusWithEligibility(pr, eligibility, merges.get(pr.id)),
+          // The five words a change is in. `status` above keeps the retired
+          // delivery word for one flag-day cycle — nothing in this repository
+          // reads it except this CLI's own tests, but `yrd pr list --json` is
+          // a public surface and an unannounced removal would break a reader
+          // we cannot see.
+          ...(listedRow === undefined ? {} : { state: listedRow.state }),
+          ...(listedRow?.check === undefined ? {} : { check: listedRow.check }),
           eligibility: projectEligibilityTaskStatus(eligibility),
           requestedReviewers: pr.requestedReviewers ?? [],
           needsReview,
@@ -7322,7 +7335,7 @@ async function listPrs(
       runs: runs.map(projectQueueRunTaskStatus),
     },
     createElement(ChangeListView, {
-      rows: changeListRows(rows, runs, io.now?.() ?? Date.now(), merges, options.strict === true),
+      rows: listRows,
       columns: io.columns ?? 120,
       window: { hidden: matching.length - listed.length, total: matching.length },
     }),
