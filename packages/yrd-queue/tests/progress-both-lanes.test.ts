@@ -25,6 +25,7 @@ const BASE = "a".repeat(40)
 const AT = "2026-01-01T00:00:00.000Z"
 const RECORD_MERGE_AT = "2026-01-02T00:00:00.000Z"
 const DERIVED_MERGE_AT = "2026-01-03T00:00:00.000Z"
+const RECORD_NEWER_MERGE_AT = "2026-01-04T00:00:00.000Z"
 
 const MERGE_STEP: InstalledStep = { name: "merge", title: "Merge", revision: "merge-v1", kind: "merge" }
 
@@ -88,33 +89,46 @@ function queuesWith(...records: readonly QueueRecord[]): QueuesState {
 }
 
 describe("latestQueueMergeMs — the last-merge clock reads both lanes", () => {
-  it("a DERIVED merged run advances the clock — the 2026-08-31 false alarm", () => {
-    // No record row anywhere: the merge exists only as a settled run whose
-    // retained snapshot names a recordless member — the PR2769/PR2770 shape.
-    const state = {
+  it.each([
+    {
+      case: "a DERIVED merged run advances the clock — the 2026-08-31 false alarm",
+      // No record row anywhere: the merge exists only as a settled run whose
+      // retained snapshot names a recordless member — the PR2769/PR2770 shape.
       bays: baysWith(),
-      queues: queuesWith(mergedRun("R1", [snapshot({ id: "PR9", branch: "task/derived", revision: 1 })], DERIVED_MERGE_AT)),
-    }
-    expect(latestQueueMergeMs(state, "main")).toBe(Date.parse(DERIVED_MERGE_AT))
-  })
-
-  it("the record lane still answers exactly as before", () => {
-    const state = {
+      queues: queuesWith(
+        mergedRun("R1", [snapshot({ id: "PR9", branch: "task/derived", revision: 1 })], DERIVED_MERGE_AT),
+      ),
+      expected: Date.parse(DERIVED_MERGE_AT),
+    },
+    {
+      case: "the record lane still answers exactly as before",
       bays: baysWith(mergedRecord({ id: "PR1", branch: "task/recorded", integratedAt: RECORD_MERGE_AT })),
       queues: queuesWith(),
-    }
-    expect(latestQueueMergeMs(state, "main")).toBe(Date.parse(RECORD_MERGE_AT))
-  })
-
-  it("both lanes together: the newest merge wins whichever lane holds it", () => {
-    const state = {
+      expected: Date.parse(RECORD_MERGE_AT),
+    },
+    {
+      case: "both lanes together: the newest merge wins whichever lane holds it",
       bays: baysWith(mergedRecord({ id: "PR1", branch: "task/recorded", integratedAt: RECORD_MERGE_AT })),
-      queues: queuesWith(mergedRun("R1", [snapshot({ id: "PR9", branch: "task/derived", revision: 1 })], DERIVED_MERGE_AT)),
-    }
-    expect(latestQueueMergeMs(state, "main")).toBe(Date.parse(DERIVED_MERGE_AT))
-  })
-
-  it("no merge in either lane is honestly undefined", () => {
-    expect(latestQueueMergeMs({ bays: baysWith(), queues: queuesWith() }, "main")).toBeUndefined()
+      queues: queuesWith(
+        mergedRun("R1", [snapshot({ id: "PR9", branch: "task/derived", revision: 1 })], DERIVED_MERGE_AT),
+      ),
+      expected: Date.parse(DERIVED_MERGE_AT),
+    },
+    {
+      case: "both lanes together: the record lane wins when it is newer",
+      bays: baysWith(mergedRecord({ id: "PR1", branch: "task/recorded", integratedAt: RECORD_NEWER_MERGE_AT })),
+      queues: queuesWith(
+        mergedRun("R1", [snapshot({ id: "PR9", branch: "task/derived", revision: 1 })], DERIVED_MERGE_AT),
+      ),
+      expected: Date.parse(RECORD_NEWER_MERGE_AT),
+    },
+    {
+      case: "no merge in either lane is honestly undefined",
+      bays: baysWith(),
+      queues: queuesWith(),
+      expected: undefined,
+    },
+  ])("$case", ({ bays, queues, expected }) => {
+    expect(latestQueueMergeMs({ bays, queues }, "main")).toBe(expected)
   })
 })
