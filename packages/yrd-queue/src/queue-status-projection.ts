@@ -113,21 +113,12 @@ export function queueDisplayState(
   // filtering `nativeStatus` integrated/already-landed/withdrawn, ~:3862).
   // Callers that DO have a word for a closed record read `delivery`.
   if (pr.state === "closed") return { kind, terminal: true, native, delivery: native, preRun: undefined }
-  // An OPEN record whose current revision already landed. The record is the
-  // slower of the two facts: `pr/integrated` is applied in a SEPARATE write from
-  // the run's own settle, so a process death between them leaves a merged change
-  // reading `submitted` with `checks: queued` forever — PR3216 rev 1 merged in
-  // run #3766 at 06:36 on 2026-09-02 and was still printing
-  // `○ ready … (change 'PR3216' checks are queued)` two hours later, because the
-  // resident restarted at 06:39 in that window. The run record carries the merge
-  // proof (`stampRunIntegration`), so the landing is derivable without the
-  // record's stamp — and a derivation that reads the run can never show a landed
-  // change as ready, whatever the store lost. `queue recover` converges the store
-  // behind this (`recoverableIntegrationStamps`); this is the L4 guard that makes
-  // the untruthful row impossible in the first place.
-  if (landedRunForCurrentRevision(pr, options.runs ?? []) !== undefined) {
-    return { kind, terminal: true, native, delivery: "integrated", preRun: undefined }
-  }
+  // A landed record whose store row is still open is NOT filtered here. The
+  // timeline drops that row through `queueSnapshot().eligible`, which reads the
+  // Run's own merge proof — one guard, in `timelineNonIntegratedRows`. A second
+  // one here would be a parallel derivation of the same fact, and every caller
+  // of `projectedChangeStatus` passes no runs, so it could not fire for them
+  // anyway. What this file owns is the RULE both sides read: {@link runProvesMerge}.
   const delivery = options.eligibility?.reason?.code === "needs-author" ? "needs-author" : native
   return {
     kind,
@@ -139,29 +130,26 @@ export function queueDisplayState(
 }
 
 /**
- * The completed, succeeded run that MERGED this change's current revision, or
- * `undefined` when no run proves it landed.
+ * Does this retained Run prove a merge? It has a merge step AND the integration
+ * proof that step produces. A run can reach `completed` with nothing to merge,
+ * and a run that failed a LATER step still landed its members — so neither
+ * status nor conclusion is consulted, only the proof.
  *
- * The ONE predicate for "this open record is really integrated", shared by the
- * display projection above and by `queue recover`'s re-stamping pass, so the
- * surface a human reads and the pass that repairs the store can never disagree
- * about which records are stale (docs/lessons/no-parallel-derivation.md).
+ * THE one rule for "a Run says this revision is on the base", so
+ * {@link queueSnapshot}'s eligibility fold — which is what drops a landed
+ * change's `ready` row from the timeline — and `queue recover`'s re-stamping
+ * pass, which closes that change's still-open record, cannot drift apart
+ * (docs/lessons/no-parallel-derivation.md). Extracted from `queueSnapshot`,
+ * where it was written; nothing about its behaviour moved.
  *
- * Three conjuncts, all required: the run reached `completed`/`success`, it
- * carries an integration proof (a run can succeed with nothing to merge), and
- * the change's CURRENT revision — not an older one — was one of its members. A
- * superseded revision that landed says nothing about the revision now open.
+ * The two halves are not interchangeable and both are needed. Deriving the row
+ * away leaves the record `submitted` with `checks: queued` and its submit fact
+ * standing forever — PR3216 (merged in R3766 at 06:36 on 2026-09-02), PR2462
+ * (R3605) and PR2145 (R3590) were all in that state. Closing the record without
+ * the derivation leaves the row up until recovery next runs.
  */
-export function landedRunForCurrentRevision(pr: Change, runs: readonly Run[]): Run | undefined {
-  const revision = currentChangeRev(pr)
-  const key = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
-  return runs.find(
-    (run) =>
-      run.status === "completed" &&
-      run.conclusion === "success" &&
-      run.integration !== undefined &&
-      run.prs.some((member) => queueRevisionKey(member) === key),
-  )
+export function runProvesMerge(run: Pick<Run, "steps" | "integration">): boolean {
+  return run.integration !== undefined && run.steps.some((step) => step.kind === "merge")
 }
 
 /**
@@ -986,7 +974,11 @@ export function queueSnapshot(
   }
 
   for (const run of scopedRuns) {
-    if (!run.steps.some((step) => step.kind === "merge")) continue
+    // {@link runProvesMerge} — the same rule `queue recover`'s re-stamping pass
+    // reads, named once so the row this drops and the record that pass closes
+    // are decided by one derivation.
+    if (!runProvesMerge(run)) continue
+    // Redundant with the rule above, kept for the narrowing the lines below need.
     if (run.integration === undefined) continue
     for (const member of run.prs) terminalRevisions.add(queueRevisionKey(member))
     // Already-landed settles eligibility but is not a merge performed by this

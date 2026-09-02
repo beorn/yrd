@@ -185,7 +185,7 @@ import {
 } from "./projection-index.ts"
 import { candidateRefFor } from "./candidate-refs.ts"
 import { compactQueuesState, queueRetentionRoot } from "./retention.ts"
-import { queueSnapshot } from "./queue-status-projection.ts"
+import { queueSnapshot, runProvesMerge } from "./queue-status-projection.ts"
 
 /**
  * A queue command refused to compose because a peer's Queue run already holds
@@ -5003,8 +5003,8 @@ function createQueue<Shape extends ChangeShape>(
         // Converge the store behind a run that merged and never got to stamp
         // its members: re-apply `pr/integrated` for every completed, merged run
         // whose member records are still open. Without this the landing lives
-        // only in the run record, `queue status` derives it (the L4 guard in
-        // `queueDisplayState`) but the record itself stays open forever, its
+        // only in the run record: 240ea10f's `queueSnapshot` fold derives the
+        // stale `ready` row away, but the record itself stays open forever, its
         // submit fact stands, and every stale-submit surface keeps reporting it.
         // One INFO line per stamp; idempotent, so a second pass says nothing.
         for (const stamp of recoverableIntegrationStamps(runtime(), reader)) {
@@ -9832,6 +9832,10 @@ function recoverableIntegrationStamps(
     const run = reader.read(record, state.jobs)
     // Quarantined: its integration proof is part of what could not be read.
     if (run === undefined) continue
+    // {@link runProvesMerge} — the same rule `queueSnapshot` folds eligibility
+    // on, so the surface that HIDES a landed row and this pass, which CLOSES
+    // its record, can never disagree about which revisions landed.
+    if (!runProvesMerge(run)) continue
     if (run.status !== "completed" || run.conclusion !== "success") continue
     // A run the ordinary resume path still owns is not stranded — its own
     // advance emits `pr/integrated` the moment the next pass reaches it, and
