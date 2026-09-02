@@ -625,7 +625,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // rewritten — and a registered event is an accepted input shape, so the
     // identity moves; former target 2498f5d4 is retained.
     const previousTargetIdentity ="36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("f800b0790450fa50c9544b7aa592867682f9376fc29043bb021cfa2011f5d501")
+    expect(first.manifest.targetIdentity).toBe("7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -2064,7 +2064,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("f800b0790450fa50c9544b7aa592867682f9376fc29043bb021cfa2011f5d501")
+    expect(rewritten.checkpoint_identity).toBe("7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2153,7 +2153,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("f800b0790450fa50c9544b7aa592867682f9376fc29043bb021cfa2011f5d501")
+    expect(rewritten.checkpoint_identity).toBe("7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074")
     redatabase.close()
   })
 
@@ -3783,6 +3783,10 @@ checks: [{check: {run: "true"}}]
       { from: "1d285ebf24b688b75dbca2c5101a5f1e85cf70ab004a5ca400be89a57daf53d4", to: releasedHop },
       // The production composition's correlation-era identity (props cut).
       { from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5", to: releasedHop },
+      // The ledger's superseded last entry before `yrd pr retire` registered
+      // `queue/revision/retired` (2026-09-01) — what deployments were asked to
+      // store until then.
+      { from: "2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5", to: releasedHop },
       // The interim step-plan identity the live journal advanced to while
       // this work was in flight, measured from its own refusal.
       { from: "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817", to: releasedHop },

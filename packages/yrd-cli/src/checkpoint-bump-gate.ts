@@ -139,8 +139,11 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // `queues.retiredSubmits` row shape — no new projection key, no stored
   // record rewritten. A registered event is an accepted input shape, so the
   // identity moves all the same (the bd1c0b88 trap above); a checkpoint at
-  // the predecessor replays after its stored cursor unchanged. Current.
-  "f800b0790450fa50c9544b7aa592867682f9376fc29043bb021cfa2011f5d501",
+  // the predecessor replays after its stored cursor unchanged. An interim
+  // identity f800b079 existed on this branch only while the fact's who-field
+  // was still spelled `actor` (a retired noun); no deployment ever stored it,
+  // so it is deliberately not retained. Current.
+  "7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074",
 ])
 
 /** Whether the migration graph connects `from` to `target`.
