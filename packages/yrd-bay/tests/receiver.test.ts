@@ -680,7 +680,23 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
           throw new Error("must not run before ref acceptance")
         },
       }),
-    ).toEqual({ delivered: [], failed: [], ambiguous: [result!.id], deferred: [] })
+    ).toEqual({
+      delivered: [],
+      failed: [],
+      // The facts travel with the id: whoever reports this has to name the
+      // change an operator would go looking for, and `receivedAt` is what
+      // separates a push still in flight from one that never finished.
+      ambiguous: [
+        {
+          id: result!.id,
+          ref: "refs/heads/issue/recover",
+          branch: "issue/recover",
+          headSha,
+          receivedAt: result!.receivedAt,
+        },
+      ],
+      deferred: [],
+    })
     expect(await inboxFiles(f.receiver)).toEqual([`${result!.id}.prepared.json`])
     await git(f.receiver.receiverPath, "update-ref", "refs/heads/issue/recover", headSha, zero)
 
