@@ -22,6 +22,8 @@ export {
   type AdmitSelection,
   type PauseQueueArgs,
   type RecoverQueueOptions,
+  type LandedMergeInput,
+  type LandedMergeResolver,
   type RecordAdmissionRefusalArgs,
   type SettleAdmissionRefusalArgs,
   type RetireSubmitFactArgs,
@@ -149,4 +151,5 @@ export * from "./stranded-observation.ts"
 export * from "./submodule-composition-policy.ts"
 
 export { deriveRunLiveness, describeOrphanedRun, runnerPid } from "./run-liveness.ts"
+export { hostRunnerAlive, hostRunnerLivenessProbe } from "./runner-liveness-probe.ts"
 export type { RunLiveness, RunnerLivenessProbe, RunningJobIdentity } from "./run-liveness.ts"

@@ -153,9 +153,13 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     })
     expect(changeDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
 
-    const readmitted = await replayed.queue.run({ prs: ["PR1"] }, runtime)
-    expect(readmitted.at(-1)).toMatchObject({ status: "completed", conclusion: "success" })
+    // ONE pass, not two (24030): the release happens at the pass START, before
+    // the compose selects, so the same pass re-admits the still-submitted PR
+    // under the installed config and runs it to success as R2. A second pass
+    // finds that revision already covered and composes nothing new.
     expect(Queues.ids(replayed.state().queues)).toContain("R2")
+    expect(replayed.queue.get("R2")).toMatchObject({ status: "completed", conclusion: "success" })
+    await expect(replayed.queue.run({ prs: ["PR1"] }, runtime)).resolves.toEqual([])
   })
 
   it("queue recover reports and releases a queued current step with a stale Job revision", async () => {

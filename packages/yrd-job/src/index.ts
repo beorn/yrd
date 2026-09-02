@@ -42,6 +42,7 @@ export type {
   JobCommands,
   JobCompletion,
   JobDefs,
+  JobRecoverOptions,
   Jobs,
   JobsOptions,
   JobsState,
@@ -51,6 +52,8 @@ export type {
   RunJobOptions,
 } from "./jobs.ts"
 export { localRunner } from "./runner.ts"
+export { deriveRunLiveness, describeOrphanedRun, runnerPid } from "./run-liveness.ts"
+export type { RunLiveness, RunnerLivenessProbe, RunningJobIdentity } from "./run-liveness.ts"
 export type {
   HasRunner,
   LocalRunnerOptions,

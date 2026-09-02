@@ -1,5 +1,5 @@
 import * as z from "zod"
-import { isConcurrentSettlementConflict, Job, type Jobs } from "./jobs.ts"
+import { isConcurrentSettlementConflict, Job, type JobRecoverOptions, type Jobs } from "./jobs.ts"
 import type { ContextReq, RuntimeContext } from "./job.ts"
 
 const IdSchema = z.string().trim().min(1)
@@ -35,7 +35,7 @@ export type Runner = Readonly<{
   submit(input: RunnerSubmission): Promise<Job>
   observe(job: string): ReturnType<Jobs["get"]>
   cancel(job: string, options: Readonly<{ by: string; reason: string }>): Promise<Job>
-  recover(options: Readonly<{ now: string; reason?: string; runner?: string }>): Promise<readonly string[]>
+  recover(options: JobRecoverOptions): Promise<readonly string[]>
 }>
 
 export type HasRunner = Readonly<{ runner: Runner }>
