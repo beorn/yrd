@@ -48,6 +48,24 @@ export const HABITANT_EXIT = {
    * all by design — and all seven read as failures because this exit shared
    * `refusal`'s generic code 1 with every genuine one. */
   "installed-plan-stale": 13,
+  /**
+   * The queue repository's RECORDED pin of Yrd moved while this process was
+   * serving, so the code this runner is executing is no longer the code the
+   * queue's own main branch prescribes (24047).
+   *
+   * The third member of the "the code moved under me" family, and the one the
+   * other two could not see. `source-stale` (11) compares this process against
+   * the CHECKOUT it booted from, and `installed-plan-stale` (13) compares its
+   * installed step set against the base tip's declaration — so a pin advance
+   * that changed neither the local checkout nor the step plan was invisible to
+   * both, and every one of them was landed by hand: an operator stopped the
+   * resident, advanced the gitlink, and started it again. Measured 2026-09-02:
+   * best case 2m43s, worst ~40 minutes, on the fleet's critical path.
+   *
+   * `restart-immediately` for the same reason as its two siblings: a fresh
+   * process reads the pin as it now stands, so the restart IS the cure.
+   */
+  "root-pin-moved": 18,
   // 14 and 15 were `queue-wedged` and `refusal-loop`: declared stand-downs
   // (`habitant-queue-wedge.ts`, `habitant-refusal-loop.ts`) that no call site
   // ever reached. Deleted with @i/10-yrd/24030: the wedge the 2-hour bound was
@@ -114,6 +132,11 @@ export const HABITANT_EXIT_DISPOSITION: Readonly<Record<HabitantExitCondition, H
     // A fresh process installs whatever the base tip declares at boot, which
     // is exactly the cure — same reasoning as `source-stale`.
     "installed-plan-stale": "restart-immediately",
+    // A fresh process reads the recorded pin as it now stands. Same cure, same
+    // family: 11, 13 and 18 are the three RESTART codes, and a supervisor that
+    // files any of them under "stays down" reintroduces the hand ritual each
+    // one exists to remove.
+    "root-pin-moved": "restart-immediately",
     // Restarting contradicts the instruction that produced it.
     drained: "stand-down",
     // ERROR is the abnormal-not-auto-fixable class by definition; a successor
