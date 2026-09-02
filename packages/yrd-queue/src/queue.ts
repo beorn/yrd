@@ -2010,11 +2010,29 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   type CycleBaseResolver = (base: string) => Promise<string>
-  /** The pass's base memo, plus the one act that invalidates it: a merge this
+  /** A memoised base that no longer matches the ref: what it was memoised as
+   * (`from`, the sha every member so far was checked at) and where the ref
+   * points now (`to`). */
+  type CycleBaseMove = Readonly<{ base: string; from: string; to: string }>
+  /** The pass's base memo, plus the two acts that invalidate it. A merge this
    * pass landed MOVES the base, and the member behind the merged head must be
    * checked at the moved base, not admitted against the sha the pass started
-   * on (`forget`). Callers that only resolve see the plain resolver type. */
-  type CycleBaseCycle = CycleBaseResolver & Readonly<{ forget: (base: string) => void }>
+   * on (`forget`). And main moves for reasons that are nobody's merge in this
+   * pass — a direct root push, a merge by a previous pass this one composed
+   * against, a foreign carrier — so a drain turn re-reads the ref and replaces
+   * the memo where it moved (`refresh`), instead of checking every remaining
+   * member at a base the merge step will refuse (`stale-check`, measured
+   * 2026-09-01: two members' full check sets lost to one pin push). Callers
+   * that only resolve see the plain resolver type. */
+  type CycleBaseCycle = CycleBaseResolver &
+    Readonly<{
+      forget: (base: string) => void
+      /** Re-read the memoised base(s) from the ref — the same read the top of
+       * a pass takes — replacing the memo where it moved, and answer every
+       * move. Only bases this pass has already resolved are read: a base with
+       * no memo is resolved fresh at its first use anyway. */
+      refresh: (base?: string) => Promise<readonly CycleBaseMove[]>
+    }>
   const createBaseResolutionCycle = (): CycleBaseCycle | undefined => {
     if (resolveBaseSha === undefined) return undefined
     const resolved = new Map<string, Promise<string>>()
@@ -2030,6 +2048,19 @@ function createQueue<Shape extends ChangeShape>(
     return Object.assign(resolve, {
       forget: (selector: string): void => {
         resolved.delete(baseIdentity(selector))
+      },
+      refresh: async (selector?: string): Promise<readonly CycleBaseMove[]> => {
+        const only = selector === undefined ? undefined : baseIdentity(selector)
+        const moves: CycleBaseMove[] = []
+        for (const [base, memo] of [...resolved]) {
+          if (only !== undefined && base !== only) continue
+          const from = await memo
+          const to = await resolveBaseSha(base)
+          if (to === from) continue
+          resolved.set(base, Promise.resolve(to))
+          moves.push({ base, from, to })
+        }
+        return moves
       },
     })
   }
@@ -3513,6 +3544,12 @@ function createQueue<Shape extends ChangeShape>(
     // `typecheck started PR3160`, no merge row; a later pass ran 50 minutes
     // with zero merges.
     stopAtGreenDerivedHead = false,
+    // Members the drain re-points at a base that moved under their green
+    // verdict and dispatches FIRST, at their own position: the admission
+    // order reads such a member as already checked (its Jobs at the old base
+    // are green) and so lists everyone behind it as ahead of it. It holds the
+    // line; the line does not hold it.
+    rechecking?: ReadonlySet<string>,
   ): Promise<AdmissionDispatch> => {
     const admitted: string[] = []
     const refused: string[] = []
@@ -3560,7 +3597,8 @@ function createQueue<Shape extends ChangeShape>(
         // clears it; the reporter's dedup memo collapses the steady-state
         // repeats into one summary.
         const withheld = admissionWithholding(snapshot, steps, pr, selection, derived, ejected)
-        if (withheld !== undefined) {
+        const holdsTheLine = withheld?.code === "admission-order-held" && rechecking?.has(pr.id) === true
+        if (withheld !== undefined && !holdsTheLine) {
           composeConditions.report(
             `admission-withheld:${pr.id}:${withheld.code}`,
             "warn",
@@ -3821,6 +3859,73 @@ function createQueue<Shape extends ChangeShape>(
         resolveCycleBase,
       )
     }
+    /** The settled merge run in this journal whose integration commit IS
+     * `sha` — the mover of a base that moved to `sha`, when the journal knows
+     * it. `undefined` is an honest "no run in this journal merged that
+     * commit": a direct root push, a foreign carrier, or a merge some other
+     * journal recorded. */
+    const mergedBy = (
+      snapshot: DeepReadonly<RuntimeState>,
+      sha: string,
+    ): Readonly<{ run: RunId; prs: readonly string[] }> | undefined => {
+      let mover: Readonly<{ run: RunId; prs: readonly string[] }> | undefined
+      for (const record of Queues.values(snapshot.queues)) {
+        if (record.parent !== undefined || record.integration?.commit !== sha) continue
+        if (mover === undefined || compareNatural(record.id, mover.run) > 0) {
+          mover = { run: record.id, prs: record.prs.map((pr) => pr.id) }
+        }
+      }
+      return mover
+    }
+    /** THE L4 for the 2026-09-01 18:41 pass: a pass must not need main to hold
+     * still between its turns. Re-read every base this pass has memoised from
+     * the ref itself — the read the top of a pass takes — and when one moved
+     * for a reason that is not this drain's own merge (a direct root push, a
+     * merge by a previous pass this one composed against, a foreign carrier),
+     * replace the memo, re-point the members not yet dispatched exactly as an
+     * own merge does, and say so ONCE, naming old, new and the mover when this
+     * journal knows it. An own merge never reaches here: `mergeGreenHead`
+     * forgets the memo before the next turn, so there is nothing to compare. */
+    const reresolveBaseBetweenTurns = async (): Promise<void> => {
+      if (resolveCycleBase === undefined) return
+      const moves = await resolveCycleBase.refresh()
+      if (moves.length === 0) return
+      const snapshot = runtime()
+      for (const move of moves) {
+        const mover = mergedBy(snapshot, move.to)
+        log.info?.(
+          `queue base '${move.base}' moved from ${move.from} to ${move.to} between drain turns` +
+            (mover === undefined
+              ? " (external: no run in this journal merged that commit)"
+              : ` (run '${mover.run}' merged ${mover.prs.join(", ")})`) +
+            "; the members not yet dispatched are checked at the new base",
+          {
+            action: "base-moved-between-turns",
+            base: move.base,
+            from: move.from,
+            to: move.to,
+            movedBy: mover === undefined ? "external" : mover.prs.join(","),
+            ...(mover === undefined ? {} : { run: mover.run }),
+          },
+        )
+      }
+      await repointAfterBaseMove()
+    }
+    /** Did the base this head was green at move? Re-read the ref now, for
+     * exactly this head's base, replacing the memo when it did. */
+    const movedUnder = async (pr: DeepReadonly<Change>): Promise<CycleBaseMove | undefined> => {
+      if (resolveCycleBase === undefined) return undefined
+      const base = baseIdentity(pr.base)
+      return (await resolveCycleBase.refresh(base)).find((move) => move.base === base)
+    }
+    /** Heads re-pointed at a base that moved under their green verdict, in
+     * the order it happened; the next turn dispatches the first of them
+     * before it reads the admission order, so a head keeps its position. */
+    const recheckLine: string[] = []
+    /** How many times this pass has re-checked each head at a moved base:
+     * the bound that keeps a base moving under one head from spinning the
+     * pass, after which the ordinary refusal path takes the head. */
+    const rechecksAtMovedBase = new Map<string, number>()
     /** Merge one green derived head in place and account for how it ended.
      * Whatever came of it, the head has had its turn: it is released so the
      * drain never re-picks it, which is also this branch's termination
@@ -3849,6 +3954,42 @@ function createQueue<Shape extends ChangeShape>(
           return
         }
         case "failed": {
+          // The base moved UNDER a green head: main is no longer where its
+          // checks were taken, so the merge step refused `stale-check` — a
+          // fact about the world, not about the head's content. Its verdict
+          // at X is spent and a verdict at Y is what its merge needs, so
+          // re-point it there and let the NEXT TURN re-check it first, at its
+          // own position — not the next pass, post-drain, behind every other
+          // member's checks, which is where its released authority used to
+          // land it (PR3153 on 2026-09-01: 28 minutes of checks lost to a pin
+          // pushed between passes, then the member behind it lost the same
+          // way at the same stale base). Green Jobs at Y are reused by key,
+          // never re-run. Bounded per head per pass: a base that keeps moving
+          // under one head is the no-progress shape, and beyond the bound the
+          // refusal below takes it, so `released` still grows and the drain
+          // still terminates.
+          const moved = result.code === "stale-check" ? await movedUnder(pr) : undefined
+          const rechecks = rechecksAtMovedBase.get(pr.id) ?? 0
+          if (moved !== undefined && rechecks < ADMISSION_DRAIN_NO_PROGRESS_TURNS) {
+            rechecksAtMovedBase.set(pr.id, rechecks + 1)
+            released.delete(pr.id)
+            recheckLine.push(pr.id)
+            await repointAfterBaseMove()
+            log.info?.(
+              `queue admission: change '${pr.id}' (${pr.branch}) passed every required check at ${baseSha} but ` +
+                `its merge run '${result.run}' found '${moved.base}' at ${moved.to}; re-pointed at ${moved.to} ` +
+                "and re-checked on the next turn, keeping its position",
+              {
+                action: "rechecked-at-moved-base",
+                pr: pr.id,
+                branch: pr.branch,
+                run: result.run,
+                from: baseSha,
+                to: moved.to,
+              },
+            )
+            return
+          }
           // The run record holds the verdict (a failed merge run is durable
           // and audit-visible on its own); this row names the reason so the
           // pass log says WHY the next member got the turn.
@@ -3901,6 +4042,9 @@ function createQueue<Shape extends ChangeShape>(
     while (targets.size > 0) {
       if (options.continueAdmissions?.() === false) break
       await actions.refresh()
+      // Every turn starts from the base the ref points at NOW, never from the
+      // one this pass happened to start on.
+      await reresolveBaseBetweenTurns()
       const snapshot = runtime()
       const selected = admissionSteps(steps)
       // Admission verdicts no longer mint Runs, but replay can still contain an
@@ -3944,14 +4088,20 @@ function createQueue<Shape extends ChangeShape>(
       // single turn and needs no release. At batch 1 the dispatch also hands
       // back the head the moment it goes green (`stopAtGreenDerivedHead`), so
       // its merge lands before the next member's first check starts.
-      const turn = onePerTurn ? queued.slice(0, 1) : queued
+      // A head re-pointed at a moved base takes the turn FIRST, at its own
+      // position: the admission order reads its green Jobs at the old base
+      // as checked and would not list it, and the member behind it must not
+      // overtake a head that lost nothing but the ground under it.
+      const recheck = recheckLine.shift()
+      const turn = recheck === undefined ? (onePerTurn ? queued.slice(0, 1) : queued).map((pr) => pr.id) : [recheck]
       const dispatched = await dispatchAdmissions(
-        turn.map((pr) => pr.id),
+        turn,
         resolveCycleBase,
         selection,
         options,
         derived,
         mergeWhenGreen,
+        recheck === undefined ? undefined : new Set([recheck]),
       )
       for (const pr of dispatched.admitted) admitted.add(pr)
       for (const pr of dispatched.refused) released.add(pr)
@@ -3973,7 +4123,8 @@ function createQueue<Shape extends ChangeShape>(
       // or ejected, and PRs behind it have not been tried yet. Take the next
       // one. `released` grows by at least one whenever this branch is taken, so
       // `queued` strictly shrinks and the loop still terminates.
-      if (dispatched.refused.length + dispatched.ejected.length > 0 && queued.length > turn.length) continue
+      const untried = queued.filter((pr) => !turn.includes(pr.id))
+      if (dispatched.refused.length + dispatched.ejected.length > 0 && untried.length > 0) continue
       if (dispatched.admitted.length > 0 && dispatched.refused.length === 0) {
         // "Admitted" is progress only if the next turn sees a different queue.
         // Measured 2026-09-01 (PR3152): a derived head whose four required-check
