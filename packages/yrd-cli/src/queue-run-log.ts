@@ -8,6 +8,14 @@
  * It owns the record shape, the file, and nothing else — no decisions, no
  * classification, no reading. Callers hand it facts they already hold.
  *
+ * The field names are the boundary suite's table (`tests/boundary/
+ * queue-run-log.test.ts`), which is the contract; this file follows it.
+ *
+ * WHERE THE LOG IS. The queue run names its own log and reports the path as the
+ * `log` field of its `--json` result. No environment variable and no flag: the
+ * queue has to print a log path per change anyway, so the queue run owns the
+ * naming, and one field on the object it already prints is the whole mechanism.
+ *
  * THREE PROPERTIES, each load-bearing.
  *
  * 1. ONE PLACE. Every record in the stream is written through `write` here, so
@@ -28,111 +36,123 @@
  *    cannot be written must not turn a passing queue run into a stuck one — but
  *    it must not vanish either, so the first failure reports itself through the
  *    caller's own logger, once, with the path and the reason, and the rest are
- *    counted and reported by `close`. NO SILENT ERRORS: the count is the proof
- *    that a short stream is known to be short.
+ *    counted. NO SILENT ERRORS: the count is the proof that a short stream is
+ *    known to be short.
  */
 import { appendFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 
-/** Names the DIRECTORY the queue run writes its log into. One file per queue
- * run is created inside it, named by the queue run's id, because the plan says
- * one file per queue run and a service loops queue runs in one process. Unset =
- * no JSONL stream, and the human log is unaffected. */
-export const QUEUE_RUN_LOG_ENV = "YRD_QUEUE_RUN_LOG" as const
-
 /**
  * The six kinds, exactly as the plan names them.
  *
- * - `run`     once per queue run: the pin and the check-config blob it read.
- * - `change`  once per change the queue run considered: what it decided.
+ * - `run`     once per queue run: the pin and the check config it judged from.
+ * - `change`  once per change the queue run saw: what it did with it.
  * - `check`   once per check: its start, end, duration and log path.
- * - `result`  once per ended change: pass, fail or stuck, and the inputs the
- *             rule used to say so.
+ * - `result`  once per ended change: pass, fail or stuck, the inputs the
+ *             attribution rule used, and who it is billed to.
  * - `merge`   once per landing: the merge commit and the target's new tip.
- * - `message` once per message sent: its recipient.
+ * - `message` once per message sent: its recipient and what it says.
  */
 export const QUEUE_RUN_LOG_KINDS = ["run", "change", "check", "result", "merge", "message"] as const
 export type QueueRunLogKind = (typeof QUEUE_RUN_LOG_KINDS)[number]
 
-/** What every record carries, whatever its kind: which queue run wrote it, when,
- * and the ids that join it to the others (plan: "each carrying the queue run,
- * branch, head and check ids"). */
+/** What a queue run did with a change, in its own vocabulary. */
+export type QueueChangeDecision = "checked" | "merged" | "failed" | "stuck" | "waiting"
+
+/** Pass, fail or stuck — the three results, and nothing else. */
+export type QueueResult = "pass" | "fail" | "stuck"
+
+/** Who a result is billed to. `queue` is the default a result must be argued
+ * out of: a fail is the queue's fault until the attribution rule proves it the
+ * submitter's (plan, principle 5). */
+export type QueueWhose = "submitter" | "queue"
+
+/** What a message tells its recipient. */
+export type QueueMessageSays = "merged" | "fail" | "stuck"
+
+/** On every record: which queue run wrote it, and when that queue run started. */
 type QueueRunLogCommon = Readonly<{
   /** The queue run this record belongs to. */
   run: string
-  /** ISO-8601, when the record was written. */
+  /** When the queue run started, ISO 8601. One value across the whole file:
+   * a record's own moment is not a fact anyone reads, and the queue run's is. */
   at: string
-  /** The change's branch, on every record that is about one change. */
-  branch?: string
-  /** The change's head sha, on every record that is about one change. */
-  head?: string
-  /** The check's id, on every record that is about one check. */
-  check?: string
 }>
 
 export type QueueRunRecord = QueueRunLogCommon &
   Readonly<{
     kind: "run"
-    /** The target branch this queue run is draining. */
-    target: string
-    /** The target's tip when the queue run read it. */
-    base?: string
-    /** The recorded yrd pin the queue run is executing. */
+    /** The yrd pin the queue run ran, a sha. */
     pin?: string
-    /** The blob sha of the check config read from the target. */
+    /** The target's check config, a blob sha. */
     config?: string
+    /** The branch this queue is for. */
+    target: string
   }>
 
 export type QueueChangeRecord = QueueRunLogCommon &
   Readonly<{
     kind: "change"
-    /** What the queue run decided about this change. */
-    decision: string
-    /** Why, when the decision carries a code. */
-    code?: string
-    /** The human sentence behind the decision. */
-    reason?: string
+    /** The branch, which is the change's name. */
+    branch?: string
+    /** The sha it is a branch at. */
+    head?: string
+    decision: QueueChangeDecision
   }>
 
 export type QueueCheckRecord = QueueRunLogCommon &
   Readonly<{
     kind: "check"
-    started: string
-    ended: string
-    durationMs: number
+    /** The check's key in the target's config. */
+    name: string
+    /** Whose worktree it ran in. */
+    branch?: string
+    head?: string
+    start: string
+    end: string
+    /** How long it took. */
+    ms: number
     /** The file holding the check's own output. */
     log?: string
-    /** The check's exit status, when the check reached one. */
-    exit?: number
   }>
 
 export type QueueResultRecord = QueueRunLogCommon &
   Readonly<{
     kind: "result"
-    result: "pass" | "fail" | "stuck"
+    branch?: string
+    head?: string
+    /** The check this result is about. */
+    name?: string
+    result: QueueResult
+    /** The check's results in the change's worktree, in order. */
+    worktree?: readonly QueueResult[]
+    /** The same check's result at the target, or null when it was not run
+     * there. Null is a FACT — "we did not ask" — never a missing field. */
+    target: QueueResult | null
+    whose: QueueWhose
     /** The failure code, when the result is not a pass. */
     code?: string
-    /** The inputs the attribution rule used to reach this result. */
-    inputs?: Readonly<Record<string, unknown>>
   }>
 
 export type QueueMergeRecord = QueueRunLogCommon &
   Readonly<{
     kind: "merge"
-    /** The merge commit written. */
+    branch?: string
+    head?: string
+    /** The merge commit. */
     commit: string
-    /** The target's new tip, which the target fast-forwards onto. */
+    /** The target's new tip. */
     tip: string
   }>
 
 export type QueueMessageRecord = QueueRunLogCommon &
   Readonly<{
     kind: "message"
-    recipient: string
-    /** What the message says, in one word: `landed`, `send-back`, `yrd-broken`. */
-    says: string
-    /** The id the notifier printed for the message it opened, when it opened one. */
-    id?: string
+    /** The recipient. */
+    to: string
+    /** The branch it is about. */
+    about?: string
+    says: QueueMessageSays
   }>
 
 export type QueueRunLogRecord =
@@ -155,39 +175,27 @@ export type QueueRunLogEntry =
   | Omit<QueueMessageRecord, "run" | "at">
 
 export type QueueRunLog = Readonly<{
-  /** The file this stream is being written to. */
+  /** The file this stream is being written to — what the queue run reports as
+   * the `log` field of its `--json` result. */
   path: string
   /** Append one record. Never throws; see property 3 above. */
   write(record: QueueRunLogEntry): void
   /** How many records reached the file. */
   written(): number
-  /** How many were lost, and to what. Empty when the stream is whole. */
+  /** How many were lost, and to what. Absent when the stream is whole. */
   dropped(): Readonly<{ count: number; reason: string }> | undefined
 }>
 
 export type QueueRunLogOptions = Readonly<{
-  /** The directory to write into ({@link QUEUE_RUN_LOG_ENV}). */
+  /** The directory to write into: the queue run's own log directory. */
   directory: string
   /** The queue run's id — the file's name, and every record's `run`. */
   run: string
+  /** When the queue run started; every record's `at`. */
+  startedAt: string
   /** Where a write failure is reported. Called at most once. */
   onFailure?: (message: string, props: Readonly<Record<string, unknown>>) => void
-  /** The clock, for the `at` field. */
-  now?: () => Date
 }>
-
-/**
- * The directory a queue run logs into, or `undefined` when nothing named one.
- *
- * Read once, from the environment, and never defaulted to a path of our
- * choosing: a log that appears somewhere nobody asked for is a file nobody
- * finds and nobody prunes. Absent means no stream, which is a supported state,
- * not a degraded one.
- */
-export function queueRunLogDirectory(env: NodeJS.ProcessEnv): string | undefined {
-  const value = env[QUEUE_RUN_LOG_ENV]?.trim()
-  return value === undefined || value === "" ? undefined : value
-}
 
 /** The file one queue run writes: `<directory>/<run>.jsonl`. */
 export function queueRunLogFile(directory: string, run: string): string {
@@ -199,7 +207,6 @@ export function queueRunLogFile(directory: string, run: string): string {
 
 export function createQueueRunLog(options: QueueRunLogOptions): QueueRunLog {
   const path = queueRunLogFile(options.directory, options.run)
-  const now = options.now ?? ((): Date => new Date())
   let written = 0
   let droppedCount = 0
   let droppedReason: string | undefined
@@ -226,9 +233,7 @@ export function createQueueRunLog(options: QueueRunLogOptions): QueueRunLog {
           mkdirSync(options.directory, { recursive: true })
           directoryReady = true
         }
-        // `at` and `run` are the writer's to stamp, so a caller can neither
-        // forget them nor disagree with the file it is writing into.
-        appendFileSync(path, `${JSON.stringify({ ...record, run: options.run, at: now().toISOString() })}\n`)
+        appendFileSync(path, `${JSON.stringify({ ...record, run: options.run, at: options.startedAt })}\n`)
         written += 1
       } catch (cause) {
         fail(cause)
@@ -245,59 +250,82 @@ export function createQueueRunLog(options: QueueRunLogOptions): QueueRunLog {
  * PURE, and separate from the writer on purpose: what belongs in the stream is
  * a question about the queue run, and whether the bytes reached the disk is a
  * question about the filesystem. Keeping them apart means the shape of the
- * stream can be asserted without a temp directory, and the writer can be
- * asserted without a queue.
+ * stream can be asserted without a temp directory, and the writer without a
+ * queue.
  *
- * It reads only what the queue run HANDED BACK — the runs it drove, the changes
- * it declined to select, the step selection it resolved and the outcomes it
- * notified. Nothing is re-derived from git and nothing is re-classified: a
- * record that disagreed with the run it describes would be worse than no
- * record, because a reader cannot tell which of the two lied.
+ * It reads only what the queue run HANDED BACK. Nothing is re-derived from git
+ * and nothing is re-classified: a record that disagreed with the run it
+ * describes would be worse than no record, because a reader cannot tell which
+ * of the two lied.
  */
 export type QueueRunLogSource = Readonly<{
-  /** The target this queue run drained. */
+  /** The branch this queue is for. */
   target: string
-  /** The recorded yrd pin this queue run executed, when it could be read. */
+  /** The yrd pin this queue run ran. */
   pin?: string
+  /** The target's check config, a blob sha. */
+  config?: string
   /** The runs this queue run drove, in order. */
   runs: readonly QueueRunSourceRun[]
   /** Changes considered and not selected, with the reason. */
   blocked?: readonly QueueRunSourceBlocked[]
-  /** One row per outcome the notifier handled this pass. */
+  /** One row per message the notifier sent this pass. */
   messages?: readonly QueueRunSourceMessage[]
   /** Changes this queue run refused at admission, where most fails and every
    * stuck actually land — they never become a run. */
   refusals?: readonly QueueRunSourceRefusal[]
-  /** Checks this queue run ran outside a run's steps, which is most of them:
-   * the on-submit checks run at admission. */
+  /** Every check this queue run ran, from the jobs themselves: most checks
+   * never belong to a run, because a change that fails one never becomes one. */
   checks?: readonly QueueRunSourceCheck[]
+  /**
+   * The queue run threw and did not finish. Every change it had in hand ends
+   * STUCK: an uncaught throw judged nothing, so nobody is billed and the
+   * changes stay where they were (plan, The queue run).
+   */
+  crashed?: Readonly<{ code?: string; changes: readonly QueueRunSourceChange[] }>
 }>
 
-/**
- * A change the queue run REFUSED at admission, as its `change` and `result`
- * records.
- *
- * Needed because most changes never become a `Run`: a check that fails or gets
- * stuck at admission leaves no run at all, so a log built from `runs` alone
- * showed the pass's message and nothing about the change it was about —
- * measured 2026-09-02, a failing queue run whose log held two lines and named
- * neither the branch nor the check.
- *
- * The refusal row is a STREAK, so it is filtered to this queue run by its own
- * `lastAt`: a row last written before this queue run started belongs to an
- * earlier one and is not re-reported here.
- */
+/** The shape this module reads off a `Run`. Structural, so `@yrd/queue`'s own
+ * `Run` satisfies it without this module depending on the whole model. */
+export type QueueRunSourceRun = Readonly<{
+  id: string
+  base?: string
+  conclusion?: string
+  status?: string
+  error?: Readonly<{ code?: string; message?: string }>
+  integration?: Readonly<{ commit?: string; baseSha?: string }>
+  prs?: readonly QueueRunSourceChange[]
+}>
+
+export type QueueRunSourceChange = Readonly<{ id?: string; branch?: string; headSha?: string }>
+
+export type QueueRunSourceBlocked = Readonly<{
+  pr?: QueueRunSourceChange
+  eligibility?: Readonly<{ reason?: Readonly<{ code?: string; message?: string }> }>
+}>
+
+export type QueueRunSourceMessage = Readonly<{
+  attempt?: string
+  kind?: string
+  recipient?: string
+  branch?: string
+  ball?: string
+  disposition?: string
+}>
+
+/** A change this queue run refused at admission. */
 export type QueueRunSourceRefusal = Readonly<{
   pr?: string
   branch?: string
   headSha?: string
   code?: string
+  /** The admission kind — the billing decision the queue already made. */
   kind?: string
   reason?: string
   lastAt?: string
 }>
 
-/** A check this queue run ran, whatever it was admitting or merging. */
+/** One check this queue run ran. */
 export type QueueRunSourceCheck = Readonly<{
   branch?: string
   head?: string
@@ -309,72 +337,23 @@ export type QueueRunSourceCheck = Readonly<{
   exit?: number
 }>
 
-
-/** The shape this module reads off a `Run`. Structural, so `@yrd/queue`'s own
- * `Run` satisfies it without this module depending on the whole model. */
-export type QueueRunSourceRun = Readonly<{
-  id: string
-  base?: string
-  conclusion?: string
-  status?: string
-  error?: Readonly<{ code?: string; message?: string }>
-  integration?: Readonly<{ commit?: string; baseSha?: string }>
-  stepSelection?: Readonly<{ baseSha?: string; configBlobSha?: string }>
-  prs?: readonly QueueRunSourceChange[]
-  steps?: readonly QueueRunSourceStep[]
-}>
-
-export type QueueRunSourceChange = Readonly<{ id?: string; branch?: string; headSha?: string }>
-
-export type QueueRunSourceStep = Readonly<{
-  name?: string
-  kind?: string
-  job?: Readonly<{
-    id?: string
-    startedAt?: string
-    finishedAt?: string
-    requestedAt?: string
-    conclusion?: string
-    status?: string
-    error?: Readonly<{ code?: string; message?: string }>
-    output?: unknown
-  }>
-}>
-
-export type QueueRunSourceBlocked = Readonly<{
-  pr?: QueueRunSourceChange
-  eligibility?: Readonly<{ reason?: Readonly<{ code?: string; message?: string }> }>
-}>
-
-export type QueueRunSourceMessage = Readonly<{
-  attempt?: string
-  kind?: string
-  recipient?: string
-  ball?: string
-  disposition?: string
-}>
-
 /** The first failing step's code — the one fact the result turns on when the
  * run itself recorded none. */
-function failedStepCode(run: QueueRunSourceRun): string | undefined {
-  for (const step of run.steps ?? []) {
-    if (step.job?.conclusion === "failure" && step.job.error?.code !== undefined) return step.job.error.code
-  }
-  return undefined
+function failedRunCode(run: QueueRunSourceRun): string | undefined {
+  return run.error?.code
 }
 
 /**
- * Pass, fail or stuck — the three results, read from what the run recorded.
+ * Who a result is billed to.
  *
- * `stuck` is handed in rather than imported so this stays pure and so the ONE
- * definition of who owns a code (ENVIRONMENT_OWNED_FAILURE_CODES) is the one
- * the caller passes. A second copy of that judgement here is exactly the kind
- * of disagreement the log exists to prevent.
+ * `stuck` is the queue's, always. A fail is the SUBMITTER's — but only a fail:
+ * "a fail is the queue's fault until proven the submitter's" is enforced one
+ * layer down, in whether the code is environment-owned at all, and `stuck` is
+ * exactly the answer that rule produces. So this is a projection of that
+ * decision, never a second opinion on it.
  */
-function runResult(run: QueueRunSourceRun, stuck: (code: string) => boolean): "pass" | "fail" | "stuck" {
-  const code = run.error?.code ?? failedStepCode(run)
-  if (code === undefined) return run.conclusion === "failure" ? "fail" : "pass"
-  return stuck(code) ? "stuck" : "fail"
+function whose(result: QueueResult): QueueWhose {
+  return result === "fail" ? "submitter" : "queue"
 }
 
 /** The change a run is about, when it is about exactly one. */
@@ -386,64 +365,68 @@ function soleChange(run: QueueRunSourceRun): Readonly<{ branch?: string; head?: 
   }
 }
 
+/** What a message the notifier sent tells its recipient, in the log's three
+ * words rather than the notifier's own. */
+function messageSays(kind: string | undefined): QueueMessageSays {
+  if (kind === "landed") return "merged"
+  if (kind === "send-back") return "fail"
+  return "stuck"
+}
+
 /**
  * Every record one queue run writes, in the order a reader wants them: the
- * queue run itself, then per run the changes it took, the checks it ran, the
- * result it reached and the merge it wrote, then the changes it held, then the
- * messages it sent.
- *
- * `run` and `at` are stamped by the writer, so they are absent here — which is
- * also what makes two queue runs' records comparable.
+ * queue run itself, every check it ran, then per run the change it took, the
+ * result it reached and the merge it wrote, then the changes it refused or
+ * held, then the messages it sent.
  */
 export function queueRunLogRecords(
   source: QueueRunLogSource,
   stuck: (code: string) => boolean,
 ): readonly QueueRunLogEntry[] {
   const records: QueueRunLogEntry[] = []
-  const selection = source.runs.find((run) => run.stepSelection !== undefined)?.stepSelection
   records.push({
     kind: "run",
-    target: source.target,
     ...(source.pin === undefined ? {} : { pin: source.pin }),
-    ...(selection?.baseSha === undefined ? {} : { base: selection.baseSha }),
-    ...(selection?.configBlobSha === undefined ? {} : { config: selection.configBlobSha }),
+    ...(source.config === undefined ? {} : { config: source.config }),
+    target: source.target,
   })
   for (const ran of source.checks ?? []) {
-    if (ran.startedAt === undefined || ran.finishedAt === undefined) continue
+    if (ran.startedAt === undefined || ran.finishedAt === undefined || ran.name === undefined) continue
     records.push({
       kind: "check",
+      name: ran.name,
       ...(ran.branch === undefined ? {} : { branch: ran.branch }),
       ...(ran.head === undefined ? {} : { head: ran.head }),
-      ...(ran.name === undefined ? {} : { check: ran.name }),
-      started: ran.startedAt,
-      ended: ran.finishedAt,
-      durationMs: ran.durationMs ?? Date.parse(ran.finishedAt) - Date.parse(ran.startedAt),
+      start: ran.startedAt,
+      end: ran.finishedAt,
+      ms: ran.durationMs ?? Date.parse(ran.finishedAt) - Date.parse(ran.startedAt),
       ...(ran.log === undefined ? {} : { log: ran.log }),
-      ...(ran.exit === undefined ? {} : { exit: ran.exit }),
     })
   }
   for (const run of source.runs) {
     const change = soleChange(run)
-    for (const taken of run.prs ?? []) {
-      records.push({
-        kind: "change",
-        ...(taken.branch === undefined ? {} : { branch: taken.branch }),
-        ...(taken.headSha === undefined ? {} : { head: taken.headSha }),
-        decision: "selected",
-      })
-    }
-    const code = run.error?.code ?? failedStepCode(run)
+    const code = failedRunCode(run)
+    const result: QueueResult =
+      code === undefined ? (run.conclusion === "failure" ? "fail" : "pass") : stuck(code) ? "stuck" : "fail"
+    const merged = run.integration?.commit !== undefined
+    records.push({
+      kind: "change",
+      ...change,
+      // What the queue run DID with it, which is not the same as how the check
+      // went: a change whose checks passed and which then merged is `merged`,
+      // and one that passed its checks without merging is `checked`.
+      decision: merged ? "merged" : result === "pass" ? "checked" : result === "stuck" ? "stuck" : "failed",
+    })
     records.push({
       kind: "result",
       ...change,
-      result: runResult(run, stuck),
+      result,
+      // Not run at the target: today's attribution never asks, and null says
+      // so. A missing field would read as "no answer recorded", which is a
+      // different and untrue claim.
+      target: null,
+      whose: whose(result),
       ...(code === undefined ? {} : { code }),
-      // The inputs the rule used, so a reader can check the result rather than
-      // trust it — the whole point of naming inputs in the plan.
-      inputs: {
-        conclusion: run.conclusion ?? run.status ?? "unknown",
-        ...(code === undefined ? {} : { environmentOwned: stuck(code) }),
-      },
     })
     if (run.integration?.commit !== undefined) {
       records.push({
@@ -451,10 +434,7 @@ export function queueRunLogRecords(
         ...change,
         commit: run.integration.commit,
         // The plan asks for the new target tip, which IS the merge commit: the
-        // target fast-forwards onto it. The tip BEFORE the merge is not carried
-        // here, because the integration proof's own `baseSha` is the merge
-        // commit too, and a `base` field holding the merge would be a lie a
-        // reader cannot detect (measured 2026-09-02).
+        // target fast-forwards onto it.
         tip: run.integration.commit,
       })
     }
@@ -464,25 +444,17 @@ export function queueRunLogRecords(
       ...(refused.branch === undefined ? {} : { branch: refused.branch }),
       ...(refused.headSha === undefined ? {} : { head: refused.headSha }),
     }
-    records.push({
-      kind: "change",
-      ...subject,
-      decision: "refused",
-      ...(refused.code === undefined ? {} : { code: refused.code }),
-      ...(refused.reason === undefined ? {} : { reason: refused.reason }),
-    })
+    // The admission kind IS the billing decision the queue already made, so it
+    // is what the result reads — never recomputed here into a second opinion.
+    const result: QueueResult = refused.kind === "infrastructure" ? "stuck" : "fail"
+    records.push({ kind: "change", ...subject, decision: result === "stuck" ? "stuck" : "failed" })
     records.push({
       kind: "result",
       ...subject,
-      // The admission kind IS the billing decision the queue already made, so
-      // it is the input the result rule used — read off the row, never
-      // recomputed here into a second opinion.
-      result: refused.kind === "infrastructure" ? "stuck" : "fail",
+      result,
+      target: null,
+      whose: whose(result),
       ...(refused.code === undefined ? {} : { code: refused.code }),
-      inputs: {
-        admission: refused.kind ?? "unknown",
-        ...(refused.code === undefined ? {} : { environmentOwned: stuck(refused.code) }),
-      },
     })
   }
   for (const held of source.blocked ?? []) {
@@ -490,17 +462,30 @@ export function queueRunLogRecords(
       kind: "change",
       ...(held.pr?.branch === undefined ? {} : { branch: held.pr.branch }),
       ...(held.pr?.headSha === undefined ? {} : { head: held.pr.headSha }),
-      decision: "held",
-      ...(held.eligibility?.reason?.code === undefined ? {} : { code: held.eligibility.reason.code }),
-      ...(held.eligibility?.reason?.message === undefined ? {} : { reason: held.eligibility.reason.message }),
+      decision: "waiting",
+    })
+  }
+  for (const held of source.crashed?.changes ?? []) {
+    const subject = {
+      ...(held.branch === undefined ? {} : { branch: held.branch }),
+      ...(held.headSha === undefined ? {} : { head: held.headSha }),
+    }
+    records.push({ kind: "change", ...subject, decision: "stuck" })
+    records.push({
+      kind: "result",
+      ...subject,
+      result: "stuck",
+      target: null,
+      whose: "queue",
+      ...(source.crashed?.code === undefined ? {} : { code: source.crashed.code }),
     })
   }
   for (const message of source.messages ?? []) {
     records.push({
       kind: "message",
-      recipient: message.recipient ?? "unknown",
-      says: message.kind ?? message.disposition ?? "unknown",
-      ...(message.ball === undefined ? {} : { id: message.ball }),
+      to: message.recipient ?? "unknown",
+      ...(message.branch === undefined ? {} : { about: message.branch }),
+      says: messageSays(message.kind),
     })
   }
   return records

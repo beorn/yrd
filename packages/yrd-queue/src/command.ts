@@ -301,6 +301,12 @@ export const CommandEvidenceSchema = z
       .regex(/^[0-9a-f]{64}$/u)
       .optional(),
     artifacts: z.array(StepArtifactSchema),
+    /** The file holding this command's own output, named whether or not
+     * anything was written to it. `artifacts` lists what EXISTS, so a check
+     * that printed nothing carries an empty list and its log is unnameable from
+     * the evidence — which left every passing check's record in the queue run's
+     * log with no `log` field, the one field a reader follows. */
+    log: z.string().min(1).optional(),
     classification: z.enum(["base", "carrier"]).optional(),
     mode: GateModeSchema.optional(),
     gateReports: z.array(GateReportSchema).min(1).optional(),
@@ -730,6 +736,7 @@ function configuredCommand<Shape extends ChangeShape>(
       configHash,
       environmentHash: environmentHash(env),
       artifacts,
+      log: artifactSink.log,
       classification: options.classification ?? "carrier",
       mode,
       ...(gateReports.values.length === 0 ? {} : { gateReports: gateReports.values }),

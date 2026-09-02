@@ -1,9 +1,9 @@
 /**
- * @failure A queue run's log is prose in the plan and nothing in the code: no
- *          JSONL file is written at all today, so what a queue run did is
- *          readable only by reading four WARN rows on stderr and guessing.
- *          Nothing pins the fact stream, so the rebuild at M4 could ship any
- *          shape, or none, and every existing test would still pass.
+ * @failure A queue run's log is prose in the plan and nothing in the code, so
+ *          what a queue run did is readable only by reading four WARN rows on
+ *          stderr and guessing. Nothing pins the fact stream, so the rebuild at
+ *          M4 could ship any shape, or none, and every existing test would
+ *          still pass.
  * @level   l3
  * @consumer the mechanic reading a garage queue run · `queue list`'s log path ·
  *           any later reader of what one round did
@@ -126,11 +126,9 @@ function warningRows(stderr: string): readonly string[] {
 
 describe("the queue run's log", { timeout: 120_000 }, () => {
   /**
-   * One file, JSONL, at a path the queue run itself names. Red today for the
-   * first reason a test can be red: there is no such file anywhere, and the
-   * `--json` result names none.
+   * One file, JSONL, at a path the queue run itself names.
    */
-  it.fails("is one JSONL file the queue run names, every line a JSON object with a kind", async () => {
+  it("is one JSONL file the queue run names, every line a JSON object with a kind", async () => {
     const { repo } = await boundaryRepository({ exit: 0, notify: true })
     await submitOneCommit(repo, "green")
 
@@ -151,9 +149,9 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
   /**
    * The six kinds, on a queue run that exercises all of them: a change is seen,
    * a check runs, a result is reached, the change merges, and the submitter is
-   * told. Red today for the same first reason.
+   * told.
    */
-  it.fails("names the six kinds when one change is checked and merged", async () => {
+  it("names the six kinds when one change is checked and merged", async () => {
     const { repo } = await boundaryRepository({ exit: 0, notify: true })
     const { branch, headSha } = await submitOneCommit(repo, "green")
 
@@ -247,7 +245,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
 
   describe("a queue run with nothing submitted", () => {
     /** Nothing happened, so the log says only that the queue run looked. */
-    it.fails("writes exactly the run line", async () => {
+    it("writes exactly the run line", async () => {
       const { repo } = await boundaryRepository({ exit: 0, notify: true })
 
       const run = await queueRunOnce(repo)
@@ -266,10 +264,10 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * nothing: the two messages a submitter gets are `merged` and `fail`, and
    * neither may be sent for a queue run that could not do its job.
    *
-   * Red today on the log, which does not exist. The billing itself is already
-   * right underneath: exit 2 and `check-stuck` are M1's, landed 2026-09-02.
+   * The billing underneath is M1's: exit 2 and `check-stuck`, landed
+   * 2026-09-02. This adds the log's account of it.
    */
-  it.fails("records a stuck result and bills the submitter nothing", async () => {
+  it("records a stuck result and bills the submitter nothing", async () => {
     const { repo, notifyLog } = await boundaryRepository({ exit: 2, notify: true })
     const { branch, headSha } = await submitOneCommit(repo, "two")
 

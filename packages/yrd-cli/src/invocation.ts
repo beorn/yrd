@@ -550,18 +550,54 @@ function stableValue(value: unknown): unknown {
   )
 }
 
-export function classifyFailure(error: unknown): FailureVerdict {
-  const failure =
-    failureFact(error) ??
+/** What the failing command WAS, where that changes the verdict. */
+export type FailurePosture = Readonly<{
+  /** This was `yrd queue run`. Every uncaught throw in a queue run is STUCK. */
+  queueRun?: boolean
+}>
+
+/**
+ * An uncaught error, as an exit code and a failure fact.
+ *
+ * ORDINARY COMMANDS keep the mapping they have always had: a refusal exits 1,
+ * a usage or configuration fault exits 2, anything else exits 3.
+ *
+ * A QUEUE RUN has three results and only three — pass, fail, stuck — and a
+ * CRASH is none of the first two. It is stuck: the queue could not do its job,
+ * nobody is billed, and the change stays where it was (plan of record, The
+ * queue run: "A crash, an unhandled exception, … and a bad invocation of the
+ * queue run itself are stuck"). So an untyped throw exits 2 rather than 3.
+ *
+ * A CRASH IS NOT EVERY THROW, and the difference is the whole care in this
+ * function. A `raiseFailure` that reaches this boundary is the queue run's
+ * DESIGNED refusal path — an unknown selector, a second runner already
+ * holding the lease — and the queue run reached that answer on purpose. Those
+ * keep the exit codes they document: measured 2026-09-02, collapsing them cost
+ * five tests that were right. Only a throw carrying no failure fact is a crash,
+ * and only that is retyped.
+ *
+ * A bad invocation of a queue run is stuck too, per the same ruling, and needs
+ * nothing here: usage and configuration already exit 2.
+ */
+export function classifyFailure(error: unknown, posture: FailurePosture = {}): FailureVerdict {
+  const fact = failureFact(error)
+  const raised =
+    fact ??
     Object.freeze({
       kind: "infrastructure" as const,
       code: "unexpected",
       message: error instanceof Error ? error.message : String(error),
     })
+  // The crash: no failure fact, so nothing typed it, so nothing judged anyone's
+  // change. `infrastructure` is already its kind, which is what downstream
+  // billing reads.
+  if (posture.queueRun === true && fact === undefined) {
+    return Object.freeze({ exitCode: 2 satisfies YrdCliExitCode, failure: raised })
+  }
   const exitCode = (
-    failure.kind === "refusal" ? 1 : failure.kind === "usage" || failure.kind === "configuration" ? 2 : 3
+    raised.kind === "refusal" ? 1 : raised.kind === "usage" || raised.kind === "configuration" ? 2 : 3
   ) satisfies YrdCliExitCode
-  return Object.freeze({ exitCode, failure })
+  return Object.freeze({ exitCode, failure: raised })
 }
 
 export type UnrecognizedKeyFailure = Readonly<{ keys: readonly string[] }>

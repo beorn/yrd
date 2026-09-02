@@ -308,12 +308,7 @@ import {
   type QueuePassMessage,
 } from "./outcome-notify.ts"
 import type { ConditionalLogger } from "loggily"
-import {
-  createQueueRunLog,
-  queueRunLogDirectory,
-  queueRunLogRecords,
-  type QueueRunSourceCheck,
-} from "./queue-run-log.ts"
+import { createQueueRunLog, queueRunLogRecords, type QueueRunSourceCheck } from "./queue-run-log.ts"
 
 /** How many outcome-ledger rows `queue list` prints beneath the timeline. */
 const QUEUE_LIST_NOTIFICATION_ROWS = 20
@@ -14416,11 +14411,53 @@ function buildProgram(
       // and reporting it again would make every queue run look like it redid
       // the last one's work.
       const passStartedAt = new Date().toISOString()
-      const runs = draining() ? [] : await runQueues(app, selectors, options, io)
+      // A queue run that throws still owes its account of itself. Without this
+      // the crash path — the one a reader most needs the log for — wrote
+      // nothing at all, and the change it had in hand went unmentioned.
+      // Rethrown untouched: the exit code is `classifyFailure`'s to decide, and
+      // it makes an uncaught throw in a queue run STUCK.
+      let runs: readonly Run[]
+      try {
+        runs = draining() ? [] : await runQueues(app, selectors, options, io)
+      } catch (cause) {
+        writeQueueRunLog({
+          cwd: io.cwd ?? process.cwd(),
+          app,
+          since: passStartedAt,
+          runs: [],
+          blocked: [],
+          messages: outcomes?.passMessages() ?? [],
+          crashed: {
+            ...(failureFact(cause)?.code === undefined ? {} : { code: failureFact(cause)?.code }),
+            // Every change that was still submitted when the throw happened.
+            // `admissionBlockedChanges` is the wrong set here: it names only
+            // the changes ALREADY refused, and a crash mid-run leaves a change
+            // that was perfectly runnable a moment earlier.
+            changes: recordChanges(stateOf(app).bays).filter((pr) => {
+              const delivery = changeDeliveryState(pr)
+              return delivery === "submitted" || delivery === "ready" || delivery === "needs-author"
+            }),
+          },
+          log: app.log,
+        })
+        throw cause
+      }
       const selectedChangeIds =
         selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
       const blocked = admissionBlockedChanges(app, selectedChangeIds)
       const blockerText = blocked.map(({ eligibility }) => eligibility.reason?.message).join("\n")
+      // Written BEFORE the result is printed, because the result names the log:
+      // a path in the JSON that points at a file not yet on disk would be a
+      // promise, and every reader of it would race the writer.
+      const queueRunLog = writeQueueRunLog({
+        cwd: io.cwd ?? process.cwd(),
+        app,
+        since: passStartedAt,
+        runs,
+        blocked,
+        messages: outcomes?.passMessages() ?? [],
+        log: app.log,
+      })
       const human =
         blocked.length === 0
           ? createElement(QueueRunsView, { runs })
@@ -14432,6 +14469,9 @@ function buildProgram(
         jsonEnabled(options),
         {
           command: "queue.run",
+          // The queue run names its own log, and this is where it says so: the
+          // one field a reader follows to find what this round did.
+          ...(queueRunLog === undefined ? {} : { log: queueRunLog }),
           publications: publications.map((job) => ({ ...job, projection: projectPublication(job) })),
           results: runs.map(projectQueueRunTaskStatus),
           ...(blocked.length === 0
@@ -14451,16 +14491,6 @@ function buildProgram(
       // changes taken and held, every check's timing and log, each run's result
       // and merge, and what the notifier told whom. Nothing above this line is
       // changed by it, and an unset YRD_QUEUE_RUN_LOG writes nothing at all.
-      writeQueueRunLog({
-        env: bootstrap?.env ?? process.env,
-        cwd: io.cwd ?? process.cwd(),
-        app,
-        since: passStartedAt,
-        runs,
-        blocked,
-        messages: outcomes?.passMessages() ?? [],
-        log: app.log,
-      })
       const publicationFailed = publications.some((job) => job.status !== "completed" || job.conclusion !== "success")
       // The three-way verdict (@i/10-yrd/24028): computed from the outcomes
       // this pass handed to the notifier seam, on the registry's disposition,
@@ -15085,7 +15115,9 @@ async function executeYrd(
       )
       return 2
     }
-    const { exitCode } = classifyFailure(error)
+    // A throw that reached here ended the command. For a queue run that is
+    // STUCK, never a refusal and never an unknown: see `classifyFailure`.
+    const { exitCode } = classifyFailure(error, { queueRun: invocation.queueRunMode !== undefined })
     const globals = program.opts() as Readonly<{ verbose?: number }>
     await diagnostic(runtimeIO, error, {
       json: jsonOutputRequested(program, args),
@@ -15125,23 +15157,26 @@ export function runYrd(
 }
 
 /**
- * Write one queue run's JSONL log — the wiring, and the only caller of
- * {@link createQueueRunLog}.
+ * Write one queue run's JSONL log and return the path — the wiring, and the
+ * only caller of {@link createQueueRunLog}.
  *
  * It lives here, beside the queue run's own action, because this is the one
- * scope that holds all six facts at once: the step selection the runs resolved,
- * the changes taken and the changes held, every check's timing and artifact,
- * each run's result and merge commit, and what the notifier told whom. Reading
- * any of those from anywhere else would mean deriving a fact the queue run has
- * already decided, and a log that disagrees with the run it describes is worse
- * than no log.
+ * scope that holds all six facts at once: the pin and the check config the run
+ * judged from, the changes taken, refused and held, every check's timing and
+ * artifact, each run's result and merge commit, and what the notifier told
+ * whom. Reading any of those anywhere else would mean deriving a fact the queue
+ * run has already decided, and a log that disagrees with the run it describes
+ * is worse than no log.
  *
- * Never throws. A queue run's verdict is not the log's to change, and the
- * writer reports its own failures through `log` (NO SILENT ERRORS).
+ * The queue run NAMES the file, under the same `.git/yrd` root its artifacts
+ * already live in, and reports it as the `log` field of its `--json` result.
+ * No environment variable: the queue has to hand a reader a log path anyway.
+ *
+ * Never throws. A queue run's result is not the log's to change, and the writer
+ * reports its own failures through `log` (NO SILENT ERRORS).
  */
 function writeQueueRunLog(
   input: Readonly<{
-    env: NodeJS.ProcessEnv
     cwd: string
     app: YrdCliApp
     /** The instant this queue run started; durable rows older than it belong to
@@ -15150,11 +15185,13 @@ function writeQueueRunLog(
     runs: readonly Run[]
     blocked: readonly Readonly<{ pr: Change; eligibility: ChangeEligibility }>[]
     messages: readonly QueuePassMessage[]
+    /** The queue run threw: what it had in hand ends stuck. */
+    crashed?: Readonly<{ code?: string; changes: readonly Change[] }>
     log: ConditionalLogger
   }>,
-): void {
-  const directory = queueRunLogDirectory(input.env)
-  if (directory === undefined) return
+): string | undefined {
+  const directory = queueRunLogDirectory(input.cwd)
+  if (directory === undefined) return undefined
   const state = stateOf(input.app)
   const changes = state.bays.prs
   const refusals = Object.values(state.queues.admissionRefusals)
@@ -15171,27 +15208,43 @@ function writeQueueRunLog(
   const checks = Object.values(state.jobs.byId)
     .filter((job) => job.status === "completed" && "startedAt" in job && job.startedAt >= input.since)
     .map((job) => queueRunLogCheck(job, changes))
-  const target =
-    input.runs[0]?.base ?? input.blocked[0]?.pr.base ?? Object.values(changes)[0]?.base ?? "main"
-  const pin = queueRecordedYrdPin(input.cwd)
+    // The MERGE step is not a check: it is what the queue does once the checks
+    // pass, it has no key in the target's check config, and a record calling it
+    // one would put a name in the stream that a reader cannot look up.
+    .filter((check) => check.name !== undefined && check.name !== "merge")
+  const target = input.runs[0]?.base ?? input.blocked[0]?.pr.base ?? Object.values(changes)[0]?.base ?? "main"
   const records = queueRunLogRecords(
     {
       target,
-      ...("pinSha" in pin ? { pin: pin.pinSha } : {}),
+      ...(queueRunLogPin(input.cwd) === undefined ? {} : { pin: queueRunLogPin(input.cwd) }),
+      ...(queueRunLogConfig(input.runs) === undefined ? {} : { config: queueRunLogConfig(input.runs) }),
       runs: input.runs,
       blocked: input.blocked,
       messages: input.messages,
       refusals,
       checks,
+      ...(input.crashed === undefined
+        ? {}
+        : {
+            crashed: {
+              ...(input.crashed.code === undefined ? {} : { code: input.crashed.code }),
+              changes: input.crashed.changes.map((change) => ({
+                id: change.id,
+                branch: change.branch,
+                headSha: changeHead(change),
+              })),
+            },
+          }),
     },
     // The ONE definition of who owns a code, handed in rather than copied: the
-    // log's `result` must agree with the queue's own billing or one of them is
+    // log's `result` must agree with the queue's own billing, or one of them is
     // lying and a reader cannot tell which.
     (code) => ENVIRONMENT_OWNED_FAILURE_CODES.has(code),
   )
   const stream = createQueueRunLog({
     directory,
     run: queueRunLogId(input.runs, refusals.length > 0 || checks.length > 0),
+    startedAt: input.since,
     onFailure: (message, props) => input.log.warn?.(message, props),
   })
   for (const record of records) stream.write(record)
@@ -15203,6 +15256,50 @@ function writeQueueRunLog(
       { action: "queue-run-log-short", code: "queue-run-log-short", path: stream.path, dropped: dropped.count },
     )
   }
+  return stream.path
+}
+
+/** Where a queue run's logs go: beside its artifacts, under the repository's
+ * own git directory. Undefined when this is not a work tree, which is the one
+ * case where there is no repository to put them in. */
+function queueRunLogDirectory(cwd: string): string | undefined {
+  try {
+    const gitDir = gitSync(cwd, ["rev-parse", "--absolute-git-dir"]).trim()
+    return gitDir === "" ? undefined : join(gitDir, "yrd", "logs")
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The yrd pin this queue run ran, as a sha.
+ *
+ * The target's recorded gitlink when the repository declares the submodule,
+ * because that is the pin the plan means. A repository with no yrd submodule
+ * still ran SOME yrd, and its commit answers the same question a reader is
+ * asking — which code judged my change — so the source checkout's own HEAD
+ * stands in rather than leaving the field off.
+ */
+function queueRunLogPin(cwd: string): string | undefined {
+  const pin = queueRecordedYrdPin(cwd)
+  if ("pinSha" in pin) return pin.pinSha
+  const root = yrdSourceRoot()
+  if (root === undefined) return undefined
+  try {
+    const head = gitSync(root, ["rev-parse", "HEAD"]).trim()
+    return /^[0-9a-f]{40,64}$/u.test(head) ? head : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The target's check config, as the blob sha the runs resolved it to. */
+function queueRunLogConfig(runs: readonly Run[]): string | undefined {
+  for (const run of runs) {
+    const blob = run.stepSelection?.configBlobSha
+    if (blob !== undefined) return blob
+  }
+  return undefined
 }
 
 /**
@@ -15210,16 +15307,12 @@ function writeQueueRunLog(
  *
  * The first run's id when this queue run drove one, because that is the name
  * every other instrument already prints for the work; otherwise the clock and
- * the pid, which is the only identity an idle queue run has. Deliberately not a
- * fresh uuid per queue run when a run id exists: a reader holding a run id must
- * be able to find its log without a lookup table.
+ * the pid. `idle` is a CLAIM, and it was wrong for every fail and every stuck:
+ * those queue runs did a full check and refused a change without ever building
+ * a run, so a file called `idle-…` named the one thing the queue run was not.
  */
 function queueRunLogId(runs: readonly Run[], worked: boolean): string {
   if (runs[0]?.id !== undefined) return runs[0].id
-  // `idle` is a CLAIM, and it was wrong for every fail and every stuck: those
-  // queue runs did a full check and refused a change without ever building a
-  // run, so a file called `idle-…` named the one thing the queue run was not
-  // (measured 2026-09-02).
   return `${worked ? "run" : "idle"}-${String(Date.now())}-${String(globalThis.process.pid)}`
 }
 
@@ -15229,8 +15322,7 @@ function queueRunLogId(runs: readonly Run[], worked: boolean): string {
  *
  * Reads the job rather than the run, because most checks never belong to a run
  * — the on-submit checks run at admission, and a change that fails one never
- * becomes a run at all. `queue.step.<name>` is the definition every queue check
- * carries; the step's own name is what a reader knows it by.
+ * becomes a run at all.
  */
 function queueRunLogCheck(
   job: DeepReadonly<Job>,
@@ -15240,9 +15332,7 @@ function queueRunLogCheck(
   const first = Array.isArray(input?.prs) ? input.prs[0] : undefined
   const change = typeof first?.id === "string" ? changes[first.id] : undefined
   const output = job.status === "completed" && "output" in job ? job.output : undefined
-  const evidence = output as Readonly<{ exitCode?: unknown; durationMs?: unknown }> | undefined
-  const artifacts = (job as Readonly<{ artifacts?: readonly Readonly<{ name?: unknown; path?: unknown }>[] }>).artifacts
-  const stdout = Array.isArray(artifacts) ? artifacts.find((artifact) => artifact.name === "stdout") : undefined
+  const evidence = output as Readonly<{ durationMs?: unknown; exitCode?: unknown; log?: unknown }> | undefined
   return {
     ...(change?.branch === undefined ? {} : { branch: change.branch }),
     ...(change === undefined ? {} : { head: changeHead(change) }),
@@ -15251,6 +15341,6 @@ function queueRunLogCheck(
     ...("finishedAt" in job && typeof job.finishedAt === "string" ? { finishedAt: job.finishedAt } : {}),
     ...(typeof evidence?.durationMs === "number" ? { durationMs: evidence.durationMs } : {}),
     ...(typeof evidence?.exitCode === "number" ? { exit: evidence.exitCode } : {}),
-    ...(typeof stdout?.path === "string" ? { log: stdout.path } : {}),
+    ...(typeof evidence?.log === "string" ? { log: evidence.log } : {}),
   }
 }

@@ -377,6 +377,8 @@ export type QueuePassMessage = Readonly<{
   kind: OutcomeNotification["kind"]
   recipient: string
   disposition: OutcomeDisposition
+  /** What the message is about. */
+  branch: string
   ball?: string
 }>
 
@@ -602,6 +604,10 @@ export function createOutcomeNotifier(options: OutcomeNotifierOptions): OutcomeN
       kind: notification.kind,
       recipient: notification.recipient,
       disposition: notification.disposition,
+      // What the message is ABOUT, which is what a reader of the log matches
+      // against; the attempt id is the notifier's own key and names nothing a
+      // person recognises.
+      branch: notification.branch,
     })
     if (command === undefined || command === "") {
       if (!warnedUnconfigured) {

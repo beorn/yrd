@@ -3,8 +3,11 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Command } from "@silvery/commander"
 import { beforeAll, describe, expect, it } from "vitest"
+import type { FailureKind } from "@yrd/core"
+import { createFailure } from "@yrd/core"
 import {
   canonicalizeYrdCommandAliases,
+  classifyFailure,
   configureYrdGlobalOptions,
   normalizeYrdInvocation,
   normalizeYrdRepositoryAliasInvocation,
@@ -580,5 +583,50 @@ describe("resolveYrdContext", () => {
     const help = configureYrdGlobalOptions(new Command("yrd")).helpInformation()
     expect(help).not.toContain("--name")
     expect(help).not.toContain("--wire")
+  })
+})
+
+/**
+ * @failure An uncaught throw inside `yrd queue run` exits 1 or 3, so a queue
+ * run that crashed reads as a refused change or as an unclassified fault. The
+ * plan gives a queue run three results and only three, and a crash is stuck:
+ * exit 2, nobody billed. The exit census (2026-09-02) found this mapping
+ * reconciled only for the usage collision.
+ * @level l2
+ * @consumer `yrd queue run` · Hab supervision · any caller reading the exit code
+ */
+describe("classifyFailure — a crash in a queue run is stuck", () => {
+  const raised = (kind: FailureKind) => createFailure({ kind, code: `${kind}-probe`, message: "probe" })
+
+  it("maps a crash in a queue run to exit 2, kind infrastructure", () => {
+    // No failure fact, so nothing typed it and nothing judged a change.
+    const crash = classifyFailure(new Error("the queue run threw"), { queueRun: true })
+    expect(crash.exitCode).toBe(2)
+    expect(crash.failure.kind).toBe("infrastructure")
+    // Without the posture the same crash is an unclassified 3, which is the
+    // gap: a supervisor could not tell it from any other command's fault.
+    expect(classifyFailure(new Error("the queue run threw")).exitCode).toBe(3)
+  })
+
+  it.each(["refusal", "usage", "configuration", "infrastructure"] as const)(
+    "leaves a %s the queue run RAISED on purpose exactly where it was",
+    (kind) => {
+      // A raised failure is the designed refusal path, not a crash: an unknown
+      // selector, a second runner already holding the lease. Collapsing these
+      // to stuck cost five tests that were right (measured 2026-09-02).
+      expect(classifyFailure(raised(kind), { queueRun: true })).toEqual(classifyFailure(raised(kind)))
+    },
+  )
+
+  it("NEGATIVE CONTROL: every other command keeps the mapping it had", () => {
+    // Without the posture the four kinds must still spread across 1, 2 and 3 —
+    // otherwise the assertions above pass because the mapping collapsed for
+    // everyone, which is exactly what this change must not do.
+    expect(classifyFailure(raised("refusal")).exitCode).toBe(1)
+    expect(classifyFailure(raised("usage")).exitCode).toBe(2)
+    expect(classifyFailure(raised("configuration")).exitCode).toBe(2)
+    expect(classifyFailure(raised("infrastructure")).exitCode).toBe(3)
+    expect(classifyFailure(new Error("boom")).exitCode).toBe(3)
+    expect(classifyFailure(raised("refusal")).failure.kind).toBe("refusal")
   })
 })
