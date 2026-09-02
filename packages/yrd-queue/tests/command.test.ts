@@ -7436,12 +7436,16 @@ describe("Queue command adapters", () => {
    * than a branch carrier's authored tree, so if this merged it would silently
    * revert the submodule.
    *
-   * It is NOT refused — it merges. The guard is monotonicity, not refusal: the
-   * promotion target only ever advances (command.ts:4361), so the merge writes
-   * the forward pin and the authored backward gitlink loses to it. That is
-   * invisible from either end on its own — read admission and the carrier looks
-   * unguarded, read the promotion loop and it looks unreachable — so the
-   * assertion below reads the pin the run actually wrote.
+   * Until 414f343c the guard was monotonicity, not refusal: the carrier MERGED
+   * and the promotion target, which only ever advances, wrote the forward pin
+   * over the authored backward gitlink. Since 414f343c the merge run
+   * independently refuses any submodule gitlink that is not a descendant of the
+   * same gitlink at the CURRENT base (ruling
+   * @i/10-yrd/superseded-carrier-with-pin-is-a-queued-revert, proven live by
+   * PR2751.5): the run fails `merge-gitlink-regression`, naming the path and
+   * the BACKWARD direction, and main's pin is never touched. Either way the
+   * property under test is the same — the submodule is not rolled back — so
+   * the assertion below reads the pin main actually holds AND the verdict.
    */
   it("does not roll the submodule back for a clean-headed carrier that moves the gitlink backward", async () => {
     const fixture = await submoduleMainMergeRepository()
@@ -7494,15 +7498,29 @@ describe("Queue command adapters", () => {
         .then(() => true)
         .catch(() => false))
 
-    // It MERGES — the carrier is admitted, which is the surprising half. What
-    // protects the submodule is that the merge writes the forward pin anyway:
-    // the promotion target only ever advances (:4361), so the authored backward
-    // gitlink loses to it. Refusal is not the guard here; monotonicity is.
-    expect({ conclusion: run?.conclusion, writtenPin, walkedBack }).toEqual({
-      conclusion: "success",
+    // The carrier is ADMITTED — its head is clean, which is the surprising
+    // half — and the merge run's own gitlink floor (414f343c) is what refuses
+    // it: the candidate would move `dep` backward against the base's pin, so
+    // the run fails `merge-gitlink-regression`, and main keeps the forward pin
+    // it already held. The verdict is read from the merge step's Job, where a
+    // candidate failure lands, with the run's own error as the fallback.
+    const merge = run?.steps.find((step) => step.kind === "merge")?.job
+    const verdict =
+      merge?.status === "completed" && merge.conclusion === "failure" ? merge.error : (run?.error ?? undefined)
+    expect({
+      conclusion: run?.conclusion,
+      code: verdict?.code,
+      writtenPin,
+      walkedBack,
+    }).toEqual({
+      conclusion: "failure",
+      code: "merge-gitlink-regression",
       writtenPin: fixture.pinSha,
       walkedBack: false,
     })
+    expect(verdict?.message).toContain("'dep': BACKWARD")
+    expect(verdict?.message).toContain(`base '${fixture.pinSha}'`)
+    expect(verdict?.message).toContain(`candidate '${fixture.submoduleBaseSha}'`)
   })
 
   it("does not tell a spent submodule pin to rebuild when submodule main already contains it", async () => {
