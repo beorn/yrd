@@ -309,7 +309,7 @@ describe("pass start settles every run whose holder is gone (24030)", () => {
     return { log, rows }
   }
 
-  it("R3742 shape: an in_progress job at the cursor with an expired lease and a dead pid is canceled at pass start, its PR re-queues, and one INFO row names the holder", async () => {
+  it("R3742 shape: an in_progress job at the cursor with an expired lease and a dead pid is timed out at pass start through the one recovery, its PR re-queues, and one INFO row names the holder", async () => {
     const { log, rows } = tracing()
     const journal = createMemoryJournal()
     await using app = await createApp(journal, ids(), log, {
@@ -332,17 +332,15 @@ describe("pass start settles every run whose holder is gone (24030)", () => {
     await app.queue.run({ prs: [] }, { runner: "local", leaseMs: 60_000, now: () => Date.parse(PASS) })
 
     const settled = app.queue.get("R1")
-    expect(settled, "the orphaned run is canceled, not failed: the fault is not its members' own").toMatchObject({
+    expect(
+      settled,
+      "the orphaned run fails under the timeout disposition: the fault is the environment's",
+    ).toMatchObject({
       status: "completed",
-      conclusion: "cancelled",
+      conclusion: "failure",
     })
-    const canceledJob = app.state().jobs.byId[job.id]
-    expect(canceledJob).toMatchObject({
-      status: "completed",
-      conclusion: "cancelled",
-      canceledBy: "yrd/recover",
-      cancelReason: `orphaned: lease expired ${LAPSED}, holder ${HOLDER} (pid 3411471)`,
-    })
+    const timedOutJob = app.state().jobs.byId[job.id]
+    expect(timedOutJob).toMatchObject({ status: "completed", conclusion: "timed_out" })
     // Re-queued, never rejected: the member is still submitted (and may already be in a fresh run).
     expect(changeDeliveryState(app.state().bays.prs[pr.id]!)).not.toBe("rejected")
     const frames = (await (async () => {
@@ -353,8 +351,7 @@ describe("pass start settles every run whose holder is gone (24030)", () => {
     const canceledFacts = frames
       .flatMap((frame) => frame.events ?? [])
       .filter((event) => event.name === "queue/run/canceled")
-    expect(canceledFacts, "the cancel goes through the same journal fact `queue cancel` writes").toHaveLength(1)
-    expect(canceledFacts[0]?.data).toMatchObject({ run: "R1", by: "yrd/recover" })
+    expect(canceledFacts, "ONE settler: the job layer timed it out; nothing wrote a cancel fact").toHaveLength(0)
 
     const row = rows("orphaned-run-settled")
     expect(row, "exactly one INFO row per settlement").toHaveLength(1)
@@ -366,7 +363,7 @@ describe("pass start settles every run whose holder is gone (24030)", () => {
       pid: 3411471,
       leaseExpiresAt: LAPSED,
       cause: "lease-expired",
-      disposition: "canceled",
+      disposition: "timed-out",
     })
     log.end()
   })
@@ -446,7 +443,7 @@ describe("pass start settles every run whose holder is gone (24030)", () => {
     log.end()
   })
 
-  it("a merge-step orphan the base does not contain is canceled, and the row says the reader answered", async () => {
+  it("a merge-step orphan the base does not contain is timed out by the job layer, and the row says the reader answered", async () => {
     const { log, rows } = tracing()
     await using app = await createApp(createMemoryJournal(), ids(), log, {
       merge: true,
@@ -471,11 +468,11 @@ describe("pass start settles every run whose holder is gone (24030)", () => {
 
     await app.queue.run({ prs: [] }, { runner: "local", leaseMs: 60_000, now: () => Date.parse(PASS) })
 
-    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "cancelled" })
+    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "failure" })
     expect(rows("orphaned-run-settled")[0]?.props).toMatchObject({
       run: "R1",
       cause: "holder-dead",
-      disposition: "canceled",
+      disposition: "timed-out",
       landedMergeReader: "consulted",
     })
     log.end()

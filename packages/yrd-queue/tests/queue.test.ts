@@ -3236,9 +3236,9 @@ describe("Queue", () => {
       expect.objectContaining({
         id: "R1",
         status: "completed",
-        conclusion: "cancelled",
+        conclusion: "failure",
         steps: [
-          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "cancelled" }) }),
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
           expect.anything(),
         ],
       }),
@@ -3288,9 +3288,9 @@ describe("Queue", () => {
       expect.objectContaining({
         id: "R1",
         status: "completed",
-        conclusion: "cancelled",
+        conclusion: "failure",
         steps: [
-          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "cancelled" }) }),
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
           expect.anything(),
         ],
       }),
@@ -3330,18 +3330,16 @@ describe("Queue", () => {
       expect.objectContaining({
         id: "R1",
         status: "completed",
-        conclusion: "cancelled",
+        conclusion: "failure",
         steps: [
-          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "cancelled" }) }),
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
           expect.anything(),
         ],
       }),
     ])
     expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({
       status: "completed",
-      conclusion: "cancelled",
-      canceledBy: "yrd/recover",
-      cancelReason: "orphaned: lease expired 2026-01-01T00:00:01.000Z, holder yrd-cli:31337 (pid 31337)",
+      conclusion: "timed_out",
       runner: "yrd-cli:31337",
     })
     expect(checkCalls).toBe(0)
@@ -3395,14 +3393,14 @@ describe("Queue", () => {
       expect.objectContaining({
         id: "R1",
         status: "completed",
-        conclusion: "cancelled",
+        conclusion: "failure",
         steps: [
-          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "cancelled" }) }),
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
           expect.anything(),
         ],
       }),
     ])
-    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "cancelled" })
+    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "failure" })
     expect(checkCalls).toBe(0)
   })
 

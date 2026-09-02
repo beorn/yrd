@@ -4444,10 +4444,19 @@ function createQueue<Shape extends ChangeShape>(
    * Job projects its run terminal (`timed_out`), and a terminal run can be
    * neither canceled nor finished. One INFO row per settlement.
    */
+  /** An orphan this pass leaves to `jobs.recover`: the row it logs once the Job is timed out. */
+  type OrphanTimeout = Readonly<{
+    run: RunId
+    step: StepName
+    job: string
+    liveness: Parameters<typeof describeOrphanedRun>[0]
+    landedMergeReader?: "absent" | "consulted"
+  }>
+
   const settleOrphanedRunningRuns = async (
     probe: RunnerLivenessProbe,
     reader: TolerantQueueReader,
-    by: string,
+    timeouts: OrphanTimeout[],
   ): Promise<readonly RunId[]> => {
     const settled: RunId[] = []
     const snapshot = runtime()
@@ -4459,39 +4468,56 @@ function createQueue<Shape extends ChangeShape>(
       if (step === undefined || job === undefined || job.status !== "in_progress") continue
       const liveness = deriveRunLiveness({ runner: job.runner, leaseExpiresAt: job.leaseExpiresAt }, probe)
       if (liveness.state !== "orphaned") continue
-      const reason = describeOrphanedRun(liveness)
+      const landedMergeReader = step.kind !== "merge" ? undefined : landedMerge === undefined ? "absent" : "consulted"
       const landed = step.kind === "merge" ? await landedMergeProof(run) : undefined
-      let disposition: "merged-recovered" | "canceled"
-      if (landed !== undefined) {
-        await jobs.finish(job.id, {
-          attempt: job.attempt,
-          runner: job.runner,
-          result: { status: "completed", conclusion: "success", output: landed },
+      if (landed === undefined) {
+        // ONE settler for a holder that is gone: `jobs.recover` (below) times
+        // the Job out through the same liveness derivation, aborts any child
+        // still attached to it, and the run fails under the timeout
+        // disposition, which re-queues its members. A cancel from here would
+        // be a second settler — and one that waits on a Job a stalled child
+        // never finishes (command.test "renews one runner lease only on child
+        // progress and recovers a stalled child without merge"). This pass
+        // only adds the row naming the holder once that settlement is in.
+        timeouts.push({
+          run: run.id,
+          step: step.name,
+          job: job.id,
+          liveness,
+          ...(landedMergeReader === undefined ? {} : { landedMergeReader }),
         })
-        await actions.advance(run.id)
-        const advanced = current(run.id)
-        if (Queues.terminal(advanced)) {
-          await persistMergeRecord(advanced)
-          await markSettledRoot(run.id)
-        }
-        disposition = "merged-recovered"
-      } else {
-        await cancelQueueRun({ run: run.id, by, reason })
-        disposition = "canceled"
+        continue
       }
-      log.info?.(`Settled orphaned queue run ${run.id} at step '${step.name}' (${disposition}): ${reason}`, {
-        action: "orphaned-run-settled",
-        run: run.id,
-        step: step.name,
-        job: job.id,
-        runner: liveness.runner,
-        ...(liveness.pid === undefined ? {} : { pid: liveness.pid }),
-        leaseExpiresAt: liveness.leaseExpiresAt,
-        cause: liveness.cause,
-        disposition,
-        ...(step.kind !== "merge" ? {} : { landedMergeReader: landedMerge === undefined ? "absent" : "consulted" }),
-        ...(landed === undefined ? {} : { commit: landed.commit }),
+      // The one settlement the job layer cannot make: a merge that already
+      // landed is finished as success in the holder's name, whatever condemned
+      // the holder, and the run advances through the writers a live merge uses.
+      await jobs.finish(job.id, {
+        attempt: job.attempt,
+        runner: job.runner,
+        result: { status: "completed", conclusion: "success", output: landed },
       })
+      await actions.advance(run.id)
+      const advanced = current(run.id)
+      if (Queues.terminal(advanced)) {
+        await persistMergeRecord(advanced)
+        await markSettledRoot(run.id)
+      }
+      log.info?.(
+        `Settled orphaned queue run ${run.id} at step '${step.name}' (merged-recovered): ${describeOrphanedRun(liveness)}`,
+        {
+          action: "orphaned-run-settled",
+          run: run.id,
+          step: step.name,
+          job: job.id,
+          runner: liveness.runner,
+          ...(liveness.pid === undefined ? {} : { pid: liveness.pid }),
+          leaseExpiresAt: liveness.leaseExpiresAt,
+          cause: liveness.cause,
+          disposition: "merged-recovered",
+          ...(landedMergeReader === undefined ? {} : { landedMergeReader }),
+          commit: landed.commit,
+        },
+      )
       settled.push(run.id)
     }
     return settled
@@ -4528,7 +4554,8 @@ function createQueue<Shape extends ChangeShape>(
           now: Date.parse(recoverOptions.recoveryTime),
           runnerAlive: (runner) => (runner === recoverOptions.runner ? false : alive(runner)),
         }
-        for (const id of await settleOrphanedRunningRuns(probe, reader, recoverOptions.runner ?? "yrd/recover")) {
+        const orphanTimeouts: OrphanTimeout[] = []
+        for (const id of await settleOrphanedRunningRuns(probe, reader, orphanTimeouts)) {
           affected.add(id)
         }
         const recoveredJobs = new Set(
@@ -4546,6 +4573,25 @@ function createQueue<Shape extends ChangeShape>(
                 runnerAlive: alive,
               })),
         )
+        for (const orphan of orphanTimeouts) {
+          if (!recoveredJobs.has(orphan.job)) continue
+          affected.add(orphan.run)
+          log.info?.(
+            `Settled orphaned queue run ${orphan.run} at step '${orphan.step}' (timed-out): ${describeOrphanedRun(orphan.liveness)}`,
+            {
+              action: "orphaned-run-settled",
+              run: orphan.run,
+              step: orphan.step,
+              job: orphan.job,
+              runner: orphan.liveness.runner,
+              ...(orphan.liveness.pid === undefined ? {} : { pid: orphan.liveness.pid }),
+              leaseExpiresAt: orphan.liveness.leaseExpiresAt,
+              cause: orphan.liveness.cause,
+              disposition: "timed-out",
+              ...(orphan.landedMergeReader === undefined ? {} : { landedMergeReader: orphan.landedMergeReader }),
+            },
+          )
+        }
         const staleAdmissions = staleRevisionAdmissionJobs()
         for (const job of staleAdmissions) {
           await jobs.cancel({
