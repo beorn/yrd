@@ -8,6 +8,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  certifyPathReapDeletion,
   createProcess,
   inspectPathHolderCensus,
   inspectPathHolders,
@@ -350,36 +351,105 @@ describe("inspectPathHolders", () => {
   )
 
   test.runIf(process.platform === "linux")(
-    "denied counts without named pids can never be tolerated",
+    "the certification records every tolerated gap with its reason, identity and start time",
     async () => {
-      // An injected census claims denials it cannot attribute to a pid — the
-      // tolerance flag must not certify what the census could not name.
-      const reap = {
-        targetedPids: [],
-        survivorPids: [],
-        survivorHolders: [],
-        survivorCoverage: {
-          platform: "linux",
-          scope: "same-uid",
-          procRoot: "injected-unnamed-denials",
+      // The close record has to say what the certification waived and why, in
+      // one shape for a zombie, a proc that exited mid-census and a pid the
+      // operator named — with the identity the world-readable stat gives:
+      // comm, ppid, and the start time from field 22 against the boot time.
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-tolerated-record-"))
+      scratch.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      mkdirSync(ownedPath)
+      mkdirSync(procRoot)
+      const bootSeconds = 1_770_000_000
+      writeFileSync(join(procRoot, "stat"), `cpu  1 2 3\nbtime ${bootSeconds}\nprocesses 42\n`)
+      // After comm: state, ppid, seventeen fields of filler, then starttime (field 22).
+      const statLine = (pid: number, state: string, ticks: number) =>
+        `${pid} (probe) ${state} 1 ${Array.from({ length: 17 }, () => "0").join(" ")} ${ticks} 0 0\n`
+      const startedAt = (afterBootMs: number) => new Date(bootSeconds * 1_000 + afterBootMs).toISOString()
+      const deniedFdTables: string[] = []
+      for (const [pid, stat] of [
+        [4242, statLine(4242, "Z", 9_000)],
+        [4243, statLine(4243, "S", 12_000)],
+        [4244, undefined],
+      ] as const) {
+        const processRoot = join(procRoot, String(pid))
+        mkdirSync(join(processRoot, "fd"), { recursive: true })
+        symlinkSync("/", join(processRoot, "cwd"))
+        symlinkSync("/bin/sh", join(processRoot, "exe"))
+        symlinkSync("/", join(processRoot, "root"))
+        writeFileSync(join(processRoot, "maps"), "")
+        if (stat !== undefined) writeFileSync(join(processRoot, "stat"), stat)
+        chmodSync(join(processRoot, "fd"), 0o000)
+        deniedFdTables.push(join(processRoot, "fd"))
+      }
+
+      try {
+        const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+        expect(census.coverage).toMatchObject({
           complete: false,
-          processes: { enumerated: 2, sameUid: 2, otherUid: 0, unavailable: { exited: 0, denied: 1 } },
-          sources: {
-            cwd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
-            exe: { readable: 1, unavailable: { exited: 0, denied: 0 } },
-            root: { readable: 1, unavailable: { exited: 0, denied: 0 } },
-            maps: { readable: 1, unavailable: { exited: 0, denied: 0 } },
-            fd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
-          },
-        },
-        forcedKill: false,
-        signalFailures: [],
-      } as const
-      expect(pathReapDeletionFailure(reap, new Set([4242, 9999]))).toMatch(
-        /no denied pids were identified/iu,
-      )
+          unreadable: [
+            { pid: 4242, comm: "probe", ppid: 1, state: "Z", startedAt: startedAt(90_000), denied: ["fd"] },
+            { pid: 4243, comm: "probe", ppid: 1, state: "S", startedAt: startedAt(120_000), denied: ["fd"] },
+            { pid: 4244, exited: true, denied: ["fd"] },
+          ],
+        })
+        const reap = {
+          targetedPids: [],
+          survivorPids: [],
+          survivorHolders: [],
+          survivorCoverage: census.coverage,
+          forcedKill: false,
+          signalFailures: [],
+        }
+        // Unwaived: the live proc is named with its start time, nothing is tolerated.
+        const refused = certifyPathReapDeletion(reap)
+        expect(refused.failure).toContain(`pid 4243 (probe, ppid 1, started ${startedAt(120_000)}) via fd`)
+        expect(refused.tolerated).toEqual([])
+        // Waived: the record carries every tolerated gap with its reason and identity.
+        const certified = certifyPathReapDeletion(reap, new Set([4243]))
+        expect(certified.failure).toBeUndefined()
+        expect(certified.tolerated).toEqual([
+          { pid: 4242, comm: "probe", ppid: 1, startedAt: startedAt(90_000), reason: "zombie" },
+          { pid: 4243, comm: "probe", ppid: 1, startedAt: startedAt(120_000), reason: "operator-flag" },
+          { pid: 4244, reason: "exited" },
+        ])
+        // The string projection is the same certification, not a second reader.
+        expect(pathReapDeletionFailure(reap, new Set([4243]))).toBeUndefined()
+      } finally {
+        for (const table of deniedFdTables) chmodSync(table, 0o755)
+      }
     },
   )
+
+  test.runIf(process.platform === "linux")("denied counts without named pids can never be tolerated", async () => {
+    // An injected census claims denials it cannot attribute to a pid — the
+    // tolerance flag must not certify what the census could not name.
+    const reap = {
+      targetedPids: [],
+      survivorPids: [],
+      survivorHolders: [],
+      survivorCoverage: {
+        platform: "linux",
+        scope: "same-uid",
+        procRoot: "injected-unnamed-denials",
+        complete: false,
+        processes: { enumerated: 2, sameUid: 2, otherUid: 0, unavailable: { exited: 0, denied: 1 } },
+        sources: {
+          cwd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+          exe: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+          root: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+          maps: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+          fd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+        },
+      },
+      forcedKill: false,
+      signalFailures: [],
+    } as const
+    expect(pathReapDeletionFailure(reap, new Set([4242, 9999]))).toMatch(/no denied pids were identified/iu)
+  })
 
   test.runIf(process.platform === "linux")(
     "keeps an exited source separate from denial without reducing coverage",

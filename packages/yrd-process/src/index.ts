@@ -41,11 +41,15 @@ export {
 } from "./pid-identity.ts"
 
 export {
+  certifyPathReapDeletion,
+  describeProcessIdentity,
+  describeToleratedCensusGap,
   inspectPathHolderCensus,
   inspectPathHolders,
   pathHolderRefusal,
   pathReapDeletionFailure,
   pathReapFailure,
+  provablyEmptyGapReason,
   type DarwinPathHolderCoverage,
   type LinuxPathHolderCoverage,
   type UnreadableProcess,
@@ -55,7 +59,10 @@ export {
   type PathHolderCoverage,
   type PathHolderSourceCoverage,
   type PathHolderUnavailableCoverage,
+  type PathReapCertification,
   type PathReapResult,
+  type ProvablyEmptyGapReason,
+  type ToleratedCensusGap,
 } from "./path-reaper.ts"
 
 export type ProcessRequest = Readonly<{

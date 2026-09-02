@@ -189,10 +189,7 @@ function observeLinuxPid(pid: number, procRoot: string): PidObservation {
     if (code === "ENOENT" || code === "ESRCH") return { kind: "gone" }
     return { kind: "denied", detail: `${procRoot}/${String(pid)}/stat: ${errorDetail(error)}` }
   }
-  const bootedAtMs = linuxBootTimeMs(procRoot)
-  const ticks = procStatStartTicks(stat)
-  const startedAtMs =
-    bootedAtMs === undefined || ticks === undefined ? undefined : bootedAtMs + (ticks / LINUX_USER_HZ) * 1_000
+  const startedAtMs = procStatStartedAtMs(stat, linuxBootTimeMs(procRoot))
   let command = ""
   try {
     command = readFileSync(`${procRoot}/${String(pid)}/cmdline`, "utf8")
@@ -212,7 +209,11 @@ function observeLinuxPid(pid: number, procRoot: string): PidObservation {
   }
 }
 
-function linuxBootTimeMs(procRoot: string): number | undefined {
+/**
+ * Boot time in wall-clock ms, from `btime` in `/proc/stat`; undefined when the
+ * proc root carries none. One value per host, so a census reads it once.
+ */
+export function linuxBootTimeMs(procRoot: string): number | undefined {
   let raw: string
   try {
     raw = readFileSync(`${procRoot}/stat`, "utf8")
@@ -228,13 +229,16 @@ function linuxBootTimeMs(procRoot: string): number | undefined {
 }
 
 /**
- * Field 22 of `/proc/[pid]/stat`, in clock ticks since boot.
+ * Wall-clock ms at which the process behind this `/proc/[pid]/stat` line
+ * started: field 22, in clock ticks since boot, against the boot time. The one
+ * parser of that field; the path-holder census reads it through here too.
  *
  * `comm` is field 2, is parenthesized, and may itself contain spaces AND
  * parentheses — so the split point is the LAST `)`, never the first, and never a
  * whitespace split of the whole line.
  */
-function procStatStartTicks(stat: string): number | undefined {
+export function procStatStartedAtMs(stat: string, bootedAtMs: number | undefined): number | undefined {
+  if (bootedAtMs === undefined) return undefined
   const close = stat.lastIndexOf(")")
   if (close < 0) return undefined
   const fields = stat
@@ -243,7 +247,7 @@ function procStatStartTicks(stat: string): number | undefined {
     .split(/\s+/u)
   // fields[0] is `state`, which is field 3; field 22 is therefore index 19.
   const ticks = Number(fields[19])
-  return Number.isFinite(ticks) && ticks >= 0 ? ticks : undefined
+  return Number.isFinite(ticks) && ticks >= 0 ? bootedAtMs + (ticks / LINUX_USER_HZ) * 1_000 : undefined
 }
 
 async function observeDarwinPid(pid: number): Promise<PidObservation> {

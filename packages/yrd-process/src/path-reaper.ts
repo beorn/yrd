@@ -10,6 +10,7 @@
 
 import { readFile, readdir, readlink, realpath, stat } from "node:fs/promises"
 import { resolve, sep } from "node:path"
+import { linuxBootTimeMs, procStatStartedAtMs } from "./pid-identity.ts"
 
 export type PathHolder = Readonly<{
   pid: number
@@ -42,20 +43,29 @@ export type UnreadableProcess = Readonly<{
   /**
    * Process state from the world-readable `/proc/N/stat`. `Z` (zombie) has
    * already released its fd table and address space, so it can hold no path —
-   * see isProvablyEmptyProcess.
+   * see provablyEmptyGapReason.
    */
   state?: string
   /**
    * The proc entry was gone (ENOENT/ESRCH on `/proc/N/stat`) by the time its
    * identity was read: it exited between the source read that was denied and
-   * this one. An exited process holds no path — see isProvablyEmptyProcess.
+   * this one. An exited process holds no path — see provablyEmptyGapReason.
    */
   exited?: true
+  /**
+   * Wall-clock start, ISO, from field 22 of the same stat read against the
+   * host's boot time; absent when either could not be read.
+   */
+  startedAt?: string
   denied: readonly ("process" | "cwd" | "exe" | "root" | "maps" | "fd")[]
 }>
 
+/** Why a census gap provably holds nothing and so needs no operator waiver. */
+export type ProvablyEmptyGapReason = "zombie" | "exited"
+
 /**
- * A census gap that provably holds nothing, so it needs no operator waiver.
+ * The one classification of a census gap: the reason it provably holds nothing,
+ * or undefined when only an operator can vouch for it.
  *
  * A zombie has already released its fd table and address space; `/proc/N/fd`
  * answers EACCES precisely BECAUSE there is no table left to read. Clearing
@@ -71,8 +81,52 @@ export type UnreadableProcess = Readonly<{
  * bay closes after zombies were cleared: one to three such pids per census,
  * never the same twice, each rendered as `pid N via fd` with no identity.
  */
-export function isProvablyEmptyProcess(proc: UnreadableProcess): boolean {
-  return proc.state === "Z" || proc.exited === true
+export function provablyEmptyGapReason(proc: UnreadableProcess): ProvablyEmptyGapReason | undefined {
+  if (proc.state === "Z") return "zombie"
+  if (proc.exited === true) return "exited"
+  return undefined
+}
+
+/**
+ * One census gap a deletion certification tolerated, and why: `zombie` and
+ * `exited` cleared themselves (provablyEmptyGapReason); `operator-flag` is a
+ * live denial the caller named in `--tolerate-unreadable`. Identity is whatever
+ * the world-readable stat gave — comm, ppid, start time — or nothing for a proc
+ * that was gone before it could be read.
+ */
+export type ToleratedCensusGap = Readonly<{
+  pid: number
+  comm?: string
+  ppid?: number
+  startedAt?: string
+  reason: ProvablyEmptyGapReason | "operator-flag"
+}>
+
+/**
+ * What certifying a deletion decided: a failure when the path cannot be
+ * deleted, else every gap it tolerated, so the caller can record them. A
+ * refused certification tolerates nothing.
+ */
+export type PathReapCertification = Readonly<{
+  failure?: string
+  tolerated: readonly ToleratedCensusGap[]
+}>
+
+/** `pid N (comm, ppid P, started T)` — as much identity as the stat read gave. */
+export function describeProcessIdentity(
+  proc: Readonly<{ pid: number; comm?: string; ppid?: number; startedAt?: string }>,
+): string {
+  const identity = [
+    ...(proc.comm === undefined ? [] : [proc.comm]),
+    ...(proc.ppid === undefined ? [] : [`ppid ${proc.ppid}`]),
+    ...(proc.startedAt === undefined ? [] : [`started ${proc.startedAt}`]),
+  ]
+  return identity.length === 0 ? `pid ${proc.pid}` : `pid ${proc.pid} (${identity.join(", ")})`
+}
+
+/** One tolerated gap as the close record prints it: identity, then why. */
+export function describeToleratedCensusGap(gap: ToleratedCensusGap): string {
+  return `${describeProcessIdentity(gap)} ${gap.reason === "operator-flag" ? "operator flag" : gap.reason}`
 }
 
 export type LinuxPathHolderCoverage = Readonly<{
@@ -189,15 +243,26 @@ export function pathReapFailure(result: PathReapResult): string | undefined {
   return parts.length === 0 ? undefined : parts.join("; ")
 }
 
-/**
- * Settlement failure plus the stronger coverage proof required before deleting
- * an owned path. Blindness is a deletion refusal, not a generic process-run failure.
- */
+/** The failure text of certifyPathReapDeletion, for callers that only refuse. */
 export function pathReapDeletionFailure(
   result: PathReapResult,
   tolerateUnreadablePids?: ReadonlySet<number>,
 ): string | undefined {
+  return certifyPathReapDeletion(result, tolerateUnreadablePids).failure
+}
+
+/**
+ * Settlement failure plus the stronger coverage proof required before deleting
+ * an owned path. Blindness is a deletion refusal, not a generic process-run
+ * failure. A certified result also names every census gap it tolerated and
+ * why, because a waiver nobody recorded is a silent one.
+ */
+export function certifyPathReapDeletion(
+  result: PathReapResult,
+  tolerateUnreadablePids?: ReadonlySet<number>,
+): PathReapCertification {
   const parts = [pathReapFailure(result)]
+  const tolerated: ToleratedCensusGap[] = []
   const coverage = result.survivorCoverage
   if (coverage === undefined) {
     parts.push("path-holder census coverage missing; deletion cannot be certified")
@@ -217,23 +282,23 @@ export function pathReapDeletionFailure(
     // A gap that provably holds nothing clears itself; only the rest need a
     // waiver. Without this the flag is unreachable on a live host, because the
     // set it demands changes between the refusal and the retry.
-    const autoCleared = unreadable.filter((proc) => isProvablyEmptyProcess(proc))
-    const requiresNaming = unreadable.filter((proc) => !isProvablyEmptyProcess(proc))
+    const autoCleared = unreadable.filter((proc) => provablyEmptyGapReason(proc) !== undefined)
+    const requiresNaming = unreadable.filter((proc) => provablyEmptyGapReason(proc) === undefined)
     const named =
       requiresNaming.length === 0 ||
       (tolerateUnreadablePids !== undefined && requiresNaming.every(({ pid }) => tolerateUnreadablePids.has(pid)))
-    const tolerated = fullyAttributed && named
-    if (!tolerated) {
+    if (fullyAttributed && named) {
+      for (const proc of unreadable) {
+        tolerated.push(toleratedCensusGap(proc, provablyEmptyGapReason(proc) ?? "operator-flag"))
+      }
+    } else {
       const unwaived = requiresNaming.length === 0 ? unreadable : requiresNaming
       const identities =
         unreadable.length === 0
           ? "no denied pids were identified"
           : `unreadable: ${unwaived
               .slice(0, 10)
-              .map(
-                ({ pid, comm, ppid, denied }) =>
-                  `pid ${pid}${comm === undefined ? "" : ` (${comm}${ppid === undefined ? "" : `, ppid ${ppid}`})`} via ${denied.join(",")}`,
-              )
+              .map((proc) => `${describeProcessIdentity(proc)} via ${proc.denied.join(",")}`)
               .join("; ")}${unwaived.length > 10 ? ` … ${unwaived.length - 10} more` : ""}`
       const cleared =
         autoCleared.length === 0
@@ -250,7 +315,17 @@ export function pathReapDeletionFailure(
     }
   }
   const failures = parts.filter((part): part is string => part !== undefined)
-  return failures.length === 0 ? undefined : failures.join("; ")
+  return failures.length === 0 ? { tolerated } : { failure: failures.join("; "), tolerated: [] }
+}
+
+function toleratedCensusGap(proc: UnreadableProcess, reason: ToleratedCensusGap["reason"]): ToleratedCensusGap {
+  return {
+    pid: proc.pid,
+    ...(proc.comm === undefined ? {} : { comm: proc.comm }),
+    ...(proc.ppid === undefined ? {} : { ppid: proc.ppid }),
+    ...(proc.startedAt === undefined ? {} : { startedAt: proc.startedAt }),
+    reason,
+  }
 }
 
 /** Render read-only holder evidence into an actionable destructive-operation refusal. */
@@ -372,6 +447,8 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
   })
   const uid = process.getuid?.()
   if (uid === undefined) throw new Error("Linux process census requires the current uid")
+  // One value per host: every unreadable proc's start time is read against it.
+  const bootedAtMs = linuxBootTimeMs(procRoot)
   const numericEntries = entries.filter((entry) => entry.isDirectory() && /^\d+$/u.test(entry.name))
   const processCoverage = {
     enumerated: numericEntries.length,
@@ -395,7 +472,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       if (metadata.availability !== "readable") {
         processCoverage.unavailable[metadata.availability] += 1
         if (metadata.availability === "denied") {
-          unreadable.push({ pid, ...(await observeProcessIdentity(proc)), denied: ["process"] })
+          unreadable.push({ pid, ...(await observeProcessIdentity(proc, bootedAtMs)), denied: ["process"] })
         }
         return []
       }
@@ -428,7 +505,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
         .filter(([, availability]) => availability === "denied")
         .map(([name]) => name)
       if (deniedSources.length > 0) {
-        unreadable.push({ pid, ...(await observeProcessIdentity(proc)), denied: deniedSources })
+        unreadable.push({ pid, ...(await observeProcessIdentity(proc, bootedAtMs)), denied: deniedSources })
       }
       const holders: PathHolder[] = []
       if (cwd.value !== undefined && pathWithin(root, cwd.value)) {
@@ -601,7 +678,8 @@ async function observeProcessDescriptors(
  * as `exited` so the gap clears itself instead of being named for a waiver. */
 async function observeProcessIdentity(
   proc: string,
-): Promise<{ comm?: string; ppid?: number; state?: string; exited?: true }> {
+  bootedAtMs: number | undefined,
+): Promise<{ comm?: string; ppid?: number; state?: string; startedAt?: string; exited?: true }> {
   try {
     const contents = await readFile(`${proc}/stat`, "utf8")
     const open = contents.indexOf("(")
@@ -609,14 +687,20 @@ async function observeProcessIdentity(
     if (open === -1 || close === -1 || close < open) return {}
     const comm = contents.slice(open + 1, close)
     // `pid (comm) state ppid …` — state is the first field after comm, so it
-    // costs nothing beyond the read already made for identity.
-    const rest = contents.slice(close + 1).trim().split(/\s+/u)
+    // costs nothing beyond the read already made for identity; the start time
+    // is field 22 of the same line, parsed where pid-identity parses it.
+    const rest = contents
+      .slice(close + 1)
+      .trim()
+      .split(/\s+/u)
     const state = rest[0]
     const ppid = Number(rest[1])
+    const startedAtMs = procStatStartedAtMs(contents, bootedAtMs)
     return {
       comm,
       ...(state === undefined || state === "" ? {} : { state }),
       ...(Number.isSafeInteger(ppid) ? { ppid } : {}),
+      ...(startedAtMs === undefined ? {} : { startedAt: new Date(startedAtMs).toISOString() }),
     }
   } catch (error) {
     if (processEntryUnavailability(error) === "exited") return { exited: true }
