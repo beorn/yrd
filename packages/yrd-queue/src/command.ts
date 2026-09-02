@@ -66,6 +66,7 @@ import {
 import { candidateRefFor, sourceCandidateRefFor } from "./candidate-refs.ts"
 import { submoduleMainScratchCleanupFailure } from "./submodule-main-outcome.ts"
 import {
+  CHECK_STORAGE_EXHAUSTED,
   describeScratchReap,
   isStorageExhaustion,
   liveWorktreeEntries,
@@ -74,8 +75,12 @@ import {
   reapOrphanedScratch,
   resolveArtifactRetentionMs,
   storageExhaustionError,
+  storageExhaustionPath,
+  storageExhaustionReport,
+  storageExhaustionStatement,
   tagStorageExhaustion,
   taggedStorageExhaustion,
+  type StorageExhaustionStatement,
 } from "./scratch-storage.ts"
 import type { CandidatePool } from "./candidate-pool.ts"
 import type {
@@ -512,28 +517,14 @@ function configuredCommand<Shape extends ChangeShape>(
     .update("\0")
     .update(mode)
     .digest("hex")
-  return async (input, context): Promise<JobResult<CommandEvidence>> => {
+  const execute = async (
+    input: StepExecution<Shape>,
+    context: JobContext,
+    cwd: string,
+    variables: Readonly<Record<string, string | undefined>>,
+    artifactRoot: string,
+  ): Promise<JobResult<CommandEvidence>> => {
     const { process } = options.inject
-    const primary = primaryPR(input)
-    const cwd = resolve(typeof options.cwd === "function" ? await options.cwd(input) : options.cwd)
-    const variables = {
-      YRD_BASE: primary.base,
-      YRD_BASE_SHA: primary.baseSha,
-      YRD_GATE_MODE: mode,
-      YRD_JOB: context.id,
-      YRD_ATTEMPT: String(context.attempt),
-      YRD_RUNNER: context.runner,
-      YRD_RUN: input.run,
-      YRD_SHA: primary.headSha,
-      YRD_SHAS: JSON.stringify(input.prs.map((pr) => pr.headSha)),
-      YRD_STEP: input.step,
-      YRD_PR: primary.id,
-      YRD_PRS: JSON.stringify(input.prs.map((pr) => pr.id)),
-      YRD_TARGET: input.targetSha ?? primary.headSha,
-      ...options.variables?.(input),
-    }
-    const artifactRoot = resolve(options.artifactRoot ?? defaultCommandArtifactRoot(cwd, process))
-    await pruneArtifactsOnce(artifactRoot, options.env ?? globalThis.process.env)
     const artifactSink = await createArtifactSink(artifactRoot, input, context.attempt)
     const env = commandEnvironment(options.env ?? globalThis.process.env, variables, declaration)
     let result: Awaited<ReturnType<Process["run"]>>
@@ -598,7 +589,32 @@ function configuredCommand<Shape extends ChangeShape>(
     // process implementation that predates `verdict` still reports the
     // wall-clock kill, and `ProcessResult` only ties `stalled: true` to the
     // STALLED verdict, so that one needs no separate check here.
+    //
+    // The FILESYSTEM's statement is never the check's verdict on the content.
+    // PR3159's `affected-tests` (2026-09-01 22:24 PDT) printed `fatal: unable
+    // to write loose object file: Disk quota exceeded` from a quota'd `/tmp`,
+    // exited 1, and was filed as `affected-tests-failed` — the author sent
+    // back, and the standing submit fact retired, for a full disk. Read once,
+    // HERE, ahead of `judgedFailure`: that `fatal:` line matches the
+    // judged-line shapes, and a judged red is structurally permanent
+    // (queue.ts `structurallyPermanentAdmissionRefusal`), so recording it as a
+    // judgement would make the outage un-retryable. Only a non-zero exit is
+    // read: a check that exited 0 stated its own verdict, and a warning it
+    // tolerated is not a failure it suffered.
+    const exhaustion = result.exitCode === 0 ? undefined : storageExhaustionStatement(message)
+    const exhausted =
+      exhaustion === undefined
+        ? undefined
+        : await checkStorageExhaustion({
+            purpose: options.purpose,
+            action: waiting ? "launcher" : "command",
+            exitCode: result.exitCode,
+            output: message,
+            statement: exhaustion,
+            log: artifactSink.log,
+          })
     const judgedFailure =
+      exhaustion === undefined &&
       firstJudgedFailureLine(message) !== undefined &&
       progress.verdict !== "STALLED" &&
       progress.verdict !== "TIMED_OUT" &&
@@ -676,6 +692,11 @@ function configuredCommand<Shape extends ChangeShape>(
           evidence,
         )
       }
+      // Typed above; a filesystem that ran out under the check judged nothing
+      // about the content, whatever else the output went on to say.
+      if (exhausted !== undefined) {
+        return { status: "completed", conclusion: "failure", error: exhausted, output: evidence }
+      }
       if (gateReports.error !== undefined) {
         return failed(`${options.purpose}-gate-report-invalid`, gateReports.error, evidence)
       }
@@ -733,6 +754,121 @@ function configuredCommand<Shape extends ChangeShape>(
       durationMs: result.durationMs,
     })
     return outcome
+  }
+  return async (input, context): Promise<JobResult<CommandEvidence>> => {
+    const { process } = options.inject
+    const primary = primaryPR(input)
+    const cwd = resolve(typeof options.cwd === "function" ? await options.cwd(input) : options.cwd)
+    const variables = {
+      YRD_BASE: primary.base,
+      YRD_BASE_SHA: primary.baseSha,
+      YRD_GATE_MODE: mode,
+      YRD_JOB: context.id,
+      YRD_ATTEMPT: String(context.attempt),
+      YRD_RUNNER: context.runner,
+      YRD_RUN: input.run,
+      YRD_SHA: primary.headSha,
+      YRD_SHAS: JSON.stringify(input.prs.map((pr) => pr.headSha)),
+      YRD_STEP: input.step,
+      YRD_PR: primary.id,
+      YRD_PRS: JSON.stringify(input.prs.map((pr) => pr.id)),
+      YRD_TARGET: input.targetSha ?? primary.headSha,
+      ...options.variables?.(input),
+    }
+    const artifactRoot = resolve(options.artifactRoot ?? defaultCommandArtifactRoot(cwd, process))
+    await pruneArtifactsOnce(artifactRoot, options.env ?? globalThis.process.env)
+    try {
+      return await execute(input, context, cwd, variables, artifactRoot)
+    } catch (cause) {
+      const exhausted = await driverStorageExhaustion(options.purpose, artifactRoot, cause)
+      if (exhausted !== undefined) return exhausted
+      throw cause
+    }
+  }
+}
+
+/** How much of the filesystem's statement a refusal headline carries — the
+ * bound `firstJudgedFailureLine` applies to a judged line, for the same reason:
+ * past it the line stops being a headline and starts being the log. */
+const STORAGE_STATEMENT_HEADLINE_LIMIT = 200
+
+/**
+ * The typed failure for a check whose output says the FILESYSTEM ran out —
+ * quota or space — rather than that the content is wrong. The message carries
+ * what a reader acts on: which step, the line the tool stated it in, the path
+ * it named (when it named one) with that filesystem's own numbers, and the
+ * cure; `evidence` carries the same as facts. A quota is called out as such
+ * because `storageExhaustionReport` reads the DEVICE, and a spent per-user
+ * quota leaves the device's totals looking healthy — `df` lies about it.
+ */
+async function checkStorageExhaustion(
+  input: Readonly<{
+    purpose: string
+    action: string
+    exitCode: number
+    output: string
+    statement: StorageExhaustionStatement
+    log: string
+  }>,
+): Promise<JobError> {
+  const { line, kind } = input.statement
+  const headline =
+    line.length <= STORAGE_STATEMENT_HEADLINE_LIMIT ? line : `${line.slice(0, STORAGE_STATEMENT_HEADLINE_LIMIT - 1)}…`
+  const path = storageExhaustionPath(input.output)
+  const report = path === undefined ? undefined : await storageExhaustionReport(path)
+  return {
+    code: CHECK_STORAGE_EXHAUSTED,
+    message:
+      `${input.purpose} ${input.action} exited ${input.exitCode} because the filesystem ran out of ${kind}, ` +
+      `not because of the submitted content: ${headline}` +
+      (path === undefined ? "" : `; failing path ${path}`) +
+      (report === undefined ? "" : `; ${report.detail}`) +
+      (kind === "quota" ? " (a spent per-user quota leaves the device's own totals looking healthy)" : "") +
+      `. Cure: free the filesystem backing ${path ?? "the check's scratch"} (or point the repo's check scratch ` +
+      "elsewhere), then the queue re-admits this submission on its next pass — nothing about the submitted " +
+      `content is at fault; full output: ${input.log}`,
+    evidence: {
+      ...(report?.evidence ?? {}),
+      kind: "storage-exhaustion",
+      line,
+      ...(path === undefined ? {} : { failingPath: path }),
+    },
+  }
+}
+
+/**
+ * The runner's own writes — the artifact sink under `artifactRoot`, the
+ * terminal record, the spawn itself — sit on the same host as the check's
+ * child, and an EDQUOT/ENOSPC there used to escape as a thrown, untyped error.
+ * The job layer files a throw as `runner-error` (yrd-job `jobs.ts`), which
+ * queue.ts raises as a pass-stopping infrastructure failure for a derived
+ * member and records as a plain `failure` — the author's kind — for a
+ * record-lane one. Same filesystem, same verdict: typed here, once, at the one
+ * seam every write in the step shares; anything that is not storage
+ * exhaustion is rethrown untouched. A cause a scratch primitive already typed
+ * keeps that answer — it was taken while the exhausted directory still existed.
+ */
+async function driverStorageExhaustion(
+  purpose: string,
+  artifactRoot: string,
+  cause: unknown,
+): Promise<JobResult<never> | undefined> {
+  const tagged = taggedStorageExhaustion(cause)
+  if (tagged !== undefined) return { status: "completed", conclusion: "failure", error: tagged }
+  if (!isStorageExhaustion(cause)) return undefined
+  const report = await storageExhaustionReport(artifactRoot)
+  return {
+    status: "completed",
+    conclusion: "failure",
+    error: {
+      code: CHECK_STORAGE_EXHAUSTED,
+      message:
+        `${purpose}: yrd could not write its own run artifacts under '${artifactRoot}' — the filesystem ran out ` +
+        `of quota or space, not the submitted content — ${report.detail}; underlying error: ${messageOf(cause)}. ` +
+        `Cure: free the filesystem backing '${artifactRoot}' (or point the repo's artifact root elsewhere), then ` +
+        "the queue re-admits this submission on its next pass — nothing about the submitted content is at fault",
+      ...(report.evidence === undefined ? {} : { evidence: report.evidence }),
+    },
   }
 }
 
