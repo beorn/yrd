@@ -48,6 +48,7 @@
  *    counted. NO SILENT ERRORS: the count is the proof that a short stream is
  *    known to be short.
  */
+import { randomUUID } from "node:crypto"
 import { appendFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 
@@ -100,6 +101,17 @@ export type QueueRunRecord = QueueRunLogCommon &
     /** The target's tip the queue run read first — the commit `config` is the
      * config AT, so the two travel together or a reader can check neither. */
     base?: string
+    /** The incumbent's Run ids this queue run built, in order, when it built
+     * any. It is what every other instrument on the incumbent still prints, so
+     * it stays readable — as a FIELD, never as the log's name: a queue run
+     * that builds no Run still has a log, and naming the file after a record
+     * the invocation may not make is what made two queue runs share one file.
+     * Goes away with the Run record itself at M4. */
+    built?: readonly string[]
+    /** How many completions of EARLIER Runs this queue run settled on its way
+     * past. A count, deliberately: their facts belong to the queue runs that
+     * made them, and writing them here claimed merges this run never made. */
+    recovered?: number
   }>
 
 export type QueueChangeRecord = QueueRunLogCommon &
@@ -224,9 +236,98 @@ export function queueRunLogDirectory(env: NodeJS.ProcessEnv): string | undefined
 /** The file one queue run writes: `<directory>/<run>.jsonl`. */
 export function queueRunLogFile(directory: string, run: string): string {
   // The run id reaches the filesystem, so anything that is not obviously safe
-  // in a name becomes a dash. Ids are uuids and `admission:PR1:1:<sha>` forms
-  // today; neither survives a naive join on every filesystem.
+  // in a name becomes a dash. `openQueueRun` mints ids that already survive
+  // this untouched; the guard stands because the id is a string parameter and
+  // a caller could hand it anything.
   return join(directory, `${run.replace(/[^A-Za-z0-9._-]/gu, "-")}.jsonl`)
+}
+
+/** One invocation of `yrd queue run`: its id and the instant it started. */
+export type QueueRunIdentity = Readonly<{
+  /** The queue run's own id — its log's name, and every record's `run`. */
+  id: string
+  /** When it started, ISO 8601 in UTC; every record's `at`. */
+  startedAt: string
+}>
+
+/**
+ * Open one queue run: mint its id and stamp its instant, in one act.
+ *
+ * A QUEUE RUN IS THE INVOCATION, not a Run it may or may not build (plan of
+ * record § The queue run). Naming its log after the first Run it built was the
+ * defect: an empty lane mints no Run, so two consecutive empty-lane queue runs
+ * both fell back to the last id the incumbent had minted and wrote to ONE file
+ * under that name — `R700.jsonl`, two `run` rows, both claiming to be R700
+ * (measured 2026-09-02 on pin 0749260a). The identity has to come from the
+ * invocation, which always exists, and a Run id, when there is one, is a field
+ * on the run row instead.
+ *
+ * MONOTONIC, then unique. The stamp sorts a log directory into the order the
+ * queue runs happened, which is what a mechanic listing it wants; the random
+ * tail is what makes two queue runs inside one millisecond — the service loops
+ * them in one process — two ids rather than one. Both halves are already
+ * filesystem-safe, so the file's name and the `run` field inside it are the
+ * same string.
+ *
+ * The instant is minted HERE, with the id, because the two are one fact: a
+ * queue run's window over the durable rows it may report is exactly the time
+ * from this call, and an id and a window that came from different clock reads
+ * could disagree about which queue run they describe.
+ */
+export function openQueueRun(): QueueRunIdentity {
+  const startedAt = new Date().toISOString()
+  const stamp = startedAt.replaceAll(/[-:.]/gu, "")
+  return Object.freeze({ id: `q-${stamp}-${randomUUID().replaceAll("-", "").slice(0, 8)}`, startedAt })
+}
+
+/** Which of the runs a queue run handed back are its own. */
+export type QueueRunOwnership = Readonly<{
+  /** The runs this queue run started — the only ones whose facts are its. */
+  own: readonly QueueRunSourceRun[]
+  /** Completions of EARLIER Runs this queue run settled on its way past. */
+  recovered: number
+  /** Runs whose start could not be read, so ownership could not be decided.
+   * Never empty quietly: the caller reports these by id (NO SILENT ERRORS). */
+  unreadable: readonly string[]
+}>
+
+/**
+ * Split the runs a queue run handed back into the ones it started and the
+ * completions of earlier Runs it merely settled.
+ *
+ * A queue run settles every run whose holder is gone before it composes
+ * anything of its own, and hands both sets back as one array. Projecting that
+ * array whole made each of two empty-lane queue runs append the same seven
+ * historical change/result/merge triplets, so both logs claimed merges neither
+ * run made while the debug log and git proved zero events (measured
+ * 2026-09-02). A recovered completion is not this run's fact. It is worth one
+ * number on the run row, which is what `recovered` becomes.
+ *
+ * The rule is the one this stream already applies to every other durable row —
+ * a row written before this queue run started belongs to an earlier one — and
+ * `startedAt` is the fact it turns on. Compared as INSTANTS, never as text: an
+ * ISO timestamp may carry an offset, so `…T05:00:00-08:00` is after noon UTC
+ * though it sorts before it.
+ *
+ * INCLUSIVE at the boundary. The queue run stamps its instant before it
+ * composes, so a run born in the same millisecond is its own.
+ */
+export function queueRunOwnRuns(runs: readonly QueueRunSourceRun[], since: string): QueueRunOwnership {
+  const start = Date.parse(since)
+  if (Number.isNaN(start)) throw new TypeError(`yrd: a queue run's start '${since}' is not a time`)
+  const own: QueueRunSourceRun[] = []
+  const unreadable: string[] = []
+  let recovered = 0
+  for (const run of runs) {
+    const startedAt = Date.parse(run.startedAt)
+    // Unreadable is neither owned nor recovered: it is a run this stream
+    // cannot place, said out loud by the caller rather than folded into
+    // either count, where it would read as a fact somebody had checked.
+    if (Number.isNaN(startedAt)) unreadable.push(run.id)
+    else if (startedAt >= start) own.push(run)
+    else recovered += 1
+  }
+  return Object.freeze({ own: Object.freeze(own), recovered, unreadable: Object.freeze(unreadable) })
 }
 
 export function createQueueRunLog(options: QueueRunLogOptions): QueueRunLog {
@@ -291,8 +392,11 @@ export type QueueRunLogSource = Readonly<{
   config?: string
   /** The target's tip the queue run read first. */
   base?: string
-  /** The runs this queue run drove, in order. */
+  /** The runs this queue run STARTED, in order — never one it merely settled
+   * on its way past. {@link queueRunOwnRuns} is what separates the two. */
   runs: readonly QueueRunSourceRun[]
+  /** How many completions of earlier Runs this queue run settled. */
+  recovered?: number
   /** Changes considered and not selected, with the reason. */
   blocked?: readonly QueueRunSourceBlocked[]
   /** One row per message the notifier sent this pass. */
@@ -315,6 +419,10 @@ export type QueueRunLogSource = Readonly<{
  * `Run` satisfies it without this module depending on the whole model. */
 export type QueueRunSourceRun = Readonly<{
   id: string
+  /** When the run started, ISO 8601. REQUIRED, because it is the fact that
+   * separates a run this queue run built from a completion it recovered, and
+   * an optional one would let a caller decide ownership by omission. */
+  startedAt: string
   base?: string
   conclusion?: string
   status?: string
@@ -416,6 +524,11 @@ export function queueRunLogRecords(
     ...(source.config === undefined ? {} : { config: source.config }),
     ...(source.base === undefined ? {} : { base: source.base }),
     target: source.target,
+    // Absent rather than empty when there were none: `built: []` and
+    // `recovered: 0` read as measurements somebody took, and a queue run that
+    // built nothing and recovered nothing took neither.
+    ...(source.runs.length === 0 ? {} : { built: source.runs.map((run) => run.id) }),
+    ...(source.recovered === undefined || source.recovered === 0 ? {} : { recovered: source.recovered }),
   })
   for (const ran of source.checks ?? []) {
     if (ran.startedAt === undefined || ran.finishedAt === undefined || ran.name === undefined) continue

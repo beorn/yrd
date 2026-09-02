@@ -56,7 +56,7 @@
  * needs no inputs, so only the stuck case below reads them.
  */
 import { readdir, readFile } from "node:fs/promises"
-import { dirname } from "node:path"
+import { basename, dirname } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   boundaryRepository,
@@ -243,7 +243,6 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     })
   })
 
-
   /**
    * The `run` record's two facts are read from the TARGET at the queue run's
    * start, not from a run it may never build.
@@ -378,45 +377,90 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       expect(records, run.report).toHaveLength(1)
       expect(records[0]?.kind, run.report).toBe("run")
     })
+
+    /**
+     * A queue run is one invocation, so it has its own log whether or not it
+     * built a Run.
+     *
+     * Measured 2026-09-02 on pin 0749260a: two consecutive empty-lane queue
+     * runs in shared main both wrote `R700.jsonl`, because the file and the
+     * `run` row were named by the last Run the incumbent had minted and an
+     * empty lane mints none. One file then held two `run` rows, both calling
+     * themselves R700, and nothing in it said which queue run wrote which.
+     */
+    it("writes its own file, twice in a row", async () => {
+      const { repo } = await boundaryRepository({ exit: 0, notify: true })
+
+      const first = await logOfQueueRun(await queueRunOnce(repo))
+      const second = await logOfQueueRun(await queueRunOnce(repo))
+
+      expect(second.path).not.toBe(first.path)
+      expect(second.records[0]?.run).not.toBe(first.records[0]?.run)
+      // Two files, each holding exactly one account of itself.
+      for (const { path, records } of [first, second]) {
+        expect(ofKind(records, "run"), `two run rows in ${path}`).toHaveLength(1)
+      }
+    })
   })
 
   /**
-   * Stuck is the queue's own fault, so the log says so and the submitter hears
-   * nothing: the two messages a submitter gets are `merged` and `fail`, and
-   * neither may be sent for a queue run that could not do its job.
+   * The queue run names its log after ITSELF, and a Run it built is a field.
    *
-   * The billing underneath is M1's: exit 2 and `check-stuck`, landed
-   * 2026-09-02. This adds the log's account of it.
+   * Naming the file after the Run is what made two queue runs share one file:
+   * the name was a fact about a record the invocation might never make, so
+   * every queue run that built no Run reused the last name minted. The Run id
+   * is still worth reading — it is what the incumbent's other instruments
+   * print — so it moves onto the run row rather than being dropped.
    */
-  it("records a stuck result and bills the submitter nothing", async () => {
-    const { repo, notifyLog } = await boundaryRepository({ exit: 2, notify: true })
-    const { branch, headSha } = await submitOneCommit(repo, "two")
+  it("names its log after the queue run, never after a Run it built", async () => {
+    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    await submitOneCommit(repo, "green")
 
     const run = await queueRunOnce(repo)
-    expect(run.exitCode, run.report).toBe(2)
+    const { path, records } = await logOfQueueRun(run)
 
-    const { records } = await logOfQueueRun(run)
+    const built = theOne(records, "run").built
+    expect(built, run.report).toEqual([expect.any(String)])
+    const id = (built as readonly string[])[0] as string
+    expect(id, run.report).toMatch(/^R\d+$/u)
 
-    const stuck = theOne(records, "result")
-    expect(stuck.result, run.report).toBe("stuck")
-    expect(stuck.branch, run.report).toBe(branch)
-    expect(stuck.head, run.report).toBe(headSha)
-    // Nobody is billed, said in the field that says who is billed.
-    expect(stuck.whose, run.report).toBe("queue")
+    // The queue run's own id is neither the Run's id nor a file named for it.
+    expect(records[0]?.run, run.report).not.toBe(id)
+    expect(basename(path), run.report).not.toBe(`${id}.jsonl`)
+  })
 
-    // The submitter's two messages are `merged` and `fail`. Neither is sent.
-    for (const message of ofKind(records, "message")) {
-      expect(["merged", "fail"], run.report).not.toContain(message.says)
+  /**
+   * A completion the queue run recovered belongs to the queue run that made
+   * it.
+   *
+   * Measured 2026-09-02: each of two empty-lane queue runs appended the same
+   * seven historical change/result/merge triplets, recovered from the
+   * checkpoint, so both logs claimed merges neither run made while the debug
+   * log and git proved zero events. The recovery is worth one number; it is
+   * not worth a merge row.
+   */
+  it("claims no merge it did not make", async () => {
+    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    const { branch } = await submitOneCommit(repo, "green")
+
+    const merging = await queueRunOnce(repo)
+    expect(ofKind((await logOfQueueRun(merging)).records, "merge"), merging.report).toHaveLength(1)
+
+    // The lane is empty now. Whatever this queue run settles from the last
+    // one, it merged nothing itself, and its log must say exactly that.
+    const after = await queueRunOnce(repo)
+    const { records } = await logOfQueueRun(after)
+
+    for (const kind of ["change", "result", "merge"]) {
+      expect(
+        ofKind(records, kind),
+        `queue run two reported queue run one's ${kind} for ${branch}\n${after.report}`,
+      ).toEqual([])
     }
-    // ...and the notifier was handed nothing that says either, so the log and
-    // what actually went out agree. The notifier really is reached on this
-    // path — measured 2026-09-02, one `yrd-broken` message — so this is a
-    // checked zero, not an empty file nobody wrote to.
-    const sent = await readFile(notifyLog, "utf8").catch(() => "")
-    expect(sent, run.report).toMatch(/"kind":"yrd-broken"/)
-    expect(sent, run.report).not.toMatch(/"kind":"(landed|send-back)"/)
-
-    // The change stays where it was, so the next queue run takes it again.
-    expect(ofKind(records, "merge"), run.report).toEqual([])
+    const recovered = theOne(records, "run").recovered
+    expect(
+      recovered === undefined || typeof recovered === "number",
+      `recovery is a count on the run row, not ${JSON.stringify(recovered)}\n${after.report}`,
+    ).toBe(true)
   })
 })

@@ -310,9 +310,12 @@ import {
 import type { ConditionalLogger } from "loggily"
 import {
   createQueueRunLog,
+  openQueueRun,
+  type QueueRunIdentity,
   queueRunLogDirectory,
   queueRunLogRecords,
   type QueueRunSourceCheck,
+  queueRunOwnRuns,
 } from "./queue-run-log.ts"
 
 /** How many outcome-ledger rows `queue list` prints beneath the timeline. */
@@ -14437,12 +14440,19 @@ function buildProgram(
       const outcomes = installedServices().outcomes
       outcomes?.setOwner(typeof options.owner === "string" ? options.owner : undefined)
       outcomes?.beginPass()
-      // The pass window. Admission refusals and jobs are DURABLE rows that
-      // outlive one queue run, so the log filters them by this instant: a row
-      // last written before this queue run started belongs to an earlier one,
-      // and reporting it again would make every queue run look like it redid
-      // the last one's work.
-      const passStartedAt = new Date().toISOString()
+      // THE QUEUE RUN'S OWN IDENTITY, minted once for this invocation: its id
+      // and the instant it started, in one act. A queue run is one invocation
+      // of `yrd queue run` and always has its own log, whether or not it goes
+      // on to build a Run — naming that log after the first Run it built made
+      // two consecutive empty-lane queue runs write to one file under the last
+      // id the incumbent had minted (measured 2026-09-02 on pin 0749260a).
+      //
+      // The instant is the pass window. Admission refusals, jobs and runs are
+      // DURABLE rows that outlive one queue run, so the log filters all three
+      // by it: a row written before this queue run started belongs to an
+      // earlier one, and reporting it again would make every queue run look
+      // like it redid the last one's work.
+      const queueRun = openQueueRun()
       // A queue run that throws still owes its account of itself. Without this
       // the crash path — the one a reader most needs the log for — wrote
       // nothing at all, and the change it had in hand went unmentioned.
@@ -14456,7 +14466,7 @@ function buildProgram(
           env: bootstrap?.env ?? process.env,
           cwd: io.cwd ?? process.cwd(),
           app,
-          since: passStartedAt,
+          queueRun,
           runs: [],
           blocked: [],
           messages: outcomes?.passMessages() ?? [],
@@ -14486,7 +14496,7 @@ function buildProgram(
         env: bootstrap?.env ?? process.env,
         cwd: io.cwd ?? process.cwd(),
         app,
-        since: passStartedAt,
+        queueRun,
         runs,
         blocked,
         messages: outcomes?.passMessages() ?? [],
@@ -15219,9 +15229,11 @@ function writeQueueRunLog(
     env: NodeJS.ProcessEnv
     cwd: string
     app: YrdCliApp
-    /** The instant this queue run started; durable rows older than it belong to
-     * an earlier queue run and are not this one's to report. */
-    since: string
+    /** This queue run's own id and start instant, minted once for the whole
+     * invocation, so the crash path and the ordinary path write one account
+     * under one name. Durable rows older than the instant belong to an earlier
+     * queue run and are not this one's to report. */
+    queueRun: QueueRunIdentity
     runs: readonly Run[]
     blocked: readonly Readonly<{ pr: Change; eligibility: ChangeEligibility }>[]
     messages: readonly QueuePassMessage[]
@@ -15234,8 +15246,32 @@ function writeQueueRunLog(
   if (directory === undefined) return undefined
   const state = stateOf(input.app)
   const changes = state.bays.prs
+  // THE RUNS THIS QUEUE RUN STARTED, not the ones it settled on its way past.
+  // A pass settles every run whose holder is gone before it composes anything
+  // of its own and hands both sets back as one array; projecting that array
+  // whole made each of two empty-lane queue runs re-report the same seven
+  // historical change/result/merge triplets, so both logs claimed merges
+  // neither run made (measured 2026-09-02 on pin 0749260a). Same window as the
+  // two filters below, on the same instant, because they are the same rule:
+  // a durable row written before this queue run started belongs to an earlier
+  // one.
+  const owned = queueRunOwnRuns(input.runs, input.queueRun.startedAt)
+  if (owned.unreadable.length > 0) {
+    // NO SILENT ERRORS: a run this stream cannot place is neither claimed nor
+    // quietly dropped. Every id is named, so the gap in the account is exactly
+    // as visible as the account.
+    input.log.warn?.(
+      `the queue run's log left out ${String(owned.unreadable.length)} run(s) whose start it could not read, ` +
+        `so it cannot say whether this queue run made them: ${owned.unreadable.join(", ")}`,
+      {
+        action: "queue-run-log-unreadable-run",
+        code: "queue-run-log-unreadable-run",
+        runs: owned.unreadable,
+      },
+    )
+  }
   const refusals = Object.values(state.queues.admissionRefusals)
-    .filter((refusal) => refusal.lastAt >= input.since)
+    .filter((refusal) => refusal.lastAt >= input.queueRun.startedAt)
     .map((refusal) => ({
       pr: refusal.pr,
       ...(changes[refusal.pr]?.branch === undefined ? {} : { branch: changes[refusal.pr]?.branch }),
@@ -15246,13 +15282,13 @@ function writeQueueRunLog(
       lastAt: refusal.lastAt,
     }))
   const checks = Object.values(state.jobs.byId)
-    .filter((job) => job.status === "completed" && "startedAt" in job && job.startedAt >= input.since)
+    .filter((job) => job.status === "completed" && "startedAt" in job && job.startedAt >= input.queueRun.startedAt)
     .map((job) => queueRunLogCheck(job, changes))
     // The MERGE step is not a check: it is what the queue does once the checks
     // pass, it has no key in the target's check config, and a record calling it
     // one would put a name in the stream that a reader cannot look up.
     .filter((check) => check.name !== undefined && check.name !== "merge")
-  const target = input.runs[0]?.base ?? input.blocked[0]?.pr.base ?? Object.values(changes)[0]?.base ?? "main"
+  const target = owned.own[0]?.base ?? input.blocked[0]?.pr.base ?? Object.values(changes)[0]?.base ?? "main"
   const authority = queueRunLogAuthority(input.cwd, target)
   const pin = queueRunLogPin(input.cwd)
   const records = queueRunLogRecords(
@@ -15261,7 +15297,8 @@ function writeQueueRunLog(
       ...(pin === undefined ? {} : { pin }),
       ...(authority.base === undefined ? {} : { base: authority.base }),
       ...(authority.config === undefined ? {} : { config: authority.config }),
-      runs: input.runs,
+      runs: owned.own,
+      ...(owned.recovered === 0 ? {} : { recovered: owned.recovered }),
       blocked: input.blocked,
       messages: input.messages,
       refusals,
@@ -15286,8 +15323,8 @@ function writeQueueRunLog(
   )
   const stream = createQueueRunLog({
     directory,
-    run: queueRunLogId(input.runs, refusals.length > 0 || checks.length > 0),
-    startedAt: input.since,
+    run: input.queueRun.id,
+    startedAt: input.queueRun.startedAt,
     onFailure: (message, props) => input.log.warn?.(message, props),
   })
   for (const record of records) stream.write(record)
@@ -15378,20 +15415,6 @@ function queueRunLogPin(cwd: string): string | undefined {
   } catch {
     return undefined
   }
-}
-
-/**
- * The queue run's own id, and so its file's name.
- *
- * The first run's id when this queue run drove one, because that is the name
- * every other instrument already prints for the work; otherwise the clock and
- * the pid. `idle` is a CLAIM, and it was wrong for every fail and every stuck:
- * those queue runs did a full check and refused a change without ever building
- * a run, so a file called `idle-…` named the one thing the queue run was not.
- */
-function queueRunLogId(runs: readonly Run[], worked: boolean): string {
-  if (runs[0]?.id !== undefined) return runs[0].id
-  return `${worked ? "run" : "idle"}-${String(Date.now())}-${String(globalThis.process.pid)}`
 }
 
 /**
