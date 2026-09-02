@@ -20,6 +20,7 @@ import type { Scope } from "@silvery/scope"
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
+import { deriveRunLiveness, describeOrphanedRun, type RunnerLivenessProbe } from "./run-liveness.ts"
 import {
   JobRequestSchema,
   JobWaitingSchema,
@@ -968,9 +969,7 @@ export type Jobs = Readonly<{
   finish(id: string, completion: JobCompletion): Promise<Job>
   cancel(input: CancelJobInput): Promise<Job>
   retry(id: string): Promise<Job>
-  recover(
-    options: Readonly<{ now: string; reason?: string; runner?: string; waitBoundMs?: number }>,
-  ): Promise<readonly string[]>
+  recover(options: JobRecoverOptions): Promise<readonly string[]>
   requested(source: CommandResult | readonly Event[]): readonly string[]
 }>
 
@@ -1031,6 +1030,24 @@ const RecoverOptionsSchema = z
     waitBoundMs: z.number().int().positive().optional(),
   })
   .strict()
+
+/**
+ * What a recovery pass asserts and can observe (@i/10-yrd/24030).
+ *
+ * `runner` names ONE holder the caller has proven dead (a departed habitant's
+ * recorded pid). `runnerAlive` is the host's process probe for every other
+ * holder — `true`/`false` for an identity carrying a pid the host can read,
+ * `undefined` for one it cannot (a bare `yrd-cli`), which leaves the lease
+ * alone to judge. Both feed the ONE liveness derivation
+ * ({@link deriveRunLiveness}); nothing here re-computes a lease or a pid.
+ */
+export type JobRecoverOptions = Readonly<{
+  now: string
+  reason?: string
+  runner?: string
+  waitBoundMs?: number
+  runnerAlive?: RunnerLivenessProbe["runnerAlive"]
+}>
 
 export function createJobs(options: CreateJobsOptions): Jobs {
   const definitions = new Map(Object.entries(options.definitions))
@@ -1327,7 +1344,8 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     },
 
     async recover(recoverOptions) {
-      const parsed = RecoverOptionsSchema.parse(recoverOptions)
+      const { runnerAlive, ...plain } = recoverOptions
+      const parsed = RecoverOptionsSchema.parse(plain)
       const cutoff = Date.parse(parsed.now)
       // With `runner` set the caller asserts that runner is dead: reclaim its
       // running jobs regardless of lease expiry, PLUS every other running job
@@ -1338,24 +1356,39 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       // the caller's dead-runner reason applies only to the named runner's
       // jobs; an expired lease of another runner says so.
       const deadRunner = parsed.runner
+      // ONE liveness derivation (24030): the named dead runner and the host's
+      // pid probe are the two facts a probe can carry, folded into it here so
+      // a holder-dead verdict and a lease-lapsed verdict come from the same
+      // function every reader of a running row uses.
+      const probe: RunnerLivenessProbe = {
+        now: cutoff,
+        runnerAlive: (runner) => (runner === deadRunner ? false : runnerAlive?.(runner)),
+      }
       const waitBoundMs = parsed.waitBoundMs ?? DEFAULT_JOB_WAIT_BOUND_MS
       const recovered: string[] = []
       for (const job of Object.values(state().byId)) {
         if (job.status !== "in_progress" && job.status !== "waiting") continue
         const named = deadRunner !== undefined && job.runner === deadRunner
+        const liveness =
+          job.status === "in_progress"
+            ? deriveRunLiveness({ runner: job.runner, leaseExpiresAt: job.leaseExpiresAt }, probe)
+            : undefined
         // A waiting job holds no lease. Its two ways out are the same dead-runner
         // evidence the in_progress arm uses, and the wait bound — without both it
         // parks forever, which the no-parking ruling forbids.
         const expired =
-          job.status === "in_progress"
-            ? Date.parse(job.leaseExpiresAt) <= cutoff
-            : Date.parse(job.changedAt) + waitBoundMs <= cutoff
+          liveness !== undefined ? liveness.state === "orphaned" : Date.parse(job.changedAt) + waitBoundMs <= cutoff
         if (!named && !expired) continue
         const reason =
           job.status === "waiting"
             ? waitEndedReason(job, named ? (parsed.reason ?? "runner disappeared") : undefined, waitBoundMs)
             : named || deadRunner === undefined
-              ? (parsed.reason ?? (named ? "runner disappeared" : "runner lease expired"))
+              ? (parsed.reason ??
+                (named
+                  ? "runner disappeared"
+                  : liveness?.state === "orphaned" && liveness.cause === "holder-dead"
+                    ? describeOrphanedRun(liveness)
+                    : "runner lease expired"))
               : "runner lease expired"
         const fence = job.status === "in_progress" ? { leaseExpiresAt: job.leaseExpiresAt } : { token: job.token }
         try {

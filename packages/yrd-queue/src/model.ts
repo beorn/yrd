@@ -1315,7 +1315,6 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "run-without-check-ancestry",
   "invalid-run",
   "orphaned-run",
-  "run-lease-expired",
   "step-unavailable",
   "step-revision-drift",
   "candidate-revision-mismatch",

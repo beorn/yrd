@@ -87,7 +87,11 @@ import {
   type Jobs,
   type Runner,
   type RunJobOptions,
+  type RunLiveness,
+  type RunnerLivenessProbe,
 } from "@yrd/job"
+import { deriveRunLiveness, describeOrphanedRun } from "./run-liveness.ts"
+import { hostRunnerAlive } from "./runner-liveness-probe.ts"
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { StepKind } from "@yrd/config"
 import type { ConditionalLogger, LogLevel } from "loggily"
@@ -851,7 +855,15 @@ export type PauseQueueArgs = Readonly<{
   allowedPRs: readonly string[]
   expiresAt: string
 }>
-export type RecoverQueueOptions = Readonly<{ recoveryTime: string; reason?: string; runner?: string }>
+export type RecoverQueueOptions = Readonly<{
+  recoveryTime: string
+  reason?: string
+  /** One holder the caller has proven dead (a departed habitant's recorded pid). */
+  runner?: string
+  /** Process probe for every other holder; absent, the queue's own
+   * ({@link QueueOptions.runnerAlive}) answers. */
+  runnerAlive?: RunnerLivenessProbe["runnerAlive"]
+}>
 const LegacyPauseQueueArgsSchema = z
   .object({
     base: GitRefSchema,
@@ -1230,7 +1242,12 @@ const QuiesceLegacyRunArgsSchema = z
   })
   .strict()
 export type QuiesceLegacyRunArgs = Readonly<z.infer<typeof QuiesceLegacyRunArgsSchema>>
-const SettleOrphanedRunArgsSchema = QuiesceLegacyRunArgsSchema
+const SettleOrphanedRunArgsSchema = QuiesceLegacyRunArgsSchema.extend({
+  /** The read's clock; without it an in_progress cursor Job cannot be judged. */
+  now: z.string().datetime({ offset: true }).optional(),
+  /** Holders the caller has proven dead; every other holder is judged by its lease alone. */
+  deadRunners: z.array(z.string().trim().min(1)).optional(),
+}).strict()
 export type SettleOrphanedRunArgs = Readonly<z.infer<typeof SettleOrphanedRunArgsSchema>>
 const QueueAuthorityTokenFactSchema = z.object({
   pr: PRIdSchema,
@@ -1431,6 +1448,17 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   isSubmitSuperseded?(input: Readonly<{ branch: string; sha: string; base: string }>): boolean | Promise<boolean>
   /** Repository-truth sink for one immutable terminal merge record. */
   recordMerge?: (input: Readonly<{ run: Run; candidate: Candidate }>) => Promise<void>
+  /**
+   * The host half of the liveness contract (24030): is the process behind a
+   * runner identity alive? Absent, `hostRunnerAlive` (@yrd/process's recorded
+   * pid liveness) answers; tests and embedded hosts inject their own. Every
+   * running row this queue reads — pass-start settlement, `recover`, the
+   * audit — derives through {@link deriveRunLiveness} with this probe.
+   */
+  runnerAlive?: RunnerLivenessProbe["runnerAlive"]
+  /** See {@link LandedMergeResolver}. Absent, an orphaned merge step is always
+   * canceled (its members re-queue) and the settlement row says the reader was absent. */
+  landedMerge?: LandedMergeResolver
   runner?: (jobs: Jobs) => Runner
   /** Progress SLO declaration. Audit emits facts; paging remains a Hab concern. */
   progress?: QueueProgressPolicy
@@ -1587,7 +1615,34 @@ function needsPersonRecipient(record: DeepReadonly<Change> | undefined, configur
   }
 }
 
-export type QueueAuditOptions = Readonly<{ now?: string }>
+export type QueueAuditOptions = Readonly<{
+  now?: string
+  /** Process probe behind the liveness derivation the audit reads running
+   * rows through (24030); absent, the queue's own answers. */
+  runnerAlive?: RunnerLivenessProbe["runnerAlive"]
+}>
+
+/** What the host is asked when an orphaned run's cursor is its merge step. */
+export type LandedMergeInput = Readonly<{
+  run: RunId
+  base: string
+  /** The base the candidate was cut against. */
+  baseSha: string
+  members: readonly Readonly<{ pr: string; revision: number; headSha: string; branch?: string; changeId?: string }>[]
+}>
+/**
+ * Repository proof that an orphaned merge step's work already reached its base
+ * (@i/10-yrd/24030, R3747: the merge commit was on main before the SIGTERM
+ * that cut the terminal row). Answers the proof a finished merge step would
+ * have written — the landing commit as `commit` and `baseSha` — or
+ * `undefined` when the base does not contain the members' heads, in which
+ * case the run is canceled and its members re-queue. The host answers with
+ * `mergedByAncestry` / `mergedByChangeId` over the base's merged-truth index;
+ * this layer never opens git.
+ */
+export type LandedMergeResolver = (
+  input: LandedMergeInput,
+) => IntegrationProof | undefined | Promise<IntegrationProof | undefined>
 
 export type CandidatePreparationInput = Readonly<{
   id: string
@@ -1984,6 +2039,8 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.resolveDeclaredPlan,
             options.prepareCandidate,
             options.recordMerge,
+            options.runnerAlive ?? hostRunnerAlive,
+            options.landedMerge,
             options.prNumberMint,
             options.readSubmitEnrichment,
             landing,
@@ -2051,6 +2108,8 @@ function createQueue<Shape extends ChangeShape>(
   resolveDeclaredPlan: QueueOptions<readonly AnyStepDef[]>["resolveDeclaredPlan"],
   prepareCandidate: CandidatePreparer | undefined,
   recordMerge: QueueOptions<readonly AnyStepDef[]>["recordMerge"],
+  runnerAlive: NonNullable<QueueOptions<readonly AnyStepDef[]>["runnerAlive"]>,
+  landedMerge: QueueOptions<readonly AnyStepDef[]>["landedMerge"],
   derivedMint: PrNumberMint | undefined,
   readSubmitEnrichment: QueueOptions<readonly AnyStepDef[]>["readSubmitEnrichment"],
   landing: SubmitLandingMemo,
@@ -4510,6 +4569,400 @@ function createQueue<Shape extends ChangeShape>(
     return [...admitted].toSorted(compareNatural)
   }
 
+  const cancelQueueRun = async (args: CancelRunArgs): Promise<Run> => {
+    const record = Queues.resolve(runtime().queues, args.run)
+    if (record === undefined) raiseFailure("refusal", "run-not-found", `yrd: no queue run '${args.run}'`)
+    const run = materializeRun(record, runtime().jobs)
+    if (Queues.terminal(run)) {
+      raiseFailure(
+        "refusal",
+        "run-terminal",
+        `yrd: queue run '${args.run}' is ${run.status}; only a running or waiting run can be canceled`,
+      )
+    }
+    // Multi-tenant, deadlock-free cancel. This runs as a SEPARATE cli process
+    // from the habitant follow-runner. Journal the run cancellation FIRST: it
+    // marks the record canceled (advanceQueue then stops reconciling it, so no
+    // pr/canceled) and releases authority so the still-submitted PRs re-queue on
+    // a future drain. THEN cancel the active job to abort in-flight work. We
+    // NEVER synchronously cancel our own loop's active merge from inside the
+    // drive loop (that deadlocks: the loop holds the queue writer while blocked
+    // mid-merge). When the run's merge is in flight in the habitant, this
+    // journaled job cancellation surfaces there as a typed settlement conflict
+    // that habitantCycleRecovery honors at the next safe cycle boundary — no
+    // second scheduler, no daemon.
+    await actions.cancelRun(args)
+    const active = run.steps[run.cursor]?.job
+    const cancelable = active?.status === "queued" || active?.status === "in_progress" || active?.status === "waiting"
+    if (cancelable) {
+      if (configuredRunner === undefined) {
+        await jobs.cancel({ id: active.id, attempt: active.attempt, by: args.by, reason: args.reason })
+      } else {
+        await configuredRunner.cancel(active.id, { by: args.by, reason: args.reason })
+      }
+    }
+    const canceled = current(args.run)
+    await persistMergeRecord(canceled)
+    return canceled
+  }
+
+  /** The proof a finished merge step would have written for this run, when
+   * the host can read it off the base; `undefined` when it cannot or when no
+   * reader is wired (the caller says which). */
+  const landedMergeProof = async (run: Run): Promise<IntegrationProof | undefined> => {
+    if (landedMerge === undefined) return undefined
+    const snapshot = runtime()
+    const candidate = snapshot.queues.candidates[run.candidateId]
+    if (candidate === undefined) {
+      throw new Error(`yrd: queue run '${run.id}' names missing Candidate '${run.candidateId}'`)
+    }
+    return landedMerge({
+      run: run.id,
+      base: run.base,
+      baseSha: candidate.baseSha,
+      members: run.prs.map((pr) => {
+        const branch = getChangeRecord(snapshot.bays, pr.id)?.branch
+        return {
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+          ...(branch === undefined ? {} : { branch }),
+          ...(pr.changeId === undefined ? {} : { changeId: pr.changeId }),
+        }
+      }),
+    })
+  }
+
+  /**
+   * Settle every non-terminal run whose cursor Job is held by a holder the ONE
+   * liveness derivation calls orphaned (@i/10-yrd/24030) — the rows that read
+   * `checking` for two hours after their process died (R3742) or `running`
+   * after a drain cut them between the merge landing and the terminal row
+   * (R3747). Two dispositions, both through writers a live pass uses:
+   *
+   * - the cursor is the merge step and the host proves the work already
+   *   landed: the cut Job is finished in its holder's name with that proof
+   *   (the same completion a waiting Job takes from a later process — the
+   *   fence is the derivation that proved the holder gone), then `advance`
+   *   writes `pr/integrated` and `settled` writes `queue/run/settled` exactly
+   *   as they would have; `merged-recovered`.
+   * - otherwise the run is canceled the way `queue cancel` cancels it, so its
+   *   members re-queue rather than being rejected for a fault that is not
+   *   their own; `canceled`.
+   *
+   * Runs BEFORE the lease writer (`jobs.recover`) loses these Jobs: a lost
+   * Job projects its run terminal (`timed_out`), and a terminal run can be
+   * neither canceled nor finished. One INFO row per settlement.
+   */
+  /** An orphan this pass leaves to `jobs.recover`: the row it logs once the Job is timed out. */
+  type OrphanTimeout = Readonly<{
+    run: RunId
+    step: StepName
+    job: string
+    liveness: Parameters<typeof describeOrphanedRun>[0]
+    landedMergeReader?: "absent" | "consulted"
+  }>
+
+  const settleOrphanedRunningRuns = async (
+    probe: RunnerLivenessProbe,
+    reader: TolerantQueueReader,
+    timeouts: OrphanTimeout[],
+  ): Promise<readonly RunId[]> => {
+    const settled: RunId[] = []
+    const snapshot = runtime()
+    for (const record of Queues.values(snapshot.queues)) {
+      const run = reader.read(record, snapshot.jobs)
+      if (run === undefined || Queues.terminal(run)) continue
+      const step = run.steps[run.cursor]
+      const job = step?.job
+      if (step === undefined || job === undefined || job.status !== "in_progress") continue
+      const liveness = deriveRunLiveness({ runner: job.runner, leaseExpiresAt: job.leaseExpiresAt }, probe)
+      if (liveness.state !== "orphaned") continue
+      const landedMergeReader = step.kind !== "merge" ? undefined : landedMerge === undefined ? "absent" : "consulted"
+      const landed = step.kind === "merge" ? await landedMergeProof(run) : undefined
+      if (landed === undefined) {
+        // ONE settler for a holder that is gone: `jobs.recover` (below) times
+        // the Job out through the same liveness derivation, aborts any child
+        // still attached to it, and the run fails under the timeout
+        // disposition, which re-queues its members. A cancel from here would
+        // be a second settler — and one that waits on a Job a stalled child
+        // never finishes (command.test "renews one runner lease only on child
+        // progress and recovers a stalled child without merge"). This pass
+        // only adds the row naming the holder once that settlement is in.
+        timeouts.push({
+          run: run.id,
+          step: step.name,
+          job: job.id,
+          liveness,
+          ...(landedMergeReader === undefined ? {} : { landedMergeReader }),
+        })
+        continue
+      }
+      // The one settlement the job layer cannot make: a merge that already
+      // landed is finished as success in the holder's name, whatever condemned
+      // the holder, and the run advances through the writers a live merge uses.
+      await jobs.finish(job.id, {
+        attempt: job.attempt,
+        runner: job.runner,
+        result: { status: "completed", conclusion: "success", output: landed },
+      })
+      await actions.advance(run.id)
+      const advanced = current(run.id)
+      if (Queues.terminal(advanced)) {
+        await persistMergeRecord(advanced)
+        await markSettledRoot(run.id)
+      }
+      log.info?.(
+        `Settled orphaned queue run ${run.id} at step '${step.name}' (merged-recovered): ${describeOrphanedRun(liveness)}`,
+        {
+          action: "orphaned-run-settled",
+          run: run.id,
+          step: step.name,
+          job: job.id,
+          runner: liveness.runner,
+          ...(liveness.pid === undefined ? {} : { pid: liveness.pid }),
+          leaseExpiresAt: liveness.leaseExpiresAt,
+          cause: liveness.cause,
+          disposition: "merged-recovered",
+          ...(landedMergeReader === undefined ? {} : { landedMergeReader }),
+          commit: landed.commit,
+        },
+      )
+      settled.push(run.id)
+    }
+    return settled
+  }
+
+  const recoverQueueRuns = async (recoverOptions: RecoverQueueOptions): Promise<readonly Run[]> => {
+    // Capture ownership at the synchronous API boundary. A habitant runner can
+    // settle and release a lost root while recovery is entering its observed
+    // async operation; that race must not erase the run from recovery evidence.
+    const rootsBeforeRecovery = activeQueueRootIds(runtime().queues.authority)
+    return observeYrdLifecycle(
+      log,
+      {
+        lifecycle: "recover",
+        attributes: {
+          recoveryTime: recoverOptions.recoveryTime,
+          ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+          ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
+        },
+        outcome: (runs) => (runs.length === 0 ? "succeeded" : "recovered"),
+        resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
+      },
+      async () => {
+        const affected = new Set<RunId>()
+        // Recovery's OWN reader, held across every enumeration below so one
+        // unreadable record is quarantined once and cannot veto the repair of
+        // any other. {@link createTolerantQueueReader} carries the incident.
+        const reader = createTolerantQueueReader()
+        // ONE liveness derivation for this pass (24030): the caller's proven-dead
+        // holder and the host's pid probe, folded into the probe every settle
+        // below and the lease writer's own walk read through.
+        const alive = recoverOptions.runnerAlive ?? runnerAlive
+        const probe: RunnerLivenessProbe = {
+          now: Date.parse(recoverOptions.recoveryTime),
+          runnerAlive: (runner) => (runner === recoverOptions.runner ? false : alive(runner)),
+        }
+        const orphanTimeouts: OrphanTimeout[] = []
+        for (const id of await settleOrphanedRunningRuns(probe, reader, orphanTimeouts)) {
+          affected.add(id)
+        }
+        const recoveredJobs = new Set(
+          await (configuredRunner === undefined
+            ? jobs.recover({
+                now: recoverOptions.recoveryTime,
+                ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+                ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
+                runnerAlive: alive,
+              })
+            : configuredRunner.recover({
+                now: recoverOptions.recoveryTime,
+                ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+                ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
+                runnerAlive: alive,
+              })),
+        )
+        for (const orphan of orphanTimeouts) {
+          if (!recoveredJobs.has(orphan.job)) continue
+          affected.add(orphan.run)
+          log.info?.(
+            `Settled orphaned queue run ${orphan.run} at step '${orphan.step}' (timed-out): ${describeOrphanedRun(orphan.liveness)}`,
+            {
+              action: "orphaned-run-settled",
+              run: orphan.run,
+              step: orphan.step,
+              job: orphan.job,
+              runner: orphan.liveness.runner,
+              ...(orphan.liveness.pid === undefined ? {} : { pid: orphan.liveness.pid }),
+              leaseExpiresAt: orphan.liveness.leaseExpiresAt,
+              cause: orphan.liveness.cause,
+              disposition: "timed-out",
+              ...(orphan.landedMergeReader === undefined ? {} : { landedMergeReader: orphan.landedMergeReader }),
+            },
+          )
+        }
+        const staleAdmissions = staleRevisionAdmissionJobs()
+        for (const job of staleAdmissions) {
+          await jobs.cancel({
+            id: job.id,
+            attempt: job.attempt,
+            by: recoverOptions.runner ?? "yrd/recover",
+            reason: "entry checks no longer belong to a live change revision",
+          })
+        }
+        if (staleAdmissions.length > 0) {
+          log.info?.("Stopped required-check jobs whose PR revision is no longer live.", {
+            action: "recover-stale-admission-settle",
+            reason: "stale-admission-job",
+            jobs: staleAdmissions.map((job) => job.id),
+          })
+        }
+        let snapshot = runtime()
+        const recoveryRoots = new Set([...rootsBeforeRecovery, ...activeQueueRootIds(snapshot.queues.authority)])
+        const candidates = [...recoveryRoots].flatMap((root) => reader.tree(snapshot, root))
+        const staleQueued: Array<{ run: RunId; step: StepName; drift: string }> = []
+        for (const candidate of candidates) {
+          const active = candidate.steps[candidate.cursor]
+          const drift = active?.job?.status === "queued" ? plannedStepDrift(byName, active) : undefined
+          if (active !== undefined && drift !== undefined) {
+            const reconciled = await actions.advance(candidate.id)
+            if (reconciled.events.length > 0) {
+              affected.add(candidate.id)
+              staleQueued.push({ run: candidate.id, step: active.name, drift })
+            }
+            snapshot = runtime()
+            continue
+          }
+          const ownsRecoveredJob = candidate.steps.some(
+            (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
+          )
+          const hasTerminalFailure = candidate.steps.some((step) => step.job !== undefined && jobFailed(step.job))
+          if (hasTerminalFailure && needsAdvance(snapshot, candidate)) {
+            const reconciled = await actions.advance(candidate.id)
+            if (reconciled.events.length > 0) affected.add(candidate.id)
+            snapshot = runtime()
+          }
+          if (ownsRecoveredJob) affected.add(candidate.id)
+        }
+        if (staleQueued.length > 0) {
+          log.info?.("Stopped queue runs whose queued step definition changed.", {
+            action: "recover-stale-steps-release",
+            reason: "stale-steps",
+            runs: staleQueued.map(({ run }) => run),
+            steps: staleQueued.map(({ step }) => step),
+            details: staleQueued.map(({ drift }) => drift),
+          })
+        }
+        // Orphan hygiene: cancel every requested Job whose parent run is
+        // terminal or absent, so a state upgrade or a settled/canceled run that
+        // never terminalized its pending Job cannot strand it forever (the class
+        // that fed the selectorless-compose poison). Loud structured result
+        // naming every settled Job + run; a terminal-run orphan's record is
+        // re-materialized into the return, an absent-run orphan has no record to
+        // return so the result is its report.
+        const settledOrphans = orphanedRequestedQueueJobs(runtime(), reader)
+        for (const orphan of settledOrphans) {
+          await jobs.cancel({
+            id: orphan.job.id,
+            attempt: orphan.job.attempt,
+            by: recoverOptions.runner ?? "yrd/recover",
+            reason: `orphaned requested job (${orphan.reason})`,
+          })
+          if (orphan.reason === "run-terminal") affected.add(orphan.run)
+        }
+        if (settledOrphans.length > 0) {
+          log.info?.("Stopped jobs whose queue run had already ended.", {
+            action: "recover-orphan-settle",
+            reason: "orphaned-requested-job",
+            jobs: settledOrphans.map((orphan) => orphan.job.id),
+            runs: [...new Set(settledOrphans.map((orphan) => orphan.run))],
+          })
+        }
+        // Settle every run whose cursor step has had no Job past the orphan
+        // grace: nothing else can. `jobs.recover()` above walks Jobs, and
+        // `advance` no-ops without one, so a jobless run is projected `running`
+        // forever (R1582 ticked for 45h over an already-integrated change). Loud
+        // structured result naming every settled run and the step it stalled on.
+        const orphanedRuns = orphanedJoblessRuns(runtime(), recoverOptions.recoveryTime, reader)
+        for (const orphan of orphanedRuns) {
+          await actions.settleOrphanedRun({
+            run: orphan.run,
+            reason: `yrd: runner disappeared before step '${orphan.step}' started; no job since ${orphan.since}`,
+          })
+          affected.add(orphan.run)
+        }
+        if (orphanedRuns.length > 0) {
+          log.info?.("Stopped queue runs whose next step never started.", {
+            action: "recover-orphan-run-settle",
+            reason: "orphaned-run",
+            runs: orphanedRuns.map((orphan) => orphan.run),
+            steps: orphanedRuns.map((orphan) => orphan.step),
+          })
+        }
+        // Retire every FAILED batch whose recorded plan drifted so it can never
+        // isolate — otherwise it re-refuses isolation every compose cycle forever
+        // (the isolate-path zombie). Typed stale-plan release; loud result.
+        const plannedRetirements = unisolableStalePlanBatches(runtime(), byName, reader)
+        const retiredBatches: UnisolableStalePlanBatch[] = []
+        for (const planned of plannedRetirements) {
+          // Each retirement appends and re-compacts the live projection. That
+          // can evict another old planned batch before this loop reaches it
+          // (live: retiring R523 crossed the retention boundary and evicted
+          // R533). Re-resolve against the refreshed projection instead of
+          // dispatching a stale plan into a now-archived run.
+          const snapshot = runtime()
+          const record = Queues.get(snapshot.queues, planned.run)
+          if (record === undefined) continue
+          const run = reader.read(record, snapshot.jobs)
+          if (run === undefined) continue
+          if (!bisectable(run) || recordedPlanDrift(run.steps, byName) === undefined) continue
+          const result = await actions.retireStalePlan(planned.run)
+          if (result.events.length === 0) continue
+          retiredBatches.push(planned)
+          affected.add(planned.run)
+        }
+        if (retiredBatches.length > 0) {
+          log.warn?.("Removed outdated batches that can no longer be tested.", {
+            action: "recover-stale-plan-retire",
+            reason: "stale-plan",
+            runs: retiredBatches.map((batch) => batch.run),
+          })
+        }
+        for (const id of await cleanupSettledRoots(reader)) affected.add(id)
+        // The disclosure half of the quarantine, and the reason this reader is
+        // not a silent fallback: every record recovery could not read is named
+        // here with WHAT (the run), WHERE (this recovery pass) and WHY (the
+        // reader's exact refusal), at the moment recovery worked around it.
+        // `queue audit` reports the same rows as `invalid-run` for as long as
+        // they stand — recovery repairs what it can and hides nothing.
+        const unreadable = reader.quarantined()
+        if (unreadable.length > 0) {
+          log.warn?.("Skipped queue runs whose records could not be read; recovery repaired the rest.", {
+            action: "recover-unreadable-run-quarantine",
+            reason: "unreadable-run",
+            runs: unreadable.map((row) => row.run),
+            details: unreadable.map((row) => row.reason),
+          })
+        }
+        const final = runtime()
+        return [...affected].flatMap((id) => {
+          const record = Queues.get(final.queues, id)
+          const run = record === undefined ? undefined : reader.read(record, final.jobs)
+          if (run !== undefined) return [run]
+          const historical = archived(id)
+          if (historical !== undefined) return [historical]
+          // Quarantined above and already reported: recovery acted on it, and
+          // dropping it from the evidence list is not silence. A run absent
+          // from projection AND history with no read failure is a different
+          // animal — nothing acted on it — so that still fails loud.
+          if (reader.isQuarantined(id)) return []
+          throw new Error(`yrd: recovered queue run '${id}' is absent from live projection and journal history`)
+        })
+      },
+    )
+  }
+
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
@@ -4712,7 +5165,21 @@ function createQueue<Shape extends ChangeShape>(
           const resolveCycleBase = createBaseResolutionCycle()
           const resolveCyclePlan = createDeclaredPlanCycle()
           await actions.refresh()
+          // PASS START, both postures (an explicit selection and the
+          // selectorless drain both enter here), BEFORE anything composes:
+          // settle every run whose holder is gone (@i/10-yrd/24030). "running"
+          // is stored belief; this is where the pass derives it from the lease
+          // holder and settles at the boundary, through the ONE recovery the
+          // habitant sweep and the boot reclaim also call — never a second
+          // implementation. A one-shot pass had no recovery at all before this,
+          // which is why R3742 read `checking` for two hours with its process
+          // dead and R3747 stayed `running` after its merge had landed.
+          // Roots settled by an EARLIER pass are archived first, so a run this
+          // pass's recovery settles (a stale plan retired, an orphan canceled)
+          // stays readable through `queue.get`/`history` until the next pass —
+          // the same window a compose-time retirement always had.
           await cleanupSettledRoots()
+          await recoverQueueRuns({ recoveryTime: new Date(runOptions.now?.() ?? Date.now()).toISOString() })
           if (args.steps?.length === 0) return []
           // Ref-only approvals derive their admission BEFORE any snapshot
           // feeds selection, so the same selectorless compose that admits them
@@ -5613,238 +6080,8 @@ function createQueue<Shape extends ChangeShape>(
       return affected.map(current)
     },
     cancelAdmissionJobs: cancelAdmissionJobsForRevision,
-    async cancelRun(args) {
-      const record = Queues.resolve(runtime().queues, args.run)
-      if (record === undefined) raiseFailure("refusal", "run-not-found", `yrd: no queue run '${args.run}'`)
-      const run = materializeRun(record, runtime().jobs)
-      if (Queues.terminal(run)) {
-        raiseFailure(
-          "refusal",
-          "run-terminal",
-          `yrd: queue run '${args.run}' is ${run.status}; only a running or waiting run can be canceled`,
-        )
-      }
-      // Multi-tenant, deadlock-free cancel. This runs as a SEPARATE cli process
-      // from the habitant follow-runner. Journal the run cancellation FIRST: it
-      // marks the record canceled (advanceQueue then stops reconciling it, so no
-      // pr/canceled) and releases authority so the still-submitted PRs re-queue on
-      // a future drain. THEN cancel the active job to abort in-flight work. We
-      // NEVER synchronously cancel our own loop's active merge from inside the
-      // drive loop (that deadlocks: the loop holds the queue writer while blocked
-      // mid-merge). When the run's merge is in flight in the habitant, this
-      // journaled job cancellation surfaces there as a typed settlement conflict
-      // that habitantCycleRecovery honors at the next safe cycle boundary — no
-      // second scheduler, no daemon.
-      await actions.cancelRun(args)
-      const active = run.steps[run.cursor]?.job
-      const cancelable = active?.status === "queued" || active?.status === "in_progress" || active?.status === "waiting"
-      if (cancelable) {
-        if (configuredRunner === undefined) {
-          await jobs.cancel({ id: active.id, attempt: active.attempt, by: args.by, reason: args.reason })
-        } else {
-          await configuredRunner.cancel(active.id, { by: args.by, reason: args.reason })
-        }
-      }
-      const canceled = current(args.run)
-      await persistMergeRecord(canceled)
-      return canceled
-    },
-    async recover(recoverOptions) {
-      // Capture ownership at the synchronous API boundary. A habitant runner can
-      // settle and release a lost root while recovery is entering its observed
-      // async operation; that race must not erase the run from recovery evidence.
-      const rootsBeforeRecovery = activeQueueRootIds(runtime().queues.authority)
-      return observeYrdLifecycle(
-        log,
-        {
-          lifecycle: "recover",
-          attributes: {
-            recoveryTime: recoverOptions.recoveryTime,
-            ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
-            ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
-          },
-          outcome: (runs) => (runs.length === 0 ? "succeeded" : "recovered"),
-          resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
-        },
-        async () => {
-          const recoveredJobs = new Set(
-            await (configuredRunner === undefined
-              ? jobs.recover({
-                  now: recoverOptions.recoveryTime,
-                  ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
-                  ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
-                })
-              : configuredRunner.recover({
-                  now: recoverOptions.recoveryTime,
-                  ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
-                  ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
-                })),
-          )
-          const staleAdmissions = staleRevisionAdmissionJobs()
-          for (const job of staleAdmissions) {
-            await jobs.cancel({
-              id: job.id,
-              attempt: job.attempt,
-              by: recoverOptions.runner ?? "yrd/recover",
-              reason: "entry checks no longer belong to a live change revision",
-            })
-          }
-          if (staleAdmissions.length > 0) {
-            log.info?.("Stopped required-check jobs whose PR revision is no longer live.", {
-              action: "recover-stale-admission-settle",
-              reason: "stale-admission-job",
-              jobs: staleAdmissions.map((job) => job.id),
-            })
-          }
-          const affected = new Set<RunId>()
-          // Recovery's OWN reader, held across every enumeration below so one
-          // unreadable record is quarantined once and cannot veto the repair of
-          // any other. {@link createTolerantQueueReader} carries the incident.
-          const reader = createTolerantQueueReader()
-          let snapshot = runtime()
-          const recoveryRoots = new Set([...rootsBeforeRecovery, ...activeQueueRootIds(snapshot.queues.authority)])
-          const candidates = [...recoveryRoots].flatMap((root) => reader.tree(snapshot, root))
-          const staleQueued: Array<{ run: RunId; step: StepName; drift: string }> = []
-          for (const candidate of candidates) {
-            const active = candidate.steps[candidate.cursor]
-            const drift = active?.job?.status === "queued" ? plannedStepDrift(byName, active) : undefined
-            if (active !== undefined && drift !== undefined) {
-              const reconciled = await actions.advance(candidate.id)
-              if (reconciled.events.length > 0) {
-                affected.add(candidate.id)
-                staleQueued.push({ run: candidate.id, step: active.name, drift })
-              }
-              snapshot = runtime()
-              continue
-            }
-            const ownsRecoveredJob = candidate.steps.some(
-              (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
-            )
-            const hasTerminalFailure = candidate.steps.some((step) => step.job !== undefined && jobFailed(step.job))
-            if (hasTerminalFailure && needsAdvance(snapshot, candidate)) {
-              const reconciled = await actions.advance(candidate.id)
-              if (reconciled.events.length > 0) affected.add(candidate.id)
-              snapshot = runtime()
-            }
-            if (ownsRecoveredJob) affected.add(candidate.id)
-          }
-          if (staleQueued.length > 0) {
-            log.info?.("Stopped queue runs whose queued step definition changed.", {
-              action: "recover-stale-steps-release",
-              reason: "stale-steps",
-              runs: staleQueued.map(({ run }) => run),
-              steps: staleQueued.map(({ step }) => step),
-              details: staleQueued.map(({ drift }) => drift),
-            })
-          }
-          // Orphan hygiene: cancel every requested Job whose parent run is
-          // terminal or absent, so a state upgrade or a settled/canceled run that
-          // never terminalized its pending Job cannot strand it forever (the class
-          // that fed the selectorless-compose poison). Loud structured result
-          // naming every settled Job + run; a terminal-run orphan's record is
-          // re-materialized into the return, an absent-run orphan has no record to
-          // return so the result is its report.
-          const settledOrphans = orphanedRequestedQueueJobs(runtime(), reader)
-          for (const orphan of settledOrphans) {
-            await jobs.cancel({
-              id: orphan.job.id,
-              attempt: orphan.job.attempt,
-              by: recoverOptions.runner ?? "yrd/recover",
-              reason: `orphaned requested job (${orphan.reason})`,
-            })
-            if (orphan.reason === "run-terminal") affected.add(orphan.run)
-          }
-          if (settledOrphans.length > 0) {
-            log.info?.("Stopped jobs whose queue run had already ended.", {
-              action: "recover-orphan-settle",
-              reason: "orphaned-requested-job",
-              jobs: settledOrphans.map((orphan) => orphan.job.id),
-              runs: [...new Set(settledOrphans.map((orphan) => orphan.run))],
-            })
-          }
-          // Settle every run whose cursor step has had no Job past the orphan
-          // grace: nothing else can. `jobs.recover()` above walks Jobs, and
-          // `advance` no-ops without one, so a jobless run is projected `running`
-          // forever (R1582 ticked for 45h over an already-integrated change). Loud
-          // structured result naming every settled run and the step it stalled on.
-          const orphanedRuns = orphanedJoblessRuns(runtime(), recoverOptions.recoveryTime, reader)
-          for (const orphan of orphanedRuns) {
-            await actions.settleOrphanedRun({
-              run: orphan.run,
-              reason: `yrd: runner disappeared before step '${orphan.step}' started; no job since ${orphan.since}`,
-            })
-            affected.add(orphan.run)
-          }
-          if (orphanedRuns.length > 0) {
-            log.info?.("Stopped queue runs whose next step never started.", {
-              action: "recover-orphan-run-settle",
-              reason: "orphaned-run",
-              runs: orphanedRuns.map((orphan) => orphan.run),
-              steps: orphanedRuns.map((orphan) => orphan.step),
-            })
-          }
-          // Retire every FAILED batch whose recorded plan drifted so it can never
-          // isolate — otherwise it re-refuses isolation every compose cycle forever
-          // (the isolate-path zombie). Typed stale-plan release; loud result.
-          const plannedRetirements = unisolableStalePlanBatches(runtime(), byName, reader)
-          const retiredBatches: UnisolableStalePlanBatch[] = []
-          for (const planned of plannedRetirements) {
-            // Each retirement appends and re-compacts the live projection. That
-            // can evict another old planned batch before this loop reaches it
-            // (live: retiring R523 crossed the retention boundary and evicted
-            // R533). Re-resolve against the refreshed projection instead of
-            // dispatching a stale plan into a now-archived run.
-            const snapshot = runtime()
-            const record = Queues.get(snapshot.queues, planned.run)
-            if (record === undefined) continue
-            const run = reader.read(record, snapshot.jobs)
-            if (run === undefined) continue
-            if (!bisectable(run) || recordedPlanDrift(run.steps, byName) === undefined) continue
-            const result = await actions.retireStalePlan(planned.run)
-            if (result.events.length === 0) continue
-            retiredBatches.push(planned)
-            affected.add(planned.run)
-          }
-          if (retiredBatches.length > 0) {
-            log.warn?.("Removed outdated batches that can no longer be tested.", {
-              action: "recover-stale-plan-retire",
-              reason: "stale-plan",
-              runs: retiredBatches.map((batch) => batch.run),
-            })
-          }
-          for (const id of await cleanupSettledRoots(reader)) affected.add(id)
-          // The disclosure half of the quarantine, and the reason this reader is
-          // not a silent fallback: every record recovery could not read is named
-          // here with WHAT (the run), WHERE (this recovery pass) and WHY (the
-          // reader's exact refusal), at the moment recovery worked around it.
-          // `queue audit` reports the same rows as `invalid-run` for as long as
-          // they stand — recovery repairs what it can and hides nothing.
-          const unreadable = reader.quarantined()
-          if (unreadable.length > 0) {
-            log.warn?.("Skipped queue runs whose records could not be read; recovery repaired the rest.", {
-              action: "recover-unreadable-run-quarantine",
-              reason: "unreadable-run",
-              runs: unreadable.map((row) => row.run),
-              details: unreadable.map((row) => row.reason),
-            })
-          }
-          const final = runtime()
-          return [...affected].flatMap((id) => {
-            const record = Queues.get(final.queues, id)
-            const run = record === undefined ? undefined : reader.read(record, final.jobs)
-            if (run !== undefined) return [run]
-            const historical = archived(id)
-            if (historical !== undefined) return [historical]
-            // Quarantined above and already reported: recovery acted on it, and
-            // dropping it from the evidence list is not silence. A run absent
-            // from projection AND history with no read failure is a different
-            // animal — nothing acted on it — so that still fails loud.
-            if (reader.isQuarantined(id)) return []
-            throw new Error(`yrd: recovered queue run '${id}' is absent from live projection and journal history`)
-          })
-        },
-      )
-    },
+    cancelRun: cancelQueueRun,
+    recover: recoverQueueRuns,
     audit: (options = {}) => {
       const snapshot = runtime()
       // Sync by contract — its consumers are sync callbacks (health probes, the
@@ -5859,7 +6096,7 @@ function createQueue<Shape extends ChangeShape>(
         needsPersonOwner,
         wiring,
         landing.reader(snapshot.bays, "'queue audit'"),
-        options,
+        { runnerAlive, ...options },
       )
     },
     eligibility(selector, projected) {
@@ -6843,18 +7080,40 @@ function createQueueCommands(
       // nothing, never a duplicate failure event.
       if (Queues.terminal(run)) return { events: [] }
       const step = run.steps[run.cursor]
-      // Guard the typed release: only a genuinely jobless cursor settles here. A
-      // run with a live Job belongs to lease recovery, which reclaims it honestly.
-      if (step === undefined || step.job !== undefined) {
-        raiseFailure(
-          "refusal",
-          "run-not-orphaned",
-          `yrd: queue run '${args.run}' has a job at step '${step?.name ?? run.cursor}'; nothing to settle`,
-        )
+      if (step === undefined) {
+        raiseFailure("refusal", "run-not-orphaned", `yrd: queue run '${args.run}' has no step at its cursor`)
+      }
+      // Guard the typed release. A queued or waiting cursor Job is live work (a
+      // runner will take it; a wait has its own bound), so it refuses. An
+      // in_progress Job is judged by the ONE liveness derivation (24030): a
+      // holder the caller proved dead, or a lapsed lease, does not make the run
+      // "not orphaned" — that was exactly R3742's two-hour `checking`.
+      const job = step.job
+      if (job !== undefined) {
+        const liveness =
+          job.status === "in_progress" && args.now !== undefined
+            ? deriveRunLiveness(
+                { runner: job.runner, leaseExpiresAt: job.leaseExpiresAt },
+                {
+                  now: Date.parse(args.now),
+                  runnerAlive: (runner) => (args.deadRunners?.includes(runner) === true ? false : undefined),
+                },
+              )
+            : undefined
+        if (liveness?.state !== "orphaned") {
+          raiseFailure(
+            "refusal",
+            "run-not-orphaned",
+            `yrd: queue run '${args.run}' has a ${job.status === "in_progress" ? "live" : job.status} job at step '${step.name}'; nothing to settle`,
+          )
+        }
       }
       // Fail (not cancel) so record.failure fixes the run terminal; `orphaned-run`
       // releases the run's queue authority, so a member PR that is still submitted
       // re-admits fresh instead of being rejected for a fault that is not its own.
+      // The failure names no Job on purpose: `activeQueueFailure` reads a failure
+      // whose Job has not itself failed as inactive, and an orphaned holder's Job
+      // is still `in_progress` here — the lease writer (`jobs.recover`) loses it.
       return { events: [queueFailedEvent(state, record, { code: "orphaned-run", message: args.reason })] }
     },
   })
@@ -9687,34 +9946,42 @@ function auditQueues(
         ...(record.steps[0] === undefined ? {} : { step: record.steps[0].name }),
       })
     }
-    // The read side of the lease seam (21094). A step whose Job is still
-    // `in_progress` PROJECTS as running no matter how long ago its lease lapsed,
-    // so the queue view showed a healthy run and audit said nothing while
-    // nothing was left to renew it. R1740's lease expired at 20:35:03.925Z and
-    // the `lose` transition was not written until 20:45:27.620Z — 10m24s in
-    // which every reader was told the run was fine. `recover` is the writer that
-    // settles this; the audit's job is to stop the gap being invisible, so it
-    // reports the lapse and how long it has stood. Clock-gated like the hold
-    // checks above: with no `now`, an expiry cannot be judged at all.
-    if (auditNowMs !== undefined) {
-      for (const step of run.steps) {
-        const job = step.job
-        if (job?.status !== "in_progress") continue
-        const leaseExpiresAtMs = parseAuditTime(job.leaseExpiresAt, "job lease expiry")
-        if (leaseExpiresAtMs > auditNowMs) continue
+    // The read side of the lease seam (21094), derived through the ONE liveness
+    // function (24030). A step whose Job is still `in_progress` PROJECTS as
+    // running no matter how long ago its lease lapsed or how long its holder
+    // has been dead, so the queue view showed a healthy run and audit said
+    // nothing while nothing was left to renew it (R1740: 10m24s; R3742: two
+    // hours). The pass start settles it; the audit's job is to stop the gap
+    // being invisible, so it reports the orphan and how long it has stood —
+    // as `orphaned-run`, the same code the settlement writes. Clock-gated like
+    // the hold checks above: with no `now`, a lease cannot be judged at all.
+    let orphanedHolder: Extract<RunLiveness, { state: "orphaned" }> | undefined
+    const cursorStep = run.steps[run.cursor]
+    const cursorJob = cursorStep?.job
+    if (auditNowMs !== undefined && cursorStep !== undefined && cursorJob?.status === "in_progress") {
+      const liveness = deriveRunLiveness(
+        { runner: cursorJob.runner, leaseExpiresAt: cursorJob.leaseExpiresAt },
+        { now: auditNowMs, runnerAlive: options.runnerAlive ?? (() => undefined) },
+      )
+      if (liveness.state === "orphaned") {
+        orphanedHolder = liveness
+        const leaseExpiresAtMs = parseAuditTime(cursorJob.leaseExpiresAt, "job lease expiry")
         findings.push({
-          code: "run-lease-expired",
+          code: "orphaned-run",
           message:
-            `queue run '${record.id}' step '${step.name}' still reports job '${job.id}' running, but its ` +
-            `runner lease expired at ${job.leaseExpiresAt} and nothing is renewing it; 'recover' settles it`,
+            `queue run '${record.id}' step '${cursorStep.name}' still reports job '${cursorJob.id}' running, but it is ` +
+            `${describeOrphanedRun(liveness)}; the next pass start settles it`,
           run: record.id,
-          step: step.name,
-          since: job.leaseExpiresAt,
-          blockedMs: Math.max(0, auditNowMs - leaseExpiresAtMs),
+          step: cursorStep.name,
+          since: liveness.cause === "lease-expired" ? cursorJob.leaseExpiresAt : cursorJob.changedAt,
+          blockedMs: Math.max(0, auditNowMs - (liveness.cause === "lease-expired" ? leaseExpiresAtMs : auditNowMs)),
         })
       }
     }
-    for (const planned of record.steps) {
+    // A stale step contract on an ORPHANED run can never stop a runner (24030
+    // outcome 4): the run is being settled, not served, so its plan's drift
+    // is not a refusal anyone must act on. Live runs keep both findings.
+    for (const planned of orphanedHolder === undefined ? record.steps : []) {
       const current = installed.get(planned.name)
       if (current === undefined) {
         findings.push({
@@ -12014,7 +12281,6 @@ export const YRD_REFUSAL_CODES = [
   // sha, and only the author pushing new content derives anything again.
   "revision-retired",
   "run-canceled",
-  "run-lease-expired",
   "run-plan-mismatch",
   "run-without-check-ancestry",
   "run-without-submit-ancestry",

@@ -29,7 +29,7 @@ describe("habitant exit taxonomy — one code per condition", () => {
   it("gives every condition a DISTINCT code", () => {
     const codes = CONDITIONS.map((condition) => HABITANT_EXIT[condition])
     expect(new Set(codes).size).toBe(codes.length)
-    expect(codes.length).toBe(9)
+    expect(codes.length).toBe(7)
   })
 
   it("names the nine conditions the supervisor has to tell apart", () => {
@@ -40,8 +40,6 @@ describe("habitant exit taxonomy — one code per condition", () => {
       "interrupted",
       "memory-cap",
       "poisoned",
-      "queue-wedged",
-      "refusal-loop",
       "source-stale",
     ])
   })
@@ -81,13 +79,8 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
   it("refuses to restart the conditions a successor cannot change at all", () => {
     // Every restartable condition lives in THIS process: a successor is not
     // poisoned, boots moved source, installs the current plan, starts small.
-    // These two live OUTSIDE it, in the queue and the journal the runner reads,
-    // so the successor re-reads the same wedge and re-derives the same refused
-    // member — pacing them only sets how often we rediscover that.
-    expect(HABITANT_EXIT_DISPOSITION["queue-wedged"]).toBe("stand-down")
-    expect(HABITANT_EXIT_DISPOSITION["refusal-loop"]).toBe("stand-down")
-    // And the third, for a different reason: a drain is a person's instruction,
-    // so restarting the pass contradicts it rather than curing anything.
+    // A drain is a person's instruction, so restarting the pass contradicts it
+    // rather than curing anything.
     expect(HABITANT_EXIT_DISPOSITION.drained).toBe("stand-down")
     // And the fourth: ERROR is the abnormal-NOT-auto-fixable class, so a
     // restart is by definition not the cure for a pass that died of one.
@@ -99,12 +92,7 @@ describe("habitant exit taxonomy — what the supervisor does about each", () =>
   })
 
   it("derives the stand-down code list the same way, and keeps the two disjoint", () => {
-    expect(HABITANT_STAND_DOWN_EXIT_CODES).toEqual([
-      HABITANT_EXIT["queue-wedged"],
-      HABITANT_EXIT["refusal-loop"],
-      HABITANT_EXIT.drained,
-      HABITANT_EXIT["fatal-error"],
-    ])
+    expect(HABITANT_STAND_DOWN_EXIT_CODES).toEqual([HABITANT_EXIT.drained, HABITANT_EXIT["fatal-error"]])
     const overlap = HABITANT_STAND_DOWN_EXIT_CODES.filter((code) => HABITANT_BACKOFF_EXIT_CODES.includes(code))
     expect(overlap).toEqual([])
   })
