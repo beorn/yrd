@@ -952,6 +952,42 @@ const RetireSubmitFactSchema = z
   })
   .strict()
 export type RetireSubmitFactArgs = Readonly<z.infer<typeof RetireSubmitFactSchema>>
+/**
+ * One REVISION of a change retired by an operator (`yrd pr retire`): the exact
+ * receiver-store rows that carried it — the submit fact `refs/yrd/submit/<branch>`
+ * (absent when only the landing request survived) and the landing-request row
+ * `refs/for/<base>/<branch>` — with the identity that names the revision and
+ * who retired it.
+ *
+ * A superseded revision lives in TWO rows of the receiver store, and retiring
+ * only the submit fact does not remove it: the `refs/for` row is what a drain
+ * re-projects the fact from, at the row's own sha, and the next compose
+ * derives it again (PR3186, 2026-09-01, composed ten minutes after its submit
+ * fact was retired by hand). This fact is the durable half of the one act that
+ * retires both rows: it projects into {@link QueueRetiredSubmit} at the row's
+ * sha, so a re-projection of the same row can never derive, and it retires the
+ * standing `bays.submits` projection in the same journal frame.
+ */
+const RetireRevisionSchema = z
+  .object({
+    branch: GitRefSchema,
+    base: z.string().trim().min(1),
+    changeId: z.string().trim().min(1),
+    revision: z.number().int().positive(),
+    /** The submit fact's sha, when the row still existed at retirement. */
+    submitSha: GitShaSchema.optional(),
+    /** The landing-request row — `refs/for/<base>/<branch>` — and its sha. */
+    forRef: z.string().trim().min(1),
+    forSha: GitShaSchema,
+    by: z.string().trim().min(1),
+    /** The derived change id the row already produced, when one was minted. */
+    pr: z.string().trim().min(1).optional(),
+    reason: z.string().trim().min(1).optional(),
+  })
+  .strict()
+export type RetireRevisionArgs = Readonly<z.infer<typeof RetireRevisionSchema>>
+/** The `QueueRetiredSubmit.code` every operator retirement projects under. */
+export const REVISION_RETIRED_CODE = "revision-retired"
 /** Consecutive refusals before `queue audit` calls a change wedged. One skip is a
  * normal losable race in a selectorless drain; a third identical cycle is not.
  *
@@ -1567,6 +1603,7 @@ export type QueueCommands = Readonly<{
     admissionRefused: CommandHandler<RecordAdmissionRefusalArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     retireSubmitFact: CommandHandler<RetireSubmitFactArgs, RuntimeState>
+    retireRevision: CommandHandler<RetireRevisionArgs, RuntimeState>
     reconcileMerge: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
   }>
 }>
@@ -1653,6 +1690,10 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   /** Stop selecting one exact refused revision after its automated remedy has
    * reached a durable needs-person outcome. A new revision clears the fact. */
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<void>
+  /** Journal one operator revision retirement (`yrd pr retire`): the durable
+   * half of the act that deletes both receiver-store rows. See
+   * {@link RetireRevisionArgs}. */
+  retireRevision(args: RetireRevisionArgs): Promise<void>
   get(run: RunId): Run | undefined
   retentionDiagnostics(): Readonly<{
     retainedRuns: number
@@ -1782,6 +1823,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         }),
         "queue/admission/settled": journalEvent(1, SettleAdmissionRefusalSchema),
         "queue/submit/retired": journalEvent(1, RetireSubmitFactSchema),
+        "queue/revision/retired": journalEvent(1, RetireRevisionSchema),
       },
       replayEvents: {
         "queue/paused": ReplayPauseQueueArgsSchema,
@@ -1838,6 +1880,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               retireSubmitFact: (args) => yrd.dispatch(commands.queue.retireSubmitFact, args),
+              retireRevision: (args) => yrd.dispatch(commands.queue.retireRevision, args),
               bindDerivedIdentity: (args) => yrd.dispatch(commands.queue.bindDerivedIdentity, args),
               reconcileMerge: (args) => yrd.dispatch(commands.queue.reconcileMerge, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
@@ -1897,6 +1940,7 @@ type QueueActions = Readonly<{
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   retireSubmitFact(args: RetireSubmitFactArgs): Promise<CommandResult>
+  retireRevision(args: RetireRevisionArgs): Promise<CommandResult>
   bindDerivedIdentity(args: DerivedIdentityBound): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecorded): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
@@ -2276,11 +2320,18 @@ function createQueue<Shape extends ChangeShape>(
       conditions.report(
         `compose-derived-fact-retired:${branch}:${row.sha}`,
         "warn",
-        "queue compose will not derive a change for a submit fact it retired: change '" +
-          row.pr +
-          "' could not progress (" +
-          row.code +
-          ") and no further change derives for this sha — push a rebased head to submit again",
+        row.code === REVISION_RETIRED_CODE
+          ? // An operator retired this exact row (`yrd pr retire`); a standing
+            // projection at its sha is a re-projection of the retired refs/for
+            // row, never new work, and derives nothing (PR3186, 2026-09-01).
+            "queue compose will not derive a change for a revision an operator retired: " +
+              row.reason +
+              " — no further change derives for this sha; push a rebased head to submit again"
+          : "queue compose will not derive a change for a submit fact it retired: change '" +
+              row.pr +
+              "' could not progress (" +
+              row.code +
+              ") and no further change derives for this sha — push a rebased head to submit again",
         {
           action: "compose-derived-fact-retired",
           branch,
@@ -4099,6 +4150,9 @@ function createQueue<Shape extends ChangeShape>(
     },
     async settleAdmissionRefusal(args) {
       await actions.settleAdmissionRefusal(args)
+    },
+    async retireRevision(args) {
+      await actions.retireRevision(args)
     },
     waitingAdmission(selector, step) {
       return waitingRevisionAdmission(selector, step)
@@ -6386,6 +6440,40 @@ function createQueueCommands(
     },
   })
 
+  const retireRevision = command({
+    title: "Retire one revision of a change: journal the retirement and drop its standing submit fact",
+    params: RetireRevisionSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: RetireRevisionArgs) {
+      const rowSha = args.submitSha ?? args.forSha
+      const submit = state.bays.submits[args.branch]
+      // The expected-old-value guard, projection side. A standing fact at a
+      // sha this retirement never examined is a re-push — newer consent for
+      // different content — and must stay derivable; retiring it on the
+      // strength of a verdict about an older row would drop live work.
+      if (submit !== undefined && submit.sha !== args.submitSha && submit.sha !== args.forSha) {
+        raiseFailure(
+          "refusal",
+          "derived-submit-moved",
+          `yrd: revision ${args.revision} of change '${args.changeId}' on '${args.branch}' stands at ${rowSha} ` +
+            `in the receiver store, but the projected submit fact reads ${submit.sha} — the branch was re-pushed ` +
+            `since this retirement was read; re-read the rows and retire the revision that is actually standing`,
+        )
+      }
+      const held = state.queues.retiredSubmits[args.branch]
+      const alreadyRetired = held?.sha === rowSha && held.code === REVISION_RETIRED_CODE
+      if (alreadyRetired && submit === undefined) return { events: [] }
+      return {
+        events: [
+          ...(alreadyRetired ? [] : [event("queue/revision/retired", args)]),
+          // The standing projection retires in the SAME frame: the physical
+          // ref leaves the store on the caller's side, and a projection that
+          // outlived its ref is exactly the state that composed PR3186.
+          ...(submit === undefined ? [] : [event("branch/unsubmitted", { branch: args.branch, reason: "deleted" })]),
+        ],
+      }
+    },
+  })
+
   const settleAdmissionRefusal = command({
     title: "Settle one exact required-check refusal as needing a person",
     params: SettleAdmissionRefusalSchema,
@@ -6504,6 +6592,7 @@ function createQueueCommands(
       admissionRefused,
       settleAdmissionRefusal,
       retireSubmitFact,
+      retireRevision,
       reconcileMerge,
     },
   }
@@ -7460,6 +7549,32 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             code: retired.code,
             reason: retired.reason,
             ...(retired.paths === undefined ? {} : { paths: [...retired.paths] }),
+            at: applied.ts,
+          },
+        },
+      },
+    }
+  }
+  if (applied.name === "queue/revision/retired") {
+    const retired = RetireRevisionSchema.parse(applied.data)
+    // Projected into the SAME row the queue's own retirements use, at the
+    // row's sha, so `retiredSubmitBranches` excludes a re-projection of this
+    // exact refs/for row from the derived lane with no second exclusion path.
+    // Last write wins per branch, exactly as `queue/submit/retired` does.
+    return {
+      queues: {
+        ...state.queues,
+        retiredSubmits: {
+          ...state.queues.retiredSubmits,
+          [retired.branch]: {
+            branch: retired.branch,
+            sha: retired.submitSha ?? retired.forSha,
+            base: retired.base,
+            pr: retired.pr ?? retired.changeId,
+            code: REVISION_RETIRED_CODE,
+            reason:
+              `revision ${retired.revision} of change '${retired.changeId}' retired by ${retired.by}` +
+              (retired.reason === undefined ? "" : `: ${retired.reason}`),
             at: applied.ts,
           },
         },
@@ -11330,6 +11445,13 @@ export const YRD_REFUSAL_CODES = [
   "repository-corrupt",
   "required-check-failed",
   "retired-command",
+  // `yrd pr retire` — one verb retiring one revision's two receiver-store rows
+  // (the submit fact and the landing request) in one journaled act.
+  "retire-no-successor",
+  "retire-refs-moved",
+  "retire-revision-ambiguous",
+  "retire-store-missing",
+  "retire-target-missing",
   "review-rejected",
   "review-required",
   "run-canceled",

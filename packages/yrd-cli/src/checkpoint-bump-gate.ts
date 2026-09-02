@@ -131,8 +131,16 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // checkpoint at the predecessor above already has valid state: all added
   // fields are optional, Jobs advances to v9, Queue advances to v13, and the
   // shared migration preserves existing state verbatim.
-  // Current.
+  // Retained predecessor.
   "2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5",
+  // 2026-09-01 — `yrd pr retire`: one verb retires one revision's two
+  // receiver-store rows in one journaled act. The queue registers ONE new
+  // event, `queue/revision/retired`, projected into the EXISTING
+  // `queues.retiredSubmits` row shape — no new projection key, no stored
+  // record rewritten. A registered event is an accepted input shape, so the
+  // identity moves all the same (the bd1c0b88 trap above); a checkpoint at
+  // the predecessor replays after its stored cursor unchanged. Current.
+  "f800b0790450fa50c9544b7aa592867682f9376fc29043bb021cfa2011f5d501",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

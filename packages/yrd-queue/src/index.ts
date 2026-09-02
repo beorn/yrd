@@ -25,6 +25,8 @@ export {
   type RecordAdmissionRefusalArgs,
   type SettleAdmissionRefusalArgs,
   type RetireSubmitFactArgs,
+  type RetireRevisionArgs,
+  REVISION_RETIRED_CODE,
   ADMISSION_REFUSAL_LOOP_THRESHOLD,
   type CancelRunArgs,
   type QuiesceLegacyRunArgs,

@@ -619,8 +619,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // v3. Existing checkpoint state needs no rewrite, but accepted schemas and
     // the projector versions move the identity, so former target 3f8a2627 is
     // retained.
-    const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5")
+    // Conscious update 2026-09-01 (`yrd pr retire`): the queue registers one
+    // new event, `queue/revision/retired`, projected into the existing
+    // `queues.retiredSubmits` row — no new projection key, no stored record
+    // rewritten — and a registered event is an accepted input shape, so the
+    // identity moves; former target 2498f5d4 is retained.
+    const previousTargetIdentity ="36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
+    expect(first.manifest.targetIdentity).toBe("f800b0790450fa50c9544b7aa592867682f9376fc29043bb021cfa2011f5d501")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -2059,7 +2064,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5")
+    expect(rewritten.checkpoint_identity).toBe("f800b0790450fa50c9544b7aa592867682f9376fc29043bb021cfa2011f5d501")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2148,7 +2153,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5")
+    expect(rewritten.checkpoint_identity).toBe("f800b0790450fa50c9544b7aa592867682f9376fc29043bb021cfa2011f5d501")
     redatabase.close()
   })
 
