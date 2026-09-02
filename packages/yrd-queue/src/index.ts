@@ -63,6 +63,7 @@ export {
   advanceQueue,
   type UnreadableQueueRun,
   COMPOSITION_FAILURE_BUCKETS,
+  ENVIRONMENT_OWNED_FAILURE_CODES,
   YRD_REFUSAL_CODES,
   type RefusalCode,
   YRD_REFUSAL_CODE_ALIASES,

@@ -825,7 +825,8 @@ async function checkStorageExhaustion(
       (report === undefined ? "" : `; ${report.detail}`) +
       (kind === "quota" ? " (a spent per-user quota leaves the device's own totals looking healthy)" : "") +
       `. Cure: free the filesystem backing ${path ?? "the check's scratch"} (or point the repo's check scratch ` +
-      "elsewhere), then the queue re-admits this submission on its next pass — nothing about the submitted " +
+      "elsewhere), then `yrd queue run --once` (or the resident runner's next pass) re-admits this submission — " +
+      "nothing about the submitted " +
       `content is at fault; full output: ${input.log}`,
     evidence: {
       ...(report?.evidence ?? {}),
@@ -866,7 +867,8 @@ async function driverStorageExhaustion(
         `${purpose}: yrd could not write its own run artifacts under '${artifactRoot}' — the filesystem ran out ` +
         `of quota or space, not the submitted content — ${report.detail}; underlying error: ${messageOf(cause)}. ` +
         `Cure: free the filesystem backing '${artifactRoot}' (or point the repo's artifact root elsewhere), then ` +
-        "the queue re-admits this submission on its next pass — nothing about the submitted content is at fault",
+        "`yrd queue run --once` (or the resident runner's next pass) re-admits this submission — nothing about the " +
+        "submitted content is at fault",
       ...(report.evidence === undefined ? {} : { evidence: report.evidence }),
     },
   }

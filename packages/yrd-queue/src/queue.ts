@@ -11871,11 +11871,27 @@ export function canonicalRefusalCode(code: string, options: CanonicalRefusalCode
  * bucket here makes that impossible by construction for every code in the
  * bucket, including the ones added after this comment was written.
  */
+/**
+ * Every failure code the ENVIRONMENT owns: the `infra-retry` bucket plus the
+ * two env-disposed codes that live outside it — `queue-environment-refused` (a
+ * host precondition) and `orphaned-run` (a runner that vanished). One set, read
+ * by {@link admissionFailureKind} here and by `failureDisposition` in the CLI,
+ * so the queue's retire decision and the operator's status column can never
+ * disagree about who owns a cure. Folded from the third case of @dev/2's
+ * 24031 suite, where a `queue-environment-refused` check failure still retired
+ * the submit fact because only the bucket was consulted.
+ */
+export const ENVIRONMENT_OWNED_FAILURE_CODES: ReadonlySet<string> = new Set<string>([
+  ...COMPOSITION_FAILURE_BUCKETS["infra-retry"],
+  "queue-environment-refused",
+  "orphaned-run",
+])
+
 function admissionFailureKind(
   result: DeepReadonly<JobErrorFact>,
   infrastructure: boolean,
 ): Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"] {
-  if (infrastructure || isInfraRetryCompositionFailure(result.code)) return "infrastructure"
+  if (infrastructure || ENVIRONMENT_OWNED_FAILURE_CODES.has(result.code)) return "infrastructure"
   return NEEDS_AUTHOR_CODES.has(result.code) ? "refusal" : "failure"
 }
 
