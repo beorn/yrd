@@ -12130,7 +12130,15 @@ export const YRD_REFUSAL_CODES = [
   "candidate-submodules-failed",
   "carrier-drops-landed",
   "carrier-inspection",
+  // The six remaining members of command.ts's STUCK family, fixed and
+  // registered on 2026-09-02 with their `check-stuck`/`check-timeout` siblings.
+  // Each was the dynamic `<purpose>-<name>`, outside the vocabulary, resolving
+  // to nothing — so every reader applied its own default and the author was
+  // billed for the queue's machinery. All environment-owned below.
+  "check-checkpoint-migration-invalid",
   "check-definition-missing",
+  "check-gate-report-invalid",
+  "check-infrastructure-signal",
   // The generic required-check catch-all `failed()` emits in command.ts —
   // no bucket of its own, always the plain default disposition. Load-bearing
   // for status-presentation.test.ts.
@@ -12138,6 +12146,8 @@ export const YRD_REFUSAL_CODES = [
   // scratch-storage.ts `CHECK_STORAGE_EXHAUSTED` — the command runner's own
   // storage verdict (a check's output stated EDQUOT/ENOSPC, or the runner's
   // own writes hit it), bucketed `infra-retry` above.
+  "check-stalled",
+  "check-stalled-escaped-descendant",
   "check-storage-exhausted",
   // command.ts `CHECK_STUCK` — the command runner's own STUCK verdict: the
   // check exited on a status that is neither pass (0) nor fail (1), so it
@@ -12320,6 +12330,10 @@ export const YRD_REFUSAL_CODES = [
   // (a queue-diagnostic audit finding, never a per-run failure code): no
   // dedicated failureDisposition branch, falls through to the generic
   // { state: "failed", owner: "author" } default like its siblings.
+  // command.ts `QUEUE_LAUNCHER_INVALID` — a waiting step's launcher exited 0
+  // and printed no job launch, breaking the queue's OWN protocol rather than
+  // saying anything about the change. Environment-owned below.
+  "queue-launcher-invalid",
   "queue-liveness-wedged",
   "queue-never-started",
   "queue-only-merger",
@@ -12565,6 +12579,19 @@ export const ENVIRONMENT_OWNED_FAILURE_CODES: ReadonlySet<string> = new Set<stri
   // reads this set and not that catch, still recorded `failure` and retired the
   // author's submit fact for a bound the author did not set.
   "check-timeout",
+  // The rest of command.ts's STUCK family, by the same ruling: a check the
+  // output-progress watchdog killed, one whose descendant held the pipe open
+  // past the drain grace, one SIGKILLed before it could speak, and the three
+  // PROTOCOL faults — a malformed gate report, a malformed checkpoint-migration
+  // attestation, and a launcher that printed no job launch. The last three fire
+  // on a check that may have exited ZERO, which is the plainest possible proof
+  // that they are not verdicts on the author's content.
+  "check-stalled",
+  "check-stalled-escaped-descendant",
+  "check-infrastructure-signal",
+  "check-gate-report-invalid",
+  "check-checkpoint-migration-invalid",
+  "queue-launcher-invalid",
 ])
 
 function admissionFailureKind(

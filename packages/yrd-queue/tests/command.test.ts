@@ -26,11 +26,22 @@ import { createProcess, shellCommand, type Process, type ProcessRequest, type Pr
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import * as z from "zod"
 import {
+  canonicalRefusalCode,
+  CHECK_GATE_REPORT_INVALID,
+  CHECK_CHECKPOINT_MIGRATION_INVALID,
+  CHECK_INFRASTRUCTURE_SIGNAL,
+  CHECK_STALLED,
+  CHECK_STALLED_ESCAPED_DESCENDANT,
   CHECK_STUCK,
   CHECK_TIMEOUT,
+  CHECKPOINT_MIGRATION_TRAILER,
   CommandEvidenceSchema,
   CommandTerminalSchema,
+  configuredWaitingCommandStep,
   DIAGNOSTICS_COMPARISON_READY,
+  ENVIRONMENT_OWNED_FAILURE_CODES,
+  GATE_REPORT_TRAILER,
+  QUEUE_LAUNCHER_INVALID,
   stuckExit,
   GitCheckEvidenceSchema,
   GitCheckResultEvidenceSchema,
@@ -3863,54 +3874,168 @@ describe("Queue command adapters", () => {
     },
   )
 
+  /** One row of the mapping table below: what the process did, and what the
+   * queue must make of it. `kind` is who pays. */
+  type ExitMapCase = Readonly<{
+    name: string
+    process: ProcessResult
+    options?: Readonly<{ timeoutMs?: number; noProgressTimeoutMs?: number }>
+    waiting?: true
+    conclusion: "success" | "failure"
+    code?: string
+    kind: "pass" | "author" | "infrastructure"
+    /** Phrases the record must carry, so a reader is never left with a code. */
+    says?: readonly string[]
+    /** Whether the check is recorded as having JUDGED the change. */
+    judged?: true
+  }>
+
   /**
-   * The whole exit mapping, in one table, at the seam that decides it.
+   * Every way `configuredCommand` can end, in one table, at the seam that
+   * decides it.
    *
-   * 0 is pass, 1 is fail, everything else is STUCK — the queue could not get an
-   * answer, so nobody is billed (operator ruling 2026-09-02). Until then a
-   * check that exited 2 and a check that was not there both came back
-   * `check-failed` and sent the author back to work they cannot do; the
-   * end-to-end proof of that is `tests/boundary/queue-run.test.ts`, and this is
-   * the unit that pins which code each status mints.
+   * A check reaches pass, fail or STUCK. Only the first two say anything about
+   * the change: 0 passes, 1 fails and is the author's, and every other way out
+   * — a strange exit, a bound that fired, a watchdog kill, a signal, and the
+   * three PROTOCOL faults a check can commit while exiting zero — is the
+   * queue's own fault, so nobody is billed (operator ruling 2026-09-02).
+   *
+   * `kind` is the fact that billing turns on, read the way `admissionFailureKind`
+   * reads it: membership of ENVIRONMENT_OWNED_FAILURE_CODES. `check-failed` is
+   * the negative control and must stay out of that set, or every row below
+   * passes for the wrong reason.
    */
+  const ran = {
+    signal: null,
+    stderr: "",
+    durationMs: 12,
+    timedOut: false,
+  } as const
+  /** A judged-failure line: what a check prints when it HAS judged the change. */
+  const JUDGED = "FAIL src/model.test.ts > model rejects an empty name\n"
+
   it.each([
-    { exitCode: 0, conclusion: "success", code: undefined, name: "0 passes" },
-    { exitCode: 1, conclusion: "failure", code: "check-failed", name: "1 fails, and it is the author's" },
-    { exitCode: 2, conclusion: "failure", code: CHECK_STUCK, name: "2 is stuck" },
-    { exitCode: 127, conclusion: "failure", code: CHECK_STUCK, name: "127 — no such check script — is stuck" },
-    { exitCode: 3, conclusion: "failure", code: CHECK_STUCK, name: "any other status is stuck" },
     {
-      exitCode: 137,
+      name: "0 passes",
+      process: { ...ran, exitCode: 0, stdout: "all good\n" },
+      conclusion: "success",
+      kind: "pass",
+    },
+    {
+      name: "1 fails, and it is the author's",
+      process: { ...ran, exitCode: 1, stdout: JUDGED },
+      conclusion: "failure",
+      code: "check-failed",
+      kind: "author",
+      says: ["1", "output.log"],
+      judged: true,
+    },
+    {
+      name: "2 is stuck",
+      process: { ...ran, exitCode: 2, stdout: JUDGED },
+      conclusion: "failure",
+      code: CHECK_STUCK,
+      kind: "infrastructure",
+      says: ["2", "output.log"],
+    },
+    {
+      name: "127 — no such check script — is stuck",
+      process: { ...ran, exitCode: 127, stdout: JUDGED },
+      conclusion: "failure",
+      code: CHECK_STUCK,
+      kind: "infrastructure",
+      says: ["127", "output.log"],
+    },
+    {
+      name: "any other status is stuck",
+      process: { ...ran, exitCode: 3, stdout: JUDGED },
+      conclusion: "failure",
+      code: CHECK_STUCK,
+      kind: "infrastructure",
+      says: ["3", "output.log"],
+    },
+    {
+      name: "past its bound is stuck, and it is not the author's",
+      process: { ...ran, exitCode: 137, stdout: JUDGED, timedOut: true, verdict: "TIMED_OUT" },
+      options: { timeoutMs: 1000 },
       conclusion: "failure",
       code: CHECK_TIMEOUT,
-      timedOut: true,
-      name: "past its bound is stuck, and it is not the author's",
+      kind: "infrastructure",
+      says: ["1000ms wall-clock bound", "never reached a verdict"],
     },
-  ])("$name", async ({ exitCode, conclusion, code, timedOut = false }) => {
+    {
+      name: "a check the progress watchdog killed is stuck",
+      process: {
+        ...ran,
+        exitCode: 137,
+        signal: "SIGKILL",
+        stdout: JUDGED,
+        stalled: true,
+        verdict: "STALLED",
+        lastProgressAtMs: 17_500,
+        lastProgressBytes: 42,
+      },
+      options: { noProgressTimeoutMs: 120_000 },
+      conclusion: "failure",
+      code: CHECK_STALLED,
+      kind: "infrastructure",
+      says: ["120000ms without progress"],
+    },
+    {
+      name: "a check whose descendant held the pipe open is stuck",
+      process: { ...ran, exitCode: 0, stdout: "", escapedDescendant: true },
+      conclusion: "failure",
+      code: CHECK_STALLED_ESCAPED_DESCENDANT,
+      kind: "infrastructure",
+      says: ["descendant"],
+    },
+    {
+      name: "a check SIGKILLed before it spoke is stuck",
+      process: { ...ran, exitCode: 137, signal: "SIGKILL", stdout: JUDGED },
+      conclusion: "failure",
+      code: CHECK_INFRASTRUCTURE_SIGNAL,
+      kind: "infrastructure",
+      says: ["SIGKILL"],
+    },
+    // The three below exit ZERO. The check tool broke its protocol with the
+    // queue; the author's content was never consulted, let alone judged.
+    {
+      name: "a malformed gate report is stuck, even from a check that exited 0",
+      process: { ...ran, exitCode: 0, stdout: `${GATE_REPORT_TRAILER}{not json\n` },
+      conclusion: "failure",
+      code: CHECK_GATE_REPORT_INVALID,
+      kind: "infrastructure",
+      says: ["check", "YRD-GATE-REPORT"],
+    },
+    {
+      name: "a malformed checkpoint migration is stuck, even from a check that exited 0",
+      process: { ...ran, exitCode: 0, stdout: `${CHECKPOINT_MIGRATION_TRAILER}{not json\n` },
+      conclusion: "failure",
+      code: CHECK_CHECKPOINT_MIGRATION_INVALID,
+      kind: "infrastructure",
+      says: ["check", "YRD-CHECKPOINT-MIGRATION"],
+    },
+    {
+      name: "a launcher that printed no job launch is stuck",
+      process: { ...ran, exitCode: 0, stdout: "starting...\n" },
+      waiting: true,
+      conclusion: "failure",
+      code: QUEUE_LAUNCHER_INVALID,
+      kind: "infrastructure",
+      says: ["check launcher", "token"],
+    },
+  ] satisfies readonly ExitMapCase[])("$name", async (testCase) => {
     const cwd = await mkdtemp(join(tmpdir(), "yrd-command-exit-map-"))
     roots.push(cwd)
-    const ran = {
-      exitCode,
-      signal: null,
-      // A judged-failure line in the output, deliberately: a check that could
-      // not do its job judged nothing, whatever it printed on the way out, and
-      // `judgedFailure` must not be recorded for it.
-      stdout: "FAIL src/model.test.ts > model rejects an empty name\n",
-      stderr: "",
-      durationMs: 12,
-    }
-    // Split rather than spread: `ProcessResult` ties `verdict: "TIMED_OUT"` to
-    // the LITERAL `timedOut: true`, which a widened boolean cannot satisfy.
-    const result: ProcessResult = timedOut
-      ? { ...ran, signal: null, timedOut: true, verdict: "TIMED_OUT" }
-      : { ...ran, signal: null, timedOut: false }
-    const step = configuredCommandStep<ChangeShape>({
+    const result = testCase.process
+    const build = testCase.waiting === true ? configuredWaitingCommandStep : configuredCommandStep
+    const step = build<ChangeShape>({
       inject: { process: { run: () => Promise.resolve(result) } },
       command: ["false"],
       cwd,
       purpose: "check",
       artifactRoot: join(cwd, "artifacts"),
-      ...(timedOut ? { timeoutMs: 1000 } : {}),
+      ...testCase.options,
     })
     const outcome = await step(
       {
@@ -3932,30 +4057,31 @@ describe("Queue command adapters", () => {
       { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
     )
 
-    expect(outcome).toMatchObject({ status: "completed", conclusion })
+    expect(outcome).toMatchObject({ status: "completed", conclusion: testCase.conclusion })
     if (outcome.status !== "completed") throw new Error(`configured command was ${outcome.status}`)
     if (outcome.conclusion === "failure") {
-      expect(outcome.error.code).toBe(code)
-      expect(outcome.error.message).toContain("check")
-      if (timedOut) {
-        // A bound that fired names the bound, not an exit: the process was
-        // killed and never reported one worth reading.
-        expect(outcome.error.message).toContain("1000ms wall-clock bound")
-        expect(outcome.error.message).toContain("never reached a verdict")
-      } else {
-        // The record names the check, its exit and the log holding the rest.
-        expect(outcome.error.message).toContain(String(exitCode))
-        expect(outcome.error.message).toMatch(/output\.log/u)
-      }
+      expect(outcome.error.code).toBe(testCase.code)
+      // Every record names the step and what happened to it.
+      for (const phrase of testCase.says ?? []) expect(outcome.error.message).toContain(phrase)
+      // WHO PAYS, read exactly where the queue reads it.
+      expect(
+        ENVIRONMENT_OWNED_FAILURE_CODES.has(outcome.error.code),
+        `'${outcome.error.code}' must be ${testCase.kind}`,
+      ).toBe(testCase.kind === "infrastructure")
+      // Registered, so no reader falls back to its own default.
+      expect(canonicalRefusalCode(outcome.error.code, { dynamicStepFamily: false })).toBeDefined()
     }
     // Only a check that ran to a pass or a fail may be recorded as having
     // JUDGED the change — a judged red is structurally permanent, so a stuck
     // one recorded that way would be un-retryable and billed to the author.
-    // (A pass stamps the flag too and the success branch ignores it; the fail
-    // is where it is read, and the stuck statuses are where it must be absent.)
     const evidence = CommandEvidenceSchema.parse(outcome.output)
-    expect(evidence.exitCode).toBe(exitCode)
-    expect(evidence.judgedFailure).toBe(stuckExit(exitCode) ? undefined : true)
+    expect(evidence.exitCode).toBe(result.exitCode)
+    expect(evidence.judgedFailure).toBe(testCase.judged === true ? true : undefined)
+  })
+
+  it("NEGATIVE CONTROL: the author's own red is in neither set the table above reads", () => {
+    expect(ENVIRONMENT_OWNED_FAILURE_CODES.has("check-failed")).toBe(false)
+    expect(canonicalRefusalCode("check-failed", { dynamicStepFamily: false })).toBe("check-failed")
   })
 
   it("reads every status but pass and fail as stuck", () => {

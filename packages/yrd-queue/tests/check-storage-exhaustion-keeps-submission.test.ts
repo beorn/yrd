@@ -30,7 +30,9 @@ import { failureDisposition } from "../../yrd-cli/src/status-presentation.ts"
 import {
   candidateRefFor,
   canonicalRefusalCode,
+  CHECK_GATE_REPORT_INVALID,
   CHECK_TIMEOUT,
+  GATE_REPORT_TRAILER,
   COMPOSITION_FAILURE_BUCKETS,
   configuredCommandStep,
   ENVIRONMENT_OWNED_FAILURE_CODES,
@@ -119,6 +121,10 @@ type CheckPlan = Readonly<{
   sleepSeconds?: number
   /** The wall-clock bound the step gives the check, when the case is about one. */
   timeoutMs?: number
+  /** The status the check exits with. Default 1 — a check that judged the
+   * content — so a case about a PROTOCOL fault can exit 0 and prove the two
+   * are independent. */
+  exitCode?: number
 }>
 
 function checkScript(root: string, lines: readonly string[], options: CheckPlan): string {
@@ -131,7 +137,7 @@ function checkScript(root: string, lines: readonly string[], options: CheckPlan)
     `cat${options.stream === "stderr" ? " >&2" : ""} <<'YRD_CHECK_OUTPUT'`,
     ...lines,
     "YRD_CHECK_OUTPUT",
-    "exit 1",
+    `exit ${String(options.exitCode ?? 1)}`,
     "",
   ].join("\n")
 }
@@ -323,6 +329,44 @@ describe("an infrastructure failure inside a check never retires a submission", 
     expect(ENVIRONMENT_OWNED_FAILURE_CODES.has("check-failed")).toBe(false)
     expect(failureDisposition("check-failed")).toMatchObject({ owner: "author" })
   }, 20_000)
+
+  /**
+   * The starkest member of the family, end to end: the check EXITED ZERO.
+   *
+   * It printed a malformed `YRD-GATE-REPORT` trailer, so the tool broke its
+   * protocol with the queue and the queue cannot read the run it just did. The
+   * author's content was never in question — nothing about a passing check is
+   * a complaint about a change — and yet until 2026-09-02 this was
+   * `<step>-gate-report-invalid`, which resolves to nothing, so
+   * `admissionFailureKind` fell through to `failure` and retired the submit
+   * fact. One registered, environment-owned code closes it.
+   */
+  it("a malformed gate report from a check that PASSED is infrastructure, and keeps the submit fact standing", async () => {
+    const { app, events, journal, invocations } = await scenario([`${GATE_REPORT_TRAILER}{not json`], {
+      stream: "stdout",
+      passOnRerun: false,
+      exitCode: 0,
+    })
+
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+
+    expect(await invocations(), "the check ran exactly once").toBe(1)
+    const pr = derivedId(events)
+    const refusal = app.state().queues.admissionRefusals[pr]
+    expect(refusal, "the refusal is recorded against the derived member").toBeDefined()
+    expect(refusal?.code, "a broken trailer is the tool's, never the content's").toBe(CHECK_GATE_REPORT_INVALID)
+    expect(refusal?.kind).toBe("infrastructure")
+    expect(refusal?.reason, "the record names the step").toContain(STEP)
+    expect(rowsWith(events, "compose-candidate-skip")).toMatchObject([
+      { props: { pr, code: CHECK_GATE_REPORT_INVALID, kind: "infrastructure" } },
+    ])
+
+    // The submission survives, exactly as it does for a full filesystem.
+    expect(app.state().queues.retiredSubmits[BRANCH], "the submit fact must stay standing").toBeUndefined()
+    expect(await journaledEventNames(journal)).not.toContain("queue/submit/retired")
+    expect(canonicalRefusalCode(CHECK_GATE_REPORT_INVALID)).toBe(CHECK_GATE_REPORT_INVALID)
+    expect(ENVIRONMENT_OWNED_FAILURE_CODES.has(CHECK_GATE_REPORT_INVALID)).toBe(true)
+  })
 
   it("the same member is re-admitted on the next pass", async () => {
     const { app, events, invocations } = await scenario(EDQUOT_OUTPUT, { stream: "stderr", passOnRerun: true })

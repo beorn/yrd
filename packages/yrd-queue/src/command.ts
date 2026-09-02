@@ -222,6 +222,33 @@ export const CHECK_STUCK = "check-stuck"
 export const CHECK_TIMEOUT = "check-timeout"
 
 /**
+ * The rest of the STUCK family: every way `configuredCommand` can end without a
+ * verdict on the change. All fixed and registered for the reason
+ * {@link CHECK_STUCK} is, all environment-owned, all named for their subject —
+ * `check-` where the check is what went wrong, `queue-` where it is the queue's
+ * own protocol.
+ *
+ * The last three are the ones worth reading twice, because they fire on a check
+ * that EXITED ZERO. A malformed `YRD-GATE-REPORT` or `YRD-CHECKPOINT-MIGRATION`
+ * trailer, and a launcher whose stdout carries no job launch, are the check
+ * TOOL breaking its contract with the queue — the author's content is not even
+ * consulted. Billing those to the author was never defensible; it happened
+ * because `<purpose>-gate-report-invalid` resolved to nothing, and a code that
+ * resolves to nothing takes whatever default the reader has.
+ */
+export const CHECK_STALLED = "check-stalled"
+export const CHECK_STALLED_ESCAPED_DESCENDANT = "check-stalled-escaped-descendant"
+/** Ends with {@link INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX} deliberately:
+ * `isMachineryJobFailure` recognises this class by that suffix, and a fixed
+ * spelling that dropped it would silently leave the family. */
+export const CHECK_INFRASTRUCTURE_SIGNAL = `check${INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX}`
+export const CHECK_GATE_REPORT_INVALID = "check-gate-report-invalid"
+export const CHECK_CHECKPOINT_MIGRATION_INVALID = "check-checkpoint-migration-invalid"
+/** `queue-`, not `check-`: what was violated is the queue's own launch protocol
+ * — stdout must carry a job launch — not anything the check computed. */
+export const QUEUE_LAUNCHER_INVALID = "queue-launcher-invalid"
+
+/**
  * Whether an exit status means the check could not do its job.
  *
  * The mapping, whole, and the only place it is decided: 0 is pass, 1 is fail,
@@ -732,7 +759,7 @@ function configuredCommand<Shape extends ChangeShape>(
       // grace fires even when no output-progress lease is configured.
       if (progress.escapedDescendant === true) {
         return failed(
-          `${options.purpose}-stalled-escaped-descendant`,
+          CHECK_STALLED_ESCAPED_DESCENDANT,
           `${options.purpose} exited but a descendant held its output pipe open past the drain grace; the drain was abandoned to un-wedge the queue — inspect and kill the leaked process tree`,
           evidence,
         )
@@ -742,7 +769,7 @@ function configuredCommand<Shape extends ChangeShape>(
           throw new Error(`${options.purpose} reported an unconfigured output-progress stall`)
         }
         return failed(
-          `${options.purpose}-stalled`,
+          CHECK_STALLED,
           `${options.purpose} stalled after ${options.noProgressTimeoutMs}ms without progress`,
           evidence,
         )
@@ -766,7 +793,7 @@ function configuredCommand<Shape extends ChangeShape>(
       // evidence into a terminal check failure.
       if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
         return failed(
-          `${options.purpose}${INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX}`,
+          CHECK_INFRASTRUCTURE_SIGNAL,
           `${options.purpose} command ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict`,
           evidence,
         )
@@ -776,11 +803,18 @@ function configuredCommand<Shape extends ChangeShape>(
       if (exhausted !== undefined) {
         return { status: "completed", conclusion: "failure", error: exhausted, output: evidence }
       }
+      // Both of these fire on a check that may have EXITED ZERO: the tool broke
+      // its protocol with the queue, and the change was never judged. Named
+      // with the step, like every other record in this family.
       if (gateReports.error !== undefined) {
-        return failed(`${options.purpose}-gate-report-invalid`, gateReports.error, evidence)
+        return failed(CHECK_GATE_REPORT_INVALID, `${options.purpose}: ${gateReports.error}`, evidence)
       }
       if (checkpointMigration.error !== undefined) {
-        return failed(`${options.purpose}-checkpoint-migration-invalid`, checkpointMigration.error, evidence)
+        return failed(
+          CHECK_CHECKPOINT_MIGRATION_INVALID,
+          `${options.purpose}: ${checkpointMigration.error}`,
+          evidence,
+        )
       }
       if (result.exitCode !== 0) {
         const action = waiting ? "launcher" : "command"
@@ -829,7 +863,7 @@ function configuredCommand<Shape extends ChangeShape>(
           checkpoint: evidence,
         }
       } catch (cause) {
-        return failed(`${options.purpose}-launcher-invalid`, messageOf(cause), evidence)
+        return failed(QUEUE_LAUNCHER_INVALID, `${options.purpose} launcher: ${messageOf(cause)}`, evidence)
       }
     })()
     await writeTerminalRecord(artifactRoot, input, context.attempt, {
@@ -6608,7 +6642,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
                 }),
               }
             }
-            if (outcome.error.code === `${purpose}${INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX}`) {
+            if (outcome.error.code === CHECK_INFRASTRUCTURE_SIGNAL) {
               const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
                 ...candidate,
                 kind: "check-execution-refusal",
@@ -6687,7 +6721,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
             )
           }
 
-          if (outcome.error.code === `${purpose}${INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX}`) {
+          if (outcome.error.code === CHECK_INFRASTRUCTURE_SIGNAL) {
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,
               kind: "check-execution-refusal",
@@ -6793,7 +6827,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
           if (
             parentOutcome.status === "completed" &&
             parentOutcome.conclusion === "failure" &&
-            parentOutcome.error.code === `${purpose}${INFRASTRUCTURE_SIGNAL_FAILURE_SUFFIX}`
+            parentOutcome.error.code === CHECK_INFRASTRUCTURE_SIGNAL
           ) {
             const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,
