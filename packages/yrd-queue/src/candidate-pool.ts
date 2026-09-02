@@ -105,6 +105,49 @@ export function createCandidatePoolGit(
   })
 }
 
+/**
+ * The same logger with its SPANS withheld until trace is on.
+ *
+ * Submodule materialization is git-super's, and its spans are the loudest
+ * thing on a merging queue run: 80 `yrd:submodules:update` spans and 10
+ * `yrd:submodules:walk` of one real merging run's 464 debug rows (measured
+ * 2026-09-02 on pin 0749260a). They are plumbing, the same class as the git
+ * chatter moved to trace in 8975957f.
+ *
+ * Its LEVEL rows are not, and that is why this withholds spans rather than the
+ * logger: they name which submodule, whether it borrowed off local disk or
+ * opened a network connection, and how long each phase took. Passing no logger
+ * at all — or flattening it, which this call site used to do — loses exactly
+ * the facts that made a sixteen-SSH run distinguishable from a sixteen-borrow
+ * one.
+ *
+ * The verbosity yrd asks a library for is yrd's own decision, and this is the
+ * seam it owns; git-super declares `log?.span?.()` optional throughout, so a
+ * logger without one is a supported call rather than a workaround. `trace` is
+ * the level probe, as everywhere else: loggily leaves a level's method
+ * undefined when that level is off.
+ */
+/** The pool's `release` span, opened only when trace is on. Returning a
+ * worktree is the pool tidying up after itself — plumbing, and one span per
+ * entry — while `acquire` and `check` say what the queue run did with the
+ * worktree and stay where they are. */
+function releaseSpan(
+  log: ConditionalLogger | undefined,
+  props: Readonly<Record<string, unknown>>,
+): ReturnType<NonNullable<ConditionalLogger["span"]>> | undefined {
+  return log?.trace === undefined ? undefined : log.span?.("release", props)
+}
+
+function withoutSpansBelowTrace(log: ConditionalLogger): ConditionalLogger {
+  if (log.trace !== undefined) return log
+  // A Proxy, not a copy: loggily's own loggers are Proxies, so spreading one
+  // would drop everything behind its traps. Reads delegate with the ORIGINAL
+  // receiver, so every method keeps the `this` it was written for.
+  return new Proxy(log, {
+    get: (target, property) => (property === "span" ? undefined : Reflect.get(target, property, target)),
+  })
+}
+
 export function createCandidatePool(options: CandidatePoolOptions): CandidatePool {
   const { repo, parent, git: gitProcess } = options
   const git = createGit(gitProcess, globalThis.process.env, GIT_TIMEOUT_MS)
@@ -238,7 +281,9 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
       worktree,
       referenceWorktree: repo,
       force: true,
-      ...(log === undefined ? {} : { log: log.child("submodules") }),
+      // Its SPANS are chatter, its rows are facts, so it is handed a logger
+      // that keeps one and withholds the other — see `withoutSpansBelowTrace`.
+      ...(log === undefined ? {} : { log: withoutSpansBelowTrace(log.child("submodules")) }),
     })
     if (updated.code !== 0) {
       throw new Error(updated.stderr || updated.stdout || `could not materialize submodules for '${ref}'`)
@@ -401,7 +446,10 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     const survivors: PoolEntry[] = []
     let failure: unknown
     for (const entry of entries) {
-      using _span = log?.span?.("release", { repo, outcome: "closed" })
+      // Returning a worktree to the pool is bookkeeping, not a decision: one
+      // span per entry, saying only that the pool did its own housekeeping.
+      // Trace, like the rest of the plumbing.
+      using _span = releaseSpan(log, { repo, outcome: "closed" })
       try {
         await serializeGit(() => removeWorktree(entry))
       } catch (cause) {
@@ -456,7 +504,7 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
           await rm(scratch, { recursive: true, force: true })
         }
       } finally {
-        using _releaseSpan = log?.span?.("release", { repo, ref, outcome: "warm" })
+        using _releaseSpan = releaseSpan(log, { repo, ref, outcome: "warm" })
         returnEntry(entry)
         releaseHold()
       }

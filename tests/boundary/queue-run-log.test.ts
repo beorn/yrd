@@ -525,6 +525,67 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
   })
 
   /**
+   * The worktree pool's own housekeeping, and the submodule materialization it
+   * delegates, are plumbing by the same rule as the storage rows above.
+   *
+   * Measured 2026-09-02 on pin 0749260a, one real merging queue run in shared
+   * main: 464 rows at debug, of which 80 were `yrd:submodules:update` spans, 10
+   * `yrd:submodules:walk` and 6 `yrd:release`. What a mechanic reads a merging
+   * run for is each change and its decision, each check's start and end, the
+   * merge and the message — and those are all `yrd:queue`, `yrd:jobs` and
+   * `yrd:outcome` rows, which the positive control below keeps honest.
+   *
+   * The boundary repository has no submodules, so git-super finds no gitlinks
+   * and its per-submodule `update` and `walk` spans never fire here; what this
+   * proves is the SEAM — the logger the pool hands it opens no span below
+   * trace, and every `yrd:submodules:*` span goes through that one logger.
+   */
+  describe("worktree and submodule plumbing", () => {
+    const logRows = (stderr: string): readonly string[] =>
+      stderr.split("\n").filter((row) => /^\d\d:\d\d:\d\d /u.test(row))
+
+    const plumbing = (rows: readonly string[]): readonly string[] =>
+      rows.filter((row) => /^\d\d:\d\d:\d\d [A-Z]+ (?:yrd:submodules\b|yrd:release\b)/u.test(row))
+
+    const mergingAt = async (level: string): Promise<QueueRunResult> => {
+      const { repo } = await boundaryRepository({ exit: 0, notify: true })
+      await submitOneCommit(repo, "green")
+      process.env.LOG_LEVEL = level
+      try {
+        return await queueRunOnce(repo)
+      } finally {
+        delete process.env.LOG_LEVEL
+      }
+    }
+
+    it("is absent at debug and present at trace on a merging run", async () => {
+      const debug = await mergingAt("debug")
+      expect(debug.exitCode, debug.report).toBe(0)
+      const debugRows = logRows(debug.stderr)
+
+      // The positive control is what the plan says a merging run's debug log is
+      // FOR: the queue reached a decision, ran a check and merged. Without it a
+      // run that logged nothing would satisfy the zero below.
+      expect(
+        debugRows.some((row) => /yrd:queue:run\b/u.test(row)),
+        debug.report,
+      ).toBe(true)
+      expect(
+        debugRows.some((row) => /yrd:jobs:(check|merge)\b/u.test(row)),
+        debug.report,
+      ).toBe(true)
+      expect(
+        plumbing(debugRows),
+        `worktree and submodule plumbing at debug:\n${plumbing(debugRows).slice(0, 5).join("\n")}`,
+      ).toEqual([])
+
+      const trace = await mergingAt("trace")
+      expect(trace.exitCode, trace.report).toBe(0)
+      expect(plumbing(logRows(trace.stderr)).length, trace.report).toBeGreaterThan(0)
+    })
+  })
+
+  /**
    * Stuck is the queue's own fault, so the log says so and the submitter hears
    * nothing: the two messages a submitter gets are `merged` and `fail`, and
    * neither may be sent for a queue run that could not do its job.
