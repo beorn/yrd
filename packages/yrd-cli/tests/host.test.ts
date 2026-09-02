@@ -5493,11 +5493,9 @@ checks: [{check: {run: "true"}}]
     const { repo, featureSha } = await repository()
     const startedPath = join(repo, "..", "one-shot-check.started")
     const finishedPath = join(repo, "..", "one-shot-check.finished")
-    const command = [
-      `touch ${JSON.stringify(startedPath)}`,
-      "sleep 3",
-      `touch ${JSON.stringify(finishedPath)}`,
-    ].join("; ")
+    const command = [`touch ${JSON.stringify(startedPath)}`, "sleep 3", `touch ${JSON.stringify(finishedPath)}`].join(
+      "; ",
+    )
     await commitYrdConfig(repo, `checks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 20000}}]\n`)
     {
       await using submitter = await createYrdHost({ cwd: repo })
