@@ -12,6 +12,7 @@ import {
   createMemoryJournal,
   createYrd,
   createYrdDef,
+  createFailure,
   journalEventVocabulary,
   pipe,
   parseJournalFrame,
@@ -25,6 +26,7 @@ import {
 import {
   createJobDef,
   isConcurrentSettlementConflict,
+  isMachineryJobFailure,
   isTerminalJobStatus,
   Job,
   JobErrorFactSchema,
@@ -44,6 +46,7 @@ import {
   type JobResult,
   type RunnerContexts,
   type JobTransition,
+  thrownJobFailure,
 } from "@yrd/job"
 import { compactJobsState, RestoreJobSchema } from "../src/jobs.ts"
 
@@ -786,6 +789,70 @@ describe("Jobs", () => {
       attempt: 2,
     })
   }, 15_000)
+  it("keeps a thrown YrdFailure's own code, message and kind in the terminal record (@i/10-yrd/24038)", async () => {
+    // The requirement: a step that raises a TYPED failure has already said what
+    // went wrong and whose it is, and the terminal record is the only place
+    // that answer can survive to reach a reader. `ensureScratchRoot` raises
+    // this exact failure before any check child is spawned; filed as
+    // `runner-error` it sat in no environment-owned bucket, so the queue billed
+    // the author for a host fault. No existing test would catch that: every one
+    // of them settles a failure the callback RETURNED, and the drop happens
+    // only on the throw path.
+    const app = await jobsApp(
+      delivery(() => {
+        throw createFailure({
+          kind: "infrastructure",
+          code: "scratch-root-unavailable",
+          message: "yrd: the repository's declared scratch root '/nope' is not writable",
+        })
+      }),
+    )
+    const requested = await app.dispatch(app.commands.sender.send, { message: "typed throw" })
+    const settled = await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })
+
+    expect(settled).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: {
+        code: "scratch-root-unavailable",
+        message: "yrd: the repository's declared scratch root '/nope' is not writable",
+        evidence: { thrown: true, thrownKind: "infrastructure" },
+      },
+    })
+    // Thrown-ness is now a fact a reader asks for by name, so no consumer has
+    // to recognise a throw by its code — which is what let the typed code be
+    // dropped in the first place.
+    expect(thrownJobFailure((settled as { error: JobError }).error)).toEqual({ kind: "infrastructure" })
+    await app.close()
+  })
+
+  it("files an UNTYPED throw as runner-error exactly as before, marked thrown but claiming no kind", async () => {
+    // The control. `runner-error` is the honest answer when the thrower said
+    // nothing: there is no typed code to keep, and inventing a kind for it
+    // would put a claim in the record that nobody made.
+    const app = await jobsApp(
+      delivery(() => {
+        throw new Error("boom")
+      }),
+    )
+    const requested = await app.dispatch(app.commands.sender.send, { message: "untyped throw" })
+    const settled = await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })
+
+    expect(settled).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "runner-error", message: "boom", evidence: { thrown: true } },
+    })
+    const error = (settled as { error: JobError }).error
+    expect((error.evidence as Readonly<{ thrownKind?: string }>).thrownKind).toBeUndefined()
+    expect(thrownJobFailure(error)).toEqual({})
+    // Both throws are MACHINERY — the class whose lifecycle row stays ERROR and
+    // stops the pass — and neither is recognised by its code any more.
+    expect(isMachineryJobFailure(error)).toBe(true)
+    expect(isMachineryJobFailure({ code: "affected-tests-failed" }), "a verdict is not machinery").toBe(false)
+    await app.close()
+  })
+
   it("keeps generic Job input opaque when no lifecycle projection is declared", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
