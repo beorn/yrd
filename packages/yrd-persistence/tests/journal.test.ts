@@ -1051,7 +1051,10 @@ describe("SQLite Journal", () => {
     await expect(Array.fromAsync(journal.read())).resolves.toEqual([{ cursor: 2, values: [legacy, versioned] }])
   })
 
-  it("releases the writer lock before the caller consumes a pinned read result", async () => {
+  it("reads a current store without the writer lock; the append is the only acquisition", async () => {
+    // 24019: every read used to take the lock as "journal-read" to run the
+    // migration funnel first, so a reader parked behind any live writer. A
+    // current store is read through a read-only snapshot with no lock at all.
     const dir = await directory()
     let held = false
     let runs = 0
@@ -1074,7 +1077,7 @@ describe("SQLite Journal", () => {
     const first = await iterator.next()
     expect(first).toEqual({ done: false, value: { cursor: 1, values: [frame("reader")] } })
     expect(held).toBe(false)
-    expect(runs).toBe(2)
+    expect(runs).toBe(1)
   })
 
   it("names every writer that takes the lock, so a starved contender can identify it", async () => {
@@ -1099,7 +1102,8 @@ describe("SQLite Journal", () => {
     expect(holders.length).toBeGreaterThan(0)
     expect(holders.every((holder) => holder.trim() !== "")).toBe(true)
     expect(holders).toContain("journal-append")
-    expect(holders).toContain("journal-read")
+    // A read of a current store is not a writer and takes no lock (24019).
+    expect(holders.filter((holder) => holder.startsWith("journal-read"))).toEqual([])
   })
 
   it("emits structured lock and append lifecycle evidence", async () => {
