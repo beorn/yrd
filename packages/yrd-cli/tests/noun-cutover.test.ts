@@ -113,7 +113,16 @@ describe("noun cutover ratchet", () => {
     }
 
     expect(sources.invocation).not.toMatch(/\bYrdPersona\b|HAB_NAME|HAB_WIRE|TRIBE_NAME|@dev\//u)
-    expect(sources.config).not.toMatch(/\bnotify\b/u)
+    // `notify:` came back on 2026-09-02 as a repository-configured notifier
+    // COMMAND (@i/10-yrd/24028): a plain string yrd spawns with one outcome JSON
+    // on stdin, agent-blind; the tribe side lives outside this repository
+    // (hh-dev tools/yrd-notify.ts). What 074d77d6 cut, and what stays out, is
+    // the signal-route table: per-event recipient lists, "submitter"/"broadcast"
+    // targets and SignalRecipient identities. The word alone is not the noun.
+    expect(sources.config).not.toMatch(
+      /\bNotifySchema\b|\bNotifyTarget|\bSignalRecipient|\bSignalRoute|"pr\/needs-author"|\bbroadcast\b/u,
+    )
+    expect(sources.config).toMatch(/^\s*notify: TextSchema\.optional\(\),$/mu)
     expect(sources.host).not.toMatch(/\bcreateTribeSignalAdapter\b|\bregisterTribeSignalRecipient\b|\bYrdPersona\b/u)
     expect(sources.run).not.toMatch(/\bprSession\b|\bjoinPRSession\b/u)
     expect(sources.bayModel).not.toMatch(/\bPRSession\b|\bsessions:/u)
