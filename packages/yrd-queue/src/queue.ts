@@ -11207,6 +11207,13 @@ export const YRD_REFUSAL_CODES = [
   // and the fall-through disposition is right: the next drain retries it, and
   // no automation should act on the finding itself.
   "receiver-intake-stranded",
+  // The receiver's push-time refusal of a ref name that nests with a ref the
+  // store already holds (`@yrd/bay` RECEIVER_REF_NESTING_CODE): git would
+  // reject the ref after pre-receive had recorded the push, orphaning the
+  // inbox entry (the 2026-09-01 wedge), so the receiver refuses FIRST and
+  // records nothing. A CLI-invocation-time refusal relayed to the pusher,
+  // never a persisted Run/Job failure; fall-through disposition.
+  "receiver-ref-nesting",
   // S6 door: both retired mint arms (bay intake + submit) refuse with this one
   // code when a live submit fact owns the branch and no record does.
   "record-mint-retired",

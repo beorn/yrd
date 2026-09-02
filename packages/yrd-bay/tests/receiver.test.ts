@@ -1803,6 +1803,146 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   // Passes before this change as well as after, deliberately: opening one
   // namespace must not open the rest, and the only way to know that is a case
   // that was already green and has to stay green.
+  /**
+   * The 2026-09-01 orphan wedge, at its source. A seat pushed
+   * `refs/for/main/@i/4-supervision/<name>` while `refs/for/main/@i/4-supervision`
+   * already stood as a FILE ref. Pre-receive wrote the push's `.prepared.json`
+   * inbox entry, THEN git's ref transaction refused the update ("cannot lock
+   * ref … exists"), post-receive never ran, and the orphaned entry refused every
+   * queue pass and every `yrd pr submit` — twice, 58 minutes each. Re-pushing
+   * recreated the identical orphan. These cases prove the receiver refuses
+   * FIRST, in both nesting directions and within one push, and writes nothing.
+   *
+   * Every case starts from an accepted push that leaves ONE pending entry (the
+   * hook host here wires no intake, so post-receive moves prepared -> pending
+   * and stops), then reads the inbox listing back after the refused push: the
+   * only acceptable listing is the one it started with.
+   */
+  const FILE_REF = "refs/for/main/@i/4-supervision"
+  const NESTED_REF = `${FILE_REF}/nested`
+  const nestingTargets = (baseSha: string): Record<string, ReceiverTarget> => ({
+    "for:main/@i/4-supervision": target(baseSha, { branch: "issue/supervision", issue: "4-supervision" }),
+    "for:main/@i/4-supervision/nested": target(baseSha, { branch: "issue/nested", issue: "nested" }),
+    "for:main/@i/4-supervision-nested": target(baseSha, { branch: "issue/flat", issue: "flat" }),
+  })
+
+  /** One accepted push of `ref` from a fresh branch off main, and the inbox listing it leaves. */
+  async function acceptedPush(f: Fixture, env: Env, branch: string, ref: string): Promise<string[]> {
+    await git(f.mainRepo, "switch", "-qc", branch, "main")
+    await submitCommit(f.mainRepo, `${branch}.txt`)
+    const result = await push(f, `${branch}:${ref}`, env)
+    expect(result.stderr).not.toContain("yrd: receiver:")
+    expect(result.code).toBe(0)
+    return await inboxFiles(f.receiver)
+  }
+
+  it("refuses a push nested UNDER an existing ref, before writing anything — the orphan is impossible, not guarded", async () => {
+    const f = await fixture("nesting-under")
+    const env = await installHookHost(f.root, nestingTargets(f.baseSha))
+    const before = await acceptedPush(f, env, "supervision", FILE_REF)
+    expect(before).toHaveLength(1)
+
+    await git(f.mainRepo, "switch", "-qc", "nested", "main")
+    await submitCommit(f.mainRepo, "nested.txt")
+    const result = await push(f, `nested:${NESTED_REF}`, env)
+    expect(result.code).not.toBe(0)
+    // The receiver's own typed refusal, naming the ref and the ref it collides
+    // with — not git's `cannot lock ref`, which is what the pusher used to read
+    // AFTER the receiver had already recorded the push.
+    expect(result.stderr).toContain(`yrd: receiver: ref '${NESTED_REF}' cannot be created`)
+    expect(result.stderr).toContain(`nests under the existing ref '${FILE_REF}'`)
+    expect(result.stderr).not.toContain("cannot lock ref")
+    // NOTHING recorded: the inbox is exactly what the accepted push left.
+    expect(await inboxFiles(f.receiver)).toEqual(before)
+    expect(before.some((name) => name.endsWith(".prepared.json"))).toBe(false)
+  })
+
+  it("refuses a push whose name an existing ref nests UNDER — the other direction git refuses", async () => {
+    const f = await fixture("nesting-over")
+    const env = await installHookHost(f.root, nestingTargets(f.baseSha))
+    const before = await acceptedPush(f, env, "nested", NESTED_REF)
+    expect(before).toHaveLength(1)
+
+    await git(f.mainRepo, "switch", "-qc", "supervision", "main")
+    await submitCommit(f.mainRepo, "supervision.txt")
+    const result = await push(f, `supervision:${FILE_REF}`, env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain(`yrd: receiver: ref '${FILE_REF}' cannot be created`)
+    expect(result.stderr).toContain(`would sit above the existing ref '${NESTED_REF}'`)
+    expect(result.stderr).not.toContain("cannot lock ref")
+    expect(await inboxFiles(f.receiver)).toEqual(before)
+  })
+
+  it("a flat name beside the existing ref still goes through and writes exactly one entry — after a refused nested push wrote none", async () => {
+    const f = await fixture("nesting-flat")
+    const env = await installHookHost(f.root, nestingTargets(f.baseSha))
+    const before = await acceptedPush(f, env, "supervision", FILE_REF)
+
+    // The refused push first, so the count below proves it left nothing behind.
+    await git(f.mainRepo, "switch", "-qc", "nested", "main")
+    await submitCommit(f.mainRepo, "nested.txt")
+    expect((await push(f, `nested:${NESTED_REF}`, env)).code).not.toBe(0)
+
+    const after = await acceptedPush(f, env, "flat", `${FILE_REF}-nested`)
+    expect(after).toHaveLength(before.length + 1)
+    expect(after.filter((name) => !before.includes(name))).toEqual([
+      expect.stringMatching(/^[0-9a-f]{64}\.pending\.json$/u),
+    ])
+    expect(after.some((name) => name.endsWith(".prepared.json"))).toBe(false)
+  })
+
+  it("names the cure: a flat spelling to push under, and the stale ref to retire", async () => {
+    const f = await fixture("nesting-cure")
+    const env = await installHookHost(f.root, nestingTargets(f.baseSha))
+    await acceptedPush(f, env, "supervision", FILE_REF)
+
+    await git(f.mainRepo, "switch", "-qc", "nested", "main")
+    await submitCommit(f.mainRepo, "nested.txt")
+    const result = await push(f, `nested:${NESTED_REF}`, env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain(`push under a flat name instead, e.g. '${FILE_REF}-nested'`)
+    expect(result.stderr).toContain(`ask the queue owner to retire the stale ref '${FILE_REF}'`)
+    // The reason is stated too — the pusher learns WHY, not only what to type.
+    expect(result.stderr).toContain("git refuses a ref that is a path prefix of another")
+  })
+
+  it("refuses two creations in ONE push that nest with each other, recording neither", async () => {
+    // Neither ref exists in the store, so a per-ref check against the store
+    // sees nothing; git would apply the first, refuse the second, and run
+    // post-receive for the first alone — the second's entry orphaned exactly as
+    // a store collision orphans it.
+    const f = await fixture("nesting-batch")
+    const env = await installHookHost(f.root, {
+      "for:main/pair": target(f.baseSha, { branch: "issue/pair", issue: "pair" }),
+      "for:main/pair/second": target(f.baseSha, { branch: "issue/second", issue: "second" }),
+    })
+    await git(f.mainRepo, "switch", "-qc", "pair", "main")
+    await submitCommit(f.mainRepo, "pair.txt")
+    await git(f.mainRepo, "switch", "-qc", "second", "main")
+    await submitCommit(f.mainRepo, "second.txt")
+    const result = await run(
+      [
+        "git",
+        "-C",
+        f.mainRepo,
+        "push",
+        f.receiver.receiverPath,
+        "pair:refs/for/main/pair",
+        "second:refs/for/main/pair/second",
+      ],
+      f.mainRepo,
+      env,
+    )
+    expect(result.code).not.toBe(0)
+    // The push is judged in ref order, so the FIRST ref of the pair is the one
+    // refused, naming the second as the ref it would sit above.
+    expect(result.stderr).toContain("yrd: receiver: ref 'refs/for/main/pair' cannot be created")
+    expect(result.stderr).toContain("would sit above 'refs/for/main/pair/second', which this same push also creates")
+    expect(result.stderr).toContain("push the two under flat names instead")
+    expect(result.stderr).not.toContain("cannot lock ref")
+    expect(await inboxFiles(f.receiver)).toEqual([])
+  })
+
   it("keeps every other ref namespace refused", async () => {
     const f = await fixture("submit-other")
     await git(f.mainRepo, "switch", "-qc", "work")
