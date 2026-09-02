@@ -11,7 +11,7 @@ import { dirname, join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { currentChangeRev, changeBaseSha, changeDeliveryState, recordLaneOwnsBranch } from "@yrd/bay"
+import { currentChangeRev, changeBaseSha, changeDeliveryState, receiverInboxDir, recordLaneOwnsBranch } from "@yrd/bay"
 import { Command, createFailure, createMemoryJournal, parseJournalFrame } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
@@ -29,6 +29,7 @@ import {
   habitantOwnsSettlementDrain,
   runYrdProcess,
 } from "../src/host.ts"
+import { HABITANT_EXIT } from "../src/habitant-exit.ts"
 import { checkpointBumpGateViolations, SHIPPED_CHECKPOINT_IDENTITIES } from "../src/checkpoint-bump-gate.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
 import { sourceRepositoryFor, takeImplementationSourceAttestation } from "../src/implementation-source.ts"
@@ -4682,6 +4683,105 @@ checks: [{check: {run: "true"}}]
     }
   })
 
+  it("skips a receiver inbox entry whose push never completed instead of refusing the whole drain", async () => {
+    // Measured 2026-09-01 17:29:57 PDT. A `pre-receive` hook writes its
+    // `.prepared.json` BEFORE Git decides whether to accept the update. One
+    // submitter's push was interrupted after the object landed but before any
+    // ref was created, so `recoverPrepared` could not confirm the push and
+    // reported the entry ambiguous — forever, because nothing else ever moves
+    // it. The host then turned that one entry into a refusal of the WHOLE
+    // inbox, and since this drain runs at host construction for every active
+    // command, every later pass exited 3 while eight eligible changes waited
+    // behind a row none of them had anything to do with.
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+
+    // One host to create the receiver and its inbox, exactly as a real
+    // repository would already have them.
+    const warm = await createYrdHost({ cwd: repo })
+    await warm.close()
+
+    // The orphan, in the shape the interrupted push left behind: a branch
+    // creation (`oldSha` all zeroes) naming a ref that does not exist. The id
+    // is the receiver's own content hash of the update, not a free-form name —
+    // an entry whose id does not rebuild from its fields is `failed`, not
+    // ambiguous, and would be refusing this drain for a different and correct
+    // reason.
+    const ref = "refs/heads/issue/interrupted-push"
+    const branch = "issue/interrupted-push"
+    const oldSha = "0".repeat(40)
+    const id = createHash("sha256").update(`${ref}\0${oldSha}\0${featureSha}`).digest("hex")
+    const receivedAt = new Date(Date.now() - 90_000).toISOString()
+    const orphan = {
+      version: 1,
+      id,
+      receivedAt,
+      ref,
+      branch,
+      oldSha,
+      headSha: featureSha,
+      intake: {
+        base: "main",
+        baseSha: await git(repo, "rev-parse", "main"),
+        branch,
+        headSha: featureSha,
+      },
+    }
+    const inbox = receiverInboxDir(stateDir)
+    await writeFile(join(inbox, `${id}.prepared.json`), `${JSON.stringify(orphan)}\n`)
+
+    const events: unknown[] = []
+    const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => events.push(value) }])
+    try {
+      // (a) On the code this replaces, THIS LINE THROWS
+      //     "receiver inbox did not drain cleanly" and there is no host at all —
+      //     no queue pass, no `pr submit`, no read-only status, for anyone.
+      const host = await createYrdHost({ cwd: repo, log })
+      try {
+        // (b) The rest of the inbox drained and the host is usable: work that
+        //     has nothing to do with the orphan proceeds.
+        await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+        expect(Object.keys(host.app.state().bays.prs)).toEqual(["PR1"])
+      } finally {
+        await host.close()
+      }
+
+      // Reported, never swallowed — one row naming the id, the branch it belongs
+      // to, the file to retire and its AGE, which is the only thing separating a
+      // push happening right now from one that never finished. An operator
+      // cannot clear what nobody named. WARN, not ERROR: the level IS the
+      // disposition (`receiver-drain-refusal.ts`), so a skipped entry cannot be
+      // reported as if it had stopped the runtime.
+      const rows = events.filter(
+        (event): event is { level: string; props: Record<string, unknown> } =>
+          typeof event === "object" &&
+          event !== null &&
+          "props" in event &&
+          typeof event.props === "object" &&
+          event.props !== null &&
+          "action" in event.props &&
+          event.props.action === "receiver-drain-ambiguous",
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.level).toBe("warn")
+      expect(rows[0]!.props).toMatchObject({
+        disposition: "skipped",
+        id,
+        branch,
+        receivedAt,
+        path: join(inbox, `${id}.prepared.json`),
+      })
+      expect(rows[0]!.props.ageMinutes).toBeGreaterThanOrEqual(1)
+
+      // Skipped, not consumed: the entry is still on disk, so a push that was
+      // merely SLOW is still delivered by a later drain under the same id, and
+      // nothing has been destroyed on an unprovable guess about what happened.
+      expect(await Bun.file(join(inbox, `${id}.prepared.json`)).exists()).toBe(true)
+    } finally {
+      log.end()
+    }
+  })
+
   it("initializes one filesystem authority and reopens its durable PR state", async () => {
     const { repo } = await repository()
     const first = await createYrdHost({ cwd: repo })
@@ -5336,6 +5436,78 @@ checks: [{check: {run: "true"}}]
     }
     if (cleanupError !== undefined) throw cleanupError
   }, 30_000)
+
+  it("drains a ONE-SHOT queue pass on SIGTERM: the job finishes and the exit says it was stopped", async () => {
+    // The 2026-09-01 incident, end to end. Three one-shot passes died to signals
+    // in one day — a peer's SIGTERM, an account rotation that took the parent
+    // shell, an agent loop whose stop walked the process tree — and each death
+    // left its job unfinished for a later pass to re-lose.
+    //
+    // `queue run --once` resolves to the `one-shot-queue-run` posture, which was
+    // the ONE queue posture `host.ts` minted no drain controller for. Without it
+    // the boundary treated the first signal as the hard one: it closed the host
+    // CONCURRENTLY with the still-running pass, killing the check mid-flight,
+    // and then re-raised the signal so the process died by SIGTERM.
+    const { repo, featureSha } = await repository()
+    const startedPath = join(repo, "..", "one-shot-check.started")
+    const finishedPath = join(repo, "..", "one-shot-check.finished")
+    const command = [
+      `touch ${JSON.stringify(startedPath)}`,
+      "sleep 3",
+      `touch ${JSON.stringify(finishedPath)}`,
+    ].join("; ")
+    await commitYrdConfig(repo, `checks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 20000}}]\n`)
+    {
+      await using submitter = await createYrdHost({ cwd: repo })
+      await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await submitter.close()
+    }
+
+    const child = Bun.spawn(
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "--once", "--json"],
+      {
+        cwd: repo,
+        env: { ...process.env, LOGGILY_FILE: join(repo, "..", "one-shot.log") },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const stdout = new Response(child.stdout).text()
+    const stderr = new Response(child.stderr).text()
+    try {
+      // Signal it MID-JOB: the check has started and has ~3s left to run.
+      await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), { timeout: 15_000 })
+      expect(await Bun.file(finishedPath).exists()).toBe(false)
+      child.kill("SIGTERM")
+      const exitCode = await child.exited
+
+      // 1. The job in flight FINISHED. This is the assertion the three incidents
+      //    were about: before the drain, closing the host on the first signal
+      //    tore the Process down under the running check and this file never
+      //    appeared.
+      expect(await Bun.file(finishedPath).exists(), "the check was killed mid-run instead of finishing").toBe(true)
+
+      // 2. The exit says "stopped on purpose", not "died after SIGTERM". A
+      //    one-shot has no supervisor, so its exit status is the only thing the
+      //    operator or the script that ran it ever learns.
+      expect(exitCode, `${await stdout}\n${await stderr}`).toBe(HABITANT_EXIT.drained)
+      expect(exitCode).not.toBe(0)
+      expect(exitCode).not.toBe(1)
+
+      // 3. Nothing is left `in_progress` for the next pass to find, and the
+      //    lease came off — proven by a fresh host taking it right here, which
+      //    is refused outright while another pass holds it.
+      await using inspector = await createYrdHost({ cwd: repo })
+      const summary = inspector.app.queue.status("main")
+      expect([...summary.running, ...summary.waiting].map((run) => run.id)).toEqual([])
+      await inspector.close()
+    } finally {
+      child.kill("SIGKILL")
+      await child.exited
+      await stdout
+      await stderr
+    }
+  }, 40_000)
 
   it("refuses a second habitant follow-runner with the active runner identity", async () => {
     const { repo, featureSha } = await repository()

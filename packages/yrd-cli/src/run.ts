@@ -3116,11 +3116,23 @@ type RuntimeBootstrap = Readonly<{
 
 function runtimeOptions(io: YrdCliIO): RuntimeOptions {
   const drainSignal = io.drainSignal
+  // `continueAdmissions` is NOT a drain marker, whatever its type says. The
+  // engine reads its mere PRESENCE as "this caller admits one change per turn"
+  // (`queue.ts` — `queued.slice(0, 1)`), which is the resident habitant's shape;
+  // a one-shot pass dispatches the whole queue in a single turn and composes
+  // one multi-member run out of it. Now that a one-shot ALSO carries a drain
+  // signal, keying the install on that signal would have silently serialized
+  // every one-shot pass into single-member runs — a change to what the queue
+  // produces, smuggled in by a change to how it stops. So it is keyed on the
+  // resident driver identity, which is what it always actually meant: `driver`
+  // is host-minted for `leaseMode: "resident"` and stays undefined for a
+  // one-shot pass.
+  const resident = io.driver !== undefined
   return {
     runner: io.runner ?? "yrd-cli",
     leaseMs: io.leaseMs ?? 5 * 60_000,
     ...(io.now === undefined ? {} : { now: io.now }),
-    ...(drainSignal === undefined ? {} : { continueAdmissions: () => !drainSignal.aborted }),
+    ...(drainSignal === undefined || !resident ? {} : { continueAdmissions: () => !drainSignal.aborted }),
   }
 }
 
@@ -13828,9 +13840,15 @@ function buildProgram(
       // replaced.
       await gate()
       const app = installed()
-      const publications = await preparePublicationQueueCycle(app, installedServices(), io)
+      // Stop TAKING work the moment a drain is asked for. A pass already inside
+      // `runQueues` finishes the run it composed — that is the "let the job in
+      // flight end" half — but a pass that has not started one must not start
+      // one now, and a publication cycle is new work by the same measure. The
+      // boundary settles whatever this leaves and exits `drained`.
+      const draining = () => io.drainSignal?.aborted === true
+      const publications = draining() ? [] : await preparePublicationQueueCycle(app, installedServices(), io)
       if (publications.length > 0) await gate()
-      const runs = await runQueues(app, selectors, options, io)
+      const runs = draining() ? [] : await runQueues(app, selectors, options, io)
       const selectedChangeIds =
         selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
       const blocked = admissionBlockedChanges(app, selectedChangeIds)

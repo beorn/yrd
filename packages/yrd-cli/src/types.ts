@@ -25,8 +25,19 @@ import type { Scope } from "@silvery/scope"
 import type { QueueReadModel } from "./queue-read-model.ts"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 import type { RetainedWorkspace } from "./workspace-retention.ts"
+import type { HabitantExitCode } from "./habitant-exit.ts"
 
-export type YrdCliExitCode = 0 | 1 | 2 | 3 | 10 | 11 | 12 | 13
+/**
+ * Every code a Yrd command may exit with: the generic verb alphabet, plus the
+ * habitant runner's lifecycle taxonomy.
+ *
+ * DERIVED from that taxonomy rather than restated beside it, because the
+ * restatement had already drifted — `queue-wedged` (14) and `refusal-loop` (15)
+ * were live conditions this union did not admit, so the next lifecycle code was
+ * a type error at whichever call site happened to reach it first rather than at
+ * the table that minted it.
+ */
+export type YrdCliExitCode = 0 | 1 | 2 | HabitantExitCode
 
 export type JournalRetentionPolicy = ResolvedRetention
 
