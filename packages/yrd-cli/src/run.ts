@@ -285,7 +285,7 @@ import {
 } from "./source-staleness.ts"
 import { HABITANT_EXIT } from "./habitant-exit.ts"
 import { QUEUE_FATAL_EXIT, fatalQueueDrain } from "./queue-drain.ts"
-import { QUEUE_OUTCOME_EXIT, recordNotifySeat, submitterSeatFromEnvironment } from "./outcome-notify.ts"
+import { QUEUE_OUTCOME_EXIT, resolveSubmitterSeat, UNKNOWN_SUBMITTER, YRD_DEFAULT_SUBMITTER_ENV } from "./outcome-notify.ts"
 
 /** How many outcome-ledger rows `queue list` prints beneath the timeline. */
 const QUEUE_LIST_NOTIFICATION_ROWS = 20
@@ -6329,9 +6329,16 @@ async function applyChangeSelection(
       }
     }
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
+    // The seat this submission's outcome ball goes to (@i/10-yrd/24028): the
+    // explicit --notify, else the launch-env identity the host already reads
+    // (YRD_DEFAULT_SUBMITTER), else the literal `unknown` — never argv, cwd
+    // or the git author. Recorded IN THE JOURNAL as the revision's submitter
+    // (record lane) or the submit fact's notify seat (derived lane).
+    const submitter = resolveSubmitterSeat(options.notify, process.env)
     // Internal compatibility seam: `draft` means emit `pr/pushed` without
     // `pr/submitted`; it is deliberately not part of either submit CLI.
     const submission = await app.bays.submitSelection(selector, {
+      submitter: submitter.seat,
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(metadata.title === undefined ? {} : { title: metadata.title }),
@@ -6347,28 +6354,14 @@ async function applyChangeSelection(
       run: runtimeOptions(io),
       warnings,
     })
-    // The seat this submission's outcome ball goes to (@i/10-yrd/24028): the
-    // explicit --notify, else the managed seat's own launch environment —
-    // never argv, cwd or the git author. Recorded beside the exact (branch,
-    // sha) submitted, on the real submit only (a staging pass writes nothing).
-    if (!stageAsDraft && io.stateDir !== undefined) {
-      const seat =
-        options.notify === undefined || options.notify.trim() === ""
-          ? submitterSeatFromEnvironment(process.env)
-          : { seat: options.notify.trim(), source: "--notify" }
-      if (seat !== undefined) {
-        recordNotifySeat(io.stateDir, {
-          branch: "lane" in submission ? submission.branch : submission.branch,
-          sha: "lane" in submission ? submission.sha : changeHead(submission),
-          seat: seat.seat,
-          source: seat.source,
-          at: new Date(io.now?.() ?? Date.now()).toISOString(),
-        })
-      } else {
-        warnings.push(
-          "no submitter seat is recorded for this submission (pass --notify <seat>, or submit from a managed seat); its outcome ball goes to the queue owner",
-        )
-      }
+    // No identity reached this submit: say so on the real submit (the staging
+    // pass previews), naming both cures — the ball for this revision goes to
+    // the queue owner, and nobody invents a seat to spare it that.
+    if (!stageAsDraft && submitter.seat === UNKNOWN_SUBMITTER) {
+      warnings.push(
+        `no submitter seat is recorded for this submission (pass --notify <seat>, or launch with ${YRD_DEFAULT_SUBMITTER_ENV}=<seat>); ` +
+          "its outcome ball goes to the queue owner as submitter unknown",
+      )
     }
     if ("lane" in submission) {
       // Routed to the derived lane: the fact is the submission. Record-lane
@@ -8845,10 +8838,10 @@ async function listQueues(
 ): Promise<void> {
   const snapshot = await createQueueListSnapshotLoader(app, filters, options, io, services, false).load()
   // The balls the outcome seam opened (@i/10-yrd/24028): the most recent
-  // rows of the state-dir ledger, newest last, so a reader of the timeline
-  // sees WHO was told how each attempt ended. Bounded, never filtered by the
-  // timeline's own selection — a ball for an attempt the filter hid is still
-  // a fact worth one line.
+  // attempt rows the journal projects (`queues.outcomes`), newest last, so a
+  // reader of the timeline sees WHO holds the ball for each ended attempt.
+  // Bounded, never filtered by the timeline's own selection — a ball for an
+  // attempt the filter hid is still a fact worth one line.
   const notifications = (services.outcomes?.ledger.rows() ?? []).slice(-QUEUE_LIST_NOTIFICATION_ROWS)
   const timeline = createElement(QueueTimelineView, {
     repositoryRoot: snapshot.repositoryRoot,
@@ -8879,8 +8872,10 @@ async function listQueues(
             "balls opened for ended attempts (newest last):",
             ...notifications.map(
               (row) =>
-                `  ${row.attempt}  ${row.kind} → ${row.recipient}` +
-                (row.ball === undefined ? "  (journaled without a ball: no notifier configured)" : `  ball ${row.ball}`) +
+                `  ${row.attempt}  ${row.kind}` +
+                (row.ball === undefined
+                  ? `  journaled without a ball (no notifier configured; ${row.recipient} was not told)`
+                  : `  ball ${row.ball} held by ${row.recipient}`) +
                 `  ${row.at}`,
             ),
           ].join("\n"),
@@ -14161,7 +14156,7 @@ function buildProgram(
     .option("--keep-on-failure", "retain a failed client-side required-check workspace for inspection")
     .option(
       "--notify <seat>",
-      "the seat that hears how this submission ends (default: this managed seat's TRIBE_SESSION_NAME/TRIBE_NAME; unknown routes to the queue owner)",
+      `the seat that hears how this submission ends, recorded in the journal as the revision's submitter (default: the launch-env ${YRD_DEFAULT_SUBMITTER_ENV}; unknown routes to the queue owner)`,
     )
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>

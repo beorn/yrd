@@ -223,7 +223,13 @@ import {
   type QueuePassFatal,
   type QueuePassStop,
 } from "./queue-drain.ts"
-import { createOutcomeNotifier, spawnNotifier, type OutcomeNotifier } from "./outcome-notify.ts"
+import {
+  createJournalOutcomeLedger,
+  createOutcomeNotifier,
+  spawnNotifier,
+  YRD_DEFAULT_SUBMITTER_ENV,
+  type OutcomeNotifier,
+} from "./outcome-notify.ts"
 import type { QueueOutcome } from "@yrd/queue"
 import { retainedWorkspaceNote, type RetainedWorkspace } from "./workspace-retention.ts"
 import type {
@@ -435,6 +441,14 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // `queues.retiredSubmits` row, so replay resumes after the stored cursor
   // with the checkpoint preserved verbatim.
   "2498f5d42e338959e6b67e49b4b78c9939bb0f94ca3e9b506bcef39276b9c6a5",
+  // The composition immediately before every queue outcome began ending in
+  // exactly one journaled ball (@i/10-yrd/24028, 2026-09-01). This is the
+  // ledger's own superseded last entry — what deployments were asked to
+  // store. Its checkpoint simply lacks `queues.outcomes` (the attempt rows
+  // `queue/attempt/notified` projects into); `fillMissingStateFromInitial`
+  // supplies the empty record before replay resumes after the stored cursor,
+  // and the derived submit fact's new `notify` key is optional.
+  "7ea283b896818c5252981498fd85fa312a8dc58eec45101449b5212c5042c074",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -4223,11 +4237,22 @@ async function createYrdRuntimeHost(
     }
     const defaultSubmitter = options.defaultSubmitter ?? "operator"
     // The outcome seam (@i/10-yrd/24028). Built before the runtime app so the
-    // queue's hook can reach it; the ledger and the notify-seat sidecar live in
-    // the state dir beside the journal. The log path is what the ball body
-    // points a reader at: the file the process logs to, when it logs to one.
+    // queue's hook can reach it; its ledger IS the journal — the attempt rows
+    // the queue projects from `queue/attempt/notified` — reached lazily through
+    // the app once it exists. Reaching it earlier is a wiring bug and raises.
+    // The log path is what the ball body points a reader at: the file the
+    // process logs to, when it logs to one.
     const outcomeNotifier = createOutcomeNotifier({
-      stateDir: repository.stateDir,
+      ledger: createJournalOutcomeLedger(() => {
+        if (app === undefined) {
+          throw new Error("yrd: the outcome ledger was reached before the runtime app existed")
+        }
+        const runtimeApp = app
+        return {
+          outcomes: () => runtimeApp.state().queues.outcomes,
+          noteAttemptOutcome: (args) => runtimeApp.queue.noteAttemptOutcome(args),
+        }
+      }),
       ...(loaded.config.notify === undefined ? {} : { notifyCommand: loaded.config.notify }),
       ...(loaded.config.owner === undefined ? {} : { owner: loaded.config.owner }),
       logPath: env.LOGGILY_FILE ?? `the runner's stderr (LOGGILY_FILE is unset; runner ${habitant?.id ?? String(globalThis.process.pid)})`,
@@ -5124,7 +5149,7 @@ export function runYrdProcess(
   return runYrdProcessHost(argv, io, false, options)
 }
 
-export const YRD_DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER" as const
+export { YRD_DEFAULT_SUBMITTER_ENV }
 
 function helpOrVersionOnly(args: readonly string[]): boolean {
   return args.some((arg) => arg === "--help" || arg === "-h" || arg === "--version" || arg === "-V")
