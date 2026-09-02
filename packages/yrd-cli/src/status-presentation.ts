@@ -15,6 +15,9 @@ export type StatusPresentationState =
   | "needs-author"
   | "draft"
   | "rejected"
+  /** A running row whose lease lapsed or whose holder is dead — derived at
+   * read (@i/10-yrd/24030); the presentation of the `orphaned-run` code. */
+  | "orphaned"
 
 export type LifecycleStatus = "open" | "working" | "done" | "fail"
 
@@ -72,6 +75,7 @@ const LIFECYCLE_ALIASES: Readonly<Record<string, LifecycleStatus>> = {
   merged: "done",
   failed: "fail",
   rejected: "fail",
+  orphaned: "fail",
 }
 
 function knownLifecycleStatus(normalized: string): LifecycleStatus | null {
@@ -106,6 +110,10 @@ const STATUS_PRESENTATIONS = {
   "needs-author": { glyph: "×", color: "$fg-warning" },
   draft: { glyph: "◌", color: "$fg-muted" },
   rejected: LIFECYCLE_PRESENTATIONS.fail,
+  // The holder is dead or its lease lapsed: environment-owned, like the
+  // `orphaned-run` failure the next pass start writes for it — never the
+  // pulsing working glyph a stored `in_progress` used to earn (24030).
+  orphaned: { glyph: "×", color: "$fg-warning" },
 } as const satisfies Readonly<Record<StatusPresentationState, StatusPresentation>>
 
 const STATUS_ALIASES: Readonly<Record<string, StatusPresentationState>> = {
@@ -125,6 +133,7 @@ const STATUS_ALIASES: Readonly<Record<string, StatusPresentationState>> = {
   "already merged": "integrated",
   "environment-refused": "env",
   "queue-environment-refused": "env",
+  "orphaned-run": "orphaned",
   lost: "timeout",
   "job-lost": "timeout",
   "lease-timeout": "timeout",
