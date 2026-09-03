@@ -872,7 +872,7 @@ export async function submitCommitWriting(
   if (submitted.exitCode !== 0 || submitted.id === undefined || submitted.branch !== branch) {
     throw new Error(`submit did not record ${branch}:\n${submitted.report}`)
   }
-  return { branch, headSha, id: submitted.id }
+  return { bayPath, branch, headSha, id: submitted.id }
 }
 
 /** A second branch name at an existing head: one fast-forward, then a submit.
@@ -891,7 +891,7 @@ export async function submitSameHead(repo: string, bay: string, headSha: string)
   if (submitted.exitCode !== 0 || submitted.id === undefined) {
     throw new Error(`submit did not record ${branch}:\n${submitted.report}`)
   }
-  return { branch, headSha, id: submitted.id }
+  return { bayPath, branch, headSha, id: submitted.id }
 }
 
 /** A throwaway clone of the shared repository, for the cases where something

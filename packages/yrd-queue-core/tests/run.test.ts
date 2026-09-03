@@ -196,7 +196,7 @@ describe("a queue run", () => {
     // The record is the notifier's contract, unchanged: its kinds are landed, send-back and yrd-broken.
     expect(sent[0]).toMatchObject({ branch: "task/one", head, kind: "landed", pr: "task/one", recipient: "@dev/2", workItem: "@i/10-yrd/1" })
     expect(sent[0]?.id).toBe(facts[2]?.sha)
-    expect(readFileSync(outcome.log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line).kind)).toEqual(
+    expect(readFileSync(outcome.log, "utf8").split("\n").filter(Boolean).map((line) => (JSON.parse(line) as { kind: string }).kind)).toEqual(
       expect.arrayContaining(["run", "change", "check", "result", "merge", "message"]),
     )
   })
