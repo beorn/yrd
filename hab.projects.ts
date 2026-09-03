@@ -83,13 +83,13 @@ export default {
         // the queue answers: one read of the line, from the repository the
         // service stands in.
         health: { command: "bun tools/yrd-runtime.mjs yrd queue list --json" },
-        // The runner relaunches itself on the three conditions whose CURE is
-        // the relaunch, and only those: `source-stale` (11), the stale
-        // installed plan (13) and a moved root pin (18) all mean "the code
-        // moved under me", and all three are designed exits taken at a pass
-        // boundary with nothing in flight. See `habitant-exit.ts` for the
-        // whole table — both restart codes are documented together there, and
-        // this value is the half that makes them do anything.
+        // The service relaunches itself on the ONE condition whose CURE is the
+        // relaunch: a moved pin (18), read at the target after every round and
+        // taken at a round boundary with nothing in flight — "the code moved
+        // under me". `source-stale` (11) and the stale installed plan (13)
+        // were the incumbent resident's self-supervision and went with it at
+        // M6 along with `habitant-exit.ts`; the loop's other two exits are 2
+        // (stuck: it stays down until the garage fixes the queue) and a signal.
         //
         // Was `restart: "never"` (andon ruling, operator 2026-09-01: a crashed
         // runner stays exited and pages once). Under that value the entire

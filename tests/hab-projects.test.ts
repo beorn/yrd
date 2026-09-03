@@ -77,12 +77,12 @@ describe("Yrd Hab runner declarations — who is paged when a runner stays down"
 
 describe("Yrd Hab runner declarations — the restart policy that makes the exit codes mean something", () => {
   it("supervises the runner, so a designed restart-exit actually relaunches it", () => {
-    // The exit taxonomy in packages/yrd-cli/src/habitant-exit.ts dispositions
-    // `source-stale` (11), `installed-plan-stale` (13) and `root-pin-moved`
-    // (18) `restart-immediately`. Under `restart: "never"` every one of them
-    // was inert: the runner left correctly and nothing brought it back. 13
-    // fired twice on 2026-09-02 and the queue stayed down both times until a
-    // person ran `hab up`.
+    // `queue up` exits 18 when the pin moves, and the relaunch on the new pin
+    // IS the cure. Under `restart: "never"` that exit is inert: the service
+    // leaves correctly and nothing brings it back. The incumbent resident's
+    // 11 and 13 fired the same way — 13 twice on 2026-09-02, the queue down
+    // both times until a person ran `hab up` — and went with it at M6; 18 is
+    // what is left, and this value is what makes it do anything.
     for (const service of Object.values(hab.services)) {
       expect(service).toMatchObject({ restart: "on-failure" })
     }
