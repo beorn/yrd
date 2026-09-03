@@ -17,8 +17,10 @@ import {
   changeName,
   changeRef,
   gitIn,
+  list,
   queueRun,
   readFacts,
+  readQueue,
   submit,
   trailer,
   trailers,
@@ -363,6 +365,11 @@ describe("a queue run", () => {
     const facts = await readFacts(w.git, "task/one", head)
     // checked after the on-submit phase, merged after the on-merge phase, sent last.
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent"])
+    // The queue list row names the merge commit and its base in full, for whoever proves a landing by ancestry.
+    const row = list(await readQueue(w.git, "origin", "main")).find((candidate) => candidate.branch === "task/one")
+    expect(row?.state).toBe("merged")
+    expect(row?.merge).toBe(after)
+    expect(row?.base).toBe(w.target)
     const sent = messages(w)
     expect(sent).toHaveLength(1)
     // The record is the notifier's contract, unchanged: its kinds are landed, send-back and yrd-broken.

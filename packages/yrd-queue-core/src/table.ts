@@ -35,6 +35,10 @@ export type Row = Readonly<{
   since?: Date
   /** When the change's last fact was written: an ended change is as recent as its ending. A hand commit is as recent as its commit. */
   at?: Date
+  /** The merge commit on the target, full sha, from the merged fact's `Merge:` (carried by the sent fact too); absent until merged. */
+  merge?: string
+  /** The target commit the change was merged or judged at, full sha, from the fact's `Base:`. */
+  base?: string
 }>
 
 export type ListOptions = Readonly<{
@@ -101,6 +105,8 @@ function row(entry: QueueEntry, position?: number): Row {
     state: entry.reading.state,
     submitter: tip === undefined ? undefined : trailer(tip, "Submitter"),
     workItem: tip === undefined ? undefined : trailer(tip, "Work-Item"),
+    merge: tip === undefined ? undefined : trailer(tip, "Merge"),
+    base: tip === undefined ? undefined : trailer(tip, "Base"),
   }
 }
 
