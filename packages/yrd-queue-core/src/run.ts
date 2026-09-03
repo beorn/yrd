@@ -227,6 +227,7 @@ async function reportByHand(run: Run, entries: QueueRead): Promise<readonly stri
   const target = run.options.target
   for (const commit of found) {
     run.log.write({
+      branch: target,
       commit: commit.commit,
       gitlinks: commit.gitlinks,
       kind: "by-hand",
