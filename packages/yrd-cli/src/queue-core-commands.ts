@@ -28,6 +28,7 @@ import {
   resolveRemote,
   runCheck,
   show,
+  refuseTarget,
   submit,
   workItemOf,
   type CheckResult,
@@ -111,6 +112,8 @@ export async function coreQueueCommand(
   switch (request.command) {
     case "submit": {
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
+      // The preview refuses exactly what the action refuses, first.
+      refuseTarget(branch, config.target)
       // A dry run says what it would open and touches nothing: no push, no
       // fact, no ref anywhere. The wrapper used to take `--dry-run` on its own
       // surface and hand the core an ordinary submit, so a dry run opened a

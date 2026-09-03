@@ -78,6 +78,18 @@ describe("the submit path", { timeout: 120_000 }, () => {
    * two opened facts. An option a command does not implement must refuse; an
    * option it does implement must reach the code that acts on it.
    */
+  it("a dry run of the target refuses like the submit, and puts nothing at the remote", async () => {
+    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    await addYrdRemote(repo, origin)
+    const before = await refs(origin)
+
+    const dry = await runYrd(repo, "queue", "submit", "main", "--dry-run")
+
+    expect(dry.exitCode, dry.report).not.toBe(0)
+    expect(dry.report).toContain("main is the target, not a change")
+    expect(await refs(origin), dry.report).toEqual(before)
+  })
+
   it("a dry run says what it would open and puts nothing at the remote", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)

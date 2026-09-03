@@ -32,6 +32,17 @@ export type Submitted = Readonly<{
   retry: boolean
 }>
 
+/**
+ * The target is not a change. Thrown at the one path in, and by the CLI's
+ * dry run before it says what it would open: a preview that accepts what
+ * the action refuses is the reverse of the flag's purpose (2026-09-03).
+ */
+export function refuseTarget(branch: string, target: string): void {
+  if (branch === target) {
+    throw new Error(`${target} is the target, not a change; a change is a branch submitted to be merged into ${target}`)
+  }
+}
+
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   // The target is not a change: a change is a branch submitted to be MERGED
   // INTO the target, so submitting the target itself asks the queue to merge a
@@ -42,11 +53,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // theirs, and that merge stayed accounted for in the E5 walk, where an
   // accounted commit hides every hand push at or below it
   // (2026-09-03: `main@0a9db9daf7eb`, named for the queue's own merge 005a622156c7).
-  if (request.branch === request.target) {
-    throw new Error(
-      `${request.target} is the target, not a change; a change is a branch submitted to be merged into ${request.target}`,
-    )
-  }
+  refuseTarget(request.branch, request.target)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const ref = changeRef(request.branch, head)
   // Where the remote holds the branch and this change right now, in one
