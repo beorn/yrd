@@ -22,8 +22,10 @@ import {
   readHints,
   remoteNames,
   resolveRemote,
+  runCheck,
   show,
   submit,
+  type CheckResult,
   type LogRecord,
   type QueueConfig,
   type Row,
@@ -36,6 +38,7 @@ export type CoreQueueCommand =
   | Readonly<{ command: "up"; intervalSeconds?: number; stop?: AbortSignal }>
   | Readonly<{ command: "list" }>
   | Readonly<{ command: "show"; branch: string }>
+  | Readonly<{ command: "check"; names: readonly string[] }>
 
 /**
  * Run one queue command on the new core, or return undefined when the
@@ -105,6 +108,28 @@ export async function coreQueueCommand(
       const rows = list(await lane(git, config.remote, config.target))
       emit(io, options.json, { changes: rows }, table(rows))
       return 0
+    }
+    case "check": {
+      // `yrd check <name>`: the named checks as the target declares them, run
+      // here in this tree, in the queue's order and stopping where the queue
+      // would stop. The exit is the result: 0 pass, 1 fail, 2 stuck.
+      const results: CheckResult[] = []
+      for (const name of request.names) {
+        const spec = config.checks.find((check) => check.name === name)
+        if (spec === undefined) {
+          throw new Error(`${name} is not a check the target declares (declared: ${config.checks.map((check) => check.name).join(", ") || "none"})`)
+        }
+        const result = await runCheck({ cwd: repo, env: options.env, logDir: join(workdir, "checks", "here"), scratch: join(workdir, "scratch"), spec })
+        results.push(result)
+        if (result.result !== "pass") break
+      }
+      emit(
+        io,
+        options.json,
+        { checks: results, command: "check" },
+        results.map((result) => `${result.name} ${result.result} exit=${String(result.exit)} ${String(result.durationMs)} ms (log ${result.log})${result.why === undefined ? "" : `: ${result.why}`}`).join("\n"),
+      )
+      return results.some((result) => result.result === "stuck") ? 2 : results.some((result) => result.result === "fail") ? 1 : 0
     }
     case "show": {
       const changes = show(await lane(git, config.remote, config.target), request.branch)

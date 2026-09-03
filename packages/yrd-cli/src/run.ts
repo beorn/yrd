@@ -15015,7 +15015,20 @@ function buildProgram(
     .command("check <name...>")
     .description("run one of the queue's checks here, now")
     .option("--json", "emit stable JSON")
-    .action(async (names, options) => checkRequired(installedServices(), names, options, io))
+    .action(async (names, options) => {
+      // The new core takes `check` when the target's declaration names a remote.
+      const taken = await coreQueueCommand(
+        invocationCwd(io),
+        io,
+        { command: "check", names: names as readonly string[] },
+        { json: (options as { json?: boolean }).json, log: runtimeApp?.log },
+      )
+      if (taken !== undefined) {
+        setExit(taken)
+        return
+      }
+      return checkRequired(installedServices(), names, options, io)
+    })
 
   program
     .command("guard [name...]", { hidden: true })

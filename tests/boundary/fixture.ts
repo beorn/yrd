@@ -685,8 +685,13 @@ export async function amendHead(repo: string, branch: string, message: string): 
 /** One `yrd <args>` in `repo`, whatever it exits with. A verb the CLI does not
  * have comes back as a non-zero result whose report names it, which is the
  * gate doing its job rather than an unhandled rejection. */
-export async function runYrd(repo: string, ...args: string[]): Promise<QueueRunResult> {
-  const run = capture(repo)
+export function runYrd(repo: string, ...args: string[]): Promise<QueueRunResult> {
+  return runYrdIn(repo, repo, ...args)
+}
+
+/** `runYrd`, standing in `cwd`: a bay, for the commands that act "here". */
+export async function runYrdIn(repo: string, cwd: string, ...args: string[]): Promise<QueueRunResult> {
+  const run = capture(cwd)
   let exitCode: number
   try {
     exitCode = await yrd(repo, run.io, ...args)
