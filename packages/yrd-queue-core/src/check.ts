@@ -78,6 +78,15 @@ export type RunCheck = Readonly<{
   scratch: string
   process?: Process
   env?: NodeJS.ProcessEnv
+  /**
+   * The log is opened create-only, so a second write to the same path throws
+   * instead of silently replacing the first one's bytes. Off by default: a
+   * queue run's own `logDir` is keyed by change, run and phase and so never
+   * legitimately collides (run.ts), while `yrd check <name>`'s own log sits
+   * at one fixed, deliberately-reused path across repeated invocations — the
+   * opposite contract — and must keep overwriting it.
+   */
+  exclusive?: boolean
 }>
 
 /**
@@ -117,7 +126,19 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   const started = Date.now()
   const result = await runner.run({ argv: shellCommand(run.spec.run), cwd: run.cwd, env, timeoutMs })
   const durationMs = Date.now() - started
-  writeFileSync(log, `${result.stdout}${result.stderr === "" ? "" : `\n--- stderr ---\n${result.stderr}`}`)
+  const body = `${result.stdout}${result.stderr === "" ? "" : `\n--- stderr ---\n${result.stderr}`}`
+  if (run.exclusive === true) {
+    try {
+      writeFileSync(log, body, { flag: "wx" })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+      throw new Error(`a check log already exists at ${log}: two checks wrote the same path instead of one each`, {
+        cause: error,
+      })
+    }
+  } else {
+    writeFileSync(log, body)
+  }
 
   const base = { durationMs, log, name: run.spec.name }
   if (result.timedOut) {

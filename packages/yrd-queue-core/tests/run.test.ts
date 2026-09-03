@@ -202,6 +202,23 @@ function records(outcome: QueueRunOutcome): readonly Record<string, unknown>[] {
     .map((line) => JSON.parse(line) as Record<string, unknown>)
 }
 
+/** The log path an ended `check` row named, for one branch, phase and check name. */
+function checkLogFor(outcome: QueueRunOutcome, branch: string, phase: string, name: string): string {
+  const row = records(outcome).find(
+    (record) =>
+      record.kind === "check" &&
+      record.branch === branch &&
+      record.phase === phase &&
+      record.name === name &&
+      record.end !== undefined,
+  )
+  const log = row?.log
+  if (typeof log !== "string") {
+    throw new Error(`no ended check row for ${branch} ${phase} ${name} in ${outcome.log}`)
+  }
+  return log
+}
+
 /** One trailer of a commit, as `git log` reads it back. */
 async function trailerOn(w: World, commit: string, key: string): Promise<string> {
   return (await w.git(["log", "-1", `--format=%(trailers:key=${key},valueonly)`, commit])).trim()
@@ -1165,5 +1182,34 @@ describe("what the queue tells a check about the tree it judges", () => {
     expect(runs[2]?.base).toBe(w.target)
     expect(runs[2]?.repo).toBe(runs[2]?.cwd)
     expect(runs[2]?.cwd).not.toBe(runs[0]?.cwd)
+  })
+})
+
+describe("a check log is keyed by its change, then the run", () => {
+  it("a run that checks two changes keeps both logs", async () => {
+    const w = await world()
+    const firstHead = await submitCommit(w, "task/one", "one.txt")
+    const secondHead = await submitCommit(w, "task/two", "two.txt")
+
+    // Both changes are queued, so this one run's on-submit loop judges both
+    // (run.ts: `for (const entry of ordered(entries, "queued", ...))`), each
+    // with the same phase and the same run id — the exact collision the log
+    // path must not make.
+    const outcome = await queueRun({
+      ...w.options({ exit: 0 }),
+      checks: [{ name: "verify", on: ["submit"], run: 'echo "candidate=$YRD_CANDIDATE_SHA"' }],
+    })
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/one"])
+    const oneLog = checkLogFor(outcome, "task/one", "submit", "verify")
+    const twoLog = checkLogFor(outcome, "task/two", "submit", "verify")
+    // Distinct paths: the change is in the path, not just the run and the phase.
+    expect(oneLog).not.toBe(twoLog)
+    expect(oneLog).toContain(changeName("task/one", firstHead))
+    expect(twoLog).toContain(changeName("task/two", secondHead))
+    // Each log still holds its own check's output: neither write clobbered the other.
+    expect(readFileSync(oneLog, "utf8")).toContain(`candidate=${firstHead}`)
+    expect(readFileSync(twoLog, "utf8")).toContain(`candidate=${secondHead}`)
   })
 })

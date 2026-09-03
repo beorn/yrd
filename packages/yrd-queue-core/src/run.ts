@@ -344,14 +344,16 @@ async function prepare(
   path: string,
   phase: string,
 ): Promise<PreparedWorktree> {
-  const logDir = join(run.options.workdir, "checks", run.log.id, phase)
+  const logDir = join(run.options.workdir, "checks", changeName(entry.branch, entry.change.head), run.log.id, phase)
   const about = { branch: entry.branch, head: entry.change.head, name: SETUP, phase }
   return prepareWorktree(run.git, run.options.repo, commit, path, {
     env: run.options.env,
     plumbing: run.options.plumbing,
     process: run.options.process,
     record: ({ result, start, end: ended }) => record(run, { ...about, end: ended, start }, result),
-    ...(run.options.setup === undefined ? {} : { setup: { logDir, run: run.options.setup, scratch: run.scratch } }),
+    ...(run.options.setup === undefined
+      ? {}
+      : { setup: { exclusive: true, logDir, run: run.options.setup, scratch: run.scratch } }),
     starting: ({ log, start }) => started(run, { ...about, log, start }),
     targetSha: run.targetSha,
   })
@@ -847,7 +849,7 @@ async function check(
   phase: string,
 ): Promise<CheckResult> {
   await restoreScripts(run, spec, cwd)
-  const logDir = join(run.options.workdir, "checks", run.log.id, phase)
+  const logDir = join(run.options.workdir, "checks", changeName(entry.branch, entry.change.head), run.log.id, phase)
   const about = {
     branch: entry.branch,
     head: entry.change.head,
@@ -860,6 +862,7 @@ async function check(
   const result = await runCheck({
     cwd,
     env: run.options.env,
+    exclusive: true,
     logDir,
     process: run.options.process,
     scratch: run.scratch,
