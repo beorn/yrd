@@ -51,6 +51,17 @@ describe("the declaration that selects this queue is the parsed one", () => {
     expect(run.stderr()).toContain("does not parse")
   })
 
+  it("a declaration that names no remote: refuses here, naming the command and the line that cures it", async () => {
+    const root = declaring("target: main\n")
+    const run = capture()
+
+    const exit = await coreQueueCommand(root, run.io, { command: "list" })
+
+    expect(exit).toBe(2)
+    expect(run.stderr()).toContain("queue list needs a queue")
+    expect(run.stderr()).toContain("`remote:`")
+  })
+
   it("POSITIVE CONTROL: a declaration that parses says nothing about parsing", async () => {
     // Without this, the line above is satisfied just as well by a switch that
     // complains about every declaration it is handed.

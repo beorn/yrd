@@ -59,21 +59,6 @@ export function resolveSubmitter(declared: string | undefined, env: NodeJS.Proce
   return launched === undefined || launched === "" ? "unknown" : launched
 }
 
-/**
- * The declaration a command stands in did not select this core.
- *
- * Until M6 this was the fallthrough to the incumbent, so it was silent. There
- * is no incumbent now, so it is a refusal, and it says the one line that cures
- * it — which is exactly what the switch reads.
- */
-function notSelected(io: YrdCliIO, what: string): YrdCliExitCode {
-  io.stderr(
-    `yrd: ${what} needs a queue, and no declaration here selects one. ` +
-      "Add a `remote:` line to the `.yrd.yml` of this repository AND of the target it names.\n",
-  )
-  return 2
-}
-
 function buildProgram(
   name: string,
   io: YrdCliIO,
@@ -106,7 +91,7 @@ function buildProgram(
       },
       { json: options.json, env, log: log() },
     )
-    setExit(taken ?? notSelected(io, "submit"))
+    setExit(taken)
   }
   const queue = program.command("queue").description("the line of changes for the target branch")
   queue.helpCommand(false)
@@ -125,7 +110,7 @@ function buildProgram(
     .action(async (options) => {
       const json = (options as { json?: boolean }).json
       const taken = await coreQueueCommand(cwd(), io, { command: "run" }, { json, env, log: log() })
-      setExit(taken ?? notSelected(io, "queue run"))
+      setExit(taken)
     })
   queue
     .command("up")
@@ -150,7 +135,7 @@ function buildProgram(
         { command: "up", ...(interval === undefined ? {} : { intervalSeconds: interval }) },
         { json, env, log: log() },
       )
-      setExit(taken ?? notSelected(io, "queue up"))
+      setExit(taken)
     })
   queue
     .command("list")
@@ -159,7 +144,7 @@ function buildProgram(
     .action(async (options) => {
       const json = (options as { json?: boolean }).json
       const taken = await coreQueueCommand(cwd(), io, { command: "list" }, { json, env, log: log() })
-      setExit(taken ?? notSelected(io, "queue list"))
+      setExit(taken)
     })
   queue
     .command("show <branch>")
@@ -173,7 +158,7 @@ function buildProgram(
         { branch: branch as string, command: "show" },
         { json, env, log: log() },
       )
-      setExit(taken ?? notSelected(io, "queue show"))
+      setExit(taken)
     })
   // The garage is a ref, so a mechanic can open it with plain git and every
   // surface reads it. These two spellings stay because the queue is IN the
@@ -238,7 +223,7 @@ function buildProgram(
         { command: "check", names: names as readonly string[] },
         { json, env, log: log() },
       )
-      setExit(taken ?? notSelected(io, "check"))
+      setExit(taken)
     })
 
   // `env` is the printed name; `bay` is today's word, kept as its alias.

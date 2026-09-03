@@ -62,16 +62,38 @@ export type CoreQueueCommand =
   | Readonly<{ command: "show"; branch: string }>
   | Readonly<{ command: "check"; names: readonly string[] }>
 
+/** What each command is called when it has to say it needs a queue. */
+const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
+  check: "check",
+  list: "queue list",
+  run: "queue run",
+  show: "queue show",
+  submit: "submit",
+  up: "queue up",
+}
+
 /**
- * Run one queue command on the new core, or return undefined when the
- * repository's declaration does not select it.
+ * Run one queue command on the new core.
+ *
+ * A repository whose declaration does not select this core is refused HERE,
+ * with the one line that cures it. Until M6 this answered `undefined` and every
+ * one of the six call sites in cli.ts carried its own `?? notSelected(...)` —
+ * six chances to forget, for a fallthrough to an incumbent that no longer
+ * exists.
  */
 export async function coreQueueCommand(
   repo: string,
   io: YrdCliIO,
   request: CoreQueueCommand,
   options: Readonly<{ json?: boolean; env?: NodeJS.ProcessEnv; workdir?: string; log?: ConditionalLogger }> = {},
-): Promise<YrdCliExitCode | undefined> {
+): Promise<YrdCliExitCode> {
+  const notSelected = (): YrdCliExitCode => {
+    io.stderr(
+      `yrd: ${NAMED[request.command]} needs a queue, and no declaration here selects one. ` +
+        "Add a `remote:` line to the `.yrd.yml` of this repository AND of the target it names.\n",
+    )
+    return 2
+  }
   // The switch: the declaration checked out where the command stands names
   // `remote:`, or this queue is not selected and no git runs at all. The
   // PARSED declaration is that switch, and the only reader of this file: a
@@ -85,12 +107,12 @@ export async function coreQueueCommand(
   // is the authority — a branch that breaks its own `.yrd.yml` still submits,
   // and D2 bills it at merge (config.ts). What it may not do is go quiet.
   const here = declarationHere(repo)
-  if (here === undefined) return undefined
+  if (here === undefined) return notSelected()
   const hints = hintsIn(here.text, join(here.root, ".yrd.yml"))
   if (hints.problem !== undefined) {
     io.stderr(`yrd: ${hints.problem}; it hints nothing, so this asks origin/main, which must declare the queue itself\n`)
   } else if (hints.remote === undefined) {
-    return undefined
+    return notSelected()
   }
   const git = gitIn(here.root)
   const log = options.log?.child("queue")
@@ -116,7 +138,7 @@ export async function coreQueueCommand(
     return { ...declared, remote: await resolveRemote(git, declared.remote) }
   }
   const config = await declaration()
-  if (config === undefined) return undefined
+  if (config === undefined) return notSelected()
   // A worktree's `.git` is a file, so the queue's own directory lives under the
   // common git dir the whole repository shares, never under a path guessed from it.
   const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
