@@ -3,9 +3,9 @@
  *
  * A branch is its ref at the queue's remote; a change is the ref
  * `refs/yrd/changes/<branch>@<sha>`, whose commits are its facts; a merge is
- * one `--no-ff` merge commit on the queue's branch, naming its change. Nothing
- * else is written and nothing is remembered: every state a reader sees is
- * derived from those refs and that branch's ancestry at the moment they ask.
+ * one `--no-ff` merge commit on the target, naming its change. Nothing else is
+ * written and nothing is remembered: every state a reader sees is derived from
+ * those refs and the target's ancestry at the moment they ask.
  *
  * This package is the replacement core of the [plan](../../../../pm/@i/10-yrd/plan.md)
  * § Milestones M4. It reuses the git wrapper, submodule materialization, the
@@ -40,4 +40,4 @@ export { list, show } from "./table.ts"
 export type { Row } from "./table.ts"
 export { readQueue, resolveRemote } from "./remote.ts"
 export { byHandCommits, handMovedLine } from "./by-hand.ts"
-export { refuseQueueBranch, submit, workItemOf } from "./submit.ts"
+export { refuseTarget, submit, workItemOf } from "./submit.ts"

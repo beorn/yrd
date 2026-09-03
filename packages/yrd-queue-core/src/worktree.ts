@@ -9,7 +9,7 @@
  * a fresh worktree does not mean a fresh network fetch.
  *
  * Materialization gives a worktree its submodules and nothing else: no
- * dependencies, no build. The queue's branch says how to finish it in one line,
+ * dependencies, no build. The target says how to finish it in one line,
  * `setup:`, and `prepareWorktree` is the one place that runs it — once per
  * fresh worktree, after materialization and before any check, so a check never
  * carries the provisioning of the tree it judges. Every caller that judges
@@ -209,7 +209,7 @@ function directoriesIn(root: string): readonly string[] {
 /** The name the setup runs, logs and ends a change under. */
 export const SETUP = "setup"
 
-/** The branch's `setup:`, with the two places its one run needs. */
+/** The target's `setup:`, with the two places its one run needs. */
 export type SetupSpec = Readonly<{
   /** The declaration's `setup:`: one shell command, as a check's `run:` is. */
   run: string
@@ -225,8 +225,8 @@ export type SetupSpec = Readonly<{
 export type SetupRan = Readonly<{ result: CheckResult; start: string; end: string }>
 
 export type PrepareWorktree = Readonly<{
-  /** The queue's branch, which every base is measured against: `YRD_BASE_SHA` is the merge base of that commit and the worktree's HEAD. */
-  branchSha: string
+  /** The target every base is measured against: `YRD_BASE_SHA` is the merge base of it and the worktree's HEAD. */
+  targetSha: string
   /** Run once in the fresh worktree, after materialization and before any check. Absent, nothing runs. */
   setup?: SetupSpec
   /** Told how the setup went, pass or not, before a failure throws: the one place a caller records it. */
@@ -247,21 +247,21 @@ export type PreparedWorktree = Worktree & Readonly<{ tree: CheckedTree }>
 
 /**
  * What a program run in `worktree` is told about the tree it stands in: the
- * HEAD checked out there, and the merge base of that HEAD and the queue's branch.
+ * HEAD checked out there, and the merge base of that HEAD and the target.
  *
  * Read from the tree itself rather than carried in by the caller, so it is a
  * fact about what is checked out; read once per worktree, because it costs two
  * git calls and every check in that worktree is judging the same thing. A HEAD
- * that shares no history with that branch throws: a base that is not an
+ * that shares no history with the target throws: a base that is not an
  * ancestor of the candidate is a lie a check would compute a diff from.
  */
-export async function checkedTree(worktree: string, branchSha: string, process?: Process): Promise<CheckedTree> {
+export async function checkedTree(worktree: string, targetSha: string, process?: Process): Promise<CheckedTree> {
   const wt = gitIn(worktree, process)
   const candidate = (await wt(["rev-parse", "HEAD"])).trim()
-  const base = await mergeBase(wt, candidate, branchSha)
+  const base = await mergeBase(wt, candidate, targetSha)
   if (base === undefined) {
     throw new Error(
-      `${worktree} stands at ${candidate.slice(0, 12)}, which shares no history with the queue's branch ${branchSha.slice(0, 12)}: there is no base to tell a check`,
+      `${worktree} stands at ${candidate.slice(0, 12)}, which shares no history with the target ${targetSha.slice(0, 12)}: there is no base to tell a check`,
     )
   }
   return { base, candidate }
@@ -286,7 +286,7 @@ export class SetupFailed extends Error {
 }
 
 /**
- * `freshWorktree`, what the tree holds read once, then the branch's `setup:` in
+ * `freshWorktree`, what the tree holds read once, then the target's `setup:` in
  * it: one shell command, the built check environment (`PATH`, `HOME`, `SHELL`,
  * `LANG`, `USER`, `LOGNAME`, `LC_*`, the temp root as `TMPDIR`, and the
  * three the queue states about the tree), the check bound, and a log of its own
@@ -309,7 +309,7 @@ export async function prepareWorktree(
   const worktree = await freshWorktree(git, repo, commit, path, options.plumbing)
   let tree: CheckedTree
   try {
-    tree = await checkedTree(worktree.path, options.branchSha, options.process)
+    tree = await checkedTree(worktree.path, options.targetSha, options.process)
   } catch (error) {
     await worktree.remove()
     throw error

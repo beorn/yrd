@@ -43,7 +43,7 @@ import {
   removeTemporaryRoots,
   submitFromBay,
   submitOneCommit,
-  branchTip,
+  targetTip,
 } from "./fixture.ts"
 
 afterEach(removeTemporaryRoots)
@@ -129,14 +129,13 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
       expect(opened.subject, read.report).not.toMatch(/^[A-Za-z][A-Za-z-]*:/)
       // One meaning each: a fact carries exactly one Fact: trailer.
       expect(opened.trailers.get("Fact"), read.report).toEqual(["opened"])
-      // One trailer names the change, branch and head in the one spelling.
+      // One trailer names the change, its branch and its head in one spelling.
       expect(opened.trailers.get("Change"), read.report).toEqual([`${change.branch}@${change.headSha}`])
-      expect(opened.trailers.get("Branch"), read.report).toEqual(["main"])
     })
 
-    // today: red — no change ref, so no submitter, branch or work item recorded
+    // today: red — no change ref, so no submitter, target or work item recorded
     // anywhere a plain git reader can see.
-    it("the opened fact names the submitter, the time, the queue's branch and the work item", async () => {
+    it("the opened fact names the submitter, the time, the target and the work item", async () => {
       // A branch under the convention `<work item>-<slug>`, so there is a work
       // item to name.
       const { boundary, change } = await submitted({ exit: 0 }, "24101-facts")
@@ -147,7 +146,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
       if (opened === undefined) throw new Error(read.report)
 
       expect(opened.trailers.get("Submitter")?.[0] ?? "", read.report).not.toBe("")
-      expect(opened.trailers.get("Branch")?.[0] ?? "", read.report).toContain("main")
+      expect(opened.trailers.get("Target")?.[0] ?? "", read.report).toContain("main")
       // The key is the plan's own words (ruling B5: `Work-Item`).
       expect(opened.trailers.get("Work-Item")?.[0] ?? "", read.report).toContain("24101")
 
@@ -178,7 +177,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
     // today: red — no change ref to walk.
     it("git log --first-parent on the change ref reads exactly the facts, never the project's history", async () => {
       const { boundary, change } = await submitted({ exit: 0 }, "walk")
-      const base = await branchTip(boundary.repo)
+      const base = await targetTip(boundary.repo)
 
       const read = await readFacts(boundary, change)
 
@@ -208,7 +207,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
 
       const merged = read.facts[2]
       if (merged === undefined) throw new Error(report)
-      expect(merged.trailers.get("Merge")?.[0] ?? "", report).toBe(await branchTip(boundary.repo))
+      expect(merged.trailers.get("Merge")?.[0] ?? "", report).toBe(await targetTip(boundary.repo))
     })
 
     // today: red — no change ref. A failure leaves no record a git reader can
@@ -272,7 +271,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
 
       // The merge commit is on the target. Dragging it onto the change ref
       // would drag the whole project history with it.
-      const mergeCommit = await branchTip(boundary.repo)
+      const mergeCommit = await targetTip(boundary.repo)
       expect(
         read.facts.flatMap((fact) => fact.parents),
         report,
@@ -384,13 +383,13 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
   describe("the tip fact is the whole answer", () => {
     // today: red — no change ref, so no `for-each-ref` answer exists at all
     // and `queue list` must read the local store the plan deletes.
-    it("one for-each-ref over the change refs answers state, change and branch with no history walk", async () => {
+    it("one for-each-ref over the change refs answers state, change and target with no history walk", async () => {
       const { boundary } = await submitted({ exit: 0, notify: true }, "answer")
 
       const run = await queueRunOnce(boundary.repo)
 
       // No `git log`, no walk: the ref's tip commit and its trailers, once each.
-      for (const key of ["Fact", "Change", "Branch"]) {
+      for (const key of ["Fact", "Change", "Target"]) {
         const values = await tipTrailer(boundary.origin, key)
         expect(values, `${runSummary(run)}\ntrailer ${key} over refs/yrd/changes/**`).toHaveLength(1)
         expect(values[0], `${runSummary(run)}\ntrailer ${key} over refs/yrd/changes/**`).not.toBe("")

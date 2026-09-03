@@ -1,5 +1,5 @@
 /**
- * @failure  `yrd check` ran the queue branch's checks in the INVOKING tree, so it
+ * @failure  `yrd check` ran the target's checks in the INVOKING tree, so it
  *           answered "is my working directory green" while wearing the name of
  *           the queue's judgement. A checkout whose dependencies are symlinked
  *           from elsewhere is judged instead of the commit, and the error runs
@@ -31,7 +31,7 @@ afterAll(() => {
 })
 
 /** The check passes only when `marker.txt` is absent from the tree it runs in. */
-const DECLARATION = 'remote: origin\nbranch: main\nchecks:\n  - {no-marker: {run: "test ! -f marker.txt"}}\n'
+const DECLARATION = 'remote: origin\ntarget: main\nchecks:\n  - {no-marker: {run: "test ! -f marker.txt"}}\n'
 
 function capture(cwd: string): Readonly<{ io: YrdCliIO; stdout(): string }> {
   let stdout = ""
@@ -127,7 +127,7 @@ describe("yrd check judges HEAD, never the invoking tree", () => {
     const run = capture(w.work)
     await expect(
       coreQueueCommand(w.work, run.io, { command: "check", names: ["nope"] }, { workdir: w.workdir }),
-    ).rejects.toThrow(/is not a check the queue's branch declares/u)
+    ).rejects.toThrow(/is not a check the target declares/u)
     // Nothing was materialized for a name that was never going to run.
     expect(existsSync(join(w.workdir, "check"))).toBe(false)
   })

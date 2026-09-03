@@ -141,8 +141,8 @@ async function world(): Promise<World> {
       env: process.env,
       process: counting.process,
       remote: "origin",
-      branch: "main",
       repo: work,
+      target: "main",
       workdir,
     }),
     work,
@@ -161,7 +161,7 @@ async function submitPin(w: World, branch: string, sha: string): Promise<string>
   await w.git(["commit", "--quiet", "-m", `${branch}: pin the component at ${sha.slice(0, 12)}`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch: "main", changeBranch: branch, submitter: "@dev/2" })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
   return head
 }
 
@@ -185,7 +185,7 @@ async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["commit", "--quiet", "-m", `${branch}: a file, no pin`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch: "main", changeBranch: branch, submitter: "@dev/2" })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
   return head
 }
 

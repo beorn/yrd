@@ -11,7 +11,7 @@
  * is read again from the remote's refs every time it is asked for, in a fixed
  * number of git invocations however many changes there are — one `ls-remote`,
  * one fetch of the change refs, one fetch of exactly the branches they name
- * (the queue's own among them), one `for-each-ref` for every change's tip fact,
+ * (the target among them), one `for-each-ref` for every change's tip fact,
  * one for ancestry — because the tip fact's trailers are the whole derived
  * state and no history is walked. The change refs are read FIRST and the
  * branches follow from them, so a remote with thousands of branches the queue
@@ -37,10 +37,10 @@ export type QueueRead = readonly QueueEntry[]
 /**
  * Every change at the remote, read: one entry per change ref, and nothing for
  * a branch nobody submitted (E2; `submit` is the one writer of a change), plus
- * the commit the queue's branch stood at in that same reading.
+ * the commit the target stood at in that same reading.
  *
- * That commit is the queue read's own answer, not a second question: the
- * `ls-remote` below already carries it and the fetch below already brings
+ * The target's commit is the queue read's own answer, not a second question:
+ * the `ls-remote` below already carries it and the fetch below already brings
  * it, so every caller that used to ask again — the queue run with an
  * `ls-remote` and a fetch of its own, `queue list` with a local re-read that
  * only worked because this fetch had run first — reads it from here.
@@ -51,41 +51,41 @@ export type QueueRead = readonly QueueEntry[]
 export async function readQueue(
   git: Git,
   remote: string,
-  branch: string,
-): Promise<Readonly<{ branchSha: string; changes: QueueRead }>> {
+  target: string,
+): Promise<Readonly<{ target: string; changes: QueueRead }>> {
   // Where every branch and every change stands at the remote, in one reading.
   // Branch heads are read from here and never from a tracking ref, so a stale
   // local ref can never speak for the remote.
   const rows = (await git(["ls-remote", "--refs", remote])).split("\n")
   const heads = new Map<string, string>()
   const changeRefs: Change[] = []
-  let branchSha: string | undefined
+  let targetSha: string | undefined
   for (const row of rows) {
     const [sha, ref] = row.trim().split(/\s+/u)
     if (sha === undefined || ref === undefined) continue
-    if (ref === `refs/heads/${branch}`) {
-      branchSha = sha
+    if (ref === `refs/heads/${target}`) {
+      targetSha = sha
     } else if (ref.startsWith("refs/heads/")) {
       heads.set(ref.slice("refs/heads/".length), sha)
     } else {
       const change = parseChangeRef(ref)
-      // A ref named after the queue's own branch is not a change, so the read
-      // yields none for it: it is never judged, never given a fact and never
-      // messaged about, and above all it never accounts for a commit on that
-      // branch's own first-parent line, where an accounted commit hides every
-      // hand push at or below it (by-hand.ts; E5). `submit` refuses to open
-      // one, so this is only about the ones a remote already holds.
-      if (change !== undefined && change.branch !== branch) changeRefs.push(change)
+      // A ref named after the target is not a change, so the read yields none
+      // for it: it is never judged, never given a fact and never messaged
+      // about, and above all it never accounts for a commit on the target's
+      // own first-parent line, where an accounted commit hides every hand push
+      // at or below it (by-hand.ts; E5). `submit` refuses to open one, so this
+      // is only about the ones a remote already holds.
+      if (change !== undefined && change.branch !== target) changeRefs.push(change)
     }
   }
-  if (branchSha === undefined) throw new Error(`the queue's branch ${branch} is not at ${remote}`)
+  if (targetSha === undefined) throw new Error(`the target ${target} is not at ${remote}`)
 
   // The change refs first (E3). An opened fact has its head as a parent, so
   // this one fetch brings every submitted head with it, whether or not the
   // branch still stands; `--prune` forgets a local change ref the remote no
   // longer holds. Nothing else is asked for: no branch, no tag.
   await git(["fetch", "--quiet", "--no-tags", "--prune", remote, `+${CHANGES}/*:${CHANGES}/*`])
-  // Then exactly the branches those changes name, and the queue's own, in one
+  // Then exactly the branches those changes name, and the target, in one
   // fetch, so the ancestry reading below asks fresh tracking refs. A named
   // branch the remote no longer has cannot be fetched (git refuses an absent
   // ref) and reads deleted from the ls-remote above; a tracking ref of it that
@@ -95,23 +95,23 @@ export async function readQueue(
   // ref standing). Nothing else under `refs/remotes/<remote>/` is touched:
   // a working repository that is also somebody's clone keeps its own refs.
   const named = new Set(changeRefs.map((change) => change.branch))
-  const standing = [...named].filter((named) => named !== branch && heads.has(named))
+  const standing = [...named].filter((branch) => branch !== target && heads.has(branch))
   await git([
     "fetch",
     "--quiet",
     "--no-tags",
     remote,
-    ...[branch, ...standing].map((name) => `+refs/heads/${name}:refs/remotes/${remote}/${name}`),
+    ...[target, ...standing].map((branch) => `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`),
   ])
-  const gone = [...named].filter((named) => named !== branch && !heads.has(named))
+  const gone = [...named].filter((branch) => branch !== target && !heads.has(branch))
   if (gone.length > 0) {
-    await git(["update-ref", "--stdin"], gone.map((name) => `delete refs/remotes/${remote}/${name}\n`).join(""))
+    await git(["update-ref", "--stdin"], gone.map((branch) => `delete refs/remotes/${remote}/${branch}\n`).join(""))
   }
 
   const tips = await tipFacts(git)
-  // Every branch tip the queue's branch already carries, in one reading.
+  // Every branch tip the target already carries, in one reading.
   const merged = new Set(
-    (await git(["for-each-ref", "--format=%(objectname)", `--merged=${branchSha}`, `refs/remotes/${remote}/`]))
+    (await git(["for-each-ref", "--format=%(objectname)", `--merged=${targetSha}`, `refs/remotes/${remote}/`]))
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line !== ""),
@@ -129,19 +129,19 @@ export async function readQueue(
     // A head that is a branch tip was answered by the one reading above; an
     // older head of a branch that moved on, or whose branch is gone, is asked
     // for itself — its object came with the change ref.
-    const headOnBranch =
+    const headOnTarget =
       merged.has(submitted.head) ||
-      (submitted.head !== branchHead && (await isAncestor(git, submitted.head, branchSha)))
+      (submitted.head !== branchHead && (await isAncestor(git, submitted.head, targetSha)))
     const change: ChangeFacts = {
       ...(branchHead === undefined ? {} : { branchHead }),
       branch: submitted.branch,
       facts: [tip],
       head: submitted.head,
-      headOnBranch,
+      headOnTarget,
     }
     entries.push({ change, reading: readChange(change) })
   }
-  return { branchSha, changes: entries }
+  return { changes: entries, target: targetSha }
 }
 
 /** Every change ref's tip fact, by ref, in one reading. A change ref that does not end in a fact is loud. */

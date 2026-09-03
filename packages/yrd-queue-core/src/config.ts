@@ -1,10 +1,10 @@
 /**
- * The queue's declaration of itself, read from the commit of the branch it
- * lands on ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, The
- * queue run: gate authority lives on the protected side).
+ * The target's declaration of the queue, read from the target commit
+ * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, The queue run:
+ * gate authority lives on the protected side).
  *
- * `.yrd.yml` is read with `git show <branch>:.yrd.yml`, never from a change's
- * worktree, so a change that edits its own checks is judged by the branch's
+ * `.yrd.yml` is read with `git show <target>:.yrd.yml`, never from a branch's
+ * worktree, so a change that edits its own checks is judged by the target's
  * version and the edit takes effect for the next change. The parser is Bun's
  * own YAML, the same one the incumbent uses, so one file means one thing.
  *
@@ -20,14 +20,14 @@ export type QueueConfig = Readonly<{
   /** The queue's remote: a remote name, or a URL the CLI adds under the name `yrd`; `origin` unless declared. */
   remote: string
   /** The branch the queue lands on; `main` unless declared. */
-  branch: string
+  target: string
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
   /**
    * The command that delivers one message, a JSON record on stdin. The record
-   * says the ROLE it is for, `submitter` or `owner`; who the owner is belongs
-   * to that command's own arguments, never to the queue.
+   * says the ROLE it is for, `submitter` or `owner`; which seat wears the
+   * owner's belongs to that command's own arguments, never to the queue.
    */
   notify?: string
   /** The queue's working directory: its checkouts, its check logs, and the temp root every check gets as `TMPDIR`; on the root filesystem. */
@@ -50,29 +50,31 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   onlyKeys(raw, TOP_KEYS, ".yrd.yml")
   const remote = raw.remote ?? "origin"
   if (typeof remote !== "string" || remote === "") throw new Error(`.yrd.yml remote: must be a remote name or URL`)
-  const branch = raw.branch ?? "main"
-  if (typeof branch !== "string" || branch === "") throw new Error(`.yrd.yml branch: must be a branch name`)
+  const target = raw.target ?? "main"
+  if (typeof target !== "string" || target === "") throw new Error(`.yrd.yml target: must be a branch name`)
   const notify = optionalString(raw, "notify")
   const workdir = optionalString(raw, "workdir")
   const setup = optionalString(raw, "setup")
-  return { blob, branch, checks: readChecks(raw.checks), notify, remote, setup, workdir }
+  return { blob, checks: readChecks(raw.checks), notify, remote, setup, target, workdir }
 }
 
 export type Hints = Readonly<{
   remote?: string
-  branch?: string
+  target?: string
   /** Why the commit's `.yrd.yml` hinted nothing, when it exists and could not be read. */
   problem?: string
 }>
 
 /**
  * What a commit's `.yrd.yml` says about where its queue is: `remote:` and
- * `branch:`, when the file exists and reads. Read on a submitter's own commit
- * these are hints for finding the queue, never authority: the queue's branch
- * holds the declaration that judges, so a change that rewrites or breaks its
- * own `.yrd.yml` still submits and is judged by the branch's rules, and D2
- * bills it at merge. A file that exists and cannot be read hints nothing and
- * says so in `problem`.
+ * `target:` (or the incumbent's `base:`), when the file exists and reads.
+ * Read on a submitter's own commit these are hints for finding the target,
+ * never authority: the target's declaration judges, so a branch that rewrites
+ * or breaks its own `.yrd.yml` still submits and is judged by the target's
+ * rules, and D2 bills it at merge. Read on the target itself, `remote` is the
+ * switch: its presence selects this core while the incumbent exists (§ Cutover),
+ * and only then is the declaration read in full and held to its keys. A file
+ * that exists and cannot be read hints nothing and says so in `problem`.
  */
 export async function readHints(git: Git, commit: string): Promise<Hints> {
   const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
@@ -90,8 +92,8 @@ export function hintsIn(text: string, where = ".yrd.yml"): Hints {
   }
   if (!isRecord(raw)) return { problem: `${where} is not a mapping` }
   const remote = typeof raw.remote === "string" && raw.remote !== "" ? raw.remote : undefined
-  const branch = typeof raw.branch === "string" && raw.branch !== "" ? raw.branch : undefined
-  return { ...(remote === undefined ? {} : { remote }), ...(branch === undefined ? {} : { branch }) }
+  const target = typeof raw.target === "string" && raw.target !== "" ? raw.target : typeof raw.base === "string" && raw.base !== "" ? raw.base : undefined
+  return { ...(remote === undefined ? {} : { remote }), ...(target === undefined ? {} : { target }) }
 }
 
 /**
@@ -143,9 +145,9 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 
 // Ruling A6's set, plus `setup:` (2026-09-02): every key here is read by the
 // queue, and one it does not read is still refused. A fresh worktree has
-// submodules and nothing else, so the declaration says how to finish it once
+// submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["remote", "branch", "checks", "setup", "notify", "workdir"] as const
+const TOP_KEYS = ["remote", "target", "checks", "setup", "notify", "workdir"] as const
 const CHECK_KEYS = ["run", "on", "timeoutMs", "environmentPassthrough", "scripts"] as const
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */

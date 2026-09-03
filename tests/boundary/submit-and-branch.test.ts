@@ -47,7 +47,7 @@ import {
   runYrd,
   secondWorkingRepo,
   setSubmitter,
-  branchTip,
+  targetTip,
 } from "./fixture.ts"
 
 afterEach(removeTemporaryRoots)
@@ -86,7 +86,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     const dry = await runYrd(repo, "queue", "submit", "main", "--dry-run")
 
     expect(dry.exitCode, dry.report).not.toBe(0)
-    expect(dry.report).toContain("main is the queue's branch, not a change")
+    expect(dry.report).toContain("main is the target, not a change")
     expect(await refs(origin), dry.report).toEqual(before)
   })
 
@@ -101,9 +101,9 @@ describe("the submit path", { timeout: 120_000 }, () => {
 
     expect(dry.exitCode, dry.report).toBe(0)
     expect(JSON.parse(dry.stdout), dry.report).toMatchObject({
-      branch: "main",
       change: `${branch}@${head}`,
       dryRun: true,
+      target: "main",
       workItem: "24099",
     })
     // The whole point: the remote is byte-for-byte where it was.
@@ -379,12 +379,12 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     expect(await refSha(origin, `refs/heads/${branch}`), submit.report).toBe(head)
     expect(await refExists(origin, changeRef({ branch: branch, head })), submit.report).toBe(true)
     await git(repo, "push", "-q", "yrd", `:${branch}`)
-    const before = await branchTip(repo)
+    const before = await targetTip(repo)
 
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).not.toBe(2)
-    expect(await branchTip(repo), run.report).toBe(before)
+    expect(await targetTip(repo), run.report).toBe(before)
     const tip = (await factMessages(origin, changeRef({ branch: branch, head })))[0] ?? ""
     expect(tip, run.report).toContain("failed")
     expect(tip, run.report).toContain("deleted")

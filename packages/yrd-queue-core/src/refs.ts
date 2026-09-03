@@ -39,7 +39,7 @@ export function changeRef(change: Change): string {
   return refOfChange(changeName(change))
 }
 
-/** The ref a change's NAME is, for a reader that has the name and not the pair. */
+/** The ref a change's NAME is, for a reader holding the name and not the pair. */
 export function refOfChange(name: string): string {
   return `${CHANGES}/${name}`
 }

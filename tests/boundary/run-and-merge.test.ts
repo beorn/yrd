@@ -17,25 +17,25 @@
  */
 import { afterEach, describe, expect, it } from "vitest"
 import {
-  advanceBranchByHand,
+  advanceTargetByHand,
   boundaryRepositoryWith,
   checkAttempts,
   checkLines,
   FAKE_CHECK,
   firstParentDistance,
   landByHand,
-  mergedIntoBranch,
+  mergedIntoTarget,
   parentsOf,
   PROBE_SCRIPT,
   queueRunOnce,
-  refreshBranch,
+  refreshTarget,
   refs,
   removeTemporaryRoots,
   temporaryLog,
   submitCommitWriting,
   submitOneCommit,
   submitSameHead,
-  branchTip,
+  targetTip,
   declaration,
 } from "./fixture.ts"
 
@@ -75,7 +75,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
         notify: true,
         checks: [{ name: "gate", run: fake(targetLog, 1) }],
       })
-      const before = await branchTip(repo)
+      const before = await targetTip(repo)
 
       // The fake check judges content: it exits as told only where the change
       // wrote a file, so the change carries one beside its rewritten config.
@@ -87,7 +87,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
       const run = await queueRunOnce(repo)
 
       expect(run.exitCode, run.report).toBe(1)
-      expect(await branchTip(repo), run.report).toBe(before)
+      expect(await targetTip(repo), run.report).toBe(before)
       expect(await checkLines(branchLog), run.report).toEqual([])
       expect((await checkLines(targetLog)).length, run.report).toBeGreaterThan(0)
     })
@@ -103,7 +103,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
         // case is about WHOSE gate ran and not about whose fault a red one is.
         files: { "gate.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$GATE_LOG\"\nif [ -e script.txt ]; then exit 1; fi\nexit 0\n" },
       })
-      const before = await branchTip(repo)
+      const before = await targetTip(repo)
 
       await submitCommitWriting(repo, "script", {
         "gate.sh": "#!/bin/sh\nprintf 'branch\\n' >>\"$GATE_LOG\"\nexit 0\n",
@@ -113,7 +113,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
       const run = await queueRunOnce(repo)
 
       expect(run.exitCode, run.report).toBe(1)
-      expect(await branchTip(repo), run.report).toBe(before)
+      expect(await targetTip(repo), run.report).toBe(before)
       // Whatever else ran, the branch's version of the gate did not.
       expect(await checkLines(log), run.report).not.toContain("branch")
     })
@@ -129,20 +129,20 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const { repo } = await boundaryRepositoryWith(passing(log))
     const first = await submitOneCommit(repo, "first")
     const second = await submitOneCommit(repo, "second")
-    const before = await branchTip(repo)
+    const before = await targetTip(repo)
 
     const one = await queueRunOnce(repo)
 
     expect(one.exitCode, one.report).toBe(0)
-    const afterOne = await branchTip(repo)
+    const afterOne = await targetTip(repo)
     expect(await firstParentDistance(repo, before, afterOne), one.report).toBe(1)
     expect(await parentsOf(repo, afterOne), one.report).toEqual([before, first.headSha])
-    expect(await mergedIntoBranch(repo, second.headSha), one.report).toBe(false)
+    expect(await mergedIntoTarget(repo, second.headSha), one.report).toBe(false)
 
     const two = await queueRunOnce(repo)
 
     expect(two.exitCode, two.report).toBe(0)
-    const afterTwo = await branchTip(repo)
+    const afterTwo = await targetTip(repo)
     expect(await firstParentDistance(repo, afterOne, afterTwo), two.report).toBe(1)
     expect(await parentsOf(repo, afterTwo), two.report).toEqual([afterOne, second.headSha])
     expect(await checkAttempts(log), one.report).toBeGreaterThan(0)
@@ -171,8 +171,8 @@ describe("the queue run", { timeout: 180_000 }, () => {
     })
     // The target gains a file AFTER the branch was cut, so "did the check see
     // it" answers "was this the head alone, or the head merged onto the target".
-    await advanceBranchByHand(origin, { "moved.txt": "moved\n" })
-    await refreshBranch(repo)
+    await advanceTargetByHand(origin, { "moved.txt": "moved\n" })
+    await refreshTarget(repo)
 
     const run = await queueRunOnce(repo)
 
@@ -197,15 +197,15 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const log = await temporaryLog("conflict")
     const { repo, origin } = await boundaryRepositoryWith(passing(log))
     const change = await submitCommitWriting(repo, "conflict", { "shared.txt": "from the change\n" })
-    await advanceBranchByHand(origin, { "shared.txt": "from the target\n" })
-    const before = await refreshBranch(repo)
+    await advanceTargetByHand(origin, { "shared.txt": "from the target\n" })
+    const before = await refreshTarget(repo)
     const refsBefore = await refs(repo)
 
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).toBe(1)
-    expect(await branchTip(repo), run.report).toBe(before)
-    expect(await mergedIntoBranch(repo, change.headSha), run.report).toBe(false)
+    expect(await targetTip(repo), run.report).toBe(before)
+    expect(await mergedIntoTarget(repo, change.headSha), run.report).toBe(false)
     // The author's refs stand: every ref name is still there and the branch
     // still points at the head. The change's own ref moved forward by one
     // failed fact, which is the record of the refusal, not a loss.
@@ -225,14 +225,14 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const { repo, origin } = await boundaryRepositoryWith(passing(log))
     const change = await submitOneCommit(repo, "landed")
     await landByHand(origin, change.headSha, repo)
-    const before = await refreshBranch(repo)
+    const before = await refreshTarget(repo)
 
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).toBe(0)
     expect(await checkAttempts(log), run.report).toBe(0)
-    expect(await branchTip(repo), run.report).toBe(before)
-    expect(await mergedIntoBranch(repo, change.headSha), run.report).toBe(true)
+    expect(await targetTip(repo), run.report).toBe(before)
+    expect(await mergedIntoTarget(repo, change.headSha), run.report).toBe(true)
   })
 
   /**
@@ -252,16 +252,16 @@ describe("the queue run", { timeout: 180_000 }, () => {
       throw new Error(`the second branch at this head was refused at submit: ${String(cause)}`)
     })
     expect(two.headSha).toBe(one.headSha)
-    const before = await branchTip(repo)
+    const before = await targetTip(repo)
 
     const run = await queueRunOnce(repo)
 
     // Nothing failed and nothing is stuck: one head landed, and the other name
     // is that same landed head.
     expect(run.exitCode, run.report).toBe(0)
-    const after = await branchTip(repo)
+    const after = await targetTip(repo)
     expect(await firstParentDistance(repo, before, after), run.report).toBe(1)
-    expect(await mergedIntoBranch(repo, one.headSha), run.report).toBe(true)
+    expect(await mergedIntoTarget(repo, one.headSha), run.report).toBe(true)
     expect(await checkAttempts(log), run.report).toBeGreaterThan(0)
   })
 
@@ -281,13 +281,13 @@ describe("the queue run", { timeout: 180_000 }, () => {
     })
     const first = await submitCommitWriting(repo, "aside", { "a.txt": "a\n" })
     const second = await submitCommitWriting(repo, "bside", { "b.txt": "b\n" })
-    const before = await branchTip(repo)
+    const before = await targetTip(repo)
 
     // Each head on its own is fine, so both pass their on-submit checks and
     // the first in line lands.
     const one = await queueRunOnce(repo)
     expect(one.exitCode, one.report).toBe(0)
-    const afterOne = await branchTip(repo)
+    const afterOne = await targetTip(repo)
     expect(await parentsOf(repo, afterOne), one.report).toEqual([before, first.headSha])
     const judgedOnce = (await checkLines(log)).length
 
@@ -295,8 +295,8 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const two = await queueRunOnce(repo)
 
     expect(two.exitCode, two.report).toBe(1)
-    expect(await mergedIntoBranch(repo, second.headSha), two.report).toBe(false)
-    expect(await branchTip(repo), two.report).toBe(afterOne)
+    expect(await mergedIntoTarget(repo, second.headSha), two.report).toBe(false)
+    expect(await targetTip(repo), two.report).toBe(afterOne)
     expect((await checkLines(log)).length, two.report).toBeGreaterThan(judgedOnce)
   })
 
@@ -311,13 +311,13 @@ describe("the queue run", { timeout: 180_000 }, () => {
     // The declaration head stays (it is what selects the core under
     // measurement, ruling A5); the body below it is what cannot be parsed.
     const change = await submitCommitWriting(repo, "broken", { ".yrd.yml": `${declaration()}checks: [{gate: {run:\n` })
-    const before = await branchTip(repo)
+    const before = await targetTip(repo)
 
     const run = await queueRunOnce(repo)
 
     // Failed, not stuck: the branch is the broken thing, not the queue.
     expect(run.exitCode, run.report).toBe(1)
-    expect(await branchTip(repo), run.report).toBe(before)
-    expect(await mergedIntoBranch(repo, change.headSha), run.report).toBe(false)
+    expect(await targetTip(repo), run.report).toBe(before)
+    expect(await mergedIntoTarget(repo, change.headSha), run.report).toBe(false)
   })
 })

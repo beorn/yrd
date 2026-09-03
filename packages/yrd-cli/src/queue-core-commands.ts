@@ -3,7 +3,7 @@
  * design, Commands).
  *
  * One switch selects the queue: a `.yrd.yml` at HEAD that names `remote:` is
- * the declaration, and the branch it names must carry the line too. That
+ * the declaration, and the target it names must carry the line too. That
  * switch was flag day's knob (§ Cutover), and the incumbent it used to fall
  * through to is gone at M6 — so `undefined` from here is no longer a
  * fallthrough, and the CLI turns it into a refusal naming the missing line.
@@ -26,10 +26,10 @@ import {
   readHints,
   readQueue,
   refAt,
-  refuseQueueBranch,
   resolveRemote,
   runCheck,
   show,
+  refuseTarget,
   submit,
   workItemOf,
   type CheckResult,
@@ -51,7 +51,7 @@ export type CoreQueueCommand =
       intervalSeconds?: number
       stop?: AbortSignal
       /**
-       * The pin: the gitlink at the queue's branch that carries the commit this yrd
+       * The pin: the gitlink at the target that carries the commit this yrd
        * runs from. Absent, both are found from this module's own checkout at
        * start; a test names them to move a pin without running from one.
        */
@@ -91,7 +91,7 @@ export async function coreQueueCommand(
   const notSelected = (): YrdCliExitCode => {
     io.stderr(
       `yrd: ${NAMED[request.command]} needs a queue, and no declaration here selects one. ` +
-        "Add a `remote:` line to the `.yrd.yml` of this repository AND of the branch it names.\n",
+        "Add a `remote:` line to the `.yrd.yml` of this repository AND of the target it names.\n",
     )
     return 2
   }
@@ -104,9 +104,9 @@ export async function coreQueueCommand(
   // origin/main with the problem said once at debug level.
   //
   // A file that does not parse hints NOTHING and says so on stderr, once: the
-  // defaults stand, because the local declaration is a hint and the queue
-  // branch's is the authority — a change that breaks its own `.yrd.yml` still
-  // submits, and D2 bills it at merge (config.ts). What it may not do is go quiet.
+  // defaults stand, because the local declaration is a hint and the target's
+  // is the authority — a branch that breaks its own `.yrd.yml` still submits,
+  // and D2 bills it at merge (config.ts). What it may not do is go quiet.
   const here = declarationHere(repo)
   if (here === undefined) return notSelected()
   const hints = hintsIn(here.text, join(here.root, ".yrd.yml"))
@@ -117,25 +117,24 @@ export async function coreQueueCommand(
   }
   const git = gitIn(here.root)
   const log = options.log?.child("queue")
-  // The declaration here only hints where the queue is (`remote:`, `branch:`);
-  // the declaration on the queue's own branch is the authority for every
-  // judgement, and it has to name `remote:` itself, or a change alone could opt
-  // into this core. A change that rewrote or broke its own `.yrd.yml` is judged
-  // by the branch's rules all the same (ruling D2 bills it at merge).
+  // The declaration here only hints where the queue is (`remote:`, `target:`);
+  // the target's declaration is the authority for every judgement, and it has
+  // to name `remote:` itself, or a branch alone could opt into this core. A
+  // branch that rewrote or broke its own `.yrd.yml` is judged by the target's
+  // rules all the same (ruling D2 bills it at merge).
   const hinted = await resolveRemote(git, hints.remote ?? "origin")
-  const hintedBranch = hints.branch ?? "main"
-  const branchRef = `${hinted}/${hintedBranch}`
-  // The declaration as the queue's branch holds it now: fetched, then the
-  // switch (the branch names `remote:`; only then is its declaration read in
-  // full and held to its keys), then the remote it names resolved. Undefined
-  // when the branch does not select this core; a declaration that exists and
-  // cannot be read throws. One reading serves a one-shot command; the service
-  // reads again before every round, so an edit on the branch takes effect on
-  // the next round.
+  const hintedTarget = hints.target ?? "main"
+  const targetRef = `${hinted}/${hintedTarget}`
+  // The target's declaration as the target holds it now: fetched, then the
+  // switch (the target names `remote:`; only then is its declaration read in
+  // full and held to its keys), then the remote it names resolved. Undefined when the target does not
+  // select this core; a declaration that exists and cannot be read throws.
+  // One reading serves a one-shot command; the service reads again before
+  // every round, so an edit at the target takes effect on the next round.
   const declaration = async (): Promise<QueueConfig | undefined> => {
-    await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedBranch}:refs/remotes/${branchRef}`])
-    if ((await readHints(git, branchRef)).remote === undefined) return undefined
-    const declared = await readConfig(git, branchRef)
+    await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
+    if ((await readHints(git, targetRef)).remote === undefined) return undefined
+    const declared = await readConfig(git, targetRef)
     if (declared === undefined) return undefined
     return { ...declared, remote: await resolveRemote(git, declared.remote) }
   }
@@ -173,12 +172,12 @@ export async function coreQueueCommand(
     case "submit": {
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       // The preview refuses exactly what the action refuses, first.
-      refuseQueueBranch(branch, config.branch)
+      refuseTarget(branch, config.target)
       // A dry run says what it would open and touches nothing: no push, no
       // fact, no ref anywhere. The wrapper used to take `--dry-run` on its own
       // surface and hand the core an ordinary submit, so a dry run opened a
-      // real change (two opened facts, 2026-09-03). The flag belongs to the
-      // command that pushes, or to no command at all.
+      // real change (task/owner-field-item13@22b2741a, two opened facts). The
+      // flag belongs to the command that pushes, or to no command at all.
       if (request.dryRun === true) {
         const head = (await git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim()
         const workItem = await workItemOf(git, branch, head, request.workItem)
@@ -186,24 +185,24 @@ export async function coreQueueCommand(
           io,
           options.json,
           {
-            branch: config.branch,
             change: changeName({ branch, head }),
             dryRun: true,
             submitter: request.submitter,
+            target: config.target,
             ...(workItem === undefined ? {} : { workItem }),
           },
-          `would open ${changeName({ branch, head })} on ${config.branch} for ${request.submitter}` +
+          `would open ${changeName({ branch, head })} on ${config.target} for ${request.submitter}` +
             `${workItem === undefined ? "" : ` (work item ${workItem})`}; nothing was pushed`,
         )
         return 0
       }
       const submitted = await submit(git, config.remote, {
-        branch: config.branch,
-        changeBranch: branch,
+        branch,
         submitter: request.submitter,
+        target: config.target,
         ...(request.workItem === undefined ? {} : { workItem: request.workItem }),
       })
-      emit(io, options.json, submitted, `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${config.branch}`)
+      emit(io, options.json, submitted, `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${config.target}`)
       return 0
     }
     case "run": {
@@ -212,7 +211,7 @@ export async function coreQueueCommand(
     }
     case "up": {
       // The service: the same round on a loop, what hab runs. It has ONE
-      // permanent exit, 2: a round is stuck, or the branch's declaration can no
+      // permanent exit, 2: a round is stuck, or the target's declaration can no
       // longer be read or no longer selects this core, and the queue stays down
       // until a person fixes it. Everything else it does on purpose — a signal,
       // and a pin that moved under it — exits 0, because hab classifies every
@@ -223,30 +222,29 @@ export async function coreQueueCommand(
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
-      const pin = request.pin ?? (await pinOf(git, branchRef, log))
+      const pin = request.pin ?? (await pinOf(git, targetRef, log))
       let current = config
       for (let round = 1; ; round += 1) {
-        // The declaration again, as the branch holds it now: a correct edit on
-        // the branch is the next round's, never a restart's.
+        // The declaration again, as the target holds it now: a correct edit at
+        // the target is the next round's, never a restart's.
         if (round > 1) {
           let why: string | undefined
           try {
             const next = await declaration()
-            if (next === undefined) why = "the branch's declaration no longer selects this core"
+            if (next === undefined) why = "the target's declaration no longer selects this core"
             else current = next
           } catch (error) {
-            why = `the branch's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
+            why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
           }
           if (why !== undefined) return stuck(why)
         }
         const outcome = await oneRound(current)
         if (outcome === undefined || outcome.exitCode === 2) return 2
         await request.afterRound?.(outcome)
-        // The pin, on the queue's branch as this round left it: the round that
-        // merged the change moving this yrd's own gitlink is the last one this
-        // code runs.
+        // The pin, at the target as this round left it: the round that merged
+        // the change moving this yrd's own gitlink is the last one this code runs.
         if (pin !== undefined) {
-          const now = await gitlinkAt(git, outcome.branchSha, pin.path)
+          const now = await gitlinkAt(git, outcome.target, pin.path)
           if (now !== pin.sha) {
             const moved = `pin moved from ${pin.sha.slice(0, 12)} to ${now === undefined ? "no gitlink" : now.slice(0, 12)}: exiting for relaunch`
             log?.info?.(moved, { from: pin.sha, pin: pin.path, to: now })
@@ -260,18 +258,18 @@ export async function coreQueueCommand(
       }
     }
     case "list": {
-      // The commits the queue's branch gained by hand are rows too (E5), judged
-      // at the commit the queue read itself saw, so the rows and the reading are
-      // about one and the same tip and no second reading can disagree with it.
-      const queue = await readQueue(git, config.remote, config.branch)
+      // The commits the target gained by hand are rows too (E5), judged at the
+      // target the queue read itself saw, so the rows and the reading are about
+      // one and the same tip and no second reading can disagree with it.
+      const queue = await readQueue(git, config.remote, config.target)
       const rows = list(queue.changes, {
-        byHand: await byHandCommits(git, config.branch, queue.branchSha, queue.changes),
+        byHand: await byHandCommits(git, config.target, queue.target, queue.changes),
       })
       emit(io, options.json, { changes: rows }, table(rows))
       return 0
     }
     case "check": {
-      // `yrd check <name>`: the named checks as the queue's branch declares them, run
+      // `yrd check <name>`: the named checks as the target declares them, run
       // in a FRESH WORKTREE OF HEAD exactly as a queue run does, in the
       // queue's order and stopping where the queue would stop. The exit is the
       // result: 0 pass, 1 fail, 2 stuck.
@@ -286,7 +284,7 @@ export async function coreQueueCommand(
       const specs = request.names.map((name) => {
         const spec = config.checks.find((check) => check.name === name)
         if (spec === undefined) {
-          throw new Error(`${name} is not a check the queue's branch declares (declared: ${config.checks.map((check) => check.name).join(", ") || "none"})`)
+          throw new Error(`${name} is not a check the target declares (declared: ${config.checks.map((check) => check.name).join(", ") || "none"})`)
         }
         return spec
       })
@@ -310,7 +308,7 @@ export async function coreQueueCommand(
         env: options.env,
         plumbing: options.log?.child("worktree"),
         ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
-        branchSha: await branchAt(git, config),
+        targetSha: await targetAt(git, config),
       })
       const results: CheckResult[] = []
       try {
@@ -331,7 +329,7 @@ export async function coreQueueCommand(
       return results.some((result) => result.result === "stuck") ? 2 : results.some((result) => result.result === "fail") ? 1 : 0
     }
     case "show": {
-      const changes = show((await readQueue(git, config.remote, config.branch)).changes, request.branch)
+      const changes = show((await readQueue(git, config.remote, config.target)).changes, request.branch)
       emit(
         io,
         options.json,
@@ -344,27 +342,27 @@ export async function coreQueueCommand(
 }
 
 /**
- * The queue's branch as this checkout has it: the remote-tracking ref the
- * declaration names, fetched by `declaration()` before any command runs here.
- * Absent is loud, because what base a check is judging against is a claim about
- * that commit. `yrd check` is the one caller: every command that reads the
- * queue takes the commit from that reading instead.
+ * The target as this checkout has it: the remote-tracking ref the declaration
+ * names, fetched by `declaration()` before any command runs here. Absent is
+ * loud, because what base a check is judging against is a claim about that
+ * commit. `yrd check` is the one caller: every command that reads the queue
+ * takes the target from that reading instead.
  */
-async function branchAt(git: Git, config: QueueConfig): Promise<string> {
-  const ref = `refs/remotes/${config.remote}/${config.branch}`
+async function targetAt(git: Git, config: QueueConfig): Promise<string> {
+  const ref = `refs/remotes/${config.remote}/${config.target}`
   const sha = await refAt(git, ref)
-  if (sha === undefined) throw new Error(`${config.branch} is not here: ${ref} is absent`)
+  if (sha === undefined) throw new Error(`${config.target} is not here: ${ref} is absent`)
   return sha
 }
 
 /**
- * The pin the service runs from: the gitlink at the queue's branch that carries
- * the very commit this yrd's code runs from, found once at start. Off — said
- * once, at info — when this yrd runs from no git checkout, or when the branch
- * pins no gitlink at its commit; then no round can see the pin move, and the
+ * The pin the service runs from: the gitlink at the target that carries the
+ * very commit this yrd's code runs from, found once at start. Off — said once,
+ * at info — when this yrd runs from no git checkout, or when the target pins
+ * no gitlink at its commit; then no round can see the pin move, and the
  * relaunch onto a new pin is a person's hand again.
  */
-async function pinOf(git: Git, branchRef: string, log: ConditionalLogger | undefined): Promise<Readonly<{ path: string; sha: string }> | undefined> {
+async function pinOf(git: Git, targetRef: string, log: ConditionalLogger | undefined): Promise<Readonly<{ path: string; sha: string }> | undefined> {
   let running: string
   try {
     running = (await gitIn(dirname(fileURLToPath(import.meta.url)))(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
@@ -372,9 +370,9 @@ async function pinOf(git: Git, branchRef: string, log: ConditionalLogger | undef
     log?.info?.("the pin exit is off: this yrd runs from no git checkout", { error: error instanceof Error ? error.message : String(error) })
     return undefined
   }
-  const pinned = gitlinks(await git(["ls-tree", "-r", "-z", branchRef])).find((row) => row.sha === running)
+  const pinned = gitlinks(await git(["ls-tree", "-r", "-z", targetRef])).find((row) => row.sha === running)
   if (pinned === undefined) {
-    log?.info?.(`the pin exit is off: the queue's branch pins no gitlink at this yrd's commit ${running.slice(0, 12)}`)
+    log?.info?.(`the pin exit is off: the target pins no gitlink at this yrd's commit ${running.slice(0, 12)}`)
     return undefined
   }
   return pinned
@@ -401,7 +399,6 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
   // reader of the log can tell the mechanic's rounds from the service's.
   const garage = readGarageDeclaration(repo)
   return {
-    branch: config.branch,
     checks: config.checks,
     configBlob: config.blob,
     env,
@@ -416,6 +413,7 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
     // A fresh worktree has submodules and no dependencies; `setup:` is what
     // finishes it, once per worktree, before any check runs in it.
     setup: config.setup,
+    target: config.target,
     workdir: config.workdir ?? workdir,
   }
 }
@@ -449,7 +447,7 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
   const where = [rest.branch, typeof rest.head === "string" ? rest.head.slice(0, 12) : undefined].filter(Boolean).join(" at ")
   switch (kind) {
     case "run":
-      return `queue run at ${rest.branch} ${String(rest.pin).slice(0, 12)}`
+      return `queue run at ${rest.target} ${String(rest.pin).slice(0, 12)}`
     case "change":
       return `${where}: ${String(rest.decision ?? rest.state)}`
     case "check":
@@ -468,10 +466,10 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `reaped the worktree ${String(rest.path)} of the run ${String(rest.of)}: ${String(rest.why)}`
     case "by-hand":
       return handMovedLine({
-        branch: String(rest.branch),
         commit: String(rest.commit),
         gitlinks: Array.isArray(rest.gitlinks) ? rest.gitlinks.map(String) : [],
         subject: String(rest.subject),
+        target: String(rest.branch),
       })
     default:
       return kind

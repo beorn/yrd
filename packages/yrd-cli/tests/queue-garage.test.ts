@@ -50,7 +50,7 @@ async function repository(): Promise<string> {
   await git(repo, "config", "user.name", "Yrd Garage")
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await installDeclaredYrdEntry(repo)
-  await writeFile(join(repo, ".yrd.yml"), 'remote: "origin"\nbranch: main\n')
+  await writeFile(join(repo, ".yrd.yml"), 'remote: "origin"\ntarget: main\n')
   await git(repo, "add", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "main")
   return repo

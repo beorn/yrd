@@ -30,33 +30,33 @@ export type EnvListOptions = Readonly<{ json?: boolean }>
 export type EnvRow = Readonly<{ name: string; path: string; branch?: string; head?: string }>
 
 /**
- * The repository a command stands in, and the branch its declaration names.
- * Absent declaration is loud: an environment is cut from the queue's branch,
- * and guessing `main` when the repository never said so is the silent default
+ * The repository a command stands in, and the target its declaration names.
+ * Absent declaration is loud: an environment is cut from the target, and
+ * guessing `main` when the repository never said so is the silent default
  * this whole design refuses.
  */
-function repositoryHere(io: YrdCliIO): Readonly<{ root: string; branch: string }> {
+function repositoryHere(io: YrdCliIO): Readonly<{ root: string; target: string }> {
   const here = declarationHere(io.cwd ?? process.cwd())
   if (here === undefined) {
-    throw new Error("yrd: no .yrd.yml here or above; an environment is cut from the branch that file declares")
+    throw new Error("yrd: no .yrd.yml here or above; an environment is cut from the target that file declares")
   }
-  return { branch: hintsIn(here.text).branch ?? "main", root: here.root }
+  return { root: here.root, target: hintsIn(here.text).target ?? "main" }
 }
 
 function baysRootOf(repo: string): string {
   return join(repo, ".bays")
 }
 
-/** The base a fresh environment is cut from: the queue's branch as this
- * checkout last fetched it, else the local branch of that name. Named, so a
- * refusal says which ref was missing rather than "could not resolve HEAD". */
-async function baseRef(process: Pick<Process, "run">, repo: string, branch: string): Promise<string> {
-  const tracking = `refs/remotes/origin/${branch}`
+/** The base a fresh environment is cut from: the target as this checkout last
+ * fetched it, else the local branch of that name. Named, so a refusal says
+ * which ref was missing rather than "could not resolve HEAD". */
+async function baseRef(process: Pick<Process, "run">, repo: string, target: string): Promise<string> {
+  const tracking = `refs/remotes/origin/${target}`
   const read = await process.run({
     argv: ["git", "rev-parse", "--verify", "--quiet", `${tracking}^{commit}`],
     cwd: repo,
   })
-  return read.exitCode === 0 && read.stdout.trim() !== "" ? tracking : branch
+  return read.exitCode === 0 && read.stdout.trim() !== "" ? tracking : target
 }
 
 /**
@@ -64,7 +64,7 @@ async function baseRef(process: Pick<Process, "run">, repo: string, branch: stri
  * path on stdout, which is what a caller `cd`s into.
  */
 export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const { root, branch: queueBranch } = repositoryHere(io)
+  const { root, target } = repositoryHere(io)
   const name = (options.bay ?? options.issue ?? `env-${Date.now().toString(36)}`).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
   const branch = `task/${name}`
@@ -74,7 +74,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     bay: name,
     name,
     branch,
-    base: await baseRef(process, root, queueBranch),
+    base: await baseRef(process, root, target),
     ...(options.issue === undefined ? {} : { issue: options.issue }),
   })
   if (provisioned.conclusion !== "success") {
@@ -84,7 +84,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   if (options.json === true) {
     io.stdout(`${JSON.stringify({ base: baseSha, branch, head: headSha, name, path })}\n`)
   } else {
-    io.stderr(`${name} on ${branch} at ${headSha.slice(0, 12)}, cut from ${queueBranch} ${baseSha.slice(0, 12)}\n`)
+    io.stderr(`${name} on ${branch} at ${headSha.slice(0, 12)}, cut from ${target} ${baseSha.slice(0, 12)}\n`)
     io.stdout(`${path}\n`)
   }
   return 0

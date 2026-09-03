@@ -85,7 +85,7 @@ function logRows(): Readonly<{
   return { log, rows }
 }
 
-const DECLARATION = "remote: origin\nbranch: main\n"
+const DECLARATION = "remote: origin\ntarget: main\n"
 
 async function identity(git: Git): Promise<void> {
   await git(["config", "user.email", "queue@yrd.test"])
@@ -121,10 +121,10 @@ async function world(): Promise<World> {
   return { git, work, workdir }
 }
 
-/** The queue branch's declaration replaced with `text` at the remote: a mechanic's edit, as the service sees it. */
+/** The target's declaration replaced with `text` at the remote: a mechanic's edit, as the service sees it. */
 async function redeclare(w: World, text: string): Promise<void> {
   writeFileSync(join(w.work, ".yrd.yml"), text)
-  await w.git(["commit", "--quiet", "-am", "the queue branch's declaration, edited"])
+  await w.git(["commit", "--quiet", "-am", "the target's declaration, edited"])
   await w.git(["push", "--quiet", "origin", "main"])
 }
 
@@ -193,7 +193,7 @@ async function submitPin(w: PinnedWorld, branch: string, sha: string): Promise<v
   await w.git(["add", "component"])
   await w.git(["commit", "--quiet", "-m", `pin the component at ${sha.slice(0, 12)}`])
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch: "main", changeBranch: branch, submitter: "@dev/2" })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
 }
 
 /** This checkout's own commit: what the service finds when nothing names the pin. */
@@ -204,7 +204,7 @@ async function thisCheckout(): Promise<string> {
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
-  it("reads the branch's declaration again every round: a key the mechanic's edit mistyped ends it stuck, naming the key", async () => {
+  it("reads the target's declaration again every round: a key the target's edit mistyped ends it stuck, naming the key", async () => {
     const w = await world()
     const run = capture(w.work)
     let rounds = 0
@@ -232,7 +232,7 @@ describe("yrd queue up, the service", () => {
     expect(written[1]).toEqual({ ...STUCK, why: expect.stringContaining("batch") as string })
   })
 
-  it("ends stuck when the branch's declaration no longer selects this core", async () => {
+  it("ends stuck when the target's declaration no longer selects this core", async () => {
     const w = await world()
     const run = capture(w.work)
     let rounds = 0
@@ -243,7 +243,7 @@ describe("yrd queue up, the service", () => {
       {
         afterRound: async () => {
           rounds += 1
-          if (rounds === 1) await redeclare(w, "branch: main\n")
+          if (rounds === 1) await redeclare(w, "target: main\n")
         },
         command: "up",
         intervalSeconds: 0,
@@ -253,7 +253,7 @@ describe("yrd queue up, the service", () => {
 
     expect(exit, run.stdout()).toBe(2)
     expect(rounds).toBe(1)
-    expect(records(run)[1]).toEqual({ ...STUCK, why: "the branch's declaration no longer selects this core" })
+    expect(records(run)[1]).toEqual({ ...STUCK, why: "the target's declaration no longer selects this core" })
   })
 
   it("ends the loop, exit 0, when the round it ran merged the change that moves its own pin", async () => {
@@ -280,7 +280,7 @@ describe("yrd queue up, the service", () => {
     expect((await w.git(["ls-tree", "origin/main", "--", "component"])).trim()).toBe(`160000 commit ${w.b}\tcomponent`)
   })
 
-  it("a signal ends it, exit 0; and with no pin named, it finds its own commit and says the queue's branch pins no gitlink at it", async () => {
+  it("a signal ends it, exit 0; and with no pin named, it finds its own commit and says the target pins no gitlink at it", async () => {
     const w = await world()
     const run = capture(w.work)
     const stop = new AbortController()
@@ -301,7 +301,7 @@ describe("yrd queue up, the service", () => {
     expect(rows.filter((row) => row.message.startsWith("the pin exit is off"))).toEqual([
       {
         level: "info",
-        message: `the pin exit is off: the queue's branch pins no gitlink at this yrd's commit ${commit.slice(0, 12)}`,
+        message: `the pin exit is off: the target pins no gitlink at this yrd's commit ${commit.slice(0, 12)}`,
       },
     ])
   })

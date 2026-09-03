@@ -5,8 +5,8 @@
  * second reader: both views are the queue read rendered, so they can never
  * disagree with a queue run or with each other. Every row is read off one
  * fact, the change's tip, whose trailers are the whole derived state — except
- * the row for a commit the queue did not put on its branch, which is read off
- * that branch itself (E5).
+ * the row for a commit the queue did not put on the target, which is read off
+ * the target itself (E5).
  */
 
 import { endedKind, trailer, trailers, type Fact } from "./facts.ts"
@@ -16,11 +16,11 @@ import type { QueueEntry, QueueRead } from "./remote.ts"
 import { inLine, tipOf, type ChangeState } from "./state.ts"
 
 export type Row = Readonly<{
-  /** The change's branch; for a `by hand` row, the queue's branch the hand commit moved. */
+  /** The change's branch; for a `by hand` row, the target the hand commit moved. */
   branch: string
   /** The change's head; for a `by hand` row, the hand commit itself. */
   head: string
-  /** A change's state, or `by hand` for a commit the queue did not put on its branch (E5). */
+  /** A change's state, or `by hand` for a commit on the target the queue did not put there (E5). */
   state: ChangeState | "by hand"
   /** 1-based place in line for queued, checked and stuck rows; absent otherwise. */
   position?: number
@@ -36,9 +36,9 @@ export type Row = Readonly<{
   since?: Date
   /** When the change's last fact was written: an ended change is as recent as its ending. A hand commit is as recent as its commit. */
   at?: Date
-  /** The merge commit on the queue's branch, full sha, from the merged fact's `Merge:` (carried by the sent fact too); absent until merged. */
+  /** The merge commit on the target, full sha, from the merged fact's `Merge:` (carried by the sent fact too); absent until merged. */
   merge?: string
-  /** The commit of the queue's branch the change was merged or judged at, full sha, from the fact's `Base:`. */
+  /** The target commit the change was merged or judged at, full sha, from the fact's `Base:`. */
   base?: string
 }>
 
@@ -46,15 +46,15 @@ export type ListOptions = Readonly<{
   now?: Date
   /** How far back the ended rows reach; the plan's default is seven days. */
   sinceMs?: number
-  /** The commits on the queue's branch it did not put there, each its own row (E5; `byHandCommits` reads them). */
+  /** The commits on the target the queue did not put there, each its own row (E5; `byHandCommits` reads them). */
   byHand?: readonly ByHandCommit[]
 }>
 
 /**
  * Every change in line with its position, then every ended change within
  * `sinceMs` (the plan's default is seven days), failed and merged included,
- * and among them every commit the queue's branch gained by hand, as recent as
- * it was committed.
+ * and among them every commit the target gained by hand, as recent as it was
+ * committed.
  */
 export function list(entries: QueueRead, options: ListOptions = {}): readonly Row[] {
   const now = options.now ?? new Date()
@@ -109,9 +109,9 @@ function row(entry: QueueEntry, position?: number): Row {
   }
 }
 
-/** A commit the queue's branch gained by hand: `<branch> moved by hand at <sha12> (<subject>)`, and the pins it moved. */
+/** A commit the target gained by hand: `<target> moved by hand at <sha12> (<subject>)`, and the pins it moved. */
 function byHandRow(commit: ByHandCommit): Row {
-  return { at: commit.at, branch: commit.branch, head: commit.commit, reason: handMovedLine(commit), state: "by hand" }
+  return { at: commit.at, branch: commit.target, head: commit.commit, reason: handMovedLine(commit), state: "by hand" }
 }
 
 function resultOf(kind: Fact["kind"], check: string | undefined): string {

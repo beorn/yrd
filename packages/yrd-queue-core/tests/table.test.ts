@@ -54,12 +54,12 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   await w.git(["commit", "--quiet", "-m", file])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch: "main", changeBranch: branch, submitter: "@dev/2", workItem: `@i/1/${file}` })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main", workItem: `@i/1/${file}` })
   return head
 }
 
-describe("the declaration is read from the commit of the branch the queue lands on", () => {
-  it("names the remote, the branch, the checks with their phases, and the notifier", async () => {
+describe("the declaration is read from the target commit", () => {
+  it("names the remote, the target, the checks with their phases, and the notifier", async () => {
     const w = await world(
       [
         "remote: origin",
@@ -75,7 +75,7 @@ describe("the declaration is read from the commit of the branch the queue lands 
       ].join("\n"),
     )
     const config = await readConfig(w.git, "main")
-    expect(config).toMatchObject({ branch: "main", notify: "bun tools/notify.ts", remote: "origin" })
+    expect(config).toMatchObject({ notify: "bun tools/notify.ts", remote: "origin", target: "main" })
     expect(config?.checks).toEqual([
       { environmentPassthrough: undefined, name: "typecheck", on: ["submit", "merge"], run: "bun run typecheck", timeoutMs: undefined },
       { environmentPassthrough: undefined, name: "tests", on: undefined, run: "bun run test", timeoutMs: 1_800_000 },
@@ -179,7 +179,7 @@ describe("the table is the queue read rendered", () => {
     await w.git(["commit", "--quiet", "-am", "again"])
     const second = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", { branch: "main", changeBranch: "task/one", submitter: "@dev/2" })
+    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: "main" })
 
     const shown = show((await readQueue(w.git, "origin", "main")).changes, "task/one")
     expect(shown.map((entry) => [entry.row.head, entry.row.state, entry.row.reason])).toEqual([

@@ -19,7 +19,7 @@
  *   never a parent;
  * - the message is a prose first line, then trailers, one meaning each, with
  *   `Fact:` naming the kind, `Change:` naming the change the fact is about and
- *   `Branch:` the queue's branch, both on every fact,
+ *   `Target:` naming the branch it lands on, both on every fact,
  *   `Opened:`, `Submitter:` and `Work-Item:` carried forward from the first
  *   fact, a sent fact naming who it went to (`To:`) and how it went
  *   (`Delivery: sent`, `logged` or `failed`), and an ended fact's result
@@ -64,10 +64,9 @@ const ABSENT = "0".repeat(40)
 const GENESIS_OBJECT = `tree ${EMPTY_TREE}\nauthor yrd <yrd@yrd> 0 +0000\ncommitter yrd <yrd@yrd> 0 +0000\n\nyrd: genesis\n`
 
 export type WriteFact = Readonly<{
-  /** The change the fact is about: a branch at a head, written as one `Change:` trailer. */
+  /** The change the fact is about: a branch at a head, written as the one `Change:` trailer. */
   change: Change
-  /** The queue's branch — the one this change is to land on. */
-  branch: string
+  target: string
   kind: FactKind
   subject: string
   trailers?: readonly (readonly [string, string])[]
@@ -167,7 +166,8 @@ export async function readFacts(git: Git, change: Change): Promise<readonly Fact
     // The first-parent walk ends at the genesis, which carries no `Fact:`
     // trailer. That is where this change's history ends.
     if (parsed === undefined) break
-    // The tip is the first fact read, so the format check happens once, here.
+    // The tip is the first fact this reads, so the one check that these facts
+    // are in the format this code understands happens once, here.
     if (facts.length === 0) changeOf(parsed, ref)
     facts.push(parsed)
   }
@@ -176,7 +176,7 @@ export async function readFacts(git: Git, change: Change): Promise<readonly Fact
 
 /** The message one fact commit carries. */
 export function factMessage(write: WriteFact): string {
-  const lines = [write.subject, "", `Fact: ${write.kind}`, `Change: ${changeName(write.change)}`, `Branch: ${write.branch}`]
+  const lines = [write.subject, "", `Fact: ${write.kind}`, `Change: ${changeName(write.change)}`, `Target: ${write.target}`]
   for (const [name, value] of write.trailers ?? []) {
     if (value.includes("\n")) throw new Error(`trailer ${name} carries a newline; one trailer is one line`)
     lines.push(`${name}: ${value}`)
@@ -191,14 +191,15 @@ export function trailer(fact: Fact, name: string): string | undefined {
 
 /**
  * The change a fact is about, from its `Change:` trailer — `<branch>@<head>`,
- * the one spelling of a change's name (refs.ts). `where` names the ref, so the
- * refusal below says which change is unreadable.
+ * the one spelling of a change's name (refs.ts), which `parseChangeName` reads
+ * back into a branch and a head. `where` names the ref, so the refusal below
+ * says which change is unreadable.
  *
  * Loud when the fact carries none. Facts written before 2026-09-03 spelled the
- * change as a `Branch:` and `Head:` pair with the queue's own branch on
- * `Target:`, and no reader here understands that shape: reading one would mean
- * two spellings of a change's name in the store, which is the thing the name
- * exists to prevent. There is no compatibility reader on purpose.
+ * change as a `Branch:` and `Head:` pair, and no reader here understands that
+ * shape: reading it would mean two spellings of a change's name in the one
+ * store, which is what the name exists to prevent. There is no compatibility
+ * reader on purpose.
  */
 export function changeOf(fact: Fact, where: string): string {
   const change = trailer(fact, "Change")

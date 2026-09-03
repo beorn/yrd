@@ -8,17 +8,17 @@
  * - `queued` — an opened fact and no checked fact after it;
  * - `checked` — a checked fact and no ended fact after it;
  * - `stuck` — the last fact ended with stuck; the change stays open;
- * - `merged` — the head is an ancestor of the queue's branch;
+ * - `merged` — the head is an ancestor of the target;
  * - `failed` — the last fact ended with failed, or the branch no longer carries
  *   this head (`replaced`), or the branch is gone (`deleted`).
  *
- * **Ancestry wins over any fact.** A change whose head is on the queue's branch
- * reads merged even when no merged fact was ever written — a hand merge in the
- * garage still shows as merged, and a queue run never re-checks content the
- * branch already carries. Measured 2026-09-02: a run merged a head under one
- * branch name, then checked a second name at the identical head against the main
- * it had just moved, failed it on a check, and billed the submitter for content
- * it had itself just landed. Reading ancestry first is what makes that impossible.
+ * **Ancestry wins over any fact.** A change whose head is on the target reads
+ * merged even when no merged fact was ever written — a hand merge in the garage
+ * still shows as merged, and a queue run never re-checks content the target
+ * already carries. Measured 2026-09-02: a run merged a head under one branch
+ * name, then checked a second name at the identical head against the main it
+ * had just moved, failed it on a check, and billed the submitter for content it
+ * had itself just landed. Reading ancestry first is what makes that impossible.
  */
 
 import type { Fact } from "./facts.ts"
@@ -33,12 +33,9 @@ export type ChangeReading = Readonly<{
   reason?: string
 }>
 
-/** A change — a branch at a head (refs.ts) — with everything a reading of it needs. */
 export type ChangeFacts = Readonly<{
-  /** The change's own branch. Never the queue's: that one is `QueueRunOptions.branch`. */
+  /** The change's own branch. Never the target: that one is `QueueRunOptions.target`. */
   branch: string
-  /** The head this change is about. */
-  head: string
   /**
    * The change's facts, oldest first, or only its tip: every reading here uses
    * the last one, whose trailers are the whole derived state. Never empty, and
@@ -47,10 +44,12 @@ export type ChangeFacts = Readonly<{
    * for a case no constructor can build.
    */
   facts: readonly [Fact, ...Fact[]]
-  /** Whether the head is an ancestor of the queue's branch, read from git. */
-  headOnBranch: boolean
-  /** Where the change's own branch points now, or undefined when it is gone. */
+  /** Whether the head is an ancestor of the target, read from git. */
+  headOnTarget: boolean
+  /** Where the branch points now, or undefined when the branch is gone. */
   branchHead?: string
+  /** The head this change is about. */
+  head: string
 }>
 
 /**
@@ -68,7 +67,7 @@ export function tipOf(change: ChangeFacts): Fact {
 /** Read one change's state. Pure: every input is a fact or a git reading. */
 export function readChange(change: ChangeFacts): ChangeReading {
   // Ancestry first, and before anything the facts say.
-  if (change.headOnBranch) return { state: "merged" }
+  if (change.headOnTarget) return { state: "merged" }
 
   // The submitter's own doing, and neither carries a message.
   if (change.branchHead === undefined) return { state: "failed", reason: "deleted" }

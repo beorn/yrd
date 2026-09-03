@@ -132,7 +132,6 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     notifyLog,
     setupCommand: (exit) => `${setupScript} ${String(exit)}`,
     options: (check) => ({
-      branch: "main",
       checks: [
         {
           environmentPassthrough: ["FAKE_EXIT", "FAKE_SLEEP", "FAKE_EVERYWHERE"],
@@ -153,6 +152,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
       remote: "origin",
       repo: work,
       ...(check.setup === undefined ? {} : { setup: check.setup }),
+      target: "main",
       workdir,
     }),
     remote,
@@ -169,7 +169,7 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   await w.git(["commit", "--quiet", "-m", file])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch: "main", changeBranch: branch, submitter: "@dev/2", workItem: "@i/10-yrd/1" })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main", workItem: "@i/10-yrd/1" })
   return head
 }
 
@@ -235,10 +235,10 @@ async function trailerOn(w: World, commit: string, key: string): Promise<string>
  */
 async function plantTargetChange(w: World, head: string): Promise<void> {
   await appendFact(w.git, {
-    branch: "main",
     change: { branch: "main", head },
     kind: "opened",
     subject: "unknown submitted main to main",
+    target: "main",
     trailers: [["Submitter", "unknown"]],
   })
   const ref = changeRef({ branch: "main", head })
@@ -433,10 +433,10 @@ describe("a queue run", () => {
       if (concurrent === undefined && args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))) {
         await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
         concurrent = await appendFact(rival, {
-          branch: "main",
           change: { branch: "task/one", head },
           kind: "stuck",
           subject: "another queue got there first",
+          target: "main",
           trailers: [["Reason", "crash"]],
         })
         await rival(["push", "--quiet", "origin", `${concurrent}:${ref}`])
@@ -624,7 +624,7 @@ describe("a queue run", () => {
     expect((await readFacts(w.git, { branch: "task/one", head })).map((fact) => fact.kind)).toEqual(["opened", "checked"])
     expect(messages(w)).toEqual([])
     expect(records(outcome)).toContainEqual(
-      expect.objectContaining({ decision: "checked", reason: "branch-moved", saw: moved }),
+      expect.objectContaining({ decision: "checked", reason: "target-moved", saw: moved }),
     )
   })
 
@@ -696,10 +696,10 @@ describe("a queue run", () => {
         advance = false
         await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
         concurrent = await appendFact(rival, {
-          branch: "main",
           change: { branch: "task/one", head },
           kind: "merged",
           subject: `another queue observed the hand merge at ${landing.slice(0, 12)}`,
+          target: "main",
           trailers: [
             ["Merge", landing],
             ["Base", w.target],
@@ -789,8 +789,8 @@ describe("a queue run", () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
     // The one path in refuses it now; the ref is planted the way the remote holds it.
-    await expect(submit(w.git, "origin", { branch: "main", changeBranch: "main", submitter: "unknown" })).rejects.toThrow(
-      "main is the queue's branch, not a change",
+    await expect(submit(w.git, "origin", { branch: "main", submitter: "unknown", target: "main" })).rejects.toThrow(
+      "main is the target, not a change",
     )
     await plantTargetChange(w, w.target)
 
@@ -863,7 +863,7 @@ describe("a queue run", () => {
     )
   })
 
-  it("a commit pushed to the branch by hand is reported once to the owner's role, and the queue goes on from the new base (E5)", async () => {
+  it("a commit pushed to the target by hand is reported once to the owner's role, and the queue goes on from the new base (E5)", async () => {
     const w = await world()
     const hand = await pushByHand(w, "hand.txt")
     const head = await submitCommit(w, "task/one", "one.txt")
@@ -926,7 +926,7 @@ describe("a queue run", () => {
     const w = await world({ declaredLater: true })
     const declaration = (await w.git(["rev-parse", "origin/main"])).trim()
     const plain = await pushByHand(w, "hand.txt")
-    const edited = await editDeclarationByHand(w, "remote: origin\nbranch: main\n")
+    const edited = await editDeclarationByHand(w, "remote: origin\ntarget: main\n")
 
     const outcome = await queueRun(w.options({ exit: 0 }))
 
@@ -1162,7 +1162,7 @@ describe("a failing check bills the submitter at once", () => {
     await w.git(["add", "two.txt"])
     await w.git(["commit", "--quiet", "-m", "two"])
     await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", { branch: "main", changeBranch: "task/one", submitter: "@dev/2", workItem: "@i/10-yrd/1" })
+    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: "main", workItem: "@i/10-yrd/1" })
 
     expect((await queueRun(w.options({ exit: 1, on: ["submit"] }))).failed).toEqual(["task/one"])
 

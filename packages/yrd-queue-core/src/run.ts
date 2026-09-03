@@ -2,15 +2,14 @@
  * One queue run ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design,
  * The queue run and Attribution).
  *
- * Read the checks from the queue's branch. For every queued change, oldest
- * first: a fresh worktree of the head and the on-submit checks; pass writes
- * checked, fail writes failed and tells the submitter, stuck writes stuck and
- * stops the run. Then the first checked change in line: the queue's branch plus
- * its head in a worktree (a conflict is a fail, the submitter's), the on-merge
- * checks; pass with the branch still at the checked base and the change's own
- * branch still at the head fast-forwards the queue's branch to the merge
- * commit. Every ended change sends one message, after its ended fact is
- * written, with that fact's sha as the id.
+ * Read the checks from the target. For every queued change, oldest first: a
+ * fresh worktree of the head and the on-submit checks; pass writes checked,
+ * fail writes failed and tells the submitter, stuck writes stuck and stops the
+ * run. Then the first checked change in line: the target plus its head in a
+ * worktree (a conflict is a fail, the submitter's), the on-merge checks; pass
+ * with the target still at the checked base and the branch still at the head
+ * fast-forwards the target to the merge commit. Every ended change sends one
+ * message, after its ended fact is written, with that fact's sha as the id.
  *
  * A failing check sends the change back at once, with the check, its exit, its
  * duration and its log path. Stuck is what the queue could not judge at all —
@@ -19,7 +18,7 @@
  * — and nothing else.
  *
  * Every worktree this run makes is prepared before anything is judged in it:
- * the branch's `setup:`, once, after materialization and before the first
+ * the target's `setup:`, once, after materialization and before the first
  * check (worktree.ts). A setup that does not pass is the queue's own ground
  * failing, so the change ends stuck with `Reason: setup` and nobody is billed.
  *
@@ -28,9 +27,9 @@
  * the one writer of an opened fact; a run only ever appends to a change that
  * exists.
  *
- * Only the queue pushes its branch, by rule, and every run proves it before
- * it judges anything: each commit on that branch's first-parent line since the
- * queue's own history starts that the queue did not put there is reported
+ * Only the queue pushes the target, by rule, and every run proves it before
+ * it judges anything: each commit on the target's first-parent line since the
+ * cutover that the queue did not put there is reported to the queue owner,
  * once, and the run goes on from the new base (E5; the reading is by-hand.ts).
  *
  * Exit 0 when nothing ended failed or stuck, 1 when a change ended failed,
@@ -58,6 +57,7 @@ import {
   readFacts,
   trailer,
   trailers,
+  type Fact,
   type Git,
   type WriteFact,
 } from "./facts.ts"
@@ -84,11 +84,11 @@ export type QueueRunOptions = Readonly<{
   repo: string
   /** The queue's remote, where branches and changes live. */
   remote: string
-  /** The branch the queue lands on — the queue's own, never a change's. */
-  branch: string
-  /** The checks the branch declares, read from its commit by the caller. A check with no `on` runs at merge. */
+  /** The branch the queue lands on. */
+  target: string
+  /** The checks the target declares, read from the target commit by the caller. A check with no `on` runs at merge. */
   checks: readonly CheckSpec[]
-  /** The branch's `setup:`: one shell command run in every worktree this run makes, before any check runs in it. */
+  /** The target's `setup:`: one shell command run in every worktree this run makes, before any check runs in it. */
   setup?: string
   /** The blob the checks were read from, recorded on every checked fact. */
   configBlob: string
@@ -111,17 +111,17 @@ export type QueueRunOutcome = Readonly<{
   exitCode: 0 | 1 | 2
   log: string
   run: string
-  /** The commit of the queue's branch every judgement was made against, and the config blob the checks came from. */
+  /** The target's commit every judgement was made against, and the config blob the checks came from. */
   base: string
   config: string
-  /** Where the queue's branch stands after the run. */
-  branchSha: string
+  /** The target after the run. */
+  target: string
   /** The garage's reason, when the round was made in the garage. */
   garage?: string
   merged: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
-  /** The commits on the branch's first-parent line that the queue did not put there, reported this run (E5). */
+  /** The commits on the target's first-parent line that the queue did not put there, reported this run (E5). */
   byHand: readonly string[]
 }>
 
@@ -133,8 +133,8 @@ type Run = Readonly<{
   /** The temp root every program this run starts gets as `TMPDIR`: `<workdir>/tmp`. */
   tmpdir: string
   worktrees: string
-  /** The queue's branch as the run read it at its start; every judgement is against that commit. */
-  branchSha: string
+  /** The target the run read at its start; every judgement is against it. */
+  targetSha: string
   /** The queue as this run read it: every change at the remote, and where each stood. */
   queue: QueueRead
   /**
@@ -150,19 +150,19 @@ type Ended = "checked" | "failed" | "stuck" | "merged"
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   const git = options.git ?? gitIn(options.repo, options.process)
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
-  // One reading of the remote yields both the queue and the commit its branch
+  // One reading of the remote yields both the queue and the commit the target
   // stood at when it was read, so the run never asks a second time and can
-  // never judge against a commit its own queue read did not see.
-  const queue = await readQueue(git, options.remote, options.branch)
-  const branchSha = queue.branchSha
+  // never judge against a target its own queue read did not see.
+  const queue = await readQueue(git, options.remote, options.target)
+  const targetSha = queue.target
   const run: Run = {
-    branchSha,
     git,
     log,
     onMain: new Set(),
     options,
     queue: queue.changes,
     tmpdir: join(options.workdir, "tmp"),
+    targetSha,
     worktrees: join(options.workdir, "worktrees", log.id),
   }
   mkdirSync(run.worktrees, { recursive: true })
@@ -174,18 +174,18 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const stuck: string[] = []
 
   const entries = queue.changes
-  // The run row: the pin (the branch's commit) and the config blob the checks
+  // The run row: the pin (the target's commit) and the config blob the checks
   // were read from. Each change CONSIDERED writes its own row with its decision
   // when the run has made one; a change that ended in an earlier run is history,
   // and this run claims nothing about it.
   log.write({
-    base: branchSha,
-    branch: options.branch,
+    base: targetSha,
     checks: options.checks.map((check) => check.name),
     config: options.configBlob,
     ...(options.garage === undefined ? {} : { garage: options.garage }),
     kind: "run",
-    pin: branchSha,
+    pin: targetSha,
+    target: options.target,
   })
 
   // The worktrees of runs that are no longer alive, taken down before this run
@@ -198,7 +198,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     log.write({ kind: "reap", of: taken.of, path: taken.path, why: taken.why })
   }
 
-  // The branch moved by hand? Read before any fact is written, so a hand merge
+  // The target moved by hand? Read before any fact is written, so a hand merge
   // of a submitted head is reported before the catch-up below accounts for it
   // (E5). Nothing stops for it: the run judges every change on the base it read.
   const byHand = await reportByHand(run, entries)
@@ -206,7 +206,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // Bookkeeping at the edges of the facts first, so every reader below reads
   // facts and never reconciles: a branch that is gone or moved off a head ends
   // that head's change failed with the reason and no message (ruling B3); a
-  // head the queue's branch already carries gets its merged fact, so the tip catches
+  // head the target already carries gets its merged fact, so the tip catches
   // up with ancestry; an ended change whose message reached nobody is sent
   // again (at-least-once, § The queue run).
   for (const entry of entries) await retire(run, entry)
@@ -216,7 +216,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // On-submit: every queued change, oldest first, in a fresh worktree of its
   // head. A stuck change kept its place, and this run takes it again from
   // here; so does a checked change whose checks ran under a check config the
-  // branch no longer declares (§ The queue run: a checked fact is reused only
+  // target no longer declares (§ The queue run: a checked fact is reused only
   // while the config blob is the one it names).
   for (const entry of ordered(entries, "queued", "stuck", "checked").filter(
     (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
@@ -231,7 +231,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
   // On-merge: the first checked change in line, re-read so this run's own
   // checked facts count.
-  const checked = ordered((await readQueue(git, options.remote, options.branch)).changes, "checked").find(
+  const checked = ordered((await readQueue(git, options.remote, options.target)).changes, "checked").find(
     (entry) => !staleChecked(run, entry),
   )
   if (checked !== undefined) {
@@ -244,7 +244,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   return finish(run, stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0, { byHand, failed, merged, stuck })
 }
 
-/** A checked change whose checked fact names a config blob the queue's branch no longer declares. */
+/** A checked change whose checked fact names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
   const tip = tipOf(entry.change)
   return tip.kind === "checked" && trailer(tip, "Config") !== run.options.configBlob
@@ -262,22 +262,22 @@ function ordered(entries: QueueRead, ...states: readonly ("queued" | "checked" |
 }
 
 /**
- * Every commit on the queue's branch's first-parent line since the queue's own
- * history starts that the queue did not put there, each reported once: a log
- * record with the commit, its parents, its subject and the pins it moved, and
- * one message for the owner's role with the commit sha as its id, so a resend
- * after a crash is the same message (E5). No fact is written, because there is
- * no change to write one on; what the queue has already accounted for is read
- * from git (by-hand.ts), so a second run says nothing new once the queue has
- * landed on top. The run never stops for it: the queue adapts already, judging
- * every change on the base it read.
+ * Every commit on the target's first-parent line since the cutover that the
+ * queue did not put there, each reported once: a log record with the commit,
+ * its parents, its subject and the pins it moved, and one message to the
+ * the owner's role with the commit sha as its id, so a resend after a crash is
+ * the same message (E5). No fact is written, because there is no change to
+ * write one on; what the queue has already accounted for is read from git
+ * (by-hand.ts), so a second run says nothing new once the queue has landed
+ * on top. The run never stops for it: the queue adapts already, judging every
+ * change on the base it read.
  */
 async function reportByHand(run: Run, entries: QueueRead): Promise<readonly string[]> {
-  const found = await byHandCommits(run.git, run.options.branch, run.branchSha, entries)
-  const branch = run.options.branch
+  const found = await byHandCommits(run.git, run.options.target, run.targetSha, entries)
+  const target = run.options.target
   for (const commit of found) {
     run.log.write({
-      branch,
+      branch: target,
       commit: commit.commit,
       gitlinks: commit.gitlinks,
       kind: "by-hand",
@@ -288,18 +288,18 @@ async function reportByHand(run: Run, entries: QueueRead): Promise<readonly stri
     const text = `${handMovedLine(commit)}: ${commit.why}. The queue goes on from the new base; a rollback is a git revert, pushed through the queue.`
     const { delivery, failure } = await deliver(run, {
       attempt_id: commit.commit,
-      base: branch,
-      branch,
+      base: target,
+      branch: target,
       code: "by-hand",
       command: text,
       kind: "yrd-broken",
-      pr: branch,
+      pr: target,
       sha: commit.commit,
       to: OWNER,
     })
     run.log.write({
-      about: branch,
-      branch,
+      about: target,
+      branch: target,
       delivered: delivery !== "failed",
       ...(failure === undefined ? {} : { error: failure }),
       head: commit.commit,
@@ -341,7 +341,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
 }
 
 /**
- * A fresh worktree of `commit`, with the branch's `setup:` run in it before
+ * A fresh worktree of `commit`, with the target's `setup:` run in it before
  * anything judges it (§ The queue run). The setup's log and temp root are the
  * phase's own, so one worktree's records sit together, and its result is
  * recorded in the check's shape: what ran, then how it ended, billed to the
@@ -365,22 +365,22 @@ async function prepare(
       ? {}
       : { setup: { logDir, run: run.options.setup, tmpdir: run.tmpdir } }),
     starting: ({ log, start }) => started(run, { ...about, log, start }),
-    branchSha: run.branchSha,
+    targetSha: run.targetSha,
   })
 }
 
 /** The on-submit phase for one queued change. */
 async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
   const { change } = entry
-  const head = change.head
-  // The built-in check: the head shares ancestry with the queue's branch, which
+  const { branch, head } = change
+  // The built-in check: the head shares ancestry with the target. The target
   // moves under every queued change by design, so "descends from the tip" would
   // fail every change behind a merge; an unrelated history is what a merge
   // must never splice in.
-  if ((await mergeBase(run.git, head, run.branchSha)) === undefined) {
+  if ((await mergeBase(run.git, head, run.targetSha)) === undefined) {
     return end(run, entry, "failed", {
-      remedy: `rebase ${change.branch} onto ${run.options.branch} and submit again`,
-      subject: `${change.branch} shares no history with ${run.options.branch}`,
+      remedy: `rebase ${branch} onto ${run.options.target} and submit again`,
+      subject: `${branch} shares no history with ${run.options.target}`,
       trailers: [["Reason", "unrelated-history"]],
     })
   }
@@ -392,7 +392,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     if (offMain !== undefined) {
       return await end(run, entry, "failed", {
         remedy: `land ${offMain.path}'s commit on its main first, pin that, and submit again`,
-        subject: `${change.branch} pins ${offMain.path} at ${offMain.sha.slice(0, 12)}, which its main does not carry`,
+        subject: `${branch} pins ${offMain.path} at ${offMain.sha.slice(0, 12)}, which its main does not carry`,
         trailers: [
           ["Reason", "gitlink-off-main"],
           ["Gitlink", `${offMain.path} ${offMain.sha}`],
@@ -403,18 +403,18 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
       return await end(run, entry, "stuck", {
-        subject: `the queue could not judge ${change.branch}: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
+        subject: `the queue could not judge ${branch}: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
         trailers: [["Reason", stuckOne.name], ...checkTrailers(results)],
       })
     }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) return await endFailing(run, entry, results, failing, "submit")
     await writeFact(run, {
-      branch: run.options.branch,
       change,
       kind: "checked",
-      subject: `${change.branch} passed the on-submit checks at ${run.options.branch} ${run.branchSha.slice(0, 12)}`,
-      trailers: [["Config", run.options.configBlob], ["Base", run.branchSha], ...checkTrailers(results)],
+      subject: `${branch} passed the on-submit checks at ${run.options.target} ${run.targetSha.slice(0, 12)}`,
+      target: run.options.target,
+      trailers: [["Config", run.options.configBlob], ["Base", run.targetSha], ...checkTrailers(results)],
     })
     return "checked"
   } finally {
@@ -425,9 +425,9 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
 /**
  * The first gitlink the change moved that its component's `main` does not
  * carry, or undefined when every moved pin is on its main (E4, amending D7).
- * Only a gitlink whose sha differs from the queue's branch is asked about —
- * added or moved by the change; a pin the branch already carries is the
- * branch's, judged when it landed — and each component is asked at its own remote, so
+ * Only a gitlink whose sha differs from the target's is asked about — added
+ * or moved by the change; a pin the target already carries is the target's,
+ * judged when it landed — and each component is asked at its own remote, so
  * the answer is about main as it is now, never a stale tracking ref. A
  * positive answer is kept on the run: a commit on main stays on main, so the
  * same pin is fetched at most once per run however many changes move it. A
@@ -454,12 +454,12 @@ async function gitlinkOffMain(
 }
 
 /**
- * The gitlinks `head` carries at a sha the queue's branch does not, in tree order:
+ * The gitlinks `head` carries at a sha the target does not, in tree order:
  * one diff of the two trees, keeping every entry whose new mode is a gitlink.
  * A gitlink the change took out, or turned into a file, has no pin to judge.
  */
 async function movedGitlinks(run: Run, head: string): Promise<readonly Readonly<{ path: string; sha: string }>[]> {
-  return (await gitlinkRows(run.git, run.branchSha, head))
+  return (await gitlinkRows(run.git, run.targetSha, head))
     .filter((row) => row.newMode === "160000")
     .map(({ path, sha }) => ({ path, sha }))
 }
@@ -467,9 +467,9 @@ async function movedGitlinks(run: Run, head: string): Promise<readonly Readonly<
 /** The on-merge phase for the first checked change. */
 async function land(run: Run, entry: QueueEntry): Promise<Ended> {
   const { change } = entry
-  const head = change.head
+  const { branch, head } = change
   const name = changeName(change)
-  const worktree = await prepare(run, entry, run.branchSha, join(run.worktrees, "merge", head.slice(0, 12)), "merge")
+  const worktree = await prepare(run, entry, run.targetSha, join(run.worktrees, "merge", head.slice(0, 12)), "merge")
   try {
     const wt = gitIn(worktree.path, run.options.process)
     let mergeCommit: string
@@ -483,7 +483,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       const workItem = trailer(tip, "Work-Item")
       const submitter = trailer(tip, "Submitter")
       const message = [
-        `merge ${short(change.branch, head)} into ${run.options.branch}`,
+        `merge ${short(branch, head)} into ${run.options.target}`,
         "",
         `Change: ${name}`,
         ...(workItem === undefined ? [] : [`Work-Item: ${workItem}`]),
@@ -492,14 +492,14 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       await wt(["merge", "--quiet", "--no-ff", "--no-edit", "-m", message, head])
       mergeCommit = (await wt(["rev-parse", "HEAD"])).trim()
     } catch (error) {
-      // A conflict is the submitter's: the change does not fit the branch. The
+      // A conflict is the submitter's: the branch does not fit the target. The
       // worktree is thrown away whole, so nothing needs aborting. What git
       // said is the detail, on one line: a trailer is one line, and the merge
       // command's own message spans several.
       const said = error instanceof GitExit ? error.detail : error instanceof Error ? error.message : String(error)
       return await end(run, entry, "failed", {
-        remedy: `rebase ${change.branch} onto ${run.options.branch}, resolve the conflict, push, and submit again`,
-        subject: `${change.branch} conflicts with ${run.options.branch}`,
+        remedy: `rebase ${branch} onto ${run.options.target}, resolve the conflict, push, and submit again`,
+        subject: `${branch} conflicts with ${run.options.target}`,
         trailers: [
           ["Reason", "conflict"],
           ["Detail", said.replace(/\s+/gu, " ").trim().slice(0, 200)],
@@ -516,37 +516,36 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     if (unreadable !== undefined) {
       return await end(run, entry, "failed", {
-        remedy: `fix .yrd.yml on ${change.branch} (${unreadable}), push, and submit again`,
-        subject: `${change.branch} would land a declaration the queue cannot read`,
+        remedy: `fix .yrd.yml on ${branch} (${unreadable}), push, and submit again`,
+        subject: `${branch} would land a declaration the queue cannot read`,
         trailers: [["Reason", "config-invalid"]],
       })
     }
     // The merge moved this worktree's HEAD, so what a check judges here is
     // read now and not at prepare time: the candidate is the merge commit,
-    // and its merge base with the queue's branch is that branch itself.
-    const merged = await checkedTree(worktree.path, run.branchSha, run.options.process)
+    // and its merge base with the target is the target itself.
+    const merged = await checkedTree(worktree.path, run.targetSha, run.options.process)
     const results = await runPhase(run, entry, "merge", worktree.path, merged)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
       return await end(run, entry, "stuck", {
-        subject: `the queue could not judge ${change.branch} at merge: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
+        subject: `the queue could not judge ${branch} at merge: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
         trailers: [["Reason", stuckOne.name], ...checkTrailers(results)],
       })
     }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) return await endFailing(run, entry, results, failing, "merge")
-    // Pass. The merge is ours to make only while the queue's branch is still
-    // where this change was checked against and the change's own branch still at
-    // the head; otherwise the change keeps its place and is checked again at the
-    // new commit next run.
-    const remoteNow = await remoteHeads(run, change.branch)
-    if (remoteNow.branch !== run.branchSha || remoteNow.changeBranch !== head) {
+    // Pass. The merge is ours to make only while the target is still where this
+    // change was checked against and the branch still at the head; otherwise the
+    // change keeps its place and is checked again at the new target next run.
+    const remoteNow = await remoteHeads(run, branch)
+    if (remoteNow.target !== run.targetSha || remoteNow.branch !== head) {
       run.log.write({
-        branch: change.branch,
+        branch,
         decision: "checked",
         head,
         kind: "change",
-        reason: remoteNow.branch !== run.branchSha ? "branch-moved" : "head-moved",
+        reason: remoteNow.target !== run.targetSha ? "target-moved" : "branch-moved",
       })
       return "checked"
     }
@@ -554,11 +553,11 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     // The merged fact says how it was merged and what it checked: by the queue,
     // with the on-merge checks' results, in the shape the checked fact uses.
     const mergedFact = await appendFact(run.git, {
-      branch: run.options.branch,
       change,
       kind: "merged",
-      subject: `${change.branch} merged into ${run.options.branch} as ${mergeCommit.slice(0, 12)}`,
-      trailers: [["Merge", mergeCommit], ["Base", run.branchSha], ["Merged-By", "queue"], ...checkTrailers(results)],
+      subject: `${branch} merged into ${run.options.target} as ${mergeCommit.slice(0, 12)}`,
+      target: run.options.target,
+      trailers: [["Merge", mergeCommit], ["Base", run.targetSha], ["Merged-By", "queue"], ...checkTrailers(results)],
     })
     const ref = changeRef(change)
     try {
@@ -566,39 +565,38 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         "push",
         "--quiet",
         "--atomic",
-        `--force-with-lease=refs/heads/${run.options.branch}:${run.branchSha}`,
+        `--force-with-lease=refs/heads/${run.options.target}:${run.targetSha}`,
         run.options.remote,
-        `${mergeCommit}:refs/heads/${run.options.branch}`,
+        `${mergeCommit}:refs/heads/${run.options.target}`,
         `${mergedFact}:${ref}`,
       ])
     } catch (error) {
-      // The reading just above and this lease are two moments, and the queue's
-      // branch can move between them: the lease then refuses the push and
-      // nothing lands. That is ruling D4 — a branch that moved under a checked
-      // change keeps that change's place and judges it again at the new commit
-      // next run — not a queue that could not do its job, so it must not end the
-      // change stuck. The remote decides which it was; git's rejection prose
-      // does not.
-      const moved = await remoteHeads(run, change.branch)
-      if (moved.branch === run.branchSha && moved.changeBranch === head) throw error
+      // The reading just above and this lease are two moments, and the target
+      // can move between them: the lease then refuses the push and nothing
+      // lands. That is ruling D4 — a target that moved under a checked change
+      // keeps its place and is judged again at the new target next run — not a
+      // queue that could not do its job, so it must not end the change stuck.
+      // The remote decides which it was; git's rejection prose does not.
+      const moved = await remoteHeads(run, branch)
+      if (moved.target === run.targetSha && moved.branch === head) throw error
       run.log.write({
-        branch: change.branch,
+        branch,
         decision: "checked",
         head,
         kind: "change",
-        reason: moved.branch !== run.branchSha ? "branch-moved" : "head-moved",
-        saw: moved.branch ?? "gone",
+        reason: moved.target !== run.targetSha ? "target-moved" : "branch-moved",
+        saw: moved.target ?? "gone",
       })
       return "checked"
     }
-    run.log.write({ branch: change.branch, change: name, commit: mergeCommit, head, kind: "merge", tip: mergeCommit })
-    run.log.write({ branch: change.branch, decision: "merged", head, kind: "change" })
+    run.log.write({ branch, change: name, commit: mergeCommit, head, kind: "merge", tip: mergeCommit })
+    run.log.write({ branch, decision: "merged", head, kind: "change" })
     await send(
       run,
       entry,
       mergedFact,
       "merged",
-      messageFor("merged", { branch: change.branch, head, merge: mergeCommit, subject: "" }),
+      messageFor("merged", { branch, head, merge: mergeCommit, subject: "" }),
     )
     return "merged"
   } finally {
@@ -611,12 +609,12 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
  * check, its exit, its duration and its log path.
  *
  * It used to run the same check again in the change's worktree and once more
- * on the queue's branch before billing anybody, so that a coin flip or a red
- * branch ended the change stuck instead. Measured over 257 check runs since flag
- * day, that reading changed no verdict at all: all 7 second runs failed again
- * and all 14 branch runs passed. What it cost was two extra check runs and a
- * whole worktree of the branch for every failure, on the queue's critical path
- * (operator ruling 2026-09-03). A flake is the author's to retry; the branch is
+ * at the target before billing anybody, so that a coin flip or a red target
+ * ended the change stuck instead. Measured over 257 check runs since flag day,
+ * that reading changed no verdict at all: all 7 second runs failed again and
+ * all 14 target runs passed. What it cost was two extra check runs and a whole
+ * worktree of the target for every failure, on the queue's critical path
+ * (operator ruling 2026-09-03). A flake is the author's to retry; the target is
  * proven green by its own last merge.
  */
 async function endFailing(
@@ -646,38 +644,38 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
   const endedAs = endedKind(tipOf(entry.change))
   if (endedAs === "failed" || endedAs === "merged") return
   const { change } = entry
-  const head = change.head
+  const { branch, head } = change
   const retiredFact = await writeFact(run, {
-    branch: run.options.branch,
     change,
     kind: "failed",
     subject:
       reason === "deleted"
-        ? `${change.branch} was deleted by its submitter`
-        : `${change.branch} moved off ${head.slice(0, 12)}; its submitter replaced it`,
+        ? `${branch} was deleted by its submitter`
+        : `${branch} moved off ${head.slice(0, 12)}; its submitter replaced it`,
+    target: run.options.target,
     trailers: [["Reason", reason]],
   })
   if (retiredFact === undefined) return
-  run.log.write({ branch: change.branch, decision: "failed", head, kind: "change", reason })
+  run.log.write({ branch, decision: "failed", head, kind: "change", reason })
 }
 
 /**
- * A head the queue's branch already carries with no merged fact yet — merged by
- * hand in the garage, or by a run that crashed after its push — gets its merged
+ * A head the target already carries with no merged fact yet — merged by hand
+ * in the garage, or by a run that crashed after its push — gets its merged
  * fact now, naming the commit that landed it and saying a hand did it, and
  * its submitter is told (§ The change: ancestry wins, and the next queue run
  * appends the merged fact so the tip catches up). A retired change is left as
  * it ended.
  */
 async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
-  if (!entry.change.headOnBranch) return
+  if (!entry.change.headOnTarget) return
   const tip = tipOf(entry.change)
   if (endedKind(tip) === "merged") return
   const reason = trailer(tip, "Reason")
   if (reason === "replaced" || reason === "deleted") return
   const { change } = entry
-  const head = change.head
-  // The first commit on the branch's first-parent line that descends from the
+  const { branch, head } = change
+  // The first commit on the target's first-parent line that descends from the
   // head is the one that landed it; none means the head was fast-forwarded.
   // `--parents` names its first parent in the same reading, so `Base:` is a
   // sha like every other Base and not a revision expression a reader would
@@ -689,7 +687,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
       "--first-parent",
       "--ancestry-path",
       "--parents",
-      `${head}..${run.branchSha}`,
+      `${head}..${run.targetSha}`,
     ])
   )
     .trim()
@@ -700,10 +698,10 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   const merge = landing?.[0] ?? head
   const base = landing?.[1] ?? head
   const mergedFact = await writeFact(run, {
-    branch: run.options.branch,
     change,
     kind: "merged",
     subject: `merged by hand at ${merge.slice(0, 12)}`,
+    target: run.options.target,
     trailers: [
       ["Merge", merge],
       ["Base", base],
@@ -711,14 +709,8 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
     ],
   })
   if (mergedFact === undefined) return
-  run.log.write({
-    branch: change.branch,
-    decision: "merged",
-    head,
-    kind: "change",
-    reason: "already on the queue's branch",
-  })
-  await send(run, entry, mergedFact, "merged", messageFor("merged", { branch: change.branch, head, merge, subject: "" }))
+  run.log.write({ branch, decision: "merged", head, kind: "change", reason: "already on the target" })
+  await send(run, entry, mergedFact, "merged", messageFor("merged", { branch, head, merge, subject: "" }))
 }
 
 /**
@@ -729,12 +721,12 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
  */
 async function resend(run: Run, entry: QueueEntry): Promise<void> {
   const tip = tipOf(entry.change)
-  // The head is on the queue's branch and this tip does not say merged: the
-  // catch-up just above owns this change — it wrote the merged fact and sent its
-  // message this run, so this entry's tip is a reading from before that. Sending
-  // from it would put `sent State: failed` on top of a merged change and tell its
+  // The head is on the target and this tip does not say merged: the catch-up
+  // just above owns this change — it wrote the merged fact and sent its message
+  // this run, so this entry's tip is a reading from before that. Sending from
+  // it would put `sent State: failed` on top of a merged change and tell its
   // submitter to fix what has already landed (ruling A2).
-  if (entry.change.headOnBranch && endedKind(tip) !== "merged") return
+  if (entry.change.headOnTarget && endedKind(tip) !== "merged") return
   const undelivered = tip.kind === "sent" && trailer(tip, "Delivery") === "failed"
   const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged"
   if (!undelivered && !unsent) return
@@ -785,15 +777,14 @@ function messageFor(
 }
 
 /**
- * A check's scripts come from the queue's branch, never from the change's
- * (§ The queue run: gate authority lives on the protected side). The check
- * declares them as `scripts:`, files or directories of the repository; each is
- * restored from the base commit into the worktree before the check runs, so a
- * change that rewrites the gate it is judged by is judged by the queue's version
- * all the same. The merge commit, already made, keeps the change's edit: it
- * lands, and judges the next change. A declared path the base does not carry is
- * loud, because a gate that silently ran the change's copy would be the hole
- * itself.
+ * A check's scripts come from the target, never from the branch (§ The queue
+ * run: gate authority lives on the protected side). The check declares them as
+ * `scripts:`, files or directories of the repository; each is restored from
+ * the base commit into the worktree before the check runs, so a change that
+ * rewrites the gate it is judged by is judged by the target's version all the
+ * same. The merge commit, already made, keeps the branch's edit: it lands, and
+ * judges the next change. A declared path the base does not carry is loud,
+ * because a gate that silently ran the branch's copy would be the hole itself.
  */
 async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<void> {
   const scripts = spec.scripts ?? []
@@ -801,14 +792,14 @@ async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<v
   const wt = gitIn(cwd, run.options.process)
   for (const path of scripts) {
     if (
-      (await refAt(run.git, `${run.branchSha}:${path}`, "blob")) === undefined &&
-      (await refAt(run.git, `${run.branchSha}:${path}`, "tree")) === undefined
+      (await refAt(run.git, `${run.targetSha}:${path}`, "blob")) === undefined &&
+      (await refAt(run.git, `${run.targetSha}:${path}`, "tree")) === undefined
     ) {
       throw new Error(
-        `check ${spec.name} declares scripts: ${path}, which ${run.options.branch} ${run.branchSha.slice(0, 12)} does not carry`,
+        `check ${spec.name} declares scripts: ${path}, which the target ${run.targetSha.slice(0, 12)} does not carry`,
       )
     }
-    await wt(["checkout", "--quiet", run.branchSha, "--", path])
+    await wt(["checkout", "--quiet", run.targetSha, "--", path])
   }
 }
 
@@ -947,10 +938,10 @@ async function end(
     ...(ended.remedy === undefined ? [] : [["Remedy", ended.remedy] as const]),
   ]
   const fact = await writeFact(run, {
-    branch: run.options.branch,
     change: entry.change,
     kind,
     subject: ended.subject,
+    target: run.options.target,
     trailers,
   })
   run.log.write({
@@ -1012,7 +1003,7 @@ async function send(
   const lastCheck = trailers(ended, "Check").at(-1)
   const { delivery, failure } = await deliver(run, {
     attempt_id: endedFact,
-    base: run.options.branch,
+    base: run.options.target,
     branch: entry.change.branch,
     code: kind === "merged" ? undefined : trailer(ended, "Reason"),
     command: text,
@@ -1030,10 +1021,10 @@ async function send(
   // so the tip fact's trailers stay the whole answer about the change and no
   // reader has to walk to the fact before (ruling A2).
   const sentWrite: WriteFact = {
-    branch: run.options.branch,
     change: entry.change,
     kind: "sent",
     subject: `${delivery === "failed" ? "could not tell" : "told"} ${addressee(to, submitter)}: ${text}`.slice(0, 200),
+    target: run.options.target,
     trailers: [
       ["Message-Id", endedFact],
       ["To", addressee(to, submitter)],
@@ -1105,7 +1096,7 @@ async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
 /**
  * Hand one message to the configured notifier, a JSON record on its stdin,
  * and say how it went: `sent` when the notifier accepted it, `logged` when
- * the queue's branch declares none (ruling A4), `failed` with why when it exited
+ * the target declares none (ruling A4), `failed` with why when it exited
  * non-zero. A notifier that fails changes nothing about what a change IS:
  * the ended fact stands and the next run sends the same message again
  * (ruling D9). Nothing here throws, so a failed delivery can never end a
@@ -1209,25 +1200,19 @@ async function fetchRemoteChange(run: Run, ref: string): Promise<string> {
   return remote
 }
 
-/**
- * Where the queue's branch and one change's branch stand at the remote right
- * now: `branch` is the queue's own commit, `changeBranch` the change's.
- */
-async function remoteHeads(
-  run: Run,
-  changeBranch: string,
-): Promise<Readonly<{ branch?: string; changeBranch?: string }>> {
+/** Where the target and one branch stand at the remote right now. */
+async function remoteHeads(run: Run, branch: string): Promise<Readonly<{ target?: string; branch?: string }>> {
   const rows = (
     await run.git([
       "ls-remote",
       "--refs",
       run.options.remote,
-      `refs/heads/${run.options.branch}`,
-      `refs/heads/${changeBranch}`,
+      `refs/heads/${run.options.target}`,
+      `refs/heads/${branch}`,
     ])
   ).split("\n")
   const at = new Map(rows.map((row) => row.trim().split(/\s+/u)).map(([sha, ref]) => [ref ?? "", sha ?? ""]))
-  return { branch: at.get(`refs/heads/${run.options.branch}`), changeBranch: at.get(`refs/heads/${changeBranch}`) }
+  return { branch: at.get(`refs/heads/${branch}`), target: at.get(`refs/heads/${run.options.target}`) }
 }
 
 async function finish(
@@ -1236,12 +1221,12 @@ async function finish(
   lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[]; byHand: readonly string[] }>,
 ): Promise<QueueRunOutcome> {
   // A push updates the remote-tracking ref it pushed to, so after a merge the
-  // queue's branch as this run left it is right there; a run that merged nothing
-  // left it where it found it.
-  const branchNow =
+  // target as this run left it is right there; a run that merged nothing left
+  // it where it found it.
+  const targetNow =
     lists.merged.length === 0
-      ? run.branchSha
-      : ((await refAt(run.git, `refs/remotes/${run.options.remote}/${run.options.branch}`)) ?? run.branchSha)
+      ? run.targetSha
+      : ((await refAt(run.git, `refs/remotes/${run.options.remote}/${run.options.target}`)) ?? run.targetSha)
   // A run that reaches here removed every worktree it made, so its own
   // directory and the pid file in it have nothing left to say. Taking them
   // leaves exactly the runs that did NOT end under the worktrees root, which
@@ -1250,13 +1235,13 @@ async function finish(
   // directory behind that no reap may touch: its pid is alive.
   rmSync(run.worktrees, { force: true, recursive: true })
   return {
-    base: run.branchSha,
-    branchSha: branchNow,
+    base: run.targetSha,
     config: run.options.configBlob,
     exitCode,
     ...(run.options.garage === undefined ? {} : { garage: run.options.garage }),
     log: run.log.path,
     run: run.log.id,
+    target: targetNow,
     ...lists,
   }
 }

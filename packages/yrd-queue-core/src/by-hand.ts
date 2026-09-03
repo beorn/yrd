@@ -1,9 +1,9 @@
 /**
- * The queue's branch's first-parent line, judged: every commit on it since the
- * queue's own history starts that the queue did not put there
- * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, ruling E5).
+ * The target's first-parent line, judged: every commit on it since the cutover
+ * that the queue did not put there ([plan](../../../../pm/@i/10-yrd/plan.md)
+ * § The final design, ruling E5).
  *
- * Only the queue pushes that branch, by rule, and the queue proves it every
+ * Only the queue pushes the target, by rule, and the queue proves it every
  * queue run instead of GitHub preventing it: detect and adapt, or fail loud.
  * A merge the queue made is a `--no-ff` merge commit with two parents and a
  * `Change:` trailer naming its change, whose merged fact names the commit
@@ -44,8 +44,8 @@ import { changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 
 export type ByHandCommit = Readonly<{
-  /** The branch it moved: the queue's own. */
-  branch: string
+  /** The branch it moved: the queue's target. */
+  target: string
   commit: string
   parents: readonly string[]
   subject: string
@@ -65,11 +65,11 @@ export type ByHandCommit = Readonly<{
  */
 export async function byHandCommits(
   git: Git,
-  branch: string,
-  branchSha: string,
+  target: string,
+  targetSha: string,
   entries: QueueRead,
 ): Promise<readonly ByHandCommit[]> {
-  const cutover = await cutoverAt(git, branch, branchSha)
+  const cutover = await cutoverAt(git, target, targetSha)
   const byName = new Map(entries.map((entry) => [changeName(entry.change), entry.change.facts.at(-1)]))
   const accounted = new Set<string>()
   for (const tip of byName.values()) {
@@ -83,7 +83,7 @@ export async function byHandCommits(
     "log",
     "--first-parent",
     "--format=%H%x00%P%x00%cI%x00%s%x00%(trailers:key=Change,valueonly)%x01",
-    `${cutover}..${branchSha}`,
+    `${cutover}..${targetSha}`,
   ])
   const found: ByHandCommit[] = []
   for (const record of out.split("\x01")) {
@@ -101,7 +101,7 @@ export async function byHandCommits(
     if (first === undefined)
       throw new Error(`${commit.slice(0, 12)} has no parent, yet it is after the cutover ${cutover.slice(0, 12)}`)
     const gitlinks = (await gitlinkRows(git, first, commit)).map((row) => row.path)
-    found.push({ at: new Date(at), branch, commit, gitlinks, parents, subject, why })
+    found.push({ at: new Date(at), commit, gitlinks, parents, subject, target, why })
   }
   return found.reverse()
 }
@@ -127,15 +127,15 @@ export async function byHandCommits(
  * makes that likely, and the failure is loud rather than silent: the boundary
  * sits too far back and the queue reports MORE hand commits, never fewer.
  */
-async function cutoverAt(git: Git, branch: string, branchSha: string): Promise<string> {
-  const introduced = (await git(["log", "--first-parent", "-Sremote:", "--format=%H", branchSha, "--", ".yrd.yml"]))
+async function cutoverAt(git: Git, target: string, targetSha: string): Promise<string> {
+  const introduced = (await git(["log", "--first-parent", "-Sremote:", "--format=%H", targetSha, "--", ".yrd.yml"]))
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "")
     .at(-1)
   if (introduced === undefined) {
     throw new Error(
-      `no commit on ${branch}'s first-parent line at ${branchSha.slice(0, 12)} introduced the remote: line in .yrd.yml; the queue cannot tell where its own history starts`,
+      `no commit on ${target}'s first-parent line at ${targetSha.slice(0, 12)} introduced the remote: line in .yrd.yml; the queue cannot tell where its own history starts`,
     )
   }
   return introduced
@@ -163,15 +163,15 @@ function notTheQueues(
 }
 
 /**
- * The one line a reader gets about a hand commit: the branch, the commit, its
+ * The one line a reader gets about a hand commit: the target, the commit, its
  * subject, and the pins it moved. It takes only the four values it says, so the
  * `list` row, the queue run's message and the log's human rendering are all one
  * sentence written once — the rendering used to spell it out a second time from
  * the log record's own fields.
  */
 export function handMovedLine(
-  commit: Readonly<{ branch: string; commit: string; subject: string; gitlinks: readonly string[] }>,
+  commit: Readonly<{ target: string; commit: string; subject: string; gitlinks: readonly string[] }>,
 ): string {
   const pins = commit.gitlinks.length === 0 ? "" : `; it moved the pin at ${commit.gitlinks.join(", ")}`
-  return `${commit.branch} moved by hand at ${commit.commit.slice(0, 12)} (${commit.subject})${pins}`
+  return `${commit.target} moved by hand at ${commit.commit.slice(0, 12)} (${commit.subject})${pins}`
 }
