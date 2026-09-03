@@ -12,6 +12,7 @@
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
   gitIn,
@@ -26,8 +27,10 @@ import {
   show,
   submit,
   type CheckResult,
+  type Git,
   type LogRecord,
   type QueueConfig,
+  type QueueRunOutcome,
   type Row,
 } from "@yrd/queue-core"
 import { readGarageDeclaration } from "./garage.ts"
@@ -36,7 +39,19 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 export type CoreQueueCommand =
   | Readonly<{ command: "submit"; branch?: string; submitter: string; workItem?: string }>
   | Readonly<{ command: "run" }>
-  | Readonly<{ command: "up"; intervalSeconds?: number; stop?: AbortSignal }>
+  | Readonly<{
+      command: "up"
+      intervalSeconds?: number
+      stop?: AbortSignal
+      /**
+       * The pin: the gitlink at the target that carries the commit this yrd
+       * runs from. Absent, both are found from this module's own checkout at
+       * start; a test names them to move a pin without running from one.
+       */
+      pin?: Readonly<{ path: string; sha: string }>
+      /** Awaited after each round, before the pin is read; a test mutates the world or stops the service here. */
+      afterRound?: (outcome: QueueRunOutcome) => void | Promise<void>
+    }>
   | Readonly<{ command: "list" }>
   | Readonly<{ command: "show"; branch: string }>
   | Readonly<{ command: "check"; names: readonly string[] }>
@@ -60,23 +75,33 @@ export async function coreQueueCommand(
   const here = declarationHere(repo)
   if (here === undefined || !/^remote:/mu.test(here.text)) return undefined
   const git = gitIn(here.root)
+  const log = options.log?.child("queue")
   // The declaration here only hints where the queue is (`remote:`, `target:`);
   // the target's declaration is the authority for every judgement, and it has
   // to name `remote:` itself, or a branch alone could opt into this core. A
   // branch that rewrote or broke its own `.yrd.yml` is judged by the target's
   // rules all the same (ruling D2 bills it at merge).
   const hints = hintsIn(here.text)
-  if (hints.problem !== undefined) options.log?.child("queue").debug?.(`${hints.problem}; asking the target`)
+  if (hints.problem !== undefined) log?.debug?.(`${hints.problem}; asking the target`)
   const hinted = await resolveRemote(git, hints.remote ?? "origin")
   const hintedTarget = hints.target ?? "main"
   const targetRef = `${hinted}/${hintedTarget}`
-  await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
-  // The switch: the target names `remote:`. Only then is its declaration read
-  // in full and held to its keys; the incumbent's file is never parsed here.
-  if ((await readHints(git, targetRef)).remote === undefined) return undefined
-  const declared = await readConfig(git, targetRef)
-  if (declared === undefined) return undefined
-  const config: QueueConfig = { ...declared, remote: await resolveRemote(git, declared.remote) }
+  // The target's declaration as the target holds it now: fetched, then the
+  // switch (the target names `remote:`; only then is its declaration read in
+  // full and held to its keys, and the incumbent's file is never parsed here),
+  // then the remote it names resolved. Undefined when the target does not
+  // select this core; a declaration that exists and cannot be read throws.
+  // One reading serves a one-shot command; the service reads again before
+  // every round, so an edit at the target takes effect on the next round.
+  const declaration = async (): Promise<QueueConfig | undefined> => {
+    await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
+    if ((await readHints(git, targetRef)).remote === undefined) return undefined
+    const declared = await readConfig(git, targetRef)
+    if (declared === undefined) return undefined
+    return { ...declared, remote: await resolveRemote(git, declared.remote) }
+  }
+  const config = await declaration()
+  if (config === undefined) return undefined
   // A worktree's `.git` is a file, so the queue's own directory lives under the
   // common git dir the whole repository shares, never under a path guessed from it.
   const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
@@ -110,15 +135,37 @@ export async function coreQueueCommand(
       return outcome.exitCode
     }
     case "up": {
-      // The service: the same round on a loop. Exit 2 when a round is stuck,
-      // because the queue stays down until a person fixes it; a signal ends it.
+      // The service: the same round on a loop, what hab runs. Three exits of
+      // its own (§ Commands): 2 when a round is stuck, or when the target's
+      // declaration can no longer be read or no longer selects this core,
+      // because the queue stays down until a person fixes it; 18 when the pin
+      // moves, so hab relaunches the service on the new pin; and a signal.
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
-      for (;;) {
-        let outcome
+      const pin = request.pin ?? (await pinOf(git, targetRef, log))
+      let current = config
+      for (let round = 1; ; round += 1) {
+        // The declaration again, as the target holds it now. The incumbent
+        // cached its check config at start, so a correct edit at the target
+        // looked like a wrong one until a restart; here it is the next round's.
+        if (round > 1) {
+          let why: string | undefined
+          try {
+            const next = await declaration()
+            if (next === undefined) why = "the target's declaration no longer selects this core"
+            else current = next
+          } catch (error) {
+            why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
+          }
+          if (why !== undefined) {
+            emit(io, options.json, { exitCode: 2, failed: [], merged: [], stuck: [], why }, `stuck: ${why}`)
+            return 2
+          }
+        }
+        let outcome: QueueRunOutcome
         try {
-          outcome = await queueRun(runOptions(repo, config, workdir, options.env, options.log))
+          outcome = await queueRun(runOptions(repo, current, workdir, options.env, options.log))
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           emit(io, options.json, { exitCode: 2, failed: [], merged: [], stuck: [], why: message }, `stuck: the queue run could not judge: ${message}`)
@@ -126,6 +173,18 @@ export async function coreQueueCommand(
         }
         emit(io, options.json, outcome, describeRun(outcome))
         if (outcome.exitCode === 2) return 2
+        await request.afterRound?.(outcome)
+        // The pin, at the target as this round left it: the round that merged
+        // the change moving this yrd's own gitlink is the last one this code runs.
+        if (pin !== undefined) {
+          const now = await gitlinkAt(git, outcome.target, pin.path)
+          if (now !== pin.sha) {
+            const moved = `the pin ${pin.path} moved from ${pin.sha.slice(0, 12)} to ${now === undefined ? "no gitlink" : now.slice(0, 12)}; exiting 18 for a relaunch on the new pin`
+            log?.info?.(moved, { from: pin.sha, pin: pin.path, to: now })
+            emit(io, options.json, { exitCode: 18, from: pin.sha, pin: pin.path, to: now }, moved)
+            return 18
+          }
+        }
         if (stopped()) return 0
         await new Promise((resolve) => setTimeout(resolve, interval))
         if (stopped()) return 0
@@ -192,6 +251,45 @@ function declarationHere(start: string): Readonly<{ root: string; text: string }
     if (parent === directory) return undefined
     directory = parent
   }
+}
+
+/**
+ * The pin the service runs from: the gitlink at the target that carries the
+ * very commit this yrd's code runs from, found once at start. Off — said once,
+ * at info — when this yrd runs from no git checkout, or when the target pins
+ * no gitlink at its commit; then no round can see the pin move, and the
+ * relaunch onto a new pin is a person's hand again.
+ */
+async function pinOf(git: Git, targetRef: string, log: ConditionalLogger | undefined): Promise<Readonly<{ path: string; sha: string }> | undefined> {
+  let running: string
+  try {
+    running = (await gitIn(dirname(fileURLToPath(import.meta.url)))(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
+  } catch (error) {
+    log?.info?.("the pin exit is off: this yrd runs from no git checkout", { error: error instanceof Error ? error.message : String(error) })
+    return undefined
+  }
+  const pinned = gitlinks(await git(["ls-tree", "-r", "-z", targetRef])).find((row) => row.sha === running)
+  if (pinned === undefined) {
+    log?.info?.(`the pin exit is off: the target pins no gitlink at this yrd's commit ${running.slice(0, 12)}`)
+    return undefined
+  }
+  return pinned
+}
+
+/** The gitlink at `path` in `commit`, or undefined when there is none there. */
+async function gitlinkAt(git: Git, commit: string, path: string): Promise<string | undefined> {
+  return gitlinks(await git(["ls-tree", "-z", commit, "--", path])).find((row) => row.path === path)?.sha
+}
+
+/** The gitlink rows of one `ls-tree -z` listing: mode 160000, a commit at a path. */
+function gitlinks(listing: string): readonly Readonly<{ path: string; sha: string }>[] {
+  const rows: Readonly<{ path: string; sha: string }>[] = []
+  for (const row of listing.split("\0")) {
+    const [meta, path] = row.split("\t")
+    const [mode, , sha] = (meta ?? "").split(" ")
+    if (mode === "160000" && path !== undefined && sha !== undefined) rows.push({ path, sha })
+  }
+  return rows
 }
 
 function runOptions(repo: string, config: QueueConfig, workdir: string, env?: NodeJS.ProcessEnv, log?: ConditionalLogger) {
