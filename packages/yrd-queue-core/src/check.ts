@@ -80,10 +80,20 @@ export type RunCheck = Readonly<{
   env?: NodeJS.ProcessEnv
 }>
 
+/**
+ * Where a check's log goes, from the directory its phase writes into and the
+ * check's own name. One reading of the two, so a caller can say where the log
+ * will be before the check has written a byte of it: the row that says a check
+ * STARTED names the same file the row that says it ended names.
+ */
+export function checkLogPath(logDir: string, name: string): string {
+  return join(logDir, `${name}.log`)
+}
+
 export async function runCheck(run: RunCheck): Promise<CheckResult> {
   mkdirSync(run.logDir, { recursive: true })
   mkdirSync(run.scratch, { recursive: true })
-  const log = join(run.logDir, `${run.spec.name}.log`)
+  const log = checkLogPath(run.logDir, run.spec.name)
   const runner = run.process ?? createProcess({ cwd: run.cwd })
   // The check's environment is built, never inherited: a fixed base a real
   // check needs (measured on the root's own checks), the scratch root as

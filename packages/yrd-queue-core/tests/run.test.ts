@@ -627,7 +627,10 @@ describe("the target's setup", () => {
       { exit: "0", name: "setup", phase: "submit", result: "pass" },
       { exit: "0", name: "setup", phase: "merge", result: "pass" },
     ])
-    expect(records(outcome).filter((record) => record.kind === "check" && record.name === "setup")).toHaveLength(2)
+    // Two setups, each with a start row and an end row: four `check` rows.
+    const setupRows = records(outcome).filter((record) => record.kind === "check" && record.name === "setup")
+    expect(setupRows).toHaveLength(4)
+    expect(setupRows.filter((record) => record.end === undefined)).toHaveLength(2)
   })
 
   it("runs again in the target worktree the attribution builds", async () => {

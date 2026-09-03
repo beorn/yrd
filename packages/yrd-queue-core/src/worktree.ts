@@ -24,7 +24,7 @@
 import { rmSync } from "node:fs"
 import { materializeSubmodulesFromLocalWorktreeParallel } from "git-super/submodules"
 import type { Process } from "@yrd/process"
-import { DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
+import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import type { Git } from "./facts.ts"
 import { gitIn, mergeBase } from "./git.ts"
 
@@ -92,6 +92,12 @@ export type PrepareWorktree = Readonly<{
   setup?: SetupSpec
   /** Told how the setup went, pass or not, before a failure throws: the one place a caller records it. */
   record?: (ran: SetupRan) => void
+  /**
+   * Told the setup is ABOUT to run, with the log it will write. A setup is the
+   * longest thing a fresh worktree does, so a caller that only hears how it
+   * went has nothing to say for the whole length of it.
+   */
+  starting?: (about: Readonly<{ start: string; log: string }>) => void
   plumbing?: PlumbingLog
   process?: Process
   env?: NodeJS.ProcessEnv
@@ -173,6 +179,7 @@ export async function prepareWorktree(
   const setup = options.setup
   if (setup === undefined) return prepared
   const start = new Date().toISOString()
+  options.starting?.({ log: checkLogPath(setup.logDir, SETUP), start })
   let result: CheckResult
   try {
     result = await runCheck({

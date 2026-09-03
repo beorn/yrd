@@ -41,7 +41,7 @@
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
-import { runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
+import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import { appendFact, endedKind, readFact, readFacts, type Fact, type Git } from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
@@ -315,13 +315,14 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
  */
 async function prepare(run: Run, entry: QueueEntry, commit: string, path: string, phase: string): Promise<PreparedWorktree> {
   const logDir = join(run.options.workdir, "checks", run.log.id, phase)
+  const about = { branch: entry.branch, head: entry.change.head, name: SETUP, phase }
   return prepareWorktree(run.git, run.options.repo, commit, path, {
     env: run.options.env,
     plumbing: run.options.plumbing,
     process: run.options.process,
-    record: ({ result, start, end: ended }) =>
-      record(run, { branch: entry.branch, end: ended, head: entry.change.head, name: SETUP, phase, start }, result),
+    record: ({ result, start, end: ended }) => record(run, { ...about, end: ended, start }, result),
     ...(run.options.setup === undefined ? {} : { setup: { logDir, run: run.options.setup, scratch: run.scratch } }),
+    starting: ({ log, start }) => started(run, { ...about, log, start }),
     targetSha: run.targetSha,
   })
 }
@@ -759,30 +760,46 @@ async function runPhase(
 
 async function check(run: Run, entry: QueueEntry, spec: QueueCheck, cwd: string, tree: CheckedTree, phase: string): Promise<CheckResult> {
   await restoreScripts(run, spec, cwd)
+  const logDir = join(run.options.workdir, "checks", run.log.id, phase)
+  const about = {
+    branch: entry.branch,
+    head: entry.change.head,
+    name: spec.name,
+    phase,
+    ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }),
+  }
   const start = new Date().toISOString()
+  started(run, { ...about, log: checkLogPath(logDir, spec.name), start })
   const result = await runCheck({
     cwd,
     env: run.options.env,
-    logDir: join(run.options.workdir, "checks", run.log.id, phase),
+    logDir,
     process: run.options.process,
     scratch: run.scratch,
     spec,
     tree,
   })
-  record(
-    run,
-    {
-      branch: entry.branch,
-      end: new Date().toISOString(),
-      head: entry.change.head,
-      name: spec.name,
-      phase,
-      start,
-      ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }),
-    },
-    result,
-  )
+  record(run, { ...about, end: new Date().toISOString(), start }, result)
   return result
+}
+
+/**
+ * The row that says a program the queue runs has STARTED, written before it
+ * runs: the same `check` kind, the same names, and the log file it is about to
+ * write, read from the same place the driver will read it. A reader tells the
+ * two rows apart by `end`, which only ending can say and which a start row
+ * therefore does not carry (neither does it carry `ms`); the end row is
+ * exactly what it always was, so nothing that reads one changes.
+ *
+ * Without this row a queue run's log is silent for the whole length of a
+ * check, and a check that is merely long reads as a hung queue: R8 was stopped
+ * as a hang while a 28.7-minute check ran (plan § Owed after M5).
+ */
+function started(
+  run: Run,
+  about: Readonly<{ branch: string; head: string; name: string; phase: string; start: string; log: string; scripts?: readonly string[] }>,
+): void {
+  run.log.write({ ...about, kind: "check" })
 }
 
 /**
