@@ -139,7 +139,6 @@ async function world(): Promise<World> {
       checks: [],
       configBlob: "test-config",
       env: process.env,
-      owner: "@cto",
       process: counting.process,
       remote: "origin",
       branch: "main",
@@ -244,7 +243,7 @@ describe("the built-in gitlink check", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>)
     expect(log.filter((record) => record.kind === "by-hand")).toMatchObject([{ commit: hand, gitlinks: ["component"] }])
     const told = log.filter((record) => record.kind === "message")
-    expect(told).toMatchObject([{ id: hand, says: "by-hand", to: "@cto" }])
+    expect(told).toMatchObject([{ id: hand, says: "by-hand", to: "owner" }])
     expect(told[0]?.text).toContain(`main moved by hand at ${hand.slice(0, 12)}`)
     expect(told[0]?.text).toContain("it moved the pin at component")
     // The report reads the commit; it never judges the pin, so no component is asked.

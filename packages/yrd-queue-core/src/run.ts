@@ -94,8 +94,6 @@ export type QueueRunOptions = Readonly<{
   configBlob: string
   /** The command that delivers one message, a JSON record on stdin. Absent, messages are logged and not sent. */
   notify?: string
-  /** Who hears about a stuck change. */
-  owner: string
   /** The queue's working directory: its logs, its worktrees and its temp root; on the root filesystem. */
   workdir: string
   /** Why the queue is in the garage, when it is: a hand-run round says so on its own record. */
@@ -267,7 +265,7 @@ function ordered(entries: QueueRead, ...states: readonly ("queued" | "checked" |
  * Every commit on the queue's branch's first-parent line since the queue's own
  * history starts that the queue did not put there, each reported once: a log
  * record with the commit, its parents, its subject and the pins it moved, and
- * one message to the queue's owner with the commit sha as its id, so a resend
+ * one message for the owner's role with the commit sha as its id, so a resend
  * after a crash is the same message (E5). No fact is written, because there is
  * no change to write one on; what the queue has already accounted for is read
  * from git (by-hand.ts), so a second run says nothing new once the queue has
@@ -296,8 +294,8 @@ async function reportByHand(run: Run, entries: QueueRead): Promise<readonly stri
       command: text,
       kind: "yrd-broken",
       pr: branch,
-      recipient: run.options.owner,
       sha: commit.commit,
+      to: OWNER,
     })
     run.log.write({
       about: branch,
@@ -309,7 +307,7 @@ async function reportByHand(run: Run, entries: QueueRead): Promise<readonly stri
       kind: "message",
       says: "by-hand",
       text,
-      to: run.options.owner,
+      to: OWNER,
     })
   }
   return found.map((commit) => commit.commit)
@@ -726,7 +724,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
 /**
  * Every ended change whose message reached nobody is sent again: an ended tip
  * with no sent fact (a crash between the two), or a sent fact whose delivery
- * failed. The id is the ended fact's sha, so the recipient sees one message
+ * failed. The id is the ended fact's sha, so whoever hears it sees one message
  * however many times it is sent (§ The queue run, at-least-once).
  */
 async function resend(run: Run, entry: QueueEntry): Promise<void> {
@@ -985,18 +983,21 @@ async function send(
   text: string,
 ): Promise<void> {
   const ended = await readFact(run.git, endedFact)
-  // A stuck change is the queue owner's to hear about; so is a change whose
+  // A stuck change is the owner's role to hear about; so is a change whose
   // submitter is `unknown` — a submit with neither `--notify` nor
   // `YRD_DEFAULT_SUBMITTER` (rulings B6 and D9) — never a seat named `unknown`.
+  // The queue addresses ROLES: which seat wears the owner's is the notifier's
+  // own business, declared on its command line, never in `.yrd.yml`.
   const submitter = trailer(ended, "Submitter")
-  const recipient =
-    kind === "stuck" || submitter === undefined || submitter === "unknown" ? run.options.owner : submitter
+  const known = submitter !== undefined && submitter !== "unknown"
+  const to = kind === "stuck" || !known ? OWNER : SUBMITTER
   // The record the configured notifier reads, and nothing besides:
   //
   //   kind         landed, send-back or yrd-broken
   //   attempt_id   the ended fact's sha, which is the message's id
   //   pr           the branch (where a PR number stood)
-  //   recipient    the seat this goes to
+  //   to           the role this goes to: submitter or owner
+  //   submitter    the seat that submitted it, absent when unknown
   //   command      what to do next, in one line
   //   branch, sha, base, code, disposition   optional, and read when present
   //   log_path     the log of the check that decided it
@@ -1020,8 +1021,9 @@ async function send(
     kind: kind === "merged" ? "landed" : kind === "failed" ? "send-back" : "yrd-broken",
     log_path: lastCheck === undefined ? undefined : readCheckTrailer(lastCheck).log,
     pr: entry.change.branch,
-    recipient,
     sha: entry.change.head,
+    ...(known ? { submitter } : {}),
+    to,
     workItem: trailer(ended, "Work-Item"),
   })
   // The sent fact repeats the ended state and carries the ended fact's result,
@@ -1031,10 +1033,10 @@ async function send(
     branch: run.options.branch,
     change: entry.change,
     kind: "sent",
-    subject: `${delivery === "failed" ? "could not tell" : "told"} ${recipient}: ${text}`.slice(0, 200),
+    subject: `${delivery === "failed" ? "could not tell" : "told"} ${addressee(to, submitter)}: ${text}`.slice(0, 200),
     trailers: [
       ["Message-Id", endedFact],
-      ["To", recipient],
+      ["To", addressee(to, submitter)],
       ["State", kind],
       ["For", endedFact],
       ["Delivery", delivery],
@@ -1059,8 +1061,21 @@ async function send(
     kind: "message",
     says: kind,
     text,
-    to: recipient,
+    to: addressee(to, submitter),
   })
+}
+
+/**
+ * The two roles the queue addresses, and nothing else: it knows a change's
+ * submitter, because the submit said so, and it knows that somebody owns the
+ * queue. WHICH seat that is is the notifier's own argument.
+ */
+const OWNER = "owner"
+const SUBMITTER = "submitter"
+
+/** Who a message went to, in the fact's own words: the role, and the seat when the role is the submitter. */
+function addressee(to: string, submitter: string | undefined): string {
+  return to === SUBMITTER && submitter !== undefined ? `${SUBMITTER} ${submitter}` : to
 }
 
 /** A change ended by its submitter moving on, which is not a failure of anything. */

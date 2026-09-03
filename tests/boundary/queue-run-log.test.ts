@@ -49,7 +49,7 @@
  *   merge      branch, head
  *              commit   the merge commit
  *              tip      the target's new tip
- *   message    to       the recipient
+ *   message    to       the role it went to, and the submitter when it is one
  *              about    the branch it is about
  *              says     merged, fail or stuck
  *

@@ -59,11 +59,10 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
 }
 
 describe("the declaration is read from the commit of the branch the queue lands on", () => {
-  it("names the remote, the branch, the checks with their phases, and who hears about stuck", async () => {
+  it("names the remote, the branch, the checks with their phases, and the notifier", async () => {
     const w = await world(
       [
         "remote: origin",
-        "owner: '@cto'",
         "notify: bun tools/notify.ts",
         "checks:",
         "  - typecheck:",
@@ -76,7 +75,7 @@ describe("the declaration is read from the commit of the branch the queue lands 
       ].join("\n"),
     )
     const config = await readConfig(w.git, "main")
-    expect(config).toMatchObject({ branch: "main", notify: "bun tools/notify.ts", owner: "@cto", remote: "origin" })
+    expect(config).toMatchObject({ branch: "main", notify: "bun tools/notify.ts", remote: "origin" })
     expect(config?.checks).toEqual([
       { environmentPassthrough: undefined, name: "typecheck", on: ["submit", "merge"], run: "bun run typecheck", timeoutMs: undefined },
       { environmentPassthrough: undefined, name: "tests", on: undefined, run: "bun run test", timeoutMs: 1_800_000 },
@@ -101,17 +100,22 @@ describe("the declaration is read from the commit of the branch the queue lands 
     await expect(readConfig(empty.git, "main")).rejects.toThrow(/setup: must be a non-empty string/u)
   })
 
-  it("names the queue's working directory as workdir:, and refuses the retired scratch: outright", async () => {
+  it("names the queue's working directory as workdir:, and refuses every retired key outright", async () => {
     // `workdir:` is the whole working directory — the checkouts, the check
     // logs, and the temp root every check gets as TMPDIR — so it is one word,
     // not the old `scratch:`, which named the same root after only the last of
-    // those three. A declaration still carrying the old key is a queue writing
-    // somewhere nobody declared, so it is refused rather than defaulted.
+    // those three. A declaration still carrying a retired key is a queue doing
+    // something nobody declared, so it is refused rather than defaulted.
     const declared = await world("remote: origin\nworkdir: /var/tmp/yrd\n")
     expect(await readConfig(declared.git, "main")).toMatchObject({ workdir: "/var/tmp/yrd" })
 
-    const old = await world("remote: origin\nscratch: /var/tmp/yrd\n")
-    await expect(readConfig(old.git, "main")).rejects.toThrow(/unknown key scratch/u)
+    const scratched = await world("remote: origin\nscratch: /var/tmp/yrd\n")
+    await expect(readConfig(scratched.git, "main")).rejects.toThrow(/unknown key scratch/u)
+
+    // `owner:` went with it: the queue addresses the roles `submitter` and
+    // `owner`, and which seat wears the owner's is the notifier's own argument.
+    const owned = await world("remote: origin\nowner: '@cto'\n")
+    await expect(readConfig(owned.git, "main")).rejects.toThrow(/unknown key owner/u)
   })
 
   it("is not this core's when it names no remote, and is loud when it is wrong", async () => {

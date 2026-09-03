@@ -24,10 +24,12 @@ export type QueueConfig = Readonly<{
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
-  /** The command that delivers one message, a JSON record on stdin. */
+  /**
+   * The command that delivers one message, a JSON record on stdin. The record
+   * says the ROLE it is for, `submitter` or `owner`; who the owner is belongs
+   * to that command's own arguments, never to the queue.
+   */
   notify?: string
-  /** Who hears about a stuck change. */
-  owner: string
   /** The queue's working directory: its checkouts, its check logs, and the temp root every check gets as `TMPDIR`; on the root filesystem. */
   workdir?: string
   /** The blob the declaration was read from, recorded on every checked fact. */
@@ -50,12 +52,10 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   if (typeof remote !== "string" || remote === "") throw new Error(`.yrd.yml remote: must be a remote name or URL`)
   const branch = raw.branch ?? "main"
   if (typeof branch !== "string" || branch === "") throw new Error(`.yrd.yml branch: must be a branch name`)
-  const owner = raw.owner ?? "operator"
-  if (typeof owner !== "string" || owner === "") throw new Error(`.yrd.yml owner: must be a seat name`)
   const notify = optionalString(raw, "notify")
   const workdir = optionalString(raw, "workdir")
   const setup = optionalString(raw, "setup")
-  return { blob, branch, checks: readChecks(raw.checks), notify, owner, remote, setup, workdir }
+  return { blob, branch, checks: readChecks(raw.checks), notify, remote, setup, workdir }
 }
 
 export type Hints = Readonly<{
@@ -145,7 +145,7 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 // queue, and one it does not read is still refused. A fresh worktree has
 // submodules and nothing else, so the declaration says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["remote", "branch", "checks", "setup", "notify", "owner", "workdir"] as const
+const TOP_KEYS = ["remote", "branch", "checks", "setup", "notify", "workdir"] as const
 const CHECK_KEYS = ["run", "on", "timeoutMs", "environmentPassthrough", "scripts"] as const
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */

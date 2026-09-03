@@ -407,7 +407,6 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
     env,
     ...(garage === undefined ? {} : { garage: garage.reason }),
     notify: config.notify,
-    owner: config.owner,
     // git-super narrates which submodule it borrowed and how long each phase
     // took; that is trace-level plumbing, so it gets a logger only at trace.
     plumbing: log?.trace === undefined ? undefined : log.child("submodules"),

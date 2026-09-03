@@ -150,7 +150,6 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
         FAKE_SLEEP: String(check.sleep ?? 0),
       },
       notify: notifier,
-      owner: "@cto",
       remote: "origin",
       repo: work,
       ...(check.setup === undefined ? {} : { setup: check.setup }),
@@ -402,8 +401,9 @@ describe("a queue run", () => {
       failures: 0,
       kind: "landed",
       pr: "task/one",
-      recipient: "@dev/2",
       sha: head,
+      submitter: "@dev/2",
+      to: "submitter",
       workItem: "@i/10-yrd/1",
     })
     expect(sent[0]?.attempt_id).toBe(facts[2]?.sha)
@@ -482,11 +482,12 @@ describe("a queue run", () => {
       code: "verify",
       disposition: "author",
       kind: "send-back",
-      recipient: "@dev/2",
+      submitter: "@dev/2",
+      to: "submitter",
     })
   })
 
-  it("stuck: a check that exits 2 stops the run, bills nobody, and tells the queue owner", async () => {
+  it("stuck: a check that exits 2 stops the run, bills nobody, and goes to the owner's role", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
 
@@ -504,12 +505,12 @@ describe("a queue run", () => {
     expect(facts[2]?.trailers.filter(([name]) => name === "Fault" || name === "Cause")).toEqual([])
     expect(facts[3]?.trailers).toEqual(
       expect.arrayContaining([
-        ["To", "@cto"],
+        ["To", "owner"],
         ["State", "stuck"],
         ["Reason", "verify"],
       ]),
     )
-    expect(messages(w)[0]).toMatchObject({ code: "verify", kind: "yrd-broken", recipient: "@cto" })
+    expect(messages(w)[0]).toMatchObject({ code: "verify", kind: "yrd-broken", to: "owner" })
   })
 
   it("a check past its bound is stuck, not the submitter's", async () => {
@@ -540,7 +541,7 @@ describe("a queue run", () => {
     const facts = await readFacts(w.git, { branch: "task/one", head })
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
     expect(facts[1]?.subject).toContain("gates/absent.sh")
-    expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
+    expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", to: "owner" })
     expect(messages(w)[0]?.command).toContain("does not carry")
   })
 
@@ -663,13 +664,13 @@ describe("a queue run", () => {
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
     expect(facts.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
-        ["To", "@dev/2"],
+        ["To", "submitter @dev/2"],
         ["Delivery", "sent"],
       ]),
     )
     const merged = facts.find((fact) => fact.kind === "merged")
     expect(messages(w)).toHaveLength(1)
-    expect(messages(w)[0]).toMatchObject({ attempt_id: merged?.sha, kind: "landed", recipient: "@dev/2" })
+    expect(messages(w)[0]).toMatchObject({ attempt_id: merged?.sha, kind: "landed", to: "submitter" })
   })
 
   it("a change merged by hand reads merged, its catch-up fact says a hand did it, and the hand merge is reported once (E5)", async () => {
@@ -738,11 +739,11 @@ describe("a queue run", () => {
     expect(records(outcome)).toContainEqual(
       expect.objectContaining({ decision: "merged", reason: "change-ref-taken", remote: concurrent }),
     )
-    // Two messages: the submitter hears the change merged; the owner hears the
+    // Two messages: the submitter hears the change merged; the owner's role hears the
     // target moved by hand, once, with the merge commit as the message's id.
-    expect(messages(w).filter((message) => message.kind === "landed")).toMatchObject([{ recipient: "@dev/2" }])
+    expect(messages(w).filter((message) => message.kind === "landed")).toMatchObject([{ submitter: "@dev/2", to: "submitter" }])
     const broken = messages(w).filter((message) => message.kind === "yrd-broken")
-    expect(broken).toMatchObject([{ attempt_id: landing, pr: "main", recipient: "@cto", sha: landing }])
+    expect(broken).toMatchObject([{ attempt_id: landing, pr: "main", sha: landing, to: "owner" }])
     expect(broken[0]?.command).toContain(`main moved by hand at ${landing.slice(0, 12)} (landed by hand)`)
     expect(broken[0]?.command).toContain("it carries no Change: trailer")
     expect(records(outcome).filter((record) => record.kind === "by-hand")).toMatchObject([
@@ -803,7 +804,7 @@ describe("a queue run", () => {
     expect((await w.git(["rev-parse", `${merge}^1`])).trim()).toBe(w.target)
 
     // The run after the merge: the one that in the specimen wrote `merged by
-    // hand at 005a622156c7` and told the owner to close a bead for it.
+    // hand at 005a622156c7` and told the owner's role to close a bead for it.
     const after = await queueRun(w.options({ exit: 0 }))
 
     expect(after.exitCode).toBe(0)
@@ -818,8 +819,8 @@ describe("a queue run", () => {
       expect(records(outcome).filter((record) => record.kind === "by-hand")).toEqual([])
     }
     expect(messages(w).filter((message) => (message.command ?? "").includes("main@"))).toEqual([])
-    expect(messages(w).filter((message) => message.recipient === "@cto")).toEqual([])
-    expect(messages(w).map((message) => message.recipient)).toEqual(["@dev/2"])
+    expect(messages(w).filter((message) => message.to === "owner")).toEqual([])
+    expect(messages(w).map((message) => message.to)).toEqual(["submitter"])
   })
 
   it("the merge commit names its change, its submitter and its work item, and the merged fact says the queue merged it and what it checked (E5)", async () => {
@@ -855,14 +856,14 @@ describe("a queue run", () => {
     expect(trailers(merged, "Check")).toEqual([expect.stringMatching(/^verify exit=0 ms=\d+ log=\S+$/u)])
     expect(facts.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
-        ["To", "@dev/2"],
+        ["To", "submitter @dev/2"],
         ["Delivery", "sent"],
         ["Merged-By", "queue"],
       ]),
     )
   })
 
-  it("a commit pushed to the target by hand is reported once to the owner, and the queue goes on from the new base (E5)", async () => {
+  it("a commit pushed to the branch by hand is reported once to the owner's role, and the queue goes on from the new base (E5)", async () => {
     const w = await world()
     const hand = await pushByHand(w, "hand.txt")
     const head = await submitCommit(w, "task/one", "one.txt")
@@ -877,7 +878,7 @@ describe("a queue run", () => {
     ])
     const broken = messages(w).filter((message) => message.kind === "yrd-broken")
     expect(broken).toMatchObject([
-      { attempt_id: hand, kind: "yrd-broken", pr: "main", recipient: "@cto", sha: hand },
+      { attempt_id: hand, kind: "yrd-broken", pr: "main", sha: hand, to: "owner" },
     ])
     expect(broken[0]?.command).toContain(`main moved by hand at ${hand.slice(0, 12)} (hand.txt by hand)`)
     expect(broken[0]?.command).toContain("it is one commit, not a merge of a change")
@@ -938,7 +939,7 @@ describe("a queue run", () => {
         .filter((record) => record.kind === "by-hand")
         .map((record) => record.commit),
     ).toEqual([plain, edited])
-    expect(messages(w).map((message) => message.recipient)).toEqual(["@cto", "@cto"])
+    expect(messages(w).map((message) => message.to)).toEqual(["owner", "owner"])
   })
 
   it("a checked change is judged again when the target's check config is not the one its checked fact names", async () => {
@@ -1075,7 +1076,7 @@ describe("the target's setup", () => {
     expect(facts[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
     // The check never ran: there was no prepared tree to run it in.
     expect(whereRan(w).filter(([what]) => what === "check")).toEqual([])
-    expect(messages(w)[0]).toMatchObject({ code: "setup", kind: "yrd-broken", recipient: "@cto" })
+    expect(messages(w)[0]).toMatchObject({ code: "setup", kind: "yrd-broken", to: "owner" })
     expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "1", result: "fail", whose: "queue" },
     ])
@@ -1139,7 +1140,8 @@ describe("a failing check bills the submitter at once", () => {
       disposition: "author",
       failures: 1,
       kind: "send-back",
-      recipient: "@dev/2",
+      submitter: "@dev/2",
+      to: "submitter",
     })
     // The log the check wrote is named in the record, so the ball says where to look.
     expect(messages(w)[0]?.log_path).toBe(checkLogFor(outcome, "task/one", "submit", "verify"))

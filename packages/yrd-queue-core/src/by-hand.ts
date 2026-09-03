@@ -34,8 +34,8 @@
  * judged then; the walk from the tip stops at the first accounted commit, and
  * a queue run reports exactly the hand commits above it. A hand commit with
  * nothing of the queue's on top is reported again next run, with the commit
- * sha as its id, so the owner's notifier sees one message however many runs
- * say it: at-least-once, the plan's shape for every message.
+ * sha as its id, so the notifier sees one message however many runs say it:
+ * at-least-once, the plan's shape for every message.
  */
 
 import { endedKind, trailer, type Fact, type Git } from "./facts.ts"
