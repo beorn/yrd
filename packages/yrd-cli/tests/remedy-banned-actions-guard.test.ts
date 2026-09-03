@@ -48,6 +48,20 @@ type Allowed = Readonly<{ file: string; reason: string }>
  * sweep — re-derive, never assume, before adding to this list. */
 const ALLOWLIST: readonly Allowed[] = [
   {
+    file: "yrd-queue-core/src/submit.ts",
+    reason:
+      "the new core's submit is one atomic push of the branch and of its change with an explicit lease on each " +
+      "ref: the compare-and-swap every write is (plan § The change). Run as git against the queue's remote, " +
+      "never printed to a human.",
+  },
+  {
+    file: "yrd-queue-core/src/run.ts",
+    reason:
+      "the new core pushes the merge commit with a lease on the target at the checked base, so a target that " +
+      "moved keeps the change in line instead of being overwritten (plan § The queue run). Run as git, never " +
+      "printed to a human.",
+  },
+  {
     file: "yrd-queue/src/candidate-pool.ts",
     reason:
       "reset --hard / clean -fdx run only against the pipeline's own ephemeral candidate-pool worktree to prove " +

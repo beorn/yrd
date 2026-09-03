@@ -76,13 +76,18 @@ export type Hints = Readonly<{
 export async function readHints(git: Git, commit: string): Promise<Hints> {
   const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
   if (blob === undefined) return {}
+  return hintsIn(await git(["show", `${commit}:.yrd.yml`]), `.yrd.yml at ${commit.slice(0, 12)}`)
+}
+
+/** `readHints` on the text of a declaration already in hand; `where` names it in `problem`. */
+export function hintsIn(text: string, where = ".yrd.yml"): Hints {
   let raw: unknown
   try {
-    raw = Bun.YAML.parse(await git(["show", `${commit}:.yrd.yml`]))
+    raw = Bun.YAML.parse(text)
   } catch (error) {
-    return { problem: `.yrd.yml at ${commit.slice(0, 12)} does not parse: ${error instanceof Error ? error.message : String(error)}` }
+    return { problem: `${where} does not parse: ${error instanceof Error ? error.message : String(error)}` }
   }
-  if (!isRecord(raw)) return { problem: `.yrd.yml at ${commit.slice(0, 12)} is not a mapping` }
+  if (!isRecord(raw)) return { problem: `${where} is not a mapping` }
   const remote = typeof raw.remote === "string" && raw.remote !== "" ? raw.remote : undefined
   const target = typeof raw.target === "string" && raw.target !== "" ? raw.target : typeof raw.base === "string" && raw.base !== "" ? raw.base : undefined
   return { ...(remote === undefined ? {} : { remote }), ...(target === undefined ? {} : { target }) }

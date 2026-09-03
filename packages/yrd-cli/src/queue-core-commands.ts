@@ -10,17 +10,17 @@
  * Nothing is run twice and nothing is converted.
  */
 
-import { mkdirSync } from "node:fs"
-import { join } from "node:path"
-import { createLogger, type ConditionalLogger } from "loggily"
+import { mkdirSync, readFileSync } from "node:fs"
+import { dirname, join, resolve } from "node:path"
+import type { ConditionalLogger } from "loggily"
 import {
   gitIn,
+  hintsIn,
   lane,
   list,
   queueRun,
   readConfig,
   readHints,
-  remoteNames,
   resolveRemote,
   runCheck,
   show,
@@ -51,17 +51,23 @@ export async function coreQueueCommand(
   request: CoreQueueCommand,
   options: Readonly<{ json?: boolean; env?: NodeJS.ProcessEnv; workdir?: string; log?: ConditionalLogger }> = {},
 ): Promise<YrdCliExitCode | undefined> {
-  const git = gitIn(repo)
-  // The submitter's own commit only hints where the queue is (`remote:`,
-  // `target:`); the target's declaration is the authority for every judgement,
-  // and for whether this core runs at all: it does when the target names
-  // `remote:`. A branch that rewrote or broke its own `.yrd.yml` is judged by
-  // the target's rules all the same (ruling D2 bills it at merge).
-  const hints = await readHints(git, "HEAD")
+  // The switch, at no cost to the incumbent: the declaration checked out where
+  // the command stands names `remote:`, or this core is not selected and no
+  // git runs at all. The incumbent's own tests drive the CLI with doubles and
+  // no working tree, and its literal one-shot reads spend exactly one git
+  // read; both hold because nothing below runs unless the file says so. The
+  // switch goes with the incumbent at M6.
+  const here = declarationHere(repo)
+  if (here === undefined || !/^remote:/mu.test(here.text)) return undefined
+  const git = gitIn(here.root)
+  // The declaration here only hints where the queue is (`remote:`, `target:`);
+  // the target's declaration is the authority for every judgement, and it has
+  // to name `remote:` itself, or a branch alone could opt into this core. A
+  // branch that rewrote or broke its own `.yrd.yml` is judged by the target's
+  // rules all the same (ruling D2 bills it at merge).
+  const hints = hintsIn(here.text)
   if (hints.problem !== undefined) options.log?.child("queue").debug?.(`${hints.problem}; asking the target`)
-  const hinted =
-    hints.remote === undefined ? ((await remoteNames(git)).includes("origin") ? "origin" : undefined) : await resolveRemote(git, hints.remote)
-  if (hinted === undefined) return undefined
+  const hinted = await resolveRemote(git, hints.remote ?? "origin")
   const hintedTarget = hints.target ?? "main"
   const targetRef = `${hinted}/${hintedTarget}`
   await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
@@ -158,6 +164,26 @@ export async function coreQueueCommand(
   }
 }
 
+/**
+ * The `.yrd.yml` checked out at `start` or the nearest directory above it,
+ * with the directory it was found in, or undefined when there is none up to
+ * the filesystem root. A file that exists and cannot be read is loud.
+ */
+function declarationHere(start: string): Readonly<{ root: string; text: string }> | undefined {
+  let directory = resolve(start)
+  for (;;) {
+    try {
+      return { root: directory, text: readFileSync(join(directory, ".yrd.yml"), "utf8") }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+    }
+    const parent = dirname(directory)
+    if (parent === directory) return undefined
+    directory = parent
+  }
+}
+
 function runOptions(repo: string, config: QueueConfig, workdir: string, env?: NodeJS.ProcessEnv, log?: ConditionalLogger) {
   // A round made while the garage is open says so on its own record, so a
   // reader of the log can tell the mechanic's rounds from the service's.
@@ -184,12 +210,14 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
  * The human line is a rendering of the record, and the CLI's own logger is the
  * one place it is rendered: one debug row per fact, named by the fact's kind,
  * at the level the invocation resolved (`--log-level`, `LOG_LEVEL`, `-v`),
- * never a second format and never a second reading of the environment. The
- * app's logger carries that level; a fresh logger would read only the process
- * environment, which is not what the invocation asked for.
+ * never a second format and never a second reading of the environment. No
+ * host logger, no rendering: the JSONL file is what happened either way, and
+ * a logger root of this file's own would create spans the stage accounting
+ * never counts.
  */
 function renderer(root: ConditionalLogger | undefined): (record: LogRecord) => void {
-  const base = root?.child("queue") ?? createLogger("yrd:queue")
+  if (root === undefined) return () => {}
+  const base = root.child("queue")
   const byKind = new Map<string, ConditionalLogger>()
   return (record) => {
     let log = byKind.get(record.kind)
