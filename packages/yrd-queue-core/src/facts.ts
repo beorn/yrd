@@ -18,7 +18,8 @@
  * - every later fact has one parent, the fact before it; the merge commit is
  *   never a parent;
  * - the message is a prose first line, then trailers, one meaning each, with
- *   `Fact:` naming the kind and `Branch:`, `Head:`, `Target:` on every fact,
+ *   `Fact:` naming the kind, `Change:` naming the change the fact is about and
+ *   `Branch:` the queue's branch, both on every fact,
  *   `Opened:`, `Submitter:` and `Work-Item:` carried forward from the first
  *   fact, a sent fact naming who it went to (`To:`) and how it went
  *   (`Delivery: sent`, `logged` or `failed`), and an ended fact's result
@@ -35,7 +36,7 @@
  */
 
 import { refAt } from "./git.ts"
-import { changeRef } from "./refs.ts"
+import { changeName, changeRef, type Change } from "./refs.ts"
 
 /** The kinds a fact can be. The vocabulary is closed. */
 export const FACT_KINDS = ["opened", "checked", "merged", "failed", "stuck", "sent"] as const
@@ -63,9 +64,10 @@ const ABSENT = "0".repeat(40)
 const GENESIS_OBJECT = `tree ${EMPTY_TREE}\nauthor yrd <yrd@yrd> 0 +0000\ncommitter yrd <yrd@yrd> 0 +0000\n\nyrd: genesis\n`
 
 export type WriteFact = Readonly<{
+  /** The change the fact is about: a branch at a head, written as one `Change:` trailer. */
+  change: Change
+  /** The queue's branch — the one this change is to land on. */
   branch: string
-  head: string
-  target: string
   kind: FactKind
   subject: string
   trailers?: readonly (readonly [string, string])[]
@@ -98,7 +100,7 @@ const FACT_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
  * a second one.
  */
 export async function factCommit(git: Git, write: WriteFact, parent: string | undefined): Promise<string> {
-  const parents = parent === undefined ? [await genesis(git), write.head] : [parent]
+  const parents = parent === undefined ? [await genesis(git), write.change.head] : [parent]
   const carried = parent === undefined ? [["Opened", new Date().toISOString()] as const] : await carriedFrom(git, parent)
   const named = new Set((write.trailers ?? []).map(([name]) => name))
   const message = factMessage({ ...write, trailers: [...carried.filter(([name]) => !named.has(name)), ...(write.trailers ?? [])] })
@@ -120,7 +122,7 @@ export async function factCommit(git: Git, write: WriteFact, parent: string | un
  * overwrites, so it writes the object with `factCommit` and leases the push.
  */
 export async function appendFact(git: Git, write: WriteFact): Promise<string> {
-  const ref = changeRef(write.branch, write.head)
+  const ref = changeRef(write.change)
   const tip = await refAt(git, ref)
   const sha = await factCommit(git, write, tip)
   await git(["update-ref", ref, sha, tip ?? ABSENT])
@@ -149,8 +151,8 @@ async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [s
 }
 
 /** Every fact of a change, oldest first. An unknown change reads as no facts. */
-export async function readFacts(git: Git, branch: string, head: string): Promise<readonly Fact[]> {
-  const ref = changeRef(branch, head)
+export async function readFacts(git: Git, change: Change): Promise<readonly Fact[]> {
+  const ref = changeRef(change)
   if ((await refAt(git, ref)) === undefined) return []
   // %x00 separates the fields and %x01 the records, because a commit message
   // holds newlines and a naive split would cut a fact in half.
@@ -165,6 +167,8 @@ export async function readFacts(git: Git, branch: string, head: string): Promise
     // The first-parent walk ends at the genesis, which carries no `Fact:`
     // trailer. That is where this change's history ends.
     if (parsed === undefined) break
+    // The tip is the first fact read, so the format check happens once, here.
+    if (facts.length === 0) changeOf(parsed, ref)
     facts.push(parsed)
   }
   return facts.reverse()
@@ -172,7 +176,7 @@ export async function readFacts(git: Git, branch: string, head: string): Promise
 
 /** The message one fact commit carries. */
 export function factMessage(write: WriteFact): string {
-  const lines = [write.subject, "", `Fact: ${write.kind}`, `Branch: ${write.branch}`, `Head: ${write.head}`, `Target: ${write.target}`]
+  const lines = [write.subject, "", `Fact: ${write.kind}`, `Change: ${changeName(write.change)}`, `Branch: ${write.branch}`]
   for (const [name, value] of write.trailers ?? []) {
     if (value.includes("\n")) throw new Error(`trailer ${name} carries a newline; one trailer is one line`)
     lines.push(`${name}: ${value}`)
@@ -183,6 +187,29 @@ export function factMessage(write: WriteFact): string {
 /** The first value of a trailer, or undefined. */
 export function trailer(fact: Fact, name: string): string | undefined {
   return fact.trailers.find(([key]) => key === name)?.[1]
+}
+
+/**
+ * The change a fact is about, from its `Change:` trailer — `<branch>@<head>`,
+ * the one spelling of a change's name (refs.ts). `where` names the ref, so the
+ * refusal below says which change is unreadable.
+ *
+ * Loud when the fact carries none. Facts written before 2026-09-03 spelled the
+ * change as a `Branch:` and `Head:` pair with the queue's own branch on
+ * `Target:`, and no reader here understands that shape: reading one would mean
+ * two spellings of a change's name in the store, which is the thing the name
+ * exists to prevent. There is no compatibility reader on purpose.
+ */
+export function changeOf(fact: Fact, where: string): string {
+  const change = trailer(fact, "Change")
+  if (change === undefined) {
+    throw new Error(
+      `${where} carries no Change: trailer at its fact ${fact.sha.slice(0, 12)}: these facts predate the ` +
+        "2026-09-03 format and no reader understands them. The queue mechanic bundles and deletes them — " +
+        "`git bundle create <file> refs/yrd/changes/*`, then delete the refs.",
+    )
+  }
+  return change
 }
 
 /** Every value of a trailer, in order. */

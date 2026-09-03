@@ -2,7 +2,7 @@
  * One check, run here, now ([plan](../../../../pm/@i/10-yrd/plan.md)
  * § The final design, The queue run).
  *
- * A check is a command the target declares, run in a change's worktree with a
+ * A check is a command the queue's branch declares, run in a change's worktree with a
  * bound. Its result is one of three words, read off the exit code once the run
  * itself settled cleanly: 0 is pass, 1 is fail, 2 is stuck — the check's own
  * statement that it could not judge. A check that is not there, one that runs
@@ -20,8 +20,8 @@
  * The environment is built, never inherited (ruling A7), and it says what the
  * check is judging: `YRD_REPO` is the worktree the check runs in, its own
  * working directory; `YRD_CANDIDATE_SHA` is that worktree's HEAD; `YRD_BASE_SHA`
- * is the merge base of that HEAD and the target, so it is always an ancestor
- * of the candidate. A check that selects work by what changed — the affected
+ * is the merge base of that HEAD and the queue's branch, so it is always an
+ * ancestor of the candidate. A check that selects work by what changed — the affected
  * tests, the co-changed manifests — needs both shas and needs that ancestry, so
  * the queue states them rather than leaving each check to derive them by shell
  * against whatever refs its worktree happens to carry. They are read once per
@@ -34,7 +34,7 @@ import { join } from "node:path"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 
 /**
- * A check as the target declares it — the whole declaration, in one type.
+ * A check as the queue's branch declares it — the whole declaration, in one type.
  * `runCheck` here reads what it runs; the queue run reads `on` and `scripts`
  * to decide when it runs and against which gate. Two names for one
  * declaration, with config.ts importing the wider one back from run.ts, was a
@@ -76,9 +76,9 @@ export type CheckResult = Readonly<{
  * and the same for every check and setup that runs in it.
  */
 export type CheckedTree = Readonly<{
-  /** `YRD_CANDIDATE_SHA`: the worktree's HEAD — the change's head at submit, the merge commit at merge, the target itself at the target. */
+  /** `YRD_CANDIDATE_SHA`: the worktree's HEAD — the change's head at submit, the merge commit at merge, the queue's branch in a worktree of the branch itself. */
   candidate: string
-  /** `YRD_BASE_SHA`: the merge base of that HEAD and the target, so it is always an ancestor of the candidate. */
+  /** `YRD_BASE_SHA`: the merge base of that HEAD and the queue's branch, so it is always an ancestor of the candidate. */
   base: string
 }>
 

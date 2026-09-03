@@ -21,16 +21,27 @@
 /** Where every change lives. */
 export const CHANGES = "refs/yrd/changes"
 
-/** The name of the change a branch opened at one head: `<branch>@<sha>`. */
-export function changeName(branch: string, head: string): string {
-  const trimmed = branch.replace(/^\/+|\/+$/gu, "")
+/**
+ * A change: a branch at a head. Everything that writes about one says both,
+ * and its name — `<branch>@<head>` — is the one spelling of the pair.
+ */
+export type Change = Readonly<{ branch: string; head: string }>
+
+/** The name of a change: `<branch>@<head>`. */
+export function changeName(change: Change): string {
+  const trimmed = change.branch.replace(/^\/+|\/+$/gu, "")
   if (trimmed === "") throw new Error("a change needs a branch name; got an empty one")
-  return `${trimmed}@${head}`
+  return `${trimmed}@${change.head}`
 }
 
-/** The change a branch opened at one head: its name under `refs/yrd/changes/`. */
-export function changeRef(branch: string, head: string): string {
-  return `${CHANGES}/${changeName(branch, head)}`
+/** The ref a change is: its name under `refs/yrd/changes/`. */
+export function changeRef(change: Change): string {
+  return refOfChange(changeName(change))
+}
+
+/** The ref a change's NAME is, for a reader that has the name and not the pair. */
+export function refOfChange(name: string): string {
+  return `${CHANGES}/${name}`
 }
 
 /**
@@ -38,7 +49,7 @@ export function changeRef(branch: string, head: string): string {
  * one. The sha has no `@` and no `/`, so the last `@` of the whole name is the
  * one before it, and a name whose tail is not a full sha is not a change name.
  */
-export function parseChangeName(name: string): Readonly<{ branch: string; head: string }> | undefined {
+export function parseChangeName(name: string): Change | undefined {
   const cut = name.lastIndexOf("@")
   if (cut <= 0) return undefined
   const head = name.slice(cut + 1)
@@ -46,8 +57,8 @@ export function parseChangeName(name: string): Readonly<{ branch: string; head: 
   return { branch: name.slice(0, cut), head }
 }
 
-/** The branch and head a change ref names, or undefined when the ref is not one. */
-export function parseChangeRef(ref: string): Readonly<{ branch: string; head: string }> | undefined {
+/** The change a ref names, or undefined when the ref is not one. */
+export function parseChangeRef(ref: string): Change | undefined {
   if (!ref.startsWith(`${CHANGES}/`)) return undefined
   return parseChangeName(ref.slice(CHANGES.length + 1))
 }

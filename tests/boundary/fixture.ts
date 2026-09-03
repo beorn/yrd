@@ -11,9 +11,9 @@
  * The throwaway-repository shape is the one `packages/yrd-cli/tests/
  * bay-submit-selected.test.ts` proves end to end: a bare shared repository
  * plus a working repository whose `origin` is that bare one, work committed
- * in a real Bay, and `yrd bay submit` as the submit form. The target the
+ * in a real Bay, and `yrd bay submit` as the submit form. The branch the
  * queue lands on is the shared repository's `main`, never the local ref, so
- * every assertion about the target reads `origin/main`.
+ * every assertion about that branch reads `origin/main`.
  */
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -83,12 +83,12 @@ export type FakeCheckPlan = Readonly<{
 }>
 
 /**
- * The head of a `.yrd.yml`: `remote:` and `target:` (ruling A5). `remote`
+ * The head of a `.yrd.yml`: `remote:` and `branch:` (ruling A5). `remote`
  * names the shared repository by URL when the case asks for the remote to be
  * added from the declaration, and `origin` otherwise.
  */
 export function declaration(remote?: string): string {
-  return `remote: ${JSON.stringify(remote ?? "origin")}\ntarget: main\n`
+  return `remote: ${JSON.stringify(remote ?? "origin")}\nbranch: main\n`
 }
 
 export type BoundaryRepository = Readonly<{
@@ -244,8 +244,8 @@ export async function changeStandings(repo: string): Promise<Readonly<Record<str
   return Object.fromEntries(parsed.changes.map((change) => [`${change.branch}@${change.head}`, change.state]))
 }
 
-/** The tip of the target the queue lands on — the shared one, not the local ref. */
-export function targetTip(repo: string): Promise<string> {
+/** The tip of the branch the queue lands on — the shared one, not the local ref. */
+export function branchTip(repo: string): Promise<string> {
   return git(repo, "rev-parse", "origin/main")
 }
 
@@ -255,7 +255,7 @@ export async function parentsOf(repo: string, sha: string): Promise<readonly str
   return parents === "" ? [] : parents.split(" ")
 }
 
-/** How many commits the target advanced along its own first-parent line. */
+/** How many commits the queue's branch advanced along its own first-parent line. */
 export async function firstParentDistance(repo: string, from: string, to: string): Promise<number> {
   return Number(await git(repo, "rev-list", "--count", "--first-parent", `${from}..${to}`))
 }
@@ -382,7 +382,7 @@ export async function readChange(
   repo: string,
   change: Readonly<{ branch: string; headSha: string }>,
 ): Promise<ChangeReading> {
-  const ref = changeRef(change.branch, change.headSha)
+  const ref = changeRef({ branch: change.branch, head: change.headSha })
   const present = await changeRefs(repo)
   const tipLine = present.find((line) => line.endsWith(` ${ref}`))
   if (tipLine === undefined) {
@@ -457,15 +457,15 @@ export async function yrdJson(repo: string, ...args: string[]): Promise<YrdJsonR
 }
 
 /**
- * The target moves without the queue: `sha` merged into it by hand and pushed,
- * as the mechanic does in the garage. Answers the target's new tip.
+ * The queue's branch moves without the queue: `sha` merged into it by hand and
+ * pushed, as the mechanic does in the garage. Answers that branch's new tip.
  */
 export async function mergeByHand(repo: string, sha: string, message = "merged by hand"): Promise<string> {
   await git(repo, "fetch", "-q", "origin")
   await git(repo, "checkout", "-q", "-B", "main", "origin/main")
   await git(repo, "merge", "-q", "--no-ff", "-m", message, sha)
   await git(repo, "push", "-q", "origin", "main")
-  return targetTip(repo)
+  return branchTip(repo)
 }
 
 /**
@@ -481,7 +481,8 @@ export async function secondReader(origin: string): Promise<string> {
   await git(root, "clone", "-q", origin, clonePath)
   const clone = await realpath(clonePath)
   // The bare shared repository's HEAD still names git's default branch, so a
-  // plain clone lands nowhere; the target is `main` and the reader stands on it.
+  // plain clone lands nowhere; the queue's branch is `main` and the reader
+  // stands on it.
   await git(clone, "checkout", "-q", "-B", "main", "origin/main")
   await refreshSecondReader(clone)
   return clone
@@ -588,9 +589,9 @@ function notifyArgs(repo: string): readonly string[] {
 let commitCounter = 0
 
 /**
- * One commit on `branch`, cut from the target the first time the branch is
+ * One commit on `branch`, cut from the queue's branch the first time it is
  * named, and the repository left standing on `main` afterwards so a queue run
- * never reads the submitter's checkout as the target.
+ * never reads the submitter's checkout as the queue's branch.
  */
 export async function commitOnBranch(repo: string, branch: string, message?: string): Promise<string> {
   if (await refExists(repo, `refs/heads/${branch}`)) await git(repo, "checkout", "-q", branch)
@@ -705,13 +706,13 @@ type PhasedCheck = Readonly<{
 }>
 
 type BoundaryPlan = Readonly<{
-  /** The target's checks, in order. */
+  /** The checks the queue's branch declares, in order. */
   checks: readonly PhasedCheck[]
   /** Declare a notifier, as `FakeCheckPlan.notify` does. */
   notify?: boolean
   /** Name the shared repository by URL in `remote:`, instead of `origin`. */
   remoteIsOrigin?: boolean
-  /** Files committed on the target alongside `README.md` and `.yrd.yml`.
+  /** Files committed on the queue's branch alongside `README.md` and `.yrd.yml`.
    * A path ending in `.sh` is committed executable. */
   files?: Readonly<Record<string, string>>
 }>
@@ -753,7 +754,7 @@ function phasedChecks(checks: readonly PhasedCheck[]): string {
   return `checks: [${entries.join(", ")}]`
 }
 
-/** A throwaway repository whose target carries the checks and files the case names. */
+/** A throwaway repository whose queue branch carries the checks and files the case names. */
 export function boundaryRepositoryWith(plan: BoundaryPlan): Promise<BoundaryRepository> {
   return buildBoundaryRepository(() => plan)
 }
@@ -856,18 +857,18 @@ async function handClone(origin: string): Promise<string> {
   roots.push(work)
   const clone = join(work, "clone")
   // `--branch main`, because the bare repository was made by `git init --bare`
-  // and its HEAD still names the host's default branch, not the target.
+  // and its HEAD still names the host's default branch, not the queue's.
   await git(work, "clone", "-q", "--branch", "main", origin, clone)
   await git(clone, "config", "user.name", "Yrd Boundary")
   await git(clone, "config", "user.email", "yrd@example.invalid")
   return clone
 }
 
-/** The target moves without the queue: one commit, pushed to `main`. */
-export async function advanceTargetByHand(
+/** The queue's branch moves without the queue: one commit, pushed to `main`. */
+export async function advanceBranchByHand(
   origin: string,
   files: Readonly<Record<string, string>>,
-  message = "the target moved",
+  message = "the queue's branch moved",
 ): Promise<string> {
   const clone = await handClone(origin)
   for (const [path, content] of Object.entries(files)) {
@@ -879,10 +880,10 @@ export async function advanceTargetByHand(
   return git(clone, "rev-parse", "HEAD")
 }
 
-/** A change landed by hand in the garage: its head merged into the target and
- * pushed, with no queue run involved. `from` is the working repository the
- * change was submitted in — a submitted head is not at the shared repository
- * until the queue puts it there, so the hand-clone has to fetch it. */
+/** A change landed by hand in the garage: its head merged into the queue's
+ * branch and pushed, with no queue run involved. `from` is the working
+ * repository the change was submitted in — a submitted head is not at the shared
+ * repository until the queue puts it there, so the hand-clone has to fetch it. */
 export async function landByHand(origin: string, headSha: string, from: string): Promise<string> {
   const clone = await handClone(origin)
   await git(clone, "fetch", "-q", from, "+refs/heads/*:refs/remotes/submitted/*")
@@ -892,14 +893,14 @@ export async function landByHand(origin: string, headSha: string, from: string):
 }
 
 /** `origin/main` as the working repository sees it after a fetch — needed
- * whenever something other than the queue moved the target. */
-export async function refreshTarget(repo: string): Promise<string> {
+ * whenever something other than the queue moved the queue's branch. */
+export async function refreshBranch(repo: string): Promise<string> {
   await git(repo, "fetch", "-q", "origin")
-  return targetTip(repo)
+  return branchTip(repo)
 }
 
-/** Whether a head is in the target's history — the plan's own merged test. */
-export async function mergedIntoTarget(repo: string, sha: string): Promise<boolean> {
+/** Whether a head is in the queue branch's history — the plan's own merged test. */
+export async function mergedIntoBranch(repo: string, sha: string): Promise<boolean> {
   return (await gitTry(repo, "merge-base", "--is-ancestor", sha, "origin/main")).exitCode === 0
 }
 

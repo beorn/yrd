@@ -27,7 +27,7 @@
  *   ────────   ──────────────────────────────────────────────────────────────
  *   run        pin      the yrd pin the queue run ran, a sha
  *              config   the target's check config, a blob sha
- *              target   the branch this queue is for
+ *              branch   the branch this queue lands on
  *              at       when the queue run started, ISO 8601
  *   change     branch   the branch, which is the change's name
  *              head     the sha it is a branch at
@@ -164,7 +164,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     const opened = theOne(records, "run")
     expect(opened.pin, run.report).toEqual(expect.any(String))
     expect(opened.config, run.report).toEqual(expect.any(String))
-    expect(opened.target, run.report).toBe("main")
+    expect(opened.branch, run.report).toBe("main")
     expect(opened.at, run.report).toEqual(expect.any(String))
 
     // change — one per change seen, with what the queue run did with it.

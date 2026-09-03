@@ -43,7 +43,7 @@ import {
   removeTemporaryRoots,
   secondReader,
   submitOneCommit,
-  targetTip,
+  branchTip,
   yrdJson,
   type YrdJsonResult,
 } from "./fixture.ts"
@@ -214,7 +214,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const { branch, headSha } = await submitOneCommit(repo, "byhand")
 
-    const before = await targetTip(repo)
+    const before = await branchTip(repo)
     const tip = await mergeByHand(repo, headSha)
     expect(tip, "the hand merge did not move the target").not.toBe(before)
 

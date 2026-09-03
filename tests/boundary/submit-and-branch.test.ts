@@ -47,7 +47,7 @@ import {
   runYrd,
   secondWorkingRepo,
   setSubmitter,
-  targetTip,
+  branchTip,
 } from "./fixture.ts"
 
 afterEach(removeTemporaryRoots)
@@ -68,7 +68,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     // Both, or neither: the branch is worth nothing to the queue without the
     // fact that opens its change, and the fact names a head that must be there.
     expect(await refSha(origin, `refs/heads/${branch}`), submit.report).toBe(head)
-    expect(await refExists(origin, changeRef(branch, head)), submit.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head })), submit.report).toBe(true)
   })
 
   /**
@@ -86,7 +86,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     const dry = await runYrd(repo, "queue", "submit", "main", "--dry-run")
 
     expect(dry.exitCode, dry.report).not.toBe(0)
-    expect(dry.report).toContain("main is the target, not a change")
+    expect(dry.report).toContain("main is the queue's branch, not a change")
     expect(await refs(origin), dry.report).toEqual(before)
   })
 
@@ -101,17 +101,17 @@ describe("the submit path", { timeout: 120_000 }, () => {
 
     expect(dry.exitCode, dry.report).toBe(0)
     expect(JSON.parse(dry.stdout), dry.report).toMatchObject({
+      branch: "main",
       change: `${branch}@${head}`,
       dryRun: true,
-      target: "main",
       workItem: "24099",
     })
     // The whole point: the remote is byte-for-byte where it was.
     expect(await refs(origin), dry.report).toEqual(before)
     expect(await refExists(origin, `refs/heads/${branch}`), dry.report).toBe(false)
-    expect(await refExists(origin, changeRef(branch, head)), dry.report).toBe(false)
+    expect(await refExists(origin, changeRef({ branch: branch, head })), dry.report).toBe(false)
     // Nor locally: a dry run appends no fact for the next submit to chain onto.
-    expect(await refExists(repo, changeRef(branch, head)), dry.report).toBe(false)
+    expect(await refExists(repo, changeRef({ branch: branch, head })), dry.report).toBe(false)
   })
 
   // today: red — the config refuses the key outright: `error: config remote is
@@ -151,8 +151,8 @@ describe("the submit path", { timeout: 120_000 }, () => {
     const submit = await queueSubmit(repo, branch)
 
     expect(submit.exitCode, submit.report).toBe(0)
-    expect(await refExists(origin, changeRef(branch, head)), submit.report).toBe(true)
-    const facts = await factMessages(origin, changeRef(branch, head))
+    expect(await refExists(origin, changeRef({ branch: branch, head })), submit.report).toBe(true)
+    const facts = await factMessages(origin, changeRef({ branch: branch, head }))
     // Nothing has judged it yet, so opened is the whole change.
     expect(facts.length, submit.report).toBe(1)
     const opened = facts[0] ?? ""
@@ -174,7 +174,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
 
     expect(submit.exitCode, submit.report).toBe(0)
     expect(await refSha(origin, `refs/heads/${branch}`), submit.report).toBe(head)
-    expect(await refExists(origin, changeRef(branch, head)), submit.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head })), submit.report).toBe(true)
   })
 
   // today: red — the second submit exits 0, but both heads went to the one
@@ -193,8 +193,8 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(second.exitCode, second.report).toBe(0)
     expect(await refSha(origin, `refs/heads/${branch}`), second.report).toBe(head2)
     // yrd deletes nothing: the first head's change is still there to read.
-    expect(await refExists(origin, changeRef(branch, head1)), second.report).toBe(true)
-    expect(await refExists(origin, changeRef(branch, head2)), second.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head: head1 })), second.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head: head2 })), second.report).toBe(true)
   })
 
   // today: red — the second push is rejected non-fast-forward and the submit
@@ -219,8 +219,8 @@ describe("the submit path", { timeout: 120_000 }, () => {
 
     expect(second.exitCode, second.report).toBe(0)
     expect(await refSha(origin, `refs/heads/${branch}`), second.report).toBe(head2)
-    expect(await refExists(origin, changeRef(branch, head1)), second.report).toBe(true)
-    expect(await refExists(origin, changeRef(branch, head2)), second.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head: head1 })), second.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head: head2 })), second.report).toBe(true)
   })
 
   /**
@@ -255,11 +255,11 @@ describe("the submit path", { timeout: 120_000 }, () => {
 
     expect(second.exitCode, second.report).toBe(0)
     expect(await refSha(origin, `refs/heads/${branch}`), second.report).toBe(head2)
-    expect(await refExists(origin, changeRef(branch, head1)), second.report).toBe(true)
-    expect(await refExists(origin, changeRef(branch, head2)), second.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head: head1 })), second.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head: head2 })), second.report).toBe(true)
     // Loud is this: each change says who put that head there.
-    expect((await factMessages(origin, changeRef(branch, head1))).at(-1) ?? "").toContain("ada@example.invalid")
-    expect((await factMessages(origin, changeRef(branch, head2))).at(-1) ?? "").toContain("bo@example.invalid")
+    expect((await factMessages(origin, changeRef({ branch: branch, head: head1 }))).at(-1) ?? "").toContain("ada@example.invalid")
+    expect((await factMessages(origin, changeRef({ branch: branch, head: head2 }))).at(-1) ?? "").toContain("bo@example.invalid")
   })
 
   /**
@@ -279,7 +279,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     const head1 = await commitOnBranch(repo, branch)
     const first = await queueSubmit(repo, branch)
     expect(first.exitCode, first.report).toBe(0)
-    const changeTip = await refSha(origin, changeRef(branch, head1))
+    const changeTip = await refSha(origin, changeRef({ branch: branch, head: head1 }))
     expect(changeTip, first.report).toBeDefined()
 
     // Take the branch out, so `refs/heads/` has room for the second name.
@@ -294,8 +294,8 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(submit.exitCode, submit.report).toBe(0)
     // Both changes stand, each under its own name, and the first is untouched.
     expect(await refExists(origin, `refs/heads/${beside}`), submit.report).toBe(true)
-    expect(await refExists(origin, changeRef(beside, head2)), submit.report).toBe(true)
-    expect(await refSha(origin, changeRef(branch, head1)), submit.report).toBe(changeTip)
+    expect(await refExists(origin, changeRef({ branch: beside, head: head2 })), submit.report).toBe(true)
+    expect(await refSha(origin, changeRef({ branch: branch, head: head1 })), submit.report).toBe(changeTip)
   })
 })
 
@@ -321,7 +321,7 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     expect(run.exitCode, run.report).toBe(0)
     // Not judged: no check ran. Not opened: no change ref, no fact.
     expect(await checkAttempts(checkLog), run.report).toBe(0)
-    expect(await refExists(origin, changeRef(branch, head)), run.report).toBe(false)
+    expect(await refExists(origin, changeRef({ branch: branch, head })), run.report).toBe(false)
     // Invisible to the table, and nothing lost: the branch stands at the remote.
     expect(
       Object.keys(await changeStandings(repo)).filter((key) => key.startsWith(`${branch}@`)),
@@ -333,7 +333,7 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     const submit = await queueSubmit(repo, branch)
 
     expect(submit.exitCode, submit.report).toBe(0)
-    expect(await refExists(origin, changeRef(branch, head)), submit.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head })), submit.report).toBe(true)
     expect(await changeStandings(repo), submit.report).toHaveProperty(`${branch}@${head}`)
   })
 
@@ -347,13 +347,13 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     const submit = await queueSubmit(repo, branch)
     expect(submit.exitCode, submit.report).toBe(0)
     expect(await refSha(origin, `refs/heads/${branch}`), submit.report).toBe(head)
-    const changeTip = await refSha(origin, changeRef(branch, head))
+    const changeTip = await refSha(origin, changeRef({ branch: branch, head }))
     expect(changeTip, submit.report).toBeDefined()
 
     await git(repo, "push", "-q", "yrd", `:${branch}`)
 
     expect(await refExists(origin, `refs/heads/${branch}`)).toBe(false)
-    expect(await refSha(origin, changeRef(branch, head))).toBe(changeTip)
+    expect(await refSha(origin, changeRef({ branch: branch, head }))).toBe(changeTip)
   })
 
   /**
@@ -377,15 +377,15 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     const submit = await queueSubmit(repo, branch)
     expect(submit.exitCode, submit.report).toBe(0)
     expect(await refSha(origin, `refs/heads/${branch}`), submit.report).toBe(head)
-    expect(await refExists(origin, changeRef(branch, head)), submit.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head })), submit.report).toBe(true)
     await git(repo, "push", "-q", "yrd", `:${branch}`)
-    const before = await targetTip(repo)
+    const before = await branchTip(repo)
 
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).not.toBe(2)
-    expect(await targetTip(repo), run.report).toBe(before)
-    const tip = (await factMessages(origin, changeRef(branch, head)))[0] ?? ""
+    expect(await branchTip(repo), run.report).toBe(before)
+    const tip = (await factMessages(origin, changeRef({ branch: branch, head })))[0] ?? ""
     expect(tip, run.report).toContain("failed")
     expect(tip, run.report).toContain("deleted")
     expect(await notifiedMessages(notifyLog), run.report).toBe("")
@@ -406,7 +406,7 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     const head1 = await commitOnBranch(repo, branch)
     const submit = await queueSubmit(repo, branch)
     expect(submit.exitCode, submit.report).toBe(0)
-    expect(await refExists(origin, changeRef(branch, head1)), submit.report).toBe(true)
+    expect(await refExists(origin, changeRef({ branch: branch, head: head1 })), submit.report).toBe(true)
 
     const head2 = await commitOnBranch(repo, branch)
     await git(repo, "push", "-q", "yrd", branch)
@@ -415,11 +415,11 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).not.toBe(2)
-    const tip = (await factMessages(origin, changeRef(branch, head1)))[0] ?? ""
+    const tip = (await factMessages(origin, changeRef({ branch: branch, head: head1 })))[0] ?? ""
     expect(tip, run.report).toContain("failed")
     expect(tip, run.report).toContain("replaced")
     expect(await notifiedMessages(notifyLog), run.report).not.toContain(head1)
     // The new head is a bare push, so no change was opened for it (E2).
-    expect(await refExists(origin, changeRef(branch, head2)), run.report).toBe(false)
+    expect(await refExists(origin, changeRef({ branch: branch, head: head2 })), run.report).toBe(false)
   })
 })

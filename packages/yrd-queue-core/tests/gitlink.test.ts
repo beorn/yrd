@@ -142,8 +142,8 @@ async function world(): Promise<World> {
       owner: "@cto",
       process: counting.process,
       remote: "origin",
+      branch: "main",
       repo: work,
-      target: "main",
       workdir,
     }),
     work,
@@ -162,7 +162,7 @@ async function submitPin(w: World, branch: string, sha: string): Promise<string>
   await w.git(["commit", "--quiet", "-m", `${branch}: pin the component at ${sha.slice(0, 12)}`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
+  await submit(w.git, "origin", { branch: "main", changeBranch: branch, submitter: "@dev/2" })
   return head
 }
 
@@ -186,7 +186,7 @@ async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["commit", "--quiet", "-m", `${branch}: a file, no pin`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
+  await submit(w.git, "origin", { branch: "main", changeBranch: branch, submitter: "@dev/2" })
   return head
 }
 
@@ -199,7 +199,7 @@ describe("the built-in gitlink check", () => {
 
     expect(outcome.exitCode).toBe(1)
     expect(outcome.failed).toEqual(["task/off"])
-    const failed = (await readFacts(w.git, "task/off", head)).find((fact) => fact.kind === "failed")
+    const failed = (await readFacts(w.git, { branch: "task/off", head })).find((fact) => fact.kind === "failed")
     if (failed === undefined) throw new Error("no failed fact")
     expect(trailer(failed, "Reason")).toBe("gitlink-off-main")
     expect(trailer(failed, "Fault")).toBe("submitter")
@@ -296,7 +296,7 @@ describe("the built-in gitlink check", () => {
     // run's answer — and one merge per run lands the first (ruling D4).
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/first"])
-    expect((await readFacts(w.git, "task/second", second)).map((fact) => fact.kind)).toEqual(["opened", "checked"])
+    expect((await readFacts(w.git, { branch: "task/second", head: second })).map((fact) => fact.kind)).toEqual(["opened", "checked"])
     expect(w.fetches()).toBe(1)
   })
 })

@@ -17,13 +17,16 @@ import { refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 
 export type SubmitRequest = Readonly<{
+  /** The branch being submitted: the change's own. */
+  changeBranch: string
+  /** The queue's branch, the one it is submitted to be merged into. */
   branch: string
-  target: string
   submitter: string
   workItem?: string
 }>
 
 export type Submitted = Readonly<{
+  /** The change's own branch, and the head it was submitted at. */
   branch: string
   head: string
   /** The opened fact's sha. */
@@ -33,29 +36,32 @@ export type Submitted = Readonly<{
 }>
 
 /**
- * The target is not a change. Thrown at the one path in, and by the CLI's
- * dry run before it says what it would open: a preview that accepts what
- * the action refuses is the reverse of the flag's purpose (2026-09-03).
+ * The queue's own branch is not a change. Thrown at the one path in, and by
+ * the CLI's dry run before it says what it would open: a preview that accepts
+ * what the action refuses is the reverse of the flag's purpose (2026-09-03).
  */
-export function refuseTarget(branch: string, target: string): void {
-  if (branch === target) {
-    throw new Error(`${target} is the target, not a change; a change is a branch submitted to be merged into ${target}`)
+export function refuseQueueBranch(changeBranch: string, branch: string): void {
+  if (changeBranch === branch) {
+    throw new Error(
+      `${branch} is the queue's branch, not a change; a change is a branch submitted to be merged into ${branch}`,
+    )
   }
 }
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
-  // The target is not a change: a change is a branch submitted to be MERGED
-  // INTO the target, so submitting the target itself asks the queue to merge a
+  // The queue's branch is not a change: a change is a branch submitted to be
+  // MERGED INTO it, so submitting that branch itself asks the queue to merge a
   // branch into itself. Nothing refused it before, and what it opened was a
-  // change whose head the target already carried: it read merged at once, the
-  // catch-up gave it a `Merged-By: hand` fact naming whatever merge landed
-  // next, its submitter was told to close a bead for a merge that was not
-  // theirs, and that merge stayed accounted for in the E5 walk, where an
+  // change whose head the queue's branch already carried: it read merged at
+  // once, the catch-up gave it a `Merged-By: hand` fact naming whatever merge
+  // landed next, its submitter was told to close a bead for a merge that was
+  // not theirs, and that merge stayed accounted for in the E5 walk, where an
   // accounted commit hides every hand push at or below it
   // (2026-09-03: `main@0a9db9daf7eb`, named for the queue's own merge 005a622156c7).
-  refuseTarget(request.branch, request.target)
-  const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
-  const ref = changeRef(request.branch, head)
+  refuseQueueBranch(request.changeBranch, request.branch)
+  const head = (await git(["rev-parse", "--verify", `refs/heads/${request.changeBranch}^{commit}`])).trim()
+  const change = { branch: request.changeBranch, head }
+  const ref = changeRef(change)
   // Where the remote holds the branch and this change right now, in one
   // reading: a retry appends to the remote's history of the change, so that
   // history is fetched first, and the branch's lease is the remote's own value,
@@ -63,27 +69,26 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // ls-remote answers "absent" as an empty list, never as an error, which is
   // the one honest empty a submit is allowed to swallow.
   const at = new Map(
-    (await git(["ls-remote", "--refs", remote, `refs/heads/${request.branch}`, ref]))
+    (await git(["ls-remote", "--refs", remote, `refs/heads/${request.changeBranch}`, ref]))
       .split("\n")
       .map((row) => row.trim().split(/\s+/u))
       .map(([sha, name]) => [name ?? "", sha ?? ""] as const),
   )
   const remoteTip = at.get(ref) ?? ""
-  const remoteBranch = at.get(`refs/heads/${request.branch}`) ?? ""
+  const remoteBranch = at.get(`refs/heads/${request.changeBranch}`) ?? ""
   const retry = remoteTip !== ""
   if (retry) await git(["fetch", "--quiet", remote, `+${ref}:${ref}`])
   // A local change ref the remote does not hold is an orphan of a refused
   // push; submit is the only writer of these refs, so it goes.
   else if ((await refAt(git, ref)) !== undefined) await git(["update-ref", "-d", ref])
-  const workItem = await workItemOf(git, request.branch, head, request.workItem)
+  const workItem = await workItemOf(git, request.changeBranch, head, request.workItem)
   const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
   if (workItem !== undefined) trailers.push(["Work-Item", workItem])
   const opened = await appendFact(git, {
     branch: request.branch,
-    head,
+    change,
     kind: "opened",
-    subject: `${request.submitter} submitted ${request.branch} to ${request.target}`,
-    target: request.target,
+    subject: `${request.submitter} submitted ${request.changeBranch} to ${request.branch}`,
     trailers,
   })
   // Two explicit leases make the push the same compare-and-swap the local
@@ -96,17 +101,17 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
       "push",
       "--quiet",
       "--atomic",
-      `--force-with-lease=refs/heads/${request.branch}:${remoteBranch === "" ? ABSENT : remoteBranch}`,
+      `--force-with-lease=refs/heads/${request.changeBranch}:${remoteBranch === "" ? ABSENT : remoteBranch}`,
       `--force-with-lease=${ref}:${retry ? remoteTip : ABSENT}`,
       remote,
-      `refs/heads/${request.branch}:refs/heads/${request.branch}`,
+      `refs/heads/${request.changeBranch}:refs/heads/${request.changeBranch}`,
       `${ref}:${ref}`,
     ])
   } catch (error) {
     await git(retry ? ["update-ref", ref, remoteTip] : ["update-ref", "-d", ref])
     throw error
   }
-  return { branch: request.branch, head, opened, retry }
+  return { branch: request.changeBranch, head, opened, retry }
 }
 
 /**
