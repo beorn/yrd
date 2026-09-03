@@ -12,14 +12,16 @@ import hab, {
 describe("Yrd Hab runner declarations", () => {
   it("keeps repository and queue identity explicit in data and generated argv", () => {
     expect(yrdQueueRunnerDeclarations).toEqual([
-      { serviceName: "yrd-runner", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
+      { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
     ])
     expect(hab.services).toMatchObject({
-      "yrd-runner": {
-        command: "bun tools/yrd-runtime.mjs yrd queue up",
-        health: { command: "bun tools/yrd-runtime.mjs yrd queue list --json" },
+      "yrd-service": {
+        command: "bun tools/yrd-runtime.mjs yrd queue up --interval 120",
+        env: { TRIBE_NAME: "@yrd-service" },
       },
     })
+    // No health probe: the loop's process and journal are its liveness (M7).
+    expect(hab.services["yrd-service"]).not.toHaveProperty("health")
   })
 
   it("refuses duplicate and incomplete runner declarations before Hab consumes them", () => {
@@ -56,7 +58,7 @@ describe("Yrd Hab runner declarations — who is paged when a runner stays down"
     // crashed" to "the runner exhausted its restart budget", and it is the
     // same seat that has to answer it.
     expect(yrdQueueRunnerDeclarations.map(({ serviceName, owner }) => [serviceName, owner])).toEqual([
-      ["yrd-runner", "@cto"],
+      ["yrd-service", "@cto"],
     ])
   })
 
