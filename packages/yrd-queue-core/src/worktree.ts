@@ -51,6 +51,12 @@ export async function freshWorktree(git: Git, repo: string, commit: string, path
   await git(["worktree", "add", "--quiet", "--detach", path, commit])
   const materialized = await materializeSubmodulesFromLocalWorktreeParallel({
     ...(plumbing === undefined ? {} : { log: plumbing }),
+    // A pin the reference checkout has never fetched is fetched from the
+    // component's remote. git-super's default (0) refuses the network and the
+    // queue stuck on a change whose km pin was on km's main but not yet in
+    // the reference's store (2026-09-03 10:52 PDT, @dev/2's 24089); a pin
+    // that is not on its component's main still fails at the gitlink check.
+    maxRemoteFallbacks: Number.POSITIVE_INFINITY,
     referenceWorktree: repo,
     worktree: path,
   })

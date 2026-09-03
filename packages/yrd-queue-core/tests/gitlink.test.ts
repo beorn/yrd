@@ -251,6 +251,40 @@ describe("the built-in gitlink check", () => {
     expect(w.fetches()).toBe(0)
   })
 
+  it("a pin the reference checkout never fetched is materialized from the component's remote, and the change merges", async () => {
+    const w = await world()
+    // The component's main moves on in its own clone and the reference
+    // checkout under `work` never fetches it; the change pins it by plumbing,
+    // so the reference's submodule store lacks the commit when the queue
+    // builds the worktree. The queue fetches it there (2026-09-03: it refused
+    // the network and stuck on @dev/2's 24089 instead).
+    const componentWork = join(w.work, "..", "component-work")
+    const cg = gitIn(componentWork)
+    writeFileSync(join(componentWork, "lib.txt"), "four\n")
+    await cg(["commit", "--quiet", "-am", "four"])
+    await cg(["push", "--quiet", "origin", "main"])
+    const four = (await cg(["rev-parse", "HEAD"])).trim()
+    // Plumbing only: the working tree and its submodule checkout stay where
+    // they are, so nothing here fetches the commit into the reference store.
+    const base = (await w.git(["rev-parse", "main"])).trim()
+    await w.git(["read-tree", "main"])
+    await w.git(["update-index", "--add", "--cacheinfo", `160000,${four},component`])
+    const tree = (await w.git(["write-tree"])).trim()
+    const head = (
+      await w.git(["commit-tree", tree, "-p", base, "-m", "task/unfetched: pin the component at a commit this checkout never fetched"])
+    ).trim()
+    await w.git(["update-ref", "refs/heads/task/unfetched", head])
+    await w.git(["read-tree", "main"])
+    await submit(w.git, "origin", { branch: "task/unfetched", submitter: "@dev/2", target: "main" })
+
+    const outcome = await queueRun(w.options())
+
+    expect(outcome.exitCode).toBe(0)
+    const kinds = (await readFacts(w.git, "task/unfetched", head)).map((fact) => fact.kind)
+    expect(kinds).not.toContain("stuck")
+    expect(kinds).toContain("merged")
+  })
+
   it("two changes moving the same pin ask the component once per run: a commit on main stays on main (E4)", async () => {
     const w = await world()
     await submitPin(w, "task/first", w.onMain)

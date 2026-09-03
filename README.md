@@ -1,8 +1,11 @@
 # Yrd
 
-Yrd is a merge queue that lives inside a Git repository. You push a branch and submit it; the queue checks it in a fresh checkout, merges it into the target branch, and tells you what happened. There is no server, no database and no web page: every fact the queue knows is a commit on a ref in the repository, so any clone can read the whole state with plain `git log`. One process runs the queue on one machine. By rule it is the only writer of the target branch; a hand push is detected and reported, not prevented.
+Yrd is a merge queue that lives inside a Git repository.
 
-Yrd was made for a team of people and AI agents pushing many branches a day into one repository, on the machine where the agents run. It also queues a Git **superproject**, a repository of repositories held together by submodules, which no other merge queue we know of does. See [Superprojects](#superprojects).
+- **Submit a branch, get a verdict.** You push a branch and submit it. The queue checks it in a fresh checkout, merges it into the target branch, and tells you what happened.
+- **No server, no database, no web page.** Every fact the queue knows is a commit on a ref in the repository. Any clone reads the whole state with plain `git log`.
+- **One process, one machine.** By rule it is the only writer of the target branch. A hand push is detected and reported, not prevented.
+- **Superprojects.** Yrd also queues a repository of repositories held together by submodules, which no other merge queue we know of does. See [Superprojects](#superprojects).
 
 ## What it was made for
 
@@ -10,10 +13,10 @@ Yrd was made for a team of people and AI agents pushing many branches a day into
 - **One repository, many writers.** Without a queue, branches race to the target, half of them tested against a target that has already moved.
 - **A repository of repositories.** A product that vendors its parts as submodules needs a queue that reads submodule pointers, not one that merges them blind.
 - **Nothing to run but git.** The queue's memory is the repository. Back up the repository and you have backed up the queue; clone it and you can read the queue.
+- **Use it** when a team, human or not, lands many changes into one repository or one superproject on one machine, and a hosted forge is storage rather than process.
+- **Do not use it** when you want a review web page, hosted runners, or many machines checking in parallel. Yrd runs one queue process, and a check is a command it runs locally.
 
-Use it when a team, human or not, lands many changes into one repository or one superproject on one machine, and a hosted forge is storage rather than process. Do not use it when you want a review web page, hosted runners, or many machines checking in parallel: Yrd runs one queue process, and a check is a command it runs locally.
-
-## The words
+## Terms
 
 - **change**: one branch at one commit, submitted to the queue; the nearest everyday thing is a pull request without a number or a review. Its name is `<branch>@<sha>`. Move the branch and submit again for a new change; push without submitting and the queue never sees it.
 - **submitter**: whoever ran `yrd submit`, a person or an agent, named by the string given with `--notify`. Every message about the change goes to them.
@@ -28,7 +31,7 @@ Use it when a team, human or not, lands many changes into one repository or one 
 ## Commands
 
 ```
-yrd submit <branch> [--notify <who>] [--issue <work item>]    push the branch and open its change; same head again is a retry
+yrd submit [branch] [--notify <who>] [--issue <work item>]    push the branch (the current one when none is named) and open its change; same head again is a retry
 yrd queue run                                                 one queue run
 yrd queue up [--interval <seconds>]                           the service: a queue run on a loop
 yrd queue list                                                every change in line, its state, position, last result and log
