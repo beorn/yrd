@@ -1,1 +1,3 @@
-{landing: none, checks: [{verify: {run: bun run test}}]}
+checks:
+  - test:
+      run: bun run test
