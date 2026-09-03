@@ -109,6 +109,15 @@ describe("submit is one atomic push of the branch and its opened fact", () => {
     expect((await remoteRefs(w)).filter((ref) => ref.startsWith("refs/yrd/changes/task/one@"))).toHaveLength(1)
   })
 
+  it("refuses the target: the target is not a change, so nothing at the remote is written", async () => {
+    const w = await world()
+
+    await expect(submit(w.git, "origin", { branch: "main", submitter: "@dev/2", target: "main" })).rejects.toThrow(
+      "main is the target, not a change",
+    )
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+  })
+
   it("a new head is a new change beside the old one", async () => {
     const w = await world()
     const first = await branchWithCommit(w, "task/one", "one.txt")
