@@ -30,8 +30,6 @@ export type QueueConfig = Readonly<{
    * owner's belongs to that command's own arguments, never to the queue.
    */
   notify?: string
-  /** The queue's working directory: its checkouts, its check logs, and the temp root every check gets as `TMPDIR`; on the root filesystem. */
-  workdir?: string
   /** The blob the declaration was read from, recorded on every checked fact. */
   blob: string
 }>
@@ -53,9 +51,8 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   const target = raw.target ?? "main"
   if (typeof target !== "string" || target === "") throw new Error(`.yrd.yml target: must be a branch name`)
   const notify = optionalString(raw, "notify")
-  const workdir = optionalString(raw, "workdir")
   const setup = optionalString(raw, "setup")
-  return { blob, checks: readChecks(raw.checks), notify, remote, setup, target, workdir }
+  return { blob, checks: readChecks(raw.checks), notify, remote, setup, target }
 }
 
 export type Hints = Readonly<{
@@ -148,13 +145,29 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 // queue, and one it does not read is still refused. A fresh worktree has
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["remote", "target", "checks", "setup", "notify", "workdir"] as const
+const TOP_KEYS = ["remote", "target", "checks", "setup", "notify"] as const
+
+/**
+ * A key the declaration used to read, and where its meaning went. A typo is
+ * refused the same way, with the known keys listed; a RETIRED key is refused
+ * with the one sentence that cures it, because "unknown key workdir" tells a
+ * reader that the queue forgot how to write somewhere, not where to say it now.
+ */
+const RETIRED: Readonly<Record<string, string>> = {
+  scratch: "the queue's working directory is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
+  workdir: "the queue's working directory is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
+}
 const CHECK_KEYS = ["run", "on", "timeoutMs", "environmentPassthrough", "scripts"] as const
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */
 function onlyKeys(record: Record<string, unknown>, known: readonly string[], where: string): void {
   const unknown = Object.keys(record).filter((key) => !known.includes(key))
-  if (unknown.length > 0) throw new Error(`${where}: unknown key ${unknown.join(", ")} (known: ${known.join(", ")})`)
+  if (unknown.length === 0) return
+  const retired = unknown.map((key) => RETIRED[key]).filter((cure): cure is string => cure !== undefined)
+  throw new Error(
+    `${where}: unknown key ${unknown.join(", ")} (known: ${known.join(", ")})` +
+      (retired.length === 0 ? "" : `; ${retired.join("; ")}`),
+  )
 }
 
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {

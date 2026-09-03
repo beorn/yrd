@@ -8,8 +8,8 @@
  * and never a mock — the store is git, and a fake git would be a fake store.
  *
  * Git answers some questions with exit 1: "that ref is absent", "that commit
- * is not an ancestor". Those are answers, not errors, and they are read here
- * and nowhere else. Any other failure — a missing object, a bad sha, a broken
+ * is not an ancestor", "nothing sets that configuration key". Those are
+ * answers, not errors, and they are read here and nowhere else. Any other failure — a missing object, a bad sha, a broken
  * repository — is rethrown, because a wrong answer to either question would
  * merge or skip the wrong change (NO SILENT ERRORS).
  */
@@ -113,6 +113,24 @@ export async function isAncestor(git: Git, sha: string, of: string): Promise<boo
     return true
   } catch (error) {
     if (isExit(error, 1)) return false
+    throw error
+  }
+}
+
+/**
+ * One git configuration value as this repository resolves it — every scope git
+ * honours, in git's own order — or undefined when nothing sets it. Git spells
+ * "no such key" as exit 1, the third of the three answers this file reads.
+ *
+ * `--default ""` would answer without an exit, but an empty argv string is
+ * refused before git sees it (`@yrd/process`), so the exit is read instead.
+ */
+export async function configValue(git: Git, name: string): Promise<string | undefined> {
+  try {
+    const out = (await git(["config", "--get", name])).trim()
+    return out === "" ? undefined : out
+  } catch (error) {
+    if (isExit(error, 1)) return undefined
     throw error
   }
 }

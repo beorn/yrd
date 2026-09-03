@@ -99,20 +99,20 @@ describe("the declaration is read from the target commit", () => {
     await expect(readConfig(empty.git, "main")).rejects.toThrow(/setup: must be a non-empty string/u)
   })
 
-  it("names the queue's working directory as workdir:, and refuses every retired key outright", async () => {
-    // `workdir:` is the whole working directory — the checkouts, the check
-    // logs, and the temp root every check gets as TMPDIR — so it is one word,
-    // not the old `scratch:`, which named the same root after only the last of
-    // those three. A declaration still carrying a retired key is a queue doing
-    // something nobody declared, so it is refused rather than defaulted.
-    const declared = await world("remote: origin\nworkdir: /var/tmp/yrd\n")
-    expect(await readConfig(declared.git, "main")).toMatchObject({ workdir: "/var/tmp/yrd" })
+  it("refuses a retired key by naming where its meaning went, not just that it is unknown", async () => {
+    // The working directory is a path on ONE machine, so it is git
+    // configuration and never a declaration key: the declaration is one file
+    // every clone shares. Both spellings it ever had are refused, and the
+    // refusal says where to say it instead — "unknown key workdir" would tell a
+    // reader the queue forgot how to write somewhere.
+    for (const key of ["workdir", "scratch"]) {
+      const retired = await world(`remote: origin\n${key}: /var/tmp/yrd\n`)
+      await expect(readConfig(retired.git, "main")).rejects.toThrow(new RegExp(`unknown key ${key}`, "u"))
+      await expect(readConfig(retired.git, "main")).rejects.toThrow(/git config yrd\.workdir/u)
+    }
 
-    const scratched = await world("remote: origin\nscratch: /var/tmp/yrd\n")
-    await expect(readConfig(scratched.git, "main")).rejects.toThrow(/unknown key scratch/u)
-
-    // `owner:` went with it: the queue addresses the roles `submitter` and
-    // `owner`, and which seat wears the owner's is the notifier's own argument.
+    // `owner:` went too: the queue addresses the roles `submitter` and `owner`,
+    // and which seat wears the owner's is the notifier's own argument.
     const owned = await world("remote: origin\nowner: '@cto'\n")
     await expect(readConfig(owned.git, "main")).rejects.toThrow(/unknown key owner/u)
   })

@@ -75,6 +75,31 @@ async function check(w: World): Promise<Readonly<{ exit: number | undefined; out
   return { exit, out: run.stdout() }
 }
 
+describe("the queue's working directory is git configuration, never a declaration key", () => {
+  it("is <git-common-dir>/yrd when the repository configures none", async () => {
+    const w = await world()
+
+    const run = capture(w.work)
+    expect(await coreQueueCommand(w.work, run.io, { command: "check", names: ["no-marker"] })).toBe(0)
+
+    const common = (await w.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    expect(existsSync(join(common, "yrd", "checks"))).toBe(true)
+  })
+
+  it("is `git config yrd.workdir` when the repository sets one, in whatever scope git resolves it", async () => {
+    const w = await world()
+    const elsewhere = join(w.workdir, "declared")
+    await w.git(["config", "yrd.workdir", elsewhere])
+
+    const run = capture(w.work)
+    expect(await coreQueueCommand(w.work, run.io, { command: "check", names: ["no-marker"] })).toBe(0)
+
+    expect(existsSync(join(elsewhere, "checks"))).toBe(true)
+    const common = (await w.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    expect(existsSync(join(common, "yrd"))).toBe(false)
+  })
+})
+
 describe("yrd check judges HEAD, never the invoking tree", () => {
   it("passes over an UNCOMMITTED error the invoking tree carries", async () => {
     const w = await world()

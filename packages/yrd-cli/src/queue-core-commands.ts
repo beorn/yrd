@@ -20,6 +20,7 @@ import type { ConditionalLogger } from "loggily"
 import {
   byHandCommits,
   changeName,
+  configValue,
   handMovedLine,
   prepareWorktree,
   gitIn,
@@ -142,10 +143,7 @@ export async function coreQueueCommand(
   }
   const config = await declaration()
   if (config === undefined) return noQueueOnTarget(targetRef)
-  // A worktree's `.git` is a file, so the queue's own directory lives under the
-  // common git dir the whole repository shares, never under a path guessed from it.
-  const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
-  const workdir = options.workdir ?? join(commonDir, "yrd-core")
+  const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
 
   /** The one shape a command that could not judge answers with (plan § The queue run). */
@@ -344,6 +342,27 @@ export async function coreQueueCommand(
 }
 
 /**
+ * The queue's working directory, where everything it writes goes: whatever
+ * `git config yrd.workdir` resolves to in the repository the command runs in —
+ * any scope git honours, so a host says it once in `--global` and a single
+ * repository can say otherwise — else `<git-common-dir>/yrd`.
+ *
+ * It is git configuration and not a `.yrd.yml` key because it is about THIS
+ * MACHINE, not about the queue: the declaration is one file shared by every
+ * clone, and a path on the queue runner's disk means nothing in a seat's
+ * checkout.
+ *
+ * A worktree's `.git` is a file, so the default lives under the common git dir
+ * the whole repository shares, never under a path guessed from it.
+ */
+async function workdirOf(git: Git): Promise<string> {
+  const declared = await configValue(git, "yrd.workdir")
+  if (declared !== undefined) return declared
+  const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+  return join(commonDir, "yrd")
+}
+
+/**
  * The target as this checkout has it: the remote-tracking ref the declaration
  * names, fetched by `declaration()` before any command runs here. Absent is
  * loud, because what base a check is judging against is a claim about that
@@ -416,7 +435,7 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
     // finishes it, once per worktree, before any check runs in it.
     setup: config.setup,
     target: config.target,
-    workdir: config.workdir ?? workdir,
+    workdir,
   }
 }
 
