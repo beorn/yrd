@@ -646,7 +646,7 @@ describe("a queue run", () => {
           target: "main",
           trailers: [
             ["Merge", landing],
-            ["Base", `${landing}^1`],
+            ["Base", w.target],
             ["Merged-By", "hand"],
           ],
         })
@@ -666,9 +666,11 @@ describe("a queue run", () => {
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "merged", "merged", "sent"])
     expect(facts.map((fact) => fact.sha)).toContain(concurrent)
     expect(facts[2]?.subject).toBe(`merged by hand at ${landing.slice(0, 12)}`)
+    // `Base:` is the landing commit's first parent, a sha like every other Base.
     expect(facts[2]?.trailers).toEqual(
       expect.arrayContaining([
         ["Merge", landing],
+        ["Base", w.target],
         ["Merged-By", "hand"],
       ]),
     )

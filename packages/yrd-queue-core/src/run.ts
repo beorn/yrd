@@ -717,12 +717,26 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   const head = entry.change.head
   // The first commit on the target's first-parent line that descends from the
   // head is the one that landed it; none means the head was fast-forwarded.
+  // `--parents` names its first parent in the same reading, so `Base:` is a
+  // sha like every other Base and not a revision expression a reader would
+  // have to hand back to git to resolve.
   const landing = (
-    await run.git(["rev-list", "--reverse", "--first-parent", "--ancestry-path", `${head}..${run.targetSha}`])
+    await run.git([
+      "rev-list",
+      "--reverse",
+      "--first-parent",
+      "--ancestry-path",
+      "--parents",
+      `${head}..${run.targetSha}`,
+    ])
   )
     .trim()
     .split("\n")[0]
-  const merge = landing === undefined || landing === "" ? head : landing
+    ?.trim()
+    .split(/\s+/u)
+    .filter((sha) => sha !== "")
+  const merge = landing?.[0] ?? head
+  const base = landing?.[1] ?? head
   const mergedFact = await appendAfterLanded(run, {
     branch,
     head,
@@ -731,7 +745,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
     target: run.options.target,
     trailers: [
       ["Merge", merge],
-      ["Base", merge === head ? head : `${merge}^1`],
+      ["Base", base],
       ["Merged-By", "hand"],
     ],
   })
