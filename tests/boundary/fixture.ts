@@ -209,9 +209,32 @@ export type SubmitAttempt = Readonly<{
   report: string
 }>
 
-/** Which core the suite measures: `YRD_BOUNDARY_CORE=new` selects the new one (plan § Cutover). */
+/**
+ * Which core the suite measures. The NEW core is the default, because flag day
+ * made it the one main actually runs (plan § Cutover): main declares its queue
+ * and the new core runs it, so a suite that defaults to the incumbent measures
+ * a program the repository no longer uses.
+ *
+ * It defaulted to the incumbent until then, and after flag day that cost a
+ * clean checkout 37 red boundary tests out of 76 — a safety suite reporting
+ * unsafe about a core nothing selects, which a seat cannot attribute without
+ * cloning the base and diffing counts.
+ *
+ * `YRD_BOUNDARY_CORE=old` is the explicit opt-out and stays while the
+ * incumbent does: M6 gates its deletion on this suite passing against it, so
+ * the old core must remain selectable right up to the moment it is removed.
+ *
+ * An unrecognised value throws instead of picking one. Before this, anything
+ * that was not "new" silently meant the incumbent; a default flipped without
+ * this guard would silently mean the new core instead — the same defect
+ * pointing the other way, and a typo that measures the wrong core is exactly
+ * what this function now exists to prevent.
+ */
 export function measuringNewCore(): boolean {
-  return process.env.YRD_BOUNDARY_CORE === "new"
+  const declared = process.env.YRD_BOUNDARY_CORE
+  if (declared === undefined || declared === "" || declared === "new") return true
+  if (declared === "old") return false
+  throw new Error(`YRD_BOUNDARY_CORE must be "new" or "old"; got ${JSON.stringify(declared)}`)
 }
 
 /**
@@ -280,7 +303,9 @@ export async function queueRunOnce(repo: string): Promise<QueueRunResult> {
  */
 export async function changeStandings(repo: string): Promise<Readonly<Record<string, string>>> {
   const listed = capture(repo)
-  if (process.env.YRD_BOUNDARY_CORE === "new") {
+  // Through `measuringNewCore` rather than the raw variable: two independent
+  // readers of one flag is how a default drifts out of step with itself.
+  if (measuringNewCore()) {
     // The new core's one table: every change keyed by branch and head, with its derived state.
     expectZero(await yrd(repo, listed.io, "queue", "list", "--json"), "queue list", listed)
     const parsed = JSON.parse(listed.stdout()) as { changes: readonly { branch: string; head: string; state: string }[] }
