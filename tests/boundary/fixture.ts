@@ -143,6 +143,9 @@ export type Change = Readonly<{
   headSha: string
   /** The id the CLI gave it. */
   id: string
+  /** The Bay the branch was authored in, so a case can commit again or submit
+   * again from where an author stands. */
+  bayPath: string
 }>
 
 /**
@@ -164,6 +167,30 @@ export async function submitOneCommit(repo: string, bay: string): Promise<Change
   const headSha = await git(bayPath, "rev-parse", "HEAD")
 
   // Standing IN the Bay, exactly as an author does.
+  const submitted = await submitFromBay(repo, bayPath)
+  if (submitted.exitCode !== 0) {
+    throw new Error(`bay submit exited ${String(submitted.exitCode)}\n${submitted.stderr}\n${submitted.stdout}`)
+  }
+  if (submitted.id === undefined || submitted.branch !== branch) {
+    throw new Error(`bay submit did not record ${branch}: ${submitted.stdout}`)
+  }
+  return { branch, headSha, id: submitted.id, bayPath }
+}
+
+/** What one submit from a Bay reported. Unlike `submitOneCommit` this never
+ * throws on a non-zero exit, because a case about submitting twice at one head
+ * wants the exit code as evidence rather than as an abort. */
+export type SubmitAttempt = Readonly<{
+  exitCode: number
+  stdout: string
+  stderr: string
+  id?: string
+  branch?: string
+  report: string
+}>
+
+/** One `yrd bay submit`, run standing in the Bay, exactly as an author does. */
+export async function submitFromBay(repo: string, bayPath: string): Promise<SubmitAttempt> {
   const submitted = capture(bayPath)
   if (process.env.YRD_BOUNDARY_CORE === "new") {
     // The new core's one path in: one atomic push of the branch and its opened fact.
@@ -177,12 +204,28 @@ export async function submitOneCommit(repo: string, bay: string): Promise<Change
   expectZero(await yrd(repo, submitted.io, "bay", "submit", "--json"), "bay submit", submitted)
   const parsed = JSON.parse(submitted.stdout()) as {
     prs: readonly { id: string; branch: string; status: string }[]
+  const exitCode = await yrd(repo, submitted.io, "bay", "submit", "--json")
+  const report = `bay submit exited ${String(exitCode)}\n--- stdout ---\n${submitted.stdout()}\n--- stderr ---\n${submitted.stderr()}`
+  let id: string | undefined
+  let branch: string | undefined
+  try {
+    const parsed = JSON.parse(submitted.stdout()) as {
+      prs?: readonly { id?: string; branch?: string }[]
+    }
+    id = parsed.prs?.[0]?.id
+    branch = parsed.prs?.[0]?.branch
+  } catch {
+    // Not JSON — the exit code and the text are the evidence.
   }
-  const id = parsed.prs[0]?.id
-  if (id === undefined || parsed.prs[0]?.branch !== branch) {
-    throw new Error(`bay submit did not record ${branch}: ${submitted.stdout()}`)
-  }
-  return { branch, headSha, id }
+  return { exitCode, stdout: submitted.stdout(), stderr: submitted.stderr(), id, branch, report }
+}
+
+/** One more commit in the Bay, so the branch gets a new head. Returns it. */
+export async function commitInBay(bayPath: string, name: string): Promise<string> {
+  await writeFile(join(bayPath, `${name}.txt`), `${name}\n`)
+  await git(bayPath, "add", `${name}.txt`)
+  await git(bayPath, "commit", "-qm", `${name}: one more commit`)
+  return git(bayPath, "rev-parse", "HEAD")
 }
 
 export type QueueRunResult = Readonly<{
@@ -250,6 +293,160 @@ export async function checkAttempts(checkLog: string): Promise<number> {
   const file = Bun.file(checkLog)
   if (!(await file.exists())) return 0
   return (await file.text()).trimEnd().split("\n").filter(Boolean).length
+}
+
+/* ---------------------------------------------------------------------------
+ * The change and its facts.
+ *
+ * Still black box: git is the store the plan names, so reading a change's ref
+ * out of the shared repository with `git for-each-ref` and `git log` is
+ * reading the published surface, not an internal. Nothing below opens a
+ * journal, a database or a module.
+ * ------------------------------------------------------------------------- */
+
+/** Where a change's facts live: the branch name, then the head sha. */
+export function changeRefName(branch: string, headSha: string): string {
+  return `refs/yrd/changes/${branch}/${headSha}`
+}
+
+/** Every change ref a repository carries, as `<sha> <name>` lines. */
+export async function changeRefs(repo: string): Promise<readonly string[]> {
+  const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/yrd/changes/**")
+  return listed === "" ? [] : listed.split("\n")
+}
+
+/** Every ref of yrd's own the repository carries — the breadcrumb a missing
+ * change ref needs, because it says what the queue wrote instead. */
+async function yrdRefs(repo: string): Promise<readonly string[]> {
+  const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/yrd/**")
+  return listed === "" ? [] : listed.split("\n")
+}
+
+/** One commit on a change's ref. */
+export type ChangeFact = Readonly<{
+  sha: string
+  parents: readonly string[]
+  /** Line one, prose, never parsed by a reader. */
+  subject: string
+  /** Every trailer, in order, as `Key: value` lines. */
+  trailerLines: readonly string[]
+  /** Values by trailer key, repeats kept. */
+  trailers: ReadonlyMap<string, readonly string[]>
+  /** The `Fact:` value, or "" when the commit carries none. */
+  kind: string
+}>
+
+/** A change's ref as a reader sees it. */
+export type ChangeReading = Readonly<{
+  /** `refs/yrd/changes/<branch>/<head>`. */
+  ref: string
+  exists: boolean
+  /** The ref's tip sha, or "" when there is no such ref. */
+  tip: string
+  /** The facts, oldest first, along the ref's first-parent line, with the
+   * parentless genesis commit at the end of that line left out. */
+  facts: readonly ChangeFact[]
+  /** The `Fact:` value of each, oldest first. */
+  kinds: readonly string[]
+  /** The parentless commit the first-parent line ends at, when there is one. */
+  genesis?: ChangeFact
+  /** Every commit on the first-parent line, newest first — including whatever
+   * is NOT a fact, which is the point of the "reads exactly the facts" case. */
+  firstParentLine: readonly string[]
+  /** Everything a failing assertion should print. */
+  report: string
+}>
+
+function parseTrailers(lines: readonly string[]): Map<string, readonly string[]> {
+  const trailers = new Map<string, string[]>()
+  for (const line of lines) {
+    const colon = line.indexOf(":")
+    if (colon <= 0) continue
+    const key = line.slice(0, colon).trim()
+    const value = line.slice(colon + 1).trim()
+    const existing = trailers.get(key)
+    if (existing === undefined) trailers.set(key, [value])
+    else existing.push(value)
+  }
+  return trailers
+}
+
+const FIELD = "\u001f"
+const RECORD = "\u001e"
+
+/** The commits on a ref's first-parent line, newest first. */
+async function firstParentCommits(repo: string, ref: string): Promise<readonly ChangeFact[]> {
+  const raw = await git(
+    repo,
+    "log",
+    "--first-parent",
+    `--format=%H${FIELD}%P${FIELD}%s${FIELD}%(trailers:only,unfold)${RECORD}`,
+    ref,
+  )
+  return raw
+    .split(RECORD)
+    .map((record) => record.replace(/^\n+/, ""))
+    .filter((record) => record.trim() !== "")
+    .map((record) => {
+      const [sha = "", parents = "", subject = "", trailerBlock = ""] = record.split(FIELD)
+      const trailerLines = trailerBlock.split("\n").filter((line) => line.trim() !== "")
+      const trailers = parseTrailers(trailerLines)
+      return {
+        sha,
+        parents: parents === "" ? [] : parents.split(" "),
+        subject,
+        trailerLines,
+        trailers,
+        kind: trailers.get("Fact")?.[0] ?? "",
+      }
+    })
+}
+
+/**
+ * Read one change's ref out of `repo`. Never throws when the ref is absent —
+ * the reading says so, and its report lists every ref the repository does
+ * carry, so a red case names what is missing instead of stack-tracing.
+ */
+export async function readChange(
+  repo: string,
+  change: Readonly<{ branch: string; headSha: string }>,
+): Promise<ChangeReading> {
+  const ref = changeRefName(change.branch, change.headSha)
+  const present = await changeRefs(repo)
+  const tipLine = present.find((line) => line.endsWith(` ${ref}`))
+  if (tipLine === undefined) {
+    const yrd = await yrdRefs(repo)
+    const carried = yrd.length === 0 ? "  (none)" : yrd.map((line) => `  ${line}`).join("\n")
+    return {
+      ref,
+      exists: false,
+      tip: "",
+      facts: [],
+      kinds: [],
+      firstParentLine: [],
+      report: `no change ref ${ref} in ${repo}\nrefs/yrd/** there:\n${carried}`,
+    }
+  }
+  const tip = tipLine.split(" ")[0] ?? ""
+  const line = await firstParentCommits(repo, ref)
+  const genesis = line.find((commit) => commit.parents.length === 0)
+  const facts = [...line].reverse().filter((commit) => commit.kind !== "")
+  const shown = line
+    .map(
+      (commit) =>
+        `  ${commit.sha.slice(0, 8)} [${commit.parents.length}p] ${commit.kind || "(no Fact:)"} — ${commit.subject}`,
+    )
+    .join("\n")
+  return {
+    ref,
+    exists: true,
+    tip,
+    facts,
+    kinds: facts.map((fact) => fact.kind),
+    genesis,
+    firstParentLine: line.map((commit) => commit.sha),
+    report: `${ref} at ${tip}\nfirst-parent line, newest first:\n${shown}`,
+  }
 }
 
 function capture(cwd: string): { io: YrdCliIO; stdout(): string; stderr(): string } {
