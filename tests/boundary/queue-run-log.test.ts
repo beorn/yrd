@@ -1,7 +1,7 @@
 /**
  * @failure A queue run's log is prose in the plan and nothing in the code, so
  *          what a queue run did is readable only by reading four WARN rows on
- *          stderr and guessing. Nothing pins the event stream, so the rebuild at
+ *          stderr and guessing. Nothing pins the record stream, so the rebuild at
  *          M4 could ship any shape, or none, and every existing test would
  *          still pass.
  * @level   l3
@@ -21,7 +21,7 @@
  * it, so naming it some other way costs one edit here.
  *
  * THE FIELDS. Every record is one JSON object on one line. `kind` says which
- * event it is; `run` is the queue run every record belongs to. Six kinds:
+ * record it is; `run` is the queue run every record belongs to. Six kinds:
  *
  *   kind       fields beyond `kind` and `run`
  *   ────────   ──────────────────────────────────────────────────────────────
@@ -198,7 +198,10 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       expect(result.branch, run.report).toBe(branch)
       expect(result.head, run.report).toBe(headSha)
     }
-    expect(results.some((result) => result.result === "pass"), run.report).toBe(true)
+    expect(
+      results.some((result) => result.result === "pass"),
+      run.report,
+    ).toBe(true)
 
     // merge — the merge commit and the tip it put on the target.
     const merged = theOne(records, "merge")
@@ -255,7 +258,9 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // names the log the end row names.
     const key = (record: LogRecord): string => `${String(record.phase)}/${String(record.name)}`
     for (const end of ends) {
-      const before = checks.slice(0, checks.indexOf(end)).filter((record) => key(record) === key(end) && record.end === undefined)
+      const before = checks
+        .slice(0, checks.indexOf(end))
+        .filter((record) => key(record) === key(end) && record.end === undefined)
       expect(before.length, `${run.report}\nno start row before ${key(end)}`).toBe(1)
       expect(before[0]?.log, run.report).toBe(end.log)
     }
@@ -296,11 +301,11 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
   })
 
   /**
-   * The `run` record's two events are read from the TARGET at the queue run's
+   * The `run` record's two records are read from the TARGET at the queue run's
    * start, not from a run it may never build.
    *
    * A queue run that refuses its change at admission builds no run and resolves
-   * no step selection, so both events were missing from exactly the queue runs a
+   * no step selection, so both records were missing from exactly the queue runs a
    * reader most needs them for — every fail and every stuck (measured
    * 2026-09-02). The pair below is the proof that the derivation is the same
    * one: a merging queue run and a stuck one, on the same target, must report
@@ -331,14 +336,14 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     expect(merged.config, mergedRun.report).toBe(selection?.configBlobSha)
 
     // A check that gets stuck builds no run and resolves no step selection at
-    // all, and both events must still be there.
+    // all, and both records must still be there.
     const stuck = await boundaryRepository({ exit: 2, hooks: true })
     await submitOneCommit(stuck.repo, "two")
     const stuckRun = await queueRunOnce(stuck.repo)
     expect(stuckRun.exitCode, stuckRun.report).toBe(2)
     expect(
       // The incumbent prints an empty results list; the new core builds no
-      // Run records at all and prints none, which is the same event.
+      // Run records at all and prints none, which is the same record.
       (JSON.parse(stuckRun.stdout) as { results?: readonly unknown[] }).results ?? [],
       "a stuck queue run builds no run, which is what makes this case the point",
     ).toEqual([])
@@ -467,7 +472,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * The queue run names its log after ITSELF.
    *
    * Naming the file after a Run it built is what made two queue runs share one
-   * file: the name was an event about a record the invocation might never make,
+   * file: the name was a record about a record the invocation might never make,
    * so every queue run that built none reused the last name minted.
    */
   it("names its log after the queue run, never after a Run it built", async () => {
@@ -488,7 +493,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * Measured 2026-09-02: each of two empty-queue queue runs appended the same
    * seven historical change/result/merge triplets, recovered from the
    * checkpoint, so both logs claimed merges neither run made while the debug
-   * log and git proved zero events. The recovery is worth one number; it is
+   * log and git proved zero records. The recovery is worth one number; it is
    * not worth a merge row.
    */
   it("claims no merge it did not make", async () => {
@@ -652,8 +657,8 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // path — measured 2026-09-02, one `stuck` record — so this is a
     // checked zero, not an empty file nobody wrote to.
     const sent = await readFile(hookLog, "utf8").catch(() => "")
-    expect(sent, run.report).toMatch(/"event":"stuck"/)
-    expect(sent, run.report).not.toMatch(/"event":"(merged|failed)"/)
+    expect(sent, run.report).toMatch(/"record":"stuck"/)
+    expect(sent, run.report).not.toMatch(/"record":"(merged|failed)"/)
 
     // The change stays where it was, so the next queue run takes it again.
     expect(ofKind(records, "merge"), run.report).toEqual([])

@@ -1,5 +1,5 @@
 /**
- * @failure A spawn whose working directory is absent fails inside posix_spawn with a bare ENOENT that names neither the directory nor the command, so callers cannot tell a missing cwd from a missing executable and no recovery path can contain it.
+ * @failure A spawn whose cwd is absent fails inside posix_spawn with a bare ENOENT that names neither the directory nor the command, so callers cannot tell a missing cwd from a missing executable and no recovery path can contain it.
  * @level l1
  * @consumer @yrd/process
  */
@@ -16,7 +16,7 @@ async function absentDirectory(): Promise<string> {
   return path
 }
 
-describe("Process — an absent working directory", () => {
+describe("Process — an absent cwd", () => {
   it("raises one typed infrastructure failure naming the absolute path and the command", async () => {
     const cwd = await absentDirectory()
     await using process = createProcess({ env: { PATH: Bun.env.PATH } })
@@ -35,7 +35,7 @@ describe("Process — an absent working directory", () => {
     expect((error as Error).message).toContain("git cat-file -e")
   })
 
-  it("still spawns normally when the working directory exists", async () => {
+  it("still spawns normally when the cwd exists", async () => {
     // Positive control: the guard rejects absent directories only. A guard that
     // also rejected live callers would be the outage, not the fix.
     const cwd = await mkdtemp(join(tmpdir(), "yrd-present-cwd-"))

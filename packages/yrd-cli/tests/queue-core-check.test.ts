@@ -1,6 +1,6 @@
 /**
  * @failure  `yrd check` ran the target's checks in the INVOKING tree, so it
- *           answered "is my working directory green" while wearing the name of
+ *           answered "is my cwd green" while wearing the name of
  *           the queue's judgement. A checkout whose dependencies are symlinked
  *           from elsewhere is judged instead of the commit, and the error runs
  *           both ways: an uncommitted mistake turns `check` red over a clean
@@ -75,7 +75,7 @@ async function check(w: World): Promise<Readonly<{ exit: number | undefined; out
   return { exit, out: run.stdout() }
 }
 
-describe("the queue's working directory is git configuration, never a declaration key", () => {
+describe("the queue workdir is git configuration, never a declaration key", () => {
   it("is <git-common-dir>/yrd when the repository configures none", async () => {
     const w = await world()
 

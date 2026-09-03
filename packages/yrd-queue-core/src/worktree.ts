@@ -26,7 +26,7 @@ import { join, relative, sep } from "node:path"
 import { materializeSubmodulesFromLocalWorktreeParallel } from "git-super/submodules"
 import type { Process } from "@yrd/process"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
-import type { Git } from "./events.ts"
+import type { Git } from "./records.ts"
 import { gitIn, mergeBase } from "./git.ts"
 
 /** The logger git-super narrates to; the queue hands one over only at trace. */
@@ -47,7 +47,13 @@ export type Worktree = Readonly<{
  * materialized throws, because a check run against a half-materialized tree
  * would judge something no commit describes.
  */
-export async function freshWorktree(git: Git, repo: string, commit: string, path: string, plumbing?: PlumbingLog): Promise<Worktree> {
+export async function freshWorktree(
+  git: Git,
+  repo: string,
+  commit: string,
+  path: string,
+  plumbing?: PlumbingLog,
+): Promise<Worktree> {
   await git(["worktree", "add", "--quiet", "--detach", path, commit])
   const materialized = await materializeSubmodulesFromLocalWorktreeParallel({
     ...(plumbing === undefined ? {} : { log: plumbing }),
@@ -263,7 +269,7 @@ export type PreparedWorktree = Worktree & Readonly<{ tree: CheckedTree }>
  * HEAD checked out there, and the merge base of that HEAD and the target.
  *
  * Read from the tree itself rather than carried in by the caller, so it is a
- * event about what is checked out; read once per worktree, because it costs two
+ * record about what is checked out; read once per worktree, because it costs two
  * git calls and every check in that worktree is judging the same thing. A HEAD
  * that shares no history with the target throws: a base that is not an
  * ancestor of the candidate is a lie a check would compute a diff from.

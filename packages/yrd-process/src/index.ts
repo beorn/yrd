@@ -903,7 +903,7 @@ function positiveInteger(value: number, name: string): number {
 }
 
 /**
- * Prove the working directory exists before spawning into it. An absent cwd
+ * Prove the cwd exists before spawning into it. An absent cwd
  * fails inside posix_spawn with an ENOENT that names neither the directory nor
  * the command — indistinguishable from a missing executable, and untyped, so no
  * caller can classify it and every recovery path treats it as a fatal fault.
@@ -921,7 +921,7 @@ function requireSpawnDirectory(argv: readonly string[], cwd: string): void {
     kind: "infrastructure",
     code: "spawn-cwd-missing",
     message:
-      `yrd: cannot run '${command}' — its working directory '${path}' ` +
+      `yrd: cannot run '${command}' — its cwd '${path}' ` +
       (stats === undefined ? "does not exist" : "is not a directory"),
   })
 }

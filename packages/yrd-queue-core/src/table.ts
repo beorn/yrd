@@ -4,24 +4,24 @@
  * time from the queue read. Nothing here is stored and nothing here is a
  * second reader: both views are the queue read rendered, so they can never
  * disagree with a queue run or with each other. Every row is read off one
- * event, the change's tip, whose trailers are the whole derived state — except
- * the row for a commit the queue did not put on the target, a BYPASS, which is
+ * record, the change's tip, whose trailers are the whole derived state — except
+ * the row for a commit the queue did not put on the target, a direct merge, which is
  * read off the target itself (E5).
  */
 
-import { endedKind, trailer, trailers, type Event } from "./events.ts"
+import { endedKind, trailer, trailers, type ChangeRecord } from "./records.ts"
 import { readCheckTrailer } from "./check.ts"
-import { bypassLine, type Bypass } from "./bypass.ts"
+import { directMergeLine, type DirectMerge } from "./direct.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
 import { inLine, tipOf, type ChangeState } from "./state.ts"
 
 export type Row = Readonly<{
-  /** The change's branch; for a `bypass` row, the target that commit moved. */
+  /** The change's branch; for a `direct` row, the target that commit moved. */
   branch: string
-  /** The change's head; for a `bypass` row, that commit itself. */
+  /** The change's head; for a `direct` row, that commit itself. */
   head: string
-  /** A change's state, or `bypass` for a commit on the target the queue did not put there (E5). */
-  state: ChangeState | "bypass"
+  /** A change's state, or `direct` for a commit on the target the queue did not put there (E5). */
+  state: ChangeState | "direct"
   /** 1-based place in line for queued, checked and stuck rows; absent otherwise. */
   position?: number
   /** The last result: pass, fail or stuck, with the check that decided it. */
@@ -30,15 +30,15 @@ export type Row = Readonly<{
   log?: string
   issue?: string
   submitter?: string
-  /** Why: `replaced`, `deleted`, a check's code, or for a `bypass` row the one line about that commit. */
+  /** Why: `replaced`, `deleted`, a check's code, or for a `direct` row the one line about that commit. */
   reason?: string
-  /** When the change was opened, from its first event's `Opened:`. */
+  /** When the change was opened, from its first record's `Opened:`. */
   since?: Date
-  /** When the change's last event was written: an ended change is as recent as its ending. A bypass is as recent as its commit. */
+  /** When the change's last record was written: an ended change is as recent as its ending. A direct merge is as recent as its commit. */
   at?: Date
-  /** The merge commit on the target, full sha, from the merged event's `Merge:` (carried by the sent event too); absent until merged. */
+  /** The merge commit on the target, full sha, from the merged record's `Merge:` (carried by the sent record too); absent until merged. */
   merge?: string
-  /** The target commit the change was merged or judged at, full sha, from the event's `Base:`. */
+  /** The target commit the change was merged or judged at, full sha, from the record's `Base:`. */
   base?: string
 }>
 
@@ -46,8 +46,8 @@ export type ListOptions = Readonly<{
   now?: Date
   /** How far back the ended rows reach; the plan's default is seven days. */
   sinceMs?: number
-  /** The commits on the target the queue did not put there, each its own row (E5; `bypassCommits` reads them). */
-  bypasses?: readonly Bypass[]
+  /** The commits on the target the queue did not put there, each its own row (E5; `directMergeCommits` reads them). */
+  directMerges?: readonly DirectMerge[]
 }>
 
 /**
@@ -69,7 +69,7 @@ export function list(entries: QueueRead, options: ListOptions = {}): readonly Ro
   // opened long ago and merged today is today's news.
   const endedRows = [
     ...rows.filter((candidate) => candidate.position === undefined),
-    ...(options.bypasses ?? []).map(bypassesRow),
+    ...(options.directMerges ?? []).map(directMergeRow),
   ]
     .filter((candidate) => candidate.at === undefined || now.getTime() - candidate.at.getTime() <= sinceMs)
     .sort((left, right) => (right.at?.getTime() ?? 0) - (left.at?.getTime() ?? 0))
@@ -80,10 +80,14 @@ export function list(entries: QueueRead, options: ListOptions = {}): readonly Ro
 export function show(
   entries: QueueRead,
   branch: string,
-): readonly Readonly<{ row: Row; checks: readonly string[]; events: readonly Event[] }>[] {
+): readonly Readonly<{ row: Row; checks: readonly string[]; records: readonly ChangeRecord[] }>[] {
   return entries
     .filter((entry) => entry.change.branch === branch)
-    .map((entry) => ({ checks: trailers(tipOf(entry.change), "Check"), events: entry.change.events, row: row(entry) }))
+    .map((entry) => ({
+      checks: trailers(tipOf(entry.change), "Check"),
+      records: entry.change.records,
+      row: row(entry),
+    }))
     .sort((left, right) => (right.row.since?.getTime() ?? 0) - (left.row.since?.getTime() ?? 0))
 }
 
@@ -109,12 +113,12 @@ function row(entry: QueueEntry, position?: number): Row {
   }
 }
 
-/** A bypass: `<target> moved around the queue at <sha12> (<subject>)`, and the pins it moved. */
-function bypassesRow(commit: Bypass): Row {
-  return { at: commit.at, branch: commit.target, head: commit.commit, reason: bypassLine(commit), state: "bypass" }
+/** A direct merge: `<target> moved around the queue at <sha12> (<subject>)`, and the pins it moved. */
+function directMergeRow(commit: DirectMerge): Row {
+  return { at: commit.at, branch: commit.target, head: commit.commit, reason: directMergeLine(commit), state: "direct" }
 }
 
-function resultOf(kind: Event["kind"], check: string | undefined): string {
+function resultOf(kind: ChangeRecord["kind"], check: string | undefined): string {
   switch (kind) {
     case "checked":
     case "merged":

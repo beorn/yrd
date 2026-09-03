@@ -336,7 +336,7 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
   })
   try {
     // The logger is built from the globals BEFORE any action runs, so the
-    // queue's event stream is rendered at the level the invocation asked for
+    // queue's log-record stream is rendered at the level the invocation asked for
     // and at no other reading of the environment.
     program.hook("preAction", () => {
       if (logger !== undefined) return

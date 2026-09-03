@@ -1,19 +1,19 @@
 /**
- * A merge freeze: one append-only event ref at the queue's remote.
+ * A merge freeze: one append-only record ref at the queue's remote.
  *
  * The ref is operational state, not queue configuration. Its latest commit is
  * the whole answer: `frozen` stops queue work and `unfrozen` permits it. A
  * missing ref is the one honest unfrozen default; an unreadable ref is loud.
  */
 
-import { ABSENT, EVENT_FORMAT, commitTrailers, type Git } from "./events.ts"
+import { ABSENT, RECORD_FORMAT, commitTrailers, type Git } from "./records.ts"
 import { refAt } from "./git.ts"
 
 export const FREEZE_REF = "refs/yrd/freeze"
 
 export type FreezeKind = "frozen" | "unfrozen"
 
-export type FreezeEvent = Readonly<{
+export type FreezeRecord = Readonly<{
   kind: FreezeKind
   sha: string
   at: Date
@@ -27,18 +27,18 @@ export type WriteFreeze = Readonly<{
   by: string
 }>
 
-/** The unfrozen event and expected tip one atomic merge push must carry. */
+/** The unfrozen record and expected tip one atomic merge push must carry. */
 export type UnfrozenFence = Readonly<{
   sha: string
   expected: string
-  previous?: FreezeEvent
+  previous?: FreezeRecord
 }>
 
 /** A normal operational refusal: the queue is intentionally frozen. */
 export class QueueFrozen extends Error {
-  readonly freeze: FreezeEvent
+  readonly freeze: FreezeRecord
 
-  constructor(freeze: FreezeEvent) {
+  constructor(freeze: FreezeRecord) {
     super(`${freezeLine(freeze)}; run 'yrd queue unfreeze [reason]' to admit and merge work again`)
     this.name = "QueueFrozen"
     this.freeze = freeze
@@ -54,23 +54,23 @@ export class QueueNotFrozen extends Error {
 }
 
 /** The active freeze, or undefined when the ref is absent or ends unfrozen. */
-export async function activeFreeze(git: Git, remote: string): Promise<FreezeEvent | undefined> {
-  const event = await readFreeze(git, remote)
-  return event?.kind === "frozen" ? event : undefined
+export async function activeFreeze(git: Git, remote: string): Promise<FreezeRecord | undefined> {
+  const record = await readFreeze(git, remote)
+  return record?.kind === "frozen" ? record : undefined
 }
 
-/** Refuse while the remote's latest freeze event is frozen. */
+/** Refuse while the remote's latest freeze record is frozen. */
 export async function requireUnfrozen(git: Git, remote: string): Promise<void> {
   const freeze = await activeFreeze(git, remote)
   if (freeze !== undefined) throw new QueueFrozen(freeze)
 }
 
 /**
- * Read the latest freeze event from the remote. Absence alone means unfrozen;
+ * Read the latest freeze record from the remote. Absence alone means unfrozen;
  * malformed, unreachable and unreadable state throws instead of opening the
  * queue on a guess.
  */
-export async function readFreeze(git: Git, remote: string): Promise<FreezeEvent | undefined> {
+export async function readFreeze(git: Git, remote: string): Promise<FreezeRecord | undefined> {
   const advertised = await freezeTip(git, remote)
   if (advertised === undefined) return undefined
   await git(["fetch", "--quiet", "--no-tags", remote, `+${FREEZE_REF}:${FREEZE_REF}`])
@@ -81,10 +81,10 @@ export async function readFreeze(git: Git, remote: string): Promise<FreezeEvent 
   return parseFreeze(git, fetched, `${remote} ${FREEZE_REF}`)
 }
 
-/** Append one frozen or unfrozen event under a lease on the remote tip. */
-export async function writeFreeze(git: Git, remote: string, write: WriteFreeze): Promise<FreezeEvent> {
-  const reason = oneLine(write.reason, "a freeze event needs a reason")
-  const by = oneLine(write.by, "a freeze event needs an actor")
+/** Append one frozen or unfrozen record under a lease on the remote tip. */
+export async function writeFreeze(git: Git, remote: string, write: WriteFreeze): Promise<FreezeRecord> {
+  const reason = oneLine(write.reason, "a freeze record needs a reason")
+  const by = oneLine(write.by, "a freeze record needs an actor")
   const previous = await readFreeze(git, remote)
   if (write.kind === "frozen" && previous?.kind === "frozen") throw new QueueFrozen(previous)
   if (write.kind === "unfrozen" && previous?.kind !== "frozen") throw new QueueNotFrozen()
@@ -101,7 +101,7 @@ export async function writeFreeze(git: Git, remote: string, write: WriteFreeze):
 }
 
 /**
- * Prepare the event that linearizes one merge against `queue freeze`.
+ * Prepare the record that linearizes one merge against `queue freeze`.
  *
  * Preparation moves no ref. The caller must include both the lease and
  * `${sha}:${FREEZE_REF}` in the SAME atomic push as the target and change
@@ -121,9 +121,9 @@ export async function unfrozenFence(
 }
 
 /** The operator-facing line shared by list, submit refusal and freeze commands. */
-export function freezeLine(event: FreezeEvent): string {
-  const since = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "long" }).format(event.at)
-  return `${event.kind} by ${event.by} since ${since}: ${event.reason}`
+export function freezeLine(record: FreezeRecord): string {
+  const since = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "long" }).format(record.at)
+  return `${record.kind} by ${record.by} since ${since}: ${record.reason}`
 }
 
 async function freezeTip(git: Git, remote: string): Promise<string | undefined> {
@@ -140,15 +140,22 @@ async function freezeTip(git: Git, remote: string): Promise<string | undefined> 
   return sha
 }
 
-async function parseFreeze(git: Git, sha: string, where: string): Promise<FreezeEvent> {
-  const [commit, atText, block, body] = (await git(["log", "-1", `--format=${EVENT_FORMAT}`, sha])).split("\x00")
+async function parseFreeze(git: Git, sha: string, where: string): Promise<FreezeRecord> {
+  const [commit, atText, block, body] = (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
   const id = commit?.trim()
   const parsed = commitTrailers(block ?? "")
-  const kinds = parsed.filter(([name]) => name === "Event").map(([, value]) => value)
+  const previousKinds = parsed.filter(([name]) => name === "Event")
+  if (previousKinds.length > 0) {
+    throw new Error(
+      `${where} at ${sha.slice(0, 12)} carries the former Event trailer; this reader accepts Record only. ` +
+        `Bundle and reset ${FREEZE_REF} during the format switch before restarting the queue.`,
+    )
+  }
+  const kinds = parsed.filter(([name]) => name === "Record").map(([, value]) => value)
   const kind = kinds[0]
   if (kinds.length !== 1 || (kind !== "frozen" && kind !== "unfrozen")) {
     throw new Error(
-      `${where} at ${sha.slice(0, 12)} carries no valid Event: frozen|unfrozen trailer ` +
+      `${where} at ${sha.slice(0, 12)} carries no valid Record: frozen|unfrozen trailer ` +
         `(found ${String(kinds.length)}; exactly one is required)`,
     )
   }
@@ -163,7 +170,7 @@ async function parseFreeze(git: Git, sha: string, where: string): Promise<Freeze
   }
   const reason = body?.split("\n")[0]?.trim()
   if (id === undefined || id === "" || atText === undefined || reason === undefined || reason === "") {
-    throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable freeze event`)
+    throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable freeze record`)
   }
   const at = new Date(atText)
   if (Number.isNaN(at.getTime())) {
@@ -172,9 +179,9 @@ async function parseFreeze(git: Git, sha: string, where: string): Promise<Freeze
   return Object.freeze({ at, by, kind, reason, sha: id })
 }
 
-async function freezeCommit(git: Git, previous: FreezeEvent | undefined, write: WriteFreeze): Promise<string> {
+async function freezeCommit(git: Git, previous: FreezeRecord | undefined, write: WriteFreeze): Promise<string> {
   const tree = (await git(["mktree"], "")).trim()
-  const message = `${write.reason}\n\nEvent: ${write.kind}\nFrozen-By: ${write.by}\n`
+  const message = `${write.reason}\n\nRecord: ${write.kind}\nFrozen-By: ${write.by}\n`
   const args = ["commit-tree", tree]
   if (previous !== undefined) args.push("-p", previous.sha)
   return (await git([...args, "-m", message])).trim()

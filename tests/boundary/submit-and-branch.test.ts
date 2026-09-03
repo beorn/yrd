@@ -1,9 +1,9 @@
 /**
  * @failure The way in is prose. `yrd queue submit` is described as one atomic
- *          push of a branch and its opened event, a bare `git push yrd` is
+ *          push of a branch and its opened record, a bare `git push yrd` is
  *          described as not a change (E2), and a branch that is deleted or
  *          pushed over is described as ending its change without a message —
- *          none of it pinned. A core that pushes the branch but not the event,
+ *          none of it pinned. A core that pushes the branch but not the record,
  *          that judges or opens a standing ref nobody submitted, or that bills
  *          a submitter for taking their own branch out passes every existing
  *          test.
@@ -33,7 +33,7 @@ import {
   changeStandings,
   checkAttempts,
   commitOnBranch,
-  eventMessages,
+  recordMessages,
   git,
   gitTry,
   hookRecords,
@@ -56,7 +56,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   // today: red — `queue submit` exits 0 but pushes `<branch>:refs/yrd/submit/
   // <branch>` to the `origin` remote. The yrd remote gets no branch, and no
   // ref under `refs/yrd/changes/` is ever written.
-  it("one push puts the branch and its opened event at the yrd remote", async () => {
+  it("one push puts the branch and its opened record at the yrd remote", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)
     const branch = "24099-widget"
@@ -66,7 +66,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
 
     expect(submit.exitCode, submit.report).toBe(0)
     // Both, or neither: the branch is worth nothing to the queue without the
-    // event that opens its change, and the event names a head that must be there.
+    // record that opens its change, and the record names a head that must be there.
     expect(await refSha(origin, `refs/heads/${branch}`), submit.report).toBe(head)
     expect(await refExists(origin, changeRef({ branch: branch, head })), submit.report).toBe(true)
   })
@@ -74,8 +74,8 @@ describe("the submit path", { timeout: 120_000 }, () => {
   /**
    * Measured 2026-09-03 on the wrapper: `yrd submit --dry-run` was accepted by
    * the wrapper's own option table, the new core's submit never received it,
-   * and the dry run OPENED A REAL CHANGE — one submit, two opened events,
-   * two opened events. An option a command does not implement must refuse; an
+   * and the dry run OPENED A REAL CHANGE — one submit, two opened records,
+   * two opened records. An option a command does not implement must refuse; an
    * option it does implement must reach the code that acts on it.
    */
   it("a dry run of the target refuses like the submit, and puts nothing at the remote", async () => {
@@ -110,7 +110,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(await refs(origin), dry.report).toEqual(before)
     expect(await refExists(origin, `refs/heads/${branch}`), dry.report).toBe(false)
     expect(await refExists(origin, changeRef({ branch: branch, head })), dry.report).toBe(false)
-    // Nor locally: a dry run appends no event for the next submit to chain onto.
+    // Nor locally: a dry run appends no record for the next submit to chain onto.
     expect(await refExists(repo, changeRef({ branch: branch, head })), dry.report).toBe(false)
   })
 
@@ -135,13 +135,13 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(await refSha(origin, `refs/heads/${branch}`), submit.report).toBe(head)
   })
 
-  // today: red — the submit writes no change ref, so there are no events to read.
+  // today: red — the submit writes no change ref, so there are no records to read.
   //
-  // The plan says the opened event "names the submitter, the time, the target
+  // The plan says the opened record "names the submitter, the time, the target
   // and the issue" and does not give the trailer keys, so this asserts the
-  // values are in the event commit, not where. The time needs no assertion: a
+  // values are in the record commit, not where. The time needs no assertion: a
   // commit carries one.
-  it("the opened event names the submitter, the target and the issue", async () => {
+  it("the opened record names the submitter, the target and the issue", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)
     await setSubmitter(repo, "Ada Submitter", "ada@example.invalid")
@@ -152,10 +152,10 @@ describe("the submit path", { timeout: 120_000 }, () => {
 
     expect(submit.exitCode, submit.report).toBe(0)
     expect(await refExists(origin, changeRef({ branch: branch, head })), submit.report).toBe(true)
-    const events = await eventMessages(origin, changeRef({ branch: branch, head }))
+    const records = await recordMessages(origin, changeRef({ branch: branch, head }))
     // Nothing has judged it yet, so opened is the whole change.
-    expect(events.length, submit.report).toBe(1)
-    const opened = events[0] ?? ""
+    expect(records.length, submit.report).toBe(1)
+    const opened = records[0] ?? ""
     expect(opened, submit.report).toContain("opened")
     expect(opened, submit.report).toContain("ada@example.invalid")
     expect(opened, submit.report).toContain("main")
@@ -258,8 +258,12 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(await refExists(origin, changeRef({ branch: branch, head: head1 })), second.report).toBe(true)
     expect(await refExists(origin, changeRef({ branch: branch, head: head2 })), second.report).toBe(true)
     // Loud is this: each change says who put that head there.
-    expect((await eventMessages(origin, changeRef({ branch: branch, head: head1 }))).at(-1) ?? "").toContain("ada@example.invalid")
-    expect((await eventMessages(origin, changeRef({ branch: branch, head: head2 }))).at(-1) ?? "").toContain("bo@example.invalid")
+    expect((await recordMessages(origin, changeRef({ branch: branch, head: head1 }))).at(-1) ?? "").toContain(
+      "ada@example.invalid",
+    )
+    expect((await recordMessages(origin, changeRef({ branch: branch, head: head2 }))).at(-1) ?? "").toContain(
+      "bo@example.invalid",
+    )
   })
 
   /**
@@ -319,7 +323,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).toBe(0)
-    // Not judged: no check ran. Not opened: no change ref, no event.
+    // Not judged: no check ran. Not opened: no change ref, no record.
     expect(await checkAttempts(checkLog), run.report).toBe(0)
     expect(await refExists(origin, changeRef({ branch: branch, head })), run.report).toBe(false)
     // Invisible to the table, and nothing lost: the branch stands at the remote.
@@ -385,7 +389,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
 
     expect(run.exitCode, run.report).not.toBe(2)
     expect(await targetTip(repo), run.report).toBe(before)
-    const tip = (await eventMessages(origin, changeRef({ branch: branch, head })))[0] ?? ""
+    const tip = (await recordMessages(origin, changeRef({ branch: branch, head })))[0] ?? ""
     expect(tip, run.report).toContain("failed")
     expect(tip, run.report).toContain("deleted")
     expect(await hookRecords(hookLog), run.report).toBe("")
@@ -415,7 +419,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).not.toBe(2)
-    const tip = (await eventMessages(origin, changeRef({ branch: branch, head: head1 })))[0] ?? ""
+    const tip = (await recordMessages(origin, changeRef({ branch: branch, head: head1 })))[0] ?? ""
     expect(tip, run.report).toContain("failed")
     expect(tip, run.report).toContain("replaced")
     expect(await hookRecords(hookLog), run.report).not.toContain(head1)

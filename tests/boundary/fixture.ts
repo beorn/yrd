@@ -185,7 +185,7 @@ type SubmitAttempt = Readonly<{
 
 /**
  * One submit, run standing in the Bay, exactly as an author does:
- * `yrd queue submit` — one atomic push of the branch and its opened event.
+ * `yrd queue submit` — one atomic push of the branch and its opened record.
  */
 export async function submitFromBay(repo: string, bayPath: string): Promise<SubmitAttempt> {
   const submitted = capture(bayPath)
@@ -272,7 +272,7 @@ export async function checkAttempts(checkLog: string): Promise<number> {
 }
 
 /* ---------------------------------------------------------------------------
- * The change and its events.
+ * The change and its records.
  *
  * Still black box: git is the store the plan names, so reading a change's ref
  * out of the shared repository with `git for-each-ref` and `git log` is
@@ -294,7 +294,7 @@ async function yrdRefs(repo: string): Promise<readonly string[]> {
 }
 
 /** One commit on a change's ref. */
-type ChangeEvent = Readonly<{
+type ChangeRecord = Readonly<{
   sha: string
   parents: readonly string[]
   /** Line one, prose, never parsed by a reader. */
@@ -303,7 +303,7 @@ type ChangeEvent = Readonly<{
   trailerLines: readonly string[]
   /** Values by trailer key, repeats kept. */
   trailers: ReadonlyMap<string, readonly string[]>
-  /** The `Event:` value, or "" when the commit carries none. */
+  /** The `Record:` value, or "" when the commit carries none. */
   kind: string
 }>
 
@@ -314,15 +314,15 @@ export type ChangeReading = Readonly<{
   exists: boolean
   /** The ref's tip sha, or "" when there is no such ref. */
   tip: string
-  /** The events, oldest first, along the ref's first-parent line, with the
+  /** The records, oldest first, along the ref's first-parent line, with the
    * parentless genesis commit at the end of that line left out. */
-  events: readonly ChangeEvent[]
-  /** The `Event:` value of each, oldest first. */
+  records: readonly ChangeRecord[]
+  /** The `Record:` value of each, oldest first. */
   kinds: readonly string[]
   /** The parentless commit the first-parent line ends at, when there is one. */
-  genesis?: ChangeEvent
+  genesis?: ChangeRecord
   /** Every commit on the first-parent line, newest first — including whatever
-   * is NOT an event, which is the point of the "reads exactly the events" case. */
+   * is NOT a record, which is the point of the "reads exactly the records" case. */
   firstParentLine: readonly string[]
   /** Everything a failing assertion should print. */
   report: string
@@ -346,7 +346,7 @@ const FIELD = "\u001f"
 const RECORD = "\u001e"
 
 /** The commits on a ref's first-parent line, newest first. */
-async function firstParentCommits(repo: string, ref: string): Promise<readonly ChangeEvent[]> {
+async function firstParentCommits(repo: string, ref: string): Promise<readonly ChangeRecord[]> {
   const raw = await git(
     repo,
     "log",
@@ -368,7 +368,7 @@ async function firstParentCommits(repo: string, ref: string): Promise<readonly C
         subject,
         trailerLines,
         trailers,
-        kind: trailers.get("Event")?.[0] ?? "",
+        kind: trailers.get("Record")?.[0] ?? "",
       }
     })
 }
@@ -392,7 +392,7 @@ export async function readChange(
       ref,
       exists: false,
       tip: "",
-      events: [],
+      records: [],
       kinds: [],
       firstParentLine: [],
       report: `no change ref ${ref} in ${repo}\nrefs/yrd/** there:\n${carried}`,
@@ -401,19 +401,19 @@ export async function readChange(
   const tip = tipLine.split(" ")[0] ?? ""
   const line = await firstParentCommits(repo, ref)
   const genesis = line.find((commit) => commit.parents.length === 0)
-  const events = [...line].reverse().filter((commit) => commit.kind !== "")
+  const records = [...line].reverse().filter((commit) => commit.kind !== "")
   const shown = line
     .map(
       (commit) =>
-        `  ${commit.sha.slice(0, 8)} [${commit.parents.length}p] ${commit.kind || "(no Event:)"} — ${commit.subject}`,
+        `  ${commit.sha.slice(0, 8)} [${commit.parents.length}p] ${commit.kind || "(no Record:)"} — ${commit.subject}`,
     )
     .join("\n")
   return {
     ref,
     exists: true,
     tip,
-    events,
-    kinds: events.map((event) => event.kind),
+    records,
+    kinds: records.map((record) => record.kind),
     genesis,
     firstParentLine: line.map((commit) => commit.sha),
     report: `${ref} at ${tip}\nfirst-parent line, newest first:\n${shown}`,
@@ -460,7 +460,11 @@ export async function yrdJson(repo: string, ...args: string[]): Promise<YrdJsonR
  * The target moves without the queue: `sha` merged into it around the queue and pushed,
  * as the mechanic does in the garage. Answers the target's new tip.
  */
-export async function mergeAroundQueue(repo: string, sha: string, message = "merged around the queue"): Promise<string> {
+export async function mergeAroundQueue(
+  repo: string,
+  sha: string,
+  message = "merged around the queue",
+): Promise<string> {
   await git(repo, "fetch", "-q", "origin")
   await git(repo, "checkout", "-q", "-B", "main", "origin/main")
   await git(repo, "merge", "-q", "--no-ff", "-m", message, sha)
@@ -647,16 +651,16 @@ export function queueSubmit(repo: string, branch: string): Promise<QueueRunResul
 }
 
 /**
- * A change's events, newest first, as their commit messages on the change ref.
- * An event carries `Event:`; the genesis commit that ends the first-parent walk
+ * A change's records, newest first, as their commit messages on the change ref.
+ * A record carries `Record:`; the genesis commit that ends the first-parent walk
  * carries none and is not one.
  */
-export async function eventMessages(dir: string, ref: string): Promise<readonly string[]> {
+export async function recordMessages(dir: string, ref: string): Promise<readonly string[]> {
   const log = await git(dir, "log", "--first-parent", "--format=%B%x00", ref)
   return log
     .split("\0")
     .map((message) => message.trim())
-    .filter((message) => /^Event: /mu.test(message))
+    .filter((message) => /^Record: /mu.test(message))
 }
 
 /** Every record a hook was handed, as one blob; empty when none ran. */
@@ -718,7 +722,7 @@ type BoundaryPlan = Readonly<{
 
 /**
  * A check written INTO a repository, so a case can ask what the check could
- * SEE. It records its name, its working directory and every tracked file at
+ * SEE. It records its name, its workdir and every tracked file at
  * that directory, then exits.
  *
  *   PROBE_LOG          file to append one line to (required)
@@ -793,8 +797,7 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   // endings, so it wants all four, and a case can count what the queue handed
   // over and read which ending each record was for.
   const recorder = JSON.stringify(`cat >>${hookLog}`)
-  const hooks =
-    plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
+  const hooks = plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
   const head = plan.remoteIsOrigin === true ? declaration(origin) : declaration()
   await writeFile(join(repo, ".yrd.yml"), `${head}${hooks}${phasedChecks(plan.checks)}\n`)
 
@@ -852,7 +855,7 @@ export async function submitSameHead(repo: string, bay: string, headSha: string)
 /** A throwaway clone of the shared repository, for the cases where something
  * OTHER than the queue moves the target. */
 async function throwawayClone(origin: string): Promise<string> {
-  const work = await mkdtemp(join(tmpdir(), "yrd-boundary-bypass-"))
+  const work = await mkdtemp(join(tmpdir(), "yrd-boundary-direct-"))
   roots.push(work)
   const clone = join(work, "clone")
   // `--branch main`, because the bare repository was made by `git init --bare`
@@ -886,7 +889,16 @@ export async function advanceTargetAroundQueue(
 export async function landAroundQueue(origin: string, headSha: string, from: string): Promise<string> {
   const clone = await throwawayClone(origin)
   await git(clone, "fetch", "-q", from, "+refs/heads/*:refs/remotes/submitted/*")
-  await git(clone, "merge", "--no-ff", "--no-edit", "-q", headSha, "-m", `landed ${headSha.slice(0, 8)} around the queue`)
+  await git(
+    clone,
+    "merge",
+    "--no-ff",
+    "--no-edit",
+    "-q",
+    headSha,
+    "-m",
+    `landed ${headSha.slice(0, 8)} around the queue`,
+  )
   await git(clone, "push", "-q", "origin", "main")
   return git(clone, "rev-parse", "HEAD")
 }

@@ -18,11 +18,11 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
-  bypassCommits,
+  directMergeCommits,
   activeFreeze,
   changeName,
   claimWorktrees,
-  bypassLine,
+  directMergeLine,
   freezeLine,
   prepareWorktree,
   gitIn,
@@ -45,7 +45,7 @@ import {
   requireUnfrozen,
   writeFreeze,
   type CheckResult,
-  type FreezeEvent,
+  type FreezeRecord,
   type Git,
   type LogRecord,
   type QueueConfig,
@@ -221,9 +221,9 @@ export async function coreQueueCommand(
         }
       }
       // A dry run says what it would open and touches nothing: no push, no
-      // event, no ref anywhere. The wrapper used to take `--dry-run` on its own
+      // record, no ref anywhere. The wrapper used to take `--dry-run` on its own
       // surface and pass the core an ordinary submit, so a dry run opened a
-      // real change: one submit, two opened events, 2026-09-03. The
+      // real change: one submit, two opened records, 2026-09-03. The
       // flag belongs to the command that pushes, or to no command at all.
       if (request.dryRun === true) {
         const head = (await git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim()
@@ -278,7 +278,7 @@ export async function coreQueueCommand(
       // and a pin that moved under it — exits 0, because hab classifies every
       // non-zero exit as a crash (ag hab-core, exit-classification.ts), backs
       // off, and counts it against a three-per-600-s budget: three pin advances
-      // in ten minutes would have stopped the queue for the one event whose
+      // in ten minutes would have stopped the queue for the one condition whose
       // whole cure is the relaunch.
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
@@ -326,7 +326,7 @@ export async function coreQueueCommand(
       // one and the same tip and no second reading can disagree with it.
       const queue = await readQueue(git, config.target.remote, config.target.branch)
       const rows = list(queue.changes, {
-        bypasses: await bypassCommits(git, config.target.branch, queue.target, queue.changes),
+        directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
       })
       const freeze = await activeFreeze(git, config.target.remote)
       emit(
@@ -440,11 +440,11 @@ export async function coreQueueCommand(
           changes: changes.map((change) => ({
             ...change.row,
             checks: change.checks,
-            events: change.events.map((event) => ({
-              at: event.at,
-              kind: event.kind,
-              sha: event.sha,
-              subject: event.subject,
+            records: change.records.map((record) => ({
+              at: record.at,
+              kind: record.kind,
+              sha: record.sha,
+              subject: record.subject,
             })),
           })),
         },
@@ -548,8 +548,8 @@ function runOptions(
 }
 
 /**
- * The human line is a rendering of the record, and the CLI's own logger is the
- * one place it is rendered: one debug row per event, named by the event's kind,
+ * The human line is a rendering of the log record, and the CLI's own logger is the
+ * one place it is rendered: one debug row per log record, named by the log record's kind,
  * at the level the invocation resolved (`--log-level`, `LOG_LEVEL`, `-v`),
  * never a second format and never a second reading of the environment. No
  * host logger, no rendering: the JSONL file is what happened either way, and
@@ -597,8 +597,8 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `reaped the worktree ${String(rest.path)} of the run ${String(rest.of)}: ${String(rest.why)}`
     case "freeze":
       return `${String(rest.state)} by ${String(rest.by)} since ${String(rest.since)}: ${String(rest.reason)}`
-    case "merged-bypass":
-      return bypassLine({
+    case "merged-direct":
+      return directMergeLine({
         commit: String(rest.commit),
         gitlinks: Array.isArray(rest.gitlinks) ? rest.gitlinks.map(String) : [],
         subject: String(rest.subject),
@@ -615,10 +615,10 @@ function describeRun(
     merged: readonly string[]
     failed: readonly string[]
     stuck: readonly string[]
-    bypasses: readonly string[]
+    directMerges: readonly string[]
     log: string
     garage?: string
-    freeze?: FreezeEvent
+    freeze?: FreezeRecord
   }>,
 ): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
@@ -626,8 +626,8 @@ function describeRun(
     outcome.merged.length > 0 ? `merged ${outcome.merged.join(", ")}` : undefined,
     outcome.failed.length > 0 ? `failed ${outcome.failed.join(", ")}` : undefined,
     outcome.stuck.length > 0 ? `stuck ${outcome.stuck.join(", ")}` : undefined,
-    outcome.bypasses.length > 0
-      ? `${String(outcome.bypasses.length)} ${outcome.bypasses.length === 1 ? "commit" : "commits"} around the queue at ${outcome.bypasses.map((sha) => sha.slice(0, 12)).join(", ")}`
+    outcome.directMerges.length > 0
+      ? `${String(outcome.directMerges.length)} ${outcome.directMerges.length === 1 ? "commit" : "commits"} around the queue at ${outcome.directMerges.map((sha) => sha.slice(0, 12)).join(", ")}`
       : undefined,
     outcome.freeze === undefined ? undefined : `${freezeLine(outcome.freeze)}; no merge was made`,
   ].filter((part): part is string => part !== undefined)

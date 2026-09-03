@@ -21,7 +21,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, queueRun, readEvents, submit, trailer } from "../src/index.ts"
+import { gitIn, queueRun, readRecords, submit, trailer } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 
 const roots: string[] = []
@@ -197,8 +197,8 @@ describe("the built-in gitlink check", () => {
 
     expect(outcome.exitCode).toBe(1)
     expect(outcome.failed).toEqual(["task/off"])
-    const failed = (await readEvents(w.git, { branch: "task/off", head })).find((event) => event.kind === "failed")
-    if (failed === undefined) throw new Error("no failed event")
+    const failed = (await readRecords(w.git, { branch: "task/off", head })).find((record) => record.kind === "failed")
+    if (failed === undefined) throw new Error("no failed record")
     expect(trailer(failed, "Reason")).toBe("gitlink-off-main")
     expect(trailer(failed, "Fault")).toBe("submitter")
     expect(failed.subject).toContain("component")
@@ -230,26 +230,28 @@ describe("the built-in gitlink check", () => {
 
   it("a pin moved on the target around the queue is reported with its path, and no component is asked about it (E5)", async () => {
     const w = await world()
-    // One change first: the queue's history starts at its own first event, so a
-    // queue that has judged nothing reports nothing (bypass.ts). Its branch is
+    // One change first: the queue's history starts at its own first record, so a
+    // queue that has judged nothing reports nothing (direct.ts). Its branch is
     // then taken away, so the run retires it without building a worktree and
-    // the count below stays about the bypass reading alone.
+    // the count below stays about the direct-merge reading alone.
     await submitFile(w, "task/first")
     await w.git(["push", "--quiet", "origin", ":task/first"])
-    const bypass = await pinAroundQueue(w, w.offMain)
+    const direct = await pinAroundQueue(w, w.offMain)
 
     const outcome = await queueRun(w.options())
 
     expect(outcome.exitCode).toBe(0)
-    expect(outcome.bypasses).toEqual([bypass])
+    expect(outcome.directMerges).toEqual([direct])
     const log = readFileSync(outcome.log, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
-    expect(log.filter((record) => record.kind === "merged-bypass")).toMatchObject([{ commit: bypass, gitlinks: ["component"] }])
-    const told = log.filter((record) => record.kind === "message" && record.says === "merged-bypass")
-    expect(told).toMatchObject([{ id: bypass, says: "merged-bypass", to: "none" }])
-    expect(told[0]?.text).toContain(`main moved around the queue at ${bypass.slice(0, 12)}`)
+    expect(log.filter((record) => record.kind === "merged-direct")).toMatchObject([
+      { commit: direct, gitlinks: ["component"] },
+    ])
+    const told = log.filter((record) => record.kind === "message" && record.says === "merged-direct")
+    expect(told).toMatchObject([{ id: direct, says: "merged-direct", to: "none" }])
+    expect(told[0]?.text).toContain(`main moved around the queue at ${direct.slice(0, 12)}`)
     expect(told[0]?.text).toContain("it moved the pin at component")
     // The report reads the commit; it never judges the pin, so no component is asked.
     expect(w.fetches()).toBe(0)
@@ -275,16 +277,27 @@ describe("the built-in gitlink check", () => {
     await w.git(["update-index", "--add", "--cacheinfo", `160000,${four},component`])
     const tree = (await w.git(["write-tree"])).trim()
     const head = (
-      await w.git(["commit-tree", tree, "-p", base, "-m", "task/unfetched: pin the component at a commit this checkout never fetched"])
+      await w.git([
+        "commit-tree",
+        tree,
+        "-p",
+        base,
+        "-m",
+        "task/unfetched: pin the component at a commit this checkout never fetched",
+      ])
     ).trim()
     await w.git(["update-ref", "refs/heads/task/unfetched", head])
     await w.git(["read-tree", "main"])
-    await submit(w.git, "origin", { branch: "task/unfetched", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
+    await submit(w.git, "origin", {
+      branch: "task/unfetched",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
 
     const outcome = await queueRun(w.options())
 
     expect(outcome.exitCode).toBe(0)
-    const kinds = (await readEvents(w.git, { branch: "task/unfetched", head })).map((event) => event.kind)
+    const kinds = (await readRecords(w.git, { branch: "task/unfetched", head })).map((record) => record.kind)
     expect(kinds).not.toContain("stuck")
     expect(kinds).toContain("merged")
   })
@@ -300,7 +313,10 @@ describe("the built-in gitlink check", () => {
     // run's answer — and one merge per run lands the first (ruling D4).
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/first"])
-    expect((await readEvents(w.git, { branch: "task/second", head: second })).map((event) => event.kind)).toEqual(["opened", "checked"])
+    expect((await readRecords(w.git, { branch: "task/second", head: second })).map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+    ])
     expect(w.fetches()).toBe(1)
   })
 })

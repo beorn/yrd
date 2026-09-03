@@ -19,7 +19,7 @@
  *
  * The environment is built, never inherited (ruling A7), and it says what the
  * check is judging: `YRD_REPO` is the worktree the check runs in, its own
- * working directory; `YRD_CANDIDATE_SHA` is that worktree's HEAD; `YRD_BASE_SHA`
+ * cwd; `YRD_CANDIDATE_SHA` is that worktree's HEAD; `YRD_BASE_SHA`
  * is the merge base of that HEAD and the target, so it is always an ancestor
  * of the candidate. A check that selects work by what changed — the affected
  * tests, the co-changed manifests — needs both shas and needs that ancestry, so
@@ -107,7 +107,7 @@ export function checkLogPath(logDir: string, name: string): string {
 }
 
 /**
- * One check result packed onto an event's `Check:` trailer, and the reading of
+ * One check result packed onto a record's `Check:` trailer, and the reading of
  * it. They live together because they are one format: the table used to pick
  * the name off with a `split(" ")` and the log path off with a regex of its
  * own, neither of them anywhere near the line that wrote them.

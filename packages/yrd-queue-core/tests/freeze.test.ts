@@ -3,10 +3,10 @@
  *           so admission or merge work proceeds while the operator intended
  *           it to stop.
  * @level    l1 (queue-core APIs over one real bare Git remote and two clones)
- * @consumer submit admission and queue runs, which both trust this event ref
+ * @consumer submit admission and queue runs, which both trust this record ref
  *           before writing
  *
- * A merge freeze is one event ref at the queue's remote. These tests use a
+ * A merge freeze is one record ref at the queue's remote. These tests use a
  * real bare remote because the lease, not an in-process flag, is the safety
  * boundary.
  */
@@ -42,8 +42,8 @@ async function world(): Promise<World> {
   return { git: gitIn(work), other: gitIn(other) }
 }
 
-describe("the queue freeze is one leased event ref at the remote", () => {
-  it("records frozen and unfrozen events with who, when and why", async () => {
+describe("the queue freeze is one leased record ref at the remote", () => {
+  it("records frozen and unfrozen records with who, when and why", async () => {
     const w = await world()
 
     expect(await readFreeze(w.git, "origin")).toBeUndefined()
@@ -65,11 +65,11 @@ describe("the queue freeze is one leased event ref at the remote", () => {
     expect(await readFreeze(w.git, "origin")).toEqual(unfrozen)
     expect(unfrozen).toMatchObject({ by: "operator", kind: "unfrozen", reason: "the repair landed" })
     expect((await w.other(["log", "-1", "--format=%(trailers:only,unfold)", FREEZE_REF])).trim()).toBe(
-      "Event: unfrozen\nFrozen-By: operator",
+      "Record: unfrozen\nFrozen-By: operator",
     )
   })
 
-  it("refuses the second writer when two events race from one observed tip", async () => {
+  it("refuses the second writer when two records race from one observed tip", async () => {
     const w = await world()
     await writeFreeze(w.git, "origin", { by: "@chief", kind: "frozen", reason: "investigating" })
     let raced = false
@@ -87,14 +87,31 @@ describe("the queue freeze is one leased event ref at the remote", () => {
     expect(await readFreeze(w.git, "origin")).toMatchObject({ by: "operator", reason: "cleared elsewhere" })
   })
 
-  it("fails closed when the ref exists but is not a freeze event", async () => {
+  it("teaches the one-time reset when the freeze ref uses the preceding record spelling", async () => {
+    const w = await world()
+    const tree = (await w.git(["mktree"], "")).trim()
+    const previous = (
+      await w.git([
+        "commit-tree",
+        tree,
+        "-m",
+        ["repair landed", "", ["Ev", "ent: unfrozen"].join(""), "Frozen-By: @chief", ""].join("\n"),
+      ])
+    ).trim()
+    await w.git(["push", "--quiet", "origin", `${previous}:${FREEZE_REF}`])
+
+    await expect(readFreeze(w.other, "origin")).rejects.toThrow(/former Event trailer/u)
+    await expect(readFreeze(w.other, "origin")).rejects.toThrow(/Bundle and reset refs\/yrd\/freeze/u)
+  })
+
+  it("fails closed when the ref exists but is not a freeze record", async () => {
     const w = await world()
     const tree = (await w.git(["mktree"], "")).trim()
     const malformed = (await w.git(["commit-tree", tree, "-m", "mystery state"])).trim()
     await w.git(["push", "--quiet", "origin", `${malformed}:${FREEZE_REF}`])
 
     await expect(readFreeze(w.other, "origin")).rejects.toThrow(
-      `${FREEZE_REF} at ${malformed.slice(0, 12)} carries no valid Event: frozen|unfrozen trailer`,
+      `${FREEZE_REF} at ${malformed.slice(0, 12)} carries no valid Record: frozen|unfrozen trailer`,
     )
   })
 
@@ -102,7 +119,12 @@ describe("the queue freeze is one leased event ref at the remote", () => {
     const w = await world()
     const tree = (await w.git(["mktree"], "")).trim()
     const ambiguous = (
-      await w.git(["commit-tree", tree, "-m", "ambiguous state\n\nEvent: frozen\nEvent: unfrozen\nFrozen-By: @chief\n"])
+      await w.git([
+        "commit-tree",
+        tree,
+        "-m",
+        "ambiguous state\n\nRecord: frozen\nRecord: unfrozen\nFrozen-By: @chief\n",
+      ])
     ).trim()
     await w.git(["push", "--quiet", "origin", `${ambiguous}:${FREEZE_REF}`])
 

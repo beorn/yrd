@@ -2,7 +2,7 @@ import { join } from "node:path"
 import { configValue, type Git } from "@yrd/queue-core"
 
 /**
- * The queue's working directory, where everything it writes goes: whatever
+ * The queue workdir, where everything it writes goes: whatever
  * `git config yrd.workdir` resolves to in the repository the command runs in —
  * any scope git honours, so a host says it once in `--global` and a single
  * repository can say otherwise — else `<git-common-dir>/yrd`.

@@ -12,7 +12,7 @@
  * guessed at its own configuration would judge every change by that guess.
  */
 
-import type { Git } from "./events.ts"
+import type { Git } from "./records.ts"
 import { refAt } from "./git.ts"
 import type { CheckSpec } from "./check.ts"
 
@@ -84,10 +84,10 @@ export function parseTarget(text: string): Target | undefined {
 const TARGET_GRAMMAR = "must be <remote>#<branch>, e.g. origin#main"
 
 /** The one line that shows what `notify:` looks like, wherever it has to be shown. */
-const NOTIFY_SHAPE = 'notify: [- <name>: {on: [merged, failed], run: <command>}]' 
+const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]"
 
 /** The endings the queue can notify about; it has no others to run a command on. */
-export const ENDINGS = ["merged", "failed", "stuck", "merged-bypass"] as const
+export const ENDINGS = ["merged", "failed", "stuck", "merged-direct"] as const
 
 export type Ending = (typeof ENDINGS)[number]
 
@@ -100,7 +100,7 @@ export type Ending = (typeof ENDINGS)[number]
  * and its own arguments. `owner:` was the other shape — a seat name in the
  * declaration — and a seat name is exactly what the queue has no way to keep
  * true. The NAME here is the declaration's own word, read by nothing but the
- * events: a sent event says `To: <name>`, so a reader can see which entry ran.
+ * records: a sent record says `To: <name>`, so a reader can see which entry ran.
  */
 export type Notifier = Readonly<{
   name: string
@@ -118,7 +118,7 @@ export type QueueConfig = Readonly<{
   setup?: string
   /** What the queue notifies, per ending; empty when the declaration names none. */
   notify: readonly Notifier[]
-  /** The blob the declaration was read from, recorded on every checked event. */
+  /** The blob the declaration was read from, recorded on every checked record. */
   blob: string
 }>
 
@@ -222,7 +222,7 @@ function namedCommands(
 /**
  * `notify:`, a named list of commands (above), each for the endings it names.
  * An entry with no `on:` wants every ending. The name is the declaration's own
- * and the queue reads nothing into it; the events carry it as `To:`.
+ * and the queue reads nothing into it; the records carry it as `To:`.
  */
 function readNotify(value: unknown): readonly Notifier[] {
   return namedCommands(value, "notify", ENDINGS, []).map((entry) => ({
@@ -237,30 +237,38 @@ function readNotify(value: unknown): readonly Notifier[] {
  * both; absent means merge.
  */
 function readChecks(value: unknown): readonly CheckSpec[] {
-  return namedCommands(value, "checks", ["submit", "merge"], ["timeoutMs", "environmentPassthrough", "scripts"]).map((entry, index) => {
-    const { body, name } = entry
-    const where = `.yrd.yml checks[${index}] ${name}`
-    const scripts = body.scripts
-    if (scripts !== undefined && (!Array.isArray(scripts) || !scripts.every((path) => typeof path === "string" && path !== ""))) {
-      throw new Error(`${where}: scripts: must be a list of repository paths`)
-    }
-    const timeoutMs = body.timeoutMs
-    if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || timeoutMs <= 0)) {
-      throw new Error(`${where}: timeoutMs: must be a positive number`)
-    }
-    const passthrough = body.environmentPassthrough
-    if (passthrough !== undefined && (!Array.isArray(passthrough) || !passthrough.every((named) => typeof named === "string"))) {
-      throw new Error(`${where}: environmentPassthrough: must be a list of names`)
-    }
-    return {
-      environmentPassthrough: passthrough as readonly string[] | undefined,
-      name,
-      on: entry.on as readonly ("submit" | "merge")[] | undefined,
-      run: entry.run,
-      scripts: scripts as readonly string[] | undefined,
-      timeoutMs,
-    }
-  })
+  return namedCommands(value, "checks", ["submit", "merge"], ["timeoutMs", "environmentPassthrough", "scripts"]).map(
+    (entry, index) => {
+      const { body, name } = entry
+      const where = `.yrd.yml checks[${index}] ${name}`
+      const scripts = body.scripts
+      if (
+        scripts !== undefined &&
+        (!Array.isArray(scripts) || !scripts.every((path) => typeof path === "string" && path !== ""))
+      ) {
+        throw new Error(`${where}: scripts: must be a list of repository paths`)
+      }
+      const timeoutMs = body.timeoutMs
+      if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || timeoutMs <= 0)) {
+        throw new Error(`${where}: timeoutMs: must be a positive number`)
+      }
+      const passthrough = body.environmentPassthrough
+      if (
+        passthrough !== undefined &&
+        (!Array.isArray(passthrough) || !passthrough.every((named) => typeof named === "string"))
+      ) {
+        throw new Error(`${where}: environmentPassthrough: must be a list of names`)
+      }
+      return {
+        environmentPassthrough: passthrough as readonly string[] | undefined,
+        name,
+        on: entry.on as readonly ("submit" | "merge")[] | undefined,
+        run: entry.run,
+        scripts: scripts as readonly string[] | undefined,
+        timeoutMs,
+      }
+    },
+  )
 }
 
 // Ruling A6's set, plus `setup:` (2026-09-02): every key here is read by the
@@ -278,8 +286,8 @@ const TOP_KEYS = ["target", "checks", "setup", "notify"] as const
 const RETIRED: Readonly<Record<string, string>> = {
   owner: `the queue addresses nobody: a notify: entry decides who hears about an ending, in its own arguments (${NOTIFY_SHAPE})`,
   remote: `the remote is the left side of the target, which ${TARGET_GRAMMAR}`,
-  scratch: "the queue's working directory is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
-  workdir: "the queue's working directory is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
+  scratch: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
+  workdir: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
 }
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */

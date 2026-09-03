@@ -36,7 +36,7 @@ describe("Process", () => {
 
   it("closes each process span with terminal outcome and measured duration", async () => {
     const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (entry: LogEvent) => events.push(entry) }])
     await using process = createProcess({
       env: { PATH: Bun.env.PATH },
       inject: { log },
@@ -61,7 +61,7 @@ describe("Process", () => {
     // against that rendering; the payload assertion holds under both, because
     // promoting a field into the headline must never move it out of `props`.
     const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (entry: LogEvent) => events.push(entry) }])
     await using process = createProcess({ env: { PATH: Bun.env.PATH }, inject: { log } })
 
     await expect(process.run({ argv: ["printf", "%s", "one two"] })).resolves.toMatchObject({ exitCode: 0 })
