@@ -28,10 +28,10 @@
  * item, failed rows included and merged rows below; nothing stores a status,
  * so two readers of one fact table must never disagree.
  *
- * WHAT EACH CASE COSTS TODAY is in its name: `today: green` where the current
- * core already agrees with the plan, `today: red — <what it does instead>`
- * where it does not. Every red was measured on yrd main at fce445eb on
- * 2026-09-02. No case is `it.fails`: a red stays red until M4 lands the core.
+ * Each case used to carry what it cost against the retired implementation —
+ * `today: green` or `today: red — <what it did instead>`, measured on yrd main
+ * at fce445eb on 2026-09-02. The core they were measured against is gone and
+ * every case passes, so the names say what the case is about and nothing else.
  */
 import { readFile } from "node:fs/promises"
 import { afterEach, describe, expect, it } from "vitest"
@@ -138,7 +138,7 @@ async function stateFromShow(repo: string, branch: string): Promise<{ state: str
 }
 
 describe("a change's state, derived", { timeout: 180_000 }, () => {
-  it("queued — an opened change the queue has not checked stands first in line [today: green]", async () => {
+  it("queued — an opened change the queue has not checked stands first in line", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const { branch, headSha } = await submitOneCommit(repo, "alpha")
 
@@ -150,7 +150,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, result.report).toBe(1)
   })
 
-  it("checked — a change whose checks passed but which has not landed is checked [today: green]", async () => {
+  it("checked — a change whose checks passed but which has not landed is checked", async () => {
     // Two changes and one queue run: the first in line merges, the second is
     // left checked. There is no other way, at the boundary, to reach the state
     // between "checks passed" and "landed".
@@ -165,7 +165,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(stateOf(rowFor(rows, second.branch, result.report), result.report), result.report).toBe("checked")
   })
 
-  it("stuck — a change the queue could not judge keeps its place in line [today: green]", async () => {
+  it("stuck — a change the queue could not judge keeps its place in line", async () => {
     // A check that exits 2 is the queue's own fault: § The queue run makes it
     // stuck, and § The words says a stuck change keeps its place.
     const { repo } = await boundaryRepository({ exit: 2 })
@@ -179,7 +179,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, `a stuck change keeps its place\n${result.report}`).toBe(1)
   })
 
-  it("failed — an ended change is still a row on the table [today: green]", async () => {
+  it("failed — an ended change is still a row on the table", async () => {
     // § Principles 7: "failed changes are rows on the table like any other".
     const { repo } = await boundaryRepository({ exit: 1 })
     const { branch, headSha } = await submitOneCommit(repo, "red")
@@ -192,7 +192,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(headIs(row, headSha), `${result.report}\nrow head: ${String(row.head)}`).toBe(true)
   })
 
-  it("merged — a change whose head reached the target has left the line [today: green]", async () => {
+  it("merged — a change whose head reached the target has left the line", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const { branch } = await submitOneCommit(repo, "alpha")
 
@@ -205,7 +205,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, `a merged change holds no place in line\n${result.report}`).toBeUndefined()
   })
 
-  it("merged — ancestry wins over any fact: a hand merge reads merged before any queue run [today: red — reads queued, at position 1, until a queue run appends the fact]", async () => {
+  it("merged — ancestry wins over any fact: a hand merge reads merged before any queue run", async () => {
     // The rule the whole area turns on. § The change: "merged if its head is an
     // ancestor of the target, and ancestry wins over any fact (a change merged
     // by hand in the garage shows merged, and the next queue run appends the
@@ -224,7 +224,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, `a merged change holds no place in line\n${result.report}`).toBeUndefined()
   })
 
-  it("position — the change behind a merged one moves up, because nothing stores a position [today: green]", async () => {
+  it("position — the change behind a merged one moves up, because nothing stores a position", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")
     const second = await submitOneCommit(repo, "beta")
@@ -242,7 +242,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ).toBe(1)
   })
 
-  it("position — the order of the opened facts is the order of the line [today: green]", async () => {
+  it("position — the order of the opened facts is the order of the line", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")
     const second = await submitOneCommit(repo, "beta")
@@ -260,7 +260,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ])
   })
 
-  it("two readers of one fact table never disagree — queue list and queue show tell an author the same thing [today: red — queue show answers with a pr object and no change state]", async () => {
+  it("two readers of one fact table never disagree — queue list and queue show tell an author the same thing", async () => {
     // § Principle 2 and § Commands: nothing stores a status, so both commands
     // derive from the same facts. Four states, four repositories, because the
     // disagreement that matters is the one an author hits on a change of theirs
@@ -284,7 +284,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     }
   })
 
-  it("nothing is stored — a reader holding only the git store derives the same states [today: red — the second reader lists no changes at all, and answers 0 without saying so]", async () => {
+  it("nothing is stored — a reader holding only the git store derives the same states", async () => {
     // § Principle 1: "Git is the truth. Every fact is a ref or a commit."
     // § The final design: "There is one store: the git repository." A checkout
     // that never ran the queue holds nothing else, so what it can say about a
@@ -310,7 +310,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     )
   })
 
-  it("a row names its work item [today: red — the row carries no work item field, and the rendered column prints '-']", async () => {
+  it("a row names its work item", async () => {
     // § The change: "the convention is `<work item>-<slug>`"; § Commands:
     // `queue list` shows the work item. A branch that carries one has to reach
     // the row, because the work item is how the queue's table joins the bead
@@ -327,7 +327,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ).toContain("24058")
   })
 
-  it("a row names its last result and the log that result came from [today: red — the row carries a result but no log path, and no column renders one]", async () => {
+  it("a row names its last result and the log that result came from", async () => {
     // § Commands: `queue list` shows "last result and log path". A failed row
     // an author cannot open is a row that tells them to go and ask the queue.
     const { repo } = await boundaryRepository({ exit: 1 })
@@ -350,7 +350,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ).resolves.toBeTypeOf("string")
   })
 
-  it("merged rows go below the changes in line [today: green]", async () => {
+  it("merged rows go below the changes in line", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")
     await queueRunOnce(repo)
