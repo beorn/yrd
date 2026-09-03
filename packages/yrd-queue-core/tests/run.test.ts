@@ -173,6 +173,16 @@ async function pushByHand(w: World, file: string): Promise<string> {
   return (await w.git(["rev-parse", "HEAD"])).trim()
 }
 
+/** The declaration itself edited on the target and pushed by hand: the commit that used to become the boundary and hide itself. */
+async function editDeclarationByHand(w: World, text: string): Promise<string> {
+  await w.git(["checkout", "--quiet", "main"])
+  writeFileSync(join(w.work, ".yrd.yml"), text)
+  await w.git(["add", ".yrd.yml"])
+  await w.git(["commit", "--quiet", "-m", "edit the declaration by hand"])
+  await w.git(["push", "--quiet", "origin", "main"])
+  return (await w.git(["rev-parse", "HEAD"])).trim()
+}
+
 /** Every record of a run's log, in order. */
 function records(outcome: QueueRunOutcome): readonly Record<string, unknown>[] {
   return readFileSync(outcome.log, "utf8")
@@ -615,6 +625,39 @@ describe("a queue run", () => {
     expect(outcome.byHand).toEqual([])
     expect(records(outcome).filter((record) => record.kind === "by-hand")).toEqual([])
     expect(messages(w)).toEqual([])
+  })
+
+  /**
+   * THE HOLE THE PLAN NAMED AT THE CUTOVER (§ Owed after M5, E5's last line).
+   *
+   * With the boundary at the newest first-parent commit that TOUCHED
+   * `.yrd.yml`, a hand push that itself edits the declaration became the
+   * boundary: it was excluded by the range that starts at the boundary, and so
+   * was every hand commit under it. One edit and a whole stretch of the target
+   * went unreported.
+   *
+   * The boundary is now where the `remote:` line came in, which no later edit
+   * can move. A hand push that edits the declaration is judged like any other
+   * first-parent commit — and the commit that introduced the line is still not
+   * judged, because the queue's own history starts there.
+   */
+  it("a hand push that edits the declaration is reported, and the commit that introduced remote: is not (E5)", async () => {
+    const w = await world({ declaredLater: true })
+    const declaration = (await w.git(["rev-parse", "origin/main"])).trim()
+    const plain = await pushByHand(w, "hand.txt")
+    const edited = await editDeclarationByHand(w, "remote: origin\ntarget: main\n")
+
+    const outcome = await queueRun(w.options({ exit: 0 }))
+
+    // Both hand commits, oldest first; the declaration commit is the boundary
+    // and is never among them.
+    expect(outcome.byHand).toEqual([plain, edited])
+    expect(outcome.byHand).not.toContain(declaration)
+    expect(records(outcome).filter((record) => record.kind === "by-hand").map((record) => record.commit)).toEqual([
+      plain,
+      edited,
+    ])
+    expect(messages(w).map((message) => message.recipient)).toEqual(["@cto", "@cto"])
   })
 
   it("a checked change is judged again when the target's check config is not the one its checked fact names", async () => {
