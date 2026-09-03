@@ -95,7 +95,9 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
   const { root } = repositoryHere(io)
   const baysRoot = baysRootOf(root)
   await using process = createProcess({ cwd: root })
-  const listed = await process.run({ argv: ["git", "worktree", "list", "--porcelain"], cwd: root })
+  // `-z` because a worktree path may contain a newline, and the newline form
+  // would then split one entry into two unreadable ones.
+  const listed = await process.run({ argv: ["git", "worktree", "list", "--porcelain", "-z"], cwd: root })
   if (listed.exitCode !== 0)
     throw new Error(`yrd: git worktree list exited ${String(listed.exitCode)}: ${listed.stderr.trim()}`)
   const under = `${resolve(baysRoot)}/`
@@ -112,7 +114,7 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
       ...(head === undefined ? {} : { head }),
     })
   }
-  for (const line of listed.stdout.split("\n")) {
+  for (const line of listed.stdout.split("\0")) {
     if (line.startsWith("worktree ")) {
       take()
       current.path = line.slice("worktree ".length).trim()
