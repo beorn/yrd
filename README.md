@@ -88,6 +88,7 @@ A key the queue does not read is refused, never ignored. Where the queue keeps i
     yrd/                                    the queue's working directory (git config yrd.workdir moves it)
       worktrees/<run id>/<phase>/<sha>      a fresh checkout per checked change, removed when the check ends
       checks/<change>/<run id>/<phase>/<name>.log   check logs, kept
+      environments/<name>/<run id>/logs, tmp        setup log and TMPDIR for one opened environment, kept
       logs/<run id>.jsonl                   the run's journal, one line per event
       tmp/                                  TMPDIR for the checks
 ```
