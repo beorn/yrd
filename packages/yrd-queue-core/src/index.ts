@@ -32,7 +32,7 @@ export { checkLogPath, checkTrailer, readCheckTrailer, runCheck } from "./check.
 export type { CheckedTree, CheckResult } from "./check.ts"
 export { runId } from "./log.ts"
 export type { LogRecord } from "./log.ts"
-export { claimWorktrees, prepareWorktree } from "./worktree.ts"
+export { checkedTree, claimWorktrees, prepareWorktree, runSetup, SetupFailed } from "./worktree.ts"
 export { queueRun } from "./run.ts"
 export type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"

@@ -3,25 +3,26 @@
  * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, Commands;
  * `yrd bay` is the same command's alias and "bay" its internal name).
  *
- * An environment is a git worktree under `.bays/`, and that is all it is. It
- * is opened through `@yrd/bay`'s own workspace primitive — the one the plan
- * keeps ("bays stay as workspaces") — never through an app, a journal or a
- * job runner: the durable `Bay` record, its lifecycle states, the PR mint and
- * the receiver remote went with the old core at M6, and nothing that is left
- * reads them.
+ * An environment is a git worktree under `.bays/`; that worktree is its whole
+ * identity and lifecycle. Opening it runs the target's declared setup after
+ * materialization, through the same bounded executor as the queue, but never
+ * creates an app, journal or job: the durable `Bay` record, its lifecycle
+ * states, the PR mint and the receiver remote went with the old core at M6,
+ * and nothing that is left reads them.
  *
  * So `list` reads the worktrees git itself holds under the bays root rather
  * than a record of what was once opened. One source per event: if git does not
  * have the worktree, the environment is not there.
  */
 
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
 import { createGitWorkspace } from "@yrd/bay"
-import { hintsIn } from "@yrd/queue-core"
-import { createProcess, type Process } from "@yrd/process"
+import { checkedTree, gitIn, hintsIn, readConfig, refAt, runId, runSetup, SetupFailed, type Git } from "@yrd/queue-core"
+import { createProcess } from "@yrd/process"
 import { declarationHere } from "./declaration.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
+import { workdirOf } from "./workdir.ts"
 
 export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean }>
 export type EnvListOptions = Readonly<{ json?: boolean }>
@@ -50,13 +51,13 @@ function baysRootOf(repo: string): string {
 /** The base a fresh environment is cut from: the target as this checkout last
  * fetched it, else the local branch of that name. Named, so a refusal says
  * which ref was missing rather than "could not resolve HEAD". */
-async function baseRef(process: Pick<Process, "run">, repo: string, target: string): Promise<string> {
+async function resolveBaseSha(git: Git, target: string): Promise<string> {
   const tracking = `refs/remotes/origin/${target}`
-  const read = await process.run({
-    argv: ["git", "rev-parse", "--verify", "--quiet", `${tracking}^{commit}`],
-    cwd: repo,
-  })
-  return read.exitCode === 0 && read.stdout.trim() !== "" ? tracking : target
+  const tracked = await refAt(git, tracking)
+  if (tracked !== undefined) return tracked
+  const local = await refAt(git, target)
+  if (local !== undefined) return local
+  throw new Error(`yrd: target '${target}' is absent at both ${tracking} and the local branch`)
 }
 
 /**
@@ -69,18 +70,44 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   if (name === "") throw new Error("yrd: --bay needs a name")
   const branch = `task/${name}`
   await using process = createProcess({ cwd: root })
+  const git = gitIn(root, process)
+  const base = await resolveBaseSha(git, target)
+  const config = await readConfig(git, base)
   const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
   const provisioned = await workspace.provision({
     bay: name,
     name,
     branch,
-    base: await baseRef(process, root, target),
+    base,
     ...(options.issue === undefined ? {} : { issue: options.issue }),
   })
   if (provisioned.conclusion !== "success") {
     throw new Error(`yrd: could not open environment '${name}': ${provisioned.error.message}`)
   }
   const { path, headSha, baseSha } = provisioned.output
+  const setup = config?.setup
+  if (setup !== undefined) {
+    const artifacts = join(await workdirOf(git), "environments", name, runId())
+    try {
+      const tree = await checkedTree(path, baseSha, process)
+      await runSetup({
+        cwd: path,
+        process,
+        setup: { logDir: join(artifacts, "logs"), run: setup, tmpdir: join(artifacts, "tmp") },
+        tree,
+      })
+    } catch (error) {
+      if (!(error instanceof SetupFailed)) throw error
+      const result = error.ran.result
+      const output = readFileSync(result.log, "utf8").trim() || "(setup produced no output)"
+      const why = result.why === undefined ? "" : ` (${result.why})`
+      throw new Error(
+        `environment setup ${result.result} in preserved bay ${path}: exit ${String(result.exit)}${why}\n` +
+          `command: ${setup}\n${output}\nlog ${result.log}`,
+        { cause: error },
+      )
+    }
+  }
   if (options.json === true) {
     io.stdout(`${JSON.stringify({ base: baseSha, branch, head: headSha, name, path })}\n`)
   } else {

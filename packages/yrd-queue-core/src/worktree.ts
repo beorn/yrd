@@ -224,6 +224,19 @@ export type SetupSpec = Readonly<{
 /** How one setup went: the check driver's own result, and when it ran. */
 export type SetupRan = Readonly<{ result: CheckResult; start: string; end: string }>
 
+/** One invocation of the shared setup executor in an already-materialized tree. */
+export type RunSetup = Readonly<{
+  cwd: string
+  tree: CheckedTree
+  setup: SetupSpec
+  /** Told how the setup went, pass or not, before a failure throws. */
+  record?: (ran: SetupRan) => void
+  /** Told the setup is about to run, with the log it will write. */
+  starting?: (about: Readonly<{ start: string; log: string }>) => void
+  process?: Process
+  env?: NodeJS.ProcessEnv
+}>
+
 export type PrepareWorktree = Readonly<{
   /** The target every base is measured against: `YRD_BASE_SHA` is the merge base of it and the worktree's HEAD. */
   targetSha: string
@@ -268,9 +281,11 @@ export async function checkedTree(worktree: string, targetSha: string, process?:
 }
 
 /**
- * A setup that did not pass. The worktree is already gone, and nobody is
- * billed: the setup is the queue's own ground, so a change that cannot be
- * prepared is stuck, never failed.
+ * A setup that did not pass. Worktree lifecycle belongs to the caller: the
+ * queue removes its ephemeral tree, while an environment keeps its retained
+ * tree for inspection. Nobody is billed for a setup failure: setup is the
+ * queue's own ground, so a change that cannot be prepared is stuck, never
+ * failed.
  */
 export class SetupFailed extends Error {
   constructor(
@@ -283,6 +298,34 @@ export class SetupFailed extends Error {
     )
     this.name = "SetupFailed"
   }
+}
+
+/**
+ * Run the target's declared setup in one materialized worktree.
+ *
+ * This function owns execution and attribution, never lifecycle: an ephemeral
+ * queue worktree removes itself when this throws, while a retained environment
+ * deliberately stays in place for inspection. Keeping cleanup at the caller
+ * is what lets both use one setup runner without making one pretend to be the
+ * other.
+ */
+export async function runSetup(options: RunSetup): Promise<SetupRan> {
+  const { cwd, tree, setup } = options
+  const start = new Date().toISOString()
+  options.starting?.({ log: checkLogPath(setup.logDir, SETUP), start })
+  const result = await runCheck({
+    cwd,
+    env: options.env,
+    logDir: setup.logDir,
+    process: options.process,
+    tmpdir: setup.tmpdir,
+    spec: { name: SETUP, run: setup.run, timeoutMs: setup.timeoutMs ?? DEFAULT_CHECK_BOUND_MS },
+    tree,
+  })
+  const ran: SetupRan = { end: new Date().toISOString(), result, start }
+  options.record?.(ran)
+  if (result.result !== "pass") throw new SetupFailed(ran, tree.candidate)
+  return ran
 }
 
 /**
@@ -307,40 +350,26 @@ export async function prepareWorktree(
   options: PrepareWorktree,
 ): Promise<PreparedWorktree> {
   const worktree = await freshWorktree(git, repo, commit, path, options.plumbing)
-  let tree: CheckedTree
   try {
-    tree = await checkedTree(worktree.path, options.targetSha, options.process)
+    const tree = await checkedTree(worktree.path, options.targetSha, options.process)
+    const prepared: PreparedWorktree = { ...worktree, tree }
+    const setup = options.setup
+    if (setup !== undefined) {
+      await runSetup({
+        cwd: worktree.path,
+        env: options.env,
+        process: options.process,
+        record: options.record,
+        setup,
+        starting: options.starting,
+        tree,
+      })
+    }
+    return prepared
   } catch (error) {
     await worktree.remove()
     throw error
   }
-  const prepared: PreparedWorktree = { ...worktree, tree }
-  const setup = options.setup
-  if (setup === undefined) return prepared
-  const start = new Date().toISOString()
-  options.starting?.({ log: checkLogPath(setup.logDir, SETUP), start })
-  let result: CheckResult
-  try {
-    result = await runCheck({
-      cwd: worktree.path,
-      env: options.env,
-      logDir: setup.logDir,
-      process: options.process,
-      tmpdir: setup.tmpdir,
-      spec: { name: SETUP, run: setup.run, timeoutMs: setup.timeoutMs ?? DEFAULT_CHECK_BOUND_MS },
-      tree,
-    })
-  } catch (error) {
-    await worktree.remove()
-    throw error
-  }
-  const ran: SetupRan = { end: new Date().toISOString(), result, start }
-  options.record?.(ran)
-  if (result.result !== "pass") {
-    await worktree.remove()
-    throw new SetupFailed(ran, commit)
-  }
-  return prepared
 }
 
 async function removeWorktree(git: Git, path: string): Promise<void> {
