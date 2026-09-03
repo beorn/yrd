@@ -164,14 +164,14 @@ async function submitPin(w: World, branch: string, sha: string): Promise<string>
   return head
 }
 
-/** The component's pin moved on main itself, by hand, and pushed: the case the gitlink check never sees (E5). */
-async function pinByHand(w: World, sha: string): Promise<string> {
+/** The component's pin moved on main itself, around the queue, and pushed: the case the gitlink check never sees (E5). */
+async function pinAroundQueue(w: World, sha: string): Promise<string> {
   await w.git(["checkout", "--quiet", "main"])
   const sub = gitIn(join(w.work, "component"))
   await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
   await sub(["checkout", "--quiet", sha])
   await w.git(["add", "component"])
-  await w.git(["commit", "--quiet", "-m", `pin the component at ${sha.slice(0, 12)} by hand`])
+  await w.git(["commit", "--quiet", "-m", `pin the component at ${sha.slice(0, 12)} around the queue`])
   await w.git(["push", "--quiet", "origin", "main"])
   return (await w.git(["rev-parse", "HEAD"])).trim()
 }
@@ -228,7 +228,7 @@ describe("the built-in gitlink check", () => {
     expect(w.fetches()).toBe(0)
   })
 
-  it("a pin moved on the target by hand is reported with its path, and no component is asked about it (E5)", async () => {
+  it("a pin moved on the target around the queue is reported with its path, and no component is asked about it (E5)", async () => {
     const w = await world()
     // One change first: the queue's history starts at its own first fact, so a
     // queue that has judged nothing reports nothing (by-hand.ts). Its branch is
@@ -236,20 +236,20 @@ describe("the built-in gitlink check", () => {
     // the count below stays about the by-hand reading alone.
     await submitFile(w, "task/first")
     await w.git(["push", "--quiet", "origin", ":task/first"])
-    const hand = await pinByHand(w, w.offMain)
+    const hand = await pinAroundQueue(w, w.offMain)
 
     const outcome = await queueRun(w.options())
 
     expect(outcome.exitCode).toBe(0)
-    expect(outcome.byHand).toEqual([hand])
+    expect(outcome.bypasses).toEqual([hand])
     const log = readFileSync(outcome.log, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
-    expect(log.filter((record) => record.kind === "by-hand")).toMatchObject([{ commit: hand, gitlinks: ["component"] }])
-    const told = log.filter((record) => record.kind === "message" && record.says === "by-hand")
-    expect(told).toMatchObject([{ id: hand, says: "by-hand", to: "owner" }])
-    expect(told[0]?.text).toContain(`main moved by hand at ${hand.slice(0, 12)}`)
+    expect(log.filter((record) => record.kind === "merged-bypass")).toMatchObject([{ commit: hand, gitlinks: ["component"] }])
+    const told = log.filter((record) => record.kind === "message" && record.says === "merged-bypass")
+    expect(told).toMatchObject([{ id: hand, says: "merged-bypass", to: "none" }])
+    expect(told[0]?.text).toContain(`main moved around the queue at ${hand.slice(0, 12)}`)
     expect(told[0]?.text).toContain("it moved the pin at component")
     // The report reads the commit; it never judges the pin, so no component is asked.
     expect(w.fetches()).toBe(0)

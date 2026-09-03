@@ -1,5 +1,5 @@
 /**
- * @failure A queue run made by hand in the garage is indistinguishable in its
+ * @failure A queue run made around the queue in the garage is indistinguishable in its
  *          own log from one the service made, so nobody reading a log later can
  *          tell which rounds were the mechanic's.
  * @level   l3
@@ -7,7 +7,7 @@
  *           log after the fact
  *
  * Black box, on the M1 harness: a real repository, a fake check, one
- * `yrd queue run` — one round, by hand, which is the round a garage is for. The
+ * `yrd queue run` — one round, around the queue, which is the round a garage is for. The
  * garage is written with plain git, because it is a ref and nothing of yrd's
  * has to exist for it to be true.
  */

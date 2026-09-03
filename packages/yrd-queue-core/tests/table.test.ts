@@ -11,7 +11,7 @@ import {
   gitIn,
   hintsIn,
   list,
-  byHandCommits,
+  bypassCommits,
   readCheckTrailer,
   readConfig,
   readQueue,
@@ -59,11 +59,17 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
 }
 
 describe("the declaration is read from the target commit", () => {
-  it("names the remote, the target, the checks with their phases, and the notifier", async () => {
+  it("names the target, the checks with their phases, and who is notified of what", async () => {
     const w = await world(
       [
         "target: origin#main",
-        "notify: bun tools/notify.ts",
+        "notify:",
+        "  - submitter:",
+        "      on: [merged, failed]",
+        "      run: bun tools/yrd-notify.ts",
+        "  - supervisor:",
+        "      on: stuck",
+        "      run: bun tools/yrd-notify.ts --to @cto",
         "checks:",
         "  - typecheck:",
         "      run: bun run typecheck",
@@ -75,7 +81,11 @@ describe("the declaration is read from the target commit", () => {
       ].join("\n"),
     )
     const config = await readConfig(w.git, "main")
-    expect(config).toMatchObject({ notify: "bun tools/notify.ts", target: { branch: "main", remote: "origin" } })
+    expect(config).toMatchObject({ target: { branch: "main", remote: "origin" } })
+    expect(config?.notify).toEqual([
+      { name: "submitter", on: ["merged", "failed"], run: "bun tools/yrd-notify.ts" },
+      { name: "supervisor", on: ["stuck"], run: "bun tools/yrd-notify.ts --to @cto" },
+    ])
     expect(config?.checks).toEqual([
       { environmentPassthrough: undefined, name: "typecheck", on: ["submit", "merge"], run: "bun run typecheck", timeoutMs: undefined },
       { environmentPassthrough: undefined, name: "tests", on: undefined, run: "bun run test", timeoutMs: 1_800_000 },
@@ -159,6 +169,32 @@ describe("the declaration is read from the target commit", () => {
     expect(hintsIn("remote: origin\n", "here.yml").problem).toContain("names remote:")
   })
 
+  it("holds notify: to the checks' own shape, and refuses the two keys it replaced", async () => {
+    // `notify:` and `checks:` are both "these commands, each for these
+    // occasions", so they are one grammar: a reader who has learned one has
+    // learned the other. An entry with no `on:` wants every ending.
+    const all = await world("notify:\n  - everyone:\n      run: bun tools/yrd-notify.ts\n")
+    expect((await readConfig(all.git, "main"))?.notify).toEqual([
+      { name: "everyone", on: ["merged", "failed", "stuck", "merged-bypass"], run: "bun tools/yrd-notify.ts" },
+    ])
+
+    // The old scalar is a list of one entry now, and the refusal shows the shape.
+    const scalar = await world("notify: bun tools/yrd-notify.ts\n")
+    await expect(readConfig(scalar.git, "main")).rejects.toThrow(/notify: must be a list of/u)
+
+    // An ending the queue does not have, and a key `notify:` does not read.
+    const unknownEnding = await world("notify:\n  - everyone:\n      on: landed\n      run: bun x\n")
+    await expect(readConfig(unknownEnding.git, "main")).rejects.toThrow(/on: must be merged or failed or stuck or merged-bypass/u)
+    const timed = await world("notify:\n  - everyone:\n      run: bun x\n      timeoutMs: 1000\n")
+    await expect(readConfig(timed.git, "main")).rejects.toThrow(/unknown key timeoutMs/u)
+
+    // `owner:` went with the seat name it held: a notify entry decides who
+    // hears about an ending, in its own arguments.
+    const owned = await world("owner: '@cto'\n")
+    await expect(readConfig(owned.git, "main")).rejects.toThrow(/unknown key owner/u)
+    await expect(readConfig(owned.git, "main")).rejects.toThrow(/the queue addresses nobody/u)
+  })
+
   it("is loud about every other key it does not read", async () => {
     const old = await world("batch: 1\nchecks:\n  - verify:\n      run: bun run test\n")
     await expect(readConfig(old.git, "main")).rejects.toThrow(/unknown key batch/u)
@@ -182,28 +218,28 @@ describe("the table is the queue read rendered", () => {
     expect(rows.map((row) => row.head)).toEqual([one, two])
   })
 
-  it("lists a commit the target gained by hand as its own row, as recent as it was committed (E5)", async () => {
+  it("lists a commit the target gained around the queue as its own row, as recent as it was committed (E5)", async () => {
     const w = await world("target: origin#main\n")
     await submitCommit(w, "task/one", "one.txt")
     await w.git(["checkout", "--quiet", "main"])
     writeFileSync(join(w.work, "hand.txt"), "hand\n")
     await w.git(["add", "hand.txt"])
-    await w.git(["commit", "--quiet", "-m", "hand.txt by hand"])
+    await w.git(["commit", "--quiet", "-m", "hand.txt around the queue"])
     await w.git(["push", "--quiet", "origin", "main"])
     const hand = (await w.git(["rev-parse", "HEAD"])).trim()
 
     const entries = (await readQueue(w.git, "origin", "main")).changes
-    const byHand = await byHandCommits(w.git, "main", hand, entries)
-    expect(byHand.map((commit) => [commit.commit, commit.subject, commit.gitlinks, commit.why])).toEqual([
-      [hand, "hand.txt by hand", [], "it is one commit, not a merge of a change"],
+    const bypasses = await bypassCommits(w.git, "main", hand, entries)
+    expect(bypasses.map((commit) => [commit.commit, commit.subject, commit.gitlinks, commit.why])).toEqual([
+      [hand, "hand.txt around the queue", [], "it is one commit, not a merge of a change"],
     ])
-    const rows = list(entries, { byHand })
+    const rows = list(entries, { bypasses })
     expect(rows.map((row) => [row.state, row.branch, row.head, row.position, row.reason])).toEqual([
       ["queued", "task/one", rows[0]?.head, 1, undefined],
-      ["by hand", "main", hand, undefined, `main moved by hand at ${hand.slice(0, 12)} (hand.txt by hand)`],
+      ["bypass", "main", hand, undefined, `main moved around the queue at ${hand.slice(0, 12)} (hand.txt around the queue)`],
     ])
-    // Windowed like every ended row: an old hand commit is not this week's news.
-    expect(list(entries, { byHand, sinceMs: 0, now: new Date(Date.now() + 60_000) }).map((row) => row.state)).toEqual([
+    // Windowed like every ended row: an old bypass is not this week's news.
+    expect(list(entries, { bypasses, sinceMs: 0, now: new Date(Date.now() + 60_000) }).map((row) => row.state)).toEqual([
       "queued",
     ])
   })

@@ -73,7 +73,7 @@ export async function readQueue(
       // for it: it is never judged, never given a fact and never messaged
       // about, and above all it never accounts for a commit on the target's
       // own first-parent line, where an accounted commit hides every hand push
-      // at or below it (by-hand.ts; E5). `submit` refuses to open one, so this
+      // at or below it (bypass.ts; E5). `submit` refuses to open one, so this
       // is only about the ones a remote already holds.
       if (change !== undefined && change.branch !== target) changeRefs.push(change)
     }

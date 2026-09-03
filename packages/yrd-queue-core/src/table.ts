@@ -5,23 +5,23 @@
  * second reader: both views are the queue read rendered, so they can never
  * disagree with a queue run or with each other. Every row is read off one
  * fact, the change's tip, whose trailers are the whole derived state — except
- * the row for a commit the queue did not put on the target, which is read off
- * the target itself (E5).
+ * the row for a commit the queue did not put on the target, a BYPASS, which is
+ * read off the target itself (E5).
  */
 
 import { endedKind, trailer, trailers, type Fact } from "./facts.ts"
 import { readCheckTrailer } from "./check.ts"
-import { handMovedLine, type ByHandCommit } from "./by-hand.ts"
+import { bypassLine, type Bypass } from "./bypass.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
 import { inLine, tipOf, type ChangeState } from "./state.ts"
 
 export type Row = Readonly<{
-  /** The change's branch; for a `by hand` row, the target the hand commit moved. */
+  /** The change's branch; for a `bypass` row, the target that commit moved. */
   branch: string
-  /** The change's head; for a `by hand` row, the hand commit itself. */
+  /** The change's head; for a `bypass` row, that commit itself. */
   head: string
-  /** A change's state, or `by hand` for a commit on the target the queue did not put there (E5). */
-  state: ChangeState | "by hand"
+  /** A change's state, or `bypass` for a commit on the target the queue did not put there (E5). */
+  state: ChangeState | "bypass"
   /** 1-based place in line for queued, checked and stuck rows; absent otherwise. */
   position?: number
   /** The last result: pass, fail or stuck, with the check that decided it. */
@@ -30,7 +30,7 @@ export type Row = Readonly<{
   log?: string
   workItem?: string
   submitter?: string
-  /** Why: `replaced`, `deleted`, a check's code, or for a `by hand` row the one line about the hand commit. */
+  /** Why: `replaced`, `deleted`, a check's code, or for a `bypass` row the one line about that commit. */
   reason?: string
   /** When the change was opened, from its first fact's `Opened:`. */
   since?: Date
@@ -46,14 +46,14 @@ export type ListOptions = Readonly<{
   now?: Date
   /** How far back the ended rows reach; the plan's default is seven days. */
   sinceMs?: number
-  /** The commits on the target the queue did not put there, each its own row (E5; `byHandCommits` reads them). */
-  byHand?: readonly ByHandCommit[]
+  /** The commits on the target the queue did not put there, each its own row (E5; `bypassCommits` reads them). */
+  bypasses?: readonly Bypass[]
 }>
 
 /**
  * Every change in line with its position, then every ended change within
  * `sinceMs` (the plan's default is seven days), failed and merged included,
- * and among them every commit the target gained by hand, as recent as it was
+ * and among them every commit that went around the queue, as recent as it was
  * committed.
  */
 export function list(entries: QueueRead, options: ListOptions = {}): readonly Row[] {
@@ -69,7 +69,7 @@ export function list(entries: QueueRead, options: ListOptions = {}): readonly Ro
   // opened long ago and merged today is today's news.
   const endedRows = [
     ...rows.filter((candidate) => candidate.position === undefined),
-    ...(options.byHand ?? []).map(byHandRow),
+    ...(options.bypasses ?? []).map(bypassesRow),
   ]
     .filter((candidate) => candidate.at === undefined || now.getTime() - candidate.at.getTime() <= sinceMs)
     .sort((left, right) => (right.at?.getTime() ?? 0) - (left.at?.getTime() ?? 0))
@@ -109,9 +109,9 @@ function row(entry: QueueEntry, position?: number): Row {
   }
 }
 
-/** A commit the target gained by hand: `<target> moved by hand at <sha12> (<subject>)`, and the pins it moved. */
-function byHandRow(commit: ByHandCommit): Row {
-  return { at: commit.at, branch: commit.target, head: commit.commit, reason: handMovedLine(commit), state: "by hand" }
+/** A bypass: `<target> moved around the queue at <sha12> (<subject>)`, and the pins it moved. */
+function bypassesRow(commit: Bypass): Row {
+  return { at: commit.at, branch: commit.target, head: commit.commit, reason: bypassLine(commit), state: "bypass" }
 }
 
 function resultOf(kind: Fact["kind"], check: string | undefined): string {

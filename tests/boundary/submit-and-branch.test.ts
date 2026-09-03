@@ -36,7 +36,7 @@ import {
   factMessages,
   git,
   gitTry,
-  notifiedMessages,
+  hookRecords,
   queueRunOnce,
   queueSubmit,
   refExists,
@@ -299,7 +299,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   })
 })
 
-describe("the branch, moved by hand", { timeout: 120_000 }, () => {
+describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
   // today: green, by accident — the old core answers `"results":[]` and runs
   // no check, because a standing ref with no journal record is invisible to
   // it. Ruling E2 (2026-09-02 evening) makes that the rule and withdraws B4:
@@ -370,7 +370,7 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
    * change ref, so there is nothing to delete and nothing to end.
    */
   it("a change whose branch is gone ends failed with the reason `deleted`, and sends nothing", async () => {
-    const { repo, origin, notifyLog } = await boundaryRepository({ exit: 0, notify: true })
+    const { repo, origin, hookLog } = await boundaryRepository({ exit: 0, hooks: true })
     await addYrdRemote(repo, origin)
     const branch = "24099-gone"
     const head = await commitOnBranch(repo, branch)
@@ -388,7 +388,7 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     const tip = (await factMessages(origin, changeRef({ branch: branch, head })))[0] ?? ""
     expect(tip, run.report).toContain("failed")
     expect(tip, run.report).toContain("deleted")
-    expect(await notifiedMessages(notifyLog), run.report).toBe("")
+    expect(await hookRecords(hookLog), run.report).toBe("")
   })
 
   /**
@@ -400,7 +400,7 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
    * today: red — the submit writes no change ref, so there is nothing to end.
    */
   it("a change whose branch no longer points at its head ends failed with `replaced`, and sends nothing about it", async () => {
-    const { repo, origin, notifyLog } = await boundaryRepository({ exit: 0, notify: true })
+    const { repo, origin, hookLog } = await boundaryRepository({ exit: 0, hooks: true })
     await addYrdRemote(repo, origin)
     const branch = "24099-moved"
     const head1 = await commitOnBranch(repo, branch)
@@ -418,7 +418,7 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     const tip = (await factMessages(origin, changeRef({ branch: branch, head: head1 })))[0] ?? ""
     expect(tip, run.report).toContain("failed")
     expect(tip, run.report).toContain("replaced")
-    expect(await notifiedMessages(notifyLog), run.report).not.toContain(head1)
+    expect(await hookRecords(hookLog), run.report).not.toContain(head1)
     // The new head is a bare push, so no change was opened for it (E2).
     expect(await refExists(origin, changeRef({ branch: branch, head: head2 })), run.report).toBe(false)
   })

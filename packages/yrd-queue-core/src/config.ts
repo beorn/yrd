@@ -53,18 +53,41 @@ export function parseTarget(text: string): Target | undefined {
 /** What a declaration that does not spell a target is told, in one sentence. */
 const TARGET_GRAMMAR = "must be <remote>#<branch>, e.g. origin#main"
 
+/** The one line that shows what `notify:` looks like, wherever it has to be shown. */
+const NOTIFY_SHAPE = 'notify: [- <name>: {on: [merged, failed], run: <command>}]' 
+
+/** The endings the queue can notify about; it has no others to run a command on. */
+export const ENDINGS = ["merged", "failed", "stuck", "merged-bypass"] as const
+
+export type Ending = (typeof ENDINGS)[number]
+
+/**
+ * One entry of `notify:`: a name the declaration chooses, the endings it wants,
+ * and the command that gets the record on stdin.
+ *
+ * The queue knows no people. It knows what happened and hands that to a
+ * command; who should hear about it, and how, is that command's own business
+ * and its own arguments. `owner:` was the other shape — a seat name in the
+ * declaration — and a seat name is exactly what the queue has no way to keep
+ * true. The NAME here is the declaration's own word, read by nothing but the
+ * events: a sent event says `To: <name>`, so a reader can see which entry ran.
+ */
+export type Notifier = Readonly<{
+  name: string
+  /** The endings this entry wants; absent in the declaration means all of them. */
+  on: readonly Ending[]
+  /** The command, run through the shell with the record as JSON on its stdin. */
+  run: string
+}>
+
 export type QueueConfig = Readonly<{
   /** The branch the queue lands on, at the remote holding it; `origin#main` unless declared. */
   target: Target
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
-  /**
-   * The command that delivers one message, a JSON record on stdin. The record
-   * says the ROLE it is for, `submitter` or `owner`; which seat wears the
-   * owner's belongs to that command's own arguments, never to the queue.
-   */
-  notify?: string
+  /** What the queue notifies, per ending; empty when the declaration names none. */
+  notify: readonly Notifier[]
   /** The blob the declaration was read from, recorded on every checked fact. */
   blob: string
 }>
@@ -84,7 +107,7 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   const declared = raw.target ?? "origin#main"
   const target = typeof declared === "string" ? parseTarget(declared) : undefined
   if (target === undefined) throw new Error(`.yrd.yml target: ${TARGET_GRAMMAR}`)
-  const notify = optionalString(raw, "notify")
+  const notify = readNotify(raw.notify)
   const setup = optionalString(raw, "setup")
   return { blob, checks: readChecks(raw.checks), notify, setup, target }
 }
@@ -126,46 +149,84 @@ export function hintsIn(text: string, where = ".yrd.yml"): Hints {
 }
 
 /**
- * Today's shape, kept: a list of single-key mappings, `- name: {run, …}`.
- * `on:` names the phases, `submit`, `merge` or both; absent means merge.
+ * A named list of commands: `- name: {run, on, …}`, the one shape `checks:` and
+ * `notify:` share. Both are "these commands, each for these occasions", so both
+ * are written and read the same way — a reader who has learned one has learned
+ * the other, and neither can drift from the other's grammar.
+ *
+ * `on:` is a single value or a list, held to `phases`; absent, the caller says
+ * what that means. `run:` is required. `extra` names the keys this list allows
+ * beyond `run` and `on`; anything else is refused with the list of what is read.
  */
-function readChecks(value: unknown): readonly CheckSpec[] {
+function namedCommands(
+  value: unknown,
+  key: string,
+  phases: readonly string[],
+  extra: readonly string[],
+): readonly Readonly<{ name: string; run: string; on?: readonly string[]; body: Record<string, unknown> }>[] {
   if (value === undefined) return []
-  if (!Array.isArray(value)) throw new Error(".yrd.yml checks: must be a list")
+  if (!Array.isArray(value)) {
+    throw new Error(`.yrd.yml ${key}: must be a list of "- <name>: {run: <command>}" entries`)
+  }
   return value.map((item, index) => {
+    const where = `.yrd.yml ${key}[${index}]`
     if (!isRecord(item) || Object.keys(item).length !== 1) {
-      throw new Error(`.yrd.yml checks[${index}]: must be one mapping of the check's name to its declaration`)
+      throw new Error(`${where}: must be one mapping of the entry's name to its declaration`)
     }
     const name = Object.keys(item)[0] ?? ""
     const body = item[name]
     if (!isRecord(body) || typeof body.run !== "string" || body.run === "") {
-      throw new Error(`.yrd.yml checks[${index}] ${name}: needs run: <command>`)
+      throw new Error(`${where} ${name}: needs run: <command>`)
     }
-    onlyKeys(body, CHECK_KEYS, `.yrd.yml checks[${index}] ${name}`)
-    const scripts = body.scripts
-    if (scripts !== undefined && (!Array.isArray(scripts) || !scripts.every((entry) => typeof entry === "string" && entry !== ""))) {
-      throw new Error(`.yrd.yml checks[${index}] ${name}: scripts: must be a list of repository paths`)
-    }
+    onlyKeys(body, ["run", "on", ...extra], `${where} ${name}`)
     const on = body.on
-    if (on !== undefined) {
-      const phases = Array.isArray(on) ? on : [on]
-      for (const phase of phases) {
-        if (phase !== "submit" && phase !== "merge") throw new Error(`.yrd.yml checks[${index}] ${name}: on: must be submit or merge`)
-      }
+    if (on === undefined) return { body, name, run: body.run }
+    const listed = (Array.isArray(on) ? on : [on]).map(String)
+    for (const phase of listed) {
+      if (!phases.includes(phase)) throw new Error(`${where} ${name}: on: must be ${phases.join(" or ")}`)
+    }
+    return { body, name, on: listed, run: body.run }
+  })
+}
+
+/**
+ * `notify:`, a named list of commands (above), each for the endings it names.
+ * An entry with no `on:` wants every ending. The name is the declaration's own
+ * and the queue reads nothing into it; the events carry it as `To:`.
+ */
+function readNotify(value: unknown): readonly Notifier[] {
+  return namedCommands(value, "notify", ENDINGS, []).map((entry) => ({
+    name: entry.name,
+    on: (entry.on ?? ENDINGS) as readonly Ending[],
+    run: entry.run,
+  }))
+}
+
+/**
+ * `checks:`, the same named list. `on:` names the phases, `submit`, `merge` or
+ * both; absent means merge.
+ */
+function readChecks(value: unknown): readonly CheckSpec[] {
+  return namedCommands(value, "checks", ["submit", "merge"], ["timeoutMs", "environmentPassthrough", "scripts"]).map((entry, index) => {
+    const { body, name } = entry
+    const where = `.yrd.yml checks[${index}] ${name}`
+    const scripts = body.scripts
+    if (scripts !== undefined && (!Array.isArray(scripts) || !scripts.every((path) => typeof path === "string" && path !== ""))) {
+      throw new Error(`${where}: scripts: must be a list of repository paths`)
     }
     const timeoutMs = body.timeoutMs
     if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || timeoutMs <= 0)) {
-      throw new Error(`.yrd.yml checks[${index}] ${name}: timeoutMs: must be a positive number`)
+      throw new Error(`${where}: timeoutMs: must be a positive number`)
     }
     const passthrough = body.environmentPassthrough
-    if (passthrough !== undefined && (!Array.isArray(passthrough) || !passthrough.every((entry) => typeof entry === "string"))) {
-      throw new Error(`.yrd.yml checks[${index}] ${name}: environmentPassthrough: must be a list of names`)
+    if (passthrough !== undefined && (!Array.isArray(passthrough) || !passthrough.every((named) => typeof named === "string"))) {
+      throw new Error(`${where}: environmentPassthrough: must be a list of names`)
     }
     return {
       environmentPassthrough: passthrough as readonly string[] | undefined,
       name,
-      on: on === undefined ? undefined : ((Array.isArray(on) ? on : [on]) as readonly ("submit" | "merge")[]),
-      run: body.run,
+      on: entry.on as readonly ("submit" | "merge")[] | undefined,
+      run: entry.run,
       scripts: scripts as readonly string[] | undefined,
       timeoutMs,
     }
@@ -185,11 +246,11 @@ const TOP_KEYS = ["target", "checks", "setup", "notify"] as const
  * reader that the queue forgot how to write somewhere, not where to say it now.
  */
 const RETIRED: Readonly<Record<string, string>> = {
+  owner: `the queue addresses nobody: a notify: entry decides who hears about an ending, in its own arguments (${NOTIFY_SHAPE})`,
   remote: `the remote is the left side of the target, which ${TARGET_GRAMMAR}`,
   scratch: "the queue's working directory is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   workdir: "the queue's working directory is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
 }
-const CHECK_KEYS = ["run", "on", "timeoutMs", "environmentPassthrough", "scripts"] as const
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */
 function onlyKeys(record: Record<string, unknown>, known: readonly string[], where: string): void {

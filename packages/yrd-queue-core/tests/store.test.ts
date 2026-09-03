@@ -202,7 +202,7 @@ describe("the state is derived, and ancestry wins over any fact", () => {
     const onTarget = await isAncestor(git, head, "HEAD")
     expect(onTarget).toBe(true)
     // The change ref still says `opened`. Ancestry is the stronger reading, so a
-    // hand merge in the garage shows as merged and nothing re-checks it.
+    // bypass in the garage shows as merged and nothing re-checks it.
     expect(facts.at(-1)?.kind).toBe("opened")
     expect(readChange({ branch: "task/one", branchHead: head, facts: written(facts), head, headOnTarget: onTarget }).state).toBe("merged")
   })

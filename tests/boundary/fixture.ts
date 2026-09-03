@@ -68,11 +68,11 @@ export type FakeCheckPlan = Readonly<{
   timeoutMs?: number
   /** Run this instead of the fake check — for the case where the check is not there. */
   command?: string
-  /** Declare a notifier, so the messages the queue run sends have somewhere to go.
-   * Default off, so every case that predates this knob writes the same
-   * `.yrd.yml` it always did. On, the target declares a notifier that appends
-   * each message to `notifyLog` and answers with a ball id. */
-  notify?: boolean
+  /** Declare a hook for every ending, so the records a queue run hands over
+   * have somewhere to go. Default off, so every case that predates this knob
+   * writes the same `.yrd.yml` it always did. On, the target declares one
+   * command for all four endings that appends each record to `hookLog`. */
+  hooks?: boolean
   /** Declare the `yrd` remote in `.yrd.yml`, so the submit path has somewhere
    * to read it from when the repository has no such remote. Default off, so
    * every case that predates this knob writes the same `.yrd.yml` it always
@@ -98,8 +98,8 @@ export type BoundaryRepository = Readonly<{
   origin: string
   /** One line per fake-check execution. */
   checkLog: string
-  /** One line per message the notifier was handed, when `notify` was asked for. */
-  notifyLog: string
+  /** One line per record a hook was handed, when `hooks` was asked for. */
+  hookLog: string
 }>
 
 /**
@@ -122,7 +122,7 @@ export function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryReposit
         ...(plan.timeoutMs === undefined ? {} : { timeoutMs: plan.timeoutMs }),
       },
     ],
-    ...(plan.notify === true ? { notify: true } : {}),
+    ...(plan.hooks === true ? { hooks: true } : {}),
     // `remote:` is the one line that selects the queue (plan § Cutover). A case
     // that asks for the yrd remote by name gets the shared repository's path.
     ...(plan.yrdRemote === true ? { remoteIsOrigin: true } : {}),
@@ -457,10 +457,10 @@ export async function yrdJson(repo: string, ...args: string[]): Promise<YrdJsonR
 }
 
 /**
- * The target moves without the queue: `sha` merged into it by hand and pushed,
+ * The target moves without the queue: `sha` merged into it around the queue and pushed,
  * as the mechanic does in the garage. Answers the target's new tip.
  */
-export async function mergeByHand(repo: string, sha: string, message = "merged by hand"): Promise<string> {
+export async function mergeAroundQueue(repo: string, sha: string, message = "merged around the queue"): Promise<string> {
   await git(repo, "fetch", "-q", "origin")
   await git(repo, "checkout", "-q", "-B", "main", "origin/main")
   await git(repo, "merge", "-q", "--no-ff", "-m", message, sha)
@@ -659,9 +659,9 @@ export async function factMessages(dir: string, ref: string): Promise<readonly s
     .filter((message) => /^Fact: /mu.test(message))
 }
 
-/** Everything the notifier was handed, as one blob; empty when nothing was sent. */
-export async function notifiedMessages(notifyLog: string): Promise<string> {
-  const file = Bun.file(notifyLog)
+/** Every record a hook was handed, as one blob; empty when none ran. */
+export async function hookRecords(hookLog: string): Promise<string> {
+  const file = Bun.file(hookLog)
   return (await file.exists()) ? await file.text() : ""
 }
 
@@ -707,8 +707,8 @@ type PhasedCheck = Readonly<{
 type BoundaryPlan = Readonly<{
   /** The target's checks, in order. */
   checks: readonly PhasedCheck[]
-  /** Declare a notifier, as `FakeCheckPlan.notify` does. */
-  notify?: boolean
+  /** Declare a hook for every ending, as `FakeCheckPlan.hooks` does. */
+  hooks?: boolean
   /** Name the shared repository by URL in `remote:`, instead of `origin`. */
   remoteIsOrigin?: boolean
   /** Files committed on the target alongside `README.md` and `.yrd.yml`.
@@ -771,7 +771,7 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   const repoPath = join(root, "repo")
   const origin = join(root, "origin.git")
   const checkLog = join(root, "fake-check.log")
-  const notifyLog = join(root, "notify.log")
+  const hookLog = join(root, "hooks.log")
   const plan = planOf(checkLog)
 
   await git(root, "init", "-q", "--bare", origin)
@@ -788,20 +788,20 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
     await writeFile(join(repo, path), content, path.endsWith(".sh") ? { mode: 0o755 } : {})
   }
 
-  // The notifier is what `.yrd.yml` documents: a command that reads the message
-  // as JSON on stdin and answers with a ball id. This one keeps the message so
-  // a case can count what was sent, and to whom.
-  const notify =
-    plan.notify === true
-      ? `notify: ${JSON.stringify(`cat >>${notifyLog}; echo '{"ball_id":"b1"}'`)}\n`
-      : ""
+  // A notify entry is what `.yrd.yml` documents: a name, the endings it wants,
+  // and a command that reads the record as JSON on stdin. This one names no
+  // endings, so it wants all four, and a case can count what the queue handed
+  // over and read which ending each record was for.
+  const recorder = JSON.stringify(`cat >>${hookLog}`)
+  const hooks =
+    plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
   const head = plan.remoteIsOrigin === true ? declaration(origin) : declaration()
-  await writeFile(join(repo, ".yrd.yml"), `${head}${notify}${phasedChecks(plan.checks)}\n`)
+  await writeFile(join(repo, ".yrd.yml"), `${head}${hooks}${phasedChecks(plan.checks)}\n`)
 
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")
   await git(repo, "push", "-q", "-u", "origin", "main")
-  return { repo, origin, checkLog, notifyLog }
+  return { repo, origin, checkLog, hookLog }
 }
 
 /** `submitOneCommit`, but the case chooses what the one commit writes — so
@@ -851,7 +851,7 @@ export async function submitSameHead(repo: string, bay: string, headSha: string)
 
 /** A throwaway clone of the shared repository, for the cases where something
  * OTHER than the queue moves the target. */
-async function handClone(origin: string): Promise<string> {
+async function throwawayClone(origin: string): Promise<string> {
   const work = await mkdtemp(join(tmpdir(), "yrd-boundary-hand-"))
   roots.push(work)
   const clone = join(work, "clone")
@@ -864,12 +864,12 @@ async function handClone(origin: string): Promise<string> {
 }
 
 /** The target moves without the queue: one commit, pushed to `main`. */
-export async function advanceTargetByHand(
+export async function advanceTargetAroundQueue(
   origin: string,
   files: Readonly<Record<string, string>>,
   message = "the target moved",
 ): Promise<string> {
-  const clone = await handClone(origin)
+  const clone = await throwawayClone(origin)
   for (const [path, content] of Object.entries(files)) {
     await writeFile(join(clone, path), content, path.endsWith(".sh") ? { mode: 0o755 } : {})
     await git(clone, "add", path)
@@ -879,14 +879,14 @@ export async function advanceTargetByHand(
   return git(clone, "rev-parse", "HEAD")
 }
 
-/** A change landed by hand in the garage: its head merged into the target and
+/** A change landed around the queue in the garage: its head merged into the target and
  * pushed, with no queue run involved. `from` is the working repository the
  * change was submitted in — a submitted head is not at the shared repository
- * until the queue puts it there, so the hand-clone has to fetch it. */
-export async function landByHand(origin: string, headSha: string, from: string): Promise<string> {
-  const clone = await handClone(origin)
+ * until the queue puts it there, so the throwaway clone has to fetch it. */
+export async function landAroundQueue(origin: string, headSha: string, from: string): Promise<string> {
+  const clone = await throwawayClone(origin)
   await git(clone, "fetch", "-q", from, "+refs/heads/*:refs/remotes/submitted/*")
-  await git(clone, "merge", "--no-ff", "--no-edit", "-q", headSha, "-m", `landed ${headSha.slice(0, 8)} by hand`)
+  await git(clone, "merge", "--no-ff", "--no-edit", "-q", headSha, "-m", `landed ${headSha.slice(0, 8)} around the queue`)
   await git(clone, "push", "-q", "origin", "main")
   return git(clone, "rev-parse", "HEAD")
 }

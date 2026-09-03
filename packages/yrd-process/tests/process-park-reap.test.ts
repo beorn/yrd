@@ -10,7 +10,7 @@ import { afterEach, describe, expect, test } from "vitest"
 import { createProcess, shellCommand } from "../src/index.ts"
 
 /**
- * The census the specimen was FOUND by, run as an assertion instead of by hand.
+ * The census the specimen was FOUND by, run as an assertion instead of around the queue.
  *
  * `waitDead` (process-tree.test.ts) asks whether one known pid is gone; that
  * cannot see a descendant whose pid the fixture never recorded, and the

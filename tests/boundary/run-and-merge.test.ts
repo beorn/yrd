@@ -17,13 +17,13 @@
  */
 import { afterEach, describe, expect, it } from "vitest"
 import {
-  advanceTargetByHand,
+  advanceTargetAroundQueue,
   boundaryRepositoryWith,
   checkAttempts,
   checkLines,
   FAKE_CHECK,
   firstParentDistance,
-  landByHand,
+  landAroundQueue,
   mergedIntoTarget,
   parentsOf,
   PROBE_SCRIPT,
@@ -54,7 +54,7 @@ function fake(log: string, exit: number): string {
  * two changes without one stops at `notify-unconfigured`, which would answer
  * every question below with the same irrelevant stuck. */
 function passing(log: string) {
-  return { notify: true, checks: [{ name: "gate", run: fake(log, 0) }] }
+  return { hooks: true, checks: [{ name: "gate", run: fake(log, 0) }] }
 }
 
 describe("the queue run", { timeout: 180_000 }, () => {
@@ -72,7 +72,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
       const targetLog = await temporaryLog("target-config")
       const branchLog = await temporaryLog("branch-config")
       const { repo } = await boundaryRepositoryWith({
-        notify: true,
+        hooks: true,
         checks: [{ name: "gate", run: fake(targetLog, 1) }],
       })
       const before = await targetTip(repo)
@@ -95,7 +95,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     it("the target's check script judges a branch that rewrote the script", async () => {
       const log = await temporaryLog("gate-script")
       const { repo } = await boundaryRepositoryWith({
-        notify: true,
+        hooks: true,
         // The check names its script, and the queue restores it from the base
         // before the check runs (ruling D5, the declared `scripts:` list).
         checks: [{ name: "gate", run: `GATE_LOG=${log} sh gate.sh`, scripts: ["gate.sh"] }],
@@ -157,7 +157,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
   it("the on-submit checks see the head alone; the on-merge checks see it merged onto the target", async () => {
     const log = await temporaryLog("phases")
     const { repo, origin } = await boundaryRepositoryWith({
-      notify: true,
+      hooks: true,
       checks: [
         { name: "atsubmit", on: "submit", run: `PROBE_NAME=submit PROBE_LOG=${log} sh gate.sh` },
         { name: "atmerge", on: "merge", run: `PROBE_NAME=merge PROBE_LOG=${log} sh gate.sh` },
@@ -171,7 +171,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     })
     // The target gains a file AFTER the branch was cut, so "did the check see
     // it" answers "was this the head alone, or the head merged onto the target".
-    await advanceTargetByHand(origin, { "moved.txt": "moved\n" })
+    await advanceTargetAroundQueue(origin, { "moved.txt": "moved\n" })
     await refreshTarget(repo)
 
     const run = await queueRunOnce(repo)
@@ -197,7 +197,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const log = await temporaryLog("conflict")
     const { repo, origin } = await boundaryRepositoryWith(passing(log))
     const change = await submitCommitWriting(repo, "conflict", { "shared.txt": "from the change\n" })
-    await advanceTargetByHand(origin, { "shared.txt": "from the target\n" })
+    await advanceTargetAroundQueue(origin, { "shared.txt": "from the target\n" })
     const before = await refreshTarget(repo)
     const refsBefore = await refs(repo)
 
@@ -217,14 +217,14 @@ describe("the queue run", { timeout: 180_000 }, () => {
 
   /**
    * "A head already an ancestor of the target is retired already-landed and
-   * never checked." The garage lands changes by hand; the next queue run must
+   * never checked." The garage lands changes around the queue; the next queue run must
    * notice, not re-judge.
    */
   it("a head already in the target is retired already-landed and never checked", async () => {
     const log = await temporaryLog("landed")
     const { repo, origin } = await boundaryRepositoryWith(passing(log))
     const change = await submitOneCommit(repo, "landed")
-    await landByHand(origin, change.headSha, repo)
+    await landAroundQueue(origin, change.headSha, repo)
     const before = await refreshTarget(repo)
 
     const run = await queueRunOnce(repo)
@@ -275,7 +275,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
   it("the target moving under a checked change re-judges it, and no earlier pass carries across bases", async () => {
     const log = await temporaryLog("bases")
     const { repo } = await boundaryRepositoryWith({
-      notify: true,
+      hooks: true,
       checks: [{ name: "gate", run: `PROBE_NAME=gate PROBE_LOG=${log} PROBE_FAIL_IF_ALL='a.txt b.txt' sh gate.sh` }],
       files: { "gate.sh": PROBE_SCRIPT },
     })

@@ -19,7 +19,7 @@
  *   checked   a checked fact and no ended fact after it
  *   stuck     the last fact is ended with stuck; the change keeps its place
  *   merged    the head is an ancestor of the target — AND ANCESTRY WINS OVER
- *             ANY FACT, so a change merged by hand reads merged before any
+ *             ANY FACT, so a change merged around the queue reads merged before any
  *             queue run has appended the merged fact
  *   failed    the last fact is ended with fail; the row is still listed
  *
@@ -37,7 +37,7 @@ import { readFile } from "node:fs/promises"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   boundaryRepository,
-  mergeByHand,
+  mergeAroundQueue,
   queueRunOnce,
   refreshSecondReader,
   removeTemporaryRoots,
@@ -205,18 +205,18 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, `a merged change holds no place in line\n${result.report}`).toBeUndefined()
   })
 
-  it("merged — ancestry wins over any fact: a hand merge reads merged before any queue run", async () => {
+  it("merged — ancestry wins over any fact: a bypass reads merged before any queue run", async () => {
     // The rule the whole area turns on. § The change: "merged if its head is an
     // ancestor of the target, and ancestry wins over any fact (a change merged
-    // by hand in the garage shows merged, and the next queue run appends the
+    // around the queue in the garage shows merged, and the next queue run appends the
     // merged fact so the tip catches up)". The state is read from git, so the
     // reader answers merged with the fact table still saying queued.
     const { repo } = await boundaryRepository({ exit: 0 })
     const { branch, headSha } = await submitOneCommit(repo, "byhand")
 
     const before = await targetTip(repo)
-    const tip = await mergeByHand(repo, headSha)
-    expect(tip, "the hand merge did not move the target").not.toBe(before)
+    const tip = await mergeAroundQueue(repo, headSha)
+    expect(tip, "the bypass did not move the target").not.toBe(before)
 
     const { rows, result } = await changesListed(repo)
     const row = rowFor(rows, branch, result.report)

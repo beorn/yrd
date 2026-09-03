@@ -18,11 +18,11 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
-  byHandCommits,
+  bypassCommits,
   changeName,
   claimWorktrees,
   configValue,
-  handMovedLine,
+  bypassLine,
   prepareWorktree,
   gitIn,
   hintsIn,
@@ -263,12 +263,12 @@ export async function coreQueueCommand(
       }
     }
     case "list": {
-      // The commits the target gained by hand are rows too (E5), judged at the
+      // The commits that went around the queue are rows too (E5), judged at the
       // target the queue read itself saw, so the rows and the reading are about
       // one and the same tip and no second reading can disagree with it.
       const queue = await readQueue(git, config.target.remote, config.target.branch)
       const rows = list(queue.changes, {
-        byHand: await byHandCommits(git, config.target.branch, queue.target, queue.changes),
+        bypasses: await bypassCommits(git, config.target.branch, queue.target, queue.changes),
       })
       emit(io, options.json, { changes: rows }, table(rows))
       return 0
@@ -505,8 +505,8 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `told ${String(rest.to)} about ${where}`
     case "reap":
       return `reaped the worktree ${String(rest.path)} of the run ${String(rest.of)}: ${String(rest.why)}`
-    case "by-hand":
-      return handMovedLine({
+    case "merged-bypass":
+      return bypassLine({
         commit: String(rest.commit),
         gitlinks: Array.isArray(rest.gitlinks) ? rest.gitlinks.map(String) : [],
         subject: String(rest.subject),
@@ -523,7 +523,7 @@ function describeRun(
     merged: readonly string[]
     failed: readonly string[]
     stuck: readonly string[]
-    byHand: readonly string[]
+    bypasses: readonly string[]
     log: string
     garage?: string
   }>,
@@ -533,8 +533,8 @@ function describeRun(
     outcome.merged.length > 0 ? `merged ${outcome.merged.join(", ")}` : undefined,
     outcome.failed.length > 0 ? `failed ${outcome.failed.join(", ")}` : undefined,
     outcome.stuck.length > 0 ? `stuck ${outcome.stuck.join(", ")}` : undefined,
-    outcome.byHand.length > 0
-      ? `${String(outcome.byHand.length)} ${outcome.byHand.length === 1 ? "commit" : "commits"} by hand at ${outcome.byHand.map((sha) => sha.slice(0, 12)).join(", ")}`
+    outcome.bypasses.length > 0
+      ? `${String(outcome.bypasses.length)} ${outcome.bypasses.length === 1 ? "commit" : "commits"} around the queue at ${outcome.bypasses.map((sha) => sha.slice(0, 12)).join(", ")}`
       : undefined,
   ].filter((part): part is string => part !== undefined)
   const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`

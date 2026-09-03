@@ -131,7 +131,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * One file, JSONL, at a path the queue run itself names.
    */
   it("is one JSONL file the queue run names, every line a JSON object with a kind", async () => {
-    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    const { repo } = await boundaryRepository({ exit: 0, hooks: true })
     await submitOneCommit(repo, "green")
 
     const run = await queueRunOnce(repo)
@@ -154,7 +154,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * told.
    */
   it("names the six kinds when one change is checked and merged", async () => {
-    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    const { repo } = await boundaryRepository({ exit: 0, hooks: true })
     const { branch, headSha } = await submitOneCommit(repo, "green")
 
     const run = await queueRunOnce(repo)
@@ -229,7 +229,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * what makes the start row useful: it names the file to tail.
    */
   it("says a check started before it says how it went, naming the same log", async () => {
-    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    const { repo } = await boundaryRepository({ exit: 0, hooks: true })
     const { branch } = await submitOneCommit(repo, "green")
 
     const run = await queueRunOnce(repo)
@@ -276,7 +276,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    */
   describe("says nothing at WARN or above", () => {
     it("with nothing submitted", async () => {
-      const { repo } = await boundaryRepository({ exit: 0, notify: true })
+      const { repo } = await boundaryRepository({ exit: 0, hooks: true })
 
       const run = await queueRunOnce(repo)
 
@@ -285,7 +285,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     })
 
     it("with one change checked and merged", async () => {
-      const { repo } = await boundaryRepository({ exit: 0, notify: true })
+      const { repo } = await boundaryRepository({ exit: 0, hooks: true })
       await submitOneCommit(repo, "green")
 
       const run = await queueRunOnce(repo)
@@ -307,7 +307,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * the same base and the same config blob.
    */
   it("names the base and the check config whether or not a run was built", async () => {
-    const merging = await boundaryRepository({ exit: 0, notify: true })
+    const merging = await boundaryRepository({ exit: 0, hooks: true })
     await submitOneCommit(merging.repo, "green")
     const mergedRun = await queueRunOnce(merging.repo)
     const merged = theOne((await logOfQueueRun(mergedRun)).records, "run")
@@ -332,7 +332,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
 
     // A check that gets stuck builds no run and resolves no step selection at
     // all, and both facts must still be there.
-    const stuck = await boundaryRepository({ exit: 2, notify: true })
+    const stuck = await boundaryRepository({ exit: 2, hooks: true })
     await submitOneCommit(stuck.repo, "two")
     const stuckRun = await queueRunOnce(stuck.repo)
     expect(stuckRun.exitCode, stuckRun.report).toBe(2)
@@ -358,7 +358,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * hand-written row would prove only that the filter can read a timestamp.
    */
   it("reports only this queue run's refusals, not an earlier one's", async () => {
-    const { repo } = await boundaryRepository({ exit: 1, notify: true })
+    const { repo } = await boundaryRepository({ exit: 1, hooks: true })
     const { branch } = await submitOneCommit(repo, "red")
 
     // Queue run one: the change is refused, and the refusal row is written.
@@ -397,7 +397,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * else grew to fill the space.
    */
   it("reads as the queue's own decisions at debug, not a git transcript", async () => {
-    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    const { repo } = await boundaryRepository({ exit: 0, hooks: true })
     await submitOneCommit(repo, "green")
 
     process.env.LOG_LEVEL = "debug"
@@ -426,7 +426,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
   describe("a queue run with nothing submitted", () => {
     /** Nothing happened, so the log says only that the queue run looked. */
     it("writes exactly the run line", async () => {
-      const { repo } = await boundaryRepository({ exit: 0, notify: true })
+      const { repo } = await boundaryRepository({ exit: 0, hooks: true })
 
       const run = await queueRunOnce(repo)
       const { records } = await logOfQueueRun(run)
@@ -449,7 +449,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
      * themselves R700, and nothing in it said which queue run wrote which.
      */
     it("writes its own file, twice in a row", async () => {
-      const { repo } = await boundaryRepository({ exit: 0, notify: true })
+      const { repo } = await boundaryRepository({ exit: 0, hooks: true })
 
       const first = await logOfQueueRun(await queueRunOnce(repo))
       const second = await logOfQueueRun(await queueRunOnce(repo))
@@ -471,7 +471,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * so every queue run that built none reused the last name minted.
    */
   it("names its log after the queue run, never after a Run it built", async () => {
-    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    const { repo } = await boundaryRepository({ exit: 0, hooks: true })
     await submitOneCommit(repo, "green")
 
     const run = await queueRunOnce(repo)
@@ -492,7 +492,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * not worth a merge row.
    */
   it("claims no merge it did not make", async () => {
-    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    const { repo } = await boundaryRepository({ exit: 0, hooks: true })
     const { branch } = await submitOneCommit(repo, "green")
 
     const merging = await queueRunOnce(repo)
@@ -535,7 +535,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       stderr.split("\n").filter((row) => /^\d\d:\d\d:\d\d /u.test(row))
 
     it("says what it did, and stays well under the plan's bound", async () => {
-      const { repo } = await boundaryRepository({ exit: 0, notify: true })
+      const { repo } = await boundaryRepository({ exit: 0, hooks: true })
       process.env.LOG_LEVEL = "debug"
       let run: QueueRunResult
       try {
@@ -580,7 +580,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       rows.filter((row) => /^\d\d:\d\d:\d\d [A-Z]+ (?:yrd:submodules\b|yrd:release\b)/u.test(row))
 
     const mergingAt = async (level: string): Promise<QueueRunResult> => {
-      const { repo } = await boundaryRepository({ exit: 0, notify: true })
+      const { repo } = await boundaryRepository({ exit: 0, hooks: true })
       await submitOneCommit(repo, "green")
       process.env.LOG_LEVEL = level
       try {
@@ -628,7 +628,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * 2026-09-02. This adds the log's account of it.
    */
   it("records a stuck result and bills the submitter nothing", async () => {
-    const { repo, notifyLog } = await boundaryRepository({ exit: 2, notify: true })
+    const { repo, hookLog } = await boundaryRepository({ exit: 2, hooks: true })
     const { branch, headSha } = await submitOneCommit(repo, "two")
 
     const run = await queueRunOnce(repo)
@@ -649,11 +649,11 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     }
     // ...and the notifier was handed nothing that says either, so the log and
     // what actually went out agree. The notifier really is reached on this
-    // path — measured 2026-09-02, one `yrd-broken` message — so this is a
+    // path — measured 2026-09-02, one `stuck` record — so this is a
     // checked zero, not an empty file nobody wrote to.
-    const sent = await readFile(notifyLog, "utf8").catch(() => "")
-    expect(sent, run.report).toMatch(/"kind":"yrd-broken"/)
-    expect(sent, run.report).not.toMatch(/"kind":"(landed|send-back)"/)
+    const sent = await readFile(hookLog, "utf8").catch(() => "")
+    expect(sent, run.report).toMatch(/"kind":"stuck"/)
+    expect(sent, run.report).not.toMatch(/"kind":"(merged|failed)"/)
 
     // The change stays where it was, so the next queue run takes it again.
     expect(ofKind(records, "merge"), run.report).toEqual([])

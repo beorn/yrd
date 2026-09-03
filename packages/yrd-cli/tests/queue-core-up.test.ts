@@ -315,10 +315,10 @@ describe("yrd queue up, the service", () => {
 })
 
 describe("yrd queue list, the table", () => {
-  it("a commit the target gained by hand is a row of its own, in the JSON and on the line (E5)", async () => {
+  it("a commit the target gained around the queue is a row of its own, in the JSON and on the line (E5)", async () => {
     const w = await world()
     // The queue's history starts at its first fact, so there is one change
-    // before the hand commit: a queue that has judged nothing has no history
+    // before the bypass: a queue that has judged nothing has no history
     // and reports nothing (by-hand.ts).
     await w.git(["checkout", "--quiet", "-b", "task/first", "main"])
     writeFileSync(join(w.work, "first.txt"), "first\n")
@@ -326,24 +326,24 @@ describe("yrd queue list, the table", () => {
     await w.git(["commit", "--quiet", "-m", "task/first"])
     await w.git(["checkout", "--quiet", "main"])
     await submit(w.git, "origin", { branch: "task/first", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
-    // The target moves by hand: one commit after that, pushed.
+    // The target moves around the queue: one commit after that, pushed.
     writeFileSync(join(w.work, "hand.txt"), "hand\n")
     await w.git(["add", "hand.txt"])
-    await w.git(["commit", "--quiet", "-m", "hand.txt by hand"])
+    await w.git(["commit", "--quiet", "-m", "hand.txt around the queue"])
     await w.git(["push", "--quiet", "origin", "main"])
     const hand = (await w.git(["rev-parse", "HEAD"])).trim()
-    const sentence = `main moved by hand at ${hand.slice(0, 12)} (hand.txt by hand)`
+    const sentence = `main moved around the queue at ${hand.slice(0, 12)} (hand.txt around the queue)`
 
     const asJson = capture(w.work)
     expect(await coreQueueCommand(w.work, asJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const listed = records(asJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
     expect(listed.changes).toMatchObject([
       { branch: "task/first", state: "queued" },
-      { branch: "main", head: hand, reason: sentence, state: "by hand" },
+      { branch: "main", head: hand, reason: sentence, state: "bypass" },
     ])
 
     const asText = capture(w.work)
     expect(await coreQueueCommand(w.work, asText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    expect(asText.stdout()).toContain(`   by hand main ${hand.slice(0, 12)} ${sentence}\n`)
+    expect(asText.stdout()).toContain(`   bypass  main ${hand.slice(0, 12)} ${sentence}\n`)
   })
 })

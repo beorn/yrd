@@ -195,7 +195,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
     // refs/yrd/root-merged/<Change-Id>/<run>; the shared repository, where the
     // plan puts the store, still carries no refs/yrd/** at all.
     it("a merged change reads opened, checked, merged, sent, and the merged fact names the merge commit", async () => {
-      const { boundary, change } = await submitted({ exit: 0, notify: true }, "green")
+      const { boundary, change } = await submitted({ exit: 0, hooks: true }, "green")
 
       const run = await queueRunOnce(boundary.repo)
       expect(run.exitCode, runSummary(run)).toBe(0)
@@ -214,7 +214,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
     // see: queue-run.test.ts measures that `pr list` reports a failed change
     // and a stuck one identically, both still `submitted`.
     it("a failed change ends with one failed fact carrying the check, the fault and the remedy", async () => {
-      const { boundary, change } = await submitted({ exit: 1, notify: true }, "red")
+      const { boundary, change } = await submitted({ exit: 1, hooks: true }, "red")
 
       const run = await queueRunOnce(boundary.repo)
       expect(run.exitCode, runSummary(run)).toBe(1)
@@ -237,7 +237,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
     // today: red — no change ref. The queue run exits 2 (M2 landed that) but
     // writes no ref a reader can see, so nothing records WHY it stopped.
     it("a stuck change ends with one stuck fact and its reason, with no fault line: stuck is always the queue's", async () => {
-      const { boundary, change } = await submitted({ exit: 2, notify: true }, "stuck")
+      const { boundary, change } = await submitted({ exit: 2, hooks: true }, "stuck")
 
       const run = await queueRunOnce(boundary.repo)
       expect(run.exitCode, runSummary(run)).toBe(2)
@@ -256,7 +256,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
     // today: red — no change ref, so no parent chain and no merge commit to
     // keep off it.
     it("every fact after the first has one parent, the fact before it, and the merge commit is never a parent", async () => {
-      const { boundary, change } = await submitted({ exit: 0, notify: true }, "chain")
+      const { boundary, change } = await submitted({ exit: 0, hooks: true }, "chain")
 
       const run = await queueRunOnce(boundary.repo)
       const read = await readFacts(boundary, change)
@@ -280,7 +280,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
 
     // today: red — no change ref, so nothing to preserve or to amend.
     it("a queue run only appends: every fact it found is still there, at the same sha, and no ref was deleted", async () => {
-      const { boundary, change } = await submitted({ exit: 0, notify: true }, "append")
+      const { boundary, change } = await submitted({ exit: 0, hooks: true }, "append")
 
       const before = await readFacts(boundary, change)
       expect(before.exists, before.report).toBe(true)
@@ -307,7 +307,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
 
     // today: red — no change ref, so nothing bounds what a Fact: may say.
     it("every fact commit carries exactly one Fact:, and its value is one of the six", async () => {
-      const { boundary, change } = await submitted({ exit: 0, notify: true }, "kinds")
+      const { boundary, change } = await submitted({ exit: 0, hooks: true }, "kinds")
 
       const run = await queueRunOnce(boundary.repo)
       const read = await readFacts(boundary, change)
@@ -384,7 +384,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
     // today: red — no change ref, so no `for-each-ref` answer exists at all
     // and `queue list` must read the local store the plan deletes.
     it("one for-each-ref over the change refs answers state, change and target with no history walk", async () => {
-      const { boundary } = await submitted({ exit: 0, notify: true }, "answer")
+      const { boundary } = await submitted({ exit: 0, hooks: true }, "answer")
 
       const run = await queueRunOnce(boundary.repo)
 

@@ -1,6 +1,6 @@
 /**
  * The target's first-parent line, judged: every commit on it since the queue's
- * own history starts that the queue did not put there
+ * own history starts that the queue did not put there — a BYPASS
  * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, ruling E5).
  *
  * Only the queue pushes the target, by rule, and the queue proves it every
@@ -9,8 +9,8 @@
  * `Change:` trailer naming its change, whose merged fact names the commit
  * back in `Merge:` and says `Merged-By: queue`. Anything else on the line —
  * one parent, no trailer, a trailer naming a change the queue does not know,
- * or one whose facts do not say the queue merged it there — was pushed by
- * hand. Adapting is already built: the lease refuses the queue's next push
+ * or one whose facts do not say the queue merged it there — went around the
+ * queue. Adapting is already built: the lease refuses the queue's next push
  * onto the old base and the queue run judges every change on the new one; a
  * rollback is a person's `git revert`, never the queue's.
  *
@@ -44,7 +44,7 @@ import { gitlinkRows } from "./git.ts"
 import { CHANGES, changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 
-export type ByHandCommit = Readonly<{
+export type Bypass = Readonly<{
   /** The branch it moved: the queue's target. */
   target: string
   commit: string
@@ -52,7 +52,7 @@ export type ByHandCommit = Readonly<{
   subject: string
   /** When it was committed. */
   at: Date
-  /** The gitlink paths it changed against its first parent: a hand-moved pin is the incident class the gitlink check never sees. */
+  /** The gitlink paths it changed against its first parent: a pin moved around the queue is the incident class the gitlink check never sees. */
   gitlinks: readonly string[]
   /** Why it is not the queue's, in plain words. */
   why: string
@@ -64,12 +64,12 @@ export type ByHandCommit = Readonly<{
  * that line introduced the `remote:` line: a target that never named this core
  * has no queue.
  */
-export async function byHandCommits(
+export async function bypassCommits(
   git: Git,
   target: string,
   targetSha: string,
   entries: QueueRead,
-): Promise<readonly ByHandCommit[]> {
+): Promise<readonly Bypass[]> {
   const started = await queueStarted(git)
   // No facts anywhere: this queue has judged nothing, so it has no history of
   // its own and nothing on the target is yet its business to report.
@@ -90,7 +90,7 @@ export async function byHandCommits(
     "--format=%H%x00%P%x00%cI%x00%s%x00%(trailers:key=Change,valueonly)%x01",
     targetSha,
   ])
-  const found: ByHandCommit[] = []
+  const found: Bypass[] = []
   for (const record of out.split("\x01")) {
     const [commit, parentList, at, subject, changes] = record.replace(/^\n/u, "").split("\x00")
     if (commit === undefined || commit === "" || parentList === undefined || at === undefined || subject === undefined)
@@ -158,20 +158,20 @@ function notTheQueues(
   if (tip === undefined || endedKind(tip) !== "merged" || trailer(tip, "Merge") !== commit) {
     return `it names the change ${name}, whose facts do not say it merged there`
   }
-  if (trailer(tip, "Merged-By") !== "queue") return `it names the change ${name}, which was merged by hand`
+  if (trailer(tip, "Merged-By") !== "queue") return `it names the change ${name}, which was merged around the queue`
   return undefined
 }
 
 /**
- * The one line a reader gets about a hand commit: the target, the commit, its
+ * The one line a reader gets about a bypass: the target, the commit, its
  * subject, and the pins it moved. It takes only the four values it says, so the
  * `list` row, the queue run's message and the log's human rendering are all one
  * sentence written once — the rendering used to spell it out a second time from
  * the log record's own fields.
  */
-export function handMovedLine(
+export function bypassLine(
   commit: Readonly<{ target: string; commit: string; subject: string; gitlinks: readonly string[] }>,
 ): string {
   const pins = commit.gitlinks.length === 0 ? "" : `; it moved the pin at ${commit.gitlinks.join(", ")}`
-  return `${commit.target} moved by hand at ${commit.commit.slice(0, 12)} (${commit.subject})${pins}`
+  return `${commit.target} moved around the queue at ${commit.commit.slice(0, 12)} (${commit.subject})${pins}`
 }

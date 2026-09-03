@@ -6,8 +6,9 @@
  * one, the branch, head and check it is about. Six kinds appear in every run:
  * the run itself (pin, target, config blob), each change considered and its
  * decision, each check's start and end with duration and log path, each merge,
- * and each message sent. A seventh, `by-hand`, appears only when the target
- * moved by hand: one record per commit the queue did not put there (E5). An
+ * and each message sent. A seventh, `merged-bypass`, appears only when
+ * something went around the queue: one record per commit on the target the
+ * queue did not put there (E5). An
  * eighth, `reap`, appears only when a run before this one died without removing
  * its worktrees: one record per worktree taken down. The human line is a
  * rendering of the record, never a second source: whatever a reader prints, the
@@ -42,7 +43,7 @@ export function runId(started: Date = new Date()): string {
   return `q-${started.toISOString().replace(/[-:.]/gu, "")}-${Math.random().toString(16).slice(2, 10)}`
 }
 
-export const LOG_KINDS = ["run", "change", "check", "result", "merge", "message", "by-hand", "reap"] as const
+export const LOG_KINDS = ["run", "change", "check", "result", "merge", "message", "merged-bypass", "reap"] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]
 

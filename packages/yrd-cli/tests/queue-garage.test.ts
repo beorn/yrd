@@ -3,7 +3,7 @@
  *          the service starts anyway and drains beside the mechanic; or the
  *          mechanic's own round is refused along with it.
  * @level   l3
- * @consumer the mechanic working the queue by hand · hab starting the service
+ * @consumer the mechanic working the queue around the queue · hab starting the service
  *
  * Black box on a throwaway repository: the CLI opens and closes the garage, and
  * every fact is read back off the ref with plain git — proving yrd needs
