@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
   byHandCommits,
-  freshWorktree,
+  prepareWorktree,
   gitIn,
   hintsIn,
   list,
@@ -198,12 +198,7 @@ export async function coreQueueCommand(
       // The commits the target gained by hand are rows too (E5), judged at the
       // target as the queue read just fetched it, so the rows and the reading
       // are about one and the same tip.
-      const targetSha = await refAt(git, `refs/remotes/${config.remote}/${config.target}`)
-      if (targetSha === undefined) {
-        throw new Error(
-          `${config.target} is not here after the queue read: refs/remotes/${config.remote}/${config.target} is absent`,
-        )
-      }
+      const targetSha = await targetAt(git, config)
       const rows = list(entries, { byHand: await byHandCommits(git, config.target, targetSha, entries) })
       emit(io, options.json, { changes: rows }, table(rows))
       return 0
@@ -236,16 +231,23 @@ export async function coreQueueCommand(
       // the same class of mismatch this command exists to remove.
       const dirty = (await git(["status", "--porcelain", "--untracked-files=no"])).trim()
       const unjudged = dirty === "" ? "" : `\n${String(dirty.split("\n").length)} uncommitted path(s) were NOT judged; this measured HEAD ${head.slice(0, 12)}`
-      const worktree = await freshWorktree(git, repo, head, join(workdir, "check", `${head.slice(0, 12)}-${String(globalThis.process.pid)}`), options.log?.child("worktree"))
+      // Prepared exactly as a queue run prepares one: materialized, the
+      // declaration's setup run once, and told the same three values.
+      const prepared = await prepareWorktree(git, repo, head, join(workdir, "check", `${head.slice(0, 12)}-${String(globalThis.process.pid)}`), {
+        env: options.env,
+        plumbing: options.log?.child("worktree"),
+        ...(config.setup === undefined ? {} : { setup: { logDir: join(workdir, "checks", "head"), run: config.setup, scratch: join(workdir, "scratch") } }),
+        targetSha: await targetAt(git, config),
+      })
       const results: CheckResult[] = []
       try {
         for (const spec of specs) {
-          const result = await runCheck({ cwd: worktree.path, env: options.env, logDir: join(workdir, "checks", "head"), scratch: join(workdir, "scratch"), spec })
+          const result = await runCheck({ cwd: prepared.path, env: options.env, logDir: join(workdir, "checks", "head"), scratch: join(workdir, "scratch"), spec, tree: prepared.tree })
           results.push(result)
           if (result.result !== "pass") break
         }
       } finally {
-        await worktree.remove()
+        await prepared.remove()
       }
       emit(
         io,
@@ -266,6 +268,19 @@ export async function coreQueueCommand(
       return 0
     }
   }
+}
+
+/**
+ * The target as this checkout has it: the remote-tracking ref the declaration
+ * names, fetched before any command runs here. Absent is loud, because every
+ * reading below — which commits the target gained by hand, what base a check is
+ * judging against — is a claim about that commit.
+ */
+async function targetAt(git: Git, config: QueueConfig): Promise<string> {
+  const ref = `refs/remotes/${config.remote}/${config.target}`
+  const sha = await refAt(git, ref)
+  if (sha === undefined) throw new Error(`${config.target} is not here: ${ref} is absent`)
+  return sha
 }
 
 /**
@@ -347,6 +362,9 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
     remote: config.remote,
     render: renderer(log),
     repo,
+    // A fresh worktree has submodules and no dependencies; `setup:` is what
+    // finishes it, once per worktree, before any check runs in it.
+    setup: config.setup,
     target: config.target,
     workdir: config.scratch === undefined ? workdir : join(config.scratch, "queue-core"),
   }

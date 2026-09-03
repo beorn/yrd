@@ -73,6 +73,23 @@ describe("the declaration is read from the target commit", () => {
     expect(config?.blob).toMatch(/^[0-9a-f]{40}$/u)
   })
 
+  it("names the setup that finishes every fresh worktree, and holds it to one command", async () => {
+    // A fresh worktree has submodules and no dependencies, so the target says
+    // once how to finish one instead of every check prefixing its own `run:`.
+    const declared = await world("remote: origin\nsetup: bun install --frozen-lockfile\nchecks:\n  - tests:\n      run: bun run test\n")
+    expect(await readConfig(declared.git, "main")).toMatchObject({ setup: "bun install --frozen-lockfile" })
+
+    // Optional: a target that declares none prepares nothing beyond materialization.
+    const none = await world("remote: origin\n")
+    expect((await readConfig(none.git, "main"))?.setup).toBeUndefined()
+
+    // Strict, as every key is: a typo is a setup that would silently never run.
+    const typo = await world("remote: origin\nsetupp: bun install\n")
+    await expect(readConfig(typo.git, "main")).rejects.toThrow(/unknown key setupp/u)
+    const empty = await world("remote: origin\nsetup: ''\n")
+    await expect(readConfig(empty.git, "main")).rejects.toThrow(/setup: must be a non-empty string/u)
+  })
+
   it("is not this core's when it names no remote, and is loud when it is wrong", async () => {
     const old = await world("batch: 1\nchecks:\n  - verify:\n      run: bun run test\n")
     // The switch reads only whether `remote:` is there; the full read holds the

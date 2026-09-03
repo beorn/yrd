@@ -27,7 +27,19 @@ type World = Readonly<{
   workdir: string
   notifyLog: string
   checkLog: string
-  options(check: Readonly<{ exit?: number; sleep?: number; timeoutMs?: number; everywhere?: boolean }>): QueueRunOptions
+  /** The target's `setup:`, exiting as the case says; it records its own working directory in `checkLog`, beside the check's. */
+  setupCommand(exit: number): string
+  options(
+    check: Readonly<{
+      exit?: number
+      sleep?: number
+      timeoutMs?: number
+      everywhere?: boolean
+      setup?: string
+      /** The phases the one check runs in; absent means merge (ruling A1). */
+      on?: readonly ("submit" | "merge")[]
+    }>,
+  ): QueueRunOptions
 }>
 
 /**
@@ -73,13 +85,27 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     [
       "#!/bin/sh",
       'sleep "${FAKE_SLEEP:-0}"',
-      `echo "fake-check exit=\${FAKE_EXIT:-0} cwd=$(pwd)" >> "${checkLog}"`,
+      `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
       "exit 0",
       "",
     ].join("\n"),
   )
   chmodSync(fakeCheck, 0o755)
+  // The setup records the worktree it prepared and exits as the case says.
+  // Its environment is built, not passed through, so the exit code travels as
+  // an argument on the command the declaration would carry.
+  const setupScript = join(root, "setup.sh")
+  writeFileSync(
+    setupScript,
+    [
+      "#!/bin/sh",
+      `echo "setup cwd=$(pwd) repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
+      'exit "${1:-0}"',
+      "",
+    ].join("\n"),
+  )
+  chmodSync(setupScript, 0o755)
   const notifier = join(root, "notify.sh")
   writeFileSync(notifier, `#!/bin/sh\ncat >> "${notifyLog}"\n`)
   chmodSync(notifier, 0o755)
@@ -88,11 +114,13 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     checkLog,
     git,
     notifyLog,
+    setupCommand: (exit) => `${setupScript} ${String(exit)}`,
     options: (check) => ({
       checks: [
         {
           environmentPassthrough: ["FAKE_EXIT", "FAKE_SLEEP", "FAKE_EVERYWHERE"],
           name: "verify",
+          on: check.on,
           run: fakeCheck,
           timeoutMs: check.timeoutMs,
         },
@@ -108,6 +136,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
       owner: "@cto",
       remote: "origin",
       repo: work,
+      ...(check.setup === undefined ? {} : { setup: check.setup }),
       target: "main",
       workdir,
     }),
@@ -158,6 +187,53 @@ async function trailerOn(w: World, commit: string, key: string): Promise<string>
 
 async function fetchChanges(w: World): Promise<void> {
   await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
+}
+
+/** One program the queue ran, as it recorded itself: the name it goes by, then its `key=value` fields. */
+type Recorded = Readonly<{ program: string; cwd: string; repo: string; candidate: string; base: string }>
+
+/**
+ * Every program the queue ran, in order, as each one recorded itself: what it
+ * was, the directory it stood in, and the three values the queue told it about
+ * the tree it was judging.
+ */
+function ranPrograms(w: World): readonly Recorded[] {
+  let lines: readonly string[]
+  try {
+    lines = readFileSync(w.checkLog, "utf8").split("\n").filter(Boolean)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
+  }
+  return lines.map((line) => {
+    const [program = "", ...rest] = line.split(" ")
+    const fields = new Map(rest.map((field) => field.split("=") as [string, string]))
+    return {
+      base: fields.get("base") ?? "",
+      candidate: fields.get("candidate") ?? "",
+      cwd: fields.get("cwd") ?? "",
+      program,
+      repo: fields.get("repo") ?? "",
+    }
+  })
+}
+
+/**
+ * What ran and where, in order, as `["setup" | "check", "<directory>"]`. The
+ * directory is the discriminator — a worktree per judgement, so "was this tree
+ * prepared before anything judged in it" has a file-shaped answer.
+ */
+function whereRan(w: World): readonly (readonly [string, string])[] {
+  return ranPrograms(w).map((ran) => [ran.program, ran.cwd] as const)
+}
+
+/** Nothing judged a worktree the setup had not prepared first. */
+function everyCheckWasPrepared(order: readonly (readonly [string, string])[]): void {
+  for (const [index, [what, where]] of order.entries()) {
+    if (what !== "check") continue
+    const prepared = order.slice(0, index).some(([earlier, at]) => earlier === "setup" && at === where)
+    expect(prepared, `a check ran in ${where}, which no setup prepared:\n${order.map((row) => row.join(" ")).join("\n")}`).toBe(true)
+  }
 }
 
 function messages(w: World): readonly Record<string, string>[] {
@@ -470,5 +546,260 @@ describe("a queue run", () => {
     facts = await readFacts(w.git, "task/two", second)
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "checked", "merged", "sent"])
     expect(facts[2]?.trailers).toEqual(expect.arrayContaining([["Config", "config-B"]]))
+  })
+})
+
+describe("the target's setup", () => {
+  it("runs once in every worktree the run makes, before anything judges it", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, setup: w.setupCommand(0) }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/one"])
+    const order = whereRan(w)
+    // Two worktrees this run made: the change's head on the submit path, and
+    // the target plus that head on the merge path. One setup each, no more.
+    const prepared = order.filter(([what]) => what === "setup").map(([, where]) => where)
+    expect(prepared).toHaveLength(2)
+    expect(new Set(prepared).size).toBe(2)
+    everyCheckWasPrepared(order)
+    // The setup is recorded in a check's own shape, billed to the queue.
+    expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
+      { exit: "0", name: "setup", phase: "submit", result: "pass" },
+      { exit: "0", name: "setup", phase: "merge", result: "pass" },
+    ])
+    expect(records(outcome).filter((record) => record.kind === "check" && record.name === "setup")).toHaveLength(2)
+  })
+
+  it("runs again in the target worktree the attribution builds", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    // The check fails everywhere, so the attribution builds the target's own
+    // worktree to ask whether the target is red — a third worktree, prepared
+    // like the other two.
+    const outcome = await queueRun(w.options({ everywhere: true, exit: 1, setup: w.setupCommand(0) }))
+
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    const order = whereRan(w)
+    const prepared = order.filter(([what]) => what === "setup").map(([, where]) => where)
+    expect(prepared).toHaveLength(3)
+    expect(new Set(prepared).size).toBe(3)
+    everyCheckWasPrepared(order)
+    expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup").map((record) => record.phase)).toEqual([
+      "submit",
+      "merge",
+      "target",
+    ])
+  })
+
+  it("a setup that fails ends the change stuck, never failed, and nothing is judged in that worktree", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, setup: w.setupCommand(1) }))
+
+    // Stuck, exit 2: the queue could not build the ground a judgement stands
+    // on, which is never the submitter's fault.
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.failed).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
+    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
+    expect(facts[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
+    // The check never ran: there was no prepared tree to run it in.
+    expect(whereRan(w).filter(([what]) => what === "check")).toEqual([])
+    expect(messages(w)[0]).toMatchObject({ code: "setup", kind: "yrd-broken", recipient: "@cto" })
+    expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
+      { exit: "1", result: "fail", whose: "queue" },
+    ])
+  })
+
+  it("a setup past its bound is stuck too, and the change is never billed", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    // 127 is the shell's own word for a command it could not find: a setup the
+    // target names and the worktree does not have is the queue's, like any
+    // other setup that did not pass.
+    const outcome = await queueRun(w.options({ exit: 0, setup: "no-such-setup-command" }))
+
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
+    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
+    expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
+      { exit: "missing", result: "stuck", whose: "queue" },
+    ])
+  })
+})
+
+/**
+ * § Attribution — "a failing check is the submitter's only if it failed both
+ * times in the change's worktree and did not fail at the target on the same
+ * check; otherwise the change ends stuck, the queue's." That reading is the
+ * whole of it on BOTH paths: the on-submit path wrote failed the moment a
+ * check failed, so a defect of the environment was sent back to an author who
+ * could not have caused it.
+ */
+describe("an on-submit check is attributed before anyone is billed for it", () => {
+  it("fails in the change's worktree and passes at the target: the submitter's", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    // The check fails only where the change's own file is, so it fails twice
+    // in the change's worktree and passes at the target.
+    const outcome = await queueRun(w.options({ exit: 1, on: ["submit"] }))
+
+    expect(outcome.exitCode).toBe(1)
+    expect(outcome.failed).toEqual(["task/one"])
+    expect(outcome.stuck).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "failed", "sent"])
+    expect(facts[1]?.trailers).toEqual(
+      expect.arrayContaining([
+        ["Reason", "verify"],
+        ["Fault", "submitter"],
+      ]),
+    )
+    expect(messages(w)[0]).toMatchObject({ code: "verify", disposition: "author", kind: "send-back", recipient: "@dev/2" })
+    // Three runs of the one check, and only because it failed: twice in the
+    // change's worktree, once at the target.
+    const ran = whereRan(w).map(([, where]) => where)
+    expect(ran).toHaveLength(3)
+    expect(ran[0]).toBe(ran[1])
+    expect(ran[2]).not.toBe(ran[0])
+  })
+
+  it("fails at the target too: the queue's, so the change is stuck and nobody is billed", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ everywhere: true, exit: 1, on: ["submit"] }))
+
+    // Stuck, not failed: the target is red, and the change is not what broke it.
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.failed).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
+    // `Reason` is the attribution's own word, the same one the merge path
+    // writes; which check produced it is in the subject and in the `Check:`
+    // trailers, so a reader of the fact alone still has the name.
+    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "inherited"]]))
+    expect(facts[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
+    expect(facts[1]?.subject).toContain("verify")
+    expect(facts[1]?.trailers.filter(([name]) => name === "Check").map(([, value]) => value)).toEqual([
+      expect.stringMatching(/^verify exit=1 /u),
+    ])
+    expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
+    expect(messages(w)[0]?.text).toMatch(/the target is red, not the change/u)
+  })
+
+  it("a passing on-submit check is run once and attributes nothing", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, on: ["submit"] }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/one"])
+    await fetchChanges(w)
+    expect((await readFacts(w.git, "task/one", head)).map((fact) => fact.kind)).toEqual([
+      "opened",
+      "checked",
+      "merged",
+      "sent",
+    ])
+    // The cost stays honest: the second run and the target run are for a
+    // FAILING check only.
+    expect(whereRan(w)).toHaveLength(1)
+  })
+})
+
+/**
+ * A check that selects work by what changed needs to be told what it is
+ * judging and what to measure it against, and the queue is the only thing
+ * that knows: `YRD_REPO`, `YRD_CANDIDATE_SHA`, `YRD_BASE_SHA`, built into
+ * every check's environment and read once per worktree.
+ */
+describe("what the queue tells a check about the tree it judges", () => {
+  it("at submit: the change's head, and the merge base with the target, not the target itself", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    // The target moves after the branch was cut, so the fork point and the
+    // target are different commits and a check that confused them would show.
+    const hand = await pushByHand(w, "hand.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, on: ["submit"] }))
+
+    expect(outcome.exitCode).toBe(0)
+    const [submitCheck] = ranPrograms(w).filter((ran) => ran.program === "check")
+    expect(submitCheck?.candidate).toBe(head)
+    expect(submitCheck?.base).toBe(w.target)
+    expect(submitCheck?.base).not.toBe(hand)
+    // `YRD_REPO` is the worktree the check ran in, which is its own directory.
+    expect(submitCheck?.repo).toBe(submitCheck?.cwd)
+    // The base is an ancestor of the candidate, which is what a diff needs.
+    await expect(w.git(["merge-base", "--is-ancestor", submitCheck?.base ?? "", submitCheck?.candidate ?? ""])).resolves.toBeDefined()
+  })
+
+  it("at merge: the merge commit, with the target as its base", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, on: ["merge"] }))
+
+    expect(outcome.merged).toEqual(["task/one"])
+    const mergeCommit = await remoteTarget(w)
+    const [mergeCheck] = ranPrograms(w).filter((ran) => ran.program === "check")
+    // The merge commit is what lands, so it is what the on-merge checks judge.
+    expect(mergeCheck?.candidate).toBe(mergeCommit)
+    expect(mergeCheck?.base).toBe(w.target)
+    expect(mergeCheck?.repo).toBe(mergeCheck?.cwd)
+  })
+
+  it("the setup is told the same three, in the worktree it is preparing", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, on: ["submit"], setup: w.setupCommand(0) }))
+
+    expect(outcome.exitCode).toBe(0)
+    const [setup, check] = ranPrograms(w)
+    expect(setup?.program).toBe("setup")
+    expect(setup?.candidate).toBe(head)
+    expect(setup?.base).toBe(w.target)
+    expect(setup?.repo).toBe(setup?.cwd)
+    // The same tree, so the same three: read once, not once per program.
+    expect([check?.candidate, check?.base, check?.repo]).toEqual([setup?.candidate, setup?.base, setup?.repo])
+  })
+
+  it("at the target, during attribution: the target itself, as its own base", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ everywhere: true, exit: 1, on: ["submit"] }))
+
+    expect(outcome.stuck).toEqual(["task/one"])
+    // Three check runs: twice in the change's worktree, then once at the target.
+    const runs = ranPrograms(w).filter((ran) => ran.program === "check")
+    expect(runs).toHaveLength(3)
+    expect(runs[2]?.candidate).toBe(w.target)
+    expect(runs[2]?.base).toBe(w.target)
+    expect(runs[2]?.repo).toBe(runs[2]?.cwd)
+    expect(runs[2]?.cwd).not.toBe(runs[0]?.cwd)
   })
 })
