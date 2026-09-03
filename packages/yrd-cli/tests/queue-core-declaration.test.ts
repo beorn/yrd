@@ -50,7 +50,7 @@ function declaringNothing(): string {
 
 describe("a queue is a branch whose commit carries a declaration that parses", () => {
   it("a declaration naming remote: that does not parse says so, naming the file, and never goes quiet", async () => {
-    const root = declaring("remote: origin\nchecks: [{\n")
+    const root = declaring("target: origin#main\nchecks: [{\n")
     const run = capture()
 
     // Whatever the command then fails on is beside the point: the file was
@@ -89,7 +89,7 @@ describe("a queue is a branch whose commit carries a declaration that parses", (
   it("POSITIVE CONTROL: a declaration that parses says nothing about parsing", async () => {
     // Without this, the line above is satisfied just as well by a switch that
     // complains about every declaration it is handed.
-    const root = declaring("remote: origin\n")
+    const root = declaring("target: origin#main\n")
     const run = capture()
 
     await coreQueueCommand(root, run.io, { command: "list" }).catch(() => undefined)

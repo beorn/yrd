@@ -9,6 +9,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import {
   checkTrailer,
   gitIn,
+  hintsIn,
   list,
   byHandCommits,
   readCheckTrailer,
@@ -53,7 +54,7 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   await w.git(["commit", "--quiet", "-m", file])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main", workItem: `@i/1/${file}` })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" }, workItem: `@i/1/${file}` })
   return head
 }
 
@@ -61,7 +62,7 @@ describe("the declaration is read from the target commit", () => {
   it("names the remote, the target, the checks with their phases, and the notifier", async () => {
     const w = await world(
       [
-        "remote: origin",
+        "target: origin#main",
         "notify: bun tools/notify.ts",
         "checks:",
         "  - typecheck:",
@@ -74,7 +75,7 @@ describe("the declaration is read from the target commit", () => {
       ].join("\n"),
     )
     const config = await readConfig(w.git, "main")
-    expect(config).toMatchObject({ notify: "bun tools/notify.ts", remote: "origin", target: "main" })
+    expect(config).toMatchObject({ notify: "bun tools/notify.ts", target: { branch: "main", remote: "origin" } })
     expect(config?.checks).toEqual([
       { environmentPassthrough: undefined, name: "typecheck", on: ["submit", "merge"], run: "bun run typecheck", timeoutMs: undefined },
       { environmentPassthrough: undefined, name: "tests", on: undefined, run: "bun run test", timeoutMs: 1_800_000 },
@@ -85,17 +86,17 @@ describe("the declaration is read from the target commit", () => {
   it("names the setup that finishes every fresh worktree, and holds it to one command", async () => {
     // A fresh worktree has submodules and no dependencies, so the target says
     // once how to finish one instead of every check prefixing its own `run:`.
-    const declared = await world("remote: origin\nsetup: bun install --frozen-lockfile\nchecks:\n  - tests:\n      run: bun run test\n")
+    const declared = await world("target: origin#main\nsetup: bun install --frozen-lockfile\nchecks:\n  - tests:\n      run: bun run test\n")
     expect(await readConfig(declared.git, "main")).toMatchObject({ setup: "bun install --frozen-lockfile" })
 
     // Optional: a target that declares none prepares nothing beyond materialization.
-    const none = await world("remote: origin\n")
+    const none = await world("target: origin#main\n")
     expect((await readConfig(none.git, "main"))?.setup).toBeUndefined()
 
     // Strict, as every key is: a typo is a setup that would silently never run.
-    const typo = await world("remote: origin\nsetupp: bun install\n")
+    const typo = await world("target: origin#main\nsetupp: bun install\n")
     await expect(readConfig(typo.git, "main")).rejects.toThrow(/unknown key setupp/u)
-    const empty = await world("remote: origin\nsetup: ''\n")
+    const empty = await world("target: origin#main\nsetup: ''\n")
     await expect(readConfig(empty.git, "main")).rejects.toThrow(/setup: must be a non-empty string/u)
   })
 
@@ -106,35 +107,70 @@ describe("the declaration is read from the target commit", () => {
     // refusal says where to say it instead — "unknown key workdir" would tell a
     // reader the queue forgot how to write somewhere.
     for (const key of ["workdir", "scratch"]) {
-      const retired = await world(`remote: origin\n${key}: /var/tmp/yrd\n`)
+      const retired = await world(`target: origin#main\n${key}: /var/tmp/yrd\n`)
       await expect(readConfig(retired.git, "main")).rejects.toThrow(new RegExp(`unknown key ${key}`, "u"))
       await expect(readConfig(retired.git, "main")).rejects.toThrow(/git config yrd\.workdir/u)
     }
 
     // `owner:` went too: the queue addresses the roles `submitter` and `owner`,
     // and which seat wears the owner's is the notifier's own argument.
-    const owned = await world("remote: origin\nowner: '@cto'\n")
+    const owned = await world("target: origin#main\nowner: '@cto'\n")
     await expect(readConfig(owned.git, "main")).rejects.toThrow(/unknown key owner/u)
   })
 
-  it("needs no remote: at all, and is loud when it is wrong", async () => {
-    // `remote:` is an ordinary optional key: absent, the queue is at `origin`.
-    // It used to be the switch that chose this core over the incumbent, so a
-    // declaration without it read as "not ours" and was never held to its keys.
+  it("names the target as one value, <remote>#<branch>, and defaults to origin#main", async () => {
+    // The remote and the branch were two keys that defaulted on their own, so a
+    // declaration could name a remote and mean another repository's `main`
+    // without ever saying `main`. A branch name alone does not name a branch.
     const plain = await world("checks:\n  - verify:\n      run: bun run test\n")
-    expect(await readConfig(plain.git, "main")).toMatchObject({ remote: "origin", target: "main" })
+    expect(await readConfig(plain.git, "main")).toMatchObject({ target: { branch: "main", remote: "origin" } })
 
+    const elsewhere = await world("target: origin#develop\n")
+    expect(await readConfig(elsewhere.git, "main")).toMatchObject({ target: { branch: "develop", remote: "origin" } })
+
+    // A URL is a remote too, and it may carry a `#`, so the branch is read from
+    // the right: everything before the last `#` is the remote.
+    const byUrl = await world("target: https://example.invalid/x.git#main\n")
+    expect(await readConfig(byUrl.git, "main")).toMatchObject({
+      target: { branch: "main", remote: "https://example.invalid/x.git" },
+    })
+  })
+
+  it("refuses a target that is not <remote>#<branch>, and the retired remote: key by name", async () => {
+    for (const written of ["main", "origin#", "#main"]) {
+      const wrong = await world(`target: ${JSON.stringify(written)}\n`)
+      await expect(readConfig(wrong.git, "main")).rejects.toThrow(/target: must be <remote>#<branch>, e\.g\. origin#main/u)
+    }
+
+    // The old two-key shape: `remote:` is refused like any unknown key, and the
+    // refusal says where its meaning went rather than only that it is gone.
+    const twoKeys = await world("remote: origin\ntarget: main\n")
+    await expect(readConfig(twoKeys.git, "main")).rejects.toThrow(/unknown key remote/u)
+    await expect(readConfig(twoKeys.git, "main")).rejects.toThrow(/left side of the target/u)
+  })
+
+  it("hints nothing, and says why, when a submitter's own file carries the old shape", async () => {
+    // `hintsIn` reads the file where a command STANDS, only to find the queue.
+    // It must not read `target: main` as a branch at some default remote: that
+    // is the guess the one-key grammar exists to remove.
+    expect(hintsIn("target: origin#develop\n")).toEqual({ target: { branch: "develop", remote: "origin" } })
+    expect(hintsIn("checks: []\n")).toEqual({})
+    expect(hintsIn("target: main\n", "here.yml").problem).toContain("here.yml target: must be <remote>#<branch>")
+    expect(hintsIn("remote: origin\n", "here.yml").problem).toContain("names remote:")
+  })
+
+  it("is loud about every other key it does not read", async () => {
     const old = await world("batch: 1\nchecks:\n  - verify:\n      run: bun run test\n")
     await expect(readConfig(old.git, "main")).rejects.toThrow(/unknown key batch/u)
 
-    const wrong = await world("remote: origin\nchecks:\n  - verify:\n      on: sometimes\n      run: bun run test\n")
+    const wrong = await world("target: origin#main\nchecks:\n  - verify:\n      on: sometimes\n      run: bun run test\n")
     await expect(readConfig(wrong.git, "main")).rejects.toThrow(/on: must be submit or merge/u)
   })
 })
 
 describe("the table is the queue read rendered", () => {
   it("lists changes in line with their position, then the ended ones", async () => {
-    const w = await world("remote: origin\n")
+    const w = await world("target: origin#main\n")
     const one = await submitCommit(w, "task/one", "one.txt")
     await new Promise((resolve) => setTimeout(resolve, 1100))
     const two = await submitCommit(w, "task/two", "two.txt")
@@ -147,7 +183,7 @@ describe("the table is the queue read rendered", () => {
   })
 
   it("lists a commit the target gained by hand as its own row, as recent as it was committed (E5)", async () => {
-    const w = await world("remote: origin\n")
+    const w = await world("target: origin#main\n")
     await submitCommit(w, "task/one", "one.txt")
     await w.git(["checkout", "--quiet", "main"])
     writeFileSync(join(w.work, "hand.txt"), "hand\n")
@@ -173,7 +209,7 @@ describe("the table is the queue read rendered", () => {
   })
 
   it("shows one branch's changes newest first", async () => {
-    const w = await world("remote: origin\n")
+    const w = await world("target: origin#main\n")
     const first = await submitCommit(w, "task/one", "one.txt")
     await new Promise((resolve) => setTimeout(resolve, 1100))
     await w.git(["checkout", "--quiet", "task/one"])
@@ -181,7 +217,7 @@ describe("the table is the queue read rendered", () => {
     await w.git(["commit", "--quiet", "-am", "again"])
     const second = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: "main" })
+    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 
     const shown = show((await readQueue(w.git, "origin", "main")).changes, "task/one")
     expect(shown.map((entry) => [entry.row.head, entry.row.state, entry.row.reason])).toEqual([

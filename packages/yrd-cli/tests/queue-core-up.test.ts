@@ -85,7 +85,7 @@ function logRows(): Readonly<{
   return { log, rows }
 }
 
-const DECLARATION = "remote: origin\ntarget: main\n"
+const DECLARATION = "target: origin#main\n"
 
 async function identity(git: Git): Promise<void> {
   await git(["config", "user.email", "queue@yrd.test"])
@@ -200,7 +200,7 @@ async function submitPin(w: PinnedWorld, branch: string, sha: string): Promise<v
   await w.git(["add", "component"])
   await w.git(["commit", "--quiet", "-m", `pin the component at ${sha.slice(0, 12)}`])
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 }
 
 /** This checkout's own commit: what the service finds when nothing names the pin. */
@@ -325,7 +325,7 @@ describe("yrd queue list, the table", () => {
     await w.git(["add", "first.txt"])
     await w.git(["commit", "--quiet", "-m", "task/first"])
     await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", { branch: "task/first", submitter: "@dev/2", target: "main" })
+    await submit(w.git, "origin", { branch: "task/first", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
     // The target moves by hand: one commit after that, pushed.
     writeFileSync(join(w.work, "hand.txt"), "hand\n")
     await w.git(["add", "hand.txt"])

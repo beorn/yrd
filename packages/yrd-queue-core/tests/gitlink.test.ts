@@ -117,7 +117,7 @@ async function world(): Promise<World> {
   const git = gitIn(work)
   await identity(git)
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), "remote: origin\n")
+  writeFileSync(join(work, ".yrd.yml"), "target: origin#main\n")
   await git(["submodule", "add", "--quiet", component, "component"])
   await git(["add", ".yrd.yml", ".gitmodules", "component"])
   await git(["commit", "--quiet", "-m", "base, with the component at its main"])
@@ -140,9 +140,8 @@ async function world(): Promise<World> {
       configBlob: "test-config",
       env: process.env,
       process: counting.process,
-      remote: "origin",
       repo: work,
-      target: "main",
+      target: { branch: "main", remote: "origin" },
       workdir,
     }),
     work,
@@ -161,7 +160,7 @@ async function submitPin(w: World, branch: string, sha: string): Promise<string>
   await w.git(["commit", "--quiet", "-m", `${branch}: pin the component at ${sha.slice(0, 12)}`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
   return head
 }
 
@@ -185,7 +184,7 @@ async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["commit", "--quiet", "-m", `${branch}: a file, no pin`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
   return head
 }
 

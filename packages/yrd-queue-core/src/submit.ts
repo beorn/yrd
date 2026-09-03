@@ -12,13 +12,16 @@
  * never saw.
  */
 
+import { targetName, type Target } from "./config.ts"
 import { appendFact, type Git } from "./facts.ts"
 import { refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 
 export type SubmitRequest = Readonly<{
+  /** The branch being submitted: the change's own. */
   branch: string
-  target: string
+  /** The queue's target: the branch it lands on, at the remote holding it. */
+  target: Target
   submitter: string
   workItem?: string
 }>
@@ -53,7 +56,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // theirs, and that merge stayed accounted for in the E5 walk, where an
   // accounted commit hides every hand push at or below it
   // (2026-09-03: `main@0a9db9daf7eb`, named for the queue's own merge 005a622156c7).
-  refuseTarget(request.branch, request.target)
+  refuseTarget(request.branch, request.target.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const change = { branch: request.branch, head }
   const ref = changeRef(change)
@@ -82,8 +85,8 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   const opened = await appendFact(git, {
     change,
     kind: "opened",
-    subject: `${request.submitter} submitted ${request.branch} to ${request.target}`,
-    target: request.target,
+    subject: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
+    target: targetName(request.target),
     trailers,
   })
   // Two explicit leases make the push the same compare-and-swap the local

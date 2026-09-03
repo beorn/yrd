@@ -87,7 +87,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
   }
   // The target declares the queue, as every real target does: the merged
   // tree's declaration is a built-in check at merge (ruling D2).
-  writeFileSync(join(work, ".yrd.yml"), "remote: origin\n")
+  writeFileSync(join(work, ".yrd.yml"), "target: origin#main\n")
   await git(["add", "target.txt", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", plan.declaredLater === true ? "declare the queue" : "base"])
   await git(["push", "--quiet", "origin", "main"])
@@ -149,10 +149,9 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
         FAKE_SLEEP: String(check.sleep ?? 0),
       },
       notify: notifier,
-      remote: "origin",
       repo: work,
       ...(check.setup === undefined ? {} : { setup: check.setup }),
-      target: "main",
+      target: { branch: "main", remote: "origin" },
       workdir,
     }),
     remote,
@@ -169,7 +168,7 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   await w.git(["commit", "--quiet", "-m", file])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main", workItem: "@i/10-yrd/1" })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" }, workItem: "@i/10-yrd/1" })
   return head
 }
 
@@ -238,7 +237,7 @@ async function plantTargetChange(w: World, head: string): Promise<void> {
     change: { branch: "main", head },
     kind: "opened",
     subject: "unknown submitted main to main",
-    target: "main",
+    target: "origin#main",
     trailers: [["Submitter", "unknown"]],
   })
   const ref = changeRef({ branch: "main", head })
@@ -436,7 +435,7 @@ describe("a queue run", () => {
           change: { branch: "task/one", head },
           kind: "stuck",
           subject: "another queue got there first",
-          target: "main",
+          target: "origin#main",
           trailers: [["Reason", "crash"]],
         })
         await rival(["push", "--quiet", "origin", `${concurrent}:${ref}`])
@@ -699,7 +698,7 @@ describe("a queue run", () => {
           change: { branch: "task/one", head },
           kind: "merged",
           subject: `another queue observed the hand merge at ${landing.slice(0, 12)}`,
-          target: "main",
+          target: "origin#main",
           trailers: [
             ["Merge", landing],
             ["Base", w.target],
@@ -789,7 +788,7 @@ describe("a queue run", () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
     // The one path in refuses it now; the ref is planted the way the remote holds it.
-    await expect(submit(w.git, "origin", { branch: "main", submitter: "unknown", target: "main" })).rejects.toThrow(
+    await expect(submit(w.git, "origin", { branch: "main", submitter: "unknown", target: { branch: "main", remote: "origin" } })).rejects.toThrow(
       "main is the target, not a change",
     )
     await plantTargetChange(w, w.target)
@@ -932,7 +931,7 @@ describe("a queue run", () => {
     await new Promise((resolve) => setTimeout(resolve, 1100))
     await submitCommit(w, "task/one", "one.txt")
     const plain = await pushByHand(w, "hand.txt")
-    const edited = await editDeclarationByHand(w, "remote: origin\ntarget: main\n")
+    const edited = await editDeclarationByHand(w, "# edited by hand\ntarget: origin#main\n")
 
     const outcome = await queueRun(w.options({ exit: 0 }))
 
@@ -1168,7 +1167,7 @@ describe("a failing check bills the submitter at once", () => {
     await w.git(["add", "two.txt"])
     await w.git(["commit", "--quiet", "-m", "two"])
     await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: "main", workItem: "@i/10-yrd/1" })
+    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: { branch: "main", remote: "origin" }, workItem: "@i/10-yrd/1" })
 
     expect((await queueRun(w.options({ exit: 1, on: ["submit"] }))).failed).toEqual(["task/one"])
 

@@ -103,7 +103,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(JSON.parse(dry.stdout), dry.report).toMatchObject({
       change: `${branch}@${head}`,
       dryRun: true,
-      target: "main",
+      target: "origin#main",
       workItem: "24099",
     })
     // The whole point: the remote is byte-for-byte where it was.

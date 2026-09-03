@@ -4,8 +4,8 @@
  *
  * A queue is a branch whose commit carries a `.yrd.yml` the parser can read.
  * That is the whole of the question "is there a queue here": the file at HEAD
- * says where to look (`remote:`, `target:`, both optional), and the file at the
- * TARGET is the declaration that judges.
+ * says where to look (`target: <remote>#<branch>`, optional), and the file at
+ * the TARGET is the declaration that judges.
  *
  * `remote:` used to be the switch — its presence chose this core over the
  * incumbent at flag day (§ Cutover) — and that made an optional key mandatory
@@ -29,6 +29,7 @@ import {
   queueRun,
   readConfig,
   readQueue,
+  targetName,
   refAt,
   resolveRemote,
   runCheck,
@@ -109,7 +110,7 @@ export async function coreQueueCommand(
     return 2
   }
   // Where to look, from the declaration checked out where the command stands:
-  // `remote:` and `target:`, both optional, both hints. A file that does not
+  // `target: <remote>#<branch>`, optional, a hint. A file that does not
   // parse hints NOTHING and says so on stderr, once: the defaults stand,
   // because this file is a hint and the target's is the authority — a branch
   // that breaks its own `.yrd.yml` still submits, and D2 bills it at merge
@@ -122,12 +123,12 @@ export async function coreQueueCommand(
   }
   const git = gitIn(here.root)
   const log = options.log?.child("queue")
-  // The declaration here only hints where the queue is (`remote:`, `target:`);
-  // the target's declaration is the authority for every judgement. A branch
+  // The declaration here only hints where the queue is (`target:`); the
+  // declaration AT that target is the authority for every judgement. A branch
   // that rewrote or broke its own `.yrd.yml` is judged by the target's rules
   // all the same (ruling D2 bills it at merge).
-  const hinted = await resolveRemote(git, hints.remote ?? "origin")
-  const hintedTarget = hints.target ?? "main"
+  const hinted = await resolveRemote(git, hints.target?.remote ?? "origin")
+  const hintedTarget = hints.target?.branch ?? "main"
   const targetRef = `${hinted}/${hintedTarget}`
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
@@ -139,7 +140,9 @@ export async function coreQueueCommand(
     await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
     const declared = await readConfig(git, targetRef)
     if (declared === undefined) return undefined
-    return { ...declared, remote: await resolveRemote(git, declared.remote) }
+    // The declared remote may be a URL; `resolveRemote` turns it into the name
+    // this repository knows it by, adding `yrd` when it has none.
+    return { ...declared, target: { ...declared.target, remote: await resolveRemote(git, declared.target.remote) } }
   }
   const config = await declaration()
   if (config === undefined) return noQueueOnTarget(targetRef)
@@ -172,7 +175,7 @@ export async function coreQueueCommand(
     case "submit": {
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       // The preview refuses exactly what the action refuses, first.
-      refuseTarget(branch, config.target)
+      refuseTarget(branch, config.target.branch)
       // A dry run says what it would open and touches nothing: no push, no
       // fact, no ref anywhere. The wrapper used to take `--dry-run` on its own
       // surface and hand the core an ordinary submit, so a dry run opened a
@@ -188,21 +191,21 @@ export async function coreQueueCommand(
             change: changeName({ branch, head }),
             dryRun: true,
             submitter: request.submitter,
-            target: config.target,
+            target: targetName(config.target),
             ...(workItem === undefined ? {} : { workItem }),
           },
-          `would open ${changeName({ branch, head })} on ${config.target} for ${request.submitter}` +
+          `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}` +
             `${workItem === undefined ? "" : ` (work item ${workItem})`}; nothing was pushed`,
         )
         return 0
       }
-      const submitted = await submit(git, config.remote, {
+      const submitted = await submit(git, config.target.remote, {
         branch,
         submitter: request.submitter,
         target: config.target,
         ...(request.workItem === undefined ? {} : { workItem: request.workItem }),
       })
-      emit(io, options.json, submitted, `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${config.target}`)
+      emit(io, options.json, submitted, `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}`)
       return 0
     }
     case "run": {
@@ -261,9 +264,9 @@ export async function coreQueueCommand(
       // The commits the target gained by hand are rows too (E5), judged at the
       // target the queue read itself saw, so the rows and the reading are about
       // one and the same tip and no second reading can disagree with it.
-      const queue = await readQueue(git, config.remote, config.target)
+      const queue = await readQueue(git, config.target.remote, config.target.branch)
       const rows = list(queue.changes, {
-        byHand: await byHandCommits(git, config.target, queue.target, queue.changes),
+        byHand: await byHandCommits(git, config.target.branch, queue.target, queue.changes),
       })
       emit(io, options.json, { changes: rows }, table(rows))
       return 0
@@ -329,7 +332,7 @@ export async function coreQueueCommand(
       return results.some((result) => result.result === "stuck") ? 2 : results.some((result) => result.result === "fail") ? 1 : 0
     }
     case "show": {
-      const changes = show((await readQueue(git, config.remote, config.target)).changes, request.branch)
+      const changes = show((await readQueue(git, config.target.remote, config.target.branch)).changes, request.branch)
       emit(
         io,
         options.json,
@@ -370,9 +373,9 @@ async function workdirOf(git: Git): Promise<string> {
  * takes the target from that reading instead.
  */
 async function targetAt(git: Git, config: QueueConfig): Promise<string> {
-  const ref = `refs/remotes/${config.remote}/${config.target}`
+  const ref = `refs/remotes/${config.target.remote}/${config.target.branch}`
   const sha = await refAt(git, ref)
-  if (sha === undefined) throw new Error(`${config.target} is not here: ${ref} is absent`)
+  if (sha === undefined) throw new Error(`${targetName(config.target)} is not here: ${ref} is absent`)
   return sha
 }
 
@@ -428,7 +431,6 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
     // git-super narrates which submodule it borrowed and how long each phase
     // took; that is trace-level plumbing, so it gets a logger only at trace.
     plumbing: log?.trace === undefined ? undefined : log.child("submodules"),
-    remote: config.remote,
     render: renderer(log),
     repo,
     // A fresh worktree has submodules and no dependencies; `setup:` is what

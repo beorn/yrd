@@ -40,7 +40,7 @@ function repositoryHere(io: YrdCliIO): Readonly<{ root: string; target: string }
   if (here === undefined) {
     throw new Error("yrd: no .yrd.yml here or above; an environment is cut from the target that file declares")
   }
-  return { root: here.root, target: hintsIn(here.text).target ?? "main" }
+  return { root: here.root, target: hintsIn(here.text).target?.branch ?? "main" }
 }
 
 function baysRootOf(repo: string): string {

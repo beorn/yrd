@@ -83,12 +83,12 @@ export type FakeCheckPlan = Readonly<{
 }>
 
 /**
- * The head of a `.yrd.yml`: `remote:` and `target:` (ruling A5). `remote`
- * names the shared repository by URL when the case asks for the remote to be
- * added from the declaration, and `origin` otherwise.
+ * The head of a `.yrd.yml`: `target: <remote>#<branch>` (ruling A5). The remote
+ * is the shared repository's URL when the case asks for it to be added from the
+ * declaration, and `origin` otherwise.
  */
 export function declaration(remote?: string): string {
-  return `remote: ${JSON.stringify(remote ?? "origin")}\ntarget: main\n`
+  return `target: ${JSON.stringify(`${remote ?? "origin"}#main`)}\n`
 }
 
 export type BoundaryRepository = Readonly<{

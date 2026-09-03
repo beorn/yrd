@@ -16,11 +16,46 @@ import type { Git } from "./facts.ts"
 import { refAt } from "./git.ts"
 import type { CheckSpec } from "./check.ts"
 
-export type QueueConfig = Readonly<{
-  /** The queue's remote: a remote name, or a URL the CLI adds under the name `yrd`; `origin` unless declared. */
+/**
+ * A queue's target: the branch it lands on, and the remote that holds it,
+ * which are one thing and are declared as one — `<remote>#<branch>`.
+ *
+ * They were two keys, `remote:` and `target:`, and each defaulted on its own,
+ * so a declaration could name a remote and mean another repository's `main`
+ * without ever saying `main`. A branch name alone does not identify a branch;
+ * the remote is half of the name.
+ */
+export type Target = Readonly<{
+  /** A name from `git remote`, or a URL the CLI adds under the remote name `yrd`. */
   remote: string
-  /** The branch the queue lands on; `main` unless declared. */
-  target: string
+  /** The branch itself, at that remote. */
+  branch: string
+}>
+
+/** A target as it is written and read: `<remote>#<branch>`. */
+export function targetName(target: Target): string {
+  return `${target.remote}#${target.branch}`
+}
+
+/**
+ * The target a string spells, or undefined when it is not one. Read from the
+ * RIGHT, because the remote may be a URL and a URL may carry a `#`, while a
+ * branch name may not.
+ */
+export function parseTarget(text: string): Target | undefined {
+  const cut = text.lastIndexOf("#")
+  if (cut <= 0) return undefined
+  const branch = text.slice(cut + 1)
+  if (branch === "") return undefined
+  return { branch, remote: text.slice(0, cut) }
+}
+
+/** What a declaration that does not spell a target is told, in one sentence. */
+const TARGET_GRAMMAR = "must be <remote>#<branch>, e.g. origin#main"
+
+export type QueueConfig = Readonly<{
+  /** The branch the queue lands on, at the remote holding it; `origin#main` unless declared. */
+  target: Target
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
@@ -46,38 +81,30 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   const raw: unknown = Bun.YAML.parse(text)
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${commit.slice(0, 12)} is not a mapping`)
   onlyKeys(raw, TOP_KEYS, ".yrd.yml")
-  const remote = raw.remote ?? "origin"
-  if (typeof remote !== "string" || remote === "") throw new Error(`.yrd.yml remote: must be a remote name or URL`)
-  const target = raw.target ?? "main"
-  if (typeof target !== "string" || target === "") throw new Error(`.yrd.yml target: must be a branch name`)
+  const declared = raw.target ?? "origin#main"
+  const target = typeof declared === "string" ? parseTarget(declared) : undefined
+  if (target === undefined) throw new Error(`.yrd.yml target: ${TARGET_GRAMMAR}`)
   const notify = optionalString(raw, "notify")
   const setup = optionalString(raw, "setup")
-  return { blob, checks: readChecks(raw.checks), notify, remote, setup, target }
+  return { blob, checks: readChecks(raw.checks), notify, setup, target }
 }
 
 export type Hints = Readonly<{
-  remote?: string
-  target?: string
+  /** The target the file names, when it names one this reader understands. */
+  target?: Target
   /** Why the commit's `.yrd.yml` hinted nothing, when it exists and could not be read. */
   problem?: string
 }>
 
 /**
- * What a commit's `.yrd.yml` says about where its queue is: `remote:` and
- * `target:` (or the incumbent's `base:`), when the file exists and reads.
- * These are hints for FINDING the queue, never authority: the target's
- * declaration is what judges, so a branch that rewrites or breaks its own
- * `.yrd.yml` still submits and is judged by the target's rules, and D2 bills
- * it at merge. A file that exists and cannot be read hints nothing and says so
- * in `problem`.
- *
- * `remote:` used to be a switch here as well as a hint — its presence on the
- * TARGET selected this core while the incumbent existed (§ Cutover) — which is
- * why `readHints`, a reader of it at a commit, existed at all. The incumbent
- * is gone, so the key is an ordinary optional one (`origin` unless declared)
- * and the question "is there a queue here" is answered by `readConfig`: a
- * commit whose `.yrd.yml` parses declares a queue, and one without a `.yrd.yml`
- * does not.
+ * What a commit's `.yrd.yml` says about where its queue is: `target:`, when the
+ * file exists and reads. This is a hint for FINDING the queue, never authority:
+ * the declaration at the target is what judges, so a branch that rewrites or
+ * breaks its own `.yrd.yml` still submits and is judged by the target's rules,
+ * and D2 bills it at merge. A file that exists and cannot be read hints nothing
+ * and says so in `problem`, and so does one whose `target:` this reader does
+ * not understand — including the two-key shape it used to have, where `remote:`
+ * and a bare branch name each defaulted on their own.
  *
  * `where` names the file in `problem`.
  */
@@ -89,9 +116,13 @@ export function hintsIn(text: string, where = ".yrd.yml"): Hints {
     return { problem: `${where} does not parse: ${error instanceof Error ? error.message : String(error)}` }
   }
   if (!isRecord(raw)) return { problem: `${where} is not a mapping` }
-  const remote = typeof raw.remote === "string" && raw.remote !== "" ? raw.remote : undefined
-  const target = typeof raw.target === "string" && raw.target !== "" ? raw.target : typeof raw.base === "string" && raw.base !== "" ? raw.base : undefined
-  return { ...(remote === undefined ? {} : { remote }), ...(target === undefined ? {} : { target }) }
+  if (raw.remote !== undefined) {
+    return { problem: `${where} names remote:, which is now the left side of target: ${TARGET_GRAMMAR}` }
+  }
+  if (raw.target === undefined) return {}
+  const target = typeof raw.target === "string" ? parseTarget(raw.target) : undefined
+  if (target === undefined) return { problem: `${where} target: ${TARGET_GRAMMAR}` }
+  return { target }
 }
 
 /**
@@ -145,7 +176,7 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 // queue, and one it does not read is still refused. A fresh worktree has
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["remote", "target", "checks", "setup", "notify"] as const
+const TOP_KEYS = ["target", "checks", "setup", "notify"] as const
 
 /**
  * A key the declaration used to read, and where its meaning went. A typo is
@@ -154,6 +185,7 @@ const TOP_KEYS = ["remote", "target", "checks", "setup", "notify"] as const
  * reader that the queue forgot how to write somewhere, not where to say it now.
  */
 const RETIRED: Readonly<Record<string, string>> = {
+  remote: `the remote is the left side of the target, which ${TARGET_GRAMMAR}`,
   scratch: "the queue's working directory is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   workdir: "the queue's working directory is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
 }

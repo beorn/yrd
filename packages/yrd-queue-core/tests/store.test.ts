@@ -58,7 +58,7 @@ describe("a change's facts are its commits", () => {
       change: { branch: "task/one", head },
       kind: "opened",
       subject: "@dev/2 submitted task/one to main",
-      target: "main",
+      target: "origin#main",
       trailers: [
         ["Submitter", "@dev/2"],
         ["Work-Item", "@i/10-yrd/24061"],
@@ -81,12 +81,12 @@ describe("a change's facts are its commits", () => {
 
   it("keeps the facts in the order they happened", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "main" })
+    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
     await appendFact(git, {
       change: { branch: "task/one", head },
       kind: "checked",
       subject: "on-submit checks passed",
-      target: "main",
+      target: "origin#main",
       trailers: [
         ["Config", "88f70021"],
         ["Check", "typecheck exit=0 ms=1200 log=/tmp/typecheck.log"],
@@ -101,10 +101,10 @@ describe("a change's facts are its commits", () => {
 
   it("refuses a second writer that read the same tip, instead of interleaving", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "main" })
+    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
     const ref = changeRef({ branch: "task/one", head })
     const tip = (await git(["rev-parse", ref])).trim()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "checked", subject: "checks passed", target: "main" })
+    await appendFact(git, { change: { branch: "task/one", head }, kind: "checked", subject: "checks passed", target: "origin#main" })
 
     // The loser's own update-ref, replayed with the tip it had read.
     const stale = (await git(["commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-p", tip, "-p", head, "-m", "late\n\nFact: checked\n"])).trim()
@@ -183,18 +183,18 @@ describe("a change's facts are its commits", () => {
 describe("the state is derived, and ancestry wins over any fact", () => {
   it("queued, then checked, from the facts", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "main" })
+    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
     let facts = await readFacts(git, { branch: "task/one", head })
     expect(readChange({ branch: "task/one", branchHead: head, facts: written(facts), head, headOnTarget: false }).state).toBe("queued")
 
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "checked", subject: "checks passed", target: "main" })
+    await appendFact(git, { change: { branch: "task/one", head }, kind: "checked", subject: "checks passed", target: "origin#main" })
     facts = await readFacts(git, { branch: "task/one", head })
     expect(readChange({ branch: "task/one", branchHead: head, facts: written(facts), head, headOnTarget: false }).state).toBe("checked")
   })
 
   it("merged from ancestry alone, with no merged fact written", async () => {
     const { git, head, target } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "main" })
+    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
     await git(["merge", "--quiet", "--no-ff", "-m", "merge task/one", head])
     expect((await git(["rev-parse", "HEAD"])).trim()).not.toBe(target)
 
@@ -209,7 +209,7 @@ describe("the state is derived, and ancestry wins over any fact", () => {
 
   it("a branch that moved off its head is failed, replaced; a branch that is gone, deleted", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "main" })
+    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
     const facts = await readFacts(git, { branch: "task/one", head })
 
     const replaced = readChange({ branch: "task/one", branchHead: "0".repeat(40), facts: written(facts), head, headOnTarget: false })
@@ -221,12 +221,12 @@ describe("the state is derived, and ancestry wins over any fact", () => {
 
   it("stuck leaves the change open and carries its why", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "main" })
+    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
     await appendFact(git, {
       change: { branch: "task/one", head },
       kind: "stuck",
       subject: "the queue could not judge this change",
-      target: "main",
+      target: "origin#main",
       trailers: [["Reason", "check-timeout"]],
     })
 
