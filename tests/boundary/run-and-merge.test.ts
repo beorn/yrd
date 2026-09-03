@@ -309,7 +309,9 @@ describe("the queue run", { timeout: 180_000 }, () => {
   it("a branch whose config cannot be parsed ends failed, and the queue keeps running", async () => {
     const log = await scratchLog("unparseable")
     const { repo } = await boundaryRepositoryWith(passing(log))
-    const change = await submitCommitWriting(repo, "broken", { ".yrd.yml": "base: main\nchecks: [{gate: {run:\n" })
+    // The declaration head stays (it is what selects the core under
+    // measurement, ruling A5); the body below it is what cannot be parsed.
+    const change = await submitCommitWriting(repo, "broken", { ".yrd.yml": `${declaration()}checks: [{gate: {run:\n` })
     const before = await targetTip(repo)
 
     const run = await queueRunOnce(repo)
