@@ -19,6 +19,7 @@ import {
   checkLogPath,
   gitIn,
   list,
+  mergedByRun,
   queueRun,
   readFacts,
   readQueue,
@@ -895,7 +896,16 @@ describe("a queue run", () => {
     const facts = await readFacts(w.git, { branch: "task/one", head })
     const merged = facts.find((fact) => fact.kind === "merged")
     if (merged === undefined) throw new Error("no merged fact")
-    expect(trailer(merged, "Merged-By")).toBe("queue")
+    // `Merged-By:` names the queue and the run of it that merged: the run id is
+    // what a reader needs, and one formatter writes it on both the event and
+    // the merge commit, so the two can never say different things.
+    const by = trailer(merged, "Merged-By") ?? ""
+    expect(by).toBe(`yrd queue ${w.remote}#main [${outcome.run}]`)
+    expect(mergedByRun(by)).toBe(outcome.run)
+    expect(await trailerOn(w, merge, "Merged-By")).toBe(by)
+    // The queue commits as itself, so a reader tells its merges from a person's
+    // with `git log` alone.
+    expect((await w.git(["log", "-1", "--format=%cn <%ce>", merge])).trim()).toMatch(/^yrd-service <yrd-service@/u)
     expect(trailer(merged, "Merge")).toBe(merge)
     // One `Check:` per on-merge check, in the shape the checked fact uses.
     expect(trailers(merged, "Check")).toEqual([expect.stringMatching(/^verify exit=0 ms=\d+ log=\S+$/u)])
@@ -903,7 +913,7 @@ describe("a queue run", () => {
       expect.arrayContaining([
         ["To", "recorder"],
         ["Delivery", "sent"],
-        ["Merged-By", "queue"],
+        ["Merged-By", by],
       ]),
     )
   })

@@ -32,6 +32,36 @@ export type Target = Readonly<{
   branch: string
 }>
 
+/**
+ * The queue's own name: its target with the remote resolved to a URL and
+ * normalized — `<host>/<path>#<branch>`.
+ *
+ * A remote NAME means nothing outside the repository that holds it: two clones
+ * call one queue `origin` and `yrd`, and a reader of a merge commit has neither.
+ * A URL is the same everywhere, so it is what the queue calls itself in
+ * anything a stranger reads. The normalizing drops what is about HOW you reach
+ * it rather than WHICH it is — the scheme, the `user@`, a trailing `.git` — and
+ * writes an scp-style URL's colon as a slash, so `git@github.com:beorn/hh.git`
+ * and `https://github.com/beorn/hh.git` are one name. A local path is already
+ * unambiguous and is kept whole.
+ */
+export function queueName(target: Target, remoteUrl: string): string {
+  return `${normalizedRemote(remoteUrl)}#${target.branch}`
+}
+
+/** A remote URL as the queue's name spells it; a path is returned as it stands. */
+function normalizedRemote(url: string): string {
+  const text = url.trim()
+  if (text.startsWith("/") || text.startsWith(".") || text.startsWith("~")) return text
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//iu
+  const withoutUser = text.replace(scheme, "").replace(/^[^/@]*@/u, "")
+  // scp-style `host:path`: the colon separates the host from the path, and a
+  // slash says the same thing in the one spelling every other form uses. Only
+  // a URL with no scheme can be scp-style, and only there is a colon not a port.
+  const asPath = scheme.test(text) ? withoutUser : withoutUser.replace(/^([^/:]+):/u, "$1/")
+  return asPath.replace(/\.git$/u, "").replace(/\/+$/u, "")
+}
+
 /** A target as it is written and read: `<remote>#<branch>`. */
 export function targetName(target: Target): string {
   return `${target.remote}#${target.branch}`

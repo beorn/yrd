@@ -51,8 +51,10 @@ import {
 } from "./check.ts"
 import {
   appendFact,
+  BYPASS_MERGE,
   endedKind,
   factCommit,
+  mergedBy,
   readFact,
   readFacts,
   trailer,
@@ -61,7 +63,7 @@ import {
   type Git,
   type WriteFact,
 } from "./facts.ts"
-import { readConfig, targetName, type Ending, type Notifier, type Target } from "./config.ts"
+import { queueName, readConfig, targetName, type Ending, type Notifier, type Target } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { bypassCommits, bypassLine } from "./bypass.ts"
@@ -133,6 +135,8 @@ type Run = Readonly<{
   worktrees: string
   /** The target the run read at its start; every judgement is against it. */
   targetSha: string
+  /** What this queue calls itself wherever a stranger reads it: `<host>/<path>#<branch>`. */
+  name: string
   /** The queue as this run read it: every change at the remote, and where each stood. */
   queue: QueueRead
   /**
@@ -156,6 +160,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const run: Run = {
     git,
     log,
+    name: queueName(options.target, await remoteUrl(git, options.target.remote)),
     onMain: new Set(),
     options,
     queue: queue.changes,
@@ -183,6 +188,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     ...(options.garage === undefined ? {} : { garage: options.garage }),
     kind: "run",
     pin: targetSha,
+    queue: run.name,
     target: options.target.branch,
   })
 
@@ -485,6 +491,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         `merge ${short(branch, head)} into ${run.options.target.branch}`,
         "",
         `Change: ${name}`,
+        `Merged-By: ${mergedBy(run.name, run.log.id)}`,
         ...(workItem === undefined ? [] : [`Work-Item: ${workItem}`]),
         ...(submitter === undefined ? [] : [`Submitter: ${submitter}`]),
       ].join("\n")
@@ -556,7 +563,12 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       kind: "merged",
       subject: `${branch} merged into ${run.options.target.branch} as ${mergeCommit.slice(0, 12)}`,
       target: targetName(run.options.target),
-      trailers: [["Merge", mergeCommit], ["Base", run.targetSha], ["Merged-By", "queue"], ...checkTrailers(results)],
+      trailers: [
+        ["Merge", mergeCommit],
+        ["Base", run.targetSha],
+        ["Merged-By", mergedBy(run.name, run.log.id)],
+        ...checkTrailers(results),
+      ],
     })
     const ref = changeRef(change)
     try {
@@ -704,7 +716,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
     trailers: [
       ["Merge", merge],
       ["Base", base],
-      ["Merged-By", "bypass"],
+      ["Merged-By", BYPASS_MERGE],
     ],
   })
   if (mergedFact === undefined) return
@@ -1222,6 +1234,19 @@ async function fetchRemoteChange(run: Run, ref: string): Promise<string> {
   if (remote === undefined) throw new Error(`${ref}: fetch completed without a change tip`)
   await run.git(["update-ref", "-d", fetchedRef, remote])
   return remote
+}
+
+/**
+ * The URL a remote name stands for, or the name itself when git has no such
+ * remote — the declaration may name a URL outright, and `resolveRemote` has
+ * already made it a name by the time a run sees it.
+ */
+async function remoteUrl(git: Git, remote: string): Promise<string> {
+  try {
+    return (await git(["remote", "get-url", remote])).trim()
+  } catch {
+    return remote
+  }
 }
 
 /** Where the target and one branch stand at the remote right now. */

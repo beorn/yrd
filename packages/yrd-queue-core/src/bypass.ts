@@ -7,7 +7,7 @@
  * queue run instead of GitHub preventing it: detect and adapt, or fail loud.
  * A merge the queue made is a `--no-ff` merge commit with two parents and a
  * `Change:` trailer naming its change, whose merged fact names the commit
- * back in `Merge:` and says `Merged-By: queue`. Anything else on the line —
+ * back in `Merge:` and says which run of which queue made it (`Merged-By:`). Anything else on the line —
  * one parent, no trailer, a trailer naming a change the queue does not know,
  * or one whose facts do not say the queue merged it there — went around the
  * queue. Adapting is already built: the lease refuses the queue's next push
@@ -39,7 +39,7 @@
  * at-least-once, the plan's shape for every message.
  */
 
-import { endedKind, trailer, type Fact, type Git } from "./facts.ts"
+import { endedKind, mergedByRun, trailer, type Fact, type Git } from "./facts.ts"
 import { gitlinkRows } from "./git.ts"
 import { CHANGES, changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
@@ -158,7 +158,9 @@ function notTheQueues(
   if (tip === undefined || endedKind(tip) !== "merged" || trailer(tip, "Merge") !== commit) {
     return `it names the change ${name}, whose facts do not say it merged there`
   }
-  if (trailer(tip, "Merged-By") !== "queue") return `it names the change ${name}, which was merged around the queue`
+  if (mergedByRun(trailer(tip, "Merged-By")) === undefined) {
+    return `it names the change ${name}, which was merged around the queue`
+  }
   return undefined
 }
 

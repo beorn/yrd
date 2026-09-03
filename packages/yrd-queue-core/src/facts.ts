@@ -184,6 +184,28 @@ export function factMessage(write: WriteFact): string {
   return `${lines.join("\n")}\n`
 }
 
+/**
+ * What a merged event's — and its merge commit's — `Merged-By:` says: which
+ * queue merged it, and which of that queue's runs. One formatter and one
+ * reader, because the two places it is written must not drift.
+ */
+export function mergedBy(queue: string, run: string): string {
+  return `yrd queue ${queue} [${run}]`
+}
+
+/**
+ * The run id a `Merged-By:` value names, or undefined when no queue run made
+ * this merge — `bypass`, or anything a reader does not understand. What a
+ * reader needs from the value is exactly that: the queue's own merges carry a
+ * run, and a bypass carries the word instead.
+ */
+export function mergedByRun(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : (/^yrd queue .+ \[([^\]]+)\]$/u.exec(value)?.[1] ?? undefined)
+}
+
+/** What a `Merged-By:` says when the merge went around the queue. */
+export const BYPASS_MERGE = "bypass"
+
 /** The first value of a trailer, or undefined. */
 export function trailer(fact: Fact, name: string): string | undefined {
   return fact.trailers.find(([key]) => key === name)?.[1]

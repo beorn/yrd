@@ -14,6 +14,7 @@
  * merge or skip the wrong change (NO SILENT ERRORS).
  */
 
+import { hostname } from "node:os"
 import { createProcess, type Process } from "@yrd/process"
 import type { Git } from "./facts.ts"
 
@@ -60,7 +61,16 @@ const ROUTING_VARIABLES = new Set([
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 ])
 
-/** The caller's environment without its routing variables, plus the queue's own git configuration. */
+/**
+ * The caller's environment without its routing variables, plus the queue's own
+ * git configuration and its own committer identity.
+ *
+ * Every commit the queue makes is committed by `yrd-service@<host>`, so
+ * `git log --format=%cn` tells the queue's merges from a person's without
+ * reading a single one of its refs. The AUTHOR is untouched: whoever wrote the
+ * change wrote it, and a merge commit's author is the run's git identity as it
+ * always was.
+ */
 export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = Object.fromEntries(
     Object.entries(source).filter(([key, value]) => value !== undefined && !ROUTING_VARIABLES.has(key)),
@@ -69,6 +79,8 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const count = Number.isInteger(declared) && declared >= 0 ? declared : 0
   return {
     ...env,
+    GIT_COMMITTER_EMAIL: `yrd-service@${hostname()}`,
+    GIT_COMMITTER_NAME: "yrd-service",
     GIT_CONFIG_COUNT: String(count + 2),
     [`GIT_CONFIG_KEY_${count}`]: "fetch.recurseSubmodules",
     [`GIT_CONFIG_VALUE_${count}`]: "no",

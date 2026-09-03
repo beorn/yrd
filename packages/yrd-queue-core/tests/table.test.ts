@@ -12,6 +12,7 @@ import {
   hintsIn,
   list,
   bypassCommits,
+  queueName,
   readCheckTrailer,
   readConfig,
   readQueue,
@@ -193,6 +194,19 @@ describe("the declaration is read from the target commit", () => {
     const owned = await world("owner: '@cto'\n")
     await expect(readConfig(owned.git, "main")).rejects.toThrow(/unknown key owner/u)
     await expect(readConfig(owned.git, "main")).rejects.toThrow(/the queue addresses nobody/u)
+  })
+
+  it("names itself by URL, normalized, so two clones of one queue say one name", async () => {
+    // A remote NAME means nothing outside the repository that holds it, and a
+    // merge commit is read by people who have neither. What is dropped is how
+    // you reach it, never which it is.
+    const main = { branch: "main", remote: "unused" }
+    expect(queueName(main, "git@github.com:beorn/hh.git")).toBe("github.com/beorn/hh#main")
+    expect(queueName(main, "https://github.com/beorn/hh.git")).toBe("github.com/beorn/hh#main")
+    expect(queueName(main, "/srv/git/hh.git")).toBe("/srv/git/hh.git#main")
+    expect(queueName({ branch: "develop", remote: "unused" }, "ssh://git@example.invalid:22/x/y/")).toBe(
+      "example.invalid:22/x/y#develop",
+    )
   })
 
   it("is loud about every other key it does not read", async () => {
