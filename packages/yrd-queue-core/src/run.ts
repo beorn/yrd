@@ -41,7 +41,7 @@
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
-import { runCheck, type CheckResult, type CheckSpec } from "./check.ts"
+import { runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import { appendFact, endedKind, readFact, readFacts, type Fact, type Git } from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
@@ -50,7 +50,7 @@ import { byHandCommits, handMovedLine } from "./by-hand.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine } from "./state.ts"
-import { prepareWorktree, SETUP, SetupFailed, type PlumbingLog, type Worktree } from "./worktree.ts"
+import { checkedTree, prepareWorktree, SETUP, SetupFailed, type PlumbingLog, type PreparedWorktree } from "./worktree.ts"
 
 export type QueueCheck = CheckSpec &
   Readonly<{
@@ -313,7 +313,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
  * recorded in the check's shape: what ran, then how it ended, billed to the
  * queue whichever way it went.
  */
-async function prepare(run: Run, entry: QueueEntry, commit: string, path: string, phase: string): Promise<Worktree> {
+async function prepare(run: Run, entry: QueueEntry, commit: string, path: string, phase: string): Promise<PreparedWorktree> {
   const logDir = join(run.options.workdir, "checks", run.log.id, phase)
   return prepareWorktree(run.git, run.options.repo, commit, path, {
     env: run.options.env,
@@ -322,6 +322,7 @@ async function prepare(run: Run, entry: QueueEntry, commit: string, path: string
     record: ({ result, start, end: ended }) =>
       record(run, { branch: entry.branch, end: ended, head: entry.change.head, name: SETUP, phase, start }, result),
     ...(run.options.setup === undefined ? {} : { setup: { logDir, run: run.options.setup, scratch: run.scratch } }),
+    targetSha: run.targetSha,
   })
 }
 
@@ -352,7 +353,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
         trailers: [["Reason", "gitlink-off-main"], ["Gitlink", `${offMain.path} ${offMain.sha}`]],
       })
     }
-    const results = await runPhase(run, entry, "submit", worktree.path)
+    const results = await runPhase(run, entry, "submit", worktree.path, worktree.tree)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
       return end(run, entry, "stuck", {
@@ -364,7 +365,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     // Awaited, not returned: the attribution runs the check again in THIS
     // worktree, and an async function runs its `finally` before it settles a
     // returned promise, so a bare return would remove the tree out from under it.
-    if (failing.length > 0) return await endFailing(run, entry, results, failing, worktree.path, "submit")
+    if (failing.length > 0) return await endFailing(run, entry, results, failing, worktree.path, worktree.tree, "submit")
     await appendFact(run.git, {
       branch,
       head,
@@ -479,7 +480,11 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         trailers: [["Reason", "config-invalid"]],
       })
     }
-    const results = await runPhase(run, entry, "merge", worktree.path)
+    // The merge moved this worktree's HEAD, so what a check judges here is
+    // read now and not at prepare time: the candidate is the merge commit,
+    // and its merge base with the target is the target itself.
+    const merged = await checkedTree(worktree.path, run.targetSha, run.options.process)
+    const results = await runPhase(run, entry, "merge", worktree.path, merged)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
       return end(run, entry, "stuck", {
@@ -490,7 +495,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     const failing = results.filter((result) => result.result === "fail")
     // Awaited for the same reason as at submit: the attribution judges in this
     // worktree, and the `finally` below must not remove it first.
-    if (failing.length > 0) return await endFailing(run, entry, results, failing, worktree.path, "merge")
+    if (failing.length > 0) return await endFailing(run, entry, results, failing, worktree.path, merged, "merge")
     // Pass. The merge is ours to make only while the target is still where this
     // change was checked against and the branch still at the head; otherwise the
     // change keeps its place and is checked again at the new target next run.
@@ -543,10 +548,11 @@ async function endFailing(
   results: readonly CheckResult[],
   failing: readonly CheckResult[],
   changeWorktree: string,
+  changeTree: CheckedTree,
   phase: "submit" | "merge",
 ): Promise<Ended> {
   const { branch } = entry
-  const verdict = await attribute(run, entry, failing, changeWorktree)
+  const verdict = await attribute(run, entry, failing, changeWorktree, changeTree)
   if (verdict.result === "stuck") {
     // `Reason` is the attribution's own word for why nobody is billed —
     // `inherited`, `flake`, `no-evidence` — and the check that produced it is
@@ -581,17 +587,18 @@ async function attribute(
   entry: QueueEntry,
   failing: readonly CheckResult[],
   changeWorktree: string,
+  changeTree: CheckedTree,
 ): Promise<Readonly<{ result: "fail" | "stuck"; kind: string; why: string }>> {
   for (const first of failing) {
     const spec = run.options.checks.find((check) => check.name === first.name)
     if (spec === undefined) return { kind: "no-evidence", result: "stuck", why: `${first.name} is not a declared check` }
-    const again = await check(run, entry, spec, changeWorktree, "again")
+    const again = await check(run, entry, spec, changeWorktree, changeTree, "again")
     if (again.result !== "fail") {
       return { kind: "flake", result: "stuck", why: `${first.name} failed once and passed once in the change's worktree; the queue does not merge on a coin flip; fix or remove the test` }
     }
     const targetTree = await prepare(run, entry, run.targetSha, join(run.worktrees, "target", first.name), "target")
     try {
-      const atTarget = await check(run, entry, spec, targetTree.path, "target")
+      const atTarget = await check(run, entry, spec, targetTree.path, targetTree.tree, "target")
       if (atTarget.result !== "pass") {
         return { kind: "inherited", result: "stuck", why: `${first.name} fails at the target ${run.targetSha.slice(0, 12)} too; the target is red, not the change; fix the target first, then the queue resumes` }
       }
@@ -740,16 +747,17 @@ async function runPhase(
   entry: QueueEntry,
   phase: "submit" | "merge",
   cwd: string,
+  tree: CheckedTree,
 ): Promise<readonly CheckResult[]> {
   const results: CheckResult[] = []
   for (const spec of run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes(phase))) {
-    results.push(await check(run, entry, spec, cwd, phase))
+    results.push(await check(run, entry, spec, cwd, tree, phase))
     if (results.at(-1)?.result !== "pass") break
   }
   return results
 }
 
-async function check(run: Run, entry: QueueEntry, spec: QueueCheck, cwd: string, phase: string): Promise<CheckResult> {
+async function check(run: Run, entry: QueueEntry, spec: QueueCheck, cwd: string, tree: CheckedTree, phase: string): Promise<CheckResult> {
   await restoreScripts(run, spec, cwd)
   const start = new Date().toISOString()
   const result = await runCheck({
@@ -759,6 +767,7 @@ async function check(run: Run, entry: QueueEntry, spec: QueueCheck, cwd: string,
     process: run.options.process,
     scratch: run.scratch,
     spec,
+    tree,
   })
   record(
     run,

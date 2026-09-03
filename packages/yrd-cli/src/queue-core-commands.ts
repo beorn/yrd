@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
   byHandCommits,
+  checkedTree,
   gitIn,
   hintsIn,
   list,
@@ -197,12 +198,7 @@ export async function coreQueueCommand(
       // The commits the target gained by hand are rows too (E5), judged at the
       // target as the queue read just fetched it, so the rows and the reading
       // are about one and the same tip.
-      const targetSha = await refAt(git, `refs/remotes/${config.remote}/${config.target}`)
-      if (targetSha === undefined) {
-        throw new Error(
-          `${config.target} is not here after the queue read: refs/remotes/${config.remote}/${config.target} is absent`,
-        )
-      }
+      const targetSha = await targetAt(git, config)
       const rows = list(entries, { byHand: await byHandCommits(git, config.target, targetSha, entries) })
       emit(io, options.json, { changes: rows }, table(rows))
       return 0
@@ -211,13 +207,18 @@ export async function coreQueueCommand(
       // `yrd check <name>`: the named checks as the target declares them, run
       // here in this tree, in the queue's order and stopping where the queue
       // would stop. The exit is the result: 0 pass, 1 fail, 2 stuck.
+      //
+      // A check by hand is told the same three things a queue run tells one,
+      // read once for this tree: where it stands, what it is judging, and the
+      // base that is an ancestor of it.
+      const tree = await checkedTree(repo, await targetAt(git, config))
       const results: CheckResult[] = []
       for (const name of request.names) {
         const spec = config.checks.find((check) => check.name === name)
         if (spec === undefined) {
           throw new Error(`${name} is not a check the target declares (declared: ${config.checks.map((check) => check.name).join(", ") || "none"})`)
         }
-        const result = await runCheck({ cwd: repo, env: options.env, logDir: join(workdir, "checks", "here"), scratch: join(workdir, "scratch"), spec })
+        const result = await runCheck({ cwd: repo, env: options.env, logDir: join(workdir, "checks", "here"), scratch: join(workdir, "scratch"), spec, tree })
         results.push(result)
         if (result.result !== "pass") break
       }
@@ -240,6 +241,19 @@ export async function coreQueueCommand(
       return 0
     }
   }
+}
+
+/**
+ * The target as this checkout has it: the remote-tracking ref the declaration
+ * names, fetched before any command runs here. Absent is loud, because every
+ * reading below — which commits the target gained by hand, what base a check is
+ * judging against — is a claim about that commit.
+ */
+async function targetAt(git: Git, config: QueueConfig): Promise<string> {
+  const ref = `refs/remotes/${config.remote}/${config.target}`
+  const sha = await refAt(git, ref)
+  if (sha === undefined) throw new Error(`${config.target} is not here: ${ref} is absent`)
+  return sha
 }
 
 /**

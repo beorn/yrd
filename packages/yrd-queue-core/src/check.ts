@@ -10,6 +10,17 @@
  * queue's fault until proven otherwise, so it is stuck too. Every result names
  * the check, its exit, its duration and its log path, because a result nobody
  * can read is not a result.
+ *
+ * The environment is built, never inherited (ruling A7), and it says what the
+ * check is judging: `YRD_REPO` is the worktree the check runs in, its own
+ * working directory; `YRD_CANDIDATE_SHA` is that worktree's HEAD; `YRD_BASE_SHA`
+ * is the merge base of that HEAD and the target, so it is always an ancestor
+ * of the candidate. A check that selects work by what changed — the affected
+ * tests, the co-changed manifests — needs both shas and needs that ancestry, so
+ * the queue states them rather than leaving each check to derive them by shell
+ * against whatever refs its worktree happens to carry. They are read once per
+ * worktree (worktree.ts) and the same for every program that runs in it, the
+ * `setup:` included.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs"
@@ -44,10 +55,23 @@ export type CheckResult = Readonly<{
   why?: string
 }>
 
+/**
+ * What the tree a program judges IS, read once when the worktree was prepared
+ * and the same for every check and setup that runs in it.
+ */
+export type CheckedTree = Readonly<{
+  /** `YRD_CANDIDATE_SHA`: the worktree's HEAD — the change's head at submit, the merge commit at merge, the target itself at the target. */
+  candidate: string
+  /** `YRD_BASE_SHA`: the merge base of that HEAD and the target, so it is always an ancestor of the candidate. */
+  base: string
+}>
+
 export type RunCheck = Readonly<{
   spec: CheckSpec
   /** The change's worktree. */
   cwd: string
+  /** What that worktree holds, as the check is told it. */
+  tree: CheckedTree
   /** Where this check's log is written. */
   logDir: string
   /** A scratch root on the root filesystem, never a shared tmpfs. */
@@ -73,6 +97,12 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   for (const [name, value] of Object.entries(source)) {
     if (name.startsWith("LC_") && value !== undefined) env[name] = value
   }
+  // Last, so they cannot be inherited over: what the check is judging is the
+  // queue's own statement about the tree it just prepared, and a check told a
+  // stale base by the environment would select the wrong work and say nothing.
+  env.YRD_REPO = run.cwd
+  env.YRD_CANDIDATE_SHA = run.tree.candidate
+  env.YRD_BASE_SHA = run.tree.base
   const timeoutMs = run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
   const started = Date.now()
   const result = await runner.run({ argv: shellCommand(run.spec.run), cwd: run.cwd, env, timeoutMs })

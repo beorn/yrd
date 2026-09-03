@@ -85,7 +85,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     [
       "#!/bin/sh",
       'sleep "${FAKE_SLEEP:-0}"',
-      `echo "fake-check exit=\${FAKE_EXIT:-0} cwd=$(pwd)" >> "${checkLog}"`,
+      `echo "check cwd=$(pwd) exit=\${FAKE_EXIT:-0} repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
       'if [ -f one.txt ] || [ "${FAKE_EVERYWHERE:-0}" = 1 ]; then exit "${FAKE_EXIT:-0}"; fi',
       "exit 0",
       "",
@@ -96,7 +96,15 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
   // Its environment is built, not passed through, so the exit code travels as
   // an argument on the command the declaration would carry.
   const setupScript = join(root, "setup.sh")
-  writeFileSync(setupScript, ["#!/bin/sh", `echo "setup cwd=$(pwd)" >> "${checkLog}"`, 'exit "${1:-0}"', ""].join("\n"))
+  writeFileSync(
+    setupScript,
+    [
+      "#!/bin/sh",
+      `echo "setup cwd=$(pwd) repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${checkLog}"`,
+      'exit "${1:-0}"',
+      "",
+    ].join("\n"),
+  )
   chmodSync(setupScript, 0o755)
   const notifier = join(root, "notify.sh")
   writeFileSync(notifier, `#!/bin/sh\ncat >> "${notifyLog}"\n`)
@@ -181,13 +189,15 @@ async function fetchChanges(w: World): Promise<void> {
   await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
 }
 
+/** One program the queue ran, as it recorded itself: the name it goes by, then its `key=value` fields. */
+type Recorded = Readonly<{ program: string; cwd: string; repo: string; candidate: string; base: string }>
+
 /**
- * What ran and where, in order: one entry per line the setup and the check
- * appended, as `["setup" | "check", "cwd=<directory>"]`. The directory is the
- * discriminator — a worktree per judgement, so "was this tree prepared before
- * anything judged in it" has a file-shaped answer.
+ * Every program the queue ran, in order, as each one recorded itself: what it
+ * was, the directory it stood in, and the three values the queue told it about
+ * the tree it was judging.
  */
-function whereRan(w: World): readonly (readonly [string, string])[] {
+function ranPrograms(w: World): readonly Recorded[] {
   let lines: readonly string[]
   try {
     lines = readFileSync(w.checkLog, "utf8").split("\n").filter(Boolean)
@@ -195,7 +205,26 @@ function whereRan(w: World): readonly (readonly [string, string])[] {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
     throw error
   }
-  return lines.map((line) => [line.startsWith("setup ") ? "setup" : "check", line.slice(line.indexOf("cwd="))] as const)
+  return lines.map((line) => {
+    const [program = "", ...rest] = line.split(" ")
+    const fields = new Map(rest.map((field) => field.split("=") as [string, string]))
+    return {
+      base: fields.get("base") ?? "",
+      candidate: fields.get("candidate") ?? "",
+      cwd: fields.get("cwd") ?? "",
+      program,
+      repo: fields.get("repo") ?? "",
+    }
+  })
+}
+
+/**
+ * What ran and where, in order, as `["setup" | "check", "<directory>"]`. The
+ * directory is the discriminator — a worktree per judgement, so "was this tree
+ * prepared before anything judged in it" has a file-shaped answer.
+ */
+function whereRan(w: World): readonly (readonly [string, string])[] {
+  return ranPrograms(w).map((ran) => [ran.program, ran.cwd] as const)
 }
 
 /** Nothing judged a worktree the setup had not prepared first. */
@@ -697,5 +726,80 @@ describe("an on-submit check is attributed before anyone is billed for it", () =
     // The cost stays honest: the second run and the target run are for a
     // FAILING check only.
     expect(whereRan(w)).toHaveLength(1)
+  })
+})
+
+/**
+ * A check that selects work by what changed needs to be told what it is
+ * judging and what to measure it against, and the queue is the only thing
+ * that knows: `YRD_REPO`, `YRD_CANDIDATE_SHA`, `YRD_BASE_SHA`, built into
+ * every check's environment and read once per worktree.
+ */
+describe("what the queue tells a check about the tree it judges", () => {
+  it("at submit: the change's head, and the merge base with the target, not the target itself", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    // The target moves after the branch was cut, so the fork point and the
+    // target are different commits and a check that confused them would show.
+    const hand = await pushByHand(w, "hand.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, on: ["submit"] }))
+
+    expect(outcome.exitCode).toBe(0)
+    const [submitCheck] = ranPrograms(w).filter((ran) => ran.program === "check")
+    expect(submitCheck?.candidate).toBe(head)
+    expect(submitCheck?.base).toBe(w.target)
+    expect(submitCheck?.base).not.toBe(hand)
+    // `YRD_REPO` is the worktree the check ran in, which is its own directory.
+    expect(submitCheck?.repo).toBe(submitCheck?.cwd)
+    // The base is an ancestor of the candidate, which is what a diff needs.
+    await expect(w.git(["merge-base", "--is-ancestor", submitCheck?.base ?? "", submitCheck?.candidate ?? ""])).resolves.toBeDefined()
+  })
+
+  it("at merge: the merge commit, with the target as its base", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, on: ["merge"] }))
+
+    expect(outcome.merged).toEqual(["task/one"])
+    const mergeCommit = await remoteTarget(w)
+    const [mergeCheck] = ranPrograms(w).filter((ran) => ran.program === "check")
+    // The merge commit is what lands, so it is what the on-merge checks judge.
+    expect(mergeCheck?.candidate).toBe(mergeCommit)
+    expect(mergeCheck?.base).toBe(w.target)
+    expect(mergeCheck?.repo).toBe(mergeCheck?.cwd)
+  })
+
+  it("the setup is told the same three, in the worktree it is preparing", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, on: ["submit"], setup: w.setupCommand(0) }))
+
+    expect(outcome.exitCode).toBe(0)
+    const [setup, check] = ranPrograms(w)
+    expect(setup?.program).toBe("setup")
+    expect(setup?.candidate).toBe(head)
+    expect(setup?.base).toBe(w.target)
+    expect(setup?.repo).toBe(setup?.cwd)
+    // The same tree, so the same three: read once, not once per program.
+    expect([check?.candidate, check?.base, check?.repo]).toEqual([setup?.candidate, setup?.base, setup?.repo])
+  })
+
+  it("at the target, during attribution: the target itself, as its own base", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ everywhere: true, exit: 1, on: ["submit"] }))
+
+    expect(outcome.stuck).toEqual(["task/one"])
+    // Three check runs: twice in the change's worktree, then once at the target.
+    const runs = ranPrograms(w).filter((ran) => ran.program === "check")
+    expect(runs).toHaveLength(3)
+    expect(runs[2]?.candidate).toBe(w.target)
+    expect(runs[2]?.base).toBe(w.target)
+    expect(runs[2]?.repo).toBe(runs[2]?.cwd)
+    expect(runs[2]?.cwd).not.toBe(runs[0]?.cwd)
   })
 })

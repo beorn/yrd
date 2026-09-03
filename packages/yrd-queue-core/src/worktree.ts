@@ -24,8 +24,9 @@
 import { rmSync } from "node:fs"
 import { materializeSubmodulesFromLocalWorktreeParallel } from "git-super/submodules"
 import type { Process } from "@yrd/process"
-import { DEFAULT_CHECK_BOUND_MS, runCheck, type CheckResult } from "./check.ts"
+import { DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import type { Git } from "./facts.ts"
+import { gitIn, mergeBase } from "./git.ts"
 
 /** The logger git-super narrates to; the queue hands one over only at trace. */
 export type PlumbingLog = NonNullable<Parameters<typeof materializeSubmodulesFromLocalWorktreeParallel>[0]["log"]>
@@ -85,6 +86,8 @@ export type SetupSpec = Readonly<{
 export type SetupRan = Readonly<{ result: CheckResult; start: string; end: string }>
 
 export type PrepareWorktree = Readonly<{
+  /** The target every base is measured against: `YRD_BASE_SHA` is the merge base of it and the worktree's HEAD. */
+  targetSha: string
   /** Run once in the fresh worktree, after materialization and before any check. Absent, nothing runs. */
   setup?: SetupSpec
   /** Told how the setup went, pass or not, before a failure throws: the one place a caller records it. */
@@ -93,6 +96,31 @@ export type PrepareWorktree = Readonly<{
   process?: Process
   env?: NodeJS.ProcessEnv
 }>
+
+/** A worktree, plus what every program run in it is told about the tree it judges. */
+export type PreparedWorktree = Worktree & Readonly<{ tree: CheckedTree }>
+
+/**
+ * What a program run in `worktree` is told about the tree it stands in: the
+ * HEAD checked out there, and the merge base of that HEAD and the target.
+ *
+ * Read from the tree itself rather than carried in by the caller, so it is a
+ * fact about what is checked out; read once per worktree, because it costs two
+ * git calls and every check in that worktree is judging the same thing. A HEAD
+ * that shares no history with the target throws: a base that is not an
+ * ancestor of the candidate is a lie a check would compute a diff from.
+ */
+export async function checkedTree(worktree: string, targetSha: string, process?: Process): Promise<CheckedTree> {
+  const wt = gitIn(worktree, process)
+  const candidate = (await wt(["rev-parse", "HEAD"])).trim()
+  const base = await mergeBase(wt, candidate, targetSha)
+  if (base === undefined) {
+    throw new Error(
+      `${worktree} stands at ${candidate.slice(0, 12)}, which shares no history with the target ${targetSha.slice(0, 12)}: there is no base to tell a check`,
+    )
+  }
+  return { base, candidate }
+}
 
 /**
  * A setup that did not pass. The worktree is already gone, and nobody is
@@ -113,11 +141,12 @@ export class SetupFailed extends Error {
 }
 
 /**
- * `freshWorktree`, then the target's `setup:` in it: one shell command, the
- * built check environment (`PATH`, `HOME`, `SHELL`, `LANG`, `USER`, `LOGNAME`,
- * `LC_*` and the scratch root as `TMPDIR`), the check bound, and a log of its
- * own — the check driver runs it, so a setup and a check are provisioned,
- * bounded and recorded by one piece of code rather than two that drift.
+ * `freshWorktree`, what the tree holds read once, then the target's `setup:` in
+ * it: one shell command, the built check environment (`PATH`, `HOME`, `SHELL`,
+ * `LANG`, `USER`, `LOGNAME`, `LC_*`, the scratch root as `TMPDIR`, and the
+ * three the queue states about the tree), the check bound, and a log of its own
+ * — the check driver runs it, so a setup and a check are provisioned, bounded
+ * and recorded by one piece of code rather than two that drift.
  *
  * Only `pass` prepares a worktree. A setup that exits anything else, runs past
  * its bound or is not there throws `SetupFailed` with the worktree already
@@ -130,11 +159,19 @@ export async function prepareWorktree(
   repo: string,
   commit: string,
   path: string,
-  options: PrepareWorktree = {},
-): Promise<Worktree> {
+  options: PrepareWorktree,
+): Promise<PreparedWorktree> {
   const worktree = await freshWorktree(git, repo, commit, path, options.plumbing)
+  let tree: CheckedTree
+  try {
+    tree = await checkedTree(worktree.path, options.targetSha, options.process)
+  } catch (error) {
+    await worktree.remove()
+    throw error
+  }
+  const prepared: PreparedWorktree = { ...worktree, tree }
   const setup = options.setup
-  if (setup === undefined) return worktree
+  if (setup === undefined) return prepared
   const start = new Date().toISOString()
   let result: CheckResult
   try {
@@ -145,6 +182,7 @@ export async function prepareWorktree(
       process: options.process,
       scratch: setup.scratch,
       spec: { name: SETUP, run: setup.run, timeoutMs: setup.timeoutMs ?? DEFAULT_CHECK_BOUND_MS },
+      tree,
     })
   } catch (error) {
     await worktree.remove()
@@ -156,7 +194,7 @@ export async function prepareWorktree(
     await worktree.remove()
     throw new SetupFailed(ran, commit)
   }
-  return worktree
+  return prepared
 }
 
 async function removeWorktree(git: Git, path: string): Promise<void> {
