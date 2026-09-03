@@ -13885,7 +13885,14 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
-  it("keeps literal one-shot queue reads fork-free", async () => {
+  // Every Git fact this read needs is pre-resolved at host bootstrap, so a
+  // fork here would be one per watch poll. There is exactly ONE exception, and
+  // it is named rather than tolerated: the garage declaration, `refs/yrd/garage`,
+  // which is read from Git on every projection BY DESIGN — a cached garage is a
+  // service restarted into a queue somebody has in pieces. One local ref read,
+  // no object walk, no network. Anything else appearing in this list is the
+  // regression this case exists for.
+  it("keeps literal one-shot queue reads to the one Git read the garage needs", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-queue-read-forks-"))
     const bin = join(repo, "bin")
     const log = join(repo, "git.log")
@@ -13917,7 +13924,9 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         expect(await runYrd(app, argv, output.io, services), output.stderr()).toBe(0)
       }
 
-      expect(readFileSync(log, "utf8").trim().split("\n").filter(Boolean)).toEqual([])
+      expect(readFileSync(log, "utf8").trim().split("\n").filter(Boolean)).toEqual([
+        `-C ${repo} rev-parse --verify --quiet refs/yrd/garage`,
+      ])
     } finally {
       process.env.PATH = originalPath
       await app.close()

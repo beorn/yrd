@@ -38,6 +38,7 @@ import {
   queueSnapshot,
   type RunnerLivenessProbe,
 } from "@yrd/queue"
+import { garageStatusLine, type GarageDeclaration } from "./garage.ts"
 import type { HabitantSourceRecycle } from "./source-staleness.ts"
 import type {
   Candidate,
@@ -673,6 +674,13 @@ export type QueueTimelineProjection = Readonly<{
   runner: QueueTimelineRunner | null
   /** Why `runner` is null. Present only when it is; the banner needs it to name a remedy. */
   runnerAbsence?: QueueRunnerAbsence
+  /**
+   * The garage this queue is in, read from `refs/yrd/garage`, or null when it
+   * is in none. ALWAYS present, null included: "no garage is open" is a fact a
+   * reader needs, and a missing field would read as "this yrd does not know
+   * about garages" — a different answer entirely.
+   */
+  garage: GarageDeclaration | null
   pause?: QueueSummary["pause"]
   oldestOpenMs: number | null
   filters: Readonly<{
@@ -747,6 +755,9 @@ export type QueueTimelineProjectionOptions = Readonly<{
   state?: BaysState
   runner?: QueueTimelineRunner | null
   runnerAbsence?: QueueRunnerAbsence
+  /** The garage the queue's repository declares. Omitted reads as "no garage",
+   * which is what every fixture and every non-repository caller means. */
+  garage?: GarageDeclaration
   /** Repository root the projected journal belongs to — the `path` half of
    * every queue's FQN identity pair (items 32a/36). One journal per repo, so
    * one path covers every queue this projection labels. */
@@ -2120,6 +2131,7 @@ function buildQueueTimelineProjection(
     siblingBases: [...new Set(options.siblingBases ?? [])].filter((candidate) => candidate !== base).toSorted(),
     runner: options.runner ?? null,
     ...(options.runner != null || options.runnerAbsence === undefined ? {} : { runnerAbsence: options.runnerAbsence }),
+    garage: options.garage ?? null,
     ...(pause === undefined ? {} : { pause }),
     oldestOpenMs,
     filters: {
@@ -5241,6 +5253,38 @@ export function TimelineRunnerBox({
     runner === null
       ? []
       : boundedHangingLines(`${runner.command ?? "habitant runner"} [${runner.pid}]`, commandWidth, 3)
+  // The garage is the queue's state, so it is the FIRST line of it — above the
+  // runner's own rails, and instead of the NO RUNNER banner. That banner's
+  // whole job is to name a remedy, and in the garage its remedy ("restart it")
+  // is the one act the garage forbids: the service is down because a mechanic
+  // put it down, and saying so is the honest answer to "why is nothing
+  // draining". A live runner still gets its command rail below this line,
+  // because a garage with something draining in it is a fact a reader must not
+  // have hidden from them.
+  const garageRail =
+    projection.garage === null ? undefined : (
+      <Text key="garage" color="$fg-warning" bold wrap="truncate" minWidth={0}>
+        {garageStatusLine(projection.garage)}
+      </Text>
+    )
+  const runnerRails =
+    runner === null
+      ? garageRail === undefined
+        ? [
+            // The NO RUNNER banner stays a one-line elided rail: a remedy
+            // parked on wrapped continuation rows is a remedy a narrow pane
+            // spends its whole height on (queue-timeline-chrome, "12-column
+            // projected-live header").
+            <Text key="banner" color="$fg-error" bold wrap="truncate" minWidth={0}>
+              {queueNoRunnerBanner(projection, drained, now, runnerRefusal)}
+            </Text>,
+          ]
+        : []
+      : commandRows.map((commandRow, index) => (
+          <Text key={`command:${index}`} color={marker.color} wrap="truncate" minWidth={0}>
+            {commandRow}
+          </Text>
+        ))
   return (
     <TitledBox
       title="RUNNER"
@@ -5254,21 +5298,7 @@ export function TimelineRunnerBox({
           </RunnerActivity>
         }
       >
-        {runner === null ? (
-          // The NO RUNNER banner stays a one-line elided rail: a remedy
-          // parked on wrapped continuation rows is a remedy a narrow pane
-          // spends its whole height on (queue-timeline-chrome, "12-column
-          // projected-live header").
-          <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
-            {queueNoRunnerBanner(projection, drained, now, runnerRefusal)}
-          </Text>
-        ) : (
-          commandRows.map((commandRow, index) => (
-            <Text key={`command:${index}`} color={marker.color} wrap="truncate" minWidth={0}>
-              {commandRow}
-            </Text>
-          ))
-        )}
+        {garageRail === undefined ? runnerRails : [garageRail, ...runnerRails]}
       </MarkerRow>
       {runner === null ? null : (
         <MarkerRow>

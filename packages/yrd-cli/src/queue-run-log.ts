@@ -101,6 +101,10 @@ export type QueueRunRecord = QueueRunLogCommon &
     /** The target's tip the queue run read first — the commit `config` is the
      * config AT, so the two travel together or a reader can check neither. */
     base?: string
+    /** The garage's reason, when this queue run was made by hand in one.
+     * Absent means no garage was open — every log from the garage says so, and
+     * no other log claims to be from one. */
+    garage?: string
     /** The incumbent's Run ids this queue run built, in order, when it built
      * any. It is what every other instrument on the incumbent still prints, so
      * it stays readable — as a FIELD, never as the log's name: a queue run
@@ -392,6 +396,8 @@ export type QueueRunLogSource = Readonly<{
   config?: string
   /** The target's tip the queue run read first. */
   base?: string
+  /** The garage's reason, when this queue run was made by hand in one. */
+  garage?: string
   /** The runs this queue run STARTED, in order — never one it merely settled
    * on its way past. {@link queueRunOwnRuns} is what separates the two. */
   runs: readonly QueueRunSourceRun[]
@@ -523,6 +529,7 @@ export function queueRunLogRecords(
     ...(source.pin === undefined ? {} : { pin: source.pin }),
     ...(source.config === undefined ? {} : { config: source.config }),
     ...(source.base === undefined ? {} : { base: source.base }),
+    ...(source.garage === undefined ? {} : { garage: source.garage }),
     target: source.target,
     // Absent rather than empty when there were none: `built: []` and
     // `recovered: 0` read as measurements somebody took, and a queue run that
