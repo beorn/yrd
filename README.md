@@ -84,9 +84,8 @@ There is one place in the code that exits. A signal, or an error nobody caught, 
 |---|---|
 | `packages/yrd-queue-core` | the queue: submit, the queue read, the queue run, checks, facts |
 | `packages/yrd-cli` | the commands |
-| `packages/yrd-process` | running commands and Git: checkouts, time limits, cleaning up what dead runs left behind |
+| `packages/yrd-process` | running commands and Git: checkouts, time limits, and reading which processes still hold a path |
 | `packages/yrd-bay` | `yrd env`: a checkout of one branch for a person or an agent to work in |
-| `packages/yrd-core` | failure, clock and duration types shared by the others |
 
 `tests/boundary` proves the queue from the outside, as a user would see it: real repositories, real pushes, real checks in their own checkouts.
 

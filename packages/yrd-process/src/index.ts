@@ -1,5 +1,5 @@
 import { createScope, type Scope } from "@silvery/scope"
-import { createFailure } from "@yrd/core"
+import { createFailure } from "./failure.ts"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { accessSync, constants, statSync, writeSync } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
@@ -10,6 +10,16 @@ import {
   type PathHolderCensusReader,
   type PathReapResult,
 } from "./path-reaper.ts"
+
+export {
+  FailureFactSchema,
+  FailureKindSchema,
+  createFailure,
+  failureFact,
+  type FailureFact,
+  type FailureKind,
+  type YrdFailure,
+} from "./failure.ts"
 
 export {
   adaptProcessGit,

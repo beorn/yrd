@@ -7,8 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { failureFact } from "@yrd/core"
-import { createProcess } from "@yrd/process"
+import { createProcess, failureFact } from "@yrd/process"
 
 async function absentDirectory(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "yrd-absent-cwd-"))

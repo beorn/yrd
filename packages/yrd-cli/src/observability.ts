@@ -1,15 +1,11 @@
-import {
-  YRD_LIFECYCLE_LEVELS,
-  observeYrdLifecycle,
-  raiseFailure,
-  withStageAccounting,
-  type YrdDeliveryIdentity,
-} from "@yrd/core"
+import { createFailure, type FailureKind } from "@yrd/process"
 import { createLogger, type ConditionalLogger, type ConfigElement, type Event, type LogLevel } from "loggily"
 import { LOG_LEVEL_PRIORITY, resolveVerbosityLevel } from "loggily"
 import { enableContextPropagation } from "loggily/context"
 
-export { YRD_LIFECYCLE_LEVELS, observeYrdLifecycle, type YrdDeliveryIdentity }
+function raiseFailure(kind: FailureKind, code: string, message: string): never {
+  throw createFailure({ kind, code, message })
+}
 
 export type YrdObservabilityFlags = Readonly<{
   verbose?: number
@@ -22,10 +18,8 @@ export type YrdObservability = Readonly<{
   debug?: string
   file?: string
   /** Spans are CONSTRUCTED. loggily deletes `logger.span` when a pipeline says
-   * `spans: false`, so this also decides whether spans EXIST — and the
-   * command's stage breakdown is derived from their construction
-   * (`withStageAccounting`), not from the emitted stream. Turn this off at a
-   * level an operator reads the breakdown at and the breakdown is empty. */
+   * `spans: false`, so this decides whether spans EXIST at all — the JSONL
+   * sink can only record what was constructed. */
   spans: boolean
   /** SPAN rows are PRINTED to the human stream. The narrower question, and the
    * one `DEBUG=` should answer no to. */
@@ -257,11 +251,7 @@ export function createYrdLogger(
       },
     ])
   }
-  // Every span this tree creates opens a stage, so the command's stage
-  // breakdown is derived from the spans instead of a list maintained beside
-  // them. Applied at the root, once: children and nested spans inherit it, so
-  // no call site has to remember. See `withStageAccounting`.
-  const created = withStageAccounting(createLogger("yrd", pipeline))
+  const created = createLogger("yrd", pipeline)
   const logger = implicitHabitant && config.file === undefined ? gateImplicitHabitantLogger(created) : created
   let disposed = false
   const dispose = (): void => {

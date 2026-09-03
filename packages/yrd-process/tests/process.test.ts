@@ -8,8 +8,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { failureFact } from "@yrd/core"
-import { createProcess, shellCommand, type Spawn } from "@yrd/process"
+import { createProcess, failureFact, shellCommand, type Spawn } from "@yrd/process"
 
 const silentLog = createLogger("test", [{ level: "silent" }])
 
