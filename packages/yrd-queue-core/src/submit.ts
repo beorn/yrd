@@ -51,10 +51,10 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // INTO the target, so submitting the target itself asks the queue to merge a
   // branch into itself. Nothing refused it before, and what it opened was a
   // change whose head the target already carried: it read merged at once, the
-  // catch-up gave it a `Merged-By: hand` event naming whatever merge landed
+  // catch-up gave it a `Merged-By: bypass` event naming whatever merge landed
   // next, its submitter was told to close a bead for a merge that was not
   // theirs, and that merge stayed accounted for in the E5 walk, where an
-  // accounted commit hides every hand push at or below it
+  // accounted commit hides every bypass at or below it
   // (2026-09-03: `main@0a9db9daf7eb`, named for the queue's own merge 005a622156c7).
   refuseTarget(request.branch, request.target.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()

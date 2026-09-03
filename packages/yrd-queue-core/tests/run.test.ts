@@ -491,7 +491,7 @@ describe("a queue run", () => {
     })
   })
 
-  it("stuck: a check that exits 2 stops the run, bills nobody, and goes to the owner's role", async () => {
+  it("stuck: a check that exits 2 stops the run, bills nobody, and is an ending of its own", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
 
@@ -727,7 +727,7 @@ describe("a queue run", () => {
     expect(messages(w)[0]).toMatchObject({ event: "merged" })
   })
 
-  it("a change merged around the queue reads merged, its catch-up event says a hand did it, and the bypass is reported once (E5)", async () => {
+  it("a change merged around the queue reads merged, its catch-up event says a bypass did it, and the bypass is reported once (E5)", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     // The garage lands it around the queue: a merge commit on main, pushed.
@@ -863,7 +863,7 @@ describe("a queue run", () => {
     expect((await w.git(["rev-parse", `${merge}^1`])).trim()).toBe(w.target)
 
     // The run after the merge: the one that in the specimen wrote `merged by
-    // hand at 005a622156c7` and told the owner's role to close a bead for it.
+    // around the queue at 005a622156c7` and told its submitter to close a bead for it.
     const after = await queueRun(w.options({ exit: 0 }))
 
     expect(after.exitCode).toBe(0)
@@ -970,7 +970,7 @@ describe("a queue run", () => {
     // instant to start from — and every commit on the target belongs to
     // whatever moved the branch before this queue existed.
     const w = await world({ declaredLater: true })
-    await pushAroundQueue(w, "hand.txt")
+    await pushAroundQueue(w, "bypass.txt")
 
     const outcome = await queueRun(w.options({ exit: 0 }))
 
@@ -999,7 +999,7 @@ describe("a queue run", () => {
     // A whole second, so the boundary is not a tie: a committer date is seconds.
     await new Promise((resolve) => setTimeout(resolve, 1100))
     await submitCommit(w, "task/one", "one.txt")
-    const plain = await pushAroundQueue(w, "hand.txt")
+    const plain = await pushAroundQueue(w, "bypass.txt")
     const edited = await editDeclarationAroundQueue(w, "# edited around the queue\ntarget: origin#main\n")
 
     const outcome = await queueRun(w.options({ exit: 0 }))

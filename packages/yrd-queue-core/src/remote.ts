@@ -72,7 +72,7 @@ export async function readQueue(
       // A ref named after the target is not a change, so the read yields none
       // for it: it is never judged, never given an event and never messaged
       // about, and above all it never accounts for a commit on the target's
-      // own first-parent line, where an accounted commit hides every hand push
+      // own first-parent line, where an accounted commit hides every bypass
       // at or below it (bypass.ts; E5). `submit` refuses to open one, so this
       // is only about the ones a remote already holds.
       if (change !== undefined && change.branch !== target) changeRefs.push(change)

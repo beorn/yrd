@@ -74,7 +74,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   /**
    * Measured 2026-09-03 on the wrapper: `yrd submit --dry-run` was accepted by
    * the wrapper's own option table, the new core's submit never received it,
-   * and the dry run OPENED A REAL CHANGE — `task/owner-field-item13@22b2741a`,
+   * and the dry run OPENED A REAL CHANGE — one submit, two opened events,
    * two opened events. An option a command does not implement must refuse; an
    * option it does implement must reach the code that acts on it.
    */

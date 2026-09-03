@@ -29,7 +29,7 @@
  *
  * Only the queue pushes the target, by rule, and every run proves it before
  * it judges anything: each commit on the target's first-parent line since the
- * cutover that the queue did not put there is reported to the queue owner,
+ * queue's own history starts that the queue did not put there is reported
  * once, and the run goes on from the new base (E5; the reading is bypass.ts).
  *
  * Exit 0 when nothing ended failed or stuck, 1 when a change ended failed,
@@ -96,11 +96,11 @@ export type QueueRunOptions = Readonly<{
   notify?: readonly Notifier[]
   /** The queue's working directory: its logs, its worktrees and its temp root; on the root filesystem. */
   workdir: string
-  /** Why the queue is in the garage, when it is: a hand-run round says so on its own record. */
+  /** Why the queue is in the garage, when it is: a round the mechanic ran says so on its own record. */
   garage?: string
   /** Receives every log record as it is written, for the human rendering. */
   render?: (record: LogRecord) => void
-  /** The logger the worktree plumbing narrates to; hand one over only at trace. */
+  /** The logger the worktree plumbing narrates to; pass one only at trace. */
   plumbing?: PlumbingLog
   git?: Git
   process?: Process
@@ -686,7 +686,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   // head is the one that landed it; none means the head was fast-forwarded.
   // `--parents` names its first parent in the same reading, so `Base:` is a
   // sha like every other Base and not a revision expression a reader would
-  // have to hand back to git to resolve.
+  // have to give back to git to resolve.
   const landing = (
     await run.git([
       "rev-list",
@@ -1113,7 +1113,7 @@ type Delivery = "sent" | "none" | "failed"
 type Handed = Readonly<{ name: string; delivery: Delivery; failure?: string }>
 
 /**
- * Hand one event to every `notify:` entry that wants this ending, in the order
+ * Give one event to every `notify:` entry that wants this ending, in the order
  * the declaration lists them, and say how each went.
  *
  * An ending no entry wants is answered by one turn under the name `none` and

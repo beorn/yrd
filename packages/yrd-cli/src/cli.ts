@@ -21,7 +21,7 @@
  * repository operand — refuses with exit 2 and names it. That rule is why
  * `--dry-run` exists on `submit` at all: the old wrapper took the flag from
  * its own surface, the new core's submit never saw it, and a dry run opened a
- * real change (task/owner-field-item13@22b2741a, two opened events).
+ * real change: one submit opened two changes, 2026-09-03.
  */
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
@@ -105,7 +105,7 @@ function buildProgram(
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
     .command("run")
-    .description("one round of queue work, by hand")
+    .description("one round of queue work, run now rather than by the service")
     .option("--json", "emit stable JSON")
     .action(async (options) => {
       const json = (options as { json?: boolean }).json
@@ -120,7 +120,7 @@ function buildProgram(
     .action(async (options) => {
       const { interval, json } = options as { interval?: number; json?: boolean }
       // The garage stops the SERVICE, and this is the last moment before it
-      // becomes one. `queue run` — one round, by hand — goes through untouched,
+      // becomes one. `queue run` — one round, run now — goes through untouched,
       // because that is what a garage is FOR; it stamps the reason on its own
       // record instead.
       const garage = readGarageDeclaration(cwd())
@@ -164,7 +164,7 @@ function buildProgram(
   // surface reads it. These two spellings stay because the queue is IN the
   // garage: they are the only non-plumbing way to open and close it, and
   // `readGarageDeclaration` is already on the run path above.
-  const garage = queue.command("garage", { hidden: true }).description("stop the service and work on the queue by hand")
+  const garage = queue.command("garage", { hidden: true }).description("stop the service and work on the queue yourself")
   garage.helpCommand(false)
   garage
     .command("open")
@@ -255,7 +255,7 @@ function addExamples(program: CliCommand, name: string): void {
     [`$ ${name} submit fix-login`, "push the branch and open its change"],
     [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
     [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
-    [`$ ${name} queue run`, "one round of queue work, by hand"],
+    [`$ ${name} queue run`, "one round of queue work, run now"],
     [`$ ${name} check affected-tests`, "run one of the queue's checks here, now"],
     [`$ ${name} env open --bay fix`, "open an environment and keep it"],
   ])
@@ -266,7 +266,7 @@ function addQueueExamples(queue: CliCommand, name: string): void {
     [`$ ${name} queue submit fix-login`, "push the branch and open its change"],
     [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
     [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
-    [`$ ${name} queue run`, "one round of queue work, by hand"],
+    [`$ ${name} queue run`, "one round of queue work, run now"],
     [`$ ${name} queue up`, "the service: the same round on a loop"],
   ])
 }

@@ -161,7 +161,7 @@ describe("a change's events are its commits", () => {
   })
 
   it("git's own parser reads the trailers: prose that looks like one is not, and a folded value reads whole", async () => {
-    // A hand-rolled `^Key: value$` scan called every line that looked like a
+    // A `^Key: value$` scan written by hand called every line that looked like a
     // trailer one, so a prose `Note: fix` in the body stood in the derived
     // state; and a value git had folded onto a second line read as two.
     const { git } = await repository()

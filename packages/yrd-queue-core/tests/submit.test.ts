@@ -230,7 +230,7 @@ describe("the queue read is every submitted change at the remote", () => {
     const head = await branchWithCommit(w, "task/gone", "gone.txt")
     await submit(w.git, "origin", { branch: "task/gone", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
     expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBe(head)
-    // Taken out at the remote by another hand, so this clone's tracking ref lingers.
+    // Taken out at the remote by somebody else, so this clone's tracking ref lingers.
     await gitIn(w.remote)(["update-ref", "-d", "refs/heads/task/gone"])
 
     const entries = (await readQueue(w.git, "origin", "main")).changes

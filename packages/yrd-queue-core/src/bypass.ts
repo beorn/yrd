@@ -29,11 +29,11 @@
  *
  * The queue remembers nothing, so what it has already reported is read from
  * git too. A commit some change's merged event names in `Merge:` is accounted
- * for: the queue merged it, or caught up on a hand merge of a submitted head
+ * for: the queue merged it, or caught up on a bypass that merged a submitted head
  * and reported it in the same queue run that wrote the event. Everything below
  * an accounted commit was on the line when that event was written, so it was
  * judged then; the walk from the tip stops at the first accounted commit, and
- * a queue run reports exactly the hand commits above it. A hand commit with
+ * a queue run reports exactly the bypasses above it. A bypass with
  * nothing of the queue's on top is reported again next run, with the commit
  * sha as its id, so the notifier sees one message however many runs say it:
  * at-least-once, the plan's shape for every message.
@@ -59,7 +59,7 @@ export type Bypass = Readonly<{
 }>
 
 /**
- * The hand commits on the target's first-parent line since the cutover that
+ * The bypasses on the target's first-parent line since the moment that
  * the queue has not yet accounted for, oldest first. Loud when no commit on
  * that line introduced the `remote:` line: a target that never named this core
  * has no queue.
@@ -129,7 +129,7 @@ export async function bypassCommits(
  * history — the silent wrong answer this reading exists to avoid.
  *
  * The date is handed to `git log --since`, which keeps commits at or after it:
- * a hand commit made in the same second as the first event is reported, never
+ * a bypass made in the same second as the first event is reported, never
  * hidden. The boundary errs towards reporting more, as the old one did.
  */
 async function queueStarted(git: Git): Promise<string | undefined> {

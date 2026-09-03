@@ -852,7 +852,7 @@ export async function submitSameHead(repo: string, bay: string, headSha: string)
 /** A throwaway clone of the shared repository, for the cases where something
  * OTHER than the queue moves the target. */
 async function throwawayClone(origin: string): Promise<string> {
-  const work = await mkdtemp(join(tmpdir(), "yrd-boundary-hand-"))
+  const work = await mkdtemp(join(tmpdir(), "yrd-boundary-bypass-"))
   roots.push(work)
   const clone = join(work, "clone")
   // `--branch main`, because the bare repository was made by `git init --bare`

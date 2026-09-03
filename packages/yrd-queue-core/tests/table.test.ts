@@ -236,21 +236,21 @@ describe("the table is the queue read rendered", () => {
     const w = await world("target: origin#main\n")
     await submitCommit(w, "task/one", "one.txt")
     await w.git(["checkout", "--quiet", "main"])
-    writeFileSync(join(w.work, "hand.txt"), "hand\n")
-    await w.git(["add", "hand.txt"])
-    await w.git(["commit", "--quiet", "-m", "hand.txt around the queue"])
+    writeFileSync(join(w.work, "bypass.txt"), "bypass\n")
+    await w.git(["add", "bypass.txt"])
+    await w.git(["commit", "--quiet", "-m", "bypass.txt around the queue"])
     await w.git(["push", "--quiet", "origin", "main"])
-    const hand = (await w.git(["rev-parse", "HEAD"])).trim()
+    const bypass = (await w.git(["rev-parse", "HEAD"])).trim()
 
     const entries = (await readQueue(w.git, "origin", "main")).changes
-    const bypasses = await bypassCommits(w.git, "main", hand, entries)
+    const bypasses = await bypassCommits(w.git, "main", bypass, entries)
     expect(bypasses.map((commit) => [commit.commit, commit.subject, commit.gitlinks, commit.why])).toEqual([
-      [hand, "hand.txt around the queue", [], "it is one commit, not a merge of a change"],
+      [bypass, "bypass.txt around the queue", [], "it is one commit, not a merge of a change"],
     ])
     const rows = list(entries, { bypasses })
     expect(rows.map((row) => [row.state, row.branch, row.head, row.position, row.reason])).toEqual([
       ["queued", "task/one", rows[0]?.head, 1, undefined],
-      ["bypass", "main", hand, undefined, `main moved around the queue at ${hand.slice(0, 12)} (hand.txt around the queue)`],
+      ["bypass", "main", bypass, undefined, `main moved around the queue at ${bypass.slice(0, 12)} (bypass.txt around the queue)`],
     ])
     // Windowed like every ended row: an old bypass is not this week's news.
     expect(list(entries, { bypasses, sinceMs: 0, now: new Date(Date.now() + 60_000) }).map((row) => row.state)).toEqual([

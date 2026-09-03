@@ -34,7 +34,7 @@ export type Row = Readonly<{
   reason?: string
   /** When the change was opened, from its first event's `Opened:`. */
   since?: Date
-  /** When the change's last event was written: an ended change is as recent as its ending. A hand commit is as recent as its commit. */
+  /** When the change's last event was written: an ended change is as recent as its ending. A bypass is as recent as its commit. */
   at?: Date
   /** The merge commit on the target, full sha, from the merged event's `Merge:` (carried by the sent event too); absent until merged. */
   merge?: string

@@ -279,7 +279,7 @@ export function endedKind(tip: Event): EventKind {
  * block GIT read out of it; undefined when the commit is not one.
  *
  * The trailers are git's own reading, never a second parser of the same
- * bytes: a hand-rolled `^Key: value$` scan called every prose line that looks
+ * bytes: a `^Key: value$` scan written here called every prose line that looks
  * like a trailer one — `Note: fix` in the middle of a body became a `Note`
  * trailer and stood in the derived state — while git knows a trailer block is
  * the LAST paragraph and folds a wrapped value back into one line.

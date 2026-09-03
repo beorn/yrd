@@ -14,7 +14,7 @@
  * fresh worktree, after materialization and before any check, so a check never
  * carries the provisioning of the tree it judges. Every caller that judges
  * anything goes through it, the queue run and `yrd check` alike, or a check by
- * hand would run in a tree the queue never builds.
+ * a seat would run in a tree the queue never builds.
  *
  * The plumbing's own narration (which submodule, borrowed or fetched, how
  * long) is trace-level: a debug log reads as the queue's decisions, not as a

@@ -13,7 +13,7 @@
  *   this head (`replaced`), or the branch is gone (`deleted`).
  *
  * **Ancestry wins over any event.** A change whose head is on the target reads
- * merged even when no merged event was ever written — a hand merge in the garage
+ * merged even when no merged event was ever written — a bypass in the garage
  * still shows as merged, and a queue run never re-checks content the target
  * already carries. Measured 2026-09-02: a run merged a head under one branch
  * name, then checked a second name at the identical head against the main it

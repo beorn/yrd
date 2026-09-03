@@ -2,11 +2,11 @@
  * @failure  The service (`yrd queue up`) reads the target's declaration once,
  *           at start, and runs every later round on that reading: an edit at
  *           the target — a check added, a key mistyped, the switch removed —
- *           takes effect only after a hand restart, and a correct edit looks
+ *           takes effect only after a restart, and a correct edit looks
  *           like a wrong one until then. And when the change it merges is the
  *           one that moves its own pin, it keeps running the old code against
  *           a target that pins the new: the relaunch onto the new pin is a
- *           person's hand again (plan § Commands: the service's three exits;
+ *           person's job again (plan § Commands: the service's three exits;
  *           § Milestones M7).
  * @level    l2 (a real remote and a clone under a temporary root;
  *           `coreQueueCommand` driven directly, no process boundary)
@@ -319,7 +319,7 @@ describe("yrd queue list, the table", () => {
     const w = await world()
     // The queue's history starts at its first event, so there is one change
     // before the bypass: a queue that has judged nothing has no history
-    // and reports nothing (by-hand.ts).
+    // and reports nothing (bypass.ts).
     await w.git(["checkout", "--quiet", "-b", "task/first", "main"])
     writeFileSync(join(w.work, "first.txt"), "first\n")
     await w.git(["add", "first.txt"])
@@ -327,23 +327,23 @@ describe("yrd queue list, the table", () => {
     await w.git(["checkout", "--quiet", "main"])
     await submit(w.git, "origin", { branch: "task/first", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
     // The target moves around the queue: one commit after that, pushed.
-    writeFileSync(join(w.work, "hand.txt"), "hand\n")
-    await w.git(["add", "hand.txt"])
-    await w.git(["commit", "--quiet", "-m", "hand.txt around the queue"])
+    writeFileSync(join(w.work, "bypass.txt"), "bypass\n")
+    await w.git(["add", "bypass.txt"])
+    await w.git(["commit", "--quiet", "-m", "bypass.txt around the queue"])
     await w.git(["push", "--quiet", "origin", "main"])
-    const hand = (await w.git(["rev-parse", "HEAD"])).trim()
-    const sentence = `main moved around the queue at ${hand.slice(0, 12)} (hand.txt around the queue)`
+    const bypass = (await w.git(["rev-parse", "HEAD"])).trim()
+    const sentence = `main moved around the queue at ${bypass.slice(0, 12)} (bypass.txt around the queue)`
 
     const asJson = capture(w.work)
     expect(await coreQueueCommand(w.work, asJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const listed = records(asJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
     expect(listed.changes).toMatchObject([
       { branch: "task/first", state: "queued" },
-      { branch: "main", head: hand, reason: sentence, state: "bypass" },
+      { branch: "main", head: bypass, reason: sentence, state: "bypass" },
     ])
 
     const asText = capture(w.work)
     expect(await coreQueueCommand(w.work, asText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    expect(asText.stdout()).toContain(`   bypass  main ${hand.slice(0, 12)} ${sentence}\n`)
+    expect(asText.stdout()).toContain(`   bypass  main ${bypass.slice(0, 12)} ${sentence}\n`)
   })
 })

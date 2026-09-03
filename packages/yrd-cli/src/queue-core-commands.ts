@@ -180,8 +180,8 @@ export async function coreQueueCommand(
       refuseTarget(branch, config.target.branch)
       // A dry run says what it would open and touches nothing: no push, no
       // event, no ref anywhere. The wrapper used to take `--dry-run` on its own
-      // surface and hand the core an ordinary submit, so a dry run opened a
-      // real change (task/owner-field-item13@22b2741a, two opened events). The
+      // surface and pass the core an ordinary submit, so a dry run opened a
+      // real change: one submit, two opened events, 2026-09-03. The
       // flag belongs to the command that pushes, or to no command at all.
       if (request.dryRun === true) {
         const head = (await git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim()
@@ -402,7 +402,7 @@ async function targetAt(git: Git, config: QueueConfig): Promise<string> {
  * very commit this yrd's code runs from, found once at start. Off — said once,
  * at info — when this yrd runs from no git checkout, or when the target pins
  * no gitlink at its commit; then no round can see the pin move, and the
- * relaunch onto a new pin is a person's hand again.
+ * relaunch onto a new pin is a person's again.
  */
 async function pinOf(git: Git, targetRef: string, log: ConditionalLogger | undefined): Promise<Readonly<{ path: string; sha: string }> | undefined> {
   let running: string

@@ -238,7 +238,7 @@ export const DEFAULT_POST_KILL_REAP_GRACE_MS = 10_000
  *
  * That is the 2026-08-18 specimen: `bun tools/manifest-co-change.ts` at 99.5%
  * of a core for 63 minutes under an `sh -c` wrapper owned by PPID 1, found by
- * `/host-health` rather than by the queue, and needing a hand SIGTERM.
+ * `/host-health` rather than by the queue, and needing a SIGTERM sent by hand.
  *
  * This is the SAME reaper, not a second one — the group kill `signalTree`
  * already performs — moved onto the one edge that outlives a timer.

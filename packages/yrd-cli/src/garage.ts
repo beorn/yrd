@@ -2,7 +2,7 @@
  * The garage, as a declaration in git.
  *
  * A service in the garage has its automatic form stopped and one seat, the
- * mechanic, doing its work by hand (`CONTEXT.md` § Garage). For the merge
+ * mechanic, doing its work themselves (`CONTEXT.md` § Garage). For the merge
  * queue that event has to be readable by yrd itself, from the queue's own
  * repository, with nothing else running.
  *
