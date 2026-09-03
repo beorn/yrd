@@ -18,6 +18,7 @@ export {
   FACT_KINDS,
   appendFact,
   endedKind,
+  factCommit,
   factFrom,
   factMessage,
   readFact,

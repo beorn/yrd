@@ -413,106 +413,50 @@ describe("a queue run", () => {
     ).toEqual(expect.arrayContaining(["run", "change", "check", "result", "merge", "message"]))
   })
 
-  it("a stale local change ref cannot kill two consecutive merges after the remote ref moves", async () => {
+  it("a second writer that takes the change ref between the read and the push loses neither fact", async () => {
     const w = await world()
-    const firstHead = await submitCommit(w, "task/one", "one.txt")
-    const secondHead = await submitCommit(w, "task/two", "two.txt")
-    const rivalPath = join(w.workdir, "..", "rival")
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("task/one", head)
+    const rivalPath = join(w.workdir, "..", "fact-rival")
     await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
     const rival = gitIn(rivalPath)
     await rival(["config", "user.email", "rival@yrd.test"])
     await rival(["config", "user.name", "rival"])
-    let mergeNumber = 0
-    let afterMerge: Readonly<{ merged: string; number: number; ref: string; stale: string }> | undefined
-    let rewindBeforeAppend: Readonly<{ ref: string; remote: string; stale: string }> | undefined
+
     let concurrent: string | undefined
     const git: Git = async (args, input) => {
-      const refspec = args.find((arg) => arg.includes(":refs/yrd/changes/"))
-      const destination = refspec?.split(":").at(-1)
-      const mergesTarget = args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))
-      if (mergesTarget && refspec !== undefined && destination !== undefined) {
-        const source = refspec.slice(0, -destination.length - 1)
-        const intended = (await w.git(["rev-parse", `${source}^{commit}`])).trim()
-        const stale = (await w.git(["rev-parse", `${intended}^`])).trim()
-        mergeNumber += 1
-        // The first race lands between appendFact and the atomic target push:
-        // main must never land without the exact merged fact beside it.
-        if (mergeNumber === 1) await w.git(["update-ref", destination, stale, intended])
-        const result = await w.git(args, input)
-        afterMerge = { merged: intended, number: mergeNumber, ref: destination, stale }
-        return result
-      }
-      if (args[0] === "update-ref" && afterMerge?.number === 1 && args[1] === afterMerge.ref) {
-        const result = await w.git(args, input)
-        rewindBeforeAppend = { ref: afterMerge.ref, remote: afterMerge.merged, stale: afterMerge.stale }
-        afterMerge = undefined
-        return result
-      }
-      // An updater that began before the merge can finish after the helper's
-      // alignment and rewind the local ref before appendFact reads its parent.
-      if (
-        rewindBeforeAppend !== undefined &&
-        args[0] === "rev-parse" &&
-        args.at(-1) === `${rewindBeforeAppend.ref}^{commit}`
-      ) {
-        const race = rewindBeforeAppend
-        rewindBeforeAppend = undefined
-        await w.git(["update-ref", race.ref, race.stale, race.remote])
-      }
-      // A second clone advances the remote after this clone appended its sent
-      // fact. Git reports this production-shaped rejection as `fetch first`
-      // or `stale info`, not necessarily `non-fast-forward`.
-      if (!args.includes("--atomic") && afterMerge?.number === 2 && destination === afterMerge.ref) {
-        const race = afterMerge
-        afterMerge = undefined
-        await rival(["fetch", "--quiet", "origin", `${race.ref}:${race.ref}`])
+      // Between the tip this run read the change at and its leased push, a
+      // second queue appends a fact of its own and pushes it first. A real
+      // writer at the real remote, not a reading of this one's argv.
+      if (concurrent === undefined && args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))) {
+        await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
         concurrent = await appendFact(rival, {
-          branch: "task/two",
-          head: secondHead,
-          kind: "sent",
-          subject: "a concurrent queue recorded the delivered merge",
+          branch: "task/one",
+          head,
+          kind: "stuck",
+          subject: "another queue got there first",
           target: "main",
-          trailers: [
-            ["Message-Id", race.merged],
-            ["To", "@dev/2"],
-            ["State", "merged"],
-            ["For", race.merged],
-            ["Delivery", "sent"],
-          ],
+          trailers: [["Reason", "flake"]],
         })
-        await rival(["push", "--quiet", "origin", `${concurrent}:${race.ref}`])
+        await rival(["push", "--quiet", "origin", `${concurrent}:${ref}`])
       }
       return w.git(args, input)
     }
 
-    const first = await queueRun({ ...w.options({ exit: 0 }), git })
-    const second = await queueRun({ ...w.options({ exit: 0 }), git })
+    const outcome = await queueRun({ ...w.options({ exit: 0, on: ["submit"] }), git })
 
-    expect(first).toMatchObject({ exitCode: 0, merged: ["task/one"], stuck: [] })
-    expect(second).toMatchObject({ exitCode: 0, merged: ["task/two"], stuck: [] })
-    expect(records(second)).toContainEqual(
-      expect.objectContaining({
-        intended: expect.any(String),
-        reason: "change-ref-conflict",
-        relation: "diverged",
-        remote: concurrent,
-      }),
-    )
+    // The lease refused the first push, so the rival's fact stands; the same
+    // fact was written again onto it and pushed, so neither is lost and the
+    // run went on to merge.
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/one"])
     await fetchChanges(w)
-    expect((await readFacts(w.git, "task/one", firstHead)).map((fact) => fact.kind)).toEqual([
-      "opened",
-      "checked",
-      "merged",
-      "sent",
-    ])
-    expect((await readFacts(w.git, "task/two", secondHead)).map((fact) => fact.kind)).toEqual([
-      "opened",
-      "checked",
-      "merged",
-      "sent",
-      "sent",
-    ])
-    expect((await readFacts(w.git, "task/two", secondHead)).map((fact) => fact.sha)).toContain(concurrent)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "checked", "merged", "sent"])
+    expect(facts.map((fact) => fact.sha)).toContain(concurrent)
+    expect(records(outcome)).toContainEqual(
+      expect.objectContaining({ decision: "checked", reason: "change-ref-taken", remote: concurrent }),
+    )
   })
 
   it("fail: the target stands still, the change ends failed with the check and a remedy, and the submitter gets it back", async () => {
@@ -809,12 +753,7 @@ describe("a queue run", () => {
       ]),
     )
     expect(records(outcome)).toContainEqual(
-      expect.objectContaining({
-        intended: expect.any(String),
-        reason: "change-ref-conflict",
-        relation: "diverged",
-        remote: concurrent,
-      }),
+      expect.objectContaining({ decision: "merged", reason: "change-ref-taken", remote: concurrent }),
     )
     // Two messages: the submitter hears the change merged; the owner hears the
     // target moved by hand, once, with the merge commit as the message's id.

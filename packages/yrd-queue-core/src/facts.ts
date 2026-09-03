@@ -88,24 +88,41 @@ const CARRIED = ["Opened", "Submitter", "Work-Item"] as const
 const FACT_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 
 /**
- * Append one fact to a change, creating the change when this is its first.
- * Returns the new fact's sha, which is the id of what happened — a message
- * about an ended change carries it, so a resend after a crash is the same
- * message rather than a second one.
+ * The commit one fact IS, written onto `parent` — the fact the caller read this
+ * change at, or undefined for a change's first fact, which gets the genesis and
+ * the head instead. No ref moves: the object is the fact, and whoever pushes it
+ * under a lease for `parent` is deciding whether it becomes the change's tip.
+ *
+ * The sha it returns is the id of what happened — a message about an ended
+ * change carries it, so a resend after a crash is the same message rather than
+ * a second one.
  */
-export async function appendFact(git: Git, write: WriteFact, now: () => Date = () => new Date()): Promise<string> {
-  const ref = changeRef(write.branch, write.head)
-  const tip = await refAt(git, ref)
-  const parents = tip === undefined ? [await genesis(git), write.head] : [tip]
-  const carried = tip === undefined ? [["Opened", now().toISOString()] as const] : await carriedFrom(git, tip)
+export async function factCommit(git: Git, write: WriteFact, parent: string | undefined): Promise<string> {
+  const parents = parent === undefined ? [await genesis(git), write.head] : [parent]
+  const carried = parent === undefined ? [["Opened", new Date().toISOString()] as const] : await carriedFrom(git, parent)
   const named = new Set((write.trailers ?? []).map(([name]) => name))
   const message = factMessage({ ...write, trailers: [...carried.filter(([name]) => !named.has(name)), ...(write.trailers ?? [])] })
   const args = ["commit-tree", EMPTY_TREE]
-  for (const parent of parents) args.push("-p", parent)
-  const sha = (await git([...args, "-m", message])).trim()
-  // The expected old value makes this a compare-and-swap: a second writer that
-  // read the same tip fails here instead of silently overwriting the first.
-  // Git spells "the ref must not exist yet" as the zero sha.
+  for (const on of parents) args.push("-p", on)
+  return (await git([...args, "-m", message])).trim()
+}
+
+/**
+ * Append one fact to a change's LOCAL ref, creating the change when this is its
+ * first: read the tip, write the commit onto it, move the ref under a
+ * compare-and-swap, so a second writer that read the same tip fails here
+ * instead of silently overwriting the first. Git spells "the ref must not exist
+ * yet" as the zero sha.
+ *
+ * `submit` writes this way, because the local ref is what its atomic push then
+ * carries to the remote. A queue run does not: the remote's tip is its
+ * authority and its own local ref is bookkeeping the next queue read
+ * overwrites, so it writes the object with `factCommit` and leases the push.
+ */
+export async function appendFact(git: Git, write: WriteFact): Promise<string> {
+  const ref = changeRef(write.branch, write.head)
+  const tip = await refAt(git, ref)
+  const sha = await factCommit(git, write, tip)
   await git(["update-ref", ref, sha, tip ?? ABSENT])
   return sha
 }

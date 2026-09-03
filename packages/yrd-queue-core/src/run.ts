@@ -42,7 +42,7 @@ import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
-import { appendFact, endedKind, readFact, trailer, type Fact, type Git, type WriteFact } from "./facts.ts"
+import { appendFact, endedKind, factCommit, readFact, trailer, type Fact, type Git, type WriteFact } from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
@@ -400,7 +400,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     if (failing.length > 0) {
       return await endFailing(run, entry, results, failing, worktree.path, worktree.tree, "submit")
     }
-    const checkedFact = await appendFact(run.git, {
+    await writeFact(run, {
       branch,
       head,
       kind: "checked",
@@ -408,7 +408,6 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
       target: run.options.target,
       trailers: [["Config", run.options.configBlob], ["Base", run.targetSha], ...checkTrailers(results)],
     })
-    await pushChange(run, branch, head, checkedFact)
     return "checked"
   } finally {
     await worktree.remove()
@@ -698,7 +697,7 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
   if (endedAs === "failed" || endedAs === "merged") return
   const { branch } = entry
   const head = entry.change.head
-  const retiredFact = await appendFact(run.git, {
+  const retiredFact = await writeFact(run, {
     branch,
     head,
     kind: "failed",
@@ -709,7 +708,7 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
     target: run.options.target,
     trailers: [["Reason", reason]],
   })
-  await pushChange(run, branch, head, retiredFact)
+  if (retiredFact === undefined) return
   run.log.write({ branch, decision: "failed", head, kind: "change", reason })
 }
 
@@ -751,7 +750,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
     .filter((sha) => sha !== "")
   const merge = landing?.[0] ?? head
   const base = landing?.[1] ?? head
-  const mergedFact = await appendAfterLanded(run, {
+  const mergedFact = await writeFact(run, {
     branch,
     head,
     kind: "merged",
@@ -983,7 +982,7 @@ async function end(
     ...(kind === "failed" ? [["Fault", "submitter"] as const] : []),
     ...(ended.remedy === undefined ? [] : [["Remedy", ended.remedy] as const]),
   ]
-  const fact = await appendFact(run.git, {
+  const fact = await writeFact(run, {
     branch: entry.branch,
     head: entry.change.head,
     kind,
@@ -991,7 +990,6 @@ async function end(
     target: run.options.target,
     trailers,
   })
-  await pushChange(run, entry.branch, entry.change.head, fact)
   run.log.write({
     branch: entry.branch,
     decision: kind,
@@ -999,13 +997,17 @@ async function end(
     kind: "change",
     reason: ended.subject,
   })
-  await send(
-    run,
-    entry,
-    fact,
-    kind,
-    messageFor(kind, { branch: entry.branch, head: entry.change.head, remedy: ended.remedy, subject: ended.subject }),
-  )
+  // No fact, no message: the message's id IS that fact's sha, and the next
+  // run's reading of the remote is what repairs the ending (24096).
+  if (fact !== undefined) {
+    await send(
+      run,
+      entry,
+      fact,
+      kind,
+      messageFor(kind, { branch: entry.branch, head: entry.change.head, remedy: ended.remedy, subject: ended.subject }),
+    )
+  }
   return kind
 }
 
@@ -1064,16 +1066,18 @@ async function send(
       ...ended.trailers.filter(([name]) => RESULT_TRAILERS.has(name)),
     ],
   }
-  if (kind === "merged") await appendAfterLanded(run, sentWrite)
-  else {
-    const sentFact = await appendFact(run.git, sentWrite)
-    await pushChange(run, entry.branch, entry.change.head, sentFact)
-  }
+  const sentFact = await writeFact(run, sentWrite)
+  // `delivered` is the whole truth about this message or it is worth nothing:
+  // a message the notifier took whose sent fact never landed WILL be sent
+  // again by the next run, so it is not delivered, and the record says which
+  // half failed rather than claiming the id is settled.
+  const unrecorded = sentFact === undefined ? `the sent fact for ${endedFact.slice(0, 12)} was not written; the next run sends it again` : undefined
+  const trouble = [failure, unrecorded].filter((why): why is string => why !== undefined).join("; ")
   run.log.write({
     about: entry.branch,
     branch: entry.branch,
-    delivered: delivery !== "failed",
-    ...(failure === undefined ? {} : { error: failure }),
+    delivered: delivery !== "failed" && sentFact !== undefined,
+    ...(trouble === "" ? {} : { error: trouble }),
     head: entry.change.head,
     id: endedFact,
     kind: "message",
@@ -1123,85 +1127,58 @@ function checkTrailers(results: readonly CheckResult[]): readonly (readonly [str
   )
 }
 
-async function pushChange(run: Run, branch: string, head: string, intended: string): Promise<void> {
-  const ref = changeRef(branch, head)
-  // Push the fact object we just wrote, not the mutable local ref name. The
-  // shared-main updater can finish an older fetch after the remote accepts a
-  // merge and rewind the local change ref between append and push.
-  await run.git(["push", "--quiet", run.options.remote, `${intended}:${ref}`])
-}
-
-type ChangeRelation = "same" | "remote-ancestor" | "intended-ancestor" | "diverged"
-
 /**
- * Append bookkeeping after the target has landed without letting a concurrent
- * change-ref fetch or writer turn the successful merge into an exit 2. Each
- * attempt starts at an observed remote tip, pushes the immutable fact object
- * under a lease for that tip, and retries atop the winner of a genuine race.
+ * The one writer of a fact: the commit object appended onto the tip the run
+ * read the change at, pushed under a lease for that same tip.
+ *
+ * There is nothing to align and no local ref to lose. The remote is the store,
+ * `--force-with-lease` is what proves nobody else moved the ref between the
+ * reading and the push, and the object being immutable is what makes a retry
+ * cheap: on a refusal the run takes the winner's tip, writes the same fact onto
+ * it, and pushes once more. A second refusal is written down and left for the
+ * next run's catch-up to repair, because a queue that spins on a contended ref
+ * is a queue that is not judging anything (24096).
  */
-async function appendAfterLanded(run: Run, write: WriteFact): Promise<string | undefined> {
+async function writeFact(run: Run, write: WriteFact): Promise<string | undefined> {
   const ref = changeRef(write.branch, write.head)
-  let last: Readonly<{ error?: string; intended: string; relation: string; remote: string }> | undefined
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const remote = await fetchRemoteChange(run, ref)
-    await run.git(["update-ref", ref, remote])
-
-    let intended: string
+  let onto = await refAt(run.git, ref)
+  if (onto === undefined) {
+    throw new Error(`${ref} is not here; the queue read fetched every change ref the remote listed`)
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const fact = await factCommit(run.git, write, onto)
     try {
-      intended = await appendFact(run.git, write)
+      await run.git(["push", "--quiet", `--force-with-lease=${ref}:${onto}`, run.options.remote, `${fact}:${ref}`])
+      // The local ref follows what the remote has just accepted, so a second
+      // fact written for this change in the same run — an ending and then its
+      // sent fact — starts from the tip that is really there.
+      await run.git(["update-ref", ref, fact])
+      return fact
     } catch (error) {
-      // appendFact's compare-and-swap lost to a local fetch. A different
-      // failure with the expected base still present is not a ref race.
-      if ((await refAt(run.git, ref)) === remote) throw error
-      last = {
-        error: error instanceof Error ? error.message : String(error),
-        intended: "not-written",
-        relation: "local-ref-moved",
-        remote,
-      }
-      continue
-    }
-
-    const prepared = await changeRelation(run, remote, intended)
-    if (prepared !== "remote-ancestor") {
-      last = { intended, relation: prepared, remote }
-      recordChangeConflict(run, write, remote, intended, prepared)
-      continue
-    }
-
-    try {
-      await run.git([
-        "push",
-        "--quiet",
-        `--force-with-lease=${ref}:${remote}`,
-        run.options.remote,
-        `${intended}:${ref}`,
-      ])
-      return intended
-    } catch (error) {
-      // Git's rejection text varies (`stale info`, `fetch first`, and
-      // `non-fast-forward`). The remote state, not that prose, decides whether
-      // this was a ref race. Transport/auth failures leave the lease base in
-      // place and remain loud.
+      // Git's rejection text varies (`stale info`, `fetch first`,
+      // `non-fast-forward`), so the remote's own tip decides whether this was a
+      // race. A transport or auth failure leaves the lease base standing and
+      // stays loud.
       const now = await fetchRemoteChange(run, ref)
-      if (now === remote) throw error
-      const relation = await changeRelation(run, now, intended)
-      if (relation === "same" || relation === "intended-ancestor") return intended
-      last = { intended, relation, remote: now }
-      recordChangeConflict(run, write, now, intended, relation)
+      if (now === onto) throw error
+      onto = now
+      run.log.write({
+        branch: write.branch,
+        decision: write.kind,
+        head: write.head,
+        kind: "change",
+        reason: "change-ref-taken",
+        remote: now,
+      })
     }
   }
   run.log.write({
     branch: write.branch,
-    decision: "merged",
+    decision: write.kind,
     head: write.head,
-    attempts: 3,
-    intended: last?.intended ?? "unknown",
     kind: "change",
-    reason: "change-ref-retry-exhausted",
-    relation: last?.relation ?? "unknown",
-    remote: last?.remote ?? "unknown",
-    ...(last?.error === undefined ? {} : { error: last.error }),
+    reason: "change-ref-contended",
+    remote: onto,
   })
   return undefined
 }
@@ -1217,32 +1194,6 @@ async function fetchRemoteChange(run: Run, ref: string): Promise<string> {
   if (remote === undefined) throw new Error(`${ref}: fetch completed without a change tip`)
   await run.git(["update-ref", "-d", fetchedRef, remote])
   return remote
-}
-
-async function changeRelation(run: Run, remote: string, intended: string): Promise<ChangeRelation> {
-  if (remote === intended) return "same"
-  if (await isAncestor(run.git, remote, intended)) return "remote-ancestor"
-  if (await isAncestor(run.git, intended, remote)) return "intended-ancestor"
-  return "diverged"
-}
-
-function recordChangeConflict(
-  run: Run,
-  write: WriteFact,
-  remote: string,
-  intended: string,
-  relation: ChangeRelation,
-): void {
-  run.log.write({
-    branch: write.branch,
-    decision: "merged",
-    head: write.head,
-    intended,
-    kind: "change",
-    reason: "change-ref-conflict",
-    relation,
-    remote,
-  })
 }
 
 /** Where the target and one branch stand at the remote right now. */
