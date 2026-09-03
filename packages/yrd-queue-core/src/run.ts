@@ -749,6 +749,12 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
 async function resend(run: Run, entry: QueueEntry): Promise<void> {
   const tip = entry.change.facts.at(-1)
   if (tip === undefined) return
+  // The head is on the target and this tip does not say merged: the catch-up
+  // just above owns this change — it wrote the merged fact and sent its message
+  // this run, so this entry's tip is a reading from before that. Sending from
+  // it would put `sent State: failed` on top of a merged change and tell its
+  // submitter to fix what has already landed (ruling A2).
+  if (entry.change.headOnTarget && endedKind(tip) !== "merged") return
   const undelivered = tip.kind === "sent" && trailerOf(tip, "Delivery") === "failed"
   const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged"
   if (!undelivered && !unsent) return

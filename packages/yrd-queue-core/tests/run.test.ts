@@ -704,6 +704,34 @@ describe("a queue run", () => {
     expect(messages(w).filter((message) => message.kind === "yrd-broken")).toHaveLength(1)
   })
 
+  it("a change that ended failed and was then merged by hand gets one message, the merged one, and its tip says merged", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    // It failed its check, and the notifier was down, so the send-back is owed:
+    // exactly what makes the next run try to deliver it again (ruling D9).
+    const down = await queueRun({ ...w.options({ exit: 1 }), notify: "sh -c 'exit 3'" })
+    expect(down.exitCode).toBe(1)
+    expect(messages(w)).toEqual([])
+
+    // The garage landed it by hand all the same.
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "landed by hand", head])
+    await w.git(["push", "--quiet", "origin", "main"])
+
+    const outcome = await queueRun(w.options({ exit: 0 }))
+
+    expect(outcome.exitCode).toBe(0)
+    await fetchChanges(w)
+    // The catch-up merged fact and its message, and no second ending on top of it.
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "failed", "sent", "merged", "sent"])
+    expect(facts.at(-1)?.trailers).toEqual(expect.arrayContaining([["State", "merged"]]))
+    expect(messages(w).filter((message) => message.branch === "task/one").map((message) => message.kind)).toEqual([
+      "landed",
+    ])
+  })
+
   it("the target is not a change: a ref named after it is judged by nothing and messages nobody (2026-09-03 main@0a9db9daf7eb)", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
