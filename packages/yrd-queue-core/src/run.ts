@@ -158,11 +158,8 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // were read from. Each change CONSIDERED writes its own row with its decision
   // when the run has made one; a change that ended in an earlier run is history,
   // and this run claims nothing about it.
-  // `built` is the Run records this queue run minted: none, ever, in this core;
-  // the field stays so a reader of either core's log asks one question.
   log.write({
     base: targetSha,
-    built: [],
     checks: options.checks.map((check) => check.name),
     config: options.configBlob,
     ...(options.garage === undefined ? {} : { garage: options.garage }),

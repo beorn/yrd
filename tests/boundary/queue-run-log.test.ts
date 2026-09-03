@@ -464,13 +464,11 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
   })
 
   /**
-   * The queue run names its log after ITSELF, and a Run it built is a field.
+   * The queue run names its log after ITSELF.
    *
-   * Naming the file after the Run is what made two queue runs share one file:
-   * the name was a fact about a record the invocation might never make, so
-   * every queue run that built no Run reused the last name minted. The Run id
-   * is still worth reading — it is what the incumbent's other instruments
-   * print — so it moves onto the run row rather than being dropped.
+   * Naming the file after a Run it built is what made two queue runs share one
+   * file: the name was a fact about a record the invocation might never make,
+   * so every queue run that built none reused the last name minted.
    */
   it("names its log after the queue run, never after a Run it built", async () => {
     const { repo } = await boundaryRepository({ exit: 0, notify: true })
@@ -479,10 +477,6 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     const run = await queueRunOnce(repo)
     const { path, records } = await logOfQueueRun(run)
 
-    const built = theOne(records, "run").built
-    // Nothing is minted per merge, and the record says so with an empty list
-    // rather than a missing field.
-    expect(built, run.report).toEqual([])
     // The file is named by the queue run's own id, and by nothing else.
     expect(basename(path), run.report).toBe(`${String(records[0]?.run)}.jsonl`)
   })
