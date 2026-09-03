@@ -238,14 +238,14 @@ describe("the built-in gitlink check", () => {
     const outcome = await queueRun(w.options())
 
     expect(outcome.exitCode).toBe(0)
-    expect(outcome.outside).toEqual([hand])
+    expect(outcome.byHand).toEqual([hand])
     const log = readFileSync(outcome.log, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
-    expect(log.filter((record) => record.kind === "outside")).toMatchObject([{ commit: hand, gitlinks: ["component"] }])
+    expect(log.filter((record) => record.kind === "by-hand")).toMatchObject([{ commit: hand, gitlinks: ["component"] }])
     const told = log.filter((record) => record.kind === "message")
-    expect(told).toMatchObject([{ id: hand, says: "outside", to: "@cto" }])
+    expect(told).toMatchObject([{ id: hand, says: "by-hand", to: "@cto" }])
     expect(told[0]?.text).toContain(`main moved by hand at ${hand.slice(0, 12)}`)
     expect(told[0]?.text).toContain("it moved the pin at component")
     // The report reads the commit; it never judges the pin, so no component is asked.

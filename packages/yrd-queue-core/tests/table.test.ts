@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, list, outsideCommits, readConfig, readHints, readQueue, show, submit } from "../src/index.ts"
+import { gitIn, list, byHandCommits, readConfig, readHints, readQueue, show, submit } from "../src/index.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -110,17 +110,17 @@ describe("the table is the queue read rendered", () => {
     const hand = (await w.git(["rev-parse", "HEAD"])).trim()
 
     const entries = await readQueue(w.git, "origin", "main")
-    const outside = await outsideCommits(w.git, "main", hand, entries)
-    expect(outside.map((commit) => [commit.commit, commit.subject, commit.gitlinks, commit.why])).toEqual([
+    const byHand = await byHandCommits(w.git, "main", hand, entries)
+    expect(byHand.map((commit) => [commit.commit, commit.subject, commit.gitlinks, commit.why])).toEqual([
       [hand, "hand.txt by hand", [], "it is one commit, not a merge of a change"],
     ])
-    const rows = list(entries, { outside })
+    const rows = list(entries, { byHand })
     expect(rows.map((row) => [row.state, row.branch, row.head, row.position, row.reason])).toEqual([
       ["queued", "task/one", rows[0]?.head, 1, undefined],
-      ["outside", "main", hand, undefined, `main moved by hand at ${hand.slice(0, 12)} (hand.txt by hand)`],
+      ["by hand", "main", hand, undefined, `main moved by hand at ${hand.slice(0, 12)} (hand.txt by hand)`],
     ])
     // Windowed like every ended row: an old hand commit is not this week's news.
-    expect(list(entries, { outside, sinceMs: 0, now: new Date(Date.now() + 60_000) }).map((row) => row.state)).toEqual([
+    expect(list(entries, { byHand, sinceMs: 0, now: new Date(Date.now() + 60_000) }).map((row) => row.state)).toEqual([
       "queued",
     ])
   })

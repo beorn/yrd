@@ -181,7 +181,7 @@ describe("a queue run", () => {
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/one"])
-    expect(outcome.outside).toEqual([])
+    expect(outcome.byHand).toEqual([])
     const after = await remoteTarget(w)
     expect(after).not.toBe(w.target)
     await w.git(["fetch", "--quiet", "origin", "main"])
@@ -327,7 +327,7 @@ describe("a queue run", () => {
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual([])
-    expect(outcome.outside).toEqual([landing])
+    expect(outcome.byHand).toEqual([landing])
     expect(await remoteTarget(w)).toBe(landing)
     await fetchChanges(w)
     const facts = await readFacts(w.git, "task/one", head)
@@ -352,14 +352,14 @@ describe("a queue run", () => {
     expect(broken).toMatchObject([{ attempt_id: landing, id: landing, pr: "main", recipient: "@cto", sha: landing }])
     expect(broken[0]?.text).toContain(`main moved by hand at ${landing.slice(0, 12)} (landed by hand)`)
     expect(broken[0]?.text).toContain("it carries no Change: trailer")
-    expect(records(outcome).filter((record) => record.kind === "outside")).toMatchObject([
+    expect(records(outcome).filter((record) => record.kind === "by-hand")).toMatchObject([
       { commit: landing, gitlinks: [], parents: [w.target, head], subject: "landed by hand" },
     ])
 
     // The next run says nothing new: the catch-up fact accounts for the commit.
     const again = await queueRun(w.options({ exit: 0 }))
-    expect(again.outside).toEqual([])
-    expect(records(again).filter((record) => record.kind === "outside")).toEqual([])
+    expect(again.byHand).toEqual([])
+    expect(records(again).filter((record) => record.kind === "by-hand")).toEqual([])
     expect(messages(w).filter((message) => message.kind === "yrd-broken")).toHaveLength(1)
   })
 
@@ -411,9 +411,9 @@ describe("a queue run", () => {
     const first = await queueRun(w.options({ exit: 0 }))
 
     expect(first.exitCode).toBe(0)
-    expect(first.outside).toEqual([hand])
+    expect(first.byHand).toEqual([hand])
     expect(first.merged).toEqual(["task/one"])
-    expect(records(first).filter((record) => record.kind === "outside")).toMatchObject([
+    expect(records(first).filter((record) => record.kind === "by-hand")).toMatchObject([
       { commit: hand, gitlinks: [], parents: [w.target], subject: "hand.txt by hand" },
     ])
     const broken = messages(w).filter((message) => message.kind === "yrd-broken")
@@ -432,8 +432,8 @@ describe("a queue run", () => {
 
     // The next run says nothing new: the queue's own merge stands on top of it.
     const second = await queueRun(w.options({ exit: 0 }))
-    expect(second.outside).toEqual([])
-    expect(records(second).filter((record) => record.kind === "outside")).toEqual([])
+    expect(second.byHand).toEqual([])
+    expect(records(second).filter((record) => record.kind === "by-hand")).toEqual([])
     expect(messages(w).filter((message) => message.kind === "yrd-broken")).toHaveLength(1)
   })
 
@@ -443,8 +443,8 @@ describe("a queue run", () => {
     const outcome = await queueRun(w.options({ exit: 0 }))
 
     expect(outcome.exitCode).toBe(0)
-    expect(outcome.outside).toEqual([])
-    expect(records(outcome).filter((record) => record.kind === "outside")).toEqual([])
+    expect(outcome.byHand).toEqual([])
+    expect(records(outcome).filter((record) => record.kind === "by-hand")).toEqual([])
     expect(messages(w)).toEqual([])
   })
 

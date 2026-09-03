@@ -152,7 +152,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
 
   it("checked — a change whose checks passed but which has not landed is checked [today: green]", async () => {
     // Two changes and one queue run: the first in line merges, the second is
-    // left checked. There is no other way from outside to reach the state
+    // left checked. There is no other way, at the boundary, to reach the state
     // between "checks passed" and "landed".
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")

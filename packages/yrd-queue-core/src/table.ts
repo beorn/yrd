@@ -10,17 +10,17 @@
  */
 
 import { endedKind, trailer, trailers, type Fact } from "./facts.ts"
-import { handMovedLine, type OutsideCommit } from "./outside.ts"
+import { handMovedLine, type ByHandCommit } from "./by-hand.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
 import { inLine, type ChangeState } from "./state.ts"
 
 export type Row = Readonly<{
-  /** The change's branch; for an `outside` row, the target the hand commit moved. */
+  /** The change's branch; for a `by hand` row, the target the hand commit moved. */
   branch: string
-  /** The change's head; for an `outside` row, the hand commit itself. */
+  /** The change's head; for a `by hand` row, the hand commit itself. */
   head: string
-  /** A change's state, or `outside` for a commit on the target the queue did not put there (E5). */
-  state: ChangeState | "outside"
+  /** A change's state, or `by hand` for a commit on the target the queue did not put there (E5). */
+  state: ChangeState | "by hand"
   /** 1-based place in line for queued, checked and stuck rows; absent otherwise. */
   position?: number
   /** The last result: pass, fail or stuck, with the check that decided it. */
@@ -29,7 +29,7 @@ export type Row = Readonly<{
   log?: string
   workItem?: string
   submitter?: string
-  /** Why: `replaced`, `deleted`, a check's code, or for an `outside` row the one line about the hand commit. */
+  /** Why: `replaced`, `deleted`, a check's code, or for a `by hand` row the one line about the hand commit. */
   reason?: string
   /** When the change was opened, from its first fact's `Opened:`. */
   since?: Date
@@ -41,8 +41,8 @@ export type ListOptions = Readonly<{
   now?: Date
   /** How far back the ended rows reach; the plan's default is seven days. */
   sinceMs?: number
-  /** The commits on the target the queue did not put there, each its own row (E5; `outsideCommits` reads them). */
-  outside?: readonly OutsideCommit[]
+  /** The commits on the target the queue did not put there, each its own row (E5; `byHandCommits` reads them). */
+  byHand?: readonly ByHandCommit[]
 }>
 
 /**
@@ -64,7 +64,7 @@ export function list(entries: QueueRead, options: ListOptions = {}): readonly Ro
   // opened long ago and merged today is today's news.
   const endedRows = [
     ...rows.filter((candidate) => candidate.position === undefined),
-    ...(options.outside ?? []).map(outsideRow),
+    ...(options.byHand ?? []).map(byHandRow),
   ]
     .filter((candidate) => candidate.at === undefined || now.getTime() - candidate.at.getTime() <= sinceMs)
     .sort((left, right) => (right.at?.getTime() ?? 0) - (left.at?.getTime() ?? 0))
@@ -105,8 +105,8 @@ function row(entry: QueueEntry, position?: number): Row {
 }
 
 /** A commit the target gained by hand: `<target> moved by hand at <sha12> (<subject>)`, and the pins it moved. */
-function outsideRow(commit: OutsideCommit): Row {
-  return { at: commit.at, branch: commit.target, head: commit.commit, reason: handMovedLine(commit), state: "outside" }
+function byHandRow(commit: ByHandCommit): Row {
+  return { at: commit.at, branch: commit.target, head: commit.commit, reason: handMovedLine(commit), state: "by hand" }
 }
 
 function resultOf(kind: Fact["kind"], lastCheck: string | undefined): string {

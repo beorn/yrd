@@ -20,7 +20,7 @@
  * Only the queue pushes the target, by rule, and every run proves it before
  * it judges anything: each commit on the target's first-parent line since the
  * cutover that the queue did not put there is reported to the queue owner,
- * once, and the run goes on from the new base (E5; the reading is outside.ts).
+ * once, and the run goes on from the new base (E5; the reading is by-hand.ts).
  *
  * Exit 0 when nothing ended failed or stuck, 1 when a change ended failed,
  * 2 on stuck. A stuck change stays open and the run stops there: the queue
@@ -35,7 +35,7 @@ import { appendFact, endedKind, readFact, readFacts, type Fact, type Git } from 
 import { readConfig } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
-import { handMovedLine, outsideCommits } from "./outside.ts"
+import { byHandCommits, handMovedLine } from "./by-hand.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine } from "./state.ts"
@@ -92,7 +92,7 @@ export type QueueRunOutcome = Readonly<{
   failed: readonly string[]
   stuck: readonly string[]
   /** The commits on the target's first-parent line that the queue did not put there, reported this run (E5). */
-  outside: readonly string[]
+  byHand: readonly string[]
 }>
 
 /** Everything one run's steps share. */
@@ -153,7 +153,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // The target moved by hand? Read before any fact is written, so a hand merge
   // of a submitted head is reported before the catch-up below accounts for it
   // (E5). Nothing stops for it: the run judges every change on the base it read.
-  const outside = await reportOutside(run, entries)
+  const byHand = await reportByHand(run, entries)
 
   // Bookkeeping at the edges of the facts first, so every reader below reads
   // facts and never reconciles: a branch that is gone or moved off a head ends
@@ -174,7 +174,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     const outcome = await guarded(run, entry, () => judge(run, entry))
     if (outcome === "stuck") {
       stuck.push(entry.branch)
-      return finish(run, 2, { failed, merged, outside, stuck })
+      return finish(run, 2, { byHand, failed, merged, stuck })
     }
     if (outcome === "failed") failed.push(entry.branch)
   }
@@ -191,7 +191,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     else if (outcome === "merged") merged.push(checked.branch)
   }
 
-  return finish(run, stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0, { failed, merged, outside, stuck })
+  return finish(run, stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0, { byHand, failed, merged, stuck })
 }
 
 /** A checked change whose checked fact names a config blob the target no longer declares. */
@@ -218,18 +218,18 @@ function ordered(entries: QueueRead, ...states: readonly ("queued" | "checked" |
  * queue owner with the commit sha as its id, so a resend after a crash is
  * the same message (E5). No fact is written, because there is no change to
  * write one on; what the queue has already accounted for is read from git
- * (outside.ts), so a second run says nothing new once the queue has landed
+ * (by-hand.ts), so a second run says nothing new once the queue has landed
  * on top. The run never stops for it: the queue adapts already, judging every
  * change on the base it read.
  */
-async function reportOutside(run: Run, entries: QueueRead): Promise<readonly string[]> {
-  const found = await outsideCommits(run.git, run.options.target, run.targetSha, entries)
+async function reportByHand(run: Run, entries: QueueRead): Promise<readonly string[]> {
+  const found = await byHandCommits(run.git, run.options.target, run.targetSha, entries)
   const target = run.options.target
   for (const commit of found) {
     run.log.write({
       commit: commit.commit,
       gitlinks: commit.gitlinks,
-      kind: "outside",
+      kind: "by-hand",
       parents: commit.parents,
       subject: commit.subject,
       why: commit.why,
@@ -239,7 +239,7 @@ async function reportOutside(run: Run, entries: QueueRead): Promise<readonly str
       attempt_id: commit.commit,
       base: target,
       branch: target,
-      code: "outside",
+      code: "by-hand",
       command: text,
       head: commit.commit,
       id: commit.commit,
@@ -257,7 +257,7 @@ async function reportOutside(run: Run, entries: QueueRead): Promise<readonly str
       head: commit.commit,
       id: commit.commit,
       kind: "message",
-      says: "outside",
+      says: "by-hand",
       text,
       to: run.options.owner,
     })
@@ -857,7 +857,7 @@ function trailerOf(fact: Fact | undefined, name: string): string | undefined {
 async function finish(
   run: Run,
   exitCode: 0 | 1 | 2,
-  lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[]; outside: readonly string[] }>,
+  lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[]; byHand: readonly string[] }>,
 ): Promise<QueueRunOutcome> {
   // A push updates the remote-tracking ref it pushed to, so after a merge the
   // target as this run left it is right there; a run that merged nothing left

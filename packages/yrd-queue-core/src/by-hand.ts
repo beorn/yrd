@@ -35,7 +35,7 @@ import { gitlinkRows } from "./git.ts"
 import { changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 
-export type OutsideCommit = Readonly<{
+export type ByHandCommit = Readonly<{
   /** The branch it moved: the queue's target. */
   target: string
   commit: string
@@ -54,12 +54,12 @@ export type OutsideCommit = Readonly<{
  * the queue has not yet accounted for, oldest first. Loud when no commit on
  * that line touched `.yrd.yml`: a target with no declaration has no queue.
  */
-export async function outsideCommits(
+export async function byHandCommits(
   git: Git,
   target: string,
   targetSha: string,
   entries: QueueRead,
-): Promise<readonly OutsideCommit[]> {
+): Promise<readonly ByHandCommit[]> {
   const cutover = (await git(["log", "--first-parent", "-1", "--format=%H", targetSha, "--", ".yrd.yml"])).trim()
   if (cutover === "") {
     throw new Error(
@@ -83,7 +83,7 @@ export async function outsideCommits(
     "--format=%H%x00%P%x00%cI%x00%s%x00%(trailers:key=Change,valueonly)%x01",
     `${cutover}..${targetSha}`,
   ])
-  const found: OutsideCommit[] = []
+  const found: ByHandCommit[] = []
   for (const record of out.split("\x01")) {
     const [commit, parentList, at, subject, changes] = record.replace(/^\n/u, "").split("\x00")
     if (commit === undefined || commit === "" || parentList === undefined || at === undefined || subject === undefined)
@@ -126,7 +126,7 @@ function notTheQueues(
 }
 
 /** The one line a reader gets about a hand commit: the target, the commit, its subject, and the pins it moved. */
-export function handMovedLine(commit: OutsideCommit): string {
+export function handMovedLine(commit: ByHandCommit): string {
   const pins = commit.gitlinks.length === 0 ? "" : `; it moved the pin at ${commit.gitlinks.join(", ")}`
   return `${commit.target} moved by hand at ${commit.commit.slice(0, 12)} (${commit.subject})${pins}`
 }
