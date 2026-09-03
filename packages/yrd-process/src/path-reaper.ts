@@ -1,11 +1,11 @@
 /**
- * Path process ownership — inspect, reap, and certify every process still
- * holding an exclusive filesystem sandbox.
+ * Path process ownership — the census of every process still holding a path.
  *
- * Process groups are the fast settlement path, but a descendant can create a
- * new session and leave its parent's group. The Bay path remains the durable
- * ownership fact: cwd, executable, or an open file under the root keeps the
- * process in the Bay lifecycle even after reparenting.
+ * cwd, executable, process root, a mapped file or an open descriptor under the
+ * path all count as holding it, so a descendant that changed session is still
+ * attributed. The census reports its own COVERAGE beside its holders: a
+ * permission denial is reduced coverage, never an empty result, so "nothing
+ * holds this" and "we were not allowed to look" can never read the same.
  */
 
 import { readFile, readdir, readlink, realpath, stat } from "node:fs/promises"
@@ -42,14 +42,13 @@ export type UnreadableProcess = Readonly<{
   ppid?: number
   /**
    * Process state from the world-readable `/proc/N/stat`. `Z` (zombie) has
-   * already released its fd table and address space, so it can hold no path —
-   * see provablyEmptyGapReason.
+   * already released its fd table and address space, so it can hold no path.
    */
   state?: string
   /**
    * The proc entry was gone (ENOENT/ESRCH on `/proc/N/stat`) by the time its
    * identity was read: it exited between the source read that was denied and
-   * this one. An exited process holds no path — see provablyEmptyGapReason.
+   * this one. An exited process holds no path.
    */
   exited?: true
   /**
@@ -59,75 +58,6 @@ export type UnreadableProcess = Readonly<{
   startedAt?: string
   denied: readonly ("process" | "cwd" | "exe" | "root" | "maps" | "fd")[]
 }>
-
-/** Why a census gap provably holds nothing and so needs no operator waiver. */
-export type ProvablyEmptyGapReason = "zombie" | "exited"
-
-/**
- * The one classification of a census gap: the reason it provably holds nothing,
- * or undefined when only an operator can vouch for it.
- *
- * A zombie has already released its fd table and address space; `/proc/N/fd`
- * answers EACCES precisely BECAUSE there is no table left to read. Clearing
- * these automatically is what makes `--tolerate-unreadable` reachable on a busy
- * host: the long-lived dumpable-0 session procs are a stable set an operator can
- * name once, while transient zombies churn between one census and the next.
- * Measured 2026-09-01: naming the exact six pids of one refusal was answered by
- * a refusal naming a different set, with same-uid procs going 187 to 214.
- *
- * A process that exited between the denied source read and the identity read
- * is the same gap one step later: `/proc/N/fd` answered EACCES while it was
- * dying, then `/proc/N/stat` was gone. Measured 2026-09-01 on five consecutive
- * bay closes after zombies were cleared: one to three such pids per census,
- * never the same twice, each rendered as `pid N via fd` with no identity.
- */
-export function provablyEmptyGapReason(proc: UnreadableProcess): ProvablyEmptyGapReason | undefined {
-  if (proc.state === "Z") return "zombie"
-  if (proc.exited === true) return "exited"
-  return undefined
-}
-
-/**
- * One census gap a deletion certification tolerated, and why: `zombie` and
- * `exited` cleared themselves (provablyEmptyGapReason); `operator-flag` is a
- * live denial the caller named in `--tolerate-unreadable`. Identity is whatever
- * the world-readable stat gave — comm, ppid, start time — or nothing for a proc
- * that was gone before it could be read.
- */
-export type ToleratedCensusGap = Readonly<{
-  pid: number
-  comm?: string
-  ppid?: number
-  startedAt?: string
-  reason: ProvablyEmptyGapReason | "operator-flag"
-}>
-
-/**
- * What certifying a deletion decided: a failure when the path cannot be
- * deleted, else every gap it tolerated, so the caller can record them. A
- * refused certification tolerates nothing.
- */
-export type PathReapCertification = Readonly<{
-  failure?: string
-  tolerated: readonly ToleratedCensusGap[]
-}>
-
-/** `pid N (comm, ppid P, started T)` — as much identity as the stat read gave. */
-export function describeProcessIdentity(
-  proc: Readonly<{ pid: number; comm?: string; ppid?: number; startedAt?: string }>,
-): string {
-  const identity = [
-    ...(proc.comm === undefined ? [] : [proc.comm]),
-    ...(proc.ppid === undefined ? [] : [`ppid ${proc.ppid}`]),
-    ...(proc.startedAt === undefined ? [] : [`started ${proc.startedAt}`]),
-  ]
-  return identity.length === 0 ? `pid ${proc.pid}` : `pid ${proc.pid} (${identity.join(", ")})`
-}
-
-/** One tolerated gap as the close record prints it: identity, then why. */
-export function describeToleratedCensusGap(gap: ToleratedCensusGap): string {
-  return `${describeProcessIdentity(gap)} ${gap.reason === "operator-flag" ? "operator flag" : gap.reason}`
-}
 
 export type LinuxPathHolderCoverage = Readonly<{
   platform: "linux"
@@ -163,171 +93,6 @@ export type PathHolderCensus = Readonly<{
   coverage: PathHolderCoverage
 }>
 
-/** Test wiring may replace only the observation boundary; settlement remains one implementation. */
-export type PathHolderCensusReader = (path: string) => Promise<PathHolderCensus>
-
-export type PathReapResult = Readonly<{
-  targetedPids: readonly number[]
-  survivorPids: readonly number[]
-  /** Exact read-only holder evidence from the final post-signal census. */
-  survivorHolders?: readonly PathHolder[]
-  /** Coverage proof for the final post-signal census; deletion consumers must require completeness. */
-  survivorCoverage?: PathHolderCoverage
-  forcedKill: boolean
-  signalFailures: readonly string[]
-}>
-
-export async function reapOwnedPath(path: string, gracefulMs: number, killMs: number): Promise<PathReapResult> {
-  return reapOwnedPathWithCensus(path, gracefulMs, killMs, inspectPathHolderCensus)
-}
-
-/** @internal Required-dependency seam used by createProcess's test-only wiring. */
-export async function reapOwnedPathWithCensus(
-  path: string,
-  gracefulMs: number,
-  killMs: number,
-  inspect: PathHolderCensusReader,
-): Promise<PathReapResult> {
-  const root = await canonicalPath(path)
-  const protectedPids = await currentProcessAncestry()
-  const signalFailures: string[] = []
-  const targeted = new Set<number>()
-  const census = async () => inspect(root)
-  const killable = async (): Promise<number[]> =>
-    uniquePids((await census()).holders.map(({ pid }) => pid)).filter((pid) => pid > 1 && !protectedPids.has(pid))
-  const signal = (pids: readonly number[], value: "SIGTERM" | "SIGKILL"): void => {
-    for (const pid of pids) {
-      targeted.add(pid)
-      try {
-        process.kill(pid, value)
-      } catch (error) {
-        if (errorCode(error) !== "ESRCH") {
-          signalFailures.push(`pid ${pid} ${value} failed (${errorCode(error) ?? errorDetail(error)})`)
-        }
-      }
-    }
-  }
-
-  let live = await killable()
-  signal(live, "SIGTERM")
-  live = await waitForPathProcesses(killable, gracefulMs)
-  const forcedKill = live.length > 0
-  if (forcedKill) {
-    signal(live, "SIGKILL")
-    await waitForPathProcesses(killable, killMs)
-  }
-  // Re-census the complete ownership set. Protected caller/ancestor PIDs are
-  // deliberately never signalled, but they remain survivor evidence: closing a
-  // Bay from a shell inside that Bay must fail loudly instead of deleting the
-  // Bay beneath a still-live process.
-  const survivorCensus = await census()
-  const survivorPids = uniquePids(survivorCensus.holders.map(({ pid }) => pid))
-  return {
-    targetedPids: [...targeted].sort((a, b) => a - b),
-    survivorPids,
-    survivorHolders: survivorCensus.holders,
-    survivorCoverage: survivorCensus.coverage,
-    forcedKill,
-    signalFailures,
-  }
-}
-
-export function pathReapFailure(result: PathReapResult): string | undefined {
-  const parts: string[] = []
-  if (result.signalFailures.length > 0) parts.push(result.signalFailures.join("; "))
-  const holderFailure = pathHolderRefusal(result.survivorHolders ?? [])
-  if (holderFailure !== undefined) parts.push(holderFailure)
-  else if (result.survivorPids.length > 0) {
-    parts.push(`process-tree reap failed; survivor pids: ${result.survivorPids.join(", ")}`)
-  }
-  return parts.length === 0 ? undefined : parts.join("; ")
-}
-
-/** The failure text of certifyPathReapDeletion, for callers that only refuse. */
-export function pathReapDeletionFailure(
-  result: PathReapResult,
-  tolerateUnreadablePids?: ReadonlySet<number>,
-): string | undefined {
-  return certifyPathReapDeletion(result, tolerateUnreadablePids).failure
-}
-
-/**
- * Settlement failure plus the stronger coverage proof required before deleting
- * an owned path. Blindness is a deletion refusal, not a generic process-run
- * failure. A certified result also names every census gap it tolerated and
- * why, because a waiver nobody recorded is a silent one.
- */
-export function certifyPathReapDeletion(
-  result: PathReapResult,
-  tolerateUnreadablePids?: ReadonlySet<number>,
-): PathReapCertification {
-  const parts = [pathReapFailure(result)]
-  const tolerated: ToleratedCensusGap[] = []
-  const coverage = result.survivorCoverage
-  if (coverage === undefined) {
-    parts.push("path-holder census coverage missing; deletion cannot be certified")
-  } else if (!coverage.complete) {
-    const unreadable = coverage.platform === "linux" ? (coverage.unreadable ?? []) : []
-    // Tolerance certifies ONLY when every denied observation is attributable to
-    // a NAMED pid and every named pid was explicitly tolerated. A census whose
-    // counts exceed its named identities keeps refusing — an unnamed denial can
-    // never be waived, whatever the flag says.
-    const namedDenials = unreadable.reduce((sum, proc) => sum + proc.denied.length, 0)
-    const countedDenials =
-      coverage.platform === "linux"
-        ? coverage.processes.unavailable.denied +
-          Object.values(coverage.sources).reduce((sum, source) => sum + source.unavailable.denied, 0)
-        : 1
-    const fullyAttributed = unreadable.length > 0 && namedDenials === countedDenials
-    // A gap that provably holds nothing clears itself; only the rest need a
-    // waiver. Without this the flag is unreachable on a live host, because the
-    // set it demands changes between the refusal and the retry.
-    const autoCleared = unreadable.filter((proc) => provablyEmptyGapReason(proc) !== undefined)
-    const requiresNaming = unreadable.filter((proc) => provablyEmptyGapReason(proc) === undefined)
-    const named =
-      requiresNaming.length === 0 ||
-      (tolerateUnreadablePids !== undefined && requiresNaming.every(({ pid }) => tolerateUnreadablePids.has(pid)))
-    if (fullyAttributed && named) {
-      for (const proc of unreadable) {
-        tolerated.push(toleratedCensusGap(proc, provablyEmptyGapReason(proc) ?? "operator-flag"))
-      }
-    } else {
-      const unwaived = requiresNaming.length === 0 ? unreadable : requiresNaming
-      const identities =
-        unreadable.length === 0
-          ? "no denied pids were identified"
-          : `unreadable: ${unwaived
-              .slice(0, 10)
-              .map((proc) => `${describeProcessIdentity(proc)} via ${proc.denied.join(",")}`)
-              .join("; ")}${unwaived.length > 10 ? ` … ${unwaived.length - 10} more` : ""}`
-      const cleared =
-        autoCleared.length === 0
-          ? ""
-          : `${autoCleared.length} further gap(s) auto-cleared as provably empty: ${autoCleared
-              .map(({ pid }) => pid)
-              .join(", ")}; `
-      parts.push(
-        `path-holder census incomplete; deletion cannot be certified: ${identities}; ` +
-          cleared +
-          `cure: verify each pid is unrelated to the path, then re-run with --tolerate-unreadable <pid,…> naming exactly those pids; ` +
-          `coverage: ${JSON.stringify(coverage)}`,
-      )
-    }
-  }
-  const failures = parts.filter((part): part is string => part !== undefined)
-  return failures.length === 0 ? { tolerated } : { failure: failures.join("; "), tolerated: [] }
-}
-
-function toleratedCensusGap(proc: UnreadableProcess, reason: ToleratedCensusGap["reason"]): ToleratedCensusGap {
-  return {
-    pid: proc.pid,
-    ...(proc.comm === undefined ? {} : { comm: proc.comm }),
-    ...(proc.ppid === undefined ? {} : { ppid: proc.ppid }),
-    ...(proc.startedAt === undefined ? {} : { startedAt: proc.startedAt }),
-    reason,
-  }
-}
-
 /** Render read-only holder evidence into an actionable destructive-operation refusal. */
 export function pathHolderRefusal(holders: readonly PathHolder[]): string | undefined {
   const evidence = uniquePathHolders(holders)
@@ -335,18 +100,6 @@ export function pathHolderRefusal(holders: readonly PathHolder[]): string | unde
   return `path remains held by ${evidence
     .map(({ pid, source, target }) => `pid ${pid} via ${source} (${target})`)
     .join("; ")}`
-}
-
-const PATH_REAP_POLL_MS = 50
-
-async function waitForPathProcesses(read: () => Promise<number[]>, timeoutMs: number): Promise<number[]> {
-  const deadline = Date.now() + timeoutMs
-  let live = await read()
-  while (live.length > 0 && Date.now() < deadline) {
-    await Bun.sleep(Math.min(PATH_REAP_POLL_MS, Math.max(1, deadline - Date.now())))
-    live = await read()
-  }
-  return live
 }
 
 /**
@@ -361,23 +114,9 @@ export async function inspectPathHolderCensus(path: string): Promise<PathHolderC
   return pathProcessHolderCensus(await canonicalPath(path))
 }
 
-/**
- * Backward-compatible holder-only view; all traversal lives in the structured census.
- * Destructive callers must use inspectPathHolderCensus so reduced coverage cannot
- * masquerade as a certified empty holder set.
- */
-export async function inspectPathHolders(path: string): Promise<PathHolder[]> {
-  return (await inspectPathHolderCensus(path)).holders
-}
-
 /** @internal Deterministic Linux seam for a synthetic proc tree. */
 export async function inspectPathHolderCensusInProc(path: string, procRoot: string): Promise<PathHolderCensus> {
   return pathProcessHolderCensus(await canonicalPath(path), { procRoot })
-}
-
-/** @internal Backward-compatible holder-only synthetic-proc seam. */
-export async function inspectPathHoldersInProc(path: string, procRoot: string): Promise<PathHolder[]> {
-  return (await inspectPathHolderCensusInProc(path, procRoot)).holders
 }
 
 async function pathProcessHolderCensus(
@@ -386,7 +125,7 @@ async function pathProcessHolderCensus(
 ): Promise<PathHolderCensus> {
   if (process.platform === "linux") return linuxPathProcessHolderCensus(root, options.procRoot ?? "/proc")
   if (process.platform === "darwin") return darwinPathProcessHolderCensus(root)
-  throw new Error(`unsupported platform ${process.platform}; cannot certify path ownership`)
+  throw new Error(`unsupported platform ${process.platform}; cannot census path ownership`)
 }
 
 async function darwinPathProcessHolderCensus(root: string): Promise<PathHolderCensus> {
@@ -545,49 +284,14 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
   }
 }
 
-async function currentProcessAncestry(): Promise<Set<number>> {
-  const child = Bun.spawn(["ps", "-axo", "pid=,ppid="], {
-    cwd: "/",
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
-  if (exitCode !== 0) throw new Error(`ps exited ${exitCode}: ${stderr.trim() || "no diagnostic"}`)
-  const parents = new Map<number, number>()
-  for (const line of stdout.split("\n")) {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s*$/u)
-    if (match === null) continue
-    parents.set(Number(match[1]), Number(match[2]))
-  }
-  const ancestry = new Set<number>()
-  let pid = process.pid
-  while (pid > 1) {
-    if (ancestry.has(pid)) throw new Error(`ps reported a cycle in current process ancestry at pid ${pid}`)
-    ancestry.add(pid)
-    const parent = parents.get(pid)
-    if (parent === undefined) throw new Error(`ps omitted parent identity for current ancestry pid ${pid}`)
-    pid = parent
-  }
-  return ancestry
-}
-
 async function canonicalPath(path: string): Promise<string> {
-  if (typeof path !== "string" || path.trim() === "") throw new TypeError("yrd: reapPath requires a non-empty path")
+  if (typeof path !== "string" || path.trim() === "") throw new TypeError("yrd: path-holder census requires a non-empty path")
   return realpath(resolve(path))
 }
 
 function pathWithin(root: string, candidate: string): boolean {
   const clean = candidate.endsWith(" (deleted)") ? candidate.slice(0, -" (deleted)".length) : candidate
   return clean === root || clean.startsWith(`${root}${sep}`)
-}
-
-function uniquePids(values: readonly number[]): number[] {
-  return [...new Set(values.filter((pid) => Number.isSafeInteger(pid) && pid > 1))].sort((a, b) => a - b)
 }
 
 function uniquePathHolders(values: readonly PathHolder[]): PathHolder[] {

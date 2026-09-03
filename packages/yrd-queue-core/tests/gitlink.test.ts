@@ -54,7 +54,6 @@ function countingFetches(
   let count = 0
   const process: Process = {
     close: () => inner.close(),
-    reapPath: (path) => inner.reapPath(path),
     run: (request) => {
       if (
         request.argv[0] === "git" &&
