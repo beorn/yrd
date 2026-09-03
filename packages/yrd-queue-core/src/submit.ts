@@ -35,16 +35,25 @@ export type Submitted = Readonly<{
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const ref = changeRef(request.branch, head)
-  // A retry appends to the remote's history of this change, so that history is
-  // read first. ls-remote answers "absent" as an empty list, never as an error,
-  // which is the one honest empty a submit is allowed to swallow.
-  const remoteTip = (await git(["ls-remote", "--refs", remote, ref])).trim().split(/\s+/u)[0] ?? ""
+  // Where the remote holds the branch and this change right now, in one
+  // reading: a retry appends to the remote's history of the change, so that
+  // history is fetched first, and the branch's lease is the remote's own value,
+  // never a tracking ref that may be stale or missing in a fresh clone.
+  // ls-remote answers "absent" as an empty list, never as an error, which is
+  // the one honest empty a submit is allowed to swallow.
+  const at = new Map(
+    (await git(["ls-remote", "--refs", remote, `refs/heads/${request.branch}`, ref]))
+      .split("\n")
+      .map((row) => row.trim().split(/\s+/u))
+      .map(([sha, name]) => [name ?? "", sha ?? ""] as const),
+  )
+  const remoteTip = at.get(ref) ?? ""
+  const remoteBranch = at.get(`refs/heads/${request.branch}`) ?? ""
   const retry = remoteTip !== ""
   if (retry) await git(["fetch", "--quiet", remote, `+${ref}:${ref}`])
-  // What the submitter believes the remote holds for the branch: its tracking
-  // ref when it has fetched, else nothing at all, so a name somebody else is
-  // already using refuses loudly instead of being overwritten.
-  const tracked = await refAt(git, `refs/remotes/${remote}/${request.branch}`)
+  // A local change ref the remote does not hold is an orphan of a refused
+  // push; submit is the only writer of these refs, so it goes.
+  else if ((await refAt(git, ref)) !== undefined) await git(["update-ref", "-d", ref])
   const workItem = await workItemOf(git, request.branch, head, request.workItem)
   const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
   if (workItem !== undefined) trailers.push(["Work-Item", workItem])
@@ -57,18 +66,25 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     trailers,
   })
   // Two explicit leases make the push the same compare-and-swap the local
-  // append is: each ref must still be where this submitter last read it (the
-  // zero sha means "absent"), or the whole push refuses and nothing lands.
-  await git([
-    "push",
-    "--quiet",
-    "--atomic",
-    `--force-with-lease=refs/heads/${request.branch}:${tracked ?? ABSENT}`,
-    `--force-with-lease=${ref}:${retry ? remoteTip : ABSENT}`,
-    remote,
-    `refs/heads/${request.branch}:refs/heads/${request.branch}`,
-    `${ref}:${ref}`,
-  ])
+  // append is: each ref must still be where this submitter just read it (the
+  // zero sha means "absent"), or the whole push refuses and nothing lands —
+  // and then the local change ref goes back to what the remote holds, so a
+  // refused submit leaves no opened fact for the next one to chain onto.
+  try {
+    await git([
+      "push",
+      "--quiet",
+      "--atomic",
+      `--force-with-lease=refs/heads/${request.branch}:${remoteBranch === "" ? ABSENT : remoteBranch}`,
+      `--force-with-lease=${ref}:${retry ? remoteTip : ABSENT}`,
+      remote,
+      `refs/heads/${request.branch}:refs/heads/${request.branch}`,
+      `${ref}:${ref}`,
+    ])
+  } catch (error) {
+    await git(retry ? ["update-ref", ref, remoteTip] : ["update-ref", "-d", ref])
+    throw error
+  }
   return { branch: request.branch, head, opened, retry }
 }
 

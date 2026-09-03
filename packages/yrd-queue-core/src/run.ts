@@ -21,7 +21,7 @@ import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { runCheck, type CheckResult, type CheckSpec } from "./check.ts"
-import { appendFact, readFacts, type Fact, type Git } from "./facts.ts"
+import { appendFact, readFact, readFacts, type Fact, type Git } from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { gitIn, isAncestor, mergeBase, refAt } from "./git.ts"
 import { workItemOf } from "./submit.ts"
@@ -131,14 +131,22 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     target: options.target,
   })
 
-  // The submitter's own doing first: a branch that is gone, or that moved off
-  // a head, ends that head's change failed with the reason and no message.
-  // Nobody is billed and the exit code does not count it (ruling B3).
+  // Bookkeeping at the edges of the facts first, so every reader below reads
+  // facts and never reconciles: a branch that is gone or moved off a head ends
+  // that head's change failed with the reason and no message (ruling B3); a
+  // head the target already carries gets its merged fact, so the tip catches
+  // up with ancestry; an ended change whose message reached nobody is sent
+  // again (at-least-once, § The queue run).
   for (const entry of entries) await retire(run, entry)
+  for (const entry of entries) await catchUp(run, entry)
+  for (const entry of entries) await resend(run, entry)
 
   // On-submit: every queued change, oldest first, in a fresh worktree of its
-  // head. A stuck change kept its place, and this run takes it again from here.
-  for (const entry of ordered(entries, "queued", "stuck")) {
+  // head. A stuck change kept its place, and this run takes it again from
+  // here; so does a checked change whose checks ran under a check config the
+  // target no longer declares (§ The queue run: a checked fact is reused only
+  // while the config blob is the one it names).
+  for (const entry of ordered(entries, "queued", "stuck", "checked").filter((entry) => entry.reading.state !== "checked" || staleChecked(run, entry))) {
     const outcome = await guarded(run, entry, () => judge(run, entry))
     if (outcome === "stuck") {
       stuck.push(entry.branch)
@@ -149,7 +157,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
   // On-merge: the first checked change in line, re-read so this run's own
   // checked facts count.
-  const checked = ordered(await lane(git, options.remote, options.target), "checked")[0]
+  const checked = ordered(await lane(git, options.remote, options.target), "checked").find((entry) => !staleChecked(run, entry))
   if (checked !== undefined) {
     const outcome = await guarded(run, checked, () => land(run, checked))
     if (outcome === "stuck") stuck.push(checked.branch)
@@ -158,6 +166,12 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   }
 
   return finish(run, stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0, { failed, merged, stuck })
+}
+
+/** A checked change whose checked fact names a config blob the target no longer declares. */
+function staleChecked(run: Run, entry: LaneEntry): boolean {
+  const tip = entry.change.facts.at(-1)
+  return tip !== undefined && tip.kind === "checked" && trailerOf(tip, "Config") !== run.options.configBlob
 }
 
 /** The entries in the named states, in line order. */
@@ -364,7 +378,7 @@ async function land(run: Run, entry: LaneEntry): Promise<Ended> {
     ])
     run.log.write({ branch, commit: mergeCommit, head, kind: "merge", tip: mergeCommit })
     run.log.write({ branch, decision: "merged", head, kind: "change" })
-    await send(run, entry, mergedFact, "merged", `close your bead: ${branch} at ${head.slice(0, 12)} merged as ${mergeCommit.slice(0, 12)}`)
+    await send(run, entry, mergedFact, "merged", messageFor("merged", { branch, head, merge: mergeCommit, subject: "" }))
     return "merged"
   } finally {
     await worktree.remove()
@@ -427,6 +441,81 @@ async function retire(run: Run, entry: LaneEntry): Promise<void> {
   })
   await pushChange(run, branch, head)
   run.log.write({ branch, decision: "failed", head, kind: "change", reason })
+}
+
+/**
+ * A head the target already carries with no merged fact yet — merged by hand
+ * in the garage, or by a run that crashed after its push — gets its merged
+ * fact now, naming the commit that landed it, and its submitter is told
+ * (§ The change: ancestry wins, and the next queue run appends the merged
+ * fact so the tip catches up). A retired change is left as it ended.
+ */
+async function catchUp(run: Run, entry: LaneEntry): Promise<void> {
+  if (!entry.change.headOnTarget) return
+  const tip = entry.change.facts.at(-1)
+  const endedAs = tip === undefined ? undefined : tip.kind === "sent" ? trailerOf(tip, "State") : tip.kind
+  if (endedAs === "merged") return
+  const reason = tip === undefined ? undefined : trailerOf(tip, "Reason")
+  if (reason === "replaced" || reason === "deleted") return
+  const { branch } = entry
+  const head = entry.change.head
+  // The first commit on the target's first-parent line that descends from the
+  // head is the one that landed it; none means the head was fast-forwarded.
+  const landing = (await run.git(["rev-list", "--reverse", "--first-parent", "--ancestry-path", `${head}..${run.targetSha}`])).trim().split("\n")[0]
+  const merge = landing === undefined || landing === "" ? head : landing
+  const mergedFact = await appendFact(run.git, {
+    branch,
+    head,
+    kind: "merged",
+    subject: `${branch} was merged into ${run.options.target} outside the queue as ${merge.slice(0, 12)}`,
+    target: run.options.target,
+    trailers: [["Merge", merge], ["Base", merge === head ? head : `${merge}^1`]],
+  })
+  await pushChange(run, branch, head)
+  run.log.write({ branch, decision: "merged", head, kind: "change", reason: "already on the target" })
+  await send(run, entry, mergedFact, "merged", messageFor("merged", { branch, head, merge, subject: "" }))
+}
+
+/**
+ * Every ended change whose message reached nobody is sent again: an ended tip
+ * with no sent fact (a crash between the two), or a sent fact whose delivery
+ * failed. The id is the ended fact's sha, so the recipient sees one message
+ * however many times it is sent (§ The queue run, at-least-once).
+ */
+async function resend(run: Run, entry: LaneEntry): Promise<void> {
+  const tip = entry.change.facts.at(-1)
+  if (tip === undefined) return
+  const undelivered = tip.kind === "sent" && trailerOf(tip, "Delivery") === "failed"
+  const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged"
+  if (!undelivered && !unsent) return
+  // A retired change sends nothing (ruling B3).
+  const reason = trailerOf(tip, "Reason")
+  if (reason === "replaced" || reason === "deleted") return
+  const endedSha = tip.kind === "sent" ? trailerOf(tip, "For") : tip.sha
+  if (endedSha === undefined) throw new Error(`${entry.branch}: sent fact ${tip.sha.slice(0, 12)} names no ended fact to send again`)
+  const ended = tip.kind === "sent" ? await readFact(run.git, endedSha) : tip
+  if (ended.kind !== "failed" && ended.kind !== "stuck" && ended.kind !== "merged") {
+    throw new Error(`${entry.branch}: ${endedSha.slice(0, 12)} is a ${ended.kind} fact, not an ended one`)
+  }
+  await send(
+    run,
+    entry,
+    ended.sha,
+    ended.kind,
+    messageFor(ended.kind, { branch: entry.branch, head: entry.change.head, merge: trailerOf(ended, "Merge") ?? "", remedy: trailerOf(ended, "Remedy"), subject: ended.subject }),
+  )
+}
+
+/** The one message an ended change sends, in the plan's three shapes (§ Commands). */
+function messageFor(kind: "merged" | "failed" | "stuck", about: Readonly<{ branch: string; head: string; subject: string; merge?: string; remedy?: string }>): string {
+  switch (kind) {
+    case "merged":
+      return `close your bead: ${about.branch} at ${about.head.slice(0, 12)} merged as ${(about.merge ?? "").slice(0, 12)}`
+    case "failed":
+      return `send it back: ${about.subject}; ${about.remedy ?? ""}`.trim()
+    case "stuck":
+      return `yrd broken: ${about.subject}; the queue stays down until a person fixes it`
+  }
 }
 
 /**
@@ -497,11 +586,7 @@ async function end(
   const fact = await appendFact(run.git, { branch: entry.branch, head: entry.change.head, kind, subject: ended.subject, target: run.options.target, trailers })
   await pushChange(run, entry.branch, entry.change.head)
   run.log.write({ branch: entry.branch, decision: kind, head: entry.change.head, kind: "change", reason: ended.subject })
-  const text =
-    kind === "stuck"
-      ? `yrd broken: ${ended.subject}; the queue stays down until a person fixes it`
-      : `send it back: ${ended.subject}; ${ended.remedy ?? ""}`.trim()
-  await send(run, entry, fact, kind, text)
+  await send(run, entry, fact, kind, messageFor(kind, { branch: entry.branch, head: entry.change.head, remedy: ended.remedy, subject: ended.subject }))
   return kind
 }
 
@@ -510,7 +595,11 @@ async function send(run: Run, entry: LaneEntry, endedFact: string, kind: "merged
   const facts = await readFacts(run.git, entry.branch, entry.change.head)
   const opened = facts.find((fact) => fact.kind === "opened")
   const ended = [...facts].reverse().find((fact) => fact.sha === endedFact)
-  const recipient = kind === "stuck" ? run.options.owner : (trailerOf(opened, "Submitter") ?? run.options.owner)
+  // A stuck change is the queue owner's to hear about; so is a change nobody
+  // submitted, whose opened fact names `unknown` (§ The change: a bare push's
+  // messages go to the queue owner).
+  const submitter = trailerOf(opened, "Submitter")
+  const recipient = kind === "stuck" || submitter === undefined || submitter === "unknown" ? run.options.owner : submitter
   // The record the configured notifier reads, unchanged from today's contract
   // (kind, attempt_id, pr, recipient, command required; the rest optional): the
   // plan's three messages map onto its three kinds, the branch stands where a
@@ -532,10 +621,19 @@ async function send(run: Run, entry: LaneEntry, endedFact: string, kind: "merged
     text,
     workItem: trailerOf(opened, "Work-Item"),
   }
+  // A notifier that fails changes nothing about what the change IS: the ended
+  // fact stands, the sent fact says the delivery failed and why, and the next
+  // run sends the same message again. Nothing here throws, so a failed
+  // delivery can never end a merged change stuck.
+  let delivery = run.options.notify === undefined ? "logged" : "notifier"
+  let failure: string | undefined
   if (run.options.notify !== undefined) {
     const runner = run.options.process ?? createProcess({ cwd: run.options.repo })
     const result = await runner.run({ argv: shellCommand(run.options.notify), cwd: run.options.repo, env: run.options.env, stdin: `${JSON.stringify(record)}\n`, timeoutMs: 60_000 })
-    if (result.exitCode !== 0) throw new Error(`the notifier exited ${result.exitCode} for ${entry.branch}: ${result.stderr.trim()}`)
+    if (result.exitCode !== 0) {
+      delivery = "failed"
+      failure = `the notifier exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`.replace(/\s+/gu, " ").slice(0, 300)
+    }
   }
   // The sent fact repeats the ended state and carries the ended fact's result,
   // so the tip fact's trailers stay the whole answer about the change and no
@@ -544,19 +642,30 @@ async function send(run: Run, entry: LaneEntry, endedFact: string, kind: "merged
     branch: entry.branch,
     head: entry.change.head,
     kind: "sent",
-    subject: `told ${recipient}: ${text}`.slice(0, 200),
+    subject: `${delivery === "failed" ? "could not tell" : "told"} ${recipient}: ${text}`.slice(0, 200),
     target: run.options.target,
     trailers: [
       ["Message-Id", endedFact],
       ["Recipient", recipient],
       ["State", kind],
       ["For", endedFact],
-      ["Delivery", run.options.notify === undefined ? "logged" : "notifier"],
+      ["Delivery", delivery],
+      ...(failure === undefined ? [] : [["Delivery-Error", failure] as const]),
       ...(ended?.trailers.filter(([name]) => RESULT_TRAILERS.has(name)) ?? []),
     ],
   })
   await pushChange(run, entry.branch, entry.change.head)
-  run.log.write({ about: entry.branch, branch: entry.branch, head: entry.change.head, id: endedFact, kind: "message", says: kind, to: recipient })
+  run.log.write({
+    about: entry.branch,
+    branch: entry.branch,
+    delivered: delivery !== "failed",
+    ...(failure === undefined ? {} : { error: failure }),
+    head: entry.change.head,
+    id: endedFact,
+    kind: "message",
+    says: kind,
+    to: recipient,
+  })
 }
 
 /** An ended fact's result, as its sent fact carries it forward. */
@@ -589,7 +698,11 @@ function trailerOf(fact: Fact | undefined, name: string): string | undefined {
   return fact?.trailers.find(([key]) => key === name)?.[1]
 }
 
-function finish(run: Run, exitCode: 0 | 1 | 2, lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[] }>): QueueRunOutcome {
+async function finish(run: Run, exitCode: 0 | 1 | 2, lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[] }>): Promise<QueueRunOutcome> {
+  // A push updates the remote-tracking ref it pushed to, so after a merge the
+  // target as this run left it is right there; a run that merged nothing left
+  // it where it found it.
+  const targetNow = lists.merged.length === 0 ? run.targetSha : ((await refAt(run.git, `refs/remotes/${run.options.remote}/${run.options.target}`)) ?? run.targetSha)
   return {
     base: run.targetSha,
     config: run.options.configBlob,
@@ -597,7 +710,7 @@ function finish(run: Run, exitCode: 0 | 1 | 2, lists: Readonly<{ merged: string[
     ...(run.options.garage === undefined ? {} : { garage: run.options.garage }),
     log: run.log.path,
     run: run.log.id,
-    target: run.targetSha,
+    target: targetNow,
     ...lists,
   }
 }

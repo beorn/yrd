@@ -14,7 +14,7 @@
  */
 
 export { CHANGES, changeRef, parseChangeRef } from "./refs.ts"
-export { FACT_KINDS, appendFact, factFrom, factMessage, readFacts, trailer, trailers } from "./facts.ts"
+export { FACT_KINDS, appendFact, factFrom, factMessage, readFact, readFacts, trailer, trailers } from "./facts.ts"
 export type { Fact, FactKind, Git, WriteFact } from "./facts.ts"
 export { CHANGE_STATES, inLine, openedAt, readChange } from "./state.ts"
 export type { ChangeFacts, ChangeReading, ChangeState } from "./state.ts"

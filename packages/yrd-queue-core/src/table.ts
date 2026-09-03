@@ -26,6 +26,8 @@ export type Row = Readonly<{
   reason?: string
   /** When the change was opened; absent for a branch pushed but never submitted. */
   since?: Date
+  /** When the change's last fact was written: an ended change is as recent as its ending. */
+  at?: Date
 }>
 
 /**
@@ -37,10 +39,12 @@ export function list(entries: readonly LaneEntry[], now: Date = new Date(), sinc
   const position = new Map(live.map((head, index) => [head, index + 1]))
   const rows = entries.map((entry) => row(entry, position.get(entry.change.head)))
   const inLineRows = rows.filter((candidate) => candidate.position !== undefined).sort((left, right) => (left.position ?? 0) - (right.position ?? 0))
+  // The window is about when a change ENDED, not when it was opened: a change
+  // opened long ago and merged today is today's news.
   const endedRows = rows
     .filter((candidate) => candidate.position === undefined)
-    .filter((candidate) => candidate.since === undefined || now.getTime() - candidate.since.getTime() <= sinceMs)
-    .sort((left, right) => (right.since?.getTime() ?? 0) - (left.since?.getTime() ?? 0))
+    .filter((candidate) => candidate.at === undefined || now.getTime() - candidate.at.getTime() <= sinceMs)
+    .sort((left, right) => (right.at?.getTime() ?? 0) - (left.at?.getTime() ?? 0))
   return [...inLineRows, ...endedRows]
 }
 
@@ -60,6 +64,7 @@ function row(entry: LaneEntry, position?: number): Row {
   const lastCheck = tip === undefined ? undefined : trailers(tip, "Check").at(-1)
   const opened = tip === undefined ? undefined : trailer(tip, "Opened")
   return {
+    at: tip?.at,
     branch: entry.branch,
     head: entry.change.head,
     log: lastCheck?.match(/log=(\S+)/u)?.[1],

@@ -10,7 +10,7 @@
  * Nothing is run twice and nothing is converted.
  */
 
-import { mkdirSync, readFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import type { ConditionalLogger } from "loggily"
 import {
@@ -116,7 +116,14 @@ export async function coreQueueCommand(
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
       for (;;) {
-        const outcome = await queueRun(runOptions(repo, config, workdir, options.env, options.log))
+        let outcome
+        try {
+          outcome = await queueRun(runOptions(repo, config, workdir, options.env, options.log))
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          emit(io, options.json, { exitCode: 2, failed: [], merged: [], stuck: [], why: message }, `stuck: the queue run could not judge: ${message}`)
+          return 2
+        }
         emit(io, options.json, outcome, describeRun(outcome))
         if (outcome.exitCode === 2) return 2
         if (stopped()) return 0
@@ -165,9 +172,11 @@ export async function coreQueueCommand(
 }
 
 /**
- * The `.yrd.yml` checked out at `start` or the nearest directory above it,
- * with the directory it was found in, or undefined when there is none up to
- * the filesystem root. A file that exists and cannot be read is loud.
+ * The `.yrd.yml` checked out at `start` or the nearest directory above it
+ * within the same repository (the walk stops at the directory that holds
+ * `.git`, a worktree's file or a repository's directory), with the directory
+ * it was found in; undefined when there is none. A file that exists and
+ * cannot be read is loud.
  */
 function declarationHere(start: string): Readonly<{ root: string; text: string }> | undefined {
   let directory = resolve(start)
@@ -178,6 +187,7 @@ function declarationHere(start: string): Readonly<{ root: string; text: string }
       const code = (error as NodeJS.ErrnoException).code
       if (code !== "ENOENT" && code !== "ENOTDIR") throw error
     }
+    if (existsSync(join(directory, ".git"))) return undefined
     const parent = dirname(directory)
     if (parent === directory) return undefined
     directory = parent

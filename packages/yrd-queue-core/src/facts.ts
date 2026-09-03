@@ -105,12 +105,17 @@ async function genesis(git: Git): Promise<string> {
   return (await git(["hash-object", "-w", "-t", "commit", "--stdin"], GENESIS_OBJECT)).trim()
 }
 
-/** The carried trailers of the fact at `sha`, which is a fact or nothing carries. */
-async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [string, string])[]> {
+/** The fact at `sha`. A commit there that is not a fact is loud: a change's ref holds only facts. */
+export async function readFact(git: Git, sha: string): Promise<Fact> {
   const [id, at, body] = (await git(["log", "-1", "--format=%H%x00%cI%x00%B", sha])).split("\x00")
   const fact = id === undefined || at === undefined || body === undefined ? undefined : factFrom(id.trim(), at, body)
   if (fact === undefined) throw new Error(`${sha.slice(0, 12)} is not a fact; a change's ref holds only facts`)
-  return fact.trailers.filter(([name]) => (CARRIED as readonly string[]).includes(name))
+  return fact
+}
+
+/** The carried trailers of the fact at `sha`. */
+async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [string, string])[]> {
+  return (await readFact(git, sha)).trailers.filter(([name]) => (CARRIED as readonly string[]).includes(name))
 }
 
 /** Every fact of a change, oldest first. An unknown change reads as no facts. */

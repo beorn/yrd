@@ -235,4 +235,74 @@ describe("a queue run", () => {
     expect(await remoteTarget(w)).toBe(w.target)
     expect(messages(w)).toEqual([])
   })
+
+  it("a failing notifier changes nothing about the change, and the next run sends the same message again", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    // The notifier is down: the merge still happens, the sent fact says the
+    // delivery failed, and the run is not stuck (ruling D9).
+    const down = await queueRun({ ...w.options({ exit: 0 }), notify: "sh -c 'echo notifier down >&2; exit 3'" })
+    expect(down.exitCode).toBe(0)
+    expect(down.merged).toEqual(["task/one"])
+    await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
+    let facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent"])
+    expect(facts.at(-1)?.trailers).toEqual(expect.arrayContaining([["State", "merged"], ["Delivery", "failed"]]))
+    expect(messages(w)).toEqual([])
+
+    // The notifier is back: the same message, with the merged fact's sha as its id.
+    const again = await queueRun(w.options({ exit: 0 }))
+    expect(again.exitCode).toBe(0)
+    await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
+    facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
+    expect(facts.at(-1)?.trailers).toEqual(expect.arrayContaining([["Delivery", "notifier"]]))
+    const merged = facts.find((fact) => fact.kind === "merged")
+    expect(messages(w)).toHaveLength(1)
+    expect(messages(w)[0]).toMatchObject({ attempt_id: merged?.sha, kind: "landed", recipient: "@dev/2" })
+  })
+
+  it("a head merged outside the queue gets its merged fact, naming the commit that landed it, and its submitter is told", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    // The garage lands it by hand: a merge commit on main, pushed.
+    await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "landed by hand", head])
+    const landing = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["push", "--quiet", "origin", "main"])
+
+    const outcome = await queueRun(w.options({ exit: 0 }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(await remoteTarget(w)).toBe(landing)
+    await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "merged", "sent"])
+    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Merge", landing]]))
+    expect(messages(w)[0]).toMatchObject({ kind: "landed", recipient: "@dev/2" })
+  })
+
+  it("a checked change is judged again when the target's check config is not the one its checked fact names", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const second = await submitCommit(w, "task/two", "two.txt")
+
+    // One merge per run: task/one lands, task/two stays checked under config A.
+    const first = await queueRun({ ...w.options({ exit: 0 }), configBlob: "config-A" })
+    expect(first.merged).toEqual(["task/one"])
+    await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
+    let facts = await readFacts(w.git, "task/two", second)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked"])
+    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Config", "config-A"]]))
+
+    // The target's declaration changed: the on-submit checks run again under B
+    // before the change lands, and the new checked fact names B.
+    const next = await queueRun({ ...w.options({ exit: 0 }), configBlob: "config-B" })
+    expect(next.merged).toEqual(["task/two"])
+    await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
+    facts = await readFacts(w.git, "task/two", second)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "checked", "merged", "sent"])
+    expect(facts[2]?.trailers).toEqual(expect.arrayContaining([["Config", "config-B"]]))
+  })
 })
