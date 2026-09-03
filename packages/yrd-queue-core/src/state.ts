@@ -36,8 +36,8 @@ export type ChangeReading = Readonly<{
 export type ChangeFacts = Readonly<{
   /**
    * The change's facts, oldest first, or only its tip: every reading here uses
-   * the last one, whose trailers are the whole derived state. Empty for a
-   * branch pushed but never submitted.
+   * the last one, whose trailers are the whole derived state. Never empty: a
+   * change exists only when submitted, and the submit is its first fact (E2).
    */
   facts: readonly Fact[]
   /** Whether the head is an ancestor of the target, read from git. */
@@ -58,10 +58,12 @@ export function readChange(change: ChangeFacts): ChangeReading {
   if (change.branchHead !== change.head) return { state: "failed", reason: "replaced" }
 
   const last = change.facts.at(-1)
-  // A branch pushed but never submitted is a change the next queue run opens:
-  // it is in line, not invisible. Measured 2026-09-02: two such refs stood at
-  // the receiver all day and no reader saw either.
-  if (last === undefined) return { state: "queued" }
+  // A change exists only when submitted (E2): the lane lists change refs and
+  // nothing else, and every change ref ends in a fact. Nothing without facts
+  // can reach here, and a reading of one would be a state made up on the spot.
+  if (last === undefined) {
+    throw new Error(`${change.head.slice(0, 12)} has no facts; a change exists only when submitted`)
+  }
 
   switch (last.kind) {
     case "merged":
@@ -105,10 +107,12 @@ export function inLine(changes: readonly ChangeFacts[]): readonly ChangeFacts[] 
     .sort((left, right) => openedAt(left) - openedAt(right))
 }
 
-/** When the change was first opened, carried on every fact as `Opened:`; a branch nobody opened yet sorts last. */
+/** When the change was first opened, carried on every fact as `Opened:`. A change with no facts has no place in line, and no existence (E2). */
 export function openedAt(change: ChangeFacts): number {
   const last = change.facts.at(-1)
-  if (last === undefined) return Number.MAX_SAFE_INTEGER
+  if (last === undefined) {
+    throw new Error(`${change.head.slice(0, 12)} has no facts; a change exists only when submitted`)
+  }
   const opened = last.trailers.find(([name]) => name === "Opened")?.[1]
   const time = opened === undefined ? Number.NaN : Date.parse(opened)
   if (Number.isNaN(time)) throw new Error(`fact ${last.sha.slice(0, 12)} carries no readable Opened: (${opened ?? "absent"})`)

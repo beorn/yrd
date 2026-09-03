@@ -1,11 +1,12 @@
 /**
  * @failure The way in is prose. `yrd queue submit` is described as one atomic
  *          push of a branch and its opened fact, a bare `git push yrd` is
- *          described as tolerated, and a branch that is deleted or pushed over
- *          is described as ending its change without a message — none of it
- *          pinned. A core that pushes the branch but not the fact, that never
- *          notices a standing ref, or that bills a submitter for taking their
- *          own branch out passes every existing test.
+ *          described as not a change (E2), and a branch that is deleted or
+ *          pushed over is described as ending its change without a message —
+ *          none of it pinned. A core that pushes the branch but not the fact,
+ *          that judges or opens a standing ref nobody submitted, or that bills
+ *          a submitter for taking their own branch out passes every existing
+ *          test.
  * @level   l3
  * @consumer `yrd queue submit` · a submitter pushing with plain git · `yrd queue run`
  *
@@ -29,6 +30,7 @@ import {
   amendHead,
   boundaryRepository,
   changeRef,
+  changeStandings,
   checkAttempts,
   commitOnBranch,
   factMessages,
@@ -256,10 +258,15 @@ describe("the submit path", { timeout: 120_000 }, () => {
 })
 
 describe("the branch, moved by hand", { timeout: 120_000 }, () => {
-  // today: red — the queue run answers `"results":[]` and runs no check: a
-  // standing ref with no journal record is invisible to the queue. Measured
-  // 2026-09-02 in the field too, where two such refs stood all day.
-  it("a bare `git push yrd <branch>` is tolerated: the next queue run opens its change", async () => {
+  // today: green, by accident — the old core answers `"results":[]` and runs
+  // no check, because a standing ref with no journal record is invisible to
+  // it. Ruling E2 (2026-09-02 evening) makes that the rule and withdraws B4:
+  // a change exists only when submitted, so a branch pushed with plain git is
+  // neither judged nor opened nor alarmed; it stands at the remote, invisible
+  // to `queue list`, until `yrd submit` opens it. (Until E2 this test asserted
+  // the opposite: that the next queue run opened the change itself, with
+  // `Submitter: unknown`.)
+  it("a bare `git push yrd <branch>` is not a change: the queue run neither judges nor opens it, and a submit later does (E2)", async () => {
     const { repo, origin, checkLog } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)
     const branch = "24099-bare"
@@ -270,9 +277,22 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     const run = await queueRunOnce(repo)
 
     expect(run.exitCode, run.report).toBe(0)
-    // Considered, not merely tolerated in silence.
-    expect(await checkAttempts(checkLog), run.report).toBeGreaterThan(0)
-    expect(await refExists(origin, changeRef(branch, head)), run.report).toBe(true)
+    // Not judged: no check ran. Not opened: no change ref, no fact.
+    expect(await checkAttempts(checkLog), run.report).toBe(0)
+    expect(await refExists(origin, changeRef(branch, head)), run.report).toBe(false)
+    // Invisible to the table, and nothing lost: the branch stands at the remote.
+    expect(
+      Object.keys(await changeStandings(repo)).filter((key) => key.startsWith(`${branch}@`)),
+      run.report,
+    ).toEqual([])
+    expect(await refSha(origin, `refs/heads/${branch}`), run.report).toBe(head)
+
+    // The author says so, and only then is it a change.
+    const submit = await queueSubmit(repo, branch)
+
+    expect(submit.exitCode, submit.report).toBe(0)
+    expect(await refExists(origin, changeRef(branch, head)), submit.report).toBe(true)
+    expect(await changeStandings(repo), submit.report).toHaveProperty(`${branch}@${head}`)
   })
 
   // today: red — the submit puts nothing at `refs/heads/<branch>`, so there is
@@ -332,8 +352,8 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
   /**
    * The branch is still there but points somewhere else, so the change that
    * named the old head is over — `replaced` — and again nobody is told. The
-   * head that replaced it is a standing ref of its own, so the same queue run
-   * may open and judge it; the assertions here name the old head only.
+   * head that replaced it was pushed with plain git, so it is not a change
+   * (E2): the same queue run neither opens nor judges it.
    *
    * today: red — the submit writes no change ref, so there is nothing to end.
    */
@@ -357,5 +377,7 @@ describe("the branch, moved by hand", { timeout: 120_000 }, () => {
     expect(tip, run.report).toContain("failed")
     expect(tip, run.report).toContain("replaced")
     expect(await notifiedMessages(notifyLog), run.report).not.toContain(head1)
+    // The new head is a bare push, so no change was opened for it (E2).
+    expect(await refExists(origin, changeRef(branch, head2)), run.report).toBe(false)
   })
 })

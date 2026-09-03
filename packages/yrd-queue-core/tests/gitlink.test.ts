@@ -1,18 +1,25 @@
 /**
- * The built-in check at submit: every gitlink reachable from its component's
- * `main` ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, The
- * queue run). A change that pins a component at a commit its main does not
- * carry ends failed, the submitter's, before any declared check runs; a pin
- * that main carries, ahead or behind, passes through.
+ * The built-in check at submit: every gitlink the change moved reachable from
+ * its component's `main` ([plan](../../../../pm/@i/10-yrd/plan.md) § The final
+ * design, The queue run; ruling E4, amending D7). A change that pins a
+ * component at a commit its main does not carry ends failed, the submitter's,
+ * before any declared check runs; a pin that main carries, ahead or behind,
+ * passes through. Only the pins the change moved against the target are
+ * asked about, and a positive answer is kept for the run, so a component is
+ * fetched at most once per run per pin, and not at all for a change that
+ * moves no pin.
  *
  * Measured 2026-09-02 on the old core: a root gitlink pointed at a branch
  * commit forked on the pin, and every later change was judged against a
- * component state no main had ever carried.
+ * component state no main had ever carried. Measured the same day on this
+ * core before E4: asking every component of the root's tree cost 15 fetches
+ * and 13.7 s per judged change.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createProcess, type Process } from "@yrd/process"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, queueRun, readFacts, submit, trailer } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
@@ -30,8 +37,39 @@ type World = Readonly<{
   onMain: string
   /** A commit on a branch of the component that its main does not carry. */
   offMain: string
+  /** How many times the queue asked the component for its main, so far. */
+  fetches(): number
   options(): QueueRunOptions
 }>
+
+/**
+ * The queue's process seam, counting every `git fetch` run inside a component
+ * checkout: the one network call the gitlink check makes. Everything else
+ * passes through untouched — a fake process would be a fake store.
+ */
+function countingFetches(
+  inner: Process,
+  inComponent: (cwd: string) => boolean,
+): Readonly<{ process: Process; count(): number }> {
+  let count = 0
+  const process: Process = {
+    close: () => inner.close(),
+    reapPath: (path) => inner.reapPath(path),
+    run: (request) => {
+      if (
+        request.argv[0] === "git" &&
+        request.argv[1] === "fetch" &&
+        request.cwd !== undefined &&
+        inComponent(request.cwd)
+      ) {
+        count += 1
+      }
+      return inner.run(request)
+    },
+    [Symbol.asyncDispose]: () => inner[Symbol.asyncDispose](),
+  }
+  return { count: () => count, process }
+}
 
 /**
  * A component whose main is `one` then `three`, with a branch `feature` at
@@ -87,11 +125,28 @@ async function world(): Promise<World> {
   await git(["push", "--quiet", "origin", "main"])
   const workdir = join(root, "queue")
   mkdirSync(workdir, { recursive: true })
+  // The component's checkout inside a judged worktree is where the check asks
+  // for main; the reference checkout under `work` is the submitter's, not the queue's.
+  const counting = countingFetches(
+    createProcess({ cwd: work }),
+    (cwd) => cwd.startsWith(workdir) && cwd.endsWith("/component"),
+  )
   return {
+    fetches: counting.count,
     git,
     offMain,
     onMain,
-    options: () => ({ checks: [], configBlob: "test-config", env: process.env, owner: "@cto", remote: "origin", repo: work, target: "main", workdir }),
+    options: () => ({
+      checks: [],
+      configBlob: "test-config",
+      env: process.env,
+      owner: "@cto",
+      process: counting.process,
+      remote: "origin",
+      repo: work,
+      target: "main",
+      workdir,
+    }),
     work,
   }
 }
@@ -103,7 +158,21 @@ async function submitPin(w: World, branch: string, sha: string): Promise<string>
   await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
   await sub(["checkout", "--quiet", sha])
   await w.git(["add", "component"])
-  await w.git(["commit", "--quiet", "-m", `pin the component at ${sha.slice(0, 12)}`])
+  // The branch is in the message, so two branches pinning the same commit in
+  // the same second are two heads, not one head under two names.
+  await w.git(["commit", "--quiet", "-m", `${branch}: pin the component at ${sha.slice(0, 12)}`])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
+  return head
+}
+
+/** A change that touches a file and no gitlink, submitted. */
+async function submitFile(w: World, branch: string): Promise<string> {
+  await w.git(["checkout", "--quiet", "-b", branch, "main"])
+  writeFileSync(join(w.work, `${branch.replace(/\//gu, "-")}.txt`), `${branch}\n`)
+  await w.git(["add", "."])
+  await w.git(["commit", "--quiet", "-m", `${branch}: a file, no pin`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
   await submit(w.git, "origin", { branch, submitter: "@dev/2", target: "main" })
@@ -125,6 +194,7 @@ describe("the built-in gitlink check", () => {
     expect(trailer(failed, "Fault")).toBe("submitter")
     expect(failed.subject).toContain("component")
     expect(trailer(failed, "Remedy")).toContain("main")
+    expect(w.fetches()).toBe(1)
   })
 
   it("a pin the component's main carries passes through, and the change merges", async () => {
@@ -135,5 +205,32 @@ describe("the built-in gitlink check", () => {
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/on"])
+    expect(w.fetches()).toBe(1)
+  })
+
+  it("a change that moves no gitlink asks no component: the target's pins are the target's, judged when they landed (E4)", async () => {
+    const w = await world()
+    await submitFile(w, "task/file")
+
+    const outcome = await queueRun(w.options())
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/file"])
+    expect(w.fetches()).toBe(0)
+  })
+
+  it("two changes moving the same pin ask the component once per run: a commit on main stays on main (E4)", async () => {
+    const w = await world()
+    await submitPin(w, "task/first", w.onMain)
+    const second = await submitPin(w, "task/second", w.onMain)
+
+    const outcome = await queueRun(w.options())
+
+    // Both were judged on submit — the first fetched, the second read the
+    // run's answer — and one merge per run lands the first (ruling D4).
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/first"])
+    expect((await readFacts(w.git, "task/second", second)).map((fact) => fact.kind)).toEqual(["opened", "checked"])
+    expect(w.fetches()).toBe(1)
   })
 })

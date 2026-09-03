@@ -12,6 +12,10 @@
  * fast-forwards the target to the merge commit. Every ended change sends one
  * message, after its ended fact is written, with that fact's sha as the id.
  *
+ * A branch at the remote with no change is not a change (E2): the lane never
+ * lists it, so nothing here judges, opens or messages it. `submit` is the one
+ * writer of an opened fact; a run only ever appends to a change that exists.
+ *
  * Exit 0 when nothing ended failed or stuck, 1 when a change ended failed,
  * 2 on stuck. A stuck change stays open and the run stops there: the queue
  * could not do its own job, and the next thing to happen is a person.
@@ -24,7 +28,6 @@ import { runCheck, type CheckResult, type CheckSpec } from "./check.ts"
 import { appendFact, readFact, readFacts, type Fact, type Git } from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { gitIn, isAncestor, mergeBase, refAt } from "./git.ts"
-import { workItemOf } from "./submit.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { changeRef } from "./refs.ts"
 import { lane, type LaneEntry } from "./remote.ts"
@@ -92,6 +95,12 @@ type Run = Readonly<{
   worktrees: string
   /** The target the run read at its start; every judgement is against it. */
   targetSha: string
+  /**
+   * Gitlinks proven on their component's `main` this run, as `<path>@<sha>`:
+   * a positive answer can only stay true, so the same pin is asked about at
+   * most once per run however many changes move it (E4).
+   */
+  onMain: Set<string>
 }>
 
 type Ended = "checked" | "failed" | "stuck" | "merged"
@@ -103,6 +112,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const run: Run = {
     git,
     log,
+    onMain: new Set(),
     options,
     scratch: join(options.workdir, "scratch"),
     targetSha,
@@ -204,20 +214,6 @@ async function guarded(run: Run, entry: LaneEntry, step: () => Promise<Ended>): 
 async function judge(run: Run, entry: LaneEntry): Promise<Ended> {
   const { branch, change } = entry
   const head = change.head
-  // A bare push is a change in state queued; the run opens it before judging
-  // it, so its facts start where every other change's do.
-  if (change.facts.length === 0) {
-    const workItem = await workItemOf(run.git, branch, head)
-    await appendFact(run.git, {
-      branch,
-      head,
-      kind: "opened",
-      subject: `${branch} was pushed without a submit; the queue run opened it`,
-      target: run.options.target,
-      trailers: [["Submitter", "unknown"], ...(workItem === undefined ? [] : [["Work-Item", workItem] as const])],
-    })
-    await pushChange(run, branch, head)
-  }
   // The built-in check: the head shares ancestry with the target. The target
   // moves under every queued change by design, so "descends from the tip" would
   // fail every change behind a merge; an unrelated history is what a merge
@@ -231,8 +227,9 @@ async function judge(run: Run, entry: LaneEntry): Promise<Ended> {
   }
   const worktree = await freshWorktree(run.git, run.options.repo, head, join(run.worktrees, "submit", head.slice(0, 12)), run.options.plumbing)
   try {
-    // The built-in check: every gitlink reachable from its component's main.
-    const offMain = await gitlinkOffMain(run, worktree.path)
+    // The built-in check: every gitlink the change moved reachable from its
+    // component's main (E4).
+    const offMain = await gitlinkOffMain(run, head, worktree.path)
     if (offMain !== undefined) {
       return end(run, entry, "failed", {
         remedy: `land ${offMain.path}'s commit on its main first, pin that, and submit again`,
@@ -272,23 +269,53 @@ async function judge(run: Run, entry: LaneEntry): Promise<Ended> {
 }
 
 /**
- * The first gitlink in the worktree's tree that its component's `main` does
- * not carry, or undefined when every pin is on its main. Each component is
- * asked at its own remote, so the answer is about main as it is now, never a
- * stale tracking ref; a component that cannot be asked throws, and the
- * change ends stuck, because a pin the queue cannot judge is not a fail.
+ * The first gitlink the change moved that its component's `main` does not
+ * carry, or undefined when every moved pin is on its main (E4, amending D7).
+ * Only a gitlink whose sha differs from the target's is asked about — added
+ * or moved by the change; a pin the target already carries is the target's,
+ * judged when it landed — and each component is asked at its own remote, so
+ * the answer is about main as it is now, never a stale tracking ref. A
+ * positive answer is kept on the run: a commit on main stays on main, so the
+ * same pin is fetched at most once per run however many changes move it. A
+ * component that cannot be asked throws, and the change ends stuck, because a
+ * pin the queue cannot judge is not a fail.
+ *
+ * Measured 2026-09-02: asking every component of the root's tree cost 15
+ * fetches and 13.7 s per judged change, for pins the change never touched.
  */
-async function gitlinkOffMain(run: Run, worktree: string): Promise<Readonly<{ path: string; sha: string }> | undefined> {
-  const wt = gitIn(worktree, run.options.process)
-  for (const row of (await wt(["ls-tree", "-r", "-z", "HEAD"])).split("\0")) {
-    const [meta, path] = row.split("\t")
-    const [mode, , sha] = (meta ?? "").split(" ")
-    if (mode !== "160000" || path === undefined || sha === undefined) continue
+async function gitlinkOffMain(
+  run: Run,
+  head: string,
+  worktree: string,
+): Promise<Readonly<{ path: string; sha: string }> | undefined> {
+  for (const { path, sha } of await movedGitlinks(run, head)) {
+    const pin = `${path}@${sha}`
+    if (run.onMain.has(pin)) continue
     const component = gitIn(join(worktree, path), run.options.process)
     await component(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
     if (!(await isAncestor(component, sha, "refs/remotes/origin/main"))) return { path, sha }
+    run.onMain.add(pin)
   }
   return undefined
+}
+
+/**
+ * The gitlinks `head` carries at a sha the target does not, in tree order:
+ * one diff of the two trees, read as git prints it with `-z` —
+ * `:<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0` per entry —
+ * keeping every entry whose new mode is a gitlink. A gitlink the change took
+ * out, or turned into a file, has no pin to judge.
+ */
+async function movedGitlinks(run: Run, head: string): Promise<readonly Readonly<{ path: string; sha: string }>[]> {
+  const fields = (await run.git(["diff-tree", "-r", "-z", "--no-renames", run.targetSha, head])).split("\0")
+  const moved: { path: string; sha: string }[] = []
+  for (let at = 0; at + 1 < fields.length; at += 2) {
+    const [, newMode, , newSha] = (fields[at] ?? "").split(" ")
+    const path = fields[at + 1]
+    if (newMode !== "160000" || newSha === undefined || path === undefined || path === "") continue
+    moved.push({ path, sha: newSha })
+  }
+  return moved
 }
 
 /** The on-merge phase for the first checked change. */
@@ -595,9 +622,9 @@ async function send(run: Run, entry: LaneEntry, endedFact: string, kind: "merged
   const facts = await readFacts(run.git, entry.branch, entry.change.head)
   const opened = facts.find((fact) => fact.kind === "opened")
   const ended = [...facts].reverse().find((fact) => fact.sha === endedFact)
-  // A stuck change is the queue owner's to hear about; so is a change nobody
-  // submitted, whose opened fact names `unknown` (§ The change: a bare push's
-  // messages go to the queue owner).
+  // A stuck change is the queue owner's to hear about; so is a change whose
+  // submitter is `unknown` — a submit with neither `--notify` nor
+  // `YRD_DEFAULT_SUBMITTER` (rulings B6 and D9) — never a seat named `unknown`.
   const submitter = trailerOf(opened, "Submitter")
   const recipient = kind === "stuck" || submitter === undefined || submitter === "unknown" ? run.options.owner : submitter
   // The record the configured notifier reads, unchanged from today's contract
