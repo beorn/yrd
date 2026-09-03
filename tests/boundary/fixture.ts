@@ -18,6 +18,7 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { changeRef } from "../../packages/yrd-queue-core/src/index.ts"
 import { runYrdProcess } from "../../packages/yrd-cli/src/cli.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../../packages/yrd-cli/src/types.ts"
 import { installDeclaredYrdEntry } from "../../packages/yrd-cli/tests/support/declared-yrd-entry.ts"
@@ -33,15 +34,28 @@ export async function removeScratchRoots(): Promise<void> {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 }
 
-export async function git(cwd: string, ...args: string[]): Promise<string> {
+/** A git command that is allowed to fail — for asking whether a ref is there. */
+export async function gitTry(
+  cwd: string,
+  ...args: string[]
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const child = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" })
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
   ])
-  if (exitCode !== 0) throw new Error(`git ${args.join(" ")} exited ${String(exitCode)}: ${stderr || stdout}`)
-  return stdout.trim()
+  return { exitCode, stdout: stdout.trim(), stderr: stderr.trim() }
+}
+
+/** The same command, where a non-zero exit is the case failing rather than an
+ * answer it can read. */
+export async function git(cwd: string, ...args: string[]): Promise<string> {
+  const run = await gitTry(cwd, ...args)
+  if (run.exitCode !== 0) {
+    throw new Error(`git ${args.join(" ")} exited ${String(run.exitCode)}: ${run.stderr || run.stdout}`)
+  }
+  return run.stdout
 }
 
 /** What the fake check should do when the queue runs it. */
@@ -68,35 +82,6 @@ export type FakeCheckPlan = Readonly<{
   yrdRemote?: boolean
 }>
 
-/** The `run:` string for a plan: the knobs travel as environment assignments
- * on the command itself, because a check runs through `sh -c`. Two tests in
- * one file therefore never share process state. */
-function fakeCheckCommand(plan: FakeCheckPlan, log: string): string {
-  return [
-    `FAKE_CHECK_EXIT=${String(plan.exit ?? 0)}`,
-    `FAKE_CHECK_SLEEP=${String(plan.sleepSeconds ?? 0)}`,
-    `FAKE_CHECK_LOG=${log}`,
-    plan.command ?? FAKE_CHECK,
-  ].join(" ")
-}
-
-/** The check as `.yrd.yml` declares it, bound included when the case sets one. */
-function checkStep(plan: FakeCheckPlan, log: string): string {
-  const run = `run: ${JSON.stringify(fakeCheckCommand(plan, log))}`
-  const bound = plan.timeoutMs === undefined ? "" : `, timeoutMs: ${String(plan.timeoutMs)}`
-  return `checks: [{check: {${run}${bound}}}]`
-}
-
-/** The `notify:` line for a plan, or nothing when the case did not ask for one.
- * The notifier is what `.yrd.yml` documents: a command that reads the message
- * as JSON on stdin and answers with a ball id. This one keeps the message so a
- * test can count what was sent, and to whom. */
-function notifyStep(plan: FakeCheckPlan, log: string): string {
-  if (plan.notify !== true) return ""
-  const command = `cat >>${log}; echo '{"ball_id":"b1"}'`
-  return `notify: ${JSON.stringify(command)}\n`
-}
-
 /**
  * The head of a `.yrd.yml`: `remote:` and `target:` (ruling A5). `remote`
  * names the shared repository by URL when the case asks for the remote to be
@@ -119,36 +104,29 @@ export type BoundaryRepository = Readonly<{
 
 /**
  * A scratch repository whose only check is the fake check, on a fresh bare
- * repository holding one commit of `main`.
+ * repository holding one commit of `main`. The fake check's knobs travel as
+ * environment assignments on the command itself, because a check runs through
+ * `sh -c` — so two cases in one file never share process state.
  */
-export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryRepository> {
-  const root = await mkdtemp(join(tmpdir(), "yrd-boundary-"))
-  roots.push(root)
-  const repoPath = join(root, "repo")
-  const origin = join(root, "origin.git")
-  const checkLog = join(root, "fake-check.log")
-  const notifyLog = join(root, "notify.log")
-
-  await git(root, "init", "-q", "--bare", origin)
-  await git(root, "init", "-q", "-b", "main", repoPath)
-  const repo = await realpath(repoPath)
-  await git(repo, "config", "user.name", "Yrd Boundary")
-  await git(repo, "config", "user.email", "yrd@example.invalid")
-  await git(repo, "remote", "add", "origin", origin)
-  await installDeclaredYrdEntry(repo)
-  await writeFile(join(repo, "README.md"), "main\n")
-  // `remote:` is the one line that selects the queue (plan § Cutover). A case
-  // that asks for the yrd remote by name gets the shared repository's path;
-  // otherwise it is `origin`.
-  const head = plan.yrdRemote === true ? declaration(origin) : declaration()
-  await writeFile(
-    join(repo, ".yrd.yml"),
-    `${head}${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
-  )
-  await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd")
-  await git(repo, "commit", "-qm", "main")
-  await git(repo, "push", "-q", "-u", "origin", "main")
-  return { repo, origin, checkLog, notifyLog }
+export function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryRepository> {
+  return buildBoundaryRepository((checkLog) => ({
+    checks: [
+      {
+        name: "check",
+        run: [
+          `FAKE_CHECK_EXIT=${String(plan.exit ?? 0)}`,
+          `FAKE_CHECK_SLEEP=${String(plan.sleepSeconds ?? 0)}`,
+          `FAKE_CHECK_LOG=${checkLog}`,
+          plan.command ?? FAKE_CHECK,
+        ].join(" "),
+        ...(plan.timeoutMs === undefined ? {} : { timeoutMs: plan.timeoutMs }),
+      },
+    ],
+    ...(plan.notify === true ? { notify: true } : {}),
+    // `remote:` is the one line that selects the queue (plan § Cutover). A case
+    // that asks for the yrd remote by name gets the shared repository's path.
+    ...(plan.yrdRemote === true ? { remoteIsOrigin: true } : {}),
+  }))
 }
 
 /** A branch at one head, submitted to the queue. */
@@ -196,7 +174,7 @@ export async function submitOneCommit(repo: string, bay: string): Promise<Change
 /** What one submit from a Bay reported. Unlike `submitOneCommit` this never
  * throws on a non-zero exit, because a case about submitting twice at one head
  * wants the exit code as evidence rather than as an abort. */
-export type SubmitAttempt = Readonly<{
+type SubmitAttempt = Readonly<{
   exitCode: number
   stdout: string
   stderr: string
@@ -290,9 +268,7 @@ export async function refs(repo: string): Promise<readonly string[]> {
 
 /** How many times the fake check ran. */
 export async function checkAttempts(checkLog: string): Promise<number> {
-  const file = Bun.file(checkLog)
-  if (!(await file.exists())) return 0
-  return (await file.text()).trimEnd().split("\n").filter(Boolean).length
+  return (await checkLines(checkLog)).length
 }
 
 /* ---------------------------------------------------------------------------
@@ -303,11 +279,6 @@ export async function checkAttempts(checkLog: string): Promise<number> {
  * reading the published surface, not an internal. Nothing below opens a
  * journal, a database or a module.
  * ------------------------------------------------------------------------- */
-
-/** Where a change's facts live: the change's name, the branch then `@` then the head sha, under the one prefix. */
-export function changeRefName(branch: string, headSha: string): string {
-  return `refs/yrd/changes/${branch}@${headSha}`
-}
 
 /** Every change ref a repository carries, as `<sha> <name>` lines. */
 export async function changeRefs(repo: string): Promise<readonly string[]> {
@@ -323,7 +294,7 @@ async function yrdRefs(repo: string): Promise<readonly string[]> {
 }
 
 /** One commit on a change's ref. */
-export type ChangeFact = Readonly<{
+type ChangeFact = Readonly<{
   sha: string
   parents: readonly string[]
   /** Line one, prose, never parsed by a reader. */
@@ -411,7 +382,7 @@ export async function readChange(
   repo: string,
   change: Readonly<{ branch: string; headSha: string }>,
 ): Promise<ChangeReading> {
-  const ref = changeRefName(change.branch, change.headSha)
+  const ref = changeRef(change.branch, change.headSha)
   const present = await changeRefs(repo)
   const tipLine = present.find((line) => line.endsWith(` ${ref}`))
   if (tipLine === undefined) {
@@ -569,27 +540,9 @@ function expectZero(
 // helper above keeps the signature it had.
 // ---------------------------------------------------------------------------
 
-/** The remote the plan pushes branches and their changes to. */
-export const YRD_REMOTE = "yrd"
-
-/** The ref a change is: `refs/yrd/changes/<branch>@<head sha>`, the change's name under the one prefix. */
-export function changeRef(branch: string, headSha: string): string {
-  return `refs/yrd/changes/${branch}@${headSha}`
-}
-
-/** A git command that is allowed to fail — for asking whether a ref is there. */
-export async function gitTry(
-  cwd: string,
-  ...args: string[]
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
-  return { exitCode, stdout: stdout.trim(), stderr: stderr.trim() }
-}
+/** The ref a change is, as the queue that writes it names it. Re-exported so no
+ * case — and nothing in this fixture — spells the prefix a second time. */
+export { changeRef }
 
 /** Whether a repository carries a ref at exactly this name. */
 export async function refExists(dir: string, ref: string): Promise<boolean> {
@@ -610,7 +563,7 @@ export async function remoteNames(repo: string): Promise<readonly string[]> {
 
 /** The submitter's own hand: a `yrd` remote added with plain git. */
 export async function addYrdRemote(repo: string, origin: string): Promise<void> {
-  await git(repo, "remote", "add", YRD_REMOTE, origin)
+  await git(repo, "remote", "add", "yrd", origin)
 }
 
 /**
@@ -740,7 +693,7 @@ export async function secondWorkingRepo(origin: string, name: string, email: str
  * ------------------------------------------------------------------ */
 
 /** One check as the PLAN spells it: a name, a phase and a command. */
-export type PhasedCheck = Readonly<{
+type PhasedCheck = Readonly<{
   name: string
   /** `on: submit` or `on: merge`. Omitted writes no phase at all. */
   on?: "submit" | "merge"
@@ -751,11 +704,13 @@ export type PhasedCheck = Readonly<{
   scripts?: readonly string[]
 }>
 
-export type BoundaryPlan = Readonly<{
+type BoundaryPlan = Readonly<{
   /** The target's checks, in order. */
   checks: readonly PhasedCheck[]
   /** Declare a notifier, as `FakeCheckPlan.notify` does. */
   notify?: boolean
+  /** Name the shared repository by URL in `remote:`, instead of `origin`. */
+  remoteIsOrigin?: boolean
   /** Files committed on the target alongside `README.md` and `.yrd.yml`.
    * A path ending in `.sh` is committed executable. */
   files?: Readonly<Record<string, string>>
@@ -799,13 +754,25 @@ function phasedChecks(checks: readonly PhasedCheck[]): string {
 }
 
 /** A scratch repository whose target carries the checks and files the case names. */
-export async function boundaryRepositoryWith(plan: BoundaryPlan): Promise<BoundaryRepository> {
+export function boundaryRepositoryWith(plan: BoundaryPlan): Promise<BoundaryRepository> {
+  return buildBoundaryRepository(() => plan)
+}
+
+/**
+ * The one scratch repository every case is built on: a bare shared repository
+ * plus a working repository whose `origin` is that bare one, with one commit
+ * of `main` carrying `README.md`, the declaration, and whatever files the plan
+ * names. The plan is a function of the log paths because a check's `run:`
+ * string has to name its log, and the log lives under the root this makes.
+ */
+async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPlan): Promise<BoundaryRepository> {
   const root = await mkdtemp(join(tmpdir(), "yrd-boundary-"))
   roots.push(root)
   const repoPath = join(root, "repo")
   const origin = join(root, "origin.git")
   const checkLog = join(root, "fake-check.log")
   const notifyLog = join(root, "notify.log")
+  const plan = planOf(checkLog)
 
   await git(root, "init", "-q", "--bare", origin)
   await git(root, "init", "-q", "-b", "main", repoPath)
@@ -821,9 +788,15 @@ export async function boundaryRepositoryWith(plan: BoundaryPlan): Promise<Bounda
     await writeFile(join(repo, path), content, path.endsWith(".sh") ? { mode: 0o755 } : {})
   }
 
+  // The notifier is what `.yrd.yml` documents: a command that reads the message
+  // as JSON on stdin and answers with a ball id. This one keeps the message so
+  // a case can count what was sent, and to whom.
   const notify =
-    plan.notify === true ? `notify: ${JSON.stringify(`cat >>${notifyLog}; echo '{"ball_id":"b1"}'`)}\n` : ""
-  await writeFile(join(repo, ".yrd.yml"), `${declaration()}${notify}${phasedChecks(plan.checks)}\n`)
+    plan.notify === true
+      ? `notify: ${JSON.stringify(`cat >>${notifyLog}; echo '{"ball_id":"b1"}'`)}\n`
+      : ""
+  const head = plan.remoteIsOrigin === true ? declaration(origin) : declaration()
+  await writeFile(join(repo, ".yrd.yml"), `${head}${notify}${phasedChecks(plan.checks)}\n`)
 
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")
@@ -927,11 +900,7 @@ export async function refreshTarget(repo: string): Promise<string> {
 
 /** Whether a head is in the target's history — the plan's own merged test. */
 export async function mergedIntoTarget(repo: string, sha: string): Promise<boolean> {
-  const child = Bun.spawn(["git", "-C", repo, "merge-base", "--is-ancestor", sha, "origin/main"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  return (await child.exited) === 0
+  return (await gitTry(repo, "merge-base", "--is-ancestor", sha, "origin/main")).exitCode === 0
 }
 
 /** Every line a check log carries, so a case can read WHAT ran, not just how

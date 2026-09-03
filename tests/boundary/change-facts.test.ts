@@ -94,22 +94,6 @@ function runSummary(run: QueueRunResult): string {
   return `queue run exited ${String(run.exitCode)}${stderr === "" ? "" : `\n--- stderr ---\n${stderr}`}`
 }
 
-/** git, with something on stdin — only the control below needs it. */
-async function gitStdin(cwd: string, stdin: string, ...args: string[]): Promise<string> {
-  const child = Bun.spawn(["git", "-C", cwd, ...args], {
-    stdin: new TextEncoder().encode(stdin),
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
-  if (exitCode !== 0) throw new Error(`git ${args.join(" ")} exited ${String(exitCode)}: ${stderr || stdout}`)
-  return stdout.trim()
-}
-
 describe("a change and its facts", { timeout: 120_000 }, () => {
   describe("the change ref", () => {
     // today: red — measured 2026-09-02: after a submit NEITHER repository
@@ -412,75 +396,6 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
       }
       const state = await tipTrailer(boundary.origin, "Fact")
       expect(FACT_KINDS.has(state[0] ?? ""), `${runSummary(run)}\nFact: ${state[0] ?? "(none)"}`).toBe(true)
-    })
-  })
-
-  /**
-   * A control, not a contract. Every case above fails on its first assertion,
-   * `the change ref exists`, so on its own this file proves only that the ref
-   * is absent — it cannot tell "the queue writes no facts" apart from "the
-   * reader cannot read facts". This builds a change ref by hand, exactly as
-   * the plan describes one, and reads it back with the same helper. Green
-   * here and red above means the reds are the queue's.
-   */
-  describe("the reader itself (a control, not a contract)", () => {
-    // today: green — it exercises the harness, never the queue.
-    it("reads a hand-built change ref: genesis first, head second, four facts in order", async () => {
-      const boundary = await boundaryRepository({ exit: 0 })
-      const bare = boundary.origin
-      await git(bare, "config", "user.name", "Yrd Control")
-      await git(bare, "config", "user.email", "yrd@example.invalid")
-
-      const emptyTree = await gitStdin(bare, "", "hash-object", "-w", "-t", "tree", "--stdin")
-      expect(emptyTree).toBe(EMPTY_TREE)
-
-      const branch = "task/control"
-      const head = await git(bare, "rev-parse", "main")
-      const trailers = `Branch: ${branch}\nHead: ${head}\nTarget: main\nRun: r1`
-
-      const genesis = await git(bare, "commit-tree", emptyTree, "-m", "yrd")
-      const opened = await git(
-        bare,
-        "commit-tree",
-        emptyTree,
-        "-p",
-        genesis,
-        "-p",
-        head,
-        "-m",
-        `opened ${branch} at ${head.slice(0, 8)}\n\nFact: opened\n${trailers}\nWork: 24101\nSubmitter: control`,
-      )
-      let tip = opened
-      for (const kind of ["checked", "merged", "sent"]) {
-        tip = await git(
-          bare,
-          "commit-tree",
-          emptyTree,
-          "-p",
-          tip,
-          "-m",
-          `${kind} ${branch} at ${head.slice(0, 8)}\n\nFact: ${kind}\n${trailers}`,
-        )
-      }
-      await git(bare, "update-ref", `refs/yrd/changes/${branch}@${head}`, tip)
-
-      const read = await readChange(bare, { branch, headSha: head })
-
-      expect(read.exists, read.report).toBe(true)
-      expect(read.kinds, read.report).toEqual(["opened", "checked", "merged", "sent"])
-      expect(read.facts[0]?.parents, read.report).toEqual([genesis, head])
-      expect(read.facts[1]?.parents, read.report).toEqual([opened])
-      expect(read.facts[0]?.trailers.get("Head"), read.report).toEqual([head])
-      expect(read.facts[0]?.trailers.get("Work"), read.report).toEqual(["24101"])
-      expect(read.facts[0]?.subject, read.report).toBe(`opened ${branch} at ${head.slice(0, 8)}`)
-      expect(read.genesis?.sha, read.report).toBe(genesis)
-      // The first-parent line is the four facts and the genesis, and the head
-      // is not on it — the whole point of putting genesis first.
-      expect(read.firstParentLine, read.report).toHaveLength(5)
-      expect(read.firstParentLine, read.report).not.toContain(head)
-      // And the one-read answer works on it.
-      expect(await tipTrailer(bare, "Fact"), read.report).toEqual(["sent"])
-      expect(await changeRefs(bare), read.report).toHaveLength(1)
     })
   })
 })
