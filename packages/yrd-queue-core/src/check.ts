@@ -3,13 +3,19 @@
  * § The final design, The queue run).
  *
  * A check is a command the target declares, run in a change's worktree with a
- * bound. Its result is one of three words, read off the exit code and nothing
- * else: 0 is pass, 1 is fail, 2 is stuck — the check's own statement that it
- * could not judge. A check that is not there, one that runs past its bound, or
- * one that exits with any other code could not judge either, and that is the
- * queue's fault until proven otherwise, so it is stuck too. Every result names
- * the check, its exit, its duration and its log path, because a result nobody
- * can read is not a result.
+ * bound. Its result is one of three words, read off the exit code once the run
+ * itself settled cleanly: 0 is pass, 1 is fail, 2 is stuck — the check's own
+ * statement that it could not judge. A check that is not there, one that runs
+ * past its bound, or one that exits with any other code could not judge either,
+ * and that is the queue's fault until proven otherwise, so it is stuck too.
+ * Every result names the check, its exit, its duration and its log path,
+ * because a result nobody can read is not a result.
+ *
+ * An exit code is only a verdict when the driver got a clean reading. When
+ * `@yrd/process` reports a stall, a descendant that outlived the check holding
+ * its output open, a settlement signal that could not reach the process group,
+ * or output dropped past the capture budget, the check was NOT measured: the
+ * result is stuck, the queue's, whatever the child exited with.
  *
  * The environment is built, never inherited (ruling A7), and it says what the
  * check is judging: `YRD_REPO` is the worktree the check runs in, its own
@@ -25,7 +31,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { createProcess, shellCommand, type Process } from "@yrd/process"
+import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 
 /** A check as the target declares it. */
 export type CheckSpec = Readonly<{
@@ -47,7 +53,7 @@ export type CheckResult = Readonly<{
   name: string
   result: "pass" | "fail" | "stuck"
   /** The exit code, or the word for what ended it when there was none. */
-  exit: number | "timeout" | "signal" | "missing"
+  exit: number | "timeout" | "signal" | "missing" | "unsettled"
   durationMs: number
   /** Where stdout and stderr went, one file per attempt. */
   log: string
@@ -147,6 +153,13 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   if (result.signal !== null) {
     return { ...base, exit: "signal", result: "stuck", why: `ended by ${result.signal}` }
   }
+  // The driver did not get a clean reading of this run, so nothing it read is a
+  // verdict: a child that exits 0 while a descendant still holds its output pipe
+  // comes back with a partial log and an exit code that means nothing, and used
+  // to be classified pass. Whatever the condition, it is the queue's ground and
+  // never the submitter's fault.
+  const unclean = unsettled(result)
+  if (unclean !== undefined) return { ...base, exit: "unsettled", result: "stuck", why: unclean }
   // 127 is the shell's own word for a command it could not find: the check is
   // not there, which is the queue's fault, not the submitter's.
   if (result.exitCode === 127) {
@@ -162,4 +175,28 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
     default:
       return { ...base, exit: result.exitCode, result: "stuck", why: `exit ${result.exitCode} is not a verdict` }
   }
+}
+
+/**
+ * What `@yrd/process` says went wrong with the RUN, as opposed to what the
+ * check said: a stall, a descendant that outlived the check and held its output
+ * open, a settlement signal that could not reach the process group, or output
+ * dropped past the capture budget. Each is loud in the result and each means
+ * the check was not measured; reading its exit code anyway is how a wedged
+ * check passes.
+ */
+function unsettled(result: ProcessResult): string | undefined {
+  const found: string[] = []
+  if (result.escapedDescendant === true) {
+    found.push("a descendant outlived it and held its output open, so the log is partial")
+  } else if (result.stalled === true) {
+    found.push("it stalled: no output progress within the bound")
+  }
+  if (result.sweepFailure !== undefined) found.push(result.sweepFailure)
+  const truncated = result.outputTruncation ?? []
+  if (truncated.length > 0) {
+    const dropped = truncated.reduce((total, entry) => total + entry.droppedBytes, 0)
+    found.push(`${String(dropped)} bytes of its output were dropped past the capture budget, so the log is partial`)
+  }
+  return found.length === 0 ? undefined : found.join("; ")
 }

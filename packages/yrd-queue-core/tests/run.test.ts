@@ -609,6 +609,34 @@ describe("a queue run", () => {
     expect(outcome.merged).toEqual(["task/one"])
   })
 
+  it("a check whose child exits 0 while a descendant holds its output open is stuck, not pass", async () => {
+    // The live wedge shape: `sh` exits 0 immediately and the backgrounded sleep
+    // inherits the run's stdout, so the driver abandons the drain at its grace
+    // and hands back exit 0 with a partial log. Read as an exit code alone,
+    // that is a pass on a check nobody measured.
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const base = w.options({ on: ["submit"] })
+
+    const outcome = await queueRun({
+      ...base,
+      checks: base.checks.map((check) => ({ ...check, run: "sleep 30 & exit 0" })),
+    })
+
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
+    const wedged = facts[1]
+    if (wedged === undefined) throw new Error("no stuck fact")
+    expect(wedged.subject).toContain("held its output open")
+    // The condition is named, and so is the partial log the check did write.
+    const check = trailers(wedged, "Check")[0] ?? ""
+    expect(check).toContain("exit=unsettled")
+    expect(existsSync(check.match(/log=(\S+)/u)?.[1] ?? "")).toBe(true)
+  }, 30_000)
+
   it("nothing submitted is nothing to do", async () => {
     const w = await world()
     const outcome = await queueRun(w.options({}))
