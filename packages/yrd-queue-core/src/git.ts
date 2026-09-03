@@ -17,15 +17,58 @@
 import { createProcess, type Process } from "@yrd/process"
 import type { Git } from "./facts.ts"
 
-/** A git runner rooted at one repository. Non-zero exits throw, loudly. */
+/**
+ * A git runner rooted at one repository. Non-zero exits throw, loudly.
+ *
+ * Two settings travel in its environment (`gitEnvironment`), so no call site
+ * can forget them: the caller's routing variables are scrubbed, and a fetch
+ * never recurses into submodules. The superproject sets
+ * `submodule.recurse=true`, under which every fetch visits all sixteen
+ * submodules (measured 2026-09-03: 16 s against 1 s for the change refs);
+ * worktrees get their submodules from materialization (worktree.ts), never
+ * from a fetch.
+ */
 export function gitIn(cwd: string, process?: Process): Git {
-  const runner = process ?? createProcess({ cwd })
+  const runner = process ?? createProcess({ cwd, env: gitEnvironment(globalThis.process.env) })
   return async (args: readonly string[], input?: string): Promise<string> => {
     const result = await runner.run({ argv: ["git", ...args], cwd, ...(input === undefined ? {} : { stdin: input }) })
     if (result.exitCode !== 0) {
       throw new GitExit(args, cwd, result.exitCode, result.stderr.trim() || result.stdout.trim())
     }
     return result.stdout
+  }
+}
+
+/**
+ * The variables git honours ahead of `cwd` when choosing a repository. A
+ * `git yrd` subcommand inherits them from git itself; a caller's shell may
+ * carry them by accident. Everything else passes: a user's `GIT_SSH_COMMAND`,
+ * a test's `GIT_CONFIG_*`.
+ */
+const ROUTING_VARIABLES = new Set([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_NAMESPACE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+])
+
+/** The caller's environment without its routing variables, plus the queue's own git configuration. */
+export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = Object.fromEntries(
+    Object.entries(source).filter(([key, value]) => value !== undefined && !ROUTING_VARIABLES.has(key)),
+  )
+  const declared = Number(env.GIT_CONFIG_COUNT ?? "0")
+  const count = Number.isInteger(declared) && declared >= 0 ? declared : 0
+  return {
+    ...env,
+    GIT_CONFIG_COUNT: String(count + 1),
+    [`GIT_CONFIG_KEY_${count}`]: "fetch.recurseSubmodules",
+    [`GIT_CONFIG_VALUE_${count}`]: "no",
   }
 }
 
