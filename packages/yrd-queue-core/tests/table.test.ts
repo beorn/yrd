@@ -55,7 +55,7 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   await w.git(["commit", "--quiet", "-m", file])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" }, workItem: `@i/1/${file}` })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" }, issue: `@i/1/${file}` })
   return head
 }
 
@@ -225,7 +225,7 @@ describe("the table is the queue read rendered", () => {
     await new Promise((resolve) => setTimeout(resolve, 1100))
     const two = await submitCommit(w, "task/two", "two.txt")
     const rows = list((await readQueue(w.git, "origin", "main")).changes)
-    expect(rows.map((row) => [row.branch, row.position, row.state, row.workItem])).toEqual([
+    expect(rows.map((row) => [row.branch, row.position, row.state, row.issue])).toEqual([
       ["task/one", 1, "queued", "@i/1/one.txt"],
       ["task/two", 2, "queued", "@i/1/two.txt"],
     ])

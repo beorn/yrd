@@ -133,10 +133,10 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
       expect(opened.trailers.get("Change"), read.report).toEqual([`${change.branch}@${change.headSha}`])
     })
 
-    // today: red — no change ref, so no submitter, target or work item recorded
+    // today: red — no change ref, so no submitter, target or issue recorded
     // anywhere a plain git reader can see.
-    it("the opened fact names the submitter, the time, the target and the work item", async () => {
-      // A branch under the convention `<work item>-<slug>`, so there is a work
+    it("the opened fact names the submitter, the time, the target and the issue", async () => {
+      // A branch under the convention `<issue>-<slug>`, so there is a work
       // item to name.
       const { boundary, change } = await submitted({ exit: 0 }, "24101-facts")
 
@@ -147,8 +147,8 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
 
       expect(opened.trailers.get("Submitter")?.[0] ?? "", read.report).not.toBe("")
       expect(opened.trailers.get("Target")?.[0] ?? "", read.report).toContain("main")
-      // The key is the plan's own words (ruling B5: `Work-Item`).
-      expect(opened.trailers.get("Work-Item")?.[0] ?? "", read.report).toContain("24101")
+      // The key is the plan's own words (ruling B5: `Issue`).
+      expect(opened.trailers.get("Issue")?.[0] ?? "", read.report).toContain("24101")
 
       // The time is the commit's own, because position in line is the order of
       // the opened facts by commit time — so it has to be on the commit.

@@ -38,7 +38,7 @@ import {
   show,
   refuseTarget,
   submit,
-  workItemOf,
+  issueOf,
   type CheckResult,
   type Git,
   type LogRecord,
@@ -51,7 +51,7 @@ import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 export type CoreQueueCommand =
-  | Readonly<{ command: "submit"; branch?: string; submitter: string; workItem?: string; dryRun?: boolean }>
+  | Readonly<{ command: "submit"; branch?: string; submitter: string; issue?: string; dryRun?: boolean }>
   | Readonly<{ command: "run" }>
   | Readonly<{
       command: "up"
@@ -185,7 +185,7 @@ export async function coreQueueCommand(
       // flag belongs to the command that pushes, or to no command at all.
       if (request.dryRun === true) {
         const head = (await git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim()
-        const workItem = await workItemOf(git, branch, head, request.workItem)
+        const issue = await issueOf(git, branch, head, request.issue)
         emit(
           io,
           options.json,
@@ -194,10 +194,10 @@ export async function coreQueueCommand(
             dryRun: true,
             submitter: request.submitter,
             target: targetName(config.target),
-            ...(workItem === undefined ? {} : { workItem }),
+            ...(issue === undefined ? {} : { issue }),
           },
           `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}` +
-            `${workItem === undefined ? "" : ` (work item ${workItem})`}; nothing was pushed`,
+            `${issue === undefined ? "" : ` (issue ${issue})`}; nothing was pushed`,
         )
         return 0
       }
@@ -205,7 +205,7 @@ export async function coreQueueCommand(
         branch,
         submitter: request.submitter,
         target: config.target,
-        ...(request.workItem === undefined ? {} : { workItem: request.workItem }),
+        ...(request.issue === undefined ? {} : { issue: request.issue }),
       })
       emit(io, options.json, submitted, `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}`)
       return 0
@@ -549,7 +549,7 @@ function table(rows: readonly Row[]): string {
 function line(row: Row): string {
   const position = row.position === undefined ? "  " : String(row.position).padStart(2)
   const result = row.result ?? row.reason ?? ""
-  return `${position} ${row.state.padEnd(7)} ${row.branch} ${row.head.slice(0, 12)} ${result}${row.workItem === undefined ? "" : ` ${row.workItem}`}`.trimEnd()
+  return `${position} ${row.state.padEnd(7)} ${row.branch} ${row.head.slice(0, 12)} ${result}${row.issue === undefined ? "" : ` ${row.issue}`}`.trimEnd()
 }
 
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {

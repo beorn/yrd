@@ -20,7 +20,7 @@
  * - the message is a prose first line, then trailers, one meaning each, with
  *   `Fact:` naming the kind, `Change:` naming the change the fact is about and
  *   `Target:` naming the branch it lands on, both on every fact,
- *   `Opened:`, `Submitter:` and `Work-Item:` carried forward from the first
+ *   `Opened:`, `Submitter:` and `Issue:` carried forward from the first
  *   fact, a sent fact naming who it went to (`To:`) and how it went
  *   (`Delivery: sent`, `logged` or `failed`), and an ended fact's result
  *   carried onto its sent fact, so the tip
@@ -75,11 +75,11 @@ export type WriteFact = Readonly<{
 /**
  * The trailers every fact carries forward from the fact before it, so the tip
  * fact alone identifies the change: when it was first opened (its place in
- * line), by whom, and for which work item. Written on the first fact from the
+ * line), by whom, and for which issue. Written on the first fact from the
  * write itself and copied on every later one; a later write naming one of
  * them again (a retry names its submitter) wins.
  */
-const CARRIED = ["Opened", "Submitter", "Work-Item"] as const
+const CARRIED = ["Opened", "Submitter", "Issue"] as const
 
 /**
  * One fact, as every reader of a commit asks for it: the sha, the committer

@@ -104,7 +104,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
       change: `${branch}@${head}`,
       dryRun: true,
       target: "origin#main",
-      workItem: "24099",
+      issue: "24099",
     })
     // The whole point: the remote is byte-for-byte where it was.
     expect(await refs(origin), dry.report).toEqual(before)
@@ -138,10 +138,10 @@ describe("the submit path", { timeout: 120_000 }, () => {
   // today: red — the submit writes no change ref, so there are no facts to read.
   //
   // The plan says the opened fact "names the submitter, the time, the target
-  // and the work item" and does not give the trailer keys, so this asserts the
+  // and the issue" and does not give the trailer keys, so this asserts the
   // values are in the fact commit, not where. The time needs no assertion: a
   // commit carries one.
-  it("the opened fact names the submitter, the target and the work item", async () => {
+  it("the opened fact names the submitter, the target and the issue", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)
     await setSubmitter(repo, "Ada Submitter", "ada@example.invalid")

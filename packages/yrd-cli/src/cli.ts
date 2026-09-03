@@ -49,7 +49,7 @@ type GlobalOptions = YrdObservabilityFlags
 type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean }>
 
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
-const ISSUE_HELP = "the work item; else the head's Resolves/Refs trailer, else the branch name's leading segment"
+const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
 const DRY_RUN_HELP = "print the change this would open and push nothing"
 
 export function resolveSubmitter(declared: string | undefined, env: NodeJS.ProcessEnv): string {
@@ -86,7 +86,7 @@ function buildProgram(
         command: "submit",
         submitter: resolveSubmitter(options.notify, env),
         ...(branch === undefined ? {} : { branch }),
-        ...(options.issue === undefined ? {} : { workItem: options.issue }),
+        ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.dryRun === true ? { dryRun: true } : {}),
       },
       { json: options.json, env, log: log() },
@@ -233,7 +233,7 @@ function buildProgram(
     .command("open")
     .description("open an environment for one branch and keep it; prints its path")
     .option("--bay <name>", "name the environment")
-    .option("--issue <ref>", "the work item this environment is for")
+    .option("--issue <ref>", "the issue this environment is for")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await openEnvironment(options as Parameters<typeof openEnvironment>[0], io)))
   env_

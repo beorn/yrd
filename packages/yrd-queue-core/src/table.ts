@@ -28,7 +28,7 @@ export type Row = Readonly<{
   result?: string
   /** The log path of the deciding check, when there is one. */
   log?: string
-  workItem?: string
+  issue?: string
   submitter?: string
   /** Why: `replaced`, `deleted`, a check's code, or for a `bypass` row the one line about that commit. */
   reason?: string
@@ -103,7 +103,7 @@ function row(entry: QueueEntry, position?: number): Row {
     since: opened === undefined ? undefined : new Date(opened),
     state: entry.reading.state,
     submitter: trailer(tip, "Submitter"),
-    workItem: trailer(tip, "Work-Item"),
+    issue: trailer(tip, "Issue"),
     merge: trailer(tip, "Merge"),
     base: trailer(tip, "Base"),
   }

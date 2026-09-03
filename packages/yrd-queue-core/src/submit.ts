@@ -23,7 +23,7 @@ export type SubmitRequest = Readonly<{
   /** The queue's target: the branch it lands on, at the remote holding it. */
   target: Target
   submitter: string
-  workItem?: string
+  issue?: string
 }>
 
 export type Submitted = Readonly<{
@@ -79,9 +79,9 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // A local change ref the remote does not hold is an orphan of a refused
   // push; submit is the only writer of these refs, so it goes.
   else if ((await refAt(git, ref)) !== undefined) await git(["update-ref", "-d", ref])
-  const workItem = await workItemOf(git, request.branch, head, request.workItem)
+  const issue = await issueOf(git, request.branch, head, request.issue)
   const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
-  if (workItem !== undefined) trailers.push(["Work-Item", workItem])
+  if (issue !== undefined) trailers.push(["Issue", issue])
   const opened = await appendFact(git, {
     change,
     kind: "opened",
@@ -113,12 +113,12 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
 }
 
 /**
- * The work item a change is for (ruling C4): the one declared on submit, else
+ * The issue a change is for (ruling C4): the one declared on submit, else
  * the head commit's `Resolves:` or `Refs:` trailer, else the leading
- * `<work item>-` segment of the branch name's last component, the convention
- * (§ The change). None of those, and the change has no work item.
+ * `<issue>-` segment of the branch name's last component, the convention
+ * (§ The change). None of those, and the change has no issue.
  */
-export async function workItemOf(git: Git, branch: string, head: string, declared?: string): Promise<string | undefined> {
+export async function issueOf(git: Git, branch: string, head: string, declared?: string): Promise<string | undefined> {
   if (declared !== undefined) return declared
   const fromTrailer = (await git(["log", "-1", "--format=%(trailers:key=Resolves,key=Refs,valueonly,separator=%x00)", head]))
     .split("\0")

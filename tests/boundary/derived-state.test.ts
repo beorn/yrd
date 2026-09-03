@@ -310,19 +310,19 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     )
   })
 
-  it("a row names its work item", async () => {
-    // § The change: "the convention is `<work item>-<slug>`"; § Commands:
-    // `queue list` shows the work item. A branch that carries one has to reach
-    // the row, because the work item is how the queue's table joins the bead
+  it("a row names its issue", async () => {
+    // § The change: "the convention is `<issue>-<slug>`"; § Commands:
+    // `queue list` shows the issue. A branch that carries one has to reach
+    // the row, because the issue is how the queue's table joins the bead
     // table.
     const { repo } = await boundaryRepository({ exit: 0 })
     const { branch } = await submitOneCommit(repo, "24058-derived")
 
     const { rows, result } = await changesListed(repo)
     const row = rowFor(rows, branch, result.report)
-    const workItem = row.workItem ?? row.work_item ?? row.item
+    const issue = row.issue
     expect(
-      typeof workItem === "string" ? workItem : `no work item on a row with keys ${Object.keys(row).join(",")}`,
+      typeof issue === "string" ? issue : `no issue on a row with keys ${Object.keys(row).join(",")}`,
       result.report,
     ).toContain("24058")
   })

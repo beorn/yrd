@@ -78,7 +78,7 @@ describe("submit is one atomic push of the branch and its opened fact", () => {
       branch: "task/one",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
-      workItem: "@i/10-yrd/24061",
+      issue: "@i/10-yrd/24061",
     })
 
     expect(submitted.head).toBe(head)
@@ -93,7 +93,7 @@ describe("submit is one atomic push of the branch and its opened fact", () => {
         ["Change", `task/one@${head}`],
         ["Submitter", "@dev/2"],
         ["Target", "origin#main"],
-        ["Work-Item", "@i/10-yrd/24061"],
+        ["Issue", "@i/10-yrd/24061"],
       ]),
     )
   })

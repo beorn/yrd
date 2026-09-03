@@ -61,7 +61,7 @@ describe("a change's facts are its commits", () => {
       target: "origin#main",
       trailers: [
         ["Submitter", "@dev/2"],
-        ["Work-Item", "@i/10-yrd/24061"],
+        ["Issue", "@i/10-yrd/24061"],
       ],
     })
 
@@ -70,7 +70,7 @@ describe("a change's facts are its commits", () => {
     expect(facts[0]?.kind).toBe("opened")
     expect(facts[0]?.sha).toBe(sha)
     expect(trailer(facts[0]!, "Submitter")).toBe("@dev/2")
-    expect(trailer(facts[0]!, "Work-Item")).toBe("@i/10-yrd/24061")
+    expect(trailer(facts[0]!, "Issue")).toBe("@i/10-yrd/24061")
 
     // The head is the fact's parent, so the content stays reachable from the
     // change ref alone: a prune of the branch cannot orphan what was judged.

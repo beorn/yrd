@@ -172,7 +172,7 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   await w.git(["commit", "--quiet", "-m", file])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" }, workItem: "@i/10-yrd/1" })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" }, issue: "@i/10-yrd/1" })
   return head
 }
 
@@ -406,7 +406,7 @@ describe("a queue run", () => {
       pr: "task/one",
       sha: head,
       submitter: "@dev/2",
-      workItem: "@i/10-yrd/1",
+      issue: "@i/10-yrd/1",
     })
     expect(sent[0]?.attempt_id).toBe(facts[2]?.sha)
     expect(
@@ -869,7 +869,7 @@ describe("a queue run", () => {
     expect(messages(w).map((message) => message.kind)).toEqual(["merged"])
   })
 
-  it("the merge commit names its change, its submitter and its work item, and the merged fact says the queue merged it and what it checked (E5)", async () => {
+  it("the merge commit names its change, its submitter and its issue, and the merged fact says the queue merged it and what it checked (E5)", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
 
@@ -886,7 +886,7 @@ describe("a queue run", () => {
     const named = await trailerOn(w, merge, "Change")
     expect(named).toBe(changeName({ branch: "task/one", head }))
     expect(`${CHANGES}/${named}`).toBe(changeRef({ branch: "task/one", head }))
-    expect(await trailerOn(w, merge, "Work-Item")).toBe("@i/10-yrd/1")
+    expect(await trailerOn(w, merge, "Issue")).toBe("@i/10-yrd/1")
     expect(await trailerOn(w, merge, "Submitter")).toBe("@dev/2")
     await fetchChanges(w)
     // The facts and the genesis, on the ref's first-parent line (facts.ts).
@@ -1225,7 +1225,7 @@ describe("a failing check bills the submitter at once", () => {
     await w.git(["add", "two.txt"])
     await w.git(["commit", "--quiet", "-m", "two"])
     await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: { branch: "main", remote: "origin" }, workItem: "@i/10-yrd/1" })
+    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: { branch: "main", remote: "origin" }, issue: "@i/10-yrd/1" })
 
     expect((await queueRun(w.options({ exit: 1, on: ["submit"] }))).failed).toEqual(["task/one"])
 

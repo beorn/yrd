@@ -48,8 +48,8 @@ type BranchProvisionDecision = Readonly<{ kind: "open"; source: "local" | "track
 
 /**
  * One state table owns branch provenance: an ordinary open takes the first
- * carrier it finds (local > tracking > base), while an environment opened FOR a
- * work item refuses every pre-existing carrier — a claim branch that already
+ * carrier it finds (local > tracking > base), while an environment opened FOR an
+ * issue refuses every pre-existing carrier — a claim branch that already
  * exists somewhere was not cut here, and opening on top of it would silently
  * adopt work whose provenance nobody proved.
  */

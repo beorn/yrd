@@ -482,17 +482,17 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       // The merge commit names its change back, by the change's own name, so
       // `git log main` says which change every merge came from and
       // `git log refs/yrd/changes/<that name>` prints its facts (E5). The
-      // submitter and the work item come with it, as the opened fact carried
+      // submitter and the issue come with it, as the opened fact carried
       // them forward, one trailer per line in git's own trailer format.
       const tip = tipOf(change)
-      const workItem = trailer(tip, "Work-Item")
+      const issue = trailer(tip, "Issue")
       const submitter = trailer(tip, "Submitter")
       const message = [
         `merge ${short(branch, head)} into ${run.options.target.branch}`,
         "",
         `Change: ${name}`,
         `Merged-By: ${mergedBy(run.name, run.log.id)}`,
-        ...(workItem === undefined ? [] : [`Work-Item: ${workItem}`]),
+        ...(issue === undefined ? [] : [`Issue: ${issue}`]),
         ...(submitter === undefined ? [] : [`Submitter: ${submitter}`]),
       ].join("\n")
       await wt(["merge", "--quiet", "--no-ff", "--no-edit", "-m", message, head])
@@ -1003,8 +1003,8 @@ async function send(
   //   log_path     the log of the check that decided it
   //   failures     how many times this branch has been sent back, this one
   //                included; the notifier raises an andon at two or more
-  //   workItem     the one field the notifier ignores, because the plan says
-  //                the message names the work item
+  //   issue     the one field the notifier ignores, because the plan says
+  //                the message names the issue
   //
   // Read at the root, 2026-09-03 (tools/yrd-notify.ts): it reads no `id`, no
   // `text` and no `head`, which this record used to carry as second spellings
@@ -1023,7 +1023,7 @@ async function send(
     pr: entry.change.branch,
     sha: entry.change.head,
     ...(known ? { submitter } : {}),
-    workItem: trailer(ended, "Work-Item"),
+    issue: trailer(ended, "Issue"),
   })
   for (const { name, delivery, failure } of handed) {
     // One sent fact per entry that fired, so a reader can see which of them the
