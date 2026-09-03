@@ -45,16 +45,15 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // ref when it has fetched, else nothing at all, so a name somebody else is
   // already using refuses loudly instead of being overwritten.
   const tracked = await refAt(git, `refs/remotes/${remote}/${request.branch}`)
-  const trailers: (readonly [string, string])[] = [
-    ["Submitter", request.submitter],
-    ["Target", request.target],
-  ]
-  if (request.workItem !== undefined) trailers.push(["Work-Item", request.workItem])
+  const workItem = await workItemOf(git, request.branch, head, request.workItem)
+  const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
+  if (workItem !== undefined) trailers.push(["Work-Item", workItem])
   const opened = await appendFact(git, {
     branch: request.branch,
     head,
     kind: "opened",
     subject: `${request.submitter} submitted ${request.branch} to ${request.target}`,
+    target: request.target,
     trailers,
   })
   // Two explicit leases make the push the same compare-and-swap the local
@@ -71,6 +70,22 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     `${ref}:${ref}`,
   ])
   return { branch: request.branch, head, opened, retry }
+}
+
+/**
+ * The work item a change is for (ruling C4): the one declared on submit, else
+ * the head commit's `Resolves:` or `Refs:` trailer, else the leading
+ * `<work item>-` segment of the branch name's last component, the convention
+ * (§ The change). None of those, and the change has no work item.
+ */
+export async function workItemOf(git: Git, branch: string, head: string, declared?: string): Promise<string | undefined> {
+  if (declared !== undefined) return declared
+  const fromTrailer = (await git(["log", "-1", "--format=%(trailers:key=Resolves,key=Refs,valueonly,separator=%x00)", head]))
+    .split("\0")
+    .map((value) => value.trim())
+    .find((value) => value !== "")
+  if (fromTrailer !== undefined) return fromTrailer
+  return /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
 }
 
 const ABSENT = "0".repeat(40)

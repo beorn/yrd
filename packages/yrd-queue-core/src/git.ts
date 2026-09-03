@@ -20,8 +20,8 @@ import type { Git } from "./facts.ts"
 /** A git runner rooted at one repository. Non-zero exits throw, loudly. */
 export function gitIn(cwd: string, process?: Process): Git {
   const runner = process ?? createProcess({ cwd })
-  return async (args: readonly string[]): Promise<string> => {
-    const result = await runner.run({ argv: ["git", ...args], cwd })
+  return async (args: readonly string[], input?: string): Promise<string> => {
+    const result = await runner.run({ argv: ["git", ...args], cwd, ...(input === undefined ? {} : { stdin: input }) })
     if (result.exitCode !== 0) {
       throw new GitExit(args, cwd, result.exitCode, result.stderr.trim() || result.stdout.trim())
     }

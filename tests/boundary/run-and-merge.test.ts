@@ -76,8 +76,11 @@ describe("the queue run", { timeout: 180_000 }, () => {
       })
       const before = await targetTip(repo)
 
+      // The fake check judges content: it exits as told only where the change
+      // wrote a file, so the change carries one beside its rewritten config.
       await submitCommitWriting(repo, "rewrite", {
         ".yrd.yml": `base: main\nbatch: 1\nchecks: [{gate: {run: ${JSON.stringify(fake(branchLog, 0))}}}]\n`,
+        "rewrite.txt": "the change\n",
       })
 
       const run = await queueRunOnce(repo)
@@ -93,12 +96,16 @@ describe("the queue run", { timeout: 180_000 }, () => {
       const { repo } = await boundaryRepositoryWith({
         notify: true,
         checks: [{ name: "gate", run: `GATE_LOG=${log} sh gate.sh` }],
-        files: { "gate.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$GATE_LOG\"\nexit 1\n" },
+        // The target's gate is red only where the change's marker is. A gate red
+        // at the target too would be the target's fault under § Attribution,
+        // and the change stuck, not failed.
+        files: { "gate.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$GATE_LOG\"\nif [ -e script.txt ]; then exit 1; fi\nexit 0\n" },
       })
       const before = await targetTip(repo)
 
       await submitCommitWriting(repo, "script", {
         "gate.sh": "#!/bin/sh\nprintf 'branch\\n' >>\"$GATE_LOG\"\nexit 0\n",
+        "script.txt": "the change\n",
       })
 
       const run = await queueRunOnce(repo)
@@ -197,7 +204,13 @@ describe("the queue run", { timeout: 180_000 }, () => {
     expect(run.exitCode, run.report).toBe(1)
     expect(await targetTip(repo), run.report).toBe(before)
     expect(await mergedIntoTarget(repo, change.headSha), run.report).toBe(false)
-    for (const ref of refsBefore) expect(await refs(repo), run.report).toContain(ref)
+    // The author's refs stand: every ref name is still there and the branch
+    // still points at the head. The change's own ref moved forward by one
+    // failed fact, which is the record of the refusal, not a loss.
+    const after = await refs(repo)
+    const names = (lines: readonly string[]): readonly string[] => lines.map((line) => line.split(" ")[1] ?? "")
+    for (const name of names(refsBefore)) expect(names(after), run.report).toContain(name)
+    expect(after, run.report).toContain(`${change.headSha} refs/heads/${change.branch}`)
   })
 
   /**

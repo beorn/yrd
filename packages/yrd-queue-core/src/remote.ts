@@ -53,13 +53,17 @@ export async function lane(git: Git, remote: string, target: string): Promise<re
   await git(["fetch", "--quiet", "--prune", remote, `+refs/heads/${target}`, `+${CHANGES}/*:${CHANGES}/*`])
 
   const entries: LaneEntry[] = []
-  for (const [branch, branchHead] of heads) {
+  // Every branch at the remote, and every branch a change still names: a
+  // branch that is gone still has its changes, which read failed (deleted).
+  const branches = new Set([...heads.keys(), ...changeRefs.map((change) => change.branch)])
+  for (const branch of branches) {
+    const branchHead = heads.get(branch)
     const known = changeRefs.filter((change) => change.branch === branch)
     // The branch's current head is a change whether or not anyone opened it.
-    const at = known.some((change) => change.head === branchHead) ? known : [...known, { branch, head: branchHead }]
+    const at = branchHead === undefined || known.some((change) => change.head === branchHead) ? known : [...known, { branch, head: branchHead }]
     for (const { head } of at) {
       const change: ChangeFacts = {
-        branchHead,
+        ...(branchHead === undefined ? {} : { branchHead }),
         facts: await readFacts(git, branch, head),
         head,
         headOnTarget: await isAncestor(git, head, targetSha),
@@ -68,4 +72,35 @@ export async function lane(git: Git, remote: string, target: string): Promise<re
     }
   }
   return entries
+}
+
+/** The remotes this repository has, by name. */
+export async function remoteNames(git: Git): Promise<readonly string[]> {
+  return (await git(["remote"]))
+    .split("\n")
+    .map((name) => name.trim())
+    .filter((name) => name !== "")
+}
+
+const YRD = "yrd"
+
+/**
+ * The remote name for a declared `remote:`: the name itself when the
+ * repository has it; else the declaration is a URL and the remote is `yrd`,
+ * added at that URL when missing (§ The change: `yrd submit` adds the `yrd`
+ * remote from `.yrd.yml` when missing). A name that is neither is loud.
+ */
+export async function resolveRemote(git: Git, declared: string): Promise<string> {
+  const names = await remoteNames(git)
+  if (names.includes(declared)) return declared
+  if (!declared.includes(":") && !declared.includes("/")) {
+    throw new Error(`.yrd.yml remote: ${declared} is neither a remote of this repository nor a URL`)
+  }
+  if (names.includes(YRD)) {
+    const url = (await git(["remote", "get-url", YRD])).trim()
+    if (url !== declared) throw new Error(`the remote ${YRD} is at ${url}, not at the declared ${declared}`)
+    return YRD
+  }
+  await git(["remote", "add", YRD, declared])
+  return YRD
 }

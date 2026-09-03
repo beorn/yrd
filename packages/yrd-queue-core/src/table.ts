@@ -14,7 +14,7 @@ export type Row = Readonly<{
   branch: string
   head: string
   state: ChangeState
-  /** 1-based place in line for queued and checked rows; absent otherwise. */
+  /** 1-based place in line for queued, checked and stuck rows; absent otherwise. */
   position?: number
   /** The last result: pass, fail or stuck, with the check that decided it. */
   result?: string

@@ -162,7 +162,8 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
 
       expect(opened.trailers.get("Submitter")?.[0] ?? "", read.report).not.toBe("")
       expect(opened.trailers.get("Target")?.[0] ?? "", read.report).toContain("main")
-      expect(opened.trailers.get("Work")?.[0] ?? "", read.report).toContain("24101")
+      // The key is the plan's own words (ruling B5: `Work-Item`).
+      expect(opened.trailers.get("Work-Item")?.[0] ?? "", read.report).toContain("24101")
 
       // The time is the commit's own, because position in line is the order of
       // the opened facts by commit time — so it has to be on the commit.
@@ -312,9 +313,11 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
       ).toEqual(before.facts.map((fact) => fact.sha))
       // Forward only.
       expect(await isAncestor(boundary.origin, before.tip, after.tip), report).toBe(true)
-      // yrd deletes nothing.
-      const refsAfter = await refs(boundary.origin)
-      for (const ref of refsBefore) expect(refsAfter, report).toContain(ref)
+      // yrd deletes nothing: every ref name is still there. The target and the
+      // change ref moved forward, which is the run's job, not a deletion.
+      const names = (lines: readonly string[]): readonly string[] => lines.map((line) => line.split(" ")[1] ?? "")
+      const refsAfter = names(await refs(boundary.origin))
+      for (const ref of names(refsBefore)) expect(refsAfter, report).toContain(ref)
     })
 
     // today: red — no change ref, so nothing bounds what a Fact: may say.

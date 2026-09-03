@@ -14375,6 +14375,11 @@ function buildProgram(
       .description(CHANGE_STATE_HELP[state])
       .option("--json", "emit stable JSON")
       .option("--dry-run", "print the resolved branches and the exact git command without pushing")
+    if (state === "submit") {
+      verb
+        .option("--notify <seat>", "the seat that hears the result; else YRD_DEFAULT_SUBMITTER, else unknown")
+        .option("--issue <id>", "the work item; else the head's Resolves/Refs trailer, else the branch name's leading segment")
+    }
     if (state === "archive") {
       verb
         .option("-m, --message <text>", "why this branch is being archived")
@@ -14384,11 +14389,15 @@ function buildProgram(
     verb.action(async (selectors: readonly string[], options: ChangeStateVerbOptions) => {
       // The new core takes `submit` when the declaration names a remote.
       if (state === "submit") {
+        // The submitter is the seat named on the command line, else the launch
+        // identity, else `unknown` — never the git author (@i/10-yrd/24028).
+        const submitOptions = options as { json?: boolean; notify?: string; issue?: string }
         const taken = await coreQueueCommand(invocationCwd(io), io, {
-          branch: selectors[0],
           command: "submit",
-          submitter: globalThis.process.env.YRD_DEFAULT_SUBMITTER ?? "operator",
-        }, { json: (options as { json?: boolean }).json })
+          submitter: resolveSubmitterSeat(submitOptions.notify, globalThis.process.env).seat,
+          ...(selectors[0] === undefined ? {} : { branch: selectors[0] }),
+          ...(submitOptions.issue === undefined ? {} : { workItem: submitOptions.issue }),
+        }, { json: submitOptions.json })
         if (taken !== undefined) {
           setExit(taken)
           return

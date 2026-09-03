@@ -75,7 +75,7 @@ describe("the declaration is read from the target commit", () => {
 
   it("is not this core's when it names no remote, and is loud when it is wrong", async () => {
     const old = await world("batch: 1\nchecks:\n  - verify:\n      run: bun run test\n")
-    expect(await readConfig(old.git, "main")).toBeUndefined()
+    expect((await readConfig(old.git, "main"))?.declaresRemote).toBe(false)
 
     const wrong = await world("remote: origin\nchecks:\n  - verify:\n      on: sometimes\n      run: bun run test\n")
     await expect(readConfig(wrong.git, "main")).rejects.toThrow(/on: must be submit or merge/u)

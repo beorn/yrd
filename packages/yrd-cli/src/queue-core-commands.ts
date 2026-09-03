@@ -19,6 +19,9 @@ import {
   list,
   queueRun,
   readConfig,
+  readHints,
+  remoteNames,
+  resolveRemote,
   show,
   submit,
   type LogRecord,
@@ -45,12 +48,21 @@ export async function coreQueueCommand(
   options: Readonly<{ json?: boolean; env?: NodeJS.ProcessEnv; workdir?: string; log?: ConditionalLogger }> = {},
 ): Promise<YrdCliExitCode | undefined> {
   const git = gitIn(repo)
-  const declared = await readConfig(git, "HEAD")
-  if (declared === undefined) return undefined
-  // The target's own declaration is the authority for every judgement; HEAD's
-  // only says which remote and target to ask.
-  await git(["fetch", "--quiet", declared.remote, `+refs/heads/${declared.target}:refs/remotes/${declared.remote}/${declared.target}`])
-  const config = (await readConfig(git, `${declared.remote}/${declared.target}`)) ?? declared
+  // The submitter's own commit only hints where the queue is (`remote:`,
+  // `target:`); the target's declaration is the authority for every judgement,
+  // and for whether this core runs at all: it does when the target names
+  // `remote:`. A branch that rewrote or broke its own `.yrd.yml` is judged by
+  // the target's rules all the same (ruling D2 bills it at merge).
+  const hints = await readHints(git, "HEAD")
+  if (hints.problem !== undefined) options.log?.child("queue").debug?.(`${hints.problem}; asking the target`)
+  const hinted =
+    hints.remote === undefined ? ((await remoteNames(git)).includes("origin") ? "origin" : undefined) : await resolveRemote(git, hints.remote)
+  if (hinted === undefined) return undefined
+  const hintedTarget = hints.target ?? "main"
+  await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${hinted}/${hintedTarget}`])
+  const declared = await readConfig(git, `${hinted}/${hintedTarget}`)
+  if (declared === undefined || !declared.declaresRemote) return undefined
+  const config: QueueConfig = { ...declared, remote: await resolveRemote(git, declared.remote) }
   // A worktree's `.git` is a file, so the queue's own directory lives under the
   // common git dir the whole repository shares, never under a path guessed from it.
   const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
@@ -64,7 +76,7 @@ export async function coreQueueCommand(
         branch,
         submitter: request.submitter,
         target: config.target,
-        workItem: request.workItem,
+        ...(request.workItem === undefined ? {} : { workItem: request.workItem }),
       })
       emit(io, options.json, submitted, `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${config.target}`)
       return 0

@@ -17,8 +17,10 @@ import { refAt } from "./git.ts"
 import type { QueueCheck } from "./run.ts"
 
 export type QueueConfig = Readonly<{
-  /** The queue's remote: a remote name, or a URL the CLI adds under the name `yrd`. Its presence selects this core. */
+  /** The queue's remote: a remote name, or a URL the CLI adds under the name `yrd`; `origin` unless declared. */
   remote: string
+  /** Whether the declaration names `remote:` itself — the line that selects this core while the incumbent still exists (§ Cutover). */
+  declaresRemote: boolean
   /** The branch the queue lands on; `main` unless declared. */
   target: string
   checks: readonly QueueCheck[]
@@ -33,9 +35,9 @@ export type QueueConfig = Readonly<{
 }>
 
 /**
- * Read the declaration at one commit, or undefined when there is none or it
- * does not name a remote (the incumbent's shape). A commit with no `.yrd.yml`
- * is an honest "not this core", read as git's exit 1; any other failure throws.
+ * Read the declaration at one commit, or undefined when the commit has no
+ * `.yrd.yml` (an honest absence, read as git's exit 1). Any other failure
+ * throws with the path that is wrong.
  */
 export async function readConfig(git: Git, commit: string): Promise<QueueConfig | undefined> {
   const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
@@ -43,15 +45,45 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   const text = await git(["show", `${commit}:.yrd.yml`])
   const raw: unknown = Bun.YAML.parse(text)
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${commit.slice(0, 12)} is not a mapping`)
-  if (raw.remote === undefined) return undefined
-  if (typeof raw.remote !== "string" || raw.remote === "") throw new Error(`.yrd.yml remote: must be a remote name or URL`)
+  const remote = raw.remote ?? "origin"
+  if (typeof remote !== "string" || remote === "") throw new Error(`.yrd.yml remote: must be a remote name or URL`)
   const target = raw.target ?? "main"
   if (typeof target !== "string" || target === "") throw new Error(`.yrd.yml target: must be a branch name`)
   const owner = raw.owner ?? "operator"
   if (typeof owner !== "string" || owner === "") throw new Error(`.yrd.yml owner: must be a seat name`)
   const notify = optionalString(raw, "notify")
   const scratch = optionalString(raw, "scratch")
-  return { blob, checks: readChecks(raw.checks), notify, owner, remote: raw.remote, scratch, target }
+  return { blob, checks: readChecks(raw.checks), declaresRemote: raw.remote !== undefined, notify, owner, remote, scratch, target }
+}
+
+export type Hints = Readonly<{
+  remote?: string
+  target?: string
+  /** Why the commit's `.yrd.yml` hinted nothing, when it exists and could not be read. */
+  problem?: string
+}>
+
+/**
+ * What a submitter's own commit says about where its queue is: `remote:` and
+ * `target:` (or the incumbent's `base:`) from its `.yrd.yml`, when that file
+ * exists and reads. Hints for finding the target, never authority: the target's
+ * declaration judges, so a branch that rewrites or breaks its own `.yrd.yml`
+ * still submits and is judged by the target's rules, and D2 bills it at merge.
+ * A file that exists and cannot be read hints nothing and says so in `problem`.
+ */
+export async function readHints(git: Git, commit: string): Promise<Hints> {
+  const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
+  if (blob === undefined) return {}
+  let raw: unknown
+  try {
+    raw = Bun.YAML.parse(await git(["show", `${commit}:.yrd.yml`]))
+  } catch (error) {
+    return { problem: `.yrd.yml at ${commit.slice(0, 12)} does not parse: ${error instanceof Error ? error.message : String(error)}` }
+  }
+  if (!isRecord(raw)) return { problem: `.yrd.yml at ${commit.slice(0, 12)} is not a mapping` }
+  const remote = typeof raw.remote === "string" && raw.remote !== "" ? raw.remote : undefined
+  const target = typeof raw.target === "string" && raw.target !== "" ? raw.target : typeof raw.base === "string" && raw.base !== "" ? raw.base : undefined
+  return { ...(remote === undefined ? {} : { remote }), ...(target === undefined ? {} : { target }) }
 }
 
 /**

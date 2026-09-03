@@ -85,17 +85,19 @@ export function readChange(change: ChangeFacts): ChangeReading {
 
 /**
  * Position in line: the order of opened facts by their commit time
- * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design). Opened facts
- * are the one kind many machines write, so a skewed clock can serve a change
- * before its turn. That is documented, not fixed: the consequence is a change
- * served early, never a wrong result, and a Lamport clock would buy ordering
- * nobody has asked for at the price of a second notion of time.
+ * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design). In line are
+ * the queued, the checked and the stuck: a stuck change keeps its place and
+ * the next queue run takes it again (§ The words). Opened facts are the one
+ * kind many machines write, so a skewed clock can serve a change before its
+ * turn. That is documented, not fixed: the consequence is a change served
+ * early, never a wrong result, and a Lamport clock would buy ordering nobody
+ * has asked for at the price of a second notion of time.
  */
 export function inLine(changes: readonly ChangeFacts[]): readonly ChangeFacts[] {
   return [...changes]
     .filter((change) => {
       const state = readChange(change).state
-      return state === "queued" || state === "checked"
+      return state === "queued" || state === "checked" || state === "stuck"
     })
     .sort((left, right) => openedAt(left) - openedAt(right))
 }
@@ -105,6 +107,7 @@ function openedAt(change: ChangeFacts): number {
   return opened?.at.getTime() ?? Number.MAX_SAFE_INTEGER
 }
 
+/** A failed fact's `Reason` (a check's name, conflict, config-invalid, replaced, deleted); a stuck fact's `Reason` (flake, inherited, no-evidence) or its `Cause`. */
 function reasonOf(fact: Fact): string | undefined {
-  return fact.trailers.find(([name]) => name === "Reason" || name === "Why" || name === "Code")?.[1]
+  return fact.trailers.find(([name]) => name === "Reason")?.[1] ?? fact.trailers.find(([name]) => name === "Cause")?.[1]
 }

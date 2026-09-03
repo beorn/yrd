@@ -224,7 +224,7 @@ export async function submitFromBay(repo: string, bayPath: string): Promise<Subm
   const submitted = capture(bayPath)
   const newCore = measuringNewCore()
   const exitCode = newCore
-    ? await yrd(repo, submitted.io, "queue", "submit", "--json")
+    ? await yrd(repo, submitted.io, "queue", "submit", "--json", ...notifyArgs(repo))
     : await yrd(repo, submitted.io, "bay", "submit", "--json")
   const verb = newCore ? "queue submit" : "bay submit"
   const report = `${verb} exited ${String(exitCode)}\n--- stdout ---\n${submitted.stdout()}\n--- stderr ---\n${submitted.stderr()}`
@@ -632,10 +632,23 @@ export async function addYrdRemote(repo: string, origin: string): Promise<void> 
   await git(repo, "remote", "add", YRD_REMOTE, origin)
 }
 
-/** Who the next commits and submits in this repository are by. */
+/**
+ * Who the next commits and submits in this repository are by: git's identity
+ * for the commits, and the seat every later submit from this repository names.
+ * The submitter is told on the command line, never read from the git author
+ * (ruling @i/10-yrd/24028: the fleet's git identity names nobody).
+ */
+const submitterOf = new Map<string, string>()
 export async function setSubmitter(repo: string, name: string, email: string): Promise<void> {
   await git(repo, "config", "user.name", name)
   await git(repo, "config", "user.email", email)
+  submitterOf.set(repo, email)
+}
+
+/** The `--notify <seat>` a submit from `repo` carries, when `setSubmitter` named one. */
+function notifyArgs(repo: string): readonly string[] {
+  const seat = submitterOf.get(repo)
+  return seat === undefined ? [] : ["--notify", seat]
 }
 
 let commitCounter = 0
@@ -691,16 +704,20 @@ export async function runYrd(repo: string, ...args: string[]): Promise<QueueRunR
 
 /** The plan's one path in: `yrd queue submit <branch>`. */
 export function queueSubmit(repo: string, branch: string): Promise<QueueRunResult> {
-  return runYrd(repo, "queue", "submit", branch)
+  return runYrd(repo, "queue", "submit", branch, ...notifyArgs(repo))
 }
 
-/** A change's facts, newest first, as their commit messages on the change ref. */
+/**
+ * A change's facts, newest first, as their commit messages on the change ref.
+ * A fact carries `Fact:`; the genesis commit that ends the first-parent walk
+ * carries none and is not one.
+ */
 export async function factMessages(dir: string, ref: string): Promise<readonly string[]> {
   const log = await git(dir, "log", "--first-parent", "--format=%B%x00", ref)
   return log
     .split("\0")
     .map((message) => message.trim())
-    .filter((message) => message !== "")
+    .filter((message) => /^Fact: /mu.test(message))
 }
 
 /** Everything the notifier was handed, as one blob; empty when nothing was sent. */

@@ -49,7 +49,10 @@ async function world(): Promise<World> {
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(work, "target.txt"), "base\n")
-  await git(["add", "target.txt"])
+  // The target declares the queue, as every real target does: the merged
+  // tree's declaration is a built-in check at merge (ruling D2).
+  writeFileSync(join(work, ".yrd.yml"), "remote: origin\n")
+  await git(["add", "target.txt", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "base"])
   await git(["push", "--quiet", "origin", "main"])
   const target = (await git(["rev-parse", "HEAD"])).trim()
@@ -177,7 +180,7 @@ describe("a queue run", () => {
     expect(facts[2]?.trailers).toEqual(
       expect.arrayContaining([
         ["Reason", "verify"],
-        ["Attribution", "submitter"],
+        ["Fault", "submitter"],
       ]),
     )
     expect(messages(w)[0]).toMatchObject({ code: "verify", disposition: "author", kind: "send-back", recipient: "@dev/2" })
@@ -210,7 +213,7 @@ describe("a queue run", () => {
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
     const facts = await readFacts(w.git, "task/one", head)
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "stuck", "sent"])
-    expect(facts[2]?.trailers).toEqual(expect.arrayContaining([["Attribution", "inherited"]]))
+    expect(facts[2]?.trailers).toEqual(expect.arrayContaining([["Reason", "inherited"]]))
     expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
     expect(messages(w)[0]?.text).toMatch(/the target is red, not the change/u)
   })

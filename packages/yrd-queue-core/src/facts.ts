@@ -9,13 +9,20 @@
  *
  * Shape of a fact commit, and why:
  * - the tree is empty, because yrd stores no content of its own;
- * - the LAST parent is the change's head, so the content the fact is about
- *   stays reachable from the ref and survives every prune;
- * - every later fact's FIRST parent is the fact before it, so the first-parent
- *   walk from the tip is the change's history in order, ending at the genesis
- *   fact, whose only parent is the head;
+ * - the opened fact has two parents, the genesis commit first and the change's
+ *   head second, so the head stays reachable from the ref and survives every
+ *   prune, and `git log --first-parent` from the tip reads exactly the facts
+ *   and stops at the genesis (measured 2026-09-02: with the head as the only
+ *   parent, a plain log walks the whole project history);
+ * - every later fact has one parent, the fact before it; the merge commit is
+ *   never a parent;
  * - the message is a prose first line, then trailers, one meaning each, with
- *   `Fact:` naming the kind.
+ *   `Fact:` naming the kind and `Branch:`, `Head:`, `Target:` on every fact,
+ *   so the tip fact's trailers are the whole answer about the change.
+ *
+ * The genesis is one object: an empty-tree commit with a fixed author and
+ * time, so it has the same sha in every repository and is written at most
+ * once per repository.
  *
  * Writing uses `update-ref` with the expected old value, so two writers racing
  * on one change lose loudly instead of interleaving.
@@ -41,15 +48,18 @@ export type Fact = Readonly<{
   trailers: readonly (readonly [string, string])[]
 }>
 
-/** One git invocation, returning its stdout. Throws on a non-zero exit. */
-export type Git = (args: readonly string[]) => Promise<string>
+/** One git invocation, returning its stdout; `input` is its stdin. Throws on a non-zero exit. */
+export type Git = (args: readonly string[], input?: string) => Promise<string>
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 const ABSENT = "0".repeat(40)
+/** The one genesis object, byte for byte as git stores it; its sha follows from these bytes. */
+const GENESIS_OBJECT = `tree ${EMPTY_TREE}\nauthor yrd <yrd@yrd> 0 +0000\ncommitter yrd <yrd@yrd> 0 +0000\n\nyrd: genesis\n`
 
 export type WriteFact = Readonly<{
   branch: string
   head: string
+  target: string
   kind: FactKind
   subject: string
   trailers?: readonly (readonly [string, string])[]
@@ -64,7 +74,7 @@ export type WriteFact = Readonly<{
 export async function appendFact(git: Git, write: WriteFact): Promise<string> {
   const ref = changeRef(write.branch, write.head)
   const tip = await refAt(git, ref)
-  const parents = tip === undefined ? [write.head] : [tip, write.head]
+  const parents = tip === undefined ? [await genesis(git), write.head] : [tip]
   const message = factMessage(write)
   const args = ["commit-tree", EMPTY_TREE]
   for (const parent of parents) args.push("-p", parent)
@@ -74,6 +84,11 @@ export async function appendFact(git: Git, write: WriteFact): Promise<string> {
   // Git spells "the ref must not exist yet" as the zero sha.
   await git(["update-ref", ref, sha, tip ?? ABSENT])
   return sha
+}
+
+/** Write the genesis object if this repository lacks it, and return its sha. */
+async function genesis(git: Git): Promise<string> {
+  return (await git(["hash-object", "-w", "-t", "commit", "--stdin"], GENESIS_OBJECT)).trim()
 }
 
 /** Every fact of a change, oldest first. An unknown change reads as no facts. */
@@ -91,9 +106,8 @@ export async function readFacts(git: Git, branch: string, head: string): Promise
     const [sha, at, body] = row.split("\x00")
     if (sha === undefined || at === undefined || body === undefined) continue
     const parsed = parseFact(sha, at, body)
-    // The walk leaves the fact chain at the genesis fact's parent, which is the
-    // change's head: an ordinary commit with no `Fact:` trailer. That is where
-    // this change's history ends.
+    // The first-parent walk ends at the genesis, which carries no `Fact:`
+    // trailer. That is where this change's history ends.
     if (parsed === undefined) break
     facts.push(parsed)
   }
@@ -102,7 +116,7 @@ export async function readFacts(git: Git, branch: string, head: string): Promise
 
 /** The message one fact commit carries. */
 export function factMessage(write: WriteFact): string {
-  const lines = [write.subject, "", `Fact: ${write.kind}`, `Change: ${write.branch}`, `Head: ${write.head}`]
+  const lines = [write.subject, "", `Fact: ${write.kind}`, `Branch: ${write.branch}`, `Head: ${write.head}`, `Target: ${write.target}`]
   for (const [name, value] of write.trailers ?? []) {
     if (value.includes("\n")) throw new Error(`trailer ${name} carries a newline; one trailer is one line`)
     lines.push(`${name}: ${value}`)
