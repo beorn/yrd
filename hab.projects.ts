@@ -51,34 +51,22 @@ export const yrdQueueRunnerDeclarations = defineYrdQueueRunnerDeclarations([
   { serviceName: "yrd-runner", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
 ] as const)
 
-/**
- * The same declarations, in the form the CLI reads them.
- *
- * `yrd queue <repository>` is a composition spelling: Yrd resolves it only when
- * a host says which repositories exist. Passing the declarations to the service
- * makes this registry the ONE source — a launcher that carried its own copy is
- * how a repository ends up declared on only one side of the contract. No root
- * is declared, so the paths stay relative to the service's own directory,
- * exactly as they are here.
- */
-export const YRD_REPOSITORY_ALIASES = JSON.stringify({
-  schema: "yrd-repository-aliases/1",
-  repositories: yrdQueueRunnerDeclarations.map(({ repository, queue }) => ({
-    name: repository.name,
-    path: repository.path,
-    base: queue.base,
-  })),
-})
-
 export default {
   name: "yrd",
   services: Object.fromEntries(
-    yrdQueueRunnerDeclarations.map(({ serviceName, repository, owner }) => [
+    yrdQueueRunnerDeclarations.map(({ serviceName, owner }) => [
       serviceName,
       {
         // The service is `yrd queue up`: the same round `yrd queue run` does, on
         // a loop (plan § Commands). `queue run` is one round and exits.
-        command: `bun tools/yrd-runtime.mjs yrd queue up ${repository.name}`,
+        //
+        // NO REPOSITORY OPERAND. `yrd queue up <repository>` was a composition
+        // spelling resolved from a `YRD_REPOSITORY_ALIASES` env this registry
+        // also minted; both went with the old core at M6, and the new commands
+        // take no repository argument — the declaration where the command
+        // stands IS the repository, and the service stands in it
+        // (`repository.path`).
+        command: "bun tools/yrd-runtime.mjs yrd queue up",
         // The habitant stands down over this RSS (exit 12, memory-cap) instead of
         // waiting for the kernel; @cto ruling 2026-08-30 on
         // @i/10-yrd/runner-exits-and-respawns — one habitant per host. Raised
@@ -88,8 +76,13 @@ export default {
         // 12:58 PDT with restart:"never" — a cap below the working set is an
         // outage generator, not a guard. The host has 121 GB; the growth itself
         // is tracked as its own defect. This number is a ceiling for runaway.
-        env: { TRIBE_NAME: "@yrd", YRD_REPOSITORY_ALIASES, YRD_HABITANT_RSS_CAP_MB: "24576" },
-        health: { command: `bun tools/yrd-runtime.mjs yrd queue ${repository.name} --check --json` },
+        env: { TRIBE_NAME: "@yrd", YRD_HABITANT_RSS_CAP_MB: "24576" },
+        // `yrd queue <repository> --check` was the incumbent resident's own
+        // health probe — it read the resident's lease, its installed plan and
+        // its journal, none of which exist now. What is left to prove is that
+        // the queue answers: one read of the line, from the repository the
+        // service stands in.
+        health: { command: "bun tools/yrd-runtime.mjs yrd queue list --json" },
         // The runner relaunches itself on the three conditions whose CURE is
         // the relaunch, and only those: `source-stale` (11), the stale
         // installed plan (13) and a moved root pin (18) all mean "the code

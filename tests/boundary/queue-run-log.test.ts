@@ -64,7 +64,6 @@ import {
   queueRunOnce,
   removeScratchRoots,
   submitOneCommit,
-  measuringNewCore,
 } from "./fixture.ts"
 
 afterEach(removeScratchRoots)
@@ -364,7 +363,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // A positive control: a debug log that says nothing at all would satisfy
     // every bound below and tell a reader nothing. The new core renders exactly
     // its records, six kinds on a merging run; the incumbent narrates more.
-    expect(rows.length, run.report).toBeGreaterThan(measuringNewCore() ? 5 : 20)
+    expect(rows.length, run.report).toBeGreaterThan(5)
     expect(rows.length, run.report).toBeLessThan(200)
 
     // No git invocation and no git span, at any level above trace.
@@ -429,20 +428,11 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     const { path, records } = await logOfQueueRun(run)
 
     const built = theOne(records, "run").built
-    // The incumbent mints a Run record per merge and names it here; the new
-    // core mints none, and says so with an empty list rather than a missing field.
-    if (measuringNewCore()) {
-      expect(built, run.report).toEqual([])
-      // The file is named by the queue run's own id, and by nothing else.
-      expect(basename(path), run.report).toBe(`${String(records[0]?.run)}.jsonl`)
-    } else {
-      expect(built, run.report).toEqual([expect.any(String)])
-      const id = (built as readonly string[])[0] as string
-      expect(id, run.report).toMatch(/^R\d+$/u)
-      // The queue run's own id is neither the Run's id nor a file named for it.
-      expect(records[0]?.run, run.report).not.toBe(id)
-      expect(basename(path), run.report).not.toBe(`${id}.jsonl`)
-    }
+    // Nothing is minted per merge, and the record says so with an empty list
+    // rather than a missing field.
+    expect(built, run.report).toEqual([])
+    // The file is named by the queue run's own id, and by nothing else.
+    expect(basename(path), run.report).toBe(`${String(records[0]?.run)}.jsonl`)
   })
 
   /**
@@ -481,61 +471,41 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
   })
 
   /**
-   * Storage bookkeeping is plumbing, the same class as the git chatter moved
-   * to trace in 8975957f, and a debug log should read as the queue's work.
+   * An empty-queue run's debug log is the queue's own work and nothing else.
    *
-   * Measured 2026-09-02 on pin 0749260a, one empty-queue queue run in shared
-   * main: 565 rows at debug, of which 124 debug plus 62 span were
+   * Measured 2026-09-02 on pin 0749260a, one empty-queue run in shared main:
+   * 565 rows at debug, of which 124 debug plus 62 span were
    * `yrd:storage:lock`, 61 each of debug, info and span were
    * `yrd:storage:append`, 64 were `yrd:core:replay` spans and 63 were
-   * `yrd:storage` checkpoint rows. The queue's own decisions were a remainder.
+   * `yrd:storage` checkpoint rows — the queue's own decisions were a
+   * remainder. The store those rows narrated is deleted at M6 (there is no
+   * store but git), so the case that moved them to trace went with it; what
+   * stays is the bound they were measured against, and a positive control that
+   * the queue still says what it did.
    */
-  describe("storage bookkeeping", () => {
+  describe("an empty-queue run at debug", () => {
     /** Every stderr row loggily prints, one per log line. */
     const logRows = (stderr: string): readonly string[] =>
       stderr.split("\n").filter((row) => /^\d\d:\d\d:\d\d /u.test(row))
 
-    /** The lock, append, checkpoint and replay rows, whatever their level.
-     * Matched on the NAMESPACE, right after the level word, so the one perf
-     * row that names every stage in its payload is not mistaken for one. */
-    const bookkeeping = (rows: readonly string[]): readonly string[] =>
-      rows.filter((row) => /^\d\d:\d\d:\d\d [A-Z]+ (?:yrd:storage\b|yrd:core:replay\b)/u.test(row))
-
-    const emptyQueueAt = async (level: string): Promise<QueueRunResult> => {
+    it("says what it did, and stays well under the plan's bound", async () => {
       const { repo } = await boundaryRepository({ exit: 0, notify: true })
-      process.env.LOG_LEVEL = level
+      process.env.LOG_LEVEL = "debug"
+      let run: QueueRunResult
       try {
-        return await queueRunOnce(repo)
+        run = await queueRunOnce(repo)
       } finally {
         delete process.env.LOG_LEVEL
       }
-    }
-
-    it("is absent at debug and present at trace", async () => {
-      const debug = await emptyQueueAt("debug")
-      expect(debug.exitCode, debug.report).toBe(0)
-      const debugRows = logRows(debug.stderr)
-
-      // A positive control under the zero: the queue's own account of the run
-      // is still there, so this is silence about plumbing and not silence.
-      expect(debugRows.length, debug.report).toBeGreaterThan(3)
-      expect(
-        bookkeeping(debugRows),
-        `storage bookkeeping at debug:\n${bookkeeping(debugRows).slice(0, 5).join("\n")}`,
-      ).toEqual([])
-
-      // The rows are moved, not deleted: a mechanic who wants the plumbing
-      // asks for trace and gets all of it.
-      const trace = await emptyQueueAt("trace")
-      expect(trace.exitCode, trace.report).toBe(0)
-      expect(bookkeeping(logRows(trace.stderr)).length, trace.report).toBeGreaterThan(0)
-    })
-
-    it("leaves an empty-queue run well under the plan's bound at debug", async () => {
-      const run = await emptyQueueAt("debug")
+      expect(run.exitCode, run.report).toBe(0)
 
       const rows = logRows(run.stderr)
-      expect(rows.length, run.report).toBeGreaterThan(3)
+      // The positive control under the bound: a zero row count would satisfy
+      // "under 200" while meaning the log had gone silent.
+      expect(
+        rows.filter((row) => /^\d\d:\d\d:\d\d [A-Z]+ yrd:queue:run\b/u.test(row)),
+        run.report,
+      ).toHaveLength(1)
       expect(rows.length, run.report).toBeLessThan(200)
     })
   })

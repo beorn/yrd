@@ -33,7 +33,6 @@ import {
   removeScratchRoots,
   submitOneCommit,
   targetTip,
-  measuringNewCore,
 } from "./fixture.ts"
 
 afterEach(removeScratchRoots)
@@ -84,7 +83,7 @@ describe("the queue-run boundary", { timeout: 120_000 }, () => {
     // same check again in the change's worktree and once at the target, three
     // attempts; the incumbent bills on the first.
     expect(run.exitCode, run.report).toBe(1)
-    expect(await checkAttempts(checkLog), run.report).toBe(measuringNewCore() ? 3 : 1)
+    expect(await checkAttempts(checkLog), run.report).toBe(3)
 
     expect(await targetTip(repo), run.report).toBe(before)
     // The author's work survives: the branch still names the head that was
@@ -121,10 +120,6 @@ describe("the queue-run boundary", { timeout: 120_000 }, () => {
    */
   async function expectRefsKept(repo: string, refsBefore: readonly string[], report: string): Promise<void> {
     const after = await refs(repo)
-    if (!measuringNewCore()) {
-      for (const ref of refsBefore) expect(after, report).toContain(ref)
-      return
-    }
     const now = new Map(after.map((line) => line.split(" ") as [string, string]).map(([sha, name]) => [name, sha]))
     for (const line of refsBefore) {
       const [sha, name] = line.split(" ") as [string, string]
@@ -158,7 +153,7 @@ describe("the queue-run boundary", { timeout: 120_000 }, () => {
       // open and bills nobody (the incumbent reports it as still submitted).
       expect(await targetTip(repo), run.report).toBe(before)
       expect(await changeStandings(repo), run.report).toEqual(
-        measuringNewCore() ? { ...standingBefore, [`${branch}@${headSha}`]: "stuck" } : standingBefore,
+        { ...standingBefore, [`${branch}@${headSha}`]: "stuck" },
       )
       expect(await refs(repo), run.report).toEqual(expect.arrayContaining([`${headSha} refs/heads/${branch}`]))
       await expectRefsKept(repo, refsBefore, run.report)

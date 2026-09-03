@@ -18,7 +18,7 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { runYrdProcess } from "../../packages/yrd-cli/src/host.ts"
+import { runYrdProcess } from "../../packages/yrd-cli/src/cli.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../../packages/yrd-cli/src/types.ts"
 import { installDeclaredYrdEntry } from "../../packages/yrd-cli/tests/support/declared-yrd-entry.ts"
 
@@ -98,15 +98,12 @@ function notifyStep(plan: FakeCheckPlan, log: string): string {
 }
 
 /**
- * The head of a `.yrd.yml` for the core under measurement: the new core's
- * `remote:` and `target:` (ruling A5), or the incumbent's `base:` and `batch:`.
- * `remote` names the shared repository by URL when the case asks for the
- * remote to be added from the declaration; the incumbent gets the line too,
- * since the case that asks is red there on the rule, not on the key.
+ * The head of a `.yrd.yml`: `remote:` and `target:` (ruling A5). `remote`
+ * names the shared repository by URL when the case asks for the remote to be
+ * added from the declaration, and `origin` otherwise.
  */
 export function declaration(remote?: string): string {
-  if (measuringNewCore()) return `remote: ${JSON.stringify(remote ?? "origin")}\ntarget: main\n`
-  return `${remote === undefined ? "" : `remote: ${JSON.stringify(remote)}\n`}base: main\nbatch: 1\n`
+  return `remote: ${JSON.stringify(remote ?? "origin")}\ntarget: main\n`
 }
 
 export type BoundaryRepository = Readonly<{
@@ -140,10 +137,9 @@ export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryR
   await git(repo, "remote", "add", "origin", origin)
   await installDeclaredYrdEntry(repo)
   await writeFile(join(repo, "README.md"), "main\n")
-  // `remote:` is the one line that selects the new core (plan § Cutover). A
-  // case that asks for the yrd remote by name gets the shared repository's
-  // path; otherwise YRD_BOUNDARY_CORE=new names `origin`, so the same
-  // black-box cases judge both cores and the gate runs this suite once per core.
+  // `remote:` is the one line that selects the queue (plan § Cutover). A case
+  // that asks for the yrd remote by name gets the shared repository's path;
+  // otherwise it is `origin`.
   const head = plan.yrdRemote === true ? declaration(origin) : declaration()
   await writeFile(
     join(repo, ".yrd.yml"),
@@ -177,7 +173,7 @@ export type Change = Readonly<{
  */
 export async function submitOneCommit(repo: string, bay: string): Promise<Change> {
   const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "bay", "open", "--bay", bay), "bay open", opened)
+  expectZero(await yrd(repo, opened.io, "env", "open", "--bay", bay), "env open", opened)
   const bayPath = opened.stdout().trim()
   const branch = await git(bayPath, "branch", "--show-current")
 
@@ -210,58 +206,19 @@ export type SubmitAttempt = Readonly<{
 }>
 
 /**
- * Which core the suite measures. The NEW core is the default, because flag day
- * made it the one main actually runs (plan § Cutover): main declares its queue
- * and the new core runs it, so a suite that defaults to the incumbent measures
- * a program the repository no longer uses.
- *
- * It defaulted to the incumbent until then, and after flag day that cost a
- * clean checkout 37 red boundary tests out of 76 — a safety suite reporting
- * unsafe about a core nothing selects, which a seat cannot attribute without
- * cloning the base and diffing counts.
- *
- * `YRD_BOUNDARY_CORE=old` is the explicit opt-out and stays while the
- * incumbent does: M6 gates its deletion on this suite passing against it, so
- * the old core must remain selectable right up to the moment it is removed.
- *
- * An unrecognised value throws instead of picking one. Before this, anything
- * that was not "new" silently meant the incumbent; a default flipped without
- * this guard would silently mean the new core instead — the same defect
- * pointing the other way, and a typo that measures the wrong core is exactly
- * what this function now exists to prevent.
- */
-export function measuringNewCore(): boolean {
-  const declared = process.env.YRD_BOUNDARY_CORE
-  if (declared === undefined || declared === "" || declared === "new") return true
-  if (declared === "old") return false
-  throw new Error(`YRD_BOUNDARY_CORE must be "new" or "old"; got ${JSON.stringify(declared)}`)
-}
-
-/**
- * One submit, run standing in the Bay, exactly as an author does: the
- * incumbent's `yrd bay submit`, or the new core's `yrd queue submit` (one atomic
- * push of the branch and its opened fact) when YRD_BOUNDARY_CORE=new selects it.
+ * One submit, run standing in the Bay, exactly as an author does:
+ * `yrd queue submit` — one atomic push of the branch and its opened fact.
  */
 export async function submitFromBay(repo: string, bayPath: string): Promise<SubmitAttempt> {
   const submitted = capture(bayPath)
-  const newCore = measuringNewCore()
-  const exitCode = newCore
-    ? await yrd(repo, submitted.io, "queue", "submit", "--json", ...notifyArgs(repo))
-    : await yrd(repo, submitted.io, "bay", "submit", "--json")
-  const verb = newCore ? "queue submit" : "bay submit"
-  const report = `${verb} exited ${String(exitCode)}\n--- stdout ---\n${submitted.stdout()}\n--- stderr ---\n${submitted.stderr()}`
+  const exitCode = await yrd(repo, submitted.io, "queue", "submit", "--json", ...notifyArgs(repo))
+  const report = `queue submit exited ${String(exitCode)}\n--- stdout ---\n${submitted.stdout()}\n--- stderr ---\n${submitted.stderr()}`
   let id: string | undefined
   let branch: string | undefined
   try {
-    if (newCore) {
-      const opened = JSON.parse(submitted.stdout()) as { branch?: string; opened?: string }
-      id = opened.opened
-      branch = opened.branch
-    } else {
-      const parsed = JSON.parse(submitted.stdout()) as { prs?: readonly { id?: string; branch?: string }[] }
-      id = parsed.prs?.[0]?.id
-      branch = parsed.prs?.[0]?.branch
-    }
+    const opened = JSON.parse(submitted.stdout()) as { branch?: string; opened?: string }
+    id = opened.opened
+    branch = opened.branch
   } catch {
     // Not JSON — the exit code and the text are the evidence.
   }
@@ -303,17 +260,10 @@ export async function queueRunOnce(repo: string): Promise<QueueRunResult> {
  */
 export async function changeStandings(repo: string): Promise<Readonly<Record<string, string>>> {
   const listed = capture(repo)
-  // Through `measuringNewCore` rather than the raw variable: two independent
-  // readers of one flag is how a default drifts out of step with itself.
-  if (measuringNewCore()) {
-    // The new core's one table: every change keyed by branch and head, with its derived state.
-    expectZero(await yrd(repo, listed.io, "queue", "list", "--json"), "queue list", listed)
-    const parsed = JSON.parse(listed.stdout()) as { changes: readonly { branch: string; head: string; state: string }[] }
-    return Object.fromEntries(parsed.changes.map((change) => [`${change.branch}@${change.head}`, change.state]))
-  }
-  expectZero(await yrd(repo, listed.io, "pr", "list", "--json"), "pr list", listed)
-  const parsed = JSON.parse(listed.stdout()) as { prs: readonly { id: string; status: string }[] }
-  return Object.fromEntries(parsed.prs.map((change) => [change.id, change.status]))
+  // The one table: every change keyed by branch and head, with its derived state.
+  expectZero(await yrd(repo, listed.io, "queue", "list", "--json"), "queue list", listed)
+  const parsed = JSON.parse(listed.stdout()) as { changes: readonly { branch: string; head: string; state: string }[] }
+  return Object.fromEntries(parsed.changes.map((change) => [`${change.branch}@${change.head}`, change.state]))
 }
 
 /** The tip of the target the queue lands on — the shared one, not the local ref. */
@@ -592,8 +542,15 @@ function capture(cwd: string): { io: YrdCliIO; stdout(): string; stderr(): strin
   }
 }
 
-function yrd(repo: string, io: YrdCliIO, ...args: string[]): Promise<YrdCliExitCode> {
-  return runYrdProcess([process.execPath, "/usr/local/bin/yrd", "--repo", repo, ...args], io)
+/**
+ * One CLI call, standing where `io.cwd` says. `repo` stays in the signature
+ * because every caller has it and a report reads better naming it, but no
+ * argument carries it: the new commands take no repository operand and no
+ * `--repo` selector — the declaration where the command stands is the
+ * repository (plan, Dropped on purpose: `--repo` aliases).
+ */
+function yrd(_repo: string, io: YrdCliIO, ...args: string[]): Promise<YrdCliExitCode> {
+  return runYrdProcess([process.execPath, "/usr/local/bin/yrd", ...args], io)
 }
 
 function expectZero(
@@ -882,7 +839,7 @@ export async function submitCommitWriting(
   files: Readonly<Record<string, string>>,
 ): Promise<Change> {
   const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "bay", "open", "--bay", bay), "bay open", opened)
+  expectZero(await yrd(repo, opened.io, "env", "open", "--bay", bay), "env open", opened)
   const bayPath = opened.stdout().trim()
   const branch = await git(bayPath, "branch", "--show-current")
 
@@ -905,7 +862,7 @@ export async function submitCommitWriting(
  * names — the shape that billed a submitter on 2026-09-02. */
 export async function submitSameHead(repo: string, bay: string, headSha: string): Promise<Change> {
   const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "bay", "open", "--bay", bay), "bay open", opened)
+  expectZero(await yrd(repo, opened.io, "env", "open", "--bay", bay), "env open", opened)
   const bayPath = opened.stdout().trim()
   const branch = await git(bayPath, "branch", "--show-current")
 

@@ -5,11 +5,9 @@
  */
 import { describe, expect, it } from "vitest"
 import hab, {
-  YRD_REPOSITORY_ALIASES,
   defineYrdQueueRunnerDeclarations,
   yrdQueueRunnerDeclarations,
 } from "../hab.projects.ts"
-import { YRD_REPOSITORY_ALIASES_ENV, takeYrdComposition } from "../packages/yrd-cli/src/repository-composition.ts"
 
 describe("Yrd Hab runner declarations", () => {
   it("keeps repository and queue identity explicit in data and generated argv", () => {
@@ -18,23 +16,9 @@ describe("Yrd Hab runner declarations", () => {
     ])
     expect(hab.services).toMatchObject({
       "yrd-runner": {
-        command: "bun tools/yrd-runtime.mjs yrd queue up code",
-        health: { command: "bun tools/yrd-runtime.mjs yrd queue code --check --json" },
+        command: "bun tools/yrd-runtime.mjs yrd queue up",
+        health: { command: "bun tools/yrd-runtime.mjs yrd queue list --json" },
       },
-    })
-  })
-
-  it("hands every runner the same declarations the CLI resolves aliases from", () => {
-    for (const service of Object.values(hab.services)) {
-      expect(service.env).toMatchObject({ YRD_REPOSITORY_ALIASES })
-    }
-    // Round-tripped through the reader, so a registry the CLI would refuse
-    // fails here rather than at a runner's first `queue run <repository>`.
-    expect(takeYrdComposition({ [YRD_REPOSITORY_ALIASES_ENV]: YRD_REPOSITORY_ALIASES })).toEqual({
-      aliases: yrdQueueRunnerDeclarations.map(({ repository, queue }) => ({
-        repository: { name: repository.name, path: repository.path },
-        queue: { base: queue.base },
-      })),
     })
   })
 
