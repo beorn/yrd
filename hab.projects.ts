@@ -48,7 +48,7 @@ export function defineYrdQueueRunnerDeclarations<const Rows extends readonly Yrd
 }
 
 export const yrdQueueRunnerDeclarations = defineYrdQueueRunnerDeclarations([
-  { serviceName: "yrd-runner", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
+  { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
 ] as const)
 
 export default {
@@ -66,7 +66,7 @@ export default {
         // take no repository argument — the declaration where the command
         // stands IS the repository, and the service stands in it
         // (`repository.path`).
-        command: "bun tools/yrd-runtime.mjs yrd queue up",
+        command: "bun tools/yrd-runtime.mjs yrd queue up --interval 120",
         // The habitant stands down over this RSS (exit 12, memory-cap) instead of
         // waiting for the kernel; @cto ruling 2026-08-30 on
         // @i/10-yrd/runner-exits-and-respawns — one habitant per host. Raised
@@ -76,13 +76,12 @@ export default {
         // 12:58 PDT with restart:"never" — a cap below the working set is an
         // outage generator, not a guard. The host has 121 GB; the growth itself
         // is tracked as its own defect. This number is a ceiling for runaway.
-        env: { TRIBE_NAME: "@yrd", YRD_HABITANT_RSS_CAP_MB: "24576" },
-        // `yrd queue <repository> --check` was the incumbent resident's own
-        // health probe — it read the resident's lease, its installed plan and
-        // its journal, none of which exist now. What is left to prove is that
-        // the queue answers: one read of the line, from the repository the
-        // service stands in.
-        health: { command: "bun tools/yrd-runtime.mjs yrd queue list --json" },
+        // The service's tribe name is its own key, never `@yrd`: that seat is
+        // retired (2026-08-31) and a service must not resurrect it.
+        env: { TRIBE_NAME: "@yrd-service", YRD_HABITANT_RSS_CAP_MB: "24576" },
+        // No health probe (M7, 2026-09-03): the loop's own process is its
+        // liveness, its journal shows a running check, and a probe shelling
+        // the CLI every tick was noise with a second opinion.
         // The service relaunches itself on the ONE condition whose CURE is the
         // relaunch: a moved pin (18), read at the target after every round and
         // taken at a round boundary with nothing in flight — "the code moved
@@ -103,12 +102,10 @@ export default {
         // is critical path and should be driven hard."
         //
         // WHAT THIS COSTS, stated rather than discovered later. `on-failure`
-        // restarts on EVERY non-zero exit, so it also restarts the two
-        // conditions the taxonomy dispositions `stand-down`: `drained` (16, a
-        // person asked this pass to stop) and `fatal-error` (17, an ERROR row
-        // no successor can fix). Inhab's default budget bounds both — three
+        // restarts on EVERY non-zero exit, so it also restarts exit 2, a stuck
+        // queue, into the same fault. Inhab's default budget bounds it — three
         // restarts per 600s with 1s→30s backoff, then `stop-budget` — so a
-        // genuine fault still ends stopped and paged to `owner` below, three
+        // stuck queue still ends stopped and paged to `owner` below, three
         // attempts and at most ten minutes later than the andon ruling wants.
         //
         // The narrower policy that would hold those two exactly is hab-core's
@@ -123,8 +120,8 @@ export default {
         // deliberately not declared. Restoring full andon fidelity means adding
         // the key to `SERVICE_KEYS`, threading it through `HabplanService` to
         // the launch envelope, and then declaring
-        // `permanentExitCodes: [HABITANT_EXIT.drained, HABITANT_EXIT["fatal-error"]]`
-        // here — a change in ag, not in Yrd.
+        // `permanentExitCodes: [2]` here — a change in ag, not in Yrd (M7,
+        // owned by dev/7 on 2026-09-03).
         restart: "on-failure" as const,
         // Wired 2026-09-01: `HabServiceDefinition.owner` (ag/packages/hab-config,
         // src/index.ts) now lists "owner" in `SERVICE_KEYS`, and a resident with
