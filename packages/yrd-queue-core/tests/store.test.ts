@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { appendFact, changeRef, gitIn, readChange, readFacts, trailer } from "../src/index.ts"
+import { appendFact, changeRef, gitIn, readChange, readFact, readFacts, trailer } from "../src/index.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -102,6 +102,41 @@ describe("a change's facts are its commits", () => {
     await expect(git(["update-ref", ref, stale, tip])).rejects.toThrow()
     const facts = await readFacts(git, "task/one", head)
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked"])
+  })
+
+  it("git's own parser reads the trailers: prose that looks like one is not, and a folded value reads whole", async () => {
+    // A hand-rolled `^Key: value$` scan called every line that looked like a
+    // trailer one, so a prose `Note: fix` in the body stood in the derived
+    // state; and a value git had folded onto a second line read as two.
+    const { git } = await repository()
+    const tree = (await git(["rev-parse", "HEAD^{tree}"])).trim()
+    const sha = (
+      await git([
+        "commit-tree",
+        tree,
+        "-m",
+        [
+          "task/one failed",
+          "",
+          "Note: fix the thing",
+          "",
+          "Fact: failed",
+          "Branch: task/one",
+          "Head: abc",
+          "Target: main",
+          "Detail: what git said,",
+          "  wrapped onto a second line",
+          "",
+        ].join("\n"),
+      ])
+    ).trim()
+
+    const fact = await readFact(git, sha)
+
+    expect(fact.kind).toBe("failed")
+    expect(fact.subject).toBe("task/one failed")
+    expect(trailer(fact, "Note")).toBeUndefined()
+    expect(trailer(fact, "Detail")).toBe("what git said, wrapped onto a second line")
   })
 
   it("reads no facts for a branch nobody submitted", async () => {

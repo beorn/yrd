@@ -42,7 +42,7 @@ import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
-import { appendFact, endedKind, readFact, type Fact, type Git, type WriteFact } from "./facts.ts"
+import { appendFact, endedKind, readFact, trailer, type Fact, type Git, type WriteFact } from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
@@ -234,7 +234,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 /** A checked change whose checked fact names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
   const tip = entry.change.facts.at(-1)
-  return tip?.kind === "checked" && trailerOf(tip, "Config") !== run.options.configBlob
+  return tip?.kind === "checked" && trailer(tip, "Config") !== run.options.configBlob
 }
 
 /** The entries in the named states, in line order. */
@@ -477,8 +477,8 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       // submitter and the work item come with it, as the opened fact carried
       // them forward, one trailer per line in git's own trailer format.
       const tip = change.facts.at(-1)
-      const workItem = trailerOf(tip, "Work-Item")
-      const submitter = trailerOf(tip, "Submitter")
+      const workItem = tip === undefined ? undefined : trailer(tip, "Work-Item")
+      const submitter = tip === undefined ? undefined : trailer(tip, "Submitter")
       const message = [
         `merge ${short(branch, head)} into ${run.options.target}`,
         "",
@@ -731,7 +731,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   const tip = entry.change.facts.at(-1)
   const endedAs = tip === undefined ? undefined : endedKind(tip)
   if (endedAs === "merged") return
-  const reason = tip === undefined ? undefined : trailerOf(tip, "Reason")
+  const reason = tip === undefined ? undefined : trailer(tip, "Reason")
   if (reason === "replaced" || reason === "deleted") return
   const { branch } = entry
   const head = entry.change.head
@@ -789,13 +789,13 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   // it would put `sent State: failed` on top of a merged change and tell its
   // submitter to fix what has already landed (ruling A2).
   if (entry.change.headOnTarget && endedKind(tip) !== "merged") return
-  const undelivered = tip.kind === "sent" && trailerOf(tip, "Delivery") === "failed"
+  const undelivered = tip.kind === "sent" && trailer(tip, "Delivery") === "failed"
   const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged"
   if (!undelivered && !unsent) return
   // A retired change sends nothing (ruling B3).
-  const reason = trailerOf(tip, "Reason")
+  const reason = trailer(tip, "Reason")
   if (reason === "replaced" || reason === "deleted") return
-  const endedSha = tip.kind === "sent" ? trailerOf(tip, "For") : tip.sha
+  const endedSha = tip.kind === "sent" ? trailer(tip, "For") : tip.sha
   if (endedSha === undefined) {
     throw new Error(`${entry.branch}: sent fact ${tip.sha.slice(0, 12)} names no ended fact to send again`)
   }
@@ -811,8 +811,8 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
     messageFor(ended.kind, {
       branch: entry.branch,
       head: entry.change.head,
-      merge: trailerOf(ended, "Merge") ?? "",
-      remedy: trailerOf(ended, "Remedy"),
+      merge: trailer(ended, "Merge") ?? "",
+      remedy: trailer(ended, "Remedy"),
       subject: ended.subject,
     }),
   )
@@ -1029,7 +1029,7 @@ async function send(
   // A stuck change is the queue owner's to hear about; so is a change whose
   // submitter is `unknown` — a submit with neither `--notify` nor
   // `YRD_DEFAULT_SUBMITTER` (rulings B6 and D9) — never a seat named `unknown`.
-  const submitter = trailerOf(ended, "Submitter")
+  const submitter = trailer(ended, "Submitter")
   const recipient =
     kind === "stuck" || submitter === undefined || submitter === "unknown" ? run.options.owner : submitter
   // The record the configured notifier reads, unchanged from today's contract
@@ -1041,7 +1041,7 @@ async function send(
     attempt_id: endedFact,
     base: run.options.target,
     branch: entry.branch,
-    code: kind === "merged" ? undefined : trailerOf(ended, "Reason"),
+    code: kind === "merged" ? undefined : trailer(ended, "Reason"),
     command: text,
     disposition: kind === "failed" ? "author" : undefined,
     head: entry.change.head,
@@ -1051,7 +1051,7 @@ async function send(
     recipient,
     sha: entry.change.head,
     text,
-    workItem: trailerOf(ended, "Work-Item"),
+    workItem: trailer(ended, "Work-Item"),
   })
   // The sent fact repeats the ended state and carries the ended fact's result,
   // so the tip fact's trailers stay the whole answer about the change and no
@@ -1273,10 +1273,6 @@ async function targetAt(git: Git, remote: string, target: string): Promise<strin
   if (sha === undefined || sha === "") throw new Error(`the target ${target} is not at ${remote}`)
   await git(["fetch", "--quiet", remote, `+refs/heads/${target}:refs/remotes/${remote}/${target}`])
   return sha
-}
-
-function trailerOf(fact: Fact | undefined, name: string): string | undefined {
-  return fact?.trailers.find(([key]) => key === name)?.[1]
 }
 
 async function finish(

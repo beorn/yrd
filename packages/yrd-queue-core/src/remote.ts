@@ -131,12 +131,17 @@ export async function readQueue(git: Git, remote: string, target: string): Promi
 
 /** Every change ref's tip fact, by ref, in one reading. A change ref that does not end in a fact is loud. */
 async function tipFacts(git: Git): Promise<ReadonlyMap<string, Fact>> {
-  const out = await git(["for-each-ref", "--format=%(objectname)%00%(refname)%00%(committerdate:iso-strict)%00%(contents)%01", `${CHANGES}/`])
+  const out = await git([
+    "for-each-ref",
+    "--format=%(objectname)%00%(refname)%00%(committerdate:iso-strict)%00%(trailers:only,unfold)%00%(contents)%01",
+    `${CHANGES}/`,
+  ])
   const tips = new Map<string, Fact>()
   for (const record of out.split("\x01")) {
-    const [sha, ref, at, body] = record.replace(/^\n/u, "").split("\x00")
-    if (sha === undefined || ref === undefined || at === undefined || body === undefined || sha.trim() === "") continue
-    const fact = factFrom(sha.trim(), at, body)
+    const [sha, ref, at, block, body] = record.replace(/^\n/u, "").split("\x00")
+    if (sha === undefined || ref === undefined || at === undefined || block === undefined || body === undefined || sha.trim() === "")
+      continue
+    const fact = factFrom(sha.trim(), at, body, block)
     if (fact === undefined) throw new Error(`${ref} does not end in a fact; a change's ref holds only facts`)
     tips.set(ref, fact)
   }

@@ -81,6 +81,13 @@ export type WriteFact = Readonly<{
 const CARRIED = ["Opened", "Submitter", "Work-Item"] as const
 
 /**
+ * One fact, as every reader of a commit asks for it: the sha, the committer
+ * date, git's own reading of the trailer block, and the raw message. `%B` is
+ * last because it is the one field that holds newlines. `%x00` separates them.
+ */
+const FACT_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
+
+/**
  * Append one fact to a change, creating the change when this is its first.
  * Returns the new fact's sha, which is the id of what happened — a message
  * about an ended change carries it, so a resend after a crash is the same
@@ -110,8 +117,11 @@ async function genesis(git: Git): Promise<string> {
 
 /** The fact at `sha`. A commit there that is not a fact is loud: a change's ref holds only facts. */
 export async function readFact(git: Git, sha: string): Promise<Fact> {
-  const [id, at, body] = (await git(["log", "-1", "--format=%H%x00%cI%x00%B", sha])).split("\x00")
-  const fact = id === undefined || at === undefined || body === undefined ? undefined : factFrom(id.trim(), at, body)
+  const [id, at, block, body] = (await git(["log", "-1", `--format=${FACT_FORMAT}`, sha])).split("\x00")
+  const fact =
+    id === undefined || at === undefined || block === undefined || body === undefined
+      ? undefined
+      : factFrom(id.trim(), at, body, block)
   if (fact === undefined) throw new Error(`${sha.slice(0, 12)} is not a fact; a change's ref holds only facts`)
   return fact
 }
@@ -127,15 +137,14 @@ export async function readFacts(git: Git, branch: string, head: string): Promise
   if ((await refAt(git, ref)) === undefined) return []
   // %x00 separates the fields and %x01 the records, because a commit message
   // holds newlines and a naive split would cut a fact in half.
-  const format = "%H%x00%cI%x00%B%x01"
-  const out = await git(["log", "--first-parent", `--format=${format}`, ref])
+  const out = await git(["log", "--first-parent", `--format=${FACT_FORMAT}%x01`, ref])
   const facts: Fact[] = []
   for (const record of out.split("\x01")) {
     const row = record.trim()
     if (row === "") continue
-    const [sha, at, body] = row.split("\x00")
-    if (sha === undefined || at === undefined || body === undefined) continue
-    const parsed = factFrom(sha, at, body)
+    const [sha, at, block, body] = row.split("\x00")
+    if (sha === undefined || at === undefined || block === undefined || body === undefined) continue
+    const parsed = factFrom(sha, at, body, block)
     // The first-parent walk ends at the genesis, which carries no `Fact:`
     // trailer. That is where this change's history ends.
     if (parsed === undefined) break
@@ -171,18 +180,28 @@ export function endedKind(tip: Fact): FactKind {
   return state === "merged" || state === "failed" || state === "stuck" ? state : "sent"
 }
 
-/** The fact a commit is, from its sha, committer date and message; undefined when the commit is not one. */
-export function factFrom(sha: string, at: string, body: string): Fact | undefined {
-  const lines = body.split("\n")
-  const subject = lines[0]?.trim() ?? ""
+/**
+ * The fact a commit is, from its sha, committer date, message and the trailer
+ * block GIT read out of it; undefined when the commit is not one.
+ *
+ * The trailers are git's own reading, never a second parser of the same
+ * bytes: a hand-rolled `^Key: value$` scan called every prose line that looks
+ * like a trailer one — `Note: fix` in the middle of a body became a `Note`
+ * trailer and stood in the derived state — while git knows a trailer block is
+ * the LAST paragraph and folds a wrapped value back into one line.
+ */
+export function factFrom(sha: string, at: string, body: string, trailerBlock: string): Fact | undefined {
   const found: (readonly [string, string])[] = []
-  for (const line of lines.slice(1)) {
-    const match = /^([A-Za-z][A-Za-z0-9-]*): (.*)$/u.exec(line.trim())
-    if (match?.[1] !== undefined && match[2] !== undefined) found.push([match[1], match[2]])
+  for (const line of trailerBlock.split("\n")) {
+    // git's own output, one trailer per line after `unfold`: the key is
+    // everything before the first colon, which git has already validated.
+    const colon = line.indexOf(":")
+    if (colon <= 0) continue
+    found.push([line.slice(0, colon), line.slice(colon + 1).replace(/^ /u, "")] as const)
   }
   const kind = found.find(([name]) => name === "Fact")?.[1]
   if (kind === undefined || !isFactKind(kind)) return undefined
-  return { at: new Date(at), kind, sha, subject, trailers: found }
+  return { at: new Date(at), kind, sha, subject: body.split("\n")[0]?.trim() ?? "", trailers: found }
 }
 
 function isFactKind(value: string): value is FactKind {
