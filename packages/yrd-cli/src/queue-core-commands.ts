@@ -12,6 +12,7 @@
 
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
+import { createLogger, type ConditionalLogger } from "loggily"
 import {
   gitIn,
   lane,
@@ -20,6 +21,7 @@ import {
   readConfig,
   show,
   submit,
+  type LogRecord,
   type QueueConfig,
   type Row,
 } from "@yrd/queue-core"
@@ -40,7 +42,7 @@ export async function coreQueueCommand(
   repo: string,
   io: YrdCliIO,
   request: CoreQueueCommand,
-  options: Readonly<{ json?: boolean; env?: NodeJS.ProcessEnv; workdir?: string }> = {},
+  options: Readonly<{ json?: boolean; env?: NodeJS.ProcessEnv; workdir?: string; log?: ConditionalLogger }> = {},
 ): Promise<YrdCliExitCode | undefined> {
   const git = gitIn(repo)
   const declared = await readConfig(git, "HEAD")
@@ -68,7 +70,7 @@ export async function coreQueueCommand(
       return 0
     }
     case "run": {
-      const outcome = await queueRun(runOptions(repo, config, workdir, options.env))
+      const outcome = await queueRun(runOptions(repo, config, workdir, options.env, options.log))
       emit(io, options.json, outcome, describeRun(outcome))
       return outcome.exitCode
     }
@@ -79,7 +81,7 @@ export async function coreQueueCommand(
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
       for (;;) {
-        const outcome = await queueRun(runOptions(repo, config, workdir, options.env))
+        const outcome = await queueRun(runOptions(repo, config, workdir, options.env, options.log))
         emit(io, options.json, outcome, describeRun(outcome))
         if (outcome.exitCode === 2) return 2
         if (stopped()) return 0
@@ -105,17 +107,64 @@ export async function coreQueueCommand(
   }
 }
 
-function runOptions(repo: string, config: QueueConfig, workdir: string, env?: NodeJS.ProcessEnv) {
+function runOptions(repo: string, config: QueueConfig, workdir: string, env?: NodeJS.ProcessEnv, log?: ConditionalLogger) {
   return {
     checks: config.checks,
     configBlob: config.blob,
     env,
     notify: config.notify,
     owner: config.owner,
+    // git-super narrates which submodule it borrowed and how long each phase
+    // took; that is trace-level plumbing, so it gets a logger only at trace.
+    plumbing: log?.trace === undefined ? undefined : log.child("submodules"),
     remote: config.remote,
+    render: renderer(log),
     repo,
     target: config.target,
     workdir: config.scratch === undefined ? workdir : join(config.scratch, "queue-core"),
+  }
+}
+
+/**
+ * The human line is a rendering of the record, and the CLI's own logger is the
+ * one place it is rendered: one debug row per fact, named by the fact's kind,
+ * at the level the invocation resolved (`--log-level`, `LOG_LEVEL`, `-v`),
+ * never a second format and never a second reading of the environment. The
+ * app's logger carries that level; a fresh logger would read only the process
+ * environment, which is not what the invocation asked for.
+ */
+function renderer(root: ConditionalLogger | undefined): (record: LogRecord) => void {
+  const base = root?.child("queue") ?? createLogger("yrd:queue")
+  const byKind = new Map<string, ConditionalLogger>()
+  return (record) => {
+    let log = byKind.get(record.kind)
+    if (log === undefined) {
+      log = base.child(record.kind)
+      byKind.set(record.kind, log)
+    }
+    const { kind, run: _run, at: _at, ...rest } = record
+    // A conditional logger has no debug method below its level: nothing to render.
+    log.debug?.(summarize(kind, rest), rest)
+  }
+}
+
+function summarize(kind: string, rest: Readonly<Record<string, unknown>>): string {
+  const where = [rest.branch, typeof rest.head === "string" ? rest.head.slice(0, 12) : undefined].filter(Boolean).join(" at ")
+  switch (kind) {
+    case "run":
+      return `queue run at ${rest.target} ${String(rest.pin).slice(0, 12)}`
+    case "change":
+      return `${where}: ${String(rest.decision ?? rest.state)}`
+    case "check":
+      return `${String(rest.name)} ran for ${where} in ${String(rest.ms)} ms`
+    case "result":
+      return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`
+    case "merge":
+      return `${where} merged as ${String(rest.commit).slice(0, 12)}`
+    case "message":
+      return `told ${String(rest.to)} about ${where}`
+    default:
+      return kind
   }
 }
 

@@ -68,6 +68,17 @@ export async function isAncestor(git: Git, sha: string, of: string): Promise<boo
   }
 }
 
+/** The merge base of two commits, or undefined when their histories are unrelated. */
+export async function mergeBase(git: Git, left: string, right: string): Promise<string | undefined> {
+  try {
+    const out = (await git(["merge-base", left, right])).trim()
+    return out === "" ? undefined : out
+  } catch (error) {
+    if (isExit(error, 1)) return undefined
+    throw error
+  }
+}
+
 function isExit(error: unknown, code: number): boolean {
   return error instanceof GitExit && error.exitCode === code
 }

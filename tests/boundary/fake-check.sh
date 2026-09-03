@@ -7,6 +7,11 @@
 # an environment variable, set inline in the `run:` command the fixture writes
 # into `.yrd.yml`, so two tests in one file never share state.
 #
+# The chosen exit applies only where a change's own content is present (the
+# Bay's `<bay>.txt`): a check judges the change, and a check that also failed
+# at the bare target would be the target's failure, not the change's (plan
+# § Attribution). At the bare target this check always passes.
+#
 #   FAKE_CHECK_EXIT   status to exit with (default 0)
 #   FAKE_CHECK_SLEEP  seconds to sleep before exiting (default 0)
 #   FAKE_CHECK_LOG    file to append one line to, when set
@@ -18,4 +23,7 @@ if [ -n "${FAKE_CHECK_LOG:-}" ]; then
   printf 'fake-check exit=%s cwd=%s\n' "${FAKE_CHECK_EXIT:-0}" "$(pwd)" >>"${FAKE_CHECK_LOG}"
 fi
 
-exit "${FAKE_CHECK_EXIT:-0}"
+for change in ./*.txt; do
+  if [ -f "$change" ]; then exit "${FAKE_CHECK_EXIT:-0}"; fi
+done
+exit 0

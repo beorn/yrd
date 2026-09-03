@@ -26,6 +26,7 @@ import {
   checkAttempts,
   type FakeCheckPlan,
   firstParentDistance,
+  git,
   parentsOf,
   queueRunOnce,
   refs,
@@ -78,15 +79,17 @@ describe("the queue-run boundary", { timeout: 120_000 }, () => {
     const run = await queueRunOnce(repo)
 
     // The submitter's content is what failed, so the failure is theirs and the
-    // queue run itself did its job.
+    // queue run itself did its job. The plan proves that before billing: the
+    // same check again in the change's worktree and once at the target, three
+    // attempts; the incumbent bills on the first.
     expect(run.exitCode, run.report).toBe(1)
-    expect(await checkAttempts(checkLog), run.report).toBe(1)
+    expect(await checkAttempts(checkLog), run.report).toBe(process.env.YRD_BOUNDARY_CORE === "new" ? 3 : 1)
 
     expect(await targetTip(repo), run.report).toBe(before)
     // The author's work survives: the branch still names the head that was
     // checked, and no ref the submit created was destroyed.
     expect(await refs(repo), run.report).toEqual(expect.arrayContaining([`${headSha} refs/heads/${branch}`]))
-    for (const ref of refsBefore) expect(await refs(repo), run.report).toContain(ref)
+    await expectRefsKept(repo, refsBefore, run.report)
   })
 
   /**
@@ -109,6 +112,29 @@ describe("the queue-run boundary", { timeout: 120_000 }, () => {
    * and a failed change identically, both still `submitted`. The exit code is
    * the ONLY place the two are told apart at this boundary.
    */
+  /**
+   * No ref the submit created was destroyed. The incumbent's refs stand still;
+   * the plan's change ref MOVES FORWARD with every fact (opened, then checked,
+   * then ended, then sent), so under the new core the invariant is that every
+   * ref name survives and each one's old value is an ancestor of its new one.
+   */
+  async function expectRefsKept(repo: string, refsBefore: readonly string[], report: string): Promise<void> {
+    const after = await refs(repo)
+    if (process.env.YRD_BOUNDARY_CORE !== "new") {
+      for (const ref of refsBefore) expect(after, report).toContain(ref)
+      return
+    }
+    const now = new Map(after.map((line) => line.split(" ") as [string, string]).map(([sha, name]) => [name, sha]))
+    for (const line of refsBefore) {
+      const [sha, name] = line.split(" ") as [string, string]
+      const current = now.get(name)
+      expect(current, `${report}\n${name} was destroyed`).toBeDefined()
+      if (current !== undefined && current !== sha) {
+        await expect(git(repo, "merge-base", "--is-ancestor", sha, current), `${report}\n${name} moved backwards`).resolves.toBeDefined()
+      }
+    }
+  }
+
   describe("stuck — the queue's own fault", () => {
     async function stuckCase(plan: FakeCheckPlan, bay: string): Promise<void> {
       const { repo, checkLog } = await boundaryRepository(plan)
@@ -126,11 +152,15 @@ describe("the queue-run boundary", { timeout: 120_000 }, () => {
       // The queue run STOPS: the check is not retried inside it.
       expect(await checkAttempts(checkLog), run.report).toBeLessThanOrEqual(1)
 
-      // The change stays where it was until someone fixes the queue.
+      // The change stays where it was until someone fixes the queue. The plan's
+      // reading names that state: stuck, an ended fact that leaves the change
+      // open and bills nobody (the incumbent reports it as still submitted).
       expect(await targetTip(repo), run.report).toBe(before)
-      expect(await changeStandings(repo), run.report).toEqual(standingBefore)
+      expect(await changeStandings(repo), run.report).toEqual(
+        process.env.YRD_BOUNDARY_CORE === "new" ? { ...standingBefore, [`${branch}@${headSha}`]: "stuck" } : standingBefore,
+      )
       expect(await refs(repo), run.report).toEqual(expect.arrayContaining([`${headSha} refs/heads/${branch}`]))
-      for (const ref of refsBefore) expect(await refs(repo), run.report).toContain(ref)
+      await expectRefsKept(repo, refsBefore, run.report)
     }
 
     it("a check that exits 2 stops the queue run, and nobody is billed", async () => {

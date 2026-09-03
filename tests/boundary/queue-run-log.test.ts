@@ -264,11 +264,16 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // them. The record must carry the same values, or the log is describing a
     // different queue run from the one that happened — which is the whole
     // reason the derivation is allowed to be independent.
-    const selection = (
-      JSON.parse(mergedRun.stdout) as {
-        results?: readonly { stepSelection?: { baseSha?: string; configBlobSha?: string } }[]
-      }
-    ).results?.[0]?.stepSelection
+    const printed = JSON.parse(mergedRun.stdout) as {
+      results?: readonly { stepSelection?: { baseSha?: string; configBlobSha?: string } }[]
+      base?: string
+      config?: string
+    }
+    // The incumbent prints them on its first result's selection; the new core
+    // prints them on the run itself, which has no selections to hang them on.
+    const selection =
+      printed.results?.[0]?.stepSelection ??
+      (printed.base === undefined ? undefined : { baseSha: printed.base, configBlobSha: printed.config })
     expect(selection?.baseSha, mergedRun.report).toEqual(expect.any(String))
     expect(merged.base, mergedRun.report).toBe(selection?.baseSha)
     expect(merged.config, mergedRun.report).toBe(selection?.configBlobSha)
@@ -280,7 +285,9 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     const stuckRun = await queueRunOnce(stuck.repo)
     expect(stuckRun.exitCode, stuckRun.report).toBe(2)
     expect(
-      (JSON.parse(stuckRun.stdout) as { results?: readonly unknown[] }).results,
+      // The incumbent prints an empty results list; the new core builds no
+      // Run records at all and prints none, which is the same fact.
+      (JSON.parse(stuckRun.stdout) as { results?: readonly unknown[] }).results ?? [],
       "a stuck queue run builds no run, which is what makes this case the point",
     ).toEqual([])
     const opened = theOne((await logOfQueueRun(stuckRun)).records, "run")
@@ -354,8 +361,9 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // payload, so counting physical lines counts JSON, not log lines.
     const rows = run.stderr.split("\n").filter((row) => /^\d\d:\d\d:\d\d /u.test(row))
     // A positive control: a debug log that says nothing at all would satisfy
-    // every bound below and tell a reader nothing.
-    expect(rows.length, run.report).toBeGreaterThan(20)
+    // every bound below and tell a reader nothing. The new core renders exactly
+    // its records, six kinds on a merging run; the incumbent narrates more.
+    expect(rows.length, run.report).toBeGreaterThan(process.env.YRD_BOUNDARY_CORE === "new" ? 5 : 20)
     expect(rows.length, run.report).toBeLessThan(200)
 
     // No git invocation and no git span, at any level above trace.
@@ -420,13 +428,20 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     const { path, records } = await logOfQueueRun(run)
 
     const built = theOne(records, "run").built
-    expect(built, run.report).toEqual([expect.any(String)])
-    const id = (built as readonly string[])[0] as string
-    expect(id, run.report).toMatch(/^R\d+$/u)
-
-    // The queue run's own id is neither the Run's id nor a file named for it.
-    expect(records[0]?.run, run.report).not.toBe(id)
-    expect(basename(path), run.report).not.toBe(`${id}.jsonl`)
+    // The incumbent mints a Run record per merge and names it here; the new
+    // core mints none, and says so with an empty list rather than a missing field.
+    if (process.env.YRD_BOUNDARY_CORE === "new") {
+      expect(built, run.report).toEqual([])
+      // The file is named by the queue run's own id, and by nothing else.
+      expect(basename(path), run.report).toBe(`${String(records[0]?.run)}.jsonl`)
+    } else {
+      expect(built, run.report).toEqual([expect.any(String)])
+      const id = (built as readonly string[])[0] as string
+      expect(id, run.report).toMatch(/^R\d+$/u)
+      // The queue run's own id is neither the Run's id nor a file named for it.
+      expect(records[0]?.run, run.report).not.toBe(id)
+      expect(basename(path), run.report).not.toBe(`${id}.jsonl`)
+    }
   })
 
   /**
@@ -566,12 +581,14 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       // The positive control is what the plan says a merging run's debug log is
       // FOR: the queue reached a decision, ran a check and merged. Without it a
       // run that logged nothing would satisfy the zero below.
+      // The new core renders its records under yrd:queue:<kind>; the incumbent
+      // narrates from yrd:queue:run and yrd:jobs:*. Either way: a run, a check, a merge.
       expect(
         debugRows.some((row) => /yrd:queue:run\b/u.test(row)),
         debug.report,
       ).toBe(true)
       expect(
-        debugRows.some((row) => /yrd:jobs:(check|merge)\b/u.test(row)),
+        debugRows.some((row) => /yrd:(jobs|queue):(check|merge)\b/u.test(row)),
         debug.report,
       ).toBe(true)
       expect(

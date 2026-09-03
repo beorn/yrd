@@ -30,16 +30,26 @@ export type LogRecord = Readonly<{
   [field: string]: string | number | boolean | undefined | readonly string[]
 }>
 
+/** A record as the run writes it; the log adds `run` and `at`. */
+export type LogWrite = Readonly<{
+  kind: LogKind
+  [field: string]: string | number | boolean | undefined | readonly string[]
+}>
+
 export type QueueRunLog = Readonly<{
   /** This run's own id: the start instant, then a random tail. */
   id: string
   /** The file every record of this run is appended to. */
   path: string
-  write(record: Omit<LogRecord, "run" | "at">): void
+  write(record: LogWrite): void
 }>
 
-/** Open the log for one queue run. */
-export function openLog(directory: string, now: () => Date = () => new Date()): QueueRunLog {
+/**
+ * Open the log for one queue run. `render`, when given, receives every record
+ * as it is written: the human line is a rendering of the record, and this is
+ * the one place a rendering can come from.
+ */
+export function openLog(directory: string, now: () => Date = () => new Date(), render?: (record: LogRecord) => void): QueueRunLog {
   mkdirSync(directory, { recursive: true })
   const started = now()
   const id = `q-${started.toISOString().replace(/[-:.]/gu, "")}-${Math.random().toString(16).slice(2, 10)}`
@@ -48,7 +58,10 @@ export function openLog(directory: string, now: () => Date = () => new Date()): 
     id,
     path,
     write(record) {
-      appendFileSync(path, `${JSON.stringify({ ...record, at: now().toISOString(), run: id })}\n`)
+      const kind: LogKind = record.kind
+      const full: LogRecord = { ...record, at: now().toISOString(), kind, run: id }
+      appendFileSync(path, `${JSON.stringify(full)}\n`)
+      render?.(full)
     },
   }
 }

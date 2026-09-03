@@ -14593,7 +14593,7 @@ function buildProgram(
     .option("--interval <seconds>", "seconds between rounds (default 15)", int)
     .option("--json", "emit stable JSON")
     .action(async (options) => {
-      const taken = await coreQueueCommand(io.repositoryRoot ?? invocationCwd(io), io, { command: "up", intervalSeconds: options.interval }, { json: options.json })
+      const taken = await coreQueueCommand(io.repositoryRoot ?? invocationCwd(io), io, { command: "up", intervalSeconds: options.interval }, { json: options.json, log: runtimeApp?.log })
       if (taken !== undefined) {
         setExit(taken)
         return
@@ -14613,7 +14613,7 @@ function buildProgram(
     .option("--owner <seat>", "the queue owner every stuck result goes to (default: .yrd.yml owner:, then @chief)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
-      const taken = await coreQueueCommand(io.repositoryRoot ?? invocationCwd(io), io, { command: "run" }, { json: options.json })
+      const taken = await coreQueueCommand(io.repositoryRoot ?? invocationCwd(io), io, { command: "run" }, { json: options.json, log: runtimeApp?.log })
       if (taken !== undefined) {
         setExit(taken)
         return
