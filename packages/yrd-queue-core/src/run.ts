@@ -23,7 +23,7 @@ import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { runCheck, type CheckResult, type CheckSpec } from "./check.ts"
 import { appendFact, readFacts, type Fact, type Git } from "./facts.ts"
 import { readConfig } from "./config.ts"
-import { gitIn, mergeBase, refAt } from "./git.ts"
+import { gitIn, isAncestor, mergeBase, refAt } from "./git.ts"
 import { workItemOf } from "./submit.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { changeRef } from "./refs.ts"
@@ -31,7 +31,13 @@ import { lane, type LaneEntry } from "./remote.ts"
 import { inLine } from "./state.ts"
 import { freshWorktree, type PlumbingLog } from "./worktree.ts"
 
-export type QueueCheck = CheckSpec & Readonly<{ on?: readonly ("submit" | "merge")[] }>
+export type QueueCheck = CheckSpec &
+  Readonly<{
+    /** The phases the check runs in; absent means merge (ruling A1). */
+    on?: readonly ("submit" | "merge")[]
+    /** Repository paths restored from the base commit before the check runs: the check's own scripts (ruling D5). */
+    scripts?: readonly string[]
+  }>
 
 export type QueueRunOptions = Readonly<{
   /** The working repository the run reads and writes through. */
@@ -117,9 +123,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // Nobody is billed and the exit code does not count it (ruling B3).
   for (const entry of entries) await retire(run, entry)
 
-  // On-submit: every queued change, oldest first, in a fresh worktree of its head.
-  for (const entry of ordered(entries, "queued")) {
-    const outcome = await judge(run, entry)
+  // On-submit: every queued change, oldest first, in a fresh worktree of its
+  // head. A stuck change kept its place, and this run takes it again from here.
+  for (const entry of ordered(entries, "queued", "stuck")) {
+    const outcome = await guarded(run, entry, () => judge(run, entry))
     if (outcome === "stuck") {
       stuck.push(entry.branch)
       return finish(run, 2, { failed, merged, stuck })
@@ -131,7 +138,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // checked facts count.
   const checked = ordered(await lane(git, options.remote, options.target), "checked")[0]
   if (checked !== undefined) {
-    const outcome = await land(run, checked)
+    const outcome = await guarded(run, checked, () => land(run, checked))
     if (outcome === "stuck") stuck.push(checked.branch)
     else if (outcome === "failed") failed.push(checked.branch)
     else if (outcome === "merged") merged.push(checked.branch)
@@ -140,12 +147,30 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   return finish(run, stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0, { failed, merged, stuck })
 }
 
-/** The entries in one state, in line order. */
-function ordered(entries: readonly LaneEntry[], state: "queued" | "checked"): readonly LaneEntry[] {
+/** The entries in the named states, in line order. */
+function ordered(entries: readonly LaneEntry[], ...states: readonly ("queued" | "checked" | "stuck")[]): readonly LaneEntry[] {
   const byHead = new Map(entries.map((entry) => [entry.change.head, entry]))
   return inLine(entries.map((entry) => entry.change))
     .map((change) => byHead.get(change.head))
-    .filter((entry): entry is LaneEntry => entry !== undefined && entry.reading.state === state)
+    .filter((entry): entry is LaneEntry => entry !== undefined && (states as readonly string[]).includes(entry.reading.state))
+}
+
+/**
+ * There is exactly one exit site (§ The queue run): a crash while judging a
+ * change ends that change stuck, the queue's, with the crash as its cause, and
+ * the run exits 2 like any other stuck. A crash inside that ending itself has
+ * nowhere left to go and reaches the caller, which exits 2 too.
+ */
+async function guarded(run: Run, entry: LaneEntry, step: () => Promise<Ended>): Promise<Ended> {
+  try {
+    return await step()
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim()
+    return end(run, entry, "stuck", {
+      subject: `the queue crashed judging ${entry.branch}: ${message.slice(0, 160)}`,
+      trailers: [["Cause", message.slice(0, 300)]],
+    })
+  }
 }
 
 /** The on-submit phase for one queued change. */
@@ -174,17 +199,26 @@ async function judge(run: Run, entry: LaneEntry): Promise<Ended> {
     return end(run, entry, "failed", {
       remedy: `rebase ${branch} onto ${run.options.target} and submit again`,
       subject: `${branch} shares no history with ${run.options.target}`,
-      trailers: [["Reason", "unrelated-history"], ["Fault", "submitter"]],
+      trailers: [["Reason", "unrelated-history"]],
     })
   }
   const worktree = await freshWorktree(run.git, run.options.repo, head, join(run.worktrees, "submit", head.slice(0, 12)), run.options.plumbing)
   try {
+    // The built-in check: every gitlink reachable from its component's main.
+    const offMain = await gitlinkOffMain(run, worktree.path)
+    if (offMain !== undefined) {
+      return end(run, entry, "failed", {
+        remedy: `land ${offMain.path}'s commit on its main first, pin that, and submit again`,
+        subject: `${branch} pins ${offMain.path} at ${offMain.sha.slice(0, 12)}, which its main does not carry`,
+        trailers: [["Reason", "gitlink-off-main"], ["Gitlink", `${offMain.path} ${offMain.sha}`]],
+      })
+    }
     const results = await runPhase(run, entry, "submit", worktree.path)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
       return end(run, entry, "stuck", {
         subject: `the queue could not judge ${branch}: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
-        trailers: [["Cause", stuckOne.why ?? stuckOne.name], ["Fault", "queue"], ...checkTrailers(results)],
+        trailers: [["Cause", stuckOne.why ?? stuckOne.name], ...checkTrailers(results)],
       })
     }
     const failedOne = results.find((result) => result.result === "fail")
@@ -192,7 +226,7 @@ async function judge(run: Run, entry: LaneEntry): Promise<Ended> {
       return end(run, entry, "failed", {
         remedy: `fix ${failedOne.name} (log: ${failedOne.log}), push, and submit again`,
         subject: `${branch} failed ${failedOne.name}`,
-        trailers: [["Reason", failedOne.name], ["Fault", "submitter"], ...checkTrailers(results)],
+        trailers: [["Reason", failedOne.name], ...checkTrailers(results)],
       })
     }
     await appendFact(run.git, {
@@ -208,6 +242,26 @@ async function judge(run: Run, entry: LaneEntry): Promise<Ended> {
   } finally {
     await worktree.remove()
   }
+}
+
+/**
+ * The first gitlink in the worktree's tree that its component's `main` does
+ * not carry, or undefined when every pin is on its main. Each component is
+ * asked at its own remote, so the answer is about main as it is now, never a
+ * stale tracking ref; a component that cannot be asked throws, and the
+ * change ends stuck, because a pin the queue cannot judge is not a fail.
+ */
+async function gitlinkOffMain(run: Run, worktree: string): Promise<Readonly<{ path: string; sha: string }> | undefined> {
+  const wt = gitIn(worktree, run.options.process)
+  for (const row of (await wt(["ls-tree", "-r", "-z", "HEAD"])).split("\0")) {
+    const [meta, path] = row.split("\t")
+    const [mode, , sha] = (meta ?? "").split(" ")
+    if (mode !== "160000" || path === undefined || sha === undefined) continue
+    const component = gitIn(join(worktree, path), run.options.process)
+    await component(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+    if (!(await isAncestor(component, sha, "refs/remotes/origin/main"))) return { path, sha }
+  }
+  return undefined
 }
 
 /** The on-merge phase for the first checked change. */
@@ -227,7 +281,7 @@ async function land(run: Run, entry: LaneEntry): Promise<Ended> {
       return end(run, entry, "failed", {
         remedy: `rebase ${branch} onto ${run.options.target}, resolve the conflict, push, and submit again`,
         subject: `${branch} conflicts with ${run.options.target}`,
-        trailers: [["Reason", "conflict"], ["Fault", "submitter"], ["Detail", String(error).slice(0, 200)]],
+        trailers: [["Reason", "conflict"], ["Detail", String(error).slice(0, 200)]],
       })
     }
     // The built-in check at merge (ruling D2): the merged tree's own declaration
@@ -242,7 +296,7 @@ async function land(run: Run, entry: LaneEntry): Promise<Ended> {
       return end(run, entry, "failed", {
         remedy: `fix .yrd.yml on ${branch} (${unreadable}), push, and submit again`,
         subject: `${branch} would land a declaration the queue cannot read`,
-        trailers: [["Reason", "config-invalid"], ["Fault", "submitter"]],
+        trailers: [["Reason", "config-invalid"]],
       })
     }
     const results = await runPhase(run, entry, "merge", worktree.path)
@@ -250,7 +304,7 @@ async function land(run: Run, entry: LaneEntry): Promise<Ended> {
     if (stuckOne !== undefined) {
       return end(run, entry, "stuck", {
         subject: `the queue could not judge ${branch} at merge: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
-        trailers: [["Cause", stuckOne.why ?? stuckOne.name], ["Fault", "queue"], ...checkTrailers(results)],
+        trailers: [["Cause", stuckOne.why ?? stuckOne.name], ...checkTrailers(results)],
       })
     }
     const failing = results.filter((result) => result.result === "fail")
@@ -259,13 +313,13 @@ async function land(run: Run, entry: LaneEntry): Promise<Ended> {
       if (verdict.result === "stuck") {
         return end(run, entry, "stuck", {
           subject: `${branch}: ${verdict.why}`,
-          trailers: [["Cause", verdict.why], ["Fault", "queue"], ["Reason", verdict.kind], ...checkTrailers(results)],
+          trailers: [["Cause", verdict.why], ["Reason", verdict.kind], ...checkTrailers(results)],
         })
       }
       return end(run, entry, "failed", {
         remedy: `fix ${failing[0]?.name ?? "the check"} (log: ${failing[0]?.log ?? ""}), push, and submit again`,
         subject: `${branch} failed ${failing.map((result) => result.name).join(", ")} at merge`,
-        trailers: [["Reason", failing[0]?.name ?? "check"], ["Fault", "submitter"], ...checkTrailers(results)],
+        trailers: [["Reason", failing[0]?.name ?? "check"], ...checkTrailers(results)],
       })
     }
     // Pass. The merge is ours to make only while the target is still where this
@@ -362,24 +416,24 @@ async function retire(run: Run, entry: LaneEntry): Promise<void> {
 
 /**
  * A check's scripts come from the target, never from the branch (§ The queue
- * run: gate authority lives on the protected side). A check's scripts are the
- * tracked files its command names; each is restored from the base commit into
- * the worktree before the check runs, so a change that rewrites the gate it is
- * judged by is judged by the target's version all the same. The merge commit,
- * already made, keeps the branch's edit: it lands, and judges the next change.
- * Returns the paths restored.
+ * run: gate authority lives on the protected side). The check declares them as
+ * `scripts:`, files or directories of the repository; each is restored from
+ * the base commit into the worktree before the check runs, so a change that
+ * rewrites the gate it is judged by is judged by the target's version all the
+ * same. The merge commit, already made, keeps the branch's edit: it lands, and
+ * judges the next change. A declared path the base does not carry is loud,
+ * because a gate that silently ran the branch's copy would be the hole itself.
  */
-async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<readonly string[]> {
+async function restoreScripts(run: Run, spec: QueueCheck, cwd: string): Promise<void> {
+  const scripts = spec.scripts ?? []
+  if (scripts.length === 0) return
   const wt = gitIn(cwd, run.options.process)
-  const restored: string[] = []
-  for (const token of spec.run.split(/\s+/u)) {
-    const path = token.replace(/^["']|["']$/gu, "").replace(/^\.\//u, "")
-    if (path === "" || path.startsWith("-") || path.includes("=")) continue
-    if ((await refAt(run.git, `${run.targetSha}:${path}`, "blob")) === undefined) continue
+  for (const path of scripts) {
+    if ((await refAt(run.git, `${run.targetSha}:${path}`, "blob")) === undefined && (await refAt(run.git, `${run.targetSha}:${path}`, "tree")) === undefined) {
+      throw new Error(`check ${spec.name} declares scripts: ${path}, which the target ${run.targetSha.slice(0, 12)} does not carry`)
+    }
     await wt(["checkout", "--quiet", run.targetSha, "--", path])
-    restored.push(path)
   }
-  return restored
 }
 
 async function runPhase(run: Run, entry: LaneEntry, phase: "submit" | "merge", cwd: string): Promise<readonly CheckResult[]> {
@@ -391,8 +445,8 @@ async function runPhase(run: Run, entry: LaneEntry, phase: "submit" | "merge", c
   return results
 }
 
-async function check(run: Run, entry: LaneEntry, spec: CheckSpec, cwd: string, phase: string): Promise<CheckResult> {
-  const scripts = await restoreScripts(run, spec, cwd)
+async function check(run: Run, entry: LaneEntry, spec: QueueCheck, cwd: string, phase: string): Promise<CheckResult> {
+  await restoreScripts(run, spec, cwd)
   const start = new Date().toISOString()
   const result = await runCheck({
     cwd,
@@ -403,7 +457,7 @@ async function check(run: Run, entry: LaneEntry, spec: CheckSpec, cwd: string, p
     spec,
   })
   const common = { branch: entry.branch, head: entry.change.head, name: spec.name, phase }
-  run.log.write({ ...common, end: new Date().toISOString(), kind: "check", log: result.log, ms: result.durationMs, ...(scripts.length === 0 ? {} : { scripts }), start })
+  run.log.write({ ...common, end: new Date().toISOString(), kind: "check", log: result.log, ms: result.durationMs, ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }), start })
   // `whose` is who the result is billed to: a stuck result is always the queue's;
   // a failing one is the submitter's until the attribution says otherwise, and
   // that later reading writes its own result row.
@@ -417,7 +471,14 @@ async function end(
   kind: "failed" | "stuck",
   ended: Readonly<{ subject: string; trailers: readonly (readonly [string, string])[]; remedy?: string }>,
 ): Promise<Ended> {
-  const trailers = ended.remedy === undefined ? ended.trailers : [...ended.trailers, ["Remedy", ended.remedy] as const]
+  // Who is billed follows from the kind, once: a fail is the submitter's, and
+  // a stuck is the queue's (§ Attribution). A `replaced` or `deleted` change
+  // bills nobody and never comes through here.
+  const trailers = [
+    ...ended.trailers,
+    ["Fault", kind === "stuck" ? "queue" : "submitter"] as const,
+    ...(ended.remedy === undefined ? [] : [["Remedy", ended.remedy] as const]),
+  ]
   const fact = await appendFact(run.git, { branch: entry.branch, head: entry.change.head, kind, subject: ended.subject, target: run.options.target, trailers })
   await pushChange(run, entry.branch, entry.change.head)
   run.log.write({ branch: entry.branch, decision: kind, head: entry.change.head, kind: "change", reason: ended.subject })

@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, lane, list, readConfig, show, submit } from "../src/index.ts"
+import { gitIn, lane, list, readConfig, readHints, show, submit } from "../src/index.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -75,7 +75,10 @@ describe("the declaration is read from the target commit", () => {
 
   it("is not this core's when it names no remote, and is loud when it is wrong", async () => {
     const old = await world("batch: 1\nchecks:\n  - verify:\n      run: bun run test\n")
-    expect((await readConfig(old.git, "main"))?.declaresRemote).toBe(false)
+    // The switch reads only whether `remote:` is there; the full read holds the
+    // file to the keys this core knows, so the incumbent's `batch:` is loud.
+    expect((await readHints(old.git, "main")).remote).toBeUndefined()
+    await expect(readConfig(old.git, "main")).rejects.toThrow(/unknown key batch/u)
 
     const wrong = await world("remote: origin\nchecks:\n  - verify:\n      on: sometimes\n      run: bun run test\n")
     await expect(readConfig(wrong.git, "main")).rejects.toThrow(/on: must be submit or merge/u)

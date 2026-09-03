@@ -31,8 +31,6 @@ export type ChangeReading = Readonly<{
   state: ChangeState
   /** Why, when the state has a reason: `replaced`, `deleted`, or a check's code. */
   reason?: string
-  /** The fact the reading came from, absent when ancestry or the branch decided it. */
-  from?: string
 }>
 
 export type ChangeFacts = Readonly<{
@@ -63,21 +61,21 @@ export function readChange(change: ChangeFacts): ChangeReading {
 
   switch (last.kind) {
     case "merged":
-      return { state: "merged", from: last.sha }
+      return { state: "merged" }
     case "failed":
-      return { state: "failed", from: last.sha, reason: reasonOf(last) }
+      return { state: "failed", reason: reasonOf(last) }
     case "stuck":
-      return { state: "stuck", from: last.sha, reason: reasonOf(last) }
+      return { state: "stuck", reason: reasonOf(last) }
     case "checked":
-      return { state: "checked", from: last.sha }
+      return { state: "checked" }
     case "opened":
-      return { state: "queued", from: last.sha }
+      return { state: "queued" }
     case "sent": {
       // A sent fact follows an ended one and says nothing new about the change,
       // so the reading is the ended fact underneath it.
       const ended = [...change.facts].reverse().find((fact) => fact.kind !== "sent")
       return ended === undefined
-        ? { state: "queued", from: last.sha }
+        ? { state: "queued" }
         : readChange({ ...change, facts: change.facts.slice(0, change.facts.indexOf(ended) + 1) })
     }
   }

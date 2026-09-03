@@ -19,8 +19,6 @@ import type { QueueCheck } from "./run.ts"
 export type QueueConfig = Readonly<{
   /** The queue's remote: a remote name, or a URL the CLI adds under the name `yrd`; `origin` unless declared. */
   remote: string
-  /** Whether the declaration names `remote:` itself — the line that selects this core while the incumbent still exists (§ Cutover). */
-  declaresRemote: boolean
   /** The branch the queue lands on; `main` unless declared. */
   target: string
   checks: readonly QueueCheck[]
@@ -45,6 +43,7 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   const text = await git(["show", `${commit}:.yrd.yml`])
   const raw: unknown = Bun.YAML.parse(text)
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${commit.slice(0, 12)} is not a mapping`)
+  onlyKeys(raw, TOP_KEYS, ".yrd.yml")
   const remote = raw.remote ?? "origin"
   if (typeof remote !== "string" || remote === "") throw new Error(`.yrd.yml remote: must be a remote name or URL`)
   const target = raw.target ?? "main"
@@ -53,7 +52,7 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   if (typeof owner !== "string" || owner === "") throw new Error(`.yrd.yml owner: must be a seat name`)
   const notify = optionalString(raw, "notify")
   const scratch = optionalString(raw, "scratch")
-  return { blob, checks: readChecks(raw.checks), declaresRemote: raw.remote !== undefined, notify, owner, remote, scratch, target }
+  return { blob, checks: readChecks(raw.checks), notify, owner, remote, scratch, target }
 }
 
 export type Hints = Readonly<{
@@ -64,12 +63,15 @@ export type Hints = Readonly<{
 }>
 
 /**
- * What a submitter's own commit says about where its queue is: `remote:` and
- * `target:` (or the incumbent's `base:`) from its `.yrd.yml`, when that file
- * exists and reads. Hints for finding the target, never authority: the target's
- * declaration judges, so a branch that rewrites or breaks its own `.yrd.yml`
- * still submits and is judged by the target's rules, and D2 bills it at merge.
- * A file that exists and cannot be read hints nothing and says so in `problem`.
+ * What a commit's `.yrd.yml` says about where its queue is: `remote:` and
+ * `target:` (or the incumbent's `base:`), when the file exists and reads.
+ * Read on a submitter's own commit these are hints for finding the target,
+ * never authority: the target's declaration judges, so a branch that rewrites
+ * or breaks its own `.yrd.yml` still submits and is judged by the target's
+ * rules, and D2 bills it at merge. Read on the target itself, `remote` is the
+ * switch: its presence selects this core while the incumbent exists (§ Cutover),
+ * and only then is the declaration read in full and held to its keys. A file
+ * that exists and cannot be read hints nothing and says so in `problem`.
  */
 export async function readHints(git: Git, commit: string): Promise<Hints> {
   const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
@@ -102,6 +104,11 @@ function readChecks(value: unknown): readonly QueueCheck[] {
     if (!isRecord(body) || typeof body.run !== "string" || body.run === "") {
       throw new Error(`.yrd.yml checks[${index}] ${name}: needs run: <command>`)
     }
+    onlyKeys(body, CHECK_KEYS, `.yrd.yml checks[${index}] ${name}`)
+    const scripts = body.scripts
+    if (scripts !== undefined && (!Array.isArray(scripts) || !scripts.every((entry) => typeof entry === "string" && entry !== ""))) {
+      throw new Error(`.yrd.yml checks[${index}] ${name}: scripts: must be a list of repository paths`)
+    }
     const on = body.on
     if (on !== undefined) {
       const phases = Array.isArray(on) ? on : [on]
@@ -122,9 +129,19 @@ function readChecks(value: unknown): readonly QueueCheck[] {
       name,
       on: on === undefined ? undefined : ((Array.isArray(on) ? on : [on]) as readonly ("submit" | "merge")[]),
       run: body.run,
+      scripts: scripts as readonly string[] | undefined,
       timeoutMs,
     }
   })
+}
+
+const TOP_KEYS = ["remote", "target", "checks", "notify", "owner", "scratch"] as const
+const CHECK_KEYS = ["run", "on", "timeoutMs", "environmentPassthrough", "scripts"] as const
+
+/** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */
+function onlyKeys(record: Record<string, unknown>, known: readonly string[], where: string): void {
+  const unknown = Object.keys(record).filter((key) => !known.includes(key))
+  if (unknown.length > 0) throw new Error(`${where}: unknown key ${unknown.join(", ")} (known: ${known.join(", ")})`)
 }
 
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {

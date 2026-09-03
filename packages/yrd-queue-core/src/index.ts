@@ -13,7 +13,7 @@
  * untouched until the flag day at M5 retires it whole.
  */
 
-export { CHANGES, SUBMITS, changeRef, parseChangeRef, parseSubmitRef, submitRef } from "./refs.ts"
+export { CHANGES, changeRef, parseChangeRef } from "./refs.ts"
 export { FACT_KINDS, appendFact, factMessage, readFacts, trailer, trailers } from "./facts.ts"
 export type { Fact, FactKind, Git, WriteFact } from "./facts.ts"
 export { CHANGE_STATES, inLine, readChange } from "./state.ts"

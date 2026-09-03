@@ -62,9 +62,13 @@ export async function coreQueueCommand(
     hints.remote === undefined ? ((await remoteNames(git)).includes("origin") ? "origin" : undefined) : await resolveRemote(git, hints.remote)
   if (hinted === undefined) return undefined
   const hintedTarget = hints.target ?? "main"
-  await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${hinted}/${hintedTarget}`])
-  const declared = await readConfig(git, `${hinted}/${hintedTarget}`)
-  if (declared === undefined || !declared.declaresRemote) return undefined
+  const targetRef = `${hinted}/${hintedTarget}`
+  await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
+  // The switch: the target names `remote:`. Only then is its declaration read
+  // in full and held to its keys; the incumbent's file is never parsed here.
+  if ((await readHints(git, targetRef)).remote === undefined) return undefined
+  const declared = await readConfig(git, targetRef)
+  if (declared === undefined) return undefined
   const config: QueueConfig = { ...declared, remote: await resolveRemote(git, declared.remote) }
   // A worktree's `.git` is a file, so the queue's own directory lives under the
   // common git dir the whole repository shares, never under a path guessed from it.
@@ -85,7 +89,16 @@ export async function coreQueueCommand(
       return 0
     }
     case "run": {
-      const outcome = await queueRun(runOptions(repo, config, workdir, options.env, options.log))
+      // The one exit site, from the outside: a run that could not even judge
+      // (a bad invocation, a remote that cannot be read) is stuck, exit 2.
+      let outcome
+      try {
+        outcome = await queueRun(runOptions(repo, config, workdir, options.env, options.log))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        emit(io, options.json, { exitCode: 2, failed: [], merged: [], stuck: [], why: message }, `stuck: the queue run could not judge: ${message}`)
+        return 2
+      }
       emit(io, options.json, outcome, describeRun(outcome))
       return outcome.exitCode
     }

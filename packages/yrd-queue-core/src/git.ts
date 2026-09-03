@@ -46,7 +46,7 @@ export class GitExit extends Error {
  * its commit; a `rev:path` names a blob already and git refuses a peel on it,
  * so it is asked for as written.
  */
-export async function refAt(git: Git, ref: string, kind: "commit" | "blob" = "commit"): Promise<string | undefined> {
+export async function refAt(git: Git, ref: string, kind: "commit" | "blob" | "tree" = "commit"): Promise<string | undefined> {
   try {
     const name = kind === "commit" ? `${ref}^{commit}` : ref
     const out = (await git(["rev-parse", "--verify", "--quiet", name])).trim()

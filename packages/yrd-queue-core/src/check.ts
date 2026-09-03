@@ -29,6 +29,9 @@ export type CheckSpec = Readonly<{
 
 export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000
 
+/** The environment every check gets, by name; `LC_*` and the check's own `environmentPassthrough` join it. */
+const BASE_ENV = ["PATH", "HOME", "SHELL", "LANG", "USER", "LOGNAME"] as const
+
 export type CheckResult = Readonly<{
   name: string
   result: "pass" | "fail" | "stuck"
@@ -58,10 +61,17 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   mkdirSync(run.scratch, { recursive: true })
   const log = join(run.logDir, `${run.spec.name}.log`)
   const runner = run.process ?? createProcess({ cwd: run.cwd })
-  const env: NodeJS.ProcessEnv = { PATH: (run.env ?? process.env).PATH, TMPDIR: run.scratch }
-  for (const name of run.spec.environmentPassthrough ?? []) {
-    const value = (run.env ?? process.env)[name]
+  // The check's environment is built, never inherited: a fixed base a real
+  // check needs (measured on the root's own checks), the scratch root as
+  // TMPDIR, and whatever the check declares. Nothing else reaches the child.
+  const source = run.env ?? process.env
+  const env: NodeJS.ProcessEnv = { TMPDIR: run.scratch }
+  for (const name of [...BASE_ENV, ...(run.spec.environmentPassthrough ?? [])]) {
+    const value = source[name]
     if (value !== undefined) env[name] = value
+  }
+  for (const [name, value] of Object.entries(source)) {
+    if (name.startsWith("LC_") && value !== undefined) env[name] = value
   }
   const timeoutMs = run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
   const started = Date.now()

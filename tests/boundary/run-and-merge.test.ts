@@ -36,6 +36,7 @@ import {
   submitOneCommit,
   submitSameHead,
   targetTip,
+  declaration,
 } from "./fixture.ts"
 
 afterEach(removeScratchRoots)
@@ -79,7 +80,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
       // The fake check judges content: it exits as told only where the change
       // wrote a file, so the change carries one beside its rewritten config.
       await submitCommitWriting(repo, "rewrite", {
-        ".yrd.yml": `base: main\nbatch: 1\nchecks: [{gate: {run: ${JSON.stringify(fake(branchLog, 0))}}}]\n`,
+        ".yrd.yml": `${declaration()}checks: [{gate: {run: ${JSON.stringify(fake(branchLog, 0))}}}]\n`,
         "rewrite.txt": "the change\n",
       })
 
@@ -95,7 +96,9 @@ describe("the queue run", { timeout: 180_000 }, () => {
       const log = await scratchLog("gate-script")
       const { repo } = await boundaryRepositoryWith({
         notify: true,
-        checks: [{ name: "gate", run: `GATE_LOG=${log} sh gate.sh` }],
+        // The check names its script, and the queue restores it from the base
+        // before the check runs (ruling D5, the declared `scripts:` list).
+        checks: [{ name: "gate", run: `GATE_LOG=${log} sh gate.sh`, scripts: ["gate.sh"] }],
         // The target's gate is red only where the change's marker is. A gate red
         // at the target too would be the target's fault under § Attribution,
         // and the change stuck, not failed.

@@ -97,11 +97,16 @@ function notifyStep(plan: FakeCheckPlan, log: string): string {
   return `notify: ${JSON.stringify(command)}\n`
 }
 
-/** The `remote:` line for a plan, naming the shared repository the branches and
- * their changes are pushed to, or nothing when the case did not ask for one. */
-function remoteStep(plan: FakeCheckPlan, origin: string): string {
-  if (plan.yrdRemote !== true) return ""
-  return `remote: ${JSON.stringify(origin)}\n`
+/**
+ * The head of a `.yrd.yml` for the core under measurement: the new core's
+ * `remote:` and `target:` (ruling A5), or the incumbent's `base:` and `batch:`.
+ * `remote` names the shared repository by URL when the case asks for the
+ * remote to be added from the declaration; the incumbent gets the line too,
+ * since the case that asks is red there on the rule, not on the key.
+ */
+export function declaration(remote?: string): string {
+  if (measuringNewCore()) return `remote: ${JSON.stringify(remote ?? "origin")}\ntarget: main\n`
+  return `${remote === undefined ? "" : `remote: ${JSON.stringify(remote)}\n`}base: main\nbatch: 1\n`
 }
 
 export type BoundaryRepository = Readonly<{
@@ -139,11 +144,10 @@ export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryR
   // case that asks for the yrd remote by name gets the shared repository's
   // path; otherwise YRD_BOUNDARY_CORE=new names `origin`, so the same
   // black-box cases judge both cores and the gate runs this suite once per core.
-  const core =
-    plan.yrdRemote === true ? remoteStep(plan, origin) : coreDeclaration()
+  const head = plan.yrdRemote === true ? declaration(origin) : declaration()
   await writeFile(
     join(repo, ".yrd.yml"),
-    `${core}base: main\nbatch: 1\n${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
+    `${head}${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
   )
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "main")
@@ -208,11 +212,6 @@ export type SubmitAttempt = Readonly<{
 /** Which core the suite measures: `YRD_BOUNDARY_CORE=new` selects the new one (plan § Cutover). */
 export function measuringNewCore(): boolean {
   return process.env.YRD_BOUNDARY_CORE === "new"
-}
-
-/** The `.yrd.yml` line that selects the new core (ruling A5); the incumbent needs none. */
-function coreDeclaration(): string {
-  return measuringNewCore() ? "remote: origin\n" : ""
 }
 
 /**
@@ -766,6 +765,8 @@ export type PhasedCheck = Readonly<{
   /** The command, verbatim — the case owns it. */
   run: string
   timeoutMs?: number
+  /** Repository paths restored from the base before the check runs (ruling D5). */
+  scripts?: readonly string[]
 }>
 
 export type BoundaryPlan = Readonly<{
@@ -809,6 +810,7 @@ function phasedChecks(checks: readonly PhasedCheck[]): string {
     const fields = [`run: ${JSON.stringify(check.run)}`]
     if (check.on !== undefined) fields.push(`on: ${check.on}`)
     if (check.timeoutMs !== undefined) fields.push(`timeoutMs: ${String(check.timeoutMs)}`)
+    if (check.scripts !== undefined) fields.push(`scripts: ${JSON.stringify(check.scripts)}`)
     return `{${check.name}: {${fields.join(", ")}}}`
   })
   return `checks: [${entries.join(", ")}]`
@@ -839,7 +841,7 @@ export async function boundaryRepositoryWith(plan: BoundaryPlan): Promise<Bounda
 
   const notify =
     plan.notify === true ? `notify: ${JSON.stringify(`cat >>${notifyLog}; echo '{"ball_id":"b1"}'`)}\n` : ""
-  await writeFile(join(repo, ".yrd.yml"), `${coreDeclaration()}base: main\nbatch: 1\n${notify}${phasedChecks(plan.checks)}\n`)
+  await writeFile(join(repo, ".yrd.yml"), `${declaration()}${notify}${phasedChecks(plan.checks)}\n`)
 
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")
