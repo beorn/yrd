@@ -400,13 +400,13 @@ describe("a queue run", () => {
     // The record is the notifier's contract, unchanged: its kinds are landed, send-back and yrd-broken.
     expect(sent[0]).toMatchObject({
       branch: "task/one",
-      head,
       kind: "landed",
       pr: "task/one",
       recipient: "@dev/2",
+      sha: head,
       workItem: "@i/10-yrd/1",
     })
-    expect(sent[0]?.id).toBe(facts[2]?.sha)
+    expect(sent[0]?.attempt_id).toBe(facts[2]?.sha)
     expect(
       readFileSync(outcome.log, "utf8")
         .split("\n")
@@ -527,7 +527,7 @@ describe("a queue run", () => {
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "stuck", "sent"])
     expect(facts[2]?.trailers).toEqual(expect.arrayContaining([["Reason", "inherited"]]))
     expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
-    expect(messages(w)[0]?.text).toMatch(/the target is red, not the change/u)
+    expect(messages(w)[0]?.command).toMatch(/the target is red, not the change/u)
   })
 
   it("a check past its bound is stuck, not the submitter's", async () => {
@@ -537,7 +537,7 @@ describe("a queue run", () => {
     const outcome = await queueRun(w.options({ sleep: 3, timeoutMs: 500 }))
 
     expect(outcome.exitCode).toBe(2)
-    expect(messages(w)[0]?.text).toMatch(/ran past its bound/u)
+    expect(messages(w)[0]?.command).toMatch(/ran past its bound/u)
   })
 
   it("a check declaring a scripts: path the target does not carry is loud: the change ends stuck and names it (D5)", async () => {
@@ -559,7 +559,7 @@ describe("a queue run", () => {
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
     expect(facts[1]?.subject).toContain("gates/absent.sh")
     expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
-    expect(messages(w)[0]?.text).toContain("does not carry")
+    expect(messages(w)[0]?.command).toContain("does not carry")
   })
 
   it("POSITIVE CONTROL: a declared scripts: path the target does carry is restored and judged (D5)", async () => {
@@ -761,9 +761,9 @@ describe("a queue run", () => {
     // target moved by hand, once, with the merge commit as the message's id.
     expect(messages(w).filter((message) => message.kind === "landed")).toMatchObject([{ recipient: "@dev/2" }])
     const broken = messages(w).filter((message) => message.kind === "yrd-broken")
-    expect(broken).toMatchObject([{ attempt_id: landing, id: landing, pr: "main", recipient: "@cto", sha: landing }])
-    expect(broken[0]?.text).toContain(`main moved by hand at ${landing.slice(0, 12)} (landed by hand)`)
-    expect(broken[0]?.text).toContain("it carries no Change: trailer")
+    expect(broken).toMatchObject([{ attempt_id: landing, pr: "main", recipient: "@cto", sha: landing }])
+    expect(broken[0]?.command).toContain(`main moved by hand at ${landing.slice(0, 12)} (landed by hand)`)
+    expect(broken[0]?.command).toContain("it carries no Change: trailer")
     expect(records(outcome).filter((record) => record.kind === "by-hand")).toMatchObject([
       { commit: landing, gitlinks: [], parents: [w.target, head], subject: "landed by hand" },
     ])
@@ -836,7 +836,7 @@ describe("a queue run", () => {
       expect(records(outcome).filter((record) => record.kind === "change" && record.branch === "main")).toEqual([])
       expect(records(outcome).filter((record) => record.kind === "by-hand")).toEqual([])
     }
-    expect(messages(w).filter((message) => (message.text ?? "").includes("main@"))).toEqual([])
+    expect(messages(w).filter((message) => (message.command ?? "").includes("main@"))).toEqual([])
     expect(messages(w).filter((message) => message.recipient === "@cto")).toEqual([])
     expect(messages(w).map((message) => message.recipient)).toEqual(["@dev/2"])
   })
@@ -896,10 +896,10 @@ describe("a queue run", () => {
     ])
     const broken = messages(w).filter((message) => message.kind === "yrd-broken")
     expect(broken).toMatchObject([
-      { attempt_id: hand, id: hand, kind: "yrd-broken", pr: "main", recipient: "@cto", sha: hand },
+      { attempt_id: hand, kind: "yrd-broken", pr: "main", recipient: "@cto", sha: hand },
     ])
-    expect(broken[0]?.text).toContain(`main moved by hand at ${hand.slice(0, 12)} (hand.txt by hand)`)
-    expect(broken[0]?.text).toContain("it is one commit, not a merge of a change")
+    expect(broken[0]?.command).toContain(`main moved by hand at ${hand.slice(0, 12)} (hand.txt by hand)`)
+    expect(broken[0]?.command).toContain("it is one commit, not a merge of a change")
     // The change merged on top of the hand commit, not on the base the queue was declared at.
     await w.git(["fetch", "--quiet", "origin", "main"])
     const parents = (await w.git(["rev-list", "--parents", "-n", "1", await remoteTarget(w)]))
@@ -1190,7 +1190,7 @@ describe("an on-submit check is attributed before anyone is billed for it", () =
       expect.stringMatching(/^verify exit=1 /u),
     ])
     expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
-    expect(messages(w)[0]?.text).toMatch(/the target is red, not the change/u)
+    expect(messages(w)[0]?.command).toMatch(/the target is red, not the change/u)
   })
 
   it("a passing on-submit check is run once and attributes nothing", async () => {

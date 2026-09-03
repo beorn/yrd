@@ -275,13 +275,10 @@ async function reportByHand(run: Run, entries: QueueRead): Promise<readonly stri
       branch: target,
       code: "by-hand",
       command: text,
-      head: commit.commit,
-      id: commit.commit,
       kind: "yrd-broken",
       pr: target,
       recipient: run.options.owner,
       sha: commit.commit,
-      text,
     })
     run.log.write({
       about: target,
@@ -1026,11 +1023,16 @@ async function send(
   const submitter = trailer(ended, "Submitter")
   const recipient =
     kind === "stuck" || submitter === undefined || submitter === "unknown" ? run.options.owner : submitter
-  // The record the configured notifier reads, unchanged from today's contract
-  // (kind, attempt_id, pr, recipient, command required; the rest optional): the
-  // plan's three messages map onto its three kinds, the branch stands where a
-  // PR number stood, and the ended fact's sha is the attempt id, so a resend
-  // after a crash is the same message.
+  // The record the configured notifier reads, and nothing besides. It requires
+  // `kind`, `attempt_id`, `pr`, `recipient` and `command`, and reads `branch`,
+  // `sha`, `base`, `code` and `disposition` when they are there (tools/yrd-notify.ts
+  // at the root, read 2026-09-03). It reads no `id`, no `text` and no `head`,
+  // which this record carried as second spellings of `attempt_id`, `command`
+  // and `sha` — a shim onto a contract nobody has: the plan's three messages
+  // map onto its three kinds, the branch stands where a PR number stood, and
+  // the ended fact's sha is the attempt id, so a resend after a crash is the
+  // same message. `workItem` is the one field the notifier ignores that stays:
+  // the plan says the message names the work item.
   const { delivery, failure } = await deliver(run, {
     attempt_id: endedFact,
     base: run.options.target,
@@ -1038,13 +1040,10 @@ async function send(
     code: kind === "merged" ? undefined : trailer(ended, "Reason"),
     command: text,
     disposition: kind === "failed" ? "author" : undefined,
-    head: entry.change.head,
-    id: endedFact,
     kind: kind === "merged" ? "landed" : kind === "failed" ? "send-back" : "yrd-broken",
     pr: entry.branch,
     recipient,
     sha: entry.change.head,
-    text,
     workItem: trailer(ended, "Work-Item"),
   })
   // The sent fact repeats the ended state and carries the ended fact's result,
