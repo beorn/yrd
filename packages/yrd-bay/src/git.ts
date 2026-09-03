@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import type { JobResult } from "@yrd/job"
 import { adaptProcessGit, gitSuperFailureDetail, type Process } from "@yrd/process"
 import { pushRefUpdates } from "git-super/push"
 import { createGitWorktreeStore, type Git } from "git-super/worktree"
-import type { BayWorkspace } from "./plugin.ts"
 import type {
+  BayWorkspace,
   CheckpointBayInput,
   CheckpointedBay,
   DeprovisionBayInput,
@@ -15,7 +14,8 @@ import type {
   ProvisionedBay,
   RefreshBayInput,
   RefreshedBay,
-} from "./model.ts"
+  WorkspaceResult,
+} from "./workspace.ts"
 
 export type GitWorkspaceLifecycle = Readonly<{ bay: string; path: string }>
 export type GitWorkspaceLifecycleHook = (workspace: GitWorkspaceLifecycle) => void | Promise<void>
@@ -55,7 +55,7 @@ export function gitWorkspaceRevision(options: GitWorkspaceRevisionOptions): stri
 
 const GIT_TIMEOUT_MS = 30_000
 
-function failure(code: string, cause: unknown): JobResult<never> {
+function failure(code: string, cause: unknown): WorkspaceResult<never> {
   return {
     status: "completed",
     conclusion: "failure",
@@ -252,7 +252,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
   return {
     revision: gitWorkspaceRevision(options),
 
-    async provision(input: ProvisionBayInput): Promise<JobResult<ProvisionedBay>> {
+    async provision(input: ProvisionBayInput): Promise<WorkspaceResult<ProvisionedBay>> {
       const path = safeBayPath(baysRoot, input.bay)
       let createdWorkspace = false
       let createdLocalBranch = false
@@ -385,7 +385,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
       }
     },
 
-    async refresh(input: RefreshBayInput): Promise<JobResult<RefreshedBay>> {
+    async refresh(input: RefreshBayInput): Promise<WorkspaceResult<RefreshedBay>> {
       if (input.path === undefined) return failure("refresh-failed", `bay '${input.bay}' has no worktree path`)
       try {
         await worktreePosture(git, { ...input, path: input.path })
@@ -404,7 +404,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
       }
     },
 
-    async checkpoint(input: CheckpointBayInput): Promise<JobResult<CheckpointedBay>> {
+    async checkpoint(input: CheckpointBayInput): Promise<WorkspaceResult<CheckpointedBay>> {
       if (input.path === undefined) return failure("checkpoint-failed", `bay '${input.bay}' has no worktree path`)
       try {
         const posture = await worktreePosture(git, { ...input, path: input.path })
@@ -534,7 +534,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
       }
     },
 
-    async deprovision(input: DeprovisionBayInput): Promise<JobResult<DeprovisionedBay>> {
+    async deprovision(input: DeprovisionBayInput): Promise<WorkspaceResult<DeprovisionedBay>> {
       try {
         const path = resolveBayWorkspacePath({ baysRoot, bay: input.bay, recordedPath: input.path })
         if (path === undefined) {

@@ -6,9 +6,12 @@
  * timestamps, 40-hex SHAs, and job UUIDs.
  *
  * Synthetic fixtures cannot prove an ordering change is safe — only the shapes
- * the running system emits can. Regenerate with
- * `bun scripts/real-order-corpus.ts <journal.sqlite>` if the identifier
- * vocabulary ever changes.
+ * the running system emits can. This corpus is FROZEN: the journal it was
+ * sampled from is the old core's store, deleted at M6 along with the sampler
+ * (`scripts/real-order-corpus.ts`), so there is nothing left to regenerate it
+ * from. It stays because the strings are real and the ordering guarantee is
+ * still the same one; a new shape the queue emits has to be added by hand,
+ * with the reading it came from named beside it.
  */
 export const REAL_ID_CORPUS: readonly string[] = [
   "0015bed0edd9e392f05be0f525ea9430cb87c032",

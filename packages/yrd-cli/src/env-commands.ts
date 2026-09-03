@@ -70,22 +70,15 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   const branch = `task/${name}`
   await using process = createProcess({ cwd: root })
   const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
-  const provisioned = await workspace.provision(
-    {
-      bay: name,
-      name,
-      branch,
-      base: await baseRef(process, root, target),
-      ...(options.issue === undefined ? {} : { issue: options.issue }),
-    },
-    // The job context the workspace never reads on this path; the job runtime
-    // it belonged to went with `@yrd/job` at M6.
-    {} as never,
-  )
-  if (provisioned.status !== "completed" || provisioned.conclusion !== "success") {
-    const detail =
-      provisioned.status === "completed" ? (provisioned.error?.message ?? provisioned.error?.code) : provisioned.status
-    throw new Error(`yrd: could not open environment '${name}': ${detail ?? "unknown"}`)
+  const provisioned = await workspace.provision({
+    bay: name,
+    name,
+    branch,
+    base: await baseRef(process, root, target),
+    ...(options.issue === undefined ? {} : { issue: options.issue }),
+  })
+  if (provisioned.conclusion !== "success") {
+    throw new Error(`yrd: could not open environment '${name}': ${provisioned.error.message}`)
   }
   const { path, headSha, baseSha } = provisioned.output
   if (options.json === true) {
