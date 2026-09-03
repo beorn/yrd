@@ -230,12 +230,13 @@ export async function coreQueueCommand(
       }
     }
     case "list": {
-      const entries = await readQueue(git, config.remote, config.target)
       // The commits the target gained by hand are rows too (E5), judged at the
-      // target as the queue read just fetched it, so the rows and the reading
-      // are about one and the same tip.
-      const targetSha = await targetAt(git, config)
-      const rows = list(entries, { byHand: await byHandCommits(git, config.target, targetSha, entries) })
+      // target the queue read itself saw, so the rows and the reading are about
+      // one and the same tip and no second reading can disagree with it.
+      const queue = await readQueue(git, config.remote, config.target)
+      const rows = list(queue.changes, {
+        byHand: await byHandCommits(git, config.target, queue.target, queue.changes),
+      })
       emit(io, options.json, { changes: rows }, table(rows))
       return 0
     }
@@ -294,7 +295,7 @@ export async function coreQueueCommand(
       return results.some((result) => result.result === "stuck") ? 2 : results.some((result) => result.result === "fail") ? 1 : 0
     }
     case "show": {
-      const changes = show(await readQueue(git, config.remote, config.target), request.branch)
+      const changes = show((await readQueue(git, config.remote, config.target)).changes, request.branch)
       emit(
         io,
         options.json,
@@ -308,9 +309,10 @@ export async function coreQueueCommand(
 
 /**
  * The target as this checkout has it: the remote-tracking ref the declaration
- * names, fetched before any command runs here. Absent is loud, because every
- * reading below — which commits the target gained by hand, what base a check is
- * judging against — is a claim about that commit.
+ * names, fetched by `declaration()` before any command runs here. Absent is
+ * loud, because what base a check is judging against is a claim about that
+ * commit. `yrd check` is the one caller: every command that reads the queue
+ * takes the target from that reading instead.
  */
 async function targetAt(git: Git, config: QueueConfig): Promise<string> {
   const ref = `refs/remotes/${config.remote}/${config.target}`

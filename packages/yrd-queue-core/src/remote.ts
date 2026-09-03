@@ -36,11 +36,23 @@ export type QueueRead = readonly QueueEntry[]
 
 /**
  * Every change at the remote, read: one entry per change ref, and nothing for
- * a branch nobody submitted (E2; `submit` is the one writer of a change).
+ * a branch nobody submitted (E2; `submit` is the one writer of a change), plus
+ * the commit the target stood at in that same reading.
+ *
+ * The target's commit is the queue read's own answer, not a second question:
+ * the `ls-remote` below already carries it and the fetch below already brings
+ * it, so every caller that used to ask again — the queue run with an
+ * `ls-remote` and a fetch of its own, `queue list` with a local re-read that
+ * only worked because this fetch had run first — reads it from here.
+ *
  * Order is not decided here; `inLine` in state.ts is the one place that knows
  * the position in line.
  */
-export async function readQueue(git: Git, remote: string, target: string): Promise<QueueRead> {
+export async function readQueue(
+  git: Git,
+  remote: string,
+  target: string,
+): Promise<Readonly<{ target: string; changes: QueueRead }>> {
   // Where every branch and every change stands at the remote, in one reading.
   // Branch heads are read from here and never from a tracking ref, so a stale
   // local ref can never speak for the remote.
@@ -126,7 +138,7 @@ export async function readQueue(git: Git, remote: string, target: string): Promi
     }
     entries.push({ branch, change, reading: readChange(change) })
   }
-  return entries
+  return { changes: entries, target: targetSha }
 }
 
 /** Every change ref's tip fact, by ref, in one reading. A change ref that does not end in a fact is loud. */

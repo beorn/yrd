@@ -139,7 +139,11 @@ type Ended = "checked" | "failed" | "stuck" | "merged"
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   const git = options.git ?? gitIn(options.repo, options.process)
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
-  const targetSha = await targetAt(git, options.remote, options.target)
+  // One reading of the remote yields both the queue and the commit the target
+  // stood at when it was read, so the run never asks a second time and can
+  // never judge against a target its own queue read did not see.
+  const queue = await readQueue(git, options.remote, options.target)
+  const targetSha = queue.target
   const run: Run = {
     git,
     log,
@@ -157,7 +161,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const failed: string[] = []
   const stuck: string[] = []
 
-  const entries = await readQueue(git, options.remote, options.target)
+  const entries = queue.changes
   // The run row: the pin (the target's commit) and the config blob the checks
   // were read from. Each change CONSIDERED writes its own row with its decision
   // when the run has made one; a change that ended in an earlier run is history,
@@ -218,7 +222,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
   // On-merge: the first checked change in line, re-read so this run's own
   // checked facts count.
-  const checked = ordered(await readQueue(git, options.remote, options.target), "checked").find(
+  const checked = ordered((await readQueue(git, options.remote, options.target)).changes, "checked").find(
     (entry) => !staleChecked(run, entry),
   )
   if (checked !== undefined) {
@@ -1266,13 +1270,6 @@ async function remoteHeads(run: Run, branch: string): Promise<Readonly<{ target?
   ).split("\n")
   const at = new Map(rows.map((row) => row.trim().split(/\s+/u)).map(([sha, ref]) => [ref ?? "", sha ?? ""]))
   return { branch: at.get(`refs/heads/${branch}`), target: at.get(`refs/heads/${run.options.target}`) }
-}
-
-async function targetAt(git: Git, remote: string, target: string): Promise<string> {
-  const sha = (await git(["ls-remote", "--refs", remote, `refs/heads/${target}`])).trim().split(/\s+/u)[0]
-  if (sha === undefined || sha === "") throw new Error(`the target ${target} is not at ${remote}`)
-  await git(["fetch", "--quiet", remote, `+refs/heads/${target}:refs/remotes/${remote}/${target}`])
-  return sha
 }
 
 async function finish(

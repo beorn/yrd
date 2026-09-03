@@ -108,7 +108,7 @@ describe("the table is the queue read rendered", () => {
     const one = await submitCommit(w, "task/one", "one.txt")
     await new Promise((resolve) => setTimeout(resolve, 1100))
     const two = await submitCommit(w, "task/two", "two.txt")
-    const rows = list(await readQueue(w.git, "origin", "main"))
+    const rows = list((await readQueue(w.git, "origin", "main")).changes)
     expect(rows.map((row) => [row.branch, row.position, row.state, row.workItem])).toEqual([
       ["task/one", 1, "queued", "@i/1/one.txt"],
       ["task/two", 2, "queued", "@i/1/two.txt"],
@@ -126,7 +126,7 @@ describe("the table is the queue read rendered", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const hand = (await w.git(["rev-parse", "HEAD"])).trim()
 
-    const entries = await readQueue(w.git, "origin", "main")
+    const entries = (await readQueue(w.git, "origin", "main")).changes
     const byHand = await byHandCommits(w.git, "main", hand, entries)
     expect(byHand.map((commit) => [commit.commit, commit.subject, commit.gitlinks, commit.why])).toEqual([
       [hand, "hand.txt by hand", [], "it is one commit, not a merge of a change"],
@@ -153,7 +153,7 @@ describe("the table is the queue read rendered", () => {
     await w.git(["checkout", "--quiet", "main"])
     await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: "main" })
 
-    const shown = show(await readQueue(w.git, "origin", "main"), "task/one")
+    const shown = show((await readQueue(w.git, "origin", "main")).changes, "task/one")
     expect(shown.map((entry) => [entry.row.head, entry.row.state, entry.row.reason])).toEqual([
       [second, "queued", undefined],
       [first, "failed", "replaced"],
