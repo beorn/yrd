@@ -272,18 +272,24 @@ export async function coreQueueCommand(
       // the same class of mismatch this command exists to remove.
       const dirty = (await git(["status", "--porcelain", "--untracked-files=no"])).trim()
       const unjudged = dirty === "" ? "" : `\n${String(dirty.split("\n").length)} uncommitted path(s) were NOT judged; this measured HEAD ${head.slice(0, 12)}`
+      // Every invocation writes its logs under a directory of its own, named by
+      // the instant it started and printed with each result: a check log is
+      // written once and never replaced, here as in a queue run, so two seats
+      // checking at once — or one seat checking twice — keep both readings
+      // instead of the second silently overwriting the first (24101).
+      const logDir = join(workdir, "checks", "head", new Date().toISOString())
       // Prepared exactly as a queue run prepares one: materialized, the
       // declaration's setup run once, and told the same three values.
       const prepared = await prepareWorktree(git, repo, head, join(workdir, "check", `${head.slice(0, 12)}-${String(globalThis.process.pid)}`), {
         env: options.env,
         plumbing: options.log?.child("worktree"),
-        ...(config.setup === undefined ? {} : { setup: { logDir: join(workdir, "checks", "head"), run: config.setup, scratch: join(workdir, "scratch") } }),
+        ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, scratch: join(workdir, "scratch") } }),
         targetSha: await targetAt(git, config),
       })
       const results: CheckResult[] = []
       try {
         for (const spec of specs) {
-          const result = await runCheck({ cwd: prepared.path, env: options.env, logDir: join(workdir, "checks", "head"), scratch: join(workdir, "scratch"), spec, tree: prepared.tree })
+          const result = await runCheck({ cwd: prepared.path, env: options.env, logDir, scratch: join(workdir, "scratch"), spec, tree: prepared.tree })
           results.push(result)
           if (result.result !== "pass") break
         }

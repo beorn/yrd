@@ -16,16 +16,18 @@ import {
   appendFact,
   changeName,
   changeRef,
+  checkLogPath,
   gitIn,
   list,
   queueRun,
   readFacts,
   readQueue,
+  runCheck,
   submit,
   trailer,
   trailers,
 } from "../src/index.ts"
-import type { Git, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
+import type { CheckedTree, Git, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
 
 const roots: string[] = []
 
@@ -345,6 +347,27 @@ async function worktreeOfRun(w: World, run: string, pid: number): Promise<string
   writeFileSync(join(directory, ".pid"), `${String(pid)}\n`)
   return path
 }
+
+describe("a check log is written once", () => {
+  it("a second write to a log path that already exists throws and names it, and the first log survives", async () => {
+    // Every caller writes under a directory of its own — the queue run's keyed
+    // by change, run and phase, `yrd check`'s by the instant it started — so a
+    // path that already exists means two programs are writing one log, and the
+    // second replacing the first's bytes in silence is the whole failure.
+    const root = mkdtempSync(join(tmpdir(), "yrd-core-check-log-"))
+    roots.push(root)
+    const tree: CheckedTree = { base: "0".repeat(40), candidate: "1".repeat(40) }
+    const where = { cwd: root, logDir: join(root, "checks"), scratch: join(root, "scratch"), tree }
+    const path = checkLogPath(where.logDir, "verify")
+
+    const first = await runCheck({ ...where, spec: { name: "verify", run: "echo hello" } })
+
+    expect(first.result).toBe("pass")
+    expect(readFileSync(path, "utf8")).toContain("hello")
+    await expect(runCheck({ ...where, spec: { name: "verify", run: "echo again" } })).rejects.toThrow(path)
+    expect(readFileSync(path, "utf8")).toContain("hello")
+  })
+})
 
 describe("a queue run", () => {
   it("pass: the change is checked, merged, the target moves by one merge commit, and the submitter is told to close their bead", async () => {

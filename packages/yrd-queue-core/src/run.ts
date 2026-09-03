@@ -349,7 +349,7 @@ async function prepare(
     record: ({ result, start, end: ended }) => record(run, { ...about, end: ended, start }, result),
     ...(run.options.setup === undefined
       ? {}
-      : { setup: { exclusive: true, logDir, run: run.options.setup, scratch: run.scratch } }),
+      : { setup: { logDir, run: run.options.setup, scratch: run.scratch } }),
     starting: ({ log, start }) => started(run, { ...about, log, start }),
     targetSha: run.targetSha,
   })
@@ -895,7 +895,6 @@ async function check(
   const result = await runCheck({
     cwd,
     env: run.options.env,
-    exclusive: true,
     logDir,
     process: run.options.process,
     scratch: run.scratch,

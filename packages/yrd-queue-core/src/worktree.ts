@@ -213,12 +213,6 @@ export type SetupSpec = Readonly<{
   scratch: string
   /** The bound; the check default unless the caller says otherwise. */
   timeoutMs?: number
-  /**
-   * Mirrors `RunCheck.exclusive` (check.ts): the queue run's own setup log
-   * never legitimately collides; `yrd check`'s fixed, reused path must keep
-   * overwriting.
-   */
-  exclusive?: boolean
 }>
 
 /** How one setup went: the check driver's own result, and when it ran. */
@@ -324,7 +318,6 @@ export async function prepareWorktree(
     result = await runCheck({
       cwd: worktree.path,
       env: options.env,
-      exclusive: setup.exclusive,
       logDir: setup.logDir,
       process: options.process,
       scratch: setup.scratch,
