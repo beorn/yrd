@@ -400,6 +400,7 @@ describe("a queue run", () => {
     // The record is the notifier's contract, unchanged: its kinds are landed, send-back and yrd-broken.
     expect(sent[0]).toMatchObject({
       branch: "task/one",
+      failures: 0,
       kind: "landed",
       pr: "task/one",
       recipient: "@dev/2",
@@ -1139,12 +1140,35 @@ describe("a failing check bills the submitter at once", () => {
     expect(messages(w)[0]).toMatchObject({
       code: "verify",
       disposition: "author",
+      failures: 1,
       kind: "send-back",
       recipient: "@dev/2",
     })
+    // The log the check wrote is named in the record, so the ball says where to look.
+    expect(messages(w)[0]?.log_path).toBe(checkLogFor(outcome, "task/one", "submit", "verify"))
     // ONE run of the one check. Two more — the second in the change's worktree
     // and one at a whole worktree of the target — is what this deleted.
     expect(whereRan(w)).toHaveLength(1)
+  })
+
+  it("counts this branch's failures, so a second send-back can raise an andon", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    expect((await queueRun(w.options({ exit: 1, on: ["submit"] }))).failed).toEqual(["task/one"])
+    expect(messages(w).at(-1)).toMatchObject({ failures: 1, kind: "send-back" })
+
+    // The author pushes a new head on the same branch and submits it again.
+    await w.git(["checkout", "--quiet", "task/one"])
+    writeFileSync(join(w.work, "two.txt"), "two\n")
+    await w.git(["add", "two.txt"])
+    await w.git(["commit", "--quiet", "-m", "two"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: "main", workItem: "@i/10-yrd/1" })
+
+    expect((await queueRun(w.options({ exit: 1, on: ["submit"] }))).failed).toEqual(["task/one"])
+
+    // Two: the change that failed under the old head, and this one.
+    expect(messages(w).at(-1)).toMatchObject({ failures: 2, kind: "send-back" })
   })
 
   it("a check that is red at the target too still bills the submitter, and the queue keeps running", async () => {

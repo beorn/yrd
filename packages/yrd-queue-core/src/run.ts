@@ -40,8 +40,27 @@
 import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
-import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
-import { appendFact, endedKind, factCommit, readFact, trailer, type Fact, type Git, type WriteFact } from "./facts.ts"
+import {
+  checkLogPath,
+  checkTrailer,
+  readCheckTrailer,
+  runCheck,
+  type CheckedTree,
+  type CheckResult,
+  type CheckSpec,
+} from "./check.ts"
+import {
+  appendFact,
+  endedKind,
+  factCommit,
+  readFact,
+  readFacts,
+  trailer,
+  trailers,
+  type Fact,
+  type Git,
+  type WriteFact,
+} from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
@@ -117,6 +136,8 @@ type Run = Readonly<{
   worktrees: string
   /** The target the run read at its start; every judgement is against it. */
   targetSha: string
+  /** The queue as this run read it: every change at the remote, and where each stood. */
+  queue: QueueRead
   /**
    * Gitlinks proven on their component's `main` this run, as `<path>@<sha>`:
    * a positive answer can only stay true, so the same pin is asked about at
@@ -140,6 +161,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     log,
     onMain: new Set(),
     options,
+    queue: queue.changes,
     scratch: join(options.workdir, "scratch"),
     targetSha,
     worktrees: join(options.workdir, "worktrees", log.id),
@@ -964,16 +986,24 @@ async function send(
   const submitter = trailer(ended, "Submitter")
   const recipient =
     kind === "stuck" || submitter === undefined || submitter === "unknown" ? run.options.owner : submitter
-  // The record the configured notifier reads, and nothing besides. It requires
-  // `kind`, `attempt_id`, `pr`, `recipient` and `command`, and reads `branch`,
-  // `sha`, `base`, `code` and `disposition` when they are there (tools/yrd-notify.ts
-  // at the root, read 2026-09-03). It reads no `id`, no `text` and no `head`,
-  // which this record carried as second spellings of `attempt_id`, `command`
-  // and `sha` — a shim onto a contract nobody has: the plan's three messages
-  // map onto its three kinds, the branch stands where a PR number stood, and
-  // the ended fact's sha is the attempt id, so a resend after a crash is the
-  // same message. `workItem` is the one field the notifier ignores that stays:
-  // the plan says the message names the work item.
+  // The record the configured notifier reads, and nothing besides:
+  //
+  //   kind         landed, send-back or yrd-broken
+  //   attempt_id   the ended fact's sha, which is the message's id
+  //   pr           the branch (where a PR number stood)
+  //   recipient    the seat this goes to
+  //   command      what to do next, in one line
+  //   branch, sha, base, code, disposition   optional, and read when present
+  //   log_path     the log of the check that decided it
+  //   failures     how many times this branch has been sent back, this one
+  //                included; the notifier raises an andon at two or more
+  //   workItem     the one field the notifier ignores, because the plan says
+  //                the message names the work item
+  //
+  // Read at the root, 2026-09-03 (tools/yrd-notify.ts): it reads no `id`, no
+  // `text` and no `head`, which this record used to carry as second spellings
+  // of `attempt_id`, `command` and `sha`.
+  const lastCheck = trailers(ended, "Check").at(-1)
   const { delivery, failure } = await deliver(run, {
     attempt_id: endedFact,
     base: run.options.target,
@@ -981,7 +1011,9 @@ async function send(
     code: kind === "merged" ? undefined : trailer(ended, "Reason"),
     command: text,
     disposition: kind === "failed" ? "author" : undefined,
+    failures: await failuresOf(run, entry),
     kind: kind === "merged" ? "landed" : kind === "failed" ? "send-back" : "yrd-broken",
+    log_path: lastCheck === undefined ? undefined : readCheckTrailer(lastCheck).log,
     pr: entry.branch,
     recipient,
     sha: entry.change.head,
@@ -1027,6 +1059,30 @@ async function send(
   })
 }
 
+/** A change ended by its submitter moving on, which is not a failure of anything. */
+const MOVED_ON = new Set(["replaced", "deleted"])
+
+/**
+ * How many times this branch has been sent back, this ending included — the
+ * number the notifier raises an andon on at two or more. A merged or stuck
+ * ending adds nothing to it, and neither does a change the submitter replaced
+ * or deleted; the count is about a branch that keeps failing its checks.
+ *
+ * Two readings, because a branch's failures live in two places: the tips of its
+ * OTHER changes, which the queue read already holds, and this change's own
+ * facts, where a retry at an unchanged head appends a second opened fact and a
+ * second failure under one ref, so the tip alone would forget the first.
+ */
+async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
+  const elsewhere = run.queue.filter((candidate) => {
+    if (candidate.branch !== entry.branch || candidate.change.head === entry.change.head) return false
+    const tip = tipOf(candidate.change)
+    return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
+  }).length
+  const own = await readFacts(run.git, entry.branch, entry.change.head)
+  return elsewhere + own.filter((fact) => fact.kind === "failed" && !MOVED_ON.has(trailer(fact, "Reason") ?? "")).length
+}
+
 /**
  * Hand one message to the configured notifier, a JSON record on its stdin,
  * and say how it went: `sent` when the notifier accepted it, `logged` when
@@ -1038,7 +1094,7 @@ async function send(
  */
 async function deliver(
   run: Run,
-  record: Readonly<Record<string, string | undefined>>,
+  record: Readonly<Record<string, string | number | undefined>>,
 ): Promise<Readonly<{ delivery: "sent" | "logged" | "failed"; failure?: string }>> {
   if (run.options.notify === undefined) return { delivery: "logged" }
   const runner = run.options.process ?? createProcess({ cwd: run.options.repo })
