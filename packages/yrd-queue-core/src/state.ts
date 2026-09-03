@@ -34,7 +34,11 @@ export type ChangeReading = Readonly<{
 }>
 
 export type ChangeFacts = Readonly<{
-  /** The change's facts, oldest first. Empty for a branch pushed but never submitted. */
+  /**
+   * The change's facts, oldest first, or only its tip: every reading here uses
+   * the last one, whose trailers are the whole derived state. Empty for a
+   * branch pushed but never submitted.
+   */
   facts: readonly Fact[]
   /** Whether the head is an ancestor of the target, read from git. */
   headOnTarget: boolean
@@ -71,12 +75,13 @@ export function readChange(change: ChangeFacts): ChangeReading {
     case "opened":
       return { state: "queued" }
     case "sent": {
-      // A sent fact follows an ended one and says nothing new about the change,
-      // so the reading is the ended fact underneath it.
-      const ended = [...change.facts].reverse().find((fact) => fact.kind !== "sent")
-      return ended === undefined
-        ? { state: "queued" }
-        : readChange({ ...change, facts: change.facts.slice(0, change.facts.indexOf(ended) + 1) })
+      // A sent fact repeats the ended state it followed (`State:`, ruling A2)
+      // and carries that fact's result, so the tip alone answers.
+      const state = last.trailers.find(([name]) => name === "State")?.[1]
+      if (state === "merged") return { state: "merged" }
+      if (state === "failed") return { state: "failed", reason: reasonOf(last) }
+      if (state === "stuck") return { state: "stuck", reason: reasonOf(last) }
+      throw new Error(`sent fact ${last.sha.slice(0, 12)} names no ended state (State: ${state ?? "absent"})`)
     }
   }
 }
@@ -100,9 +105,14 @@ export function inLine(changes: readonly ChangeFacts[]): readonly ChangeFacts[] 
     .sort((left, right) => openedAt(left) - openedAt(right))
 }
 
-function openedAt(change: ChangeFacts): number {
-  const opened = change.facts.find((fact) => fact.kind === "opened")
-  return opened?.at.getTime() ?? Number.MAX_SAFE_INTEGER
+/** When the change was first opened, carried on every fact as `Opened:`; a branch nobody opened yet sorts last. */
+export function openedAt(change: ChangeFacts): number {
+  const last = change.facts.at(-1)
+  if (last === undefined) return Number.MAX_SAFE_INTEGER
+  const opened = last.trailers.find(([name]) => name === "Opened")?.[1]
+  const time = opened === undefined ? Number.NaN : Date.parse(opened)
+  if (Number.isNaN(time)) throw new Error(`fact ${last.sha.slice(0, 12)} carries no readable Opened: (${opened ?? "absent"})`)
+  return time
 }
 
 /** A failed fact's `Reason` (a check's name, conflict, config-invalid, replaced, deleted); a stuck fact's `Reason` (flake, inherited, no-evidence) or its `Cause`. */

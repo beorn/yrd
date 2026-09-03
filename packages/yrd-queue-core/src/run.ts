@@ -412,7 +412,9 @@ async function attribute(
 async function retire(run: Run, entry: LaneEntry): Promise<void> {
   const reason = entry.reading.reason
   if (entry.reading.state !== "failed" || (reason !== "deleted" && reason !== "replaced")) return
-  if (entry.change.facts.some((fact) => fact.kind === "failed" || fact.kind === "merged")) return
+  const tip = entry.change.facts.at(-1)
+  const endedAs = tip === undefined ? undefined : tip.kind === "sent" ? trailerOf(tip, "State") : tip.kind
+  if (endedAs === "failed" || endedAs === "merged") return
   const { branch } = entry
   const head = entry.change.head
   await appendFact(run.git, {
@@ -535,8 +537,9 @@ async function send(run: Run, entry: LaneEntry, endedFact: string, kind: "merged
     const result = await runner.run({ argv: shellCommand(run.options.notify), cwd: run.options.repo, env: run.options.env, stdin: `${JSON.stringify(record)}\n`, timeoutMs: 60_000 })
     if (result.exitCode !== 0) throw new Error(`the notifier exited ${result.exitCode} for ${entry.branch}: ${result.stderr.trim()}`)
   }
-  // The sent fact repeats the ended state, so the tip fact's trailers stay the
-  // whole answer about the change and no reader has to walk to the fact before.
+  // The sent fact repeats the ended state and carries the ended fact's result,
+  // so the tip fact's trailers stay the whole answer about the change and no
+  // reader has to walk to the fact before (ruling A2).
   await appendFact(run.git, {
     branch: entry.branch,
     head: entry.change.head,
@@ -549,11 +552,15 @@ async function send(run: Run, entry: LaneEntry, endedFact: string, kind: "merged
       ["State", kind],
       ["For", endedFact],
       ["Delivery", run.options.notify === undefined ? "logged" : "notifier"],
+      ...(ended?.trailers.filter(([name]) => RESULT_TRAILERS.has(name)) ?? []),
     ],
   })
   await pushChange(run, entry.branch, entry.change.head)
   run.log.write({ about: entry.branch, branch: entry.branch, head: entry.change.head, id: endedFact, kind: "message", says: kind, to: recipient })
 }
+
+/** An ended fact's result, as its sent fact carries it forward. */
+const RESULT_TRAILERS = new Set(["Reason", "Cause", "Fault", "Remedy", "Check", "Merge", "Base", "Gitlink"])
 
 function checkTrailers(results: readonly CheckResult[]): readonly (readonly [string, string])[] {
   return results.map((result) => ["Check", `${result.name} exit=${result.exit} ms=${result.durationMs} log=${result.log}`] as const)

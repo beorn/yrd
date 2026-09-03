@@ -150,10 +150,14 @@ describe("the lane is every change at the remote, read", () => {
     const byHead = new Map(entries.map((entry) => [entry.change.head, entry]))
     expect(byHead.get(one)?.reading).toMatchObject({ reason: "replaced", state: "failed" })
     expect(byHead.get(oneAgain)?.reading.state).toBe("queued")
-    // Position in line is the first opened fact's time: the re-cut task/one
-    // keeps its place ahead of task/two, and the superseded head is not in line.
+    // Position in line is the first opened fact's time OF THE CHANGE: a new
+    // head is a new change (§ The change), so the re-cut task/one takes its
+    // place behind task/two, and the superseded head is not in line at all.
+    // Only a retry at an unchanged head keeps its place. (Until 2026-09-02
+    // this asserted the opposite and passed on a same-second tie, ordered by
+    // ls-remote's alphabetical listing; `Opened:` now carries milliseconds.)
     const ordered = inLine(entries.map((entry) => entry.change)).map((change) => change.head)
-    expect(ordered).toEqual([oneAgain, (await w.git(["rev-parse", "task/two"])).trim()])
+    expect(ordered).toEqual([(await w.git(["rev-parse", "task/two"])).trim(), oneAgain])
   })
 
   it("a head already on the target reads merged, whatever its facts say", async () => {

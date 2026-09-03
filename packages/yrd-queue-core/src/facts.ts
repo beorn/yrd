@@ -18,7 +18,10 @@
  *   never a parent;
  * - the message is a prose first line, then trailers, one meaning each, with
  *   `Fact:` naming the kind and `Branch:`, `Head:`, `Target:` on every fact,
- *   so the tip fact's trailers are the whole answer about the change.
+ *   `Opened:`, `Submitter:` and `Work-Item:` carried forward from the first
+ *   fact, and an ended fact's result carried onto its sent fact, so the tip
+ *   fact's trailers are the whole answer about the change and one
+ *   `for-each-ref` answers `yrd queue list` with no history walk.
  *
  * The genesis is one object: an empty-tree commit with a fixed author and
  * time, so it has the same sha in every repository and is written at most
@@ -66,16 +69,27 @@ export type WriteFact = Readonly<{
 }>
 
 /**
+ * The trailers every fact carries forward from the fact before it, so the tip
+ * fact alone identifies the change: when it was first opened (its place in
+ * line), by whom, and for which work item. Written on the first fact from the
+ * write itself and copied on every later one; a later write naming one of
+ * them again (a retry names its submitter) wins.
+ */
+const CARRIED = ["Opened", "Submitter", "Work-Item"] as const
+
+/**
  * Append one fact to a change, creating the change when this is its first.
  * Returns the new fact's sha, which is the id of what happened — a message
  * about an ended change carries it, so a resend after a crash is the same
  * message rather than a second one.
  */
-export async function appendFact(git: Git, write: WriteFact): Promise<string> {
+export async function appendFact(git: Git, write: WriteFact, now: () => Date = () => new Date()): Promise<string> {
   const ref = changeRef(write.branch, write.head)
   const tip = await refAt(git, ref)
   const parents = tip === undefined ? [await genesis(git), write.head] : [tip]
-  const message = factMessage(write)
+  const carried = tip === undefined ? [["Opened", now().toISOString()] as const] : await carriedFrom(git, tip)
+  const named = new Set((write.trailers ?? []).map(([name]) => name))
+  const message = factMessage({ ...write, trailers: [...carried.filter(([name]) => !named.has(name)), ...(write.trailers ?? [])] })
   const args = ["commit-tree", EMPTY_TREE]
   for (const parent of parents) args.push("-p", parent)
   const sha = (await git([...args, "-m", message])).trim()
@@ -89,6 +103,14 @@ export async function appendFact(git: Git, write: WriteFact): Promise<string> {
 /** Write the genesis object if this repository lacks it, and return its sha. */
 async function genesis(git: Git): Promise<string> {
   return (await git(["hash-object", "-w", "-t", "commit", "--stdin"], GENESIS_OBJECT)).trim()
+}
+
+/** The carried trailers of the fact at `sha`, which is a fact or nothing carries. */
+async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [string, string])[]> {
+  const [id, at, body] = (await git(["log", "-1", "--format=%H%x00%cI%x00%B", sha])).split("\x00")
+  const fact = id === undefined || at === undefined || body === undefined ? undefined : factFrom(id.trim(), at, body)
+  if (fact === undefined) throw new Error(`${sha.slice(0, 12)} is not a fact; a change's ref holds only facts`)
+  return fact.trailers.filter(([name]) => (CARRIED as readonly string[]).includes(name))
 }
 
 /** Every fact of a change, oldest first. An unknown change reads as no facts. */
@@ -105,7 +127,7 @@ export async function readFacts(git: Git, branch: string, head: string): Promise
     if (row === "") continue
     const [sha, at, body] = row.split("\x00")
     if (sha === undefined || at === undefined || body === undefined) continue
-    const parsed = parseFact(sha, at, body)
+    const parsed = factFrom(sha, at, body)
     // The first-parent walk ends at the genesis, which carries no `Fact:`
     // trailer. That is where this change's history ends.
     if (parsed === undefined) break
@@ -134,7 +156,8 @@ export function trailers(fact: Fact, name: string): readonly string[] {
   return fact.trailers.filter(([key]) => key === name).map(([, value]) => value)
 }
 
-function parseFact(sha: string, at: string, body: string): Fact | undefined {
+/** The fact a commit is, from its sha, committer date and message; undefined when the commit is not one. */
+export function factFrom(sha: string, at: string, body: string): Fact | undefined {
   const lines = body.split("\n")
   const subject = lines[0]?.trim() ?? ""
   const found: (readonly [string, string])[] = []

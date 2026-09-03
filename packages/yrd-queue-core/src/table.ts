@@ -3,7 +3,8 @@
  * Commands): `yrd queue list` and `yrd queue show <branch>`, derived at read
  * time from the lane. Nothing here is stored and nothing here is a second
  * reader: both views are the lane rendered, so they can never disagree with a
- * queue run or with each other.
+ * queue run or with each other. Every row is read off one fact, the change's
+ * tip, whose trailers are the whole derived state.
  */
 
 import { trailer, trailers, type Fact } from "./facts.ts"
@@ -23,7 +24,7 @@ export type Row = Readonly<{
   workItem?: string
   submitter?: string
   reason?: string
-  /** When the change was opened, or when the branch was pushed if nobody opened it. */
+  /** When the change was opened; absent for a branch pushed but never submitted. */
   since?: Date
 }>
 
@@ -47,27 +48,36 @@ export function list(entries: readonly LaneEntry[], now: Date = new Date(), sinc
 export function show(entries: readonly LaneEntry[], branch: string): readonly Readonly<{ row: Row; checks: readonly string[]; facts: readonly Fact[] }>[] {
   return entries
     .filter((entry) => entry.branch === branch)
-    .map((entry) => ({ checks: entry.change.facts.flatMap((fact) => trailers(fact, "Check")), facts: entry.change.facts, row: row(entry) }))
+    .map((entry) => {
+      const tip = entry.change.facts.at(-1)
+      return { checks: tip === undefined ? [] : trailers(tip, "Check"), facts: entry.change.facts, row: row(entry) }
+    })
     .sort((left, right) => (right.row.since?.getTime() ?? 0) - (left.row.since?.getTime() ?? 0))
 }
 
 function row(entry: LaneEntry, position?: number): Row {
-  const facts = entry.change.facts
-  const opened = facts.find((fact) => fact.kind === "opened")
-  const ended = [...facts].reverse().find((fact) => fact.kind !== "sent" && fact.kind !== "opened")
-  const lastCheck = ended === undefined ? undefined : trailers(ended, "Check").at(-1)
+  const tip = entry.change.facts.at(-1)
+  const lastCheck = tip === undefined ? undefined : trailers(tip, "Check").at(-1)
+  const opened = tip === undefined ? undefined : trailer(tip, "Opened")
   return {
     branch: entry.branch,
     head: entry.change.head,
     log: lastCheck?.match(/log=(\S+)/u)?.[1],
     position,
     reason: entry.reading.reason,
-    result: ended === undefined ? undefined : resultOf(ended.kind, lastCheck),
-    since: opened?.at,
+    result: tip === undefined || tip.kind === "opened" ? undefined : resultOf(endedKind(tip), lastCheck),
+    since: opened === undefined ? undefined : new Date(opened),
     state: entry.reading.state,
-    submitter: opened === undefined ? undefined : trailer(opened, "Submitter"),
-    workItem: opened === undefined ? undefined : trailer(opened, "Work-Item"),
+    submitter: tip === undefined ? undefined : trailer(tip, "Submitter"),
+    workItem: tip === undefined ? undefined : trailer(tip, "Work-Item"),
   }
+}
+
+/** The kind a tip stands for: a sent fact stands for the ended state it repeats. */
+function endedKind(tip: Fact): Fact["kind"] {
+  if (tip.kind !== "sent") return tip.kind
+  const state = trailer(tip, "State")
+  return state === "merged" || state === "failed" || state === "stuck" ? state : "sent"
 }
 
 function resultOf(kind: Fact["kind"], lastCheck: string | undefined): string {

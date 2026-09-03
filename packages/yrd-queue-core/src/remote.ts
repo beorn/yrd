@@ -6,12 +6,15 @@
  * `refs/yrd/changes/<branch>/<sha>` beside it. The remote is the one store;
  * a working repository is a reader that fetches those refs before it reads.
  * Nothing here stores a status: the lane is recomputed from the remote's refs
- * every time it is asked for, and one fetch is the only network round trip.
+ * every time it is asked for, in a fixed number of git invocations however
+ * many changes there are — one `ls-remote`, one fetch, one `for-each-ref` for
+ * every change's tip fact, one for ancestry — because the tip fact's trailers
+ * are the whole derived state and no history is walked.
  */
 
-import { readFacts, type Git } from "./facts.ts"
+import { factFrom, type Fact, type Git } from "./facts.ts"
 import { isAncestor } from "./git.ts"
-import { CHANGES, parseChangeRef } from "./refs.ts"
+import { CHANGES, changeRef, parseChangeRef } from "./refs.ts"
 import { readChange, type ChangeFacts, type ChangeReading } from "./state.ts"
 
 /** One change as the lane sees it. */
@@ -47,10 +50,18 @@ export async function lane(git: Git, remote: string, target: string): Promise<re
   }
   if (targetSha === undefined) throw new Error(`the target ${target} is not at ${remote}`)
 
-  // One fetch: the target (for ancestry) and every change ref (for the facts).
+  // One fetch: every branch (for ancestry) and every change ref (for the tips).
   // Branch heads are read from ls-remote above, so a stale local tracking ref
   // can never speak for the remote.
-  await git(["fetch", "--quiet", "--prune", remote, `+refs/heads/${target}`, `+${CHANGES}/*:${CHANGES}/*`])
+  await git(["fetch", "--quiet", "--prune", remote, `+refs/heads/*:refs/remotes/${remote}/*`, `+${CHANGES}/*:${CHANGES}/*`])
+  const tips = await tipFacts(git)
+  // Every branch tip the target already carries, in one reading.
+  const merged = new Set(
+    (await git(["for-each-ref", "--format=%(objectname)", `--merged=${targetSha}`, `refs/remotes/${remote}/`]))
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== ""),
+  )
 
   const entries: LaneEntry[] = []
   // Every branch at the remote, and every branch a change still names: a
@@ -62,16 +73,34 @@ export async function lane(git: Git, remote: string, target: string): Promise<re
     // The branch's current head is a change whether or not anyone opened it.
     const at = branchHead === undefined || known.some((change) => change.head === branchHead) ? known : [...known, { branch, head: branchHead }]
     for (const { head } of at) {
+      const tip = tips.get(changeRef(branch, head))
+      // A head that is a branch tip was answered by the one reading above; an
+      // older head of a branch that moved on is asked for itself.
+      const headOnTarget = merged.has(head) || (head !== branchHead && (await isAncestor(git, head, targetSha)))
       const change: ChangeFacts = {
         ...(branchHead === undefined ? {} : { branchHead }),
-        facts: await readFacts(git, branch, head),
+        facts: tip === undefined ? [] : [tip],
         head,
-        headOnTarget: await isAncestor(git, head, targetSha),
+        headOnTarget,
       }
       entries.push({ branch, change, reading: readChange(change) })
     }
   }
   return entries
+}
+
+/** Every change ref's tip fact, by ref, in one reading. A change ref that does not end in a fact is loud. */
+async function tipFacts(git: Git): Promise<ReadonlyMap<string, Fact>> {
+  const out = await git(["for-each-ref", "--format=%(objectname)%00%(refname)%00%(committerdate:iso-strict)%00%(contents)%01", `${CHANGES}/`])
+  const tips = new Map<string, Fact>()
+  for (const record of out.split("\x01")) {
+    const [sha, ref, at, body] = record.replace(/^\n/u, "").split("\x00")
+    if (sha === undefined || ref === undefined || at === undefined || body === undefined || sha.trim() === "") continue
+    const fact = factFrom(sha.trim(), at, body)
+    if (fact === undefined) throw new Error(`${ref} does not end in a fact; a change's ref holds only facts`)
+    tips.set(ref, fact)
+  }
+  return tips
 }
 
 /** The remotes this repository has, by name. */
