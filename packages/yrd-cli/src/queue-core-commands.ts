@@ -175,11 +175,15 @@ export async function coreQueueCommand(
       return outcome.exitCode
     }
     case "up": {
-      // The service: the same round on a loop, what hab runs. Three exits of
-      // its own (§ Commands): 2 when a round is stuck, or when the target's
-      // declaration can no longer be read or no longer selects this core,
-      // because the queue stays down until a person fixes it; 18 when the pin
-      // moves, so hab relaunches the service on the new pin; and a signal.
+      // The service: the same round on a loop, what hab runs. It has ONE
+      // permanent exit, 2: a round is stuck, or the target's declaration can no
+      // longer be read or no longer selects this core, and the queue stays down
+      // until a person fixes it. Everything else it does on purpose — a signal,
+      // and a pin that moved under it — exits 0, because hab classifies every
+      // non-zero exit as a crash (ag hab-core, exit-classification.ts), backs
+      // off, and counts it against a three-per-600-s budget: three pin advances
+      // in ten minutes would have stopped the queue for the one event whose
+      // whole cure is the relaunch.
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
@@ -218,10 +222,10 @@ export async function coreQueueCommand(
         if (pin !== undefined) {
           const now = await gitlinkAt(git, outcome.target, pin.path)
           if (now !== pin.sha) {
-            const moved = `the pin ${pin.path} moved from ${pin.sha.slice(0, 12)} to ${now === undefined ? "no gitlink" : now.slice(0, 12)}; exiting 18 for a relaunch on the new pin`
+            const moved = `pin moved from ${pin.sha.slice(0, 12)} to ${now === undefined ? "no gitlink" : now.slice(0, 12)}: exiting for relaunch`
             log?.info?.(moved, { from: pin.sha, pin: pin.path, to: now })
-            emit(io, options.json, { exitCode: 18, from: pin.sha, pin: pin.path, to: now }, moved)
-            return 18
+            emit(io, options.json, { exitCode: 0, from: pin.sha, pin: pin.path, reason: "pin-moved", to: now }, moved)
+            return 0
           }
         }
         if (stopped()) return 0

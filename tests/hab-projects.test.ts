@@ -15,10 +15,13 @@ describe("Yrd Hab runner declarations", () => {
       "yrd-service": {
         command: "bun tools/yrd-runtime.mjs yrd queue up --interval 120",
         env: { TRIBE_NAME: "@yrd-service", YRD_HABITANT_RSS_CAP_MB: "24576" },
-        // `restart: "on-failure"` is what makes exit 18 (the pin moved) relaunch
-        // on the new pin, while exit 2 (the queue is stuck) stays down for its
-        // garage. No health probe: the loop's process and journal are its
-        // liveness (M7).
+        // Exit 2 (the queue is stuck) stays down for its garage; everything the
+        // loop ends on purpose — a signal, and a pin that moved under it — is a
+        // 0, because hab reads every non-zero exit as a crash and spends a
+        // restart budget on it. Whether `on-failure` then has to become
+        // `always`, so a moved pin still relaunches, is @cto's to settle
+        // (hab.projects.ts says so where the value is).
+        // No health probe: the loop's process and journal are its liveness (M7).
         restart: "on-failure",
         permanentExitCodes: [2],
         owner: "@cto",

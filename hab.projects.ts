@@ -56,13 +56,23 @@ export default {
         // No health probe (M7, 2026-09-03): the loop's own process is its
         // liveness, its journal shows a running check, and a probe shelling
         // the CLI every tick was noise with a second opinion.
-        // The service relaunches itself on the ONE condition whose CURE is the
-        // relaunch: a moved pin (18), read at the target after every round and
-        // taken at a round boundary with nothing in flight — "the code moved
-        // under me". `source-stale` (11) and the stale installed plan (13)
-        // were the incumbent resident's self-supervision and went with it at
-        // M6 along with `habitant-exit.ts`; the loop's other two exits are 2
-        // (stuck: it stays down until the garage fixes the queue) and a signal.
+        // The loop has two endings it chooses: 2 (stuck — it stays down until
+        // the garage fixes the queue) and 0, which now covers both a signal and
+        // a moved pin, read at the target after every round and taken at a
+        // round boundary with nothing in flight. `source-stale` (11) and the
+        // stale installed plan (13) were the incumbent resident's
+        // self-supervision and went with it at M6 with `habitant-exit.ts`.
+        //
+        // OPEN, @cto's to settle (2026-09-03): a moved pin exits 0 because hab
+        // classifies every non-zero exit as a crash and spends the
+        // three-per-600-s restart budget on it, so three pin advances in ten
+        // minutes would stop the queue. Under `on-failure` a 0 is a clean
+        // ending and hab does NOT bring the loop back, so the relaunch onto the
+        // new pin is a person's hand again — the very ritual the 2026-09-02
+        // ruling ended. Keeping it automatic wants `restart: "always"` with
+        // `permanentExitCodes: [2]`, which also relaunches after a deliberate
+        // stop. Not changed here: the value is a supervision contract, not this
+        // change's to pick.
         //
         // Was `restart: "never"` (andon ruling, operator 2026-09-01: a crashed
         // runner stays exited and pages once). Under that value the entire
@@ -76,9 +86,8 @@ export default {
         // is critical path and should be driven hard."
         //
         // Exit 2 means the queue is stuck and needs its garage, so relaunching
-        // repeats the same fault. Exit 18 means the checked-out pin moved and a
-        // relaunch on the new pin is the cure. Retired exits 16/17 are not part
-        // of this runner's permanent-exit policy.
+        // repeats the same fault: it is the one permanent exit. Retired exits
+        // 16/17/18 are not part of this runner's permanent-exit policy.
         restart: "on-failure" as const,
         permanentExitCodes: [2],
         // Wired 2026-09-01: `HabServiceDefinition.owner` (ag/packages/hab-config,

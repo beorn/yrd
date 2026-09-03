@@ -71,10 +71,9 @@ Every check writes one line in the queue run's log when it starts and one when i
 
 | Exit | Meaning |
 |---|---|
-| 0 | the run ended with nothing failed or stuck |
+| 0 | the run ended with nothing failed or stuck, or the pin moved under the service and it exits for hab to relaunch it on the new pin |
 | 1 | a change ended failed and was sent back |
 | 2 | stuck: the queue cannot go on until the owner repairs it; Hab leaves the service down |
-| 18 | the pin moved under the service; Hab relaunches it on the new pin within seconds |
 
 There is one place in the code that exits. A signal, or an error nobody caught, is stuck.
 

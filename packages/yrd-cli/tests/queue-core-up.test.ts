@@ -11,7 +11,7 @@
  * @level    l2 (a real remote and a clone under a scratch root;
  *           `coreQueueCommand` driven directly, no process boundary)
  * @consumer hab, which runs `yrd queue up` as the service and relaunches it on
- *           exit 18 · the mechanic, who edits the target's declaration and
+ *           a pin-move exit · the mechanic, who edits the target's declaration and
  *           expects the next round to read it
  */
 
@@ -256,7 +256,7 @@ describe("yrd queue up, the service", () => {
     expect(records(run)[1]).toEqual({ ...STUCK, why: "the target's declaration no longer selects this core" })
   })
 
-  it("exits 18 when the round it ran merged the change that moves its own pin", async () => {
+  it("ends the loop, exit 0, when the round it ran merged the change that moves its own pin", async () => {
     const w = await pinnedWorld()
     await submitPin(w, "task/pin", w.b)
     const run = capture(w.work)
@@ -268,11 +268,14 @@ describe("yrd queue up, the service", () => {
       { json: true, workdir: w.workdir },
     )
 
-    expect(exit, run.stdout()).toBe(18)
+    // Zero, not 18: hab reads every non-zero exit as a crash and spends a
+    // restart budget on it, and a pin advance is the one thing the service is
+    // MEANT to end for.
+    expect(exit, run.stdout()).toBe(0)
     const written = records(run)
     expect(written).toHaveLength(2)
     expect(written[0]).toMatchObject({ exitCode: 0, merged: ["task/pin"] })
-    expect(written[1]).toEqual({ exitCode: 18, from: w.a, pin: "component", to: w.b })
+    expect(written[1]).toEqual({ exitCode: 0, from: w.a, pin: "component", reason: "pin-moved", to: w.b })
     // The target really moved the pin: the exit reports the world, not the request.
     expect((await w.git(["ls-tree", "origin/main", "--", "component"])).trim()).toBe(`160000 commit ${w.b}\tcomponent`)
   })
