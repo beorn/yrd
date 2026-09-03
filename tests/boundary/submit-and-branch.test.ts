@@ -40,6 +40,7 @@ import {
   queueRunOnce,
   queueSubmit,
   refExists,
+  refs,
   refSha,
   remoteNames,
   removeScratchRoots,
@@ -68,6 +69,37 @@ describe("the submit path", { timeout: 120_000 }, () => {
     // fact that opens its change, and the fact names a head that must be there.
     expect(await refSha(origin, `refs/heads/${branch}`), submit.report).toBe(head)
     expect(await refExists(origin, changeRef(branch, head)), submit.report).toBe(true)
+  })
+
+  /**
+   * Measured 2026-09-03 on the wrapper: `yrd submit --dry-run` was accepted by
+   * the wrapper's own option table, the new core's submit never received it,
+   * and the dry run OPENED A REAL CHANGE — `task/owner-field-item13@22b2741a`,
+   * two opened facts. An option a command does not implement must refuse; an
+   * option it does implement must reach the code that acts on it.
+   */
+  it("a dry run says what it would open and puts nothing at the remote", async () => {
+    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    await addYrdRemote(repo, origin)
+    const branch = "24099-dry"
+    const head = await commitOnBranch(repo, branch)
+    const before = await refs(origin)
+
+    const dry = await runYrd(repo, "queue", "submit", branch, "--dry-run", "--json")
+
+    expect(dry.exitCode, dry.report).toBe(0)
+    expect(JSON.parse(dry.stdout), dry.report).toMatchObject({
+      change: `${branch}@${head}`,
+      dryRun: true,
+      target: "main",
+      workItem: "24099",
+    })
+    // The whole point: the remote is byte-for-byte where it was.
+    expect(await refs(origin), dry.report).toEqual(before)
+    expect(await refExists(origin, `refs/heads/${branch}`), dry.report).toBe(false)
+    expect(await refExists(origin, changeRef(branch, head)), dry.report).toBe(false)
+    // Nor locally: a dry run appends no fact for the next submit to chain onto.
+    expect(await refExists(repo, changeRef(branch, head)), dry.report).toBe(false)
   })
 
   // today: red — the config refuses the key outright: `error: config remote is

@@ -1,21 +1,21 @@
 /**
- * The five queue commands on the new core
- * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, Commands).
+ * The queue commands ([plan](../../../../pm/@i/10-yrd/plan.md) § The final
+ * design, Commands).
  *
- * One switch selects the core: a `.yrd.yml` at HEAD that names `remote:` is
- * the new design's declaration, and every `yrd queue …` command then runs
- * here; without it the incumbent handles the command as before. That switch
- * is flag day's knob (§ Cutover): adding one line to the target's declaration
- * is the cutover, and removing the incumbent at M6 removes the fallthrough.
- * Nothing is run twice and nothing is converted.
+ * One switch selects the queue: a `.yrd.yml` at HEAD that names `remote:` is
+ * the declaration, and the target it names must carry the line too. That
+ * switch was flag day's knob (§ Cutover), and the incumbent it used to fall
+ * through to is gone at M6 — so `undefined` from here is no longer a
+ * fallthrough, and the CLI turns it into a refusal naming the missing line.
  */
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs"
-import { dirname, join, resolve } from "node:path"
+import { mkdirSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
   byHandCommits,
+  changeName,
   prepareWorktree,
   gitIn,
   hintsIn,
@@ -29,6 +29,7 @@ import {
   runCheck,
   show,
   submit,
+  workItemOf,
   type CheckResult,
   type Git,
   type LogRecord,
@@ -36,11 +37,12 @@ import {
   type QueueRunOutcome,
   type Row,
 } from "@yrd/queue-core"
+import { declarationHere } from "./declaration.ts"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 export type CoreQueueCommand =
-  | Readonly<{ command: "submit"; branch?: string; submitter: string; workItem?: string }>
+  | Readonly<{ command: "submit"; branch?: string; submitter: string; workItem?: string; dryRun?: boolean }>
   | Readonly<{ command: "run" }>
   | Readonly<{
       command: "up"
@@ -69,12 +71,8 @@ export async function coreQueueCommand(
   request: CoreQueueCommand,
   options: Readonly<{ json?: boolean; env?: NodeJS.ProcessEnv; workdir?: string; log?: ConditionalLogger }> = {},
 ): Promise<YrdCliExitCode | undefined> {
-  // The switch, at no cost to the incumbent: the declaration checked out where
-  // the command stands names `remote:`, or this core is not selected and no
-  // git runs at all. The incumbent's own tests drive the CLI with doubles and
-  // no working tree, and its literal one-shot reads spend exactly one git
-  // read; both hold because nothing below runs unless the file says so. The
-  // switch goes with the incumbent at M6.
+  // The switch: the declaration checked out where the command stands names
+  // `remote:`, or this queue is not selected and no git runs at all.
   const here = declarationHere(repo)
   if (here === undefined || !/^remote:/mu.test(here.text)) return undefined
   const git = gitIn(here.root)
@@ -91,8 +89,7 @@ export async function coreQueueCommand(
   const targetRef = `${hinted}/${hintedTarget}`
   // The target's declaration as the target holds it now: fetched, then the
   // switch (the target names `remote:`; only then is its declaration read in
-  // full and held to its keys, and the incumbent's file is never parsed here),
-  // then the remote it names resolved. Undefined when the target does not
+  // full and held to its keys), then the remote it names resolved. Undefined when the target does not
   // select this core; a declaration that exists and cannot be read throws.
   // One reading serves a one-shot command; the service reads again before
   // every round, so an edit at the target takes effect on the next round.
@@ -114,6 +111,29 @@ export async function coreQueueCommand(
   switch (request.command) {
     case "submit": {
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
+      // A dry run says what it would open and touches nothing: no push, no
+      // fact, no ref anywhere. The wrapper used to take `--dry-run` on its own
+      // surface and hand the core an ordinary submit, so a dry run opened a
+      // real change (task/owner-field-item13@22b2741a, two opened facts). The
+      // flag belongs to the command that pushes, or to no command at all.
+      if (request.dryRun === true) {
+        const head = (await git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim()
+        const workItem = await workItemOf(git, branch, head, request.workItem)
+        emit(
+          io,
+          options.json,
+          {
+            change: changeName(branch, head),
+            dryRun: true,
+            submitter: request.submitter,
+            target: config.target,
+            ...(workItem === undefined ? {} : { workItem }),
+          },
+          `would open ${changeName(branch, head)} on ${config.target} for ${request.submitter}` +
+            `${workItem === undefined ? "" : ` (work item ${workItem})`}; nothing was pushed`,
+        )
+        return 0
+      }
       const submitted = await submit(git, config.remote, {
         branch,
         submitter: request.submitter,
@@ -149,9 +169,8 @@ export async function coreQueueCommand(
       const pin = request.pin ?? (await pinOf(git, targetRef, log))
       let current = config
       for (let round = 1; ; round += 1) {
-        // The declaration again, as the target holds it now. The incumbent
-        // cached its check config at start, so a correct edit at the target
-        // looked like a wrong one until a restart; here it is the next round's.
+        // The declaration again, as the target holds it now: a correct edit at
+        // the target is the next round's, never a restart's.
         if (round > 1) {
           let why: string | undefined
           try {
@@ -281,29 +300,6 @@ async function targetAt(git: Git, config: QueueConfig): Promise<string> {
   const sha = await refAt(git, ref)
   if (sha === undefined) throw new Error(`${config.target} is not here: ${ref} is absent`)
   return sha
-}
-
-/**
- * The `.yrd.yml` checked out at `start` or the nearest directory above it
- * within the same repository (the walk stops at the directory that holds
- * `.git`, a worktree's file or a repository's directory), with the directory
- * it was found in; undefined when there is none. A file that exists and
- * cannot be read is loud.
- */
-function declarationHere(start: string): Readonly<{ root: string; text: string }> | undefined {
-  let directory = resolve(start)
-  for (;;) {
-    try {
-      return { root: directory, text: readFileSync(join(directory, ".yrd.yml"), "utf8") }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code !== "ENOENT" && code !== "ENOTDIR") throw error
-    }
-    if (existsSync(join(directory, ".git"))) return undefined
-    const parent = dirname(directory)
-    if (parent === directory) return undefined
-    directory = parent
-  }
 }
 
 /**

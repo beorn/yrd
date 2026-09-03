@@ -7,13 +7,10 @@
  * name the target does not declare is refused loudly. The fake check exits as
  * the plan says only where the change's own file is, so a bay with one commit
  * is where the result shows.
- *
- * The incumbent's `yrd check` runs against `--repo`, not the tree it stands
- * in, so only the pass case is measured on both cores.
  */
 
 import { afterEach, describe, expect, it } from "vitest"
-import { boundaryRepository, checkAttempts, measuringNewCore, removeScratchRoots, runYrdIn, submitOneCommit } from "./fixture.ts"
+import { boundaryRepository, checkAttempts, removeScratchRoots, runYrdIn, submitOneCommit } from "./fixture.ts"
 
 afterEach(removeScratchRoots)
 
@@ -29,7 +26,7 @@ describe("yrd check <name>", () => {
     expect(await checkAttempts(checkLog), run.report).toBe(before + 1)
   })
 
-  it.skipIf(!measuringNewCore())("exits 1 on a fail, and says which check and where its log is", async () => {
+  it("exits 1 on a fail, and says which check and where its log is", async () => {
     const { repo } = await boundaryRepository({ exit: 1 })
     const { bayPath } = await submitOneCommit(repo, "fail")
 
@@ -42,7 +39,7 @@ describe("yrd check <name>", () => {
     expect(answer.checks[0]?.log ?? "", run.report).not.toBe("")
   })
 
-  it.skipIf(!measuringNewCore())("exits 2 when the check itself cannot judge", async () => {
+  it("exits 2 when the check itself cannot judge", async () => {
     const { repo } = await boundaryRepository({ exit: 2 })
     const { bayPath } = await submitOneCommit(repo, "stuck")
 
@@ -51,7 +48,7 @@ describe("yrd check <name>", () => {
     expect(run.exitCode, run.report).toBe(2)
   })
 
-  it.skipIf(!measuringNewCore())("refuses a name the target does not declare, and names what it does", async () => {
+  it("refuses a name the target does not declare, and names what it does", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const { bayPath } = await submitOneCommit(repo, "unknown")
 

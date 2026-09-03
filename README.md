@@ -1,5 +1,20 @@
 <!-- README-as-spec: this document describes the intended shipped state as present fact. Open gaps are acceptance work in /hh/hub/yrd/TODO.md. -->
 
+> **STALE AFTER M6 (2026-09-03), and loudly so.** This manual documents the old
+> core, which is deleted: `yrd pr …`, `queue audit|status`, `log`, `why`, the
+> `refs/for/<base>/<issue>` receiver and its `bay` remote, Change-Id trailers,
+> PR numbers, the journal and its checkpoints, contests, jobs and remote
+> runners no longer exist. Do not run a command from this file without
+> checking `yrd --help`, which is generated from the code.
+>
+> What ships today is seven commands — `yrd queue submit|run|up|list|show`,
+> `yrd check`, `yrd env open|list`, with `yrd submit` and `yrd bay` as aliases
+> — over `@yrd/queue-core`, whose store is the git repository and nothing
+> else. The rewrite of this file is owed work, tracked at
+> `/hh/pm/@i/10-yrd/plan.md` § Milestones M6; the sections below the
+> conceptual half (`## Quick Start` onward) are the stale ones, and the
+> `## Packages` table below has been corrected.
+
 # Yrd
 
 **Sovereign software delivery for agent teams.**
@@ -1841,21 +1856,23 @@ The low-level packages remain usable by a single developer with no agent fleet.
 
 ## Packages
 
-| Package            | Responsibility                                                   |
-| ------------------ | ---------------------------------------------------------------- |
-| `@yrd/core`        | Immutable definition, Commands, Events, projection, Journal      |
-| `@yrd/persistence` | WAL SQLite Journal, snapshots, migration, and writer exclusion   |
-| `@yrd/process`     | Scope-owned subprocess execution, bounds, cancellation, evidence |
-| `@yrd/job`         | Durable executable lifecycle, leases, waiting work, recovery     |
-| `@yrd/issue`       | Issue references, snapshots, and source adapters                 |
-| `@yrd/bay`         | Worktrees, PR intake, Git workspace, and receive hooks           |
-| `@yrd/queue`       | Typed steps, merge proof, waiting jobs, batching, and status     |
-| `@yrd/contest`     | Competitors, evaluators, selection, metrics, exact promotion     |
-| `@yrd/cli`         | `yrd` and `git-yrd` command projections                          |
+| Package           | Responsibility                                                     |
+| ----------------- | ------------------------------------------------------------------ |
+| `@yrd/queue-core` | The queue: change refs and their facts, one run, the merge, the log |
+| `@yrd/cli`        | `yrd` and `git-yrd` — the seven commands and nothing else           |
+| `@yrd/bay`        | An environment for one branch: a git worktree, and its vocabulary   |
+| `@yrd/core`       | Immutable definition, Commands, Events, ordering, observability     |
+| `@yrd/process`    | Scope-owned subprocess execution, bounds, cancellation, evidence    |
+| `@yrd/issue`      | Issue references, snapshots, and source adapters                    |
+| `@yrd/config`     | Declaration file location and reading                               |
 
-The app is composed from `with*` plugins. Consumers can replace issue sources,
-Git workspace adapters, step runners, evaluators, Git resolution, and queue
-administration without forking the core.
+Deleted at M6 with the core they served: `@yrd/queue` (admission, typed steps,
+merge proof, batching, status), `@yrd/persistence` (the WAL SQLite journal, its
+snapshots, migrations and writer lock), `@yrd/job` (durable executable
+lifecycle, leases, waiting work) and `@yrd/contest` (competitors, evaluators,
+promotion). There is no store but the git repository, and nothing is
+remembered: every state a reader sees is derived from refs and the target's
+ancestry at the moment they ask.
 
 ## Development
 

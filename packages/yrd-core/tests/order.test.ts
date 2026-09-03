@@ -262,15 +262,4 @@ describe("collator hoist guard", () => {
     })
     expect(constructions).toEqual([])
   })
-
-  it("keeps throwing queue validators outside comparator bodies", () => {
-    const queueView = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "..", "..", "yrd-cli", "src", "queue-status-view.tsx"),
-      "utf8",
-    )
-    const timelineComparator = /function timelineSort\([^)]*\): number \{([\s\S]*?)\n\}/u.exec(queueView)?.[1]
-    expect(timelineComparator, "timelineSort must remain mechanically visible to this guard").toBeDefined()
-    expect(timelineComparator).not.toContain("timelineLocalCalendarDay")
-    expect(queueView).not.toMatch(/\.toSorted\(\(left, right\) => requiredQueuePosition\(/u)
-  })
 })

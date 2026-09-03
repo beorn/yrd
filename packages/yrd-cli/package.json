@@ -7,31 +7,11 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@silvery/ansi": "^0.24.0",
     "@silvery/commander": "^0.24.0",
-    "@silvery/scope": "^0.24.0",
     "@yrd/bay": "workspace:*",
-    "@yrd/config": "workspace:*",
-    "@yrd/contest": "workspace:*",
     "@yrd/core": "workspace:*",
-    "@yrd/issue": "workspace:*",
-    "@yrd/job": "workspace:*",
-    "@yrd/persistence": "workspace:*",
     "@yrd/process": "workspace:*",
     "@yrd/queue-core": "workspace:*",
-    "@yrd/queue": "workspace:*",
-    "git-super": "^0.1.0",
-    "loggily": "^0.10.2",
-    "react": "^19.2.0",
-    "silvery": "^0.24.0",
-    "zod": "^4.4.3"
-  },
-  "devDependencies": {
-    "@termless/core": ">=0.8.4 <1.0.0",
-    "@termless/ghostty": ">=0.8.4 <1.0.0",
-    "@termless/ghostty-native": ">=0.8.4 <1.0.0",
-    "@termless/test": ">=0.8.4 <1.0.0",
-    "@termless/xtermjs": ">=0.8.4 <1.0.0",
-    "removely": "^0.1.0"
+    "loggily": "^0.10.2"
   }
 }
