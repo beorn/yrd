@@ -10,7 +10,7 @@ function scratch(name: string): string {
 }
 
 describe("the git runner", () => {
-  it("never recurses a fetch into submodules, whatever the repository's config says", async () => {
+  it("never recurses a fetch or a push into submodules, whatever the repository's config says", async () => {
     // A superproject with one submodule whose remote is unreachable, under
     // `submodule.recurse=true` as the root's checkout has it. A plain fetch
     // recurses and fails on the submodule; the runner's fetch does not recurse.
@@ -34,6 +34,16 @@ describe("the git runner", () => {
     const control = plain(main, ["fetch", "origin"])
     expect(control.status, `the control fetch was expected to recurse and fail: ${control.stderr}`).not.toBe(0)
     await expect(gitIn(main)(["fetch", "origin"])).resolves.toBe("")
+    // The same for a push: the superproject commit moves the pin to a commit
+    // the submodule's remote does not have. Under `submodule.recurse=true` a
+    // plain push recurses on demand into the submodule, whose remote is
+    // unreachable, and fails; the runner's push does not recurse.
+    plain(join(main, "sub"), ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "sub moved"])
+    plain(main, ["add", "sub"])
+    plain(main, ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "main moves the pin"])
+    const pushControl = plain(main, ["push", "-q", "origin", "main:refs/heads/control"])
+    expect(pushControl.status, `the control push was expected to recurse and fail: ${pushControl.stderr}`).not.toBe(0)
+    await expect(gitIn(main)(["push", "-q", "origin", "main:refs/heads/runner"])).resolves.toBe("")
   })
 
   it("answers for its own repository even when the caller's GIT_DIR points elsewhere", async () => {

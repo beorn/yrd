@@ -21,12 +21,15 @@ import type { Git } from "./facts.ts"
  * A git runner rooted at one repository. Non-zero exits throw, loudly.
  *
  * Two settings travel in its environment (`gitEnvironment`), so no call site
- * can forget them: the caller's routing variables are scrubbed, and a fetch
- * never recurses into submodules. The superproject sets
+ * can forget them: the caller's routing variables are scrubbed, and neither a
+ * fetch nor a push recurses into submodules. The superproject sets
  * `submodule.recurse=true`, under which every fetch visits all sixteen
- * submodules (measured 2026-09-03: 16 s against 1 s for the change refs);
- * worktrees get their submodules from materialization (worktree.ts), never
- * from a fetch.
+ * submodules (measured 2026-09-03: 16 s against 1 s for the change refs), and
+ * a push of a change that moved a pin tries to push the submodule with the
+ * superproject's refspec and dies there (`src refspec refs/yrd/changes/… must
+ * name a ref`, @dev/2, 2026-09-03). Worktrees get their submodules from
+ * materialization (worktree.ts), never from a fetch; a moved pin is judged
+ * by the built-in check at queue time, never pushed by the submit.
  */
 export function gitIn(cwd: string, process?: Process): Git {
   const runner = process ?? createProcess({ cwd, env: gitEnvironment(globalThis.process.env) })
@@ -66,9 +69,11 @@ export function gitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const count = Number.isInteger(declared) && declared >= 0 ? declared : 0
   return {
     ...env,
-    GIT_CONFIG_COUNT: String(count + 1),
+    GIT_CONFIG_COUNT: String(count + 2),
     [`GIT_CONFIG_KEY_${count}`]: "fetch.recurseSubmodules",
     [`GIT_CONFIG_VALUE_${count}`]: "no",
+    [`GIT_CONFIG_KEY_${count + 1}`]: "push.recurseSubmodules",
+    [`GIT_CONFIG_VALUE_${count + 1}`]: "no",
   }
 }
 
