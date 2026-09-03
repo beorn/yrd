@@ -2,11 +2,15 @@
  * The queue commands ([plan](../../../../pm/@i/10-yrd/plan.md) § The final
  * design, Commands).
  *
- * One switch selects the queue: a `.yrd.yml` at HEAD that names `remote:` is
- * the declaration, and the target it names must carry the line too. That
- * switch was flag day's knob (§ Cutover), and the incumbent it used to fall
- * through to is gone at M6 — so `undefined` from here is no longer a
- * fallthrough, and the CLI turns it into a refusal naming the missing line.
+ * A queue is a branch whose commit carries a `.yrd.yml` the parser can read.
+ * That is the whole of the question "is there a queue here": the file at HEAD
+ * says where to look (`remote:`, `target:`, both optional), and the file at the
+ * TARGET is the declaration that judges.
+ *
+ * `remote:` used to be the switch — its presence chose this core over the
+ * incumbent at flag day (§ Cutover) — and that made an optional key mandatory
+ * in practice, with a refusal that told a repository declaring nothing else to
+ * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
 import { mkdirSync } from "node:fs"
@@ -23,7 +27,6 @@ import {
   list,
   queueRun,
   readConfig,
-  readHints,
   readQueue,
   refAt,
   resolveRemote,
@@ -88,58 +91,57 @@ export async function coreQueueCommand(
   request: CoreQueueCommand,
   options: Readonly<{ json?: boolean; env?: NodeJS.ProcessEnv; workdir?: string; log?: ConditionalLogger }> = {},
 ): Promise<YrdCliExitCode> {
-  const notSelected = (): YrdCliExitCode => {
+  /** No `.yrd.yml` where the command stands: nothing here says which queue this repository belongs to. */
+  const noDeclarationHere = (): YrdCliExitCode => {
     io.stderr(
-      `yrd: ${NAMED[request.command]} needs a queue, and no declaration here selects one. ` +
-        "Add a `remote:` line to the `.yrd.yml` of this repository AND of the target it names.\n",
+      `yrd: ${NAMED[request.command]} needs a queue, and there is no .yrd.yml at ${repo} or in any directory ` +
+        "above it within this repository. A queue is a branch whose commit carries one.\n",
     )
     return 2
   }
-  // The switch: the declaration checked out where the command stands names
-  // `remote:`, or this queue is not selected and no git runs at all. The
-  // PARSED declaration is that switch, and the only reader of this file: a
-  // regex for `^remote:` used to answer first and the parser two lines below
-  // answered again, so a `.yrd.yml` that named `remote:` and did not parse
-  // passed the regex, lost its `remote` to the parser, and went on against
-  // origin/main with the problem said once at debug level.
-  //
-  // A file that does not parse hints NOTHING and says so on stderr, once: the
-  // defaults stand, because the local declaration is a hint and the target's
-  // is the authority — a branch that breaks its own `.yrd.yml` still submits,
-  // and D2 bills it at merge (config.ts). What it may not do is go quiet.
+  /** The target carries no declaration: whatever stands here, that branch runs no queue. */
+  const noQueueOnTarget = (ref: string): YrdCliExitCode => {
+    io.stderr(
+      `yrd: ${NAMED[request.command]} needs a queue, and ${ref} carries no .yrd.yml. ` +
+        "The declaration that judges lives on the branch the queue lands on; one that stands only here judges nothing.\n",
+    )
+    return 2
+  }
+  // Where to look, from the declaration checked out where the command stands:
+  // `remote:` and `target:`, both optional, both hints. A file that does not
+  // parse hints NOTHING and says so on stderr, once: the defaults stand,
+  // because this file is a hint and the target's is the authority — a branch
+  // that breaks its own `.yrd.yml` still submits, and D2 bills it at merge
+  // (config.ts). What it may not do is go quiet.
   const here = declarationHere(repo)
-  if (here === undefined) return notSelected()
+  if (here === undefined) return noDeclarationHere()
   const hints = hintsIn(here.text, join(here.root, ".yrd.yml"))
   if (hints.problem !== undefined) {
-    io.stderr(`yrd: ${hints.problem}; it hints nothing, so this asks origin/main, which must declare the queue itself\n`)
-  } else if (hints.remote === undefined) {
-    return notSelected()
+    io.stderr(`yrd: ${hints.problem}; it hints nothing, so this asks origin/main, which must carry the declaration itself\n`)
   }
   const git = gitIn(here.root)
   const log = options.log?.child("queue")
   // The declaration here only hints where the queue is (`remote:`, `target:`);
-  // the target's declaration is the authority for every judgement, and it has
-  // to name `remote:` itself, or a branch alone could opt into this core. A
-  // branch that rewrote or broke its own `.yrd.yml` is judged by the target's
-  // rules all the same (ruling D2 bills it at merge).
+  // the target's declaration is the authority for every judgement. A branch
+  // that rewrote or broke its own `.yrd.yml` is judged by the target's rules
+  // all the same (ruling D2 bills it at merge).
   const hinted = await resolveRemote(git, hints.remote ?? "origin")
   const hintedTarget = hints.target ?? "main"
   const targetRef = `${hinted}/${hintedTarget}`
-  // The target's declaration as the target holds it now: fetched, then the
-  // switch (the target names `remote:`; only then is its declaration read in
-  // full and held to its keys), then the remote it names resolved. Undefined when the target does not
-  // select this core; a declaration that exists and cannot be read throws.
-  // One reading serves a one-shot command; the service reads again before
-  // every round, so an edit at the target takes effect on the next round.
+  // The target's declaration as the target holds it now: fetched, read in full
+  // and held to its keys, then the remote it names resolved. Undefined when the
+  // target carries no `.yrd.yml` at all — there is no queue there; a
+  // declaration that exists and cannot be read throws. One reading serves a
+  // one-shot command; the service reads again before every round, so an edit at
+  // the target takes effect on the next round.
   const declaration = async (): Promise<QueueConfig | undefined> => {
     await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
-    if ((await readHints(git, targetRef)).remote === undefined) return undefined
     const declared = await readConfig(git, targetRef)
     if (declared === undefined) return undefined
     return { ...declared, remote: await resolveRemote(git, declared.remote) }
   }
   const config = await declaration()
-  if (config === undefined) return notSelected()
+  if (config === undefined) return noQueueOnTarget(targetRef)
   // A worktree's `.git` is a file, so the queue's own directory lives under the
   // common git dir the whole repository shares, never under a path guessed from it.
   const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
@@ -212,7 +214,7 @@ export async function coreQueueCommand(
     case "up": {
       // The service: the same round on a loop, what hab runs. It has ONE
       // permanent exit, 2: a round is stuck, or the target's declaration can no
-      // longer be read or no longer selects this core, and the queue stays down
+      // longer be read or is no longer there at all, and the queue stays down
       // until a person fixes it. Everything else it does on purpose — a signal,
       // and a pin that moved under it — exits 0, because hab classifies every
       // non-zero exit as a crash (ag hab-core, exit-classification.ts), backs
@@ -231,7 +233,7 @@ export async function coreQueueCommand(
           let why: string | undefined
           try {
             const next = await declaration()
-            if (next === undefined) why = "the target's declaration no longer selects this core"
+            if (next === undefined) why = `${targetRef} no longer carries a .yrd.yml`
             else current = next
           } catch (error) {
             why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`

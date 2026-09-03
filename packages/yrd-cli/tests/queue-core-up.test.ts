@@ -121,6 +121,13 @@ async function world(): Promise<World> {
   return { git, work, workdir }
 }
 
+/** The target's declaration taken away at the remote: a queue that is no longer there. */
+async function undeclare(w: World): Promise<void> {
+  await w.git(["rm", "--quiet", ".yrd.yml"])
+  await w.git(["commit", "--quiet", "-m", "the queue's declaration, taken away"])
+  await w.git(["push", "--quiet", "origin", "main"])
+}
+
 /** The target's declaration replaced with `text` at the remote: a mechanic's edit, as the service sees it. */
 async function redeclare(w: World, text: string): Promise<void> {
   writeFileSync(join(w.work, ".yrd.yml"), text)
@@ -232,7 +239,7 @@ describe("yrd queue up, the service", () => {
     expect(written[1]).toEqual({ ...STUCK, why: expect.stringContaining("batch") as string })
   })
 
-  it("ends stuck when the target's declaration no longer selects this core", async () => {
+  it("ends stuck when the target no longer carries a declaration at all", async () => {
     const w = await world()
     const run = capture(w.work)
     let rounds = 0
@@ -243,7 +250,7 @@ describe("yrd queue up, the service", () => {
       {
         afterRound: async () => {
           rounds += 1
-          if (rounds === 1) await redeclare(w, "target: main\n")
+          if (rounds === 1) await undeclare(w)
         },
         command: "up",
         intervalSeconds: 0,
@@ -253,7 +260,7 @@ describe("yrd queue up, the service", () => {
 
     expect(exit, run.stdout()).toBe(2)
     expect(rounds).toBe(1)
-    expect(records(run)[1]).toEqual({ ...STUCK, why: "the target's declaration no longer selects this core" })
+    expect(records(run)[1]).toEqual({ ...STUCK, why: "origin/main no longer carries a .yrd.yml" })
   })
 
   it("ends the loop, exit 0, when the round it ran merged the change that moves its own pin", async () => {
@@ -310,7 +317,16 @@ describe("yrd queue up, the service", () => {
 describe("yrd queue list, the table", () => {
   it("a commit the target gained by hand is a row of its own, in the JSON and on the line (E5)", async () => {
     const w = await world()
-    // The target moves by hand: one commit after the declaration, pushed.
+    // The queue's history starts at its first fact, so there is one change
+    // before the hand commit: a queue that has judged nothing has no history
+    // and reports nothing (by-hand.ts).
+    await w.git(["checkout", "--quiet", "-b", "task/first", "main"])
+    writeFileSync(join(w.work, "first.txt"), "first\n")
+    await w.git(["add", "first.txt"])
+    await w.git(["commit", "--quiet", "-m", "task/first"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", { branch: "task/first", submitter: "@dev/2", target: "main" })
+    // The target moves by hand: one commit after that, pushed.
     writeFileSync(join(w.work, "hand.txt"), "hand\n")
     await w.git(["add", "hand.txt"])
     await w.git(["commit", "--quiet", "-m", "hand.txt by hand"])
@@ -321,10 +337,13 @@ describe("yrd queue list, the table", () => {
     const asJson = capture(w.work)
     expect(await coreQueueCommand(w.work, asJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const listed = records(asJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
-    expect(listed.changes).toMatchObject([{ branch: "main", head: hand, reason: sentence, state: "by hand" }])
+    expect(listed.changes).toMatchObject([
+      { branch: "task/first", state: "queued" },
+      { branch: "main", head: hand, reason: sentence, state: "by hand" },
+    ])
 
     const asText = capture(w.work)
     expect(await coreQueueCommand(w.work, asText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    expect(asText.stdout()).toBe(`   by hand main ${hand.slice(0, 12)} ${sentence}\n`)
+    expect(asText.stdout()).toContain(`   by hand main ${hand.slice(0, 12)} ${sentence}\n`)
   })
 })

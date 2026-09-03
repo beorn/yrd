@@ -68,21 +68,22 @@ export type Hints = Readonly<{
 /**
  * What a commit's `.yrd.yml` says about where its queue is: `remote:` and
  * `target:` (or the incumbent's `base:`), when the file exists and reads.
- * Read on a submitter's own commit these are hints for finding the target,
- * never authority: the target's declaration judges, so a branch that rewrites
- * or breaks its own `.yrd.yml` still submits and is judged by the target's
- * rules, and D2 bills it at merge. Read on the target itself, `remote` is the
- * switch: its presence selects this core while the incumbent exists (§ Cutover),
- * and only then is the declaration read in full and held to its keys. A file
- * that exists and cannot be read hints nothing and says so in `problem`.
+ * These are hints for FINDING the queue, never authority: the target's
+ * declaration is what judges, so a branch that rewrites or breaks its own
+ * `.yrd.yml` still submits and is judged by the target's rules, and D2 bills
+ * it at merge. A file that exists and cannot be read hints nothing and says so
+ * in `problem`.
+ *
+ * `remote:` used to be a switch here as well as a hint — its presence on the
+ * TARGET selected this core while the incumbent existed (§ Cutover) — which is
+ * why `readHints`, a reader of it at a commit, existed at all. The incumbent
+ * is gone, so the key is an ordinary optional one (`origin` unless declared)
+ * and the question "is there a queue here" is answered by `readConfig`: a
+ * commit whose `.yrd.yml` parses declares a queue, and one without a `.yrd.yml`
+ * does not.
+ *
+ * `where` names the file in `problem`.
  */
-export async function readHints(git: Git, commit: string): Promise<Hints> {
-  const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
-  if (blob === undefined) return {}
-  return hintsIn(await git(["show", `${commit}:.yrd.yml`]), `.yrd.yml at ${commit.slice(0, 12)}`)
-}
-
-/** `readHints` on the text of a declaration already in hand; `where` names it in `problem`. */
 export function hintsIn(text: string, where = ".yrd.yml"): Hints {
   let raw: unknown
   try {

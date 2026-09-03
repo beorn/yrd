@@ -13,7 +13,6 @@ import {
   byHandCommits,
   readCheckTrailer,
   readConfig,
-  readHints,
   readQueue,
   show,
   submit,
@@ -118,11 +117,14 @@ describe("the declaration is read from the target commit", () => {
     await expect(readConfig(owned.git, "main")).rejects.toThrow(/unknown key owner/u)
   })
 
-  it("is not this core's when it names no remote, and is loud when it is wrong", async () => {
+  it("needs no remote: at all, and is loud when it is wrong", async () => {
+    // `remote:` is an ordinary optional key: absent, the queue is at `origin`.
+    // It used to be the switch that chose this core over the incumbent, so a
+    // declaration without it read as "not ours" and was never held to its keys.
+    const plain = await world("checks:\n  - verify:\n      run: bun run test\n")
+    expect(await readConfig(plain.git, "main")).toMatchObject({ remote: "origin", target: "main" })
+
     const old = await world("batch: 1\nchecks:\n  - verify:\n      run: bun run test\n")
-    // The switch reads only whether `remote:` is there; the full read holds the
-    // file to the keys this core knows, so the incumbent's `batch:` is loud.
-    expect((await readHints(old.git, "main")).remote).toBeUndefined()
     await expect(readConfig(old.git, "main")).rejects.toThrow(/unknown key batch/u)
 
     const wrong = await world("remote: origin\nchecks:\n  - verify:\n      on: sometimes\n      run: bun run test\n")

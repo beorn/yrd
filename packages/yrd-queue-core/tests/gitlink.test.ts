@@ -231,6 +231,12 @@ describe("the built-in gitlink check", () => {
 
   it("a pin moved on the target by hand is reported with its path, and no component is asked about it (E5)", async () => {
     const w = await world()
+    // One change first: the queue's history starts at its own first fact, so a
+    // queue that has judged nothing reports nothing (by-hand.ts). Its branch is
+    // then taken away, so the run retires it without building a worktree and
+    // the count below stays about the by-hand reading alone.
+    await submitFile(w, "task/first")
+    await w.git(["push", "--quiet", "origin", ":task/first"])
     const hand = await pinByHand(w, w.offMain)
 
     const outcome = await queueRun(w.options())
@@ -242,7 +248,7 @@ describe("the built-in gitlink check", () => {
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
     expect(log.filter((record) => record.kind === "by-hand")).toMatchObject([{ commit: hand, gitlinks: ["component"] }])
-    const told = log.filter((record) => record.kind === "message")
+    const told = log.filter((record) => record.kind === "message" && record.says === "by-hand")
     expect(told).toMatchObject([{ id: hand, says: "by-hand", to: "owner" }])
     expect(told[0]?.text).toContain(`main moved by hand at ${hand.slice(0, 12)}`)
     expect(told[0]?.text).toContain("it moved the pin at component")

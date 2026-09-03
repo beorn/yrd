@@ -897,8 +897,12 @@ describe("a queue run", () => {
     expect(messages(w).filter((message) => message.kind === "yrd-broken")).toHaveLength(1)
   })
 
-  it("commits on the target from before the declaration are never judged, and neither is the declaration itself (E5)", async () => {
+  it("a queue that has judged nothing has no history, so it judges nothing on the target (E5)", async () => {
+    // Not one change was ever submitted here, so there is no first fact and no
+    // instant to start from — and every commit on the target belongs to
+    // whatever moved the branch before this queue existed.
     const w = await world({ declaredLater: true })
+    await pushByHand(w, "hand.txt")
 
     const outcome = await queueRun(w.options({ exit: 0 }))
 
@@ -911,35 +915,37 @@ describe("a queue run", () => {
   /**
    * THE HOLE THE PLAN NAMED AT THE CUTOVER (§ Owed after M5, E5's last line).
    *
-   * With the boundary at the newest first-parent commit that TOUCHED
-   * `.yrd.yml`, a hand push that itself edits the declaration became the
-   * boundary: it was excluded by the range that starts at the boundary, and so
-   * was every hand commit under it. One edit and a whole stretch of the target
-   * went unreported.
+   * Every earlier boundary was a commit in `.yrd.yml` — first the newest one
+   * that TOUCHED the file, then the one that introduced `remote:` — and the
+   * first of those let a hand push hide itself: it edited the declaration,
+   * became the boundary, and took every hand commit under it out of the report.
    *
-   * The boundary is now where the `remote:` line came in, which no later edit
-   * can move. A hand push that edits the declaration is judged like any other
-   * first-parent commit — and the commit that introduced the line is still not
-   * judged, because the queue's own history starts there.
+   * The boundary is the queue's own first fact now, which no commit on the
+   * target can move at all. A hand push that edits the declaration is judged
+   * like any other first-parent commit, and everything older than that first
+   * fact belongs to whoever moved the branch before this queue existed.
    */
-  it("a hand push that edits the declaration is reported, and the commit that introduced remote: is not (E5)", async () => {
+  it("a hand push after the queue's first change is reported, declaration edits included; anything older is not (E5)", async () => {
     const w = await world({ declaredLater: true })
-    const declaration = (await w.git(["rev-parse", "origin/main"])).trim()
+    const before = await pushByHand(w, "before.txt")
+    // A whole second, so the boundary is not a tie: a committer date is seconds.
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    await submitCommit(w, "task/one", "one.txt")
     const plain = await pushByHand(w, "hand.txt")
     const edited = await editDeclarationByHand(w, "remote: origin\ntarget: main\n")
 
     const outcome = await queueRun(w.options({ exit: 0 }))
 
-    // Both hand commits, oldest first; the declaration commit is the boundary
-    // and is never among them.
+    // Both hand commits, oldest first; the one from before the first change is
+    // never among them.
     expect(outcome.byHand).toEqual([plain, edited])
-    expect(outcome.byHand).not.toContain(declaration)
+    expect(outcome.byHand).not.toContain(before)
     expect(
       records(outcome)
         .filter((record) => record.kind === "by-hand")
         .map((record) => record.commit),
     ).toEqual([plain, edited])
-    expect(messages(w).map((message) => message.to)).toEqual(["owner", "owner"])
+    expect(messages(w).filter((message) => message.kind === "yrd-broken")).toHaveLength(2)
   })
 
   it("a checked change is judged again when the target's check config is not the one its checked fact names", async () => {

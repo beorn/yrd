@@ -1,7 +1,7 @@
 /**
- * The target's first-parent line, judged: every commit on it since the cutover
- * that the queue did not put there ([plan](../../../../pm/@i/10-yrd/plan.md)
- * § The final design, ruling E5).
+ * The target's first-parent line, judged: every commit on it since the queue's
+ * own history starts that the queue did not put there
+ * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, ruling E5).
  *
  * Only the queue pushes the target, by rule, and the queue proves it every
  * queue run instead of GitHub preventing it: detect and adapt, or fail loud.
@@ -14,17 +14,18 @@
  * onto the old base and the queue run judges every change on the new one; a
  * rollback is a person's `git revert`, never the queue's.
  *
- * The cutover is the first-parent commit that INTRODUCED the `remote:` line in
- * `.yrd.yml`: the one line that switches this core on, and the day the queue's
- * own history starts (§ Cutover; A5). Everything at or before it is the old
- * queue's history and is never judged.
+ * The queue's history starts at its own first fact: the oldest commit under
+ * `refs/yrd/changes/`, which is the first `opened` fact anyone wrote here.
+ * Everything on the target older than that instant belongs to whatever moved
+ * the branch before this queue existed, and is never judged.
  *
- * It used to be the NEWEST first-parent commit that touched `.yrd.yml` at all,
- * and that was a hole the plan named at the cutover: a hand push that itself
- * edits the declaration became the boundary, so it hid itself and everything
- * under it (§ Owed after M5). The introduction cannot be hidden that way,
- * because a later edit is not an introduction — it is judged like any other
- * first-parent commit.
+ * The boundary used to be a commit in `.yrd.yml` — first the newest one that
+ * touched the file at all, then the one that INTRODUCED the `remote:` line —
+ * and both readings made a line of configuration mean "the queue starts here".
+ * `remote:` is an ordinary optional key now (`origin` unless declared), so it
+ * cannot carry that meaning, and the facts say it better anyway: they are the
+ * queue's own record, nothing else writes them, and the first of them is the
+ * first moment this branch was the queue's.
  *
  * The queue remembers nothing, so what it has already reported is read from
  * git too. A commit some change's merged fact names in `Merge:` is accounted
@@ -40,7 +41,7 @@
 
 import { endedKind, trailer, type Fact, type Git } from "./facts.ts"
 import { gitlinkRows } from "./git.ts"
-import { changeName } from "./refs.ts"
+import { CHANGES, changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 
 export type ByHandCommit = Readonly<{
@@ -69,7 +70,10 @@ export async function byHandCommits(
   targetSha: string,
   entries: QueueRead,
 ): Promise<readonly ByHandCommit[]> {
-  const cutover = await cutoverAt(git, target, targetSha)
+  const started = await queueStarted(git)
+  // No facts anywhere: this queue has judged nothing, so it has no history of
+  // its own and nothing on the target is yet its business to report.
+  if (started === undefined) return []
   const byName = new Map(entries.map((entry) => [changeName(entry.change), entry.change.facts.at(-1)]))
   const accounted = new Set<string>()
   for (const tip of byName.values()) {
@@ -82,8 +86,9 @@ export async function byHandCommits(
   const out = await git([
     "log",
     "--first-parent",
+    `--since=${started}`,
     "--format=%H%x00%P%x00%cI%x00%s%x00%(trailers:key=Change,valueonly)%x01",
-    `${cutover}..${targetSha}`,
+    targetSha,
   ])
   const found: ByHandCommit[] = []
   for (const record of out.split("\x01")) {
@@ -97,9 +102,13 @@ export async function byHandCommits(
       .filter((name) => name !== "")
     const why = notTheQueues(commit, parents, names, byName)
     if (why === undefined || accounted.has(commit)) break
+    // A commit with no parent is where this branch's history begins, not
+    // something pushed onto it, and there is nothing older to walk to. It can
+    // only be reached at all because a committer date is whole seconds: a
+    // repository whose first commit and whose first fact share one second has
+    // both at the boundary.
     const first = parents[0]
-    if (first === undefined)
-      throw new Error(`${commit.slice(0, 12)} has no parent, yet it is after the cutover ${cutover.slice(0, 12)}`)
+    if (first === undefined) break
     const gitlinks = (await gitlinkRows(git, first, commit)).map((row) => row.path)
     found.push({ at: new Date(at), commit, gitlinks, parents, subject, target, why })
   }
@@ -107,38 +116,29 @@ export async function byHandCommits(
 }
 
 /**
- * The cutover boundary: the first-parent commit that introduced the `remote:`
- * line in `.yrd.yml`. Loud when no commit on that line ever did — a target
- * that never named this core has no queue, and no history of its own to start.
+ * When the queue's own history starts: the committer date of the oldest fact
+ * commit under `refs/yrd/changes/`, which is the first `opened` fact anyone
+ * wrote here. Undefined when there is no change at all — then the queue has
+ * judged nothing and has no history to start.
  *
- * One git invocation, the cheapest correct reading of the three that were on
- * the table. The pickaxe already answers "where did this string's count change
- * in this file", `--first-parent` already makes a merge's diff its first
- * parent's, and the OLDEST answer is the introduction; walking the blobs down
- * the line instead would be one `git show` per commit for the same answer, and
- * `--diff-filter=A` would name where the FILE came in, which is a different
- * and older commit — `.yrd.yml` predates the line by the whole life of the old
- * queue. Measured on 1,565 first-parent commits: 29 ms, the same as the
- * unfiltered path-limited log this replaces.
+ * The walk is first-parent from every change tip, so it reads facts and ends
+ * at the genesis (facts.ts). `--min-parents=1` drops the genesis itself, whose
+ * committer date is the epoch by construction and would put the boundary in
+ * 1970. A change ref is asked for FIRST because `git log --glob` with no
+ * matching ref falls back to HEAD, which would answer with the project's own
+ * history — the silent wrong answer this reading exists to avoid.
  *
- * The one thing it cannot tell apart is a `remote:` that is not the key — a
- * comment or a value that spells it — introduced in an older commit; that
- * commit would be the boundary instead. Nothing in the declaration's grammar
- * makes that likely, and the failure is loud rather than silent: the boundary
- * sits too far back and the queue reports MORE hand commits, never fewer.
+ * The date is handed to `git log --since`, which keeps commits at or after it:
+ * a hand commit made in the same second as the first fact is reported, never
+ * hidden. The boundary errs towards reporting more, as the old one did.
  */
-async function cutoverAt(git: Git, target: string, targetSha: string): Promise<string> {
-  const introduced = (await git(["log", "--first-parent", "-Sremote:", "--format=%H", targetSha, "--", ".yrd.yml"]))
+async function queueStarted(git: Git): Promise<string | undefined> {
+  const some = (await git(["for-each-ref", "--count=1", "--format=%(refname)", `${CHANGES}/`])).trim()
+  if (some === "") return undefined
+  return (await git(["log", "--first-parent", "--min-parents=1", "--reverse", "--format=%cI", `--glob=${CHANGES}/*`]))
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line !== "")
-    .at(-1)
-  if (introduced === undefined) {
-    throw new Error(
-      `no commit on ${target}'s first-parent line at ${targetSha.slice(0, 12)} introduced the remote: line in .yrd.yml; the queue cannot tell where its own history starts`,
-    )
-  }
-  return introduced
+    .find((line) => line !== "")
 }
 
 /** Why a commit is not a merge the queue made, or undefined when it is one. */
