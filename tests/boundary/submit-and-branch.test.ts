@@ -43,14 +43,14 @@ import {
   refs,
   refSha,
   remoteNames,
-  removeScratchRoots,
+  removeTemporaryRoots,
   runYrd,
   secondWorkingRepo,
   setSubmitter,
   targetTip,
 } from "./fixture.ts"
 
-afterEach(removeScratchRoots)
+afterEach(removeTemporaryRoots)
 
 describe("the submit path", { timeout: 120_000 }, () => {
   // today: red — `queue submit` exits 0 but pushes `<branch>:refs/yrd/submit/

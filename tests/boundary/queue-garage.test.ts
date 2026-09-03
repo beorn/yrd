@@ -18,11 +18,11 @@ import {
   git,
   type QueueRunResult,
   queueRunOnce,
-  removeScratchRoots,
+  removeTemporaryRoots,
   submitOneCommit,
 } from "./fixture.ts"
 
-afterEach(removeScratchRoots)
+afterEach(removeTemporaryRoots)
 
 /** Put the repository in the garage, the way the ref says it. */
 async function openGarage(repo: string, reason: string): Promise<void> {

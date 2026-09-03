@@ -5,7 +5,7 @@
  * @level   l3
  * @consumer the mechanic working the queue by hand · hab starting the service
  *
- * Black box on a scratch repository: the CLI opens and closes the garage, and
+ * Black box on a throwaway repository: the CLI opens and closes the garage, and
  * every fact is read back off the ref with plain git — proving yrd needs
  * nothing of its own booted to see a garage, which is the whole reason the
  * fact lives in git.

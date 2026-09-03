@@ -64,11 +64,11 @@ import {
   boundaryRepository,
   type QueueRunResult,
   queueRunOnce,
-  removeScratchRoots,
+  removeTemporaryRoots,
   submitOneCommit,
 } from "./fixture.ts"
 
-afterEach(removeScratchRoots)
+afterEach(removeTemporaryRoots)
 
 /** One record of the queue run's log. */
 type LogRecord = Readonly<Record<string, unknown>> & { kind: unknown }

@@ -64,7 +64,7 @@ type World = Readonly<{
  * old queue's history, which the E5 reading must never judge.
  */
 async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<World> {
-  // The scratch root must be a real filesystem the runner can lstat; the OS
+  // The workdir must be a real filesystem the runner can lstat; the OS
   // temp dir is fine for a test, the plan's rule about tmpfs is for real runs.
   const root = mkdtempSync(join(tmpdir(), "yrd-core-run-"))
   roots.push(root)
@@ -357,7 +357,7 @@ describe("a check log is written once", () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-core-check-log-"))
     roots.push(root)
     const tree: CheckedTree = { base: "0".repeat(40), candidate: "1".repeat(40) }
-    const where = { cwd: root, logDir: join(root, "checks"), scratch: join(root, "scratch"), tree }
+    const where = { cwd: root, logDir: join(root, "checks"), tmpdir: join(root, "tmp"), tree }
     const path = checkLogPath(where.logDir, "verify")
 
     const first = await runCheck({ ...where, spec: { name: "verify", run: "echo hello" } })

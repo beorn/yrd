@@ -90,8 +90,8 @@ export type RunCheck = Readonly<{
   tree: CheckedTree
   /** Where this check's log is written. */
   logDir: string
-  /** A scratch root on the root filesystem, never a shared tmpfs. */
-  scratch: string
+  /** The temp root the check gets as `TMPDIR`; on the root filesystem, never a shared tmpfs. */
+  tmpdir: string
   process?: Process
   env?: NodeJS.ProcessEnv
 }>
@@ -127,14 +127,14 @@ export function readCheckTrailer(packed: string): Readonly<{ name: string; log?:
 
 export async function runCheck(run: RunCheck): Promise<CheckResult> {
   mkdirSync(run.logDir, { recursive: true })
-  mkdirSync(run.scratch, { recursive: true })
+  mkdirSync(run.tmpdir, { recursive: true })
   const log = checkLogPath(run.logDir, run.spec.name)
   const runner = run.process ?? createProcess({ cwd: run.cwd })
   // The check's environment is built, never inherited: a fixed base a real
-  // check needs (measured on the root's own checks), the scratch root as
+  // check needs (measured on the root's own checks), the temp root as
   // TMPDIR, and whatever the check declares. Nothing else reaches the child.
   const source = run.env ?? process.env
-  const env: NodeJS.ProcessEnv = { TMPDIR: run.scratch }
+  const env: NodeJS.ProcessEnv = { TMPDIR: run.tmpdir }
   for (const name of [...BASE_ENV, ...(run.spec.environmentPassthrough ?? [])]) {
     const value = source[name]
     if (value !== undefined) env[name] = value

@@ -10,9 +10,9 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest"
-import { boundaryRepository, checkAttempts, removeScratchRoots, runYrdIn, submitOneCommit } from "./fixture.ts"
+import { boundaryRepository, checkAttempts, removeTemporaryRoots, runYrdIn, submitOneCommit } from "./fixture.ts"
 
-afterEach(removeScratchRoots)
+afterEach(removeTemporaryRoots)
 
 describe("yrd check <name>", () => {
   it("runs the target's check in this tree and exits 0 on a pass", async () => {

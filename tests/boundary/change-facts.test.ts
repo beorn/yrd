@@ -40,13 +40,13 @@ import {
   type QueueRunResult,
   readChange,
   refs,
-  removeScratchRoots,
+  removeTemporaryRoots,
   submitFromBay,
   submitOneCommit,
   targetTip,
 } from "./fixture.ts"
 
-afterEach(removeScratchRoots)
+afterEach(removeTemporaryRoots)
 
 /** git's own empty tree. A genesis commit of one object has this tree. */
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -80,7 +80,7 @@ async function tipTrailer(repo: string, key: string): Promise<readonly string[]>
     .filter((line) => line !== "")
 }
 
-/** A submitted change on a fresh scratch repository. */
+/** A submitted change on a fresh throwaway repository. */
 async function submitted(plan: FakeCheckPlan, bay: string): Promise<{ boundary: BoundaryRepository; change: Change }> {
   const boundary = await boundaryRepository(plan)
   const change = await submitOneCommit(boundary.repo, bay)

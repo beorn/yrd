@@ -7,7 +7,7 @@
  *           HEAD, and — the expensive direction — a dirty tree that is
  *           accidentally greener than HEAD reports pass over a change the
  *           queue will fail.
- * @level    l2 (a real remote and a clone under a scratch root;
+ * @level    l2 (a real remote and a clone under a temporary root;
  *           `coreQueueCommand` driven directly, no process boundary)
  * @consumer every seat that runs `yrd check <name>` before submitting, and
  *           expects it to say what the queue will say

@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { gitIn } from "../src/git.ts"
 
-function scratch(name: string): string {
+function temporaryRoot(name: string): string {
   return mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), `yrd-git-runner-${name}-`))
 }
 
@@ -14,7 +14,7 @@ describe("the git runner", () => {
     // A superproject with one submodule whose remote is unreachable, under
     // `submodule.recurse=true` as the root's checkout has it. A plain fetch
     // recurses and fails on the submodule; the runner's fetch does not recurse.
-    const root = scratch("recurse")
+    const root = temporaryRoot("recurse")
     const sub = join(root, "sub")
     const remote = join(root, "remote.git")
     const main = join(root, "main")
@@ -47,7 +47,7 @@ describe("the git runner", () => {
   })
 
   it("answers for its own repository even when the caller's GIT_DIR points elsewhere", async () => {
-    const root = scratch("gitdir")
+    const root = temporaryRoot("gitdir")
     const git = gitIn(root)
     await git(["init", "-q", "-b", "main"])
     process.env.GIT_DIR = join(root, "not-a-repository")

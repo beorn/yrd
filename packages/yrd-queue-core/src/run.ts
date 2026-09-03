@@ -96,7 +96,7 @@ export type QueueRunOptions = Readonly<{
   notify?: string
   /** Who hears about a stuck change. */
   owner: string
-  /** Where logs, worktrees and scratch live; on the root filesystem. */
+  /** The queue's working directory: its logs, its worktrees and its temp root; on the root filesystem. */
   workdir: string
   /** Why the queue is in the garage, when it is: a hand-run round says so on its own record. */
   garage?: string
@@ -132,7 +132,8 @@ type Run = Readonly<{
   options: QueueRunOptions
   git: Git
   log: QueueRunLog
-  scratch: string
+  /** The temp root every program this run starts gets as `TMPDIR`: `<workdir>/tmp`. */
+  tmpdir: string
   worktrees: string
   /** The target the run read at its start; every judgement is against it. */
   targetSha: string
@@ -162,7 +163,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     onMain: new Set(),
     options,
     queue: queue.changes,
-    scratch: join(options.workdir, "scratch"),
+    tmpdir: join(options.workdir, "tmp"),
     targetSha,
     worktrees: join(options.workdir, "worktrees", log.id),
   }
@@ -343,7 +344,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
 
 /**
  * A fresh worktree of `commit`, with the target's `setup:` run in it before
- * anything judges it (§ The queue run). The setup's log and scratch are the
+ * anything judges it (§ The queue run). The setup's log and temp root are the
  * phase's own, so one worktree's records sit together, and its result is
  * recorded in the check's shape: what ran, then how it ended, billed to the
  * queue whichever way it went.
@@ -364,7 +365,7 @@ async function prepare(
     record: ({ result, start, end: ended }) => record(run, { ...about, end: ended, start }, result),
     ...(run.options.setup === undefined
       ? {}
-      : { setup: { logDir, run: run.options.setup, scratch: run.scratch } }),
+      : { setup: { logDir, run: run.options.setup, tmpdir: run.tmpdir } }),
     starting: ({ log, start }) => started(run, { ...about, log, start }),
     targetSha: run.targetSha,
   })
@@ -857,7 +858,7 @@ async function check(
     env: run.options.env,
     logDir,
     process: run.options.process,
-    scratch: run.scratch,
+    tmpdir: run.tmpdir,
     spec,
     tree,
   })

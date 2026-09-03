@@ -307,13 +307,13 @@ export async function coreQueueCommand(
       const prepared = await prepareWorktree(git, repo, head, join(workdir, "check", `${head.slice(0, 12)}-${String(globalThis.process.pid)}`), {
         env: options.env,
         plumbing: options.log?.child("worktree"),
-        ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, scratch: join(workdir, "scratch") } }),
+        ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
         targetSha: await targetAt(git, config),
       })
       const results: CheckResult[] = []
       try {
         for (const spec of specs) {
-          const result = await runCheck({ cwd: prepared.path, env: options.env, logDir, scratch: join(workdir, "scratch"), spec, tree: prepared.tree })
+          const result = await runCheck({ cwd: prepared.path, env: options.env, logDir, spec, tmpdir: join(workdir, "tmp"), tree: prepared.tree })
           results.push(result)
           if (result.result !== "pass") break
         }
@@ -415,7 +415,7 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
     // finishes it, once per worktree, before any check runs in it.
     setup: config.setup,
     target: config.target,
-    workdir: config.scratch === undefined ? workdir : join(config.scratch, "queue-core"),
+    workdir: config.workdir ?? workdir,
   }
 }
 

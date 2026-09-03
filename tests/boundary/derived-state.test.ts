@@ -40,7 +40,7 @@ import {
   mergeByHand,
   queueRunOnce,
   refreshSecondReader,
-  removeScratchRoots,
+  removeTemporaryRoots,
   secondReader,
   submitOneCommit,
   targetTip,
@@ -48,7 +48,7 @@ import {
   type YrdJsonResult,
 } from "./fixture.ts"
 
-afterEach(removeScratchRoots)
+afterEach(removeTemporaryRoots)
 
 /** The five, and only the five. § The words: "Change states, all derived". */
 const PLAN_STATES = ["queued", "checked", "stuck", "merged", "failed"] as const

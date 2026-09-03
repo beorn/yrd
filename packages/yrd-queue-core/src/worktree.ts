@@ -215,8 +215,8 @@ export type SetupSpec = Readonly<{
   run: string
   /** Where the setup's log goes, the check logs' own directory. */
   logDir: string
-  /** The scratch root the setup gets as `TMPDIR`, as a check does. */
-  scratch: string
+  /** The temp root the setup gets as `TMPDIR`, as a check does. */
+  tmpdir: string
   /** The bound; the check default unless the caller says otherwise. */
   timeoutMs?: number
 }>
@@ -288,7 +288,7 @@ export class SetupFailed extends Error {
 /**
  * `freshWorktree`, what the tree holds read once, then the target's `setup:` in
  * it: one shell command, the built check environment (`PATH`, `HOME`, `SHELL`,
- * `LANG`, `USER`, `LOGNAME`, `LC_*`, the scratch root as `TMPDIR`, and the
+ * `LANG`, `USER`, `LOGNAME`, `LC_*`, the temp root as `TMPDIR`, and the
  * three the queue states about the tree), the check bound, and a log of its own
  * — the check driver runs it, so a setup and a check are provisioned, bounded
  * and recorded by one piece of code rather than two that drift.
@@ -326,7 +326,7 @@ export async function prepareWorktree(
       env: options.env,
       logDir: setup.logDir,
       process: options.process,
-      scratch: setup.scratch,
+      tmpdir: setup.tmpdir,
       spec: { name: SETUP, run: setup.run, timeoutMs: setup.timeoutMs ?? DEFAULT_CHECK_BOUND_MS },
       tree,
     })

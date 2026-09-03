@@ -10,11 +10,11 @@ import { join } from "node:path"
 import { inspectPathHolderCensus, pathHolderRefusal, type PathHolder } from "../src/index.ts"
 import { inspectPathHolderCensusInProc } from "../src/path-reaper.ts"
 
-const scratch: string[] = []
+const temporary: string[] = []
 
 afterEach(() => {
   vi.restoreAllMocks()
-  for (const path of scratch.splice(0)) rmSync(path, { recursive: true, force: true })
+  for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true })
 })
 
 describe("inspectPathHolderCensus", () => {
@@ -33,7 +33,7 @@ describe("inspectPathHolderCensus", () => {
 
   test.runIf(process.platform === "linux")("reports a process whose filesystem root holds the owned path", async () => {
     const fixture = mkdtempSync(join(tmpdir(), "yrd-path-holders-"))
-    scratch.push(fixture)
+    temporary.push(fixture)
     const ownedPath = join(fixture, "owned")
     const procRoot = join(fixture, "proc")
     const processRoot = join(procRoot, "4242")
@@ -52,7 +52,7 @@ describe("inspectPathHolderCensus", () => {
 
   test.runIf(process.platform === "linux")("reports mapped files below the owned path", async () => {
     const fixture = mkdtempSync(join(tmpdir(), "yrd-path-maps-"))
-    scratch.push(fixture)
+    temporary.push(fixture)
     const ownedPath = join(fixture, "owned")
     const mappedFile = join(ownedPath, "native.node")
     const procRoot = join(fixture, "proc")
@@ -73,7 +73,7 @@ describe("inspectPathHolderCensus", () => {
     "reports reduced same-UID coverage instead of a clean empty census when a source is denied",
     async () => {
       const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-denied-"))
-      scratch.push(fixture)
+      temporary.push(fixture)
       const ownedPath = join(fixture, "owned")
       const procRoot = join(fixture, "proc")
       const processRoot = join(procRoot, "4242")
@@ -118,7 +118,7 @@ describe("inspectPathHolderCensus", () => {
       // nothing behind it. The census records the state beside the denial, so a
       // reader can tell a gap that provably holds nothing from a live one.
       const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-zombie-"))
-      scratch.push(fixture)
+      temporary.push(fixture)
       const ownedPath = join(fixture, "owned")
       const procRoot = join(fixture, "proc")
       mkdirSync(ownedPath)
@@ -158,7 +158,7 @@ describe("inspectPathHolderCensus", () => {
       // `pid N via fd` with no comm and no state. `exited` is the fact that
       // separates it from the control beside it: same denial, still alive.
       const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-exited-between-reads-"))
-      scratch.push(fixture)
+      temporary.push(fixture)
       const ownedPath = join(fixture, "owned")
       const procRoot = join(fixture, "proc")
       mkdirSync(ownedPath)
@@ -203,7 +203,7 @@ describe("inspectPathHolderCensus", () => {
       // the start time from field 22 against the host's boot time — for a
       // zombie, a live proc, and one that was gone before it could be read.
       const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-tolerated-record-"))
-      scratch.push(fixture)
+      temporary.push(fixture)
       const ownedPath = join(fixture, "owned")
       const procRoot = join(fixture, "proc")
       mkdirSync(ownedPath)
@@ -251,7 +251,7 @@ describe("inspectPathHolderCensus", () => {
     "keeps an exited source separate from denial without reducing coverage",
     async () => {
       const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-exited-"))
-      scratch.push(fixture)
+      temporary.push(fixture)
       const ownedPath = join(fixture, "owned")
       const procRoot = join(fixture, "proc")
       const processRoot = join(procRoot, "4242")
@@ -279,7 +279,7 @@ describe("inspectPathHolderCensus", () => {
     "a complete empty census says what proc root and same-UID scope were searched",
     async () => {
       const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-empty-"))
-      scratch.push(fixture)
+      temporary.push(fixture)
       const ownedPath = join(fixture, "owned")
       const procRoot = join(fixture, "proc")
       mkdirSync(ownedPath)
@@ -307,7 +307,7 @@ describe("inspectPathHolderCensus", () => {
 
   test.runIf(process.platform === "linux")("fails loudly when the required proc root is missing", async () => {
     const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-missing-"))
-    scratch.push(fixture)
+    temporary.push(fixture)
     const ownedPath = join(fixture, "owned")
     const procRoot = join(fixture, "missing-proc")
     mkdirSync(ownedPath)

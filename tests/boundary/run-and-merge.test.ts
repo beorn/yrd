@@ -30,8 +30,8 @@ import {
   queueRunOnce,
   refreshTarget,
   refs,
-  removeScratchRoots,
-  scratchLog,
+  removeTemporaryRoots,
+  temporaryLog,
   submitCommitWriting,
   submitOneCommit,
   submitSameHead,
@@ -39,7 +39,7 @@ import {
   declaration,
 } from "./fixture.ts"
 
-afterEach(removeScratchRoots)
+afterEach(removeTemporaryRoots)
 
 /** The fake check as one `run:` string, with the log and exit the case wants. */
 function fake(log: string, exit: number): string {
@@ -69,8 +69,8 @@ describe("the queue run", { timeout: 180_000 }, () => {
       // Two logs are the whole discriminator: the target's check writes one,
       // the branch's replacement the other, so "whose config ran" has a
       // file-shaped answer.
-      const targetLog = await scratchLog("target-config")
-      const branchLog = await scratchLog("branch-config")
+      const targetLog = await temporaryLog("target-config")
+      const branchLog = await temporaryLog("branch-config")
       const { repo } = await boundaryRepositoryWith({
         notify: true,
         checks: [{ name: "gate", run: fake(targetLog, 1) }],
@@ -93,7 +93,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     })
 
     it("the target's check script judges a branch that rewrote the script", async () => {
-      const log = await scratchLog("gate-script")
+      const log = await temporaryLog("gate-script")
       const { repo } = await boundaryRepositoryWith({
         notify: true,
         // The check names its script, and the queue restores it from the base
@@ -125,7 +125,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
    * base the first one left behind.
    */
   it("one queue run merges the change first in line, and the next waits its turn", async () => {
-    const log = await scratchLog("inline")
+    const log = await temporaryLog("inline")
     const { repo } = await boundaryRepositoryWith(passing(log))
     const first = await submitOneCommit(repo, "first")
     const second = await submitOneCommit(repo, "second")
@@ -155,7 +155,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
    * the only thing that makes running the on-merge checks worth anything.
    */
   it("the on-submit checks see the head alone; the on-merge checks see it merged onto the target", async () => {
-    const log = await scratchLog("phases")
+    const log = await temporaryLog("phases")
     const { repo, origin } = await boundaryRepositoryWith({
       notify: true,
       checks: [
@@ -194,7 +194,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
    * author's refs stand so they can rebase.
    */
   it("a change that conflicts with the target ends failed, and the queue is not the one at fault", async () => {
-    const log = await scratchLog("conflict")
+    const log = await temporaryLog("conflict")
     const { repo, origin } = await boundaryRepositoryWith(passing(log))
     const change = await submitCommitWriting(repo, "conflict", { "shared.txt": "from the change\n" })
     await advanceTargetByHand(origin, { "shared.txt": "from the target\n" })
@@ -221,7 +221,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
    * notice, not re-judge.
    */
   it("a head already in the target is retired already-landed and never checked", async () => {
-    const log = await scratchLog("landed")
+    const log = await temporaryLog("landed")
     const { repo, origin } = await boundaryRepositoryWith(passing(log))
     const change = await submitOneCommit(repo, "landed")
     await landByHand(origin, change.headSha, repo)
@@ -242,7 +242,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
    * that landed and a fault of its author.
    */
   it("a second branch at a head the same run merged is retired already-landed, and nobody is billed", async () => {
-    const log = await scratchLog("same-head")
+    const log = await temporaryLog("same-head")
     const { repo } = await boundaryRepositoryWith(passing(log))
     const one = await submitOneCommit(repo, "one")
     const two = await submitSameHead(repo, "two", one.headSha).catch((cause: unknown) => {
@@ -273,7 +273,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
    * re-judgement refuses.
    */
   it("the target moving under a checked change re-judges it, and no earlier pass carries across bases", async () => {
-    const log = await scratchLog("bases")
+    const log = await temporaryLog("bases")
     const { repo } = await boundaryRepositoryWith({
       notify: true,
       checks: [{ name: "gate", run: `PROBE_NAME=gate PROBE_LOG=${log} PROBE_FAIL_IF_ALL='a.txt b.txt' sh gate.sh` }],
@@ -306,7 +306,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
    * which is exactly why the built-in has to catch it before it lands.
    */
   it("a branch whose config cannot be parsed ends failed, and the queue keeps running", async () => {
-    const log = await scratchLog("unparseable")
+    const log = await temporaryLog("unparseable")
     const { repo } = await boundaryRepositoryWith(passing(log))
     // The declaration head stays (it is what selects the core under
     // measurement, ruling A5); the body below it is what cannot be parsed.

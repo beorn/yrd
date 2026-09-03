@@ -28,8 +28,8 @@ export type QueueConfig = Readonly<{
   notify?: string
   /** Who hears about a stuck change. */
   owner: string
-  /** Where checks write their temporary files; on the root filesystem. */
-  scratch?: string
+  /** The queue's working directory: its checkouts, its check logs, and the temp root every check gets as `TMPDIR`; on the root filesystem. */
+  workdir?: string
   /** The blob the declaration was read from, recorded on every checked fact. */
   blob: string
 }>
@@ -53,9 +53,9 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   const owner = raw.owner ?? "operator"
   if (typeof owner !== "string" || owner === "") throw new Error(`.yrd.yml owner: must be a seat name`)
   const notify = optionalString(raw, "notify")
-  const scratch = optionalString(raw, "scratch")
+  const workdir = optionalString(raw, "workdir")
   const setup = optionalString(raw, "setup")
-  return { blob, checks: readChecks(raw.checks), notify, owner, remote, scratch, setup, target }
+  return { blob, checks: readChecks(raw.checks), notify, owner, remote, setup, target, workdir }
 }
 
 export type Hints = Readonly<{
@@ -147,7 +147,7 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 // queue, and one it does not read is still refused. A fresh worktree has
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["remote", "target", "checks", "setup", "notify", "owner", "scratch"] as const
+const TOP_KEYS = ["remote", "target", "checks", "setup", "notify", "owner", "workdir"] as const
 const CHECK_KEYS = ["run", "on", "timeoutMs", "environmentPassthrough", "scripts"] as const
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */

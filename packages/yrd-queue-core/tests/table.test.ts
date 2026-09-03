@@ -101,6 +101,19 @@ describe("the declaration is read from the target commit", () => {
     await expect(readConfig(empty.git, "main")).rejects.toThrow(/setup: must be a non-empty string/u)
   })
 
+  it("names the queue's working directory as workdir:, and refuses the retired scratch: outright", async () => {
+    // `workdir:` is the whole working directory — the checkouts, the check
+    // logs, and the temp root every check gets as TMPDIR — so it is one word,
+    // not the old `scratch:`, which named the same root after only the last of
+    // those three. A declaration still carrying the old key is a queue writing
+    // somewhere nobody declared, so it is refused rather than defaulted.
+    const declared = await world("remote: origin\nworkdir: /var/tmp/yrd\n")
+    expect(await readConfig(declared.git, "main")).toMatchObject({ workdir: "/var/tmp/yrd" })
+
+    const old = await world("remote: origin\nscratch: /var/tmp/yrd\n")
+    await expect(readConfig(old.git, "main")).rejects.toThrow(/unknown key scratch/u)
+  })
+
   it("is not this core's when it names no remote, and is loud when it is wrong", async () => {
     const old = await world("batch: 1\nchecks:\n  - verify:\n      run: bun run test\n")
     // The switch reads only whether `remote:` is there; the full read holds the

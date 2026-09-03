@@ -9,13 +9,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createProcess, type Spawn } from "../src/index.ts"
 
-const scratch: string[] = []
+const temporary: string[] = []
 beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => undefined)
 })
 
 afterEach(() => {
-  for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true })
+  for (const dir of temporary.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
 /**
@@ -192,7 +192,7 @@ describe("createProcess — escaped-descendant post-exit drain grace (queue-wedg
     // only arrives when sleep dies — the live wedge. NO timeoutMs/noProgressMs
     // is set, so ONLY the post-exit drain grace can un-wedge run().
     const dir = mkdtempSync(join(tmpdir(), "yrd-escaped-"))
-    scratch.push(dir)
+    temporary.push(dir)
     const pidFile = join(dir, "sleep.pid")
     // `sleep 120 &` stays in the child's process group (no setsid); echo writes
     // its pid to a file (NOT to stdout, so capture reads zero bytes and blocks

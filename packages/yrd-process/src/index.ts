@@ -907,7 +907,7 @@ function positiveInteger(value: number, name: string): number {
  * fails inside posix_spawn with an ENOENT that names neither the directory nor
  * the command — indistinguishable from a missing executable, and untyped, so no
  * caller can classify it and every recovery path treats it as a fatal fault.
- * Yrd derives spawn directories from candidate content (bay, scratch, and
+ * Yrd derives spawn directories from candidate content (bay, workdir, and
  * reference checkouts, including nested submodule paths a candidate ADDS but
  * the base checkout lacks), so an absent one is an ordinary per-candidate
  * condition that must stay containable instead of killing a long-lived runner.

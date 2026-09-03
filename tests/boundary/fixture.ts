@@ -1,5 +1,5 @@
 /**
- * The queue-run boundary: scratch repositories, a fake check whose result and
+ * The queue-run boundary: throwaway repositories, a fake check whose result and
  * duration the test chooses, and one `yrd queue run --once`.
  *
  * Everything here is black box on purpose. A test built on this fixture may
@@ -8,7 +8,7 @@
  * stands — nothing else. No journal reads, no internals, no log parsing
  * except to print on failure.
  *
- * The scratch-repository shape is the one `packages/yrd-cli/tests/
+ * The throwaway-repository shape is the one `packages/yrd-cli/tests/
  * bay-submit-selected.test.ts` proves end to end: a bare shared repository
  * plus a working repository whose `origin` is that bare one, work committed
  * in a real Bay, and `yrd bay submit` as the submit form. The target the
@@ -24,13 +24,13 @@ import type { YrdCliExitCode, YrdCliIO } from "../../packages/yrd-cli/src/types.
 import { installDeclaredYrdEntry } from "../../packages/yrd-cli/tests/support/declared-yrd-entry.ts"
 
 /** The check the fixture configures. Absolute, because it runs from a
- * workspace checkout of a scratch repository, not from this directory. */
+ * workspace checkout of a throwaway repository, not from this directory. */
 export const FAKE_CHECK = join(import.meta.dirname, "fake-check.sh")
 
 const roots: string[] = []
 
-/** Every scratch root this file handed out, removed. Call from `afterEach`. */
-export async function removeScratchRoots(): Promise<void> {
+/** Every temporary root this file handed out, removed. Call from `afterEach`. */
+export async function removeTemporaryRoots(): Promise<void> {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 }
 
@@ -103,7 +103,7 @@ export type BoundaryRepository = Readonly<{
 }>
 
 /**
- * A scratch repository whose only check is the fake check, on a fresh bare
+ * A throwaway repository whose only check is the fake check, on a fresh bare
  * repository holding one commit of `main`. The fake check's knobs travel as
  * environment assignments on the command itself, because a check runs through
  * `sh -c` — so two cases in one file never share process state.
@@ -667,7 +667,7 @@ export async function notifiedMessages(notifyLog: string): Promise<string> {
 
 /**
  * A second submitter: another working clone of the same shared repository,
- * with its own identity and its own `yrd` remote. Its scratch root is cleaned
+ * with its own identity and its own `yrd` remote. Its temporary root is cleaned
  * up with every other.
  */
 export async function secondWorkingRepo(origin: string, name: string, email: string): Promise<string> {
@@ -753,13 +753,13 @@ function phasedChecks(checks: readonly PhasedCheck[]): string {
   return `checks: [${entries.join(", ")}]`
 }
 
-/** A scratch repository whose target carries the checks and files the case names. */
+/** A throwaway repository whose target carries the checks and files the case names. */
 export function boundaryRepositoryWith(plan: BoundaryPlan): Promise<BoundaryRepository> {
   return buildBoundaryRepository(() => plan)
 }
 
 /**
- * The one scratch repository every case is built on: a bare shared repository
+ * The one throwaway repository every case is built on: a bare shared repository
  * plus a working repository whose `origin` is that bare one, with one commit
  * of `main` carrying `README.md`, the declaration, and whatever files the plan
  * names. The plan is a function of the log paths because a check's `run:`
@@ -911,10 +911,10 @@ export async function checkLines(log: string): Promise<readonly string[]> {
   return (await file.text()).trimEnd().split("\n").filter(Boolean)
 }
 
-/** A path for a log the CASE owns, under a scratch root this file removes.
+/** A path for a log the CASE owns, under a temporary root this file removes.
  * A check's `run:` string has to name its log before the repository that
  * declares the check exists, so the log cannot come from the repository. */
-export async function scratchLog(name: string): Promise<string> {
+export async function temporaryLog(name: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "yrd-boundary-log-"))
   roots.push(root)
   return join(root, `${name}.log`)

@@ -8,7 +8,7 @@
  *           a target that pins the new: the relaunch onto the new pin is a
  *           person's hand again (plan § Commands: the service's three exits;
  *           § Milestones M7).
- * @level    l2 (a real remote and a clone under a scratch root;
+ * @level    l2 (a real remote and a clone under a temporary root;
  *           `coreQueueCommand` driven directly, no process boundary)
  * @consumer hab, which runs `yrd queue up` as the service and relaunches it on
  *           a pin-move exit · the mechanic, who edits the target's declaration and

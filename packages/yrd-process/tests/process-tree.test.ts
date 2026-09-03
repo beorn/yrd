@@ -9,9 +9,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createProcess, type Spawn } from "../src/index.ts"
 
-const scratch: string[] = []
+const temporary: string[] = []
 afterEach(() => {
-  for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true })
+  for (const dir of temporary.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
 const bunExe = process.execPath
@@ -44,7 +44,7 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
 
   test("a TERM-ignoring grandchild HOLDING THE STDOUT PIPE dies at the bound; run() resolves; zero survivors", async () => {
     const dir = mkdtempSync(join(tmpdir(), "yrd-process-tree-"))
-    scratch.push(dir)
+    temporary.push(dir)
     const childPidFile = join(dir, "child.pid")
     const grandchildPidFile = join(dir, "grandchild.pid")
     // Grandchild: ignores SIGTERM, INHERITS stdout (holds the run's pipe open —
