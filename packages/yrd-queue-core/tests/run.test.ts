@@ -10,7 +10,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { CHANGES, changeName, changeRef, gitIn, queueRun, readFacts, submit, trailer, trailers } from "../src/index.ts"
+import { CHANGES, appendFact, changeName, changeRef, gitIn, queueRun, readFacts, submit, trailer, trailers } from "../src/index.ts"
 import type { Git, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
 
 const roots: string[] = []
@@ -183,6 +183,25 @@ function records(outcome: QueueRunOutcome): readonly Record<string, unknown>[] {
 /** One trailer of a commit, as `git log` reads it back. */
 async function trailerOn(w: World, commit: string, key: string): Promise<string> {
   return (await w.git(["log", "-1", `--format=%(trailers:key=${key},valueonly)`, commit])).trim()
+}
+
+/**
+ * A change ref named after the target, planted at the remote exactly as the
+ * specimen of 2026-09-03 stands there: `yrd submit` run from a checkout
+ * standing on the target opened `main@0a9db9daf7eb` with `Submitter: unknown`
+ * at 03:33 PDT. `submit` refuses that now, so the ref is written here instead.
+ */
+async function plantTargetChange(w: World, head: string): Promise<void> {
+  await appendFact(w.git, {
+    branch: "main",
+    head,
+    kind: "opened",
+    subject: "unknown submitted main to main",
+    target: "main",
+    trailers: [["Submitter", "unknown"]],
+  })
+  const ref = changeRef("main", head)
+  await w.git(["push", "--quiet", "origin", `${ref}:${ref}`])
 }
 
 async function fetchChanges(w: World): Promise<void> {
@@ -437,6 +456,44 @@ describe("a queue run", () => {
     expect(again.byHand).toEqual([])
     expect(records(again).filter((record) => record.kind === "by-hand")).toEqual([])
     expect(messages(w).filter((message) => message.kind === "yrd-broken")).toHaveLength(1)
+  })
+
+  it("the target is not a change: a ref named after it is judged by nothing and messages nobody (2026-09-03 main@0a9db9daf7eb)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    // The one path in refuses it now; the ref is planted the way the remote holds it.
+    await expect(submit(w.git, "origin", { branch: "main", submitter: "unknown", target: "main" })).rejects.toThrow(
+      "main is the target, not a change",
+    )
+    await plantTargetChange(w, w.target)
+
+    // The queue merges the real change. The merge's first parent is the head
+    // the planted ref is named after — which is what made the next run call
+    // that ref merged, name the queue's own merge as its landing, and write a
+    // `Merged-By: hand` fact on it.
+    const merging = await queueRun(w.options({ exit: 0 }))
+    expect(merging.merged).toEqual(["task/one"])
+    const merge = await remoteTarget(w)
+    expect((await w.git(["rev-parse", `${merge}^1`])).trim()).toBe(w.target)
+
+    // The run after the merge: the one that in the specimen wrote `merged by
+    // hand at 005a622156c7` and told the owner to close a bead for it.
+    const after = await queueRun(w.options({ exit: 0 }))
+
+    expect(after.exitCode).toBe(0)
+    expect(after.merged).toEqual([])
+    expect(after.byHand).toEqual([])
+    await fetchChanges(w)
+    // The planted ref still holds the one fact that was written on it, and no
+    // run considered it: no fact, no row, no message.
+    expect((await readFacts(w.git, "main", w.target)).map((fact) => fact.kind)).toEqual(["opened"])
+    for (const outcome of [merging, after]) {
+      expect(records(outcome).filter((record) => record.kind === "change" && record.branch === "main")).toEqual([])
+      expect(records(outcome).filter((record) => record.kind === "by-hand")).toEqual([])
+    }
+    expect(messages(w).filter((message) => (message.text ?? "").includes("main@"))).toEqual([])
+    expect(messages(w).filter((message) => message.recipient === "@cto")).toEqual([])
+    expect(messages(w).map((message) => message.recipient)).toEqual(["@dev/2"])
   })
 
   it("the merge commit names its change, its submitter and its work item, and the merged fact says the queue merged it and what it checked (E5)", async () => {

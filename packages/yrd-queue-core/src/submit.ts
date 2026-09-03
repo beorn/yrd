@@ -33,6 +33,20 @@ export type Submitted = Readonly<{
 }>
 
 export async function submit(git: Git, remote: string, request: SubmitRequest): Promise<Submitted> {
+  // The target is not a change: a change is a branch submitted to be MERGED
+  // INTO the target, so submitting the target itself asks the queue to merge a
+  // branch into itself. Nothing refused it before, and what it opened was a
+  // change whose head the target already carried: it read merged at once, the
+  // catch-up gave it a `Merged-By: hand` fact naming whatever merge landed
+  // next, its submitter was told to close a bead for a merge that was not
+  // theirs, and that merge stayed accounted for in the E5 walk, where an
+  // accounted commit hides every hand push at or below it
+  // (2026-09-03: `main@0a9db9daf7eb`, named for the queue's own merge 005a622156c7).
+  if (request.branch === request.target) {
+    throw new Error(
+      `${request.target} is the target, not a change; a change is a branch submitted to be merged into ${request.target}`,
+    )
+  }
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const ref = changeRef(request.branch, head)
   // Where the remote holds the branch and this change right now, in one
