@@ -27,7 +27,11 @@ type World = Readonly<{
   workdir: string
   notifyLog: string
   checkLog: string
-  options(check: Readonly<{ exit?: number; sleep?: number; timeoutMs?: number; everywhere?: boolean }>): QueueRunOptions
+  /** The target's `setup:`, exiting as the case says; it records its own working directory in `checkLog`, beside the check's. */
+  setupCommand(exit: number): string
+  options(
+    check: Readonly<{ exit?: number; sleep?: number; timeoutMs?: number; everywhere?: boolean; setup?: string }>,
+  ): QueueRunOptions
 }>
 
 /**
@@ -80,6 +84,12 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     ].join("\n"),
   )
   chmodSync(fakeCheck, 0o755)
+  // The setup records the worktree it prepared and exits as the case says.
+  // Its environment is built, not passed through, so the exit code travels as
+  // an argument on the command the declaration would carry.
+  const setupScript = join(root, "setup.sh")
+  writeFileSync(setupScript, ["#!/bin/sh", `echo "setup cwd=$(pwd)" >> "${checkLog}"`, 'exit "${1:-0}"', ""].join("\n"))
+  chmodSync(setupScript, 0o755)
   const notifier = join(root, "notify.sh")
   writeFileSync(notifier, `#!/bin/sh\ncat >> "${notifyLog}"\n`)
   chmodSync(notifier, 0o755)
@@ -88,6 +98,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
     checkLog,
     git,
     notifyLog,
+    setupCommand: (exit) => `${setupScript} ${String(exit)}`,
     options: (check) => ({
       checks: [
         {
@@ -108,6 +119,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
       owner: "@cto",
       remote: "origin",
       repo: work,
+      ...(check.setup === undefined ? {} : { setup: check.setup }),
       target: "main",
       workdir,
     }),
@@ -158,6 +170,32 @@ async function trailerOn(w: World, commit: string, key: string): Promise<string>
 
 async function fetchChanges(w: World): Promise<void> {
   await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
+}
+
+/**
+ * What ran and where, in order: one entry per line the setup and the check
+ * appended, as `["setup" | "check", "cwd=<directory>"]`. The directory is the
+ * discriminator — a worktree per judgement, so "was this tree prepared before
+ * anything judged in it" has a file-shaped answer.
+ */
+function whereRan(w: World): readonly (readonly [string, string])[] {
+  let lines: readonly string[]
+  try {
+    lines = readFileSync(w.checkLog, "utf8").split("\n").filter(Boolean)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
+  }
+  return lines.map((line) => [line.startsWith("setup ") ? "setup" : "check", line.slice(line.indexOf("cwd="))] as const)
+}
+
+/** Nothing judged a worktree the setup had not prepared first. */
+function everyCheckWasPrepared(order: readonly (readonly [string, string])[]): void {
+  for (const [index, [what, where]] of order.entries()) {
+    if (what !== "check") continue
+    const prepared = order.slice(0, index).some(([earlier, at]) => earlier === "setup" && at === where)
+    expect(prepared, `a check ran in ${where}, which no setup prepared:\n${order.map((row) => row.join(" ")).join("\n")}`).toBe(true)
+  }
 }
 
 function messages(w: World): readonly Record<string, string>[] {
@@ -470,5 +508,98 @@ describe("a queue run", () => {
     facts = await readFacts(w.git, "task/two", second)
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "checked", "merged", "sent"])
     expect(facts[2]?.trailers).toEqual(expect.arrayContaining([["Config", "config-B"]]))
+  })
+})
+
+describe("the target's setup", () => {
+  it("runs once in every worktree the run makes, before anything judges it", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, setup: w.setupCommand(0) }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/one"])
+    const order = whereRan(w)
+    // Two worktrees this run made: the change's head on the submit path, and
+    // the target plus that head on the merge path. One setup each, no more.
+    const prepared = order.filter(([what]) => what === "setup").map(([, where]) => where)
+    expect(prepared).toHaveLength(2)
+    expect(new Set(prepared).size).toBe(2)
+    everyCheckWasPrepared(order)
+    // The setup is recorded in a check's own shape, billed to the queue.
+    expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
+      { exit: "0", name: "setup", phase: "submit", result: "pass" },
+      { exit: "0", name: "setup", phase: "merge", result: "pass" },
+    ])
+    expect(records(outcome).filter((record) => record.kind === "check" && record.name === "setup")).toHaveLength(2)
+  })
+
+  it("runs again in the target worktree the attribution builds", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    // The check fails everywhere, so the attribution builds the target's own
+    // worktree to ask whether the target is red — a third worktree, prepared
+    // like the other two.
+    const outcome = await queueRun(w.options({ everywhere: true, exit: 1, setup: w.setupCommand(0) }))
+
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    const order = whereRan(w)
+    const prepared = order.filter(([what]) => what === "setup").map(([, where]) => where)
+    expect(prepared).toHaveLength(3)
+    expect(new Set(prepared).size).toBe(3)
+    everyCheckWasPrepared(order)
+    expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup").map((record) => record.phase)).toEqual([
+      "submit",
+      "merge",
+      "target",
+    ])
+  })
+
+  it("a setup that fails ends the change stuck, never failed, and nothing is judged in that worktree", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, setup: w.setupCommand(1) }))
+
+    // Stuck, exit 2: the queue could not build the ground a judgement stands
+    // on, which is never the submitter's fault.
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.failed).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
+    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
+    expect(facts[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
+    // The check never ran: there was no prepared tree to run it in.
+    expect(whereRan(w).filter(([what]) => what === "check")).toEqual([])
+    expect(messages(w)[0]).toMatchObject({ code: "setup", kind: "yrd-broken", recipient: "@cto" })
+    expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
+      { exit: "1", result: "fail", whose: "queue" },
+    ])
+  })
+
+  it("a setup past its bound is stuck too, and the change is never billed", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    // 127 is the shell's own word for a command it could not find: a setup the
+    // target names and the worktree does not have is the queue's, like any
+    // other setup that did not pass.
+    const outcome = await queueRun(w.options({ exit: 0, setup: "no-such-setup-command" }))
+
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
+    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
+    expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
+      { exit: "missing", result: "stuck", whose: "queue" },
+    ])
   })
 })

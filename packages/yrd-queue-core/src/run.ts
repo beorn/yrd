@@ -12,6 +12,11 @@
  * fast-forwards the target to the merge commit. Every ended change sends one
  * message, after its ended fact is written, with that fact's sha as the id.
  *
+ * Every worktree this run makes is prepared before anything is judged in it:
+ * the target's `setup:`, once, after materialization and before the first
+ * check (worktree.ts). A setup that does not pass is the queue's own ground
+ * failing, so the change ends stuck with `Reason: setup` and nobody is billed.
+ *
  * A branch at the remote with no change is not a change (E2): the queue read
  * never lists it, so nothing here judges, opens or messages it. `submit` is
  * the one writer of an opened fact; a run only ever appends to a change that
@@ -39,7 +44,7 @@ import { byHandCommits, handMovedLine } from "./by-hand.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine } from "./state.ts"
-import { freshWorktree, type PlumbingLog } from "./worktree.ts"
+import { prepareWorktree, SETUP, SetupFailed, type PlumbingLog, type Worktree } from "./worktree.ts"
 
 export type QueueCheck = CheckSpec &
   Readonly<{
@@ -58,6 +63,8 @@ export type QueueRunOptions = Readonly<{
   target: string
   /** The checks the target declares, read from the target commit by the caller. A check with no `on` runs at merge. */
   checks: readonly QueueCheck[]
+  /** The target's `setup:`: one shell command run in every worktree this run makes, before any check runs in it. */
+  setup?: string
   /** The blob the checks were read from, recorded on every checked fact. */
   configBlob: string
   /** The command that delivers one message, a JSON record on stdin. Absent, messages are logged and not sent. */
@@ -277,11 +284,39 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     return await step()
   } catch (error) {
     const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim()
+    // A setup that did not pass is the one crash with a name: the queue could
+    // not build the ground a judgement stands on, which is never the
+    // submitter's fault, so the reason says setup and not crash.
+    if (error instanceof SetupFailed) {
+      return end(run, entry, "stuck", {
+        subject: `the queue could not prepare a worktree for ${entry.branch}: ${message.slice(0, 200)}`,
+        trailers: [["Reason", SETUP]],
+      })
+    }
     return end(run, entry, "stuck", {
       subject: `the queue crashed judging ${entry.branch}: ${message.slice(0, 200)}`,
       trailers: [["Reason", "crash"]],
     })
   }
+}
+
+/**
+ * A fresh worktree of `commit`, with the target's `setup:` run in it before
+ * anything judges it (§ The queue run). The setup's log and scratch are the
+ * phase's own, so one worktree's records sit together, and its result is
+ * recorded in the check's shape: what ran, then how it ended, billed to the
+ * queue whichever way it went.
+ */
+async function prepare(run: Run, entry: QueueEntry, commit: string, path: string, phase: string): Promise<Worktree> {
+  const logDir = join(run.options.workdir, "checks", run.log.id, phase)
+  return prepareWorktree(run.git, run.options.repo, commit, path, {
+    env: run.options.env,
+    plumbing: run.options.plumbing,
+    process: run.options.process,
+    record: ({ result, start, end: ended }) =>
+      record(run, { branch: entry.branch, end: ended, head: entry.change.head, name: SETUP, phase, start }, result),
+    ...(run.options.setup === undefined ? {} : { setup: { logDir, run: run.options.setup, scratch: run.scratch } }),
+  })
 }
 
 /** The on-submit phase for one queued change. */
@@ -299,7 +334,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
       trailers: [["Reason", "unrelated-history"]],
     })
   }
-  const worktree = await freshWorktree(run.git, run.options.repo, head, join(run.worktrees, "submit", head.slice(0, 12)), run.options.plumbing)
+  const worktree = await prepare(run, entry, head, join(run.worktrees, "submit", head.slice(0, 12)), "submit")
   try {
     // The built-in check: every gitlink the change moved reachable from its
     // component's main (E4).
@@ -389,7 +424,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
   const { branch, change } = entry
   const head = change.head
   const name = changeName(branch, head)
-  const worktree = await freshWorktree(run.git, run.options.repo, run.targetSha, join(run.worktrees, "merge", head.slice(0, 12)), run.options.plumbing)
+  const worktree = await prepare(run, entry, run.targetSha, join(run.worktrees, "merge", head.slice(0, 12)), "merge")
   try {
     const wt = gitIn(worktree.path, run.options.process)
     let mergeCommit: string
@@ -521,7 +556,7 @@ async function attribute(
     if (again.result !== "fail") {
       return { kind: "flake", result: "stuck", why: `${first.name} failed once and passed once in the change's worktree; the queue does not merge on a coin flip; fix or remove the test` }
     }
-    const targetTree = await freshWorktree(run.git, run.options.repo, run.targetSha, join(run.worktrees, "target", first.name), run.options.plumbing)
+    const targetTree = await prepare(run, entry, run.targetSha, join(run.worktrees, "target", first.name), "target")
     try {
       const atTarget = await check(run, entry, spec, targetTree.path, "target")
       if (atTarget.result !== "pass") {
@@ -692,13 +727,39 @@ async function check(run: Run, entry: QueueEntry, spec: QueueCheck, cwd: string,
     scratch: run.scratch,
     spec,
   })
-  const common = { branch: entry.branch, head: entry.change.head, name: spec.name, phase }
-  run.log.write({ ...common, end: new Date().toISOString(), kind: "check", log: result.log, ms: result.durationMs, ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }), start })
-  // `whose` is who the result is billed to: a stuck result is always the queue's;
-  // a failing one is the submitter's until the attribution says otherwise, and
-  // that later reading writes its own result row.
-  run.log.write({ ...common, exit: String(result.exit), kind: "result", result: result.result, whose: result.result === "stuck" ? "queue" : result.result === "fail" ? "submitter" : undefined })
+  record(
+    run,
+    {
+      branch: entry.branch,
+      end: new Date().toISOString(),
+      head: entry.change.head,
+      name: spec.name,
+      phase,
+      start,
+      ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }),
+    },
+    result,
+  )
   return result
+}
+
+/**
+ * The two records every program the queue runs writes, one shape for all of
+ * them: what ran, then how it ended. `whose` is who the result is billed to —
+ * a stuck result is always the queue's, and so is anything the setup did,
+ * because the setup is the queue's own ground rather than the change; a
+ * failing check is the submitter's until the attribution says otherwise, and
+ * that later reading writes its own result row.
+ */
+function record(
+  run: Run,
+  about: Readonly<{ branch: string; head: string; name: string; phase: string; start: string; end: string; scripts?: readonly string[] }>,
+  result: CheckResult,
+): void {
+  const common = { branch: about.branch, head: about.head, name: about.name, phase: about.phase }
+  run.log.write({ ...common, end: about.end, kind: "check", log: result.log, ms: result.durationMs, ...(about.scripts === undefined ? {} : { scripts: about.scripts }), start: about.start })
+  const whose = result.result === "pass" ? undefined : result.result === "stuck" || about.name === SETUP ? "queue" : "submitter"
+  run.log.write({ ...common, exit: String(result.exit), kind: "result", result: result.result, whose })
 }
 
 async function end(

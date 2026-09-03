@@ -321,6 +321,9 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
     remote: config.remote,
     render: renderer(log),
     repo,
+    // A fresh worktree has submodules and no dependencies; `setup:` is what
+    // finishes it, once per worktree, before any check runs in it.
+    setup: config.setup,
     target: config.target,
     workdir: config.scratch === undefined ? workdir : join(config.scratch, "queue-core"),
   }

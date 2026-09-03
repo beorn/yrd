@@ -22,6 +22,8 @@ export type QueueConfig = Readonly<{
   /** The branch the queue lands on; `main` unless declared. */
   target: string
   checks: readonly QueueCheck[]
+  /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
+  setup?: string
   /** The command that delivers one message, a JSON record on stdin. */
   notify?: string
   /** Who hears about a stuck change. */
@@ -52,7 +54,8 @@ export async function readConfig(git: Git, commit: string): Promise<QueueConfig 
   if (typeof owner !== "string" || owner === "") throw new Error(`.yrd.yml owner: must be a seat name`)
   const notify = optionalString(raw, "notify")
   const scratch = optionalString(raw, "scratch")
-  return { blob, checks: readChecks(raw.checks), notify, owner, remote, scratch, target }
+  const setup = optionalString(raw, "setup")
+  return { blob, checks: readChecks(raw.checks), notify, owner, remote, scratch, setup, target }
 }
 
 export type Hints = Readonly<{
@@ -140,7 +143,11 @@ function readChecks(value: unknown): readonly QueueCheck[] {
   })
 }
 
-const TOP_KEYS = ["remote", "target", "checks", "notify", "owner", "scratch"] as const
+// Ruling A6's set, plus `setup:` (2026-09-02): every key here is read by the
+// queue, and one it does not read is still refused. A fresh worktree has
+// submodules and nothing else, so the target says how to finish it once
+// instead of every check prefixing its own `run:` with the same install.
+const TOP_KEYS = ["remote", "target", "checks", "setup", "notify", "owner", "scratch"] as const
 const CHECK_KEYS = ["run", "on", "timeoutMs", "environmentPassthrough", "scripts"] as const
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */
