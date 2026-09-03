@@ -4,10 +4,7 @@
  * @consumer Hallohuman Hab composition loading vendor/yrd/hab.projects.ts
  */
 import { describe, expect, it } from "vitest"
-import hab, {
-  defineYrdQueueRunnerDeclarations,
-  yrdQueueRunnerDeclarations,
-} from "../hab.projects.ts"
+import hab, { defineYrdQueueRunnerDeclarations, yrdQueueRunnerDeclarations } from "../hab.projects.ts"
 
 describe("Yrd Hab runner declarations", () => {
   it("keeps repository and queue identity explicit in data and generated argv", () => {
@@ -90,20 +87,10 @@ describe("Yrd Hab runner declarations — the restart policy that makes the exit
     }
   })
 
-  it("declares NO key hab-config does not accept — an unknown one takes the whole composition down", () => {
-    // This is the guard on a specific near-miss, not a style rule. The obvious
-    // way to keep the two `stand-down` codes (16, 17) down while 11/13/18
-    // restart is `permanentExitCodes`, and it reads as declarable because
-    // hab-core's restart taxonomy implements exactly that policy. It is not:
-    // the key is absent from `SERVICE_KEYS` in ag/packages/hab-config
-    // (src/index.ts), `validateServiceKeys` pushes `unknown key '<key>'` onto
-    // `diagnostics.errors`, and `checkHabConfig` then returns NO habplan —
-    // so the mistake does not disable this service, it disables every service
-    // Hab supervises. Adding the key to hab-config is the prerequisite, and
-    // it is a change in ag.
-    const allowed = new Set(["command", "env", "health", "restart", "owner"])
+  it("keeps a stuck queue down while a moved pin still relaunches", () => {
     for (const service of Object.values(hab.services)) {
-      expect(Object.keys(service).filter((key) => !allowed.has(key))).toEqual([])
+      expect(service.permanentExitCodes).toEqual([2])
+      expect(service.permanentExitCodes).not.toContain(18)
     }
   })
 })

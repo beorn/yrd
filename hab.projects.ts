@@ -101,28 +101,12 @@ export default {
         // Operator ruling 2026-09-02: "why isn't yrd fully automatic now? that
         // is critical path and should be driven hard."
         //
-        // WHAT THIS COSTS, stated rather than discovered later. `on-failure`
-        // restarts on EVERY non-zero exit, so it also restarts exit 2, a stuck
-        // queue, into the same fault. Inhab's default budget bounds it — three
-        // restarts per 600s with 1s→30s backoff, then `stop-budget` — so a
-        // stuck queue still ends stopped and paged to `owner` below, three
-        // attempts and at most ten minutes later than the andon ruling wants.
-        //
-        // The narrower policy that would hold those two exactly is hab-core's
-        // `permanentExitCodes`, and it is NOT reachable from here today: it
-        // lives on habd's runtime launch envelope
-        // (ag/packages/hab-core/src/habd-runtime.ts) with no production writer,
-        // and it is absent from `SERVICE_KEYS` in ag/packages/hab-config
-        // (src/index.ts). Declaring it here does not degrade — `validateServiceKeys`
-        // pushes `unknown key 'permanentExitCodes'` onto `diagnostics.errors`,
-        // and `checkHabConfig` then returns no habplan at all, taking down
-        // EVERY service in the composition rather than just this one. So it is
-        // deliberately not declared. Restoring full andon fidelity means adding
-        // the key to `SERVICE_KEYS`, threading it through `HabplanService` to
-        // the launch envelope, and then declaring
-        // `permanentExitCodes: [2]` here — a change in ag, not in Yrd (M7,
-        // owned by dev/7 on 2026-09-03).
+        // Exit 2 means the queue is stuck and needs its garage, so relaunching
+        // repeats the same fault. Exit 18 means the checked-out pin moved and a
+        // relaunch on the new pin is the cure. Retired exits 16/17 are not part
+        // of this runner's permanent-exit policy.
         restart: "on-failure" as const,
+        permanentExitCodes: [2],
         // Wired 2026-09-01: `HabServiceDefinition.owner` (ag/packages/hab-config,
         // src/index.ts) now lists "owner" in `SERVICE_KEYS`, and a resident with
         // `restart: "never"` and no owner is a WARNING there, not the FATAL
