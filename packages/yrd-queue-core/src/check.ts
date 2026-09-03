@@ -33,7 +33,13 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 
-/** A check as the target declares it. */
+/**
+ * A check as the target declares it — the whole declaration, in one type.
+ * `runCheck` here reads what it runs; the queue run reads `on` and `scripts`
+ * to decide when it runs and against which gate. Two names for one
+ * declaration, with config.ts importing the wider one back from run.ts, was a
+ * module cycle and a standing invitation to add a key to only one of them.
+ */
 export type CheckSpec = Readonly<{
   name: string
   /** The command, run through the shell in the change's worktree. */
@@ -42,6 +48,10 @@ export type CheckSpec = Readonly<{
   timeoutMs?: number
   /** Environment names passed through from the queue's own environment. */
   environmentPassthrough?: readonly string[]
+  /** The phases the check runs in; absent means merge (ruling A1). */
+  on?: readonly ("submit" | "merge")[]
+  /** Repository paths restored from the base commit before the check runs: the check's own scripts (ruling D5). */
+  scripts?: readonly string[]
 }>
 
 export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000

@@ -61,14 +61,6 @@ import {
   type PreparedWorktree,
 } from "./worktree.ts"
 
-export type QueueCheck = CheckSpec &
-  Readonly<{
-    /** The phases the check runs in; absent means merge (ruling A1). */
-    on?: readonly ("submit" | "merge")[]
-    /** Repository paths restored from the base commit before the check runs: the check's own scripts (ruling D5). */
-    scripts?: readonly string[]
-  }>
-
 export type QueueRunOptions = Readonly<{
   /** The working repository the run reads and writes through. */
   repo: string
@@ -77,7 +69,7 @@ export type QueueRunOptions = Readonly<{
   /** The branch the queue lands on. */
   target: string
   /** The checks the target declares, read from the target commit by the caller. A check with no `on` runs at merge. */
-  checks: readonly QueueCheck[]
+  checks: readonly CheckSpec[]
   /** The target's `setup:`: one shell command run in every worktree this run makes, before any check runs in it. */
   setup?: string
   /** The blob the checks were read from, recorded on every checked fact. */
@@ -852,7 +844,7 @@ function messageFor(
  * judges the next change. A declared path the base does not carry is loud,
  * because a gate that silently ran the branch's copy would be the hole itself.
  */
-async function restoreScripts(run: Run, spec: QueueCheck, cwd: string): Promise<void> {
+async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<void> {
   const scripts = spec.scripts ?? []
   if (scripts.length === 0) return
   const wt = gitIn(cwd, run.options.process)
@@ -887,7 +879,7 @@ async function runPhase(
 async function check(
   run: Run,
   entry: QueueEntry,
-  spec: QueueCheck,
+  spec: CheckSpec,
   cwd: string,
   tree: CheckedTree,
   phase: string,

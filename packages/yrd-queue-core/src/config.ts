@@ -14,14 +14,14 @@
 
 import type { Git } from "./facts.ts"
 import { refAt } from "./git.ts"
-import type { QueueCheck } from "./run.ts"
+import type { CheckSpec } from "./check.ts"
 
 export type QueueConfig = Readonly<{
   /** The queue's remote: a remote name, or a URL the CLI adds under the name `yrd`; `origin` unless declared. */
   remote: string
   /** The branch the queue lands on; `main` unless declared. */
   target: string
-  checks: readonly QueueCheck[]
+  checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
   /** The command that delivers one message, a JSON record on stdin. */
@@ -100,7 +100,7 @@ export function hintsIn(text: string, where = ".yrd.yml"): Hints {
  * Today's shape, kept: a list of single-key mappings, `- name: {run, …}`.
  * `on:` names the phases, `submit`, `merge` or both; absent means merge.
  */
-function readChecks(value: unknown): readonly QueueCheck[] {
+function readChecks(value: unknown): readonly CheckSpec[] {
   if (value === undefined) return []
   if (!Array.isArray(value)) throw new Error(".yrd.yml checks: must be a list")
   return value.map((item, index) => {
