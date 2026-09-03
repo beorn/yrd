@@ -38,10 +38,10 @@
  * could not do its own job, and the next thing to happen is a person.
  */
 
-import { mkdirSync } from "node:fs"
+import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
-import { runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
+import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import { appendFact, endedKind, readFact, readFacts, type Fact, type Git } from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
@@ -50,7 +50,7 @@ import { byHandCommits, handMovedLine } from "./by-hand.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine } from "./state.ts"
-import { checkedTree, prepareWorktree, SETUP, SetupFailed, type PlumbingLog, type PreparedWorktree } from "./worktree.ts"
+import { checkedTree, claimWorktrees, prepareWorktree, reapWorktrees, SETUP, SetupFailed, type PlumbingLog, type PreparedWorktree } from "./worktree.ts"
 
 export type QueueCheck = CheckSpec &
   Readonly<{
@@ -141,6 +141,9 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     worktrees: join(options.workdir, "worktrees", log.id),
   }
   mkdirSync(run.worktrees, { recursive: true })
+  // This run's own claim first, so a run starting alongside this one never
+  // reads the absence of a pid file as this run's death.
+  claimWorktrees(run.worktrees)
   const merged: string[] = []
   const failed: string[] = []
   const stuck: string[] = []
@@ -162,6 +165,16 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     pin: targetSha,
     target: options.target,
   })
+
+  // The worktrees of runs that are no longer alive, taken down before this run
+  // makes any of its own: a killed run removes nothing, so its worktrees stay
+  // registered in the repository and on disk until some later run clears them
+  // (plan § Owed after M5; R8's stayed). One row per worktree, because a
+  // directory that vanishes with nothing said about it is the silent kind of
+  // cleanup nobody can audit.
+  for (const taken of await reapWorktrees(git, join(options.workdir, "worktrees"), log.id)) {
+    log.write({ kind: "reap", of: taken.of, path: taken.path, why: taken.why })
+  }
 
   // The target moved by hand? Read before any fact is written, so a hand merge
   // of a submitted head is reported before the catch-up below accounts for it
@@ -315,13 +328,14 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
  */
 async function prepare(run: Run, entry: QueueEntry, commit: string, path: string, phase: string): Promise<PreparedWorktree> {
   const logDir = join(run.options.workdir, "checks", run.log.id, phase)
+  const about = { branch: entry.branch, head: entry.change.head, name: SETUP, phase }
   return prepareWorktree(run.git, run.options.repo, commit, path, {
     env: run.options.env,
     plumbing: run.options.plumbing,
     process: run.options.process,
-    record: ({ result, start, end: ended }) =>
-      record(run, { branch: entry.branch, end: ended, head: entry.change.head, name: SETUP, phase, start }, result),
+    record: ({ result, start, end: ended }) => record(run, { ...about, end: ended, start }, result),
     ...(run.options.setup === undefined ? {} : { setup: { logDir, run: run.options.setup, scratch: run.scratch } }),
+    starting: ({ log, start }) => started(run, { ...about, log, start }),
     targetSha: run.targetSha,
   })
 }
@@ -759,30 +773,46 @@ async function runPhase(
 
 async function check(run: Run, entry: QueueEntry, spec: QueueCheck, cwd: string, tree: CheckedTree, phase: string): Promise<CheckResult> {
   await restoreScripts(run, spec, cwd)
+  const logDir = join(run.options.workdir, "checks", run.log.id, phase)
+  const about = {
+    branch: entry.branch,
+    head: entry.change.head,
+    name: spec.name,
+    phase,
+    ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }),
+  }
   const start = new Date().toISOString()
+  started(run, { ...about, log: checkLogPath(logDir, spec.name), start })
   const result = await runCheck({
     cwd,
     env: run.options.env,
-    logDir: join(run.options.workdir, "checks", run.log.id, phase),
+    logDir,
     process: run.options.process,
     scratch: run.scratch,
     spec,
     tree,
   })
-  record(
-    run,
-    {
-      branch: entry.branch,
-      end: new Date().toISOString(),
-      head: entry.change.head,
-      name: spec.name,
-      phase,
-      start,
-      ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }),
-    },
-    result,
-  )
+  record(run, { ...about, end: new Date().toISOString(), start }, result)
   return result
+}
+
+/**
+ * The row that says a program the queue runs has STARTED, written before it
+ * runs: the same `check` kind, the same names, and the log file it is about to
+ * write, read from the same place the driver will read it. A reader tells the
+ * two rows apart by `end`, which only ending can say and which a start row
+ * therefore does not carry (neither does it carry `ms`); the end row is
+ * exactly what it always was, so nothing that reads one changes.
+ *
+ * Without this row a queue run's log is silent for the whole length of a
+ * check, and a check that is merely long reads as a hung queue: R8 was stopped
+ * as a hang while a 28.7-minute check ran (plan § Owed after M5).
+ */
+function started(
+  run: Run,
+  about: Readonly<{ branch: string; head: string; name: string; phase: string; start: string; log: string; scripts?: readonly string[] }>,
+): void {
+  run.log.write({ ...about, kind: "check" })
 }
 
 /**
@@ -967,6 +997,13 @@ async function finish(
   // target as this run left it is right there; a run that merged nothing left
   // it where it found it.
   const targetNow = lists.merged.length === 0 ? run.targetSha : ((await refAt(run.git, `refs/remotes/${run.options.remote}/${run.options.target}`)) ?? run.targetSha)
+  // A run that reaches here removed every worktree it made, so its own
+  // directory and the pid file in it have nothing left to say. Taking them
+  // leaves exactly the runs that did NOT end under the worktrees root, which
+  // is what the next run's reap reads. `queue up` is one process running many
+  // rounds, so without this every round of a day-long service would leave a
+  // directory behind that no reap may touch: its pid is alive.
+  rmSync(run.worktrees, { force: true, recursive: true })
   return {
     base: run.targetSha,
     config: run.options.configBlob,

@@ -402,13 +402,19 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
     case "change":
       return `${where}: ${String(rest.decision ?? rest.state)}`
     case "check":
-      return `${String(rest.name)} ran for ${where} in ${String(rest.ms)} ms`
+      // Two rows per check: `ms` is the end row's, and its absence is the
+      // start row, the one that says a long check is running rather than hung.
+      return rest.ms === undefined
+        ? `${String(rest.name)} started for ${where}`
+        : `${String(rest.name)} ran for ${where} in ${String(rest.ms)} ms`
     case "result":
       return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`
     case "merge":
       return `${where} merged as ${String(rest.commit).slice(0, 12)}`
     case "message":
       return `told ${String(rest.to)} about ${where}`
+    case "reap":
+      return `reaped the worktree ${String(rest.path)} of the run ${String(rest.of)}: ${String(rest.why)}`
     case "by-hand": {
       const pins =
         Array.isArray(rest.gitlinks) && rest.gitlinks.length > 0

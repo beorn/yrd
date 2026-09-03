@@ -7,9 +7,20 @@
  * the run itself (pin, target, config blob), each change considered and its
  * decision, each check's start and end with duration and log path, each merge,
  * and each message sent. A seventh, `by-hand`, appears only when the target
- * moved by hand: one record per commit the queue did not put there (E5). The
- * human line is a rendering of the record, never a second source: whatever a
- * reader prints, the file is what happened.
+ * moved by hand: one record per commit the queue did not put there (E5). An
+ * eighth, `reap`, appears only when a run before this one died without removing
+ * its worktrees: one record per worktree taken down. The human line is a
+ * rendering of the record, never a second source: whatever a reader prints, the
+ * file is what happened.
+ *
+ * A check writes its `check` kind twice, once at each end of it: the start row
+ * carries the name, the phase and the log the check is about to write, and the
+ * end row adds `end` and `ms`. `end` is what tells them apart — only ending
+ * can say it — so a reader after the result reads exactly what it always did,
+ * and a reader watching a run sees the check that is running now (plan § Owed
+ * after M5; a queue run whose log went quiet for 28.7 minutes was stopped as a
+ * hang). The target's `setup:` writes the same two rows under the name
+ * `setup`, because it is the longest thing a fresh worktree does.
  *
  * The file is named by this run's own id, minted here at open, so two runs
  * never write one file and a run that built nothing still has its own log.
@@ -18,7 +29,7 @@
 import { appendFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 
-export const LOG_KINDS = ["run", "change", "check", "result", "merge", "message", "by-hand"] as const
+export const LOG_KINDS = ["run", "change", "check", "result", "merge", "message", "by-hand", "reap"] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]
 

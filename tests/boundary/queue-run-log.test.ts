@@ -35,9 +35,11 @@
  *                       failed, stuck or waiting
  *   check      name     the check's key in the target's config
  *              branch, head   whose worktree it ran in
- *              start, end     ISO 8601
- *              ms       how long it took
- *              log      the file holding the check's own output
+ *              start, end     ISO 8601; a check writes this kind TWICE, once
+ *                       when it starts and once when it ends, and only the end
+ *                       row carries `end` — that is what tells them apart
+ *              ms       how long it took; the end row's, like `end`
+ *              log      the file holding the check's own output, on both rows
  *   result     branch, head, name
  *              result   pass, fail or stuck
  *              worktree the check's results in the change's worktree, in order
@@ -172,7 +174,8 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     expect(changes[0]?.head, run.report).toBe(headSha)
     expect(changes[0]?.decision, run.report).toBe("merged")
 
-    // check — start, end, duration and the check's own log.
+    // check — the start row, then the end row with duration; the check's own
+    // log on both.
     const checks = ofKind(records, "check")
     expect(checks.length, run.report).toBeGreaterThanOrEqual(1)
     for (const check of checks) {
@@ -180,9 +183,11 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       expect(check.branch, run.report).toBe(branch)
       expect(check.head, run.report).toBe(headSha)
       expect(check.start, run.report).toEqual(expect.any(String))
+      expect(check.log, run.report).toEqual(expect.any(String))
+    }
+    for (const check of checks.filter((record) => record.end !== undefined)) {
       expect(check.end, run.report).toEqual(expect.any(String))
       expect(typeof check.ms, run.report).toBe("number")
-      expect(check.log, run.report).toEqual(expect.any(String))
     }
 
     // result — how it ended, and against which check.
@@ -207,6 +212,53 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     expect(message.to, run.report).toEqual(expect.any(String))
     expect(message.about, run.report).toBe(branch)
     expect(message.says, run.report).toBe("merged")
+  })
+
+  /**
+   * A CHECK SAYS IT STARTED, not only how it went.
+   *
+   * With one row per check, written when the check ends, a queue run's log is
+   * silent for the whole length of a running check: R8 was stopped as a hang
+   * while a 28.7-minute check ran, because nothing in the log said which check
+   * was running or where its output was going (plan § Owed after M5).
+   *
+   * The shape: the same `check` kind, and `end` is the discriminator. A start
+   * row has `name`, `phase`, `start` and `log` and no `end`; the end row is
+   * exactly what it always was, `end` and `ms` included, so every reader of a
+   * finished check is unchanged. The log path is the same on both, which is
+   * what makes the start row useful: it names the file to tail.
+   */
+  it("says a check started before it says how it went, naming the same log", async () => {
+    const { repo } = await boundaryRepository({ exit: 0, notify: true })
+    const { branch } = await submitOneCommit(repo, "green")
+
+    const run = await queueRunOnce(repo)
+    const { records } = await logOfQueueRun(run)
+
+    const checks = ofKind(records, "check")
+    const starts = checks.filter((record) => record.end === undefined)
+    const ends = checks.filter((record) => record.end !== undefined)
+    expect(ends.length, run.report).toBeGreaterThanOrEqual(1)
+    // One start per end, and every start says which check, where, and where
+    // its output is going — everything a reader watching a run needs.
+    expect(starts.length, run.report).toBe(ends.length)
+    for (const start of starts) {
+      expect(start.branch, run.report).toBe(branch)
+      expect(start.name, run.report).toEqual(expect.any(String))
+      expect(start.phase, run.report).toEqual(expect.any(String))
+      expect(start.start, run.report).toEqual(expect.any(String))
+      expect(start.log, run.report).toEqual(expect.any(String))
+      expect(start.ms, run.report).toBeUndefined()
+    }
+
+    // Per check, in the order the file has them: the start comes first, and
+    // names the log the end row names.
+    const key = (record: LogRecord): string => `${String(record.phase)}/${String(record.name)}`
+    for (const end of ends) {
+      const before = checks.slice(0, checks.indexOf(end)).filter((record) => key(record) === key(end) && record.end === undefined)
+      expect(before.length, `${run.report}\nno start row before ${key(end)}`).toBe(1)
+      expect(before[0]?.log, run.report).toBe(end.log)
+    }
   })
 
   /**

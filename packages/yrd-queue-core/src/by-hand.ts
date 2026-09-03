@@ -14,9 +14,17 @@
  * onto the old base and the queue run judges every change on the new one; a
  * rollback is a person's `git revert`, never the queue's.
  *
- * The cutover is the newest first-parent commit that touched `.yrd.yml`: the
- * declaration that switched the queue on (§ Cutover). Everything at or before
- * it is the old queue's history and is never judged.
+ * The cutover is the first-parent commit that INTRODUCED the `remote:` line in
+ * `.yrd.yml`: the one line that switches this core on, and the day the queue's
+ * own history starts (§ Cutover; A5). Everything at or before it is the old
+ * queue's history and is never judged.
+ *
+ * It used to be the NEWEST first-parent commit that touched `.yrd.yml` at all,
+ * and that was a hole the plan named at the cutover: a hand push that itself
+ * edits the declaration became the boundary, so it hid itself and everything
+ * under it (§ Owed after M5). The introduction cannot be hidden that way,
+ * because a later edit is not an introduction — it is judged like any other
+ * first-parent commit.
  *
  * The queue remembers nothing, so what it has already reported is read from
  * git too. A commit some change's merged fact names in `Merge:` is accounted
@@ -52,7 +60,8 @@ export type ByHandCommit = Readonly<{
 /**
  * The hand commits on the target's first-parent line since the cutover that
  * the queue has not yet accounted for, oldest first. Loud when no commit on
- * that line touched `.yrd.yml`: a target with no declaration has no queue.
+ * that line introduced the `remote:` line: a target that never named this core
+ * has no queue.
  */
 export async function byHandCommits(
   git: Git,
@@ -60,12 +69,7 @@ export async function byHandCommits(
   targetSha: string,
   entries: QueueRead,
 ): Promise<readonly ByHandCommit[]> {
-  const cutover = (await git(["log", "--first-parent", "-1", "--format=%H", targetSha, "--", ".yrd.yml"])).trim()
-  if (cutover === "") {
-    throw new Error(
-      `no commit on ${target}'s first-parent line at ${targetSha.slice(0, 12)} touched .yrd.yml; the queue cannot tell where its own history starts`,
-    )
-  }
+  const cutover = await cutoverAt(git, target, targetSha)
   const byName = new Map(
     entries.map((entry) => [changeName(entry.branch, entry.change.head), entry.change.facts.at(-1)]),
   )
@@ -102,6 +106,41 @@ export async function byHandCommits(
     found.push({ at: new Date(at), commit, gitlinks, parents, subject, target, why })
   }
   return found.reverse()
+}
+
+/**
+ * The cutover boundary: the first-parent commit that introduced the `remote:`
+ * line in `.yrd.yml`. Loud when no commit on that line ever did — a target
+ * that never named this core has no queue, and no history of its own to start.
+ *
+ * One git invocation, the cheapest correct reading of the three that were on
+ * the table. The pickaxe already answers "where did this string's count change
+ * in this file", `--first-parent` already makes a merge's diff its first
+ * parent's, and the OLDEST answer is the introduction; walking the blobs down
+ * the line instead would be one `git show` per commit for the same answer, and
+ * `--diff-filter=A` would name where the FILE came in, which is a different
+ * and older commit — `.yrd.yml` predates the line by the whole life of the old
+ * queue. Measured on 1,565 first-parent commits: 29 ms, the same as the
+ * unfiltered path-limited log this replaces.
+ *
+ * The one thing it cannot tell apart is a `remote:` that is not the key — a
+ * comment or a value that spells it — introduced in an older commit; that
+ * commit would be the boundary instead. Nothing in the declaration's grammar
+ * makes that likely, and the failure is loud rather than silent: the boundary
+ * sits too far back and the queue reports MORE hand commits, never fewer.
+ */
+async function cutoverAt(git: Git, target: string, targetSha: string): Promise<string> {
+  const introduced = (await git(["log", "--first-parent", "-Sremote:", "--format=%H", targetSha, "--", ".yrd.yml"]))
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .at(-1)
+  if (introduced === undefined) {
+    throw new Error(
+      `no commit on ${target}'s first-parent line at ${targetSha.slice(0, 12)} introduced the remote: line in .yrd.yml; the queue cannot tell where its own history starts`,
+    )
+  }
+  return introduced
 }
 
 /** Why a commit is not a merge the queue made, or undefined when it is one. */
