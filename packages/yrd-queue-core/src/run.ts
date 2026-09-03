@@ -56,6 +56,8 @@ export type QueueRunOptions = Readonly<{
   owner: string
   /** Where logs, worktrees and scratch live; on the root filesystem. */
   workdir: string
+  /** Why the queue is in the garage, when it is: a hand-run round says so on its own record. */
+  garage?: string
   /** Receives every log record as it is written, for the human rendering. */
   render?: (record: LogRecord) => void
   /** The logger the worktree plumbing narrates to; hand one over only at trace. */
@@ -74,6 +76,8 @@ export type QueueRunOutcome = Readonly<{
   config: string
   /** The target after the run. */
   target: string
+  /** The garage's reason, when the round was made in the garage. */
+  garage?: string
   merged: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
@@ -116,7 +120,16 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // and this run claims nothing about it.
   // `built` is the Run records this queue run minted: none, ever, in this core;
   // the field stays so a reader of either core's log asks one question.
-  log.write({ base: targetSha, built: [], checks: options.checks.map((check) => check.name), config: options.configBlob, kind: "run", pin: targetSha, target: options.target })
+  log.write({
+    base: targetSha,
+    built: [],
+    checks: options.checks.map((check) => check.name),
+    config: options.configBlob,
+    ...(options.garage === undefined ? {} : { garage: options.garage }),
+    kind: "run",
+    pin: targetSha,
+    target: options.target,
+  })
 
   // The submitter's own doing first: a branch that is gone, or that moved off
   // a head, ends that head's change failed with the reason and no message.
@@ -570,5 +583,14 @@ function trailerOf(fact: Fact | undefined, name: string): string | undefined {
 }
 
 function finish(run: Run, exitCode: 0 | 1 | 2, lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[] }>): QueueRunOutcome {
-  return { base: run.targetSha, config: run.options.configBlob, exitCode, log: run.log.path, run: run.log.id, target: run.targetSha, ...lists }
+  return {
+    base: run.targetSha,
+    config: run.options.configBlob,
+    exitCode,
+    ...(run.options.garage === undefined ? {} : { garage: run.options.garage }),
+    log: run.log.path,
+    run: run.log.id,
+    target: run.targetSha,
+    ...lists,
+  }
 }

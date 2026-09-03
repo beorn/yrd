@@ -30,6 +30,7 @@ import {
   type QueueConfig,
   type Row,
 } from "@yrd/queue-core"
+import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 export type CoreQueueCommand =
@@ -158,10 +159,14 @@ export async function coreQueueCommand(
 }
 
 function runOptions(repo: string, config: QueueConfig, workdir: string, env?: NodeJS.ProcessEnv, log?: ConditionalLogger) {
+  // A round made while the garage is open says so on its own record, so a
+  // reader of the log can tell the mechanic's rounds from the service's.
+  const garage = readGarageDeclaration(repo)
   return {
     checks: config.checks,
     configBlob: config.blob,
     env,
+    ...(garage === undefined ? {} : { garage: garage.reason }),
     notify: config.notify,
     owner: config.owner,
     // git-super narrates which submodule it borrowed and how long each phase
@@ -218,14 +223,15 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
   }
 }
 
-function describeRun(outcome: Readonly<{ exitCode: number; merged: readonly string[]; failed: readonly string[]; stuck: readonly string[]; log: string }>): string {
+function describeRun(outcome: Readonly<{ exitCode: number; merged: readonly string[]; failed: readonly string[]; stuck: readonly string[]; log: string; garage?: string }>): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
   const parts = [
     outcome.merged.length > 0 ? `merged ${outcome.merged.join(", ")}` : undefined,
     outcome.failed.length > 0 ? `failed ${outcome.failed.join(", ")}` : undefined,
     outcome.stuck.length > 0 ? `stuck ${outcome.stuck.join(", ")}` : undefined,
   ].filter((part): part is string => part !== undefined)
-  return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")} (log ${outcome.log})`
+  const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
+  return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`
 }
 
 function table(rows: readonly Row[]): string {
