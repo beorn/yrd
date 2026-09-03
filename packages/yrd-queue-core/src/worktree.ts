@@ -190,7 +190,12 @@ function directoriesIn(root: string): readonly string[] {
     return readdirSync(root, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
-  } catch {
+  } catch (error) {
+    // "There is no root yet" is the one honest absence. A root that exists and
+    // cannot be read — a permission, a file where the directory should be —
+    // used to read as "no dead runs", so every killed run's worktree stayed
+    // standing and nothing ever said why.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
     return []
   }
 }

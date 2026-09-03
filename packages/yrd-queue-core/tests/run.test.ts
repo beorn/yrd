@@ -571,6 +571,44 @@ describe("a queue run", () => {
     expect(messages(w)[0]?.text).toMatch(/ran past its bound/u)
   })
 
+  it("a check declaring a scripts: path the target does not carry is loud: the change ends stuck and names it (D5)", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const base = w.options({ on: ["submit"] })
+
+    const outcome = await queueRun({
+      ...base,
+      checks: base.checks.map((check) => ({ ...check, scripts: ["gates/absent.sh"] })),
+    })
+
+    // A gate the queue cannot restore from the protected side is the queue's
+    // own ground missing, never the submitter's: stuck, and nobody is billed.
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
+    expect(facts[1]?.subject).toContain("gates/absent.sh")
+    expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
+    expect(messages(w)[0]?.text).toContain("does not carry")
+  })
+
+  it("POSITIVE CONTROL: a declared scripts: path the target does carry is restored and judged (D5)", async () => {
+    // Without this, the loud case above is satisfied just as well by a
+    // `scripts:` list that can never be restored at all.
+    const w = await world()
+    const base = w.options({ exit: 0, on: ["submit"] })
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun({
+      ...base,
+      checks: base.checks.map((check) => ({ ...check, scripts: [".yrd.yml"] })),
+    })
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/one"])
+  })
+
   it("nothing submitted is nothing to do", async () => {
     const w = await world()
     const outcome = await queueRun(w.options({}))
