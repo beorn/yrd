@@ -30,7 +30,15 @@ type World = Readonly<{
   /** The target's `setup:`, exiting as the case says; it records its own working directory in `checkLog`, beside the check's. */
   setupCommand(exit: number): string
   options(
-    check: Readonly<{ exit?: number; sleep?: number; timeoutMs?: number; everywhere?: boolean; setup?: string }>,
+    check: Readonly<{
+      exit?: number
+      sleep?: number
+      timeoutMs?: number
+      everywhere?: boolean
+      setup?: string
+      /** The phases the one check runs in; absent means merge (ruling A1). */
+      on?: readonly ("submit" | "merge")[]
+    }>,
   ): QueueRunOptions
 }>
 
@@ -104,6 +112,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
         {
           environmentPassthrough: ["FAKE_EXIT", "FAKE_SLEEP", "FAKE_EVERYWHERE"],
           name: "verify",
+          on: check.on,
           run: fakeCheck,
           timeoutMs: check.timeoutMs,
         },
@@ -601,5 +610,92 @@ describe("the target's setup", () => {
     expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "missing", result: "stuck", whose: "queue" },
     ])
+  })
+})
+
+/**
+ * § Attribution — "a failing check is the submitter's only if it failed both
+ * times in the change's worktree and did not fail at the target on the same
+ * check; otherwise the change ends stuck, the queue's." That reading is the
+ * whole of it on BOTH paths: the on-submit path wrote failed the moment a
+ * check failed, so a defect of the environment was sent back to an author who
+ * could not have caused it.
+ */
+describe("an on-submit check is attributed before anyone is billed for it", () => {
+  it("fails in the change's worktree and passes at the target: the submitter's", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    // The check fails only where the change's own file is, so it fails twice
+    // in the change's worktree and passes at the target.
+    const outcome = await queueRun(w.options({ exit: 1, on: ["submit"] }))
+
+    expect(outcome.exitCode).toBe(1)
+    expect(outcome.failed).toEqual(["task/one"])
+    expect(outcome.stuck).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "failed", "sent"])
+    expect(facts[1]?.trailers).toEqual(
+      expect.arrayContaining([
+        ["Reason", "verify"],
+        ["Fault", "submitter"],
+      ]),
+    )
+    expect(messages(w)[0]).toMatchObject({ code: "verify", disposition: "author", kind: "send-back", recipient: "@dev/2" })
+    // Three runs of the one check, and only because it failed: twice in the
+    // change's worktree, once at the target.
+    const ran = whereRan(w).map(([, where]) => where)
+    expect(ran).toHaveLength(3)
+    expect(ran[0]).toBe(ran[1])
+    expect(ran[2]).not.toBe(ran[0])
+  })
+
+  it("fails at the target too: the queue's, so the change is stuck and nobody is billed", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ everywhere: true, exit: 1, on: ["submit"] }))
+
+    // Stuck, not failed: the target is red, and the change is not what broke it.
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.failed).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const facts = await readFacts(w.git, "task/one", head)
+    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
+    // `Reason` is the attribution's own word, the same one the merge path
+    // writes; which check produced it is in the subject and in the `Check:`
+    // trailers, so a reader of the fact alone still has the name.
+    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "inherited"]]))
+    expect(facts[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
+    expect(facts[1]?.subject).toContain("verify")
+    expect(facts[1]?.trailers.filter(([name]) => name === "Check").map(([, value]) => value)).toEqual([
+      expect.stringMatching(/^verify exit=1 /u),
+    ])
+    expect(messages(w)[0]).toMatchObject({ kind: "yrd-broken", recipient: "@cto" })
+    expect(messages(w)[0]?.text).toMatch(/the target is red, not the change/u)
+  })
+
+  it("a passing on-submit check is run once and attributes nothing", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0, on: ["submit"] }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/one"])
+    await fetchChanges(w)
+    expect((await readFacts(w.git, "task/one", head)).map((fact) => fact.kind)).toEqual([
+      "opened",
+      "checked",
+      "merged",
+      "sent",
+    ])
+    // The cost stays honest: the second run and the target run are for a
+    // FAILING check only.
+    expect(whereRan(w)).toHaveLength(1)
   })
 })

@@ -6,11 +6,17 @@
  * fresh worktree of the head and the on-submit checks; pass writes checked,
  * fail writes failed and tells the submitter, stuck writes stuck and stops the
  * run. Then the first checked change in line: the target plus its head in a
- * worktree (a conflict is a fail, the submitter's), the on-merge checks, and
- * for a failing check the same check again and at the target; pass with the
- * target still at the checked base and the branch still at the head
+ * worktree (a conflict is a fail, the submitter's), the on-merge checks; pass
+ * with the target still at the checked base and the branch still at the head
  * fast-forwards the target to the merge commit. Every ended change sends one
  * message, after its ended fact is written, with that fact's sha as the id.
+ *
+ * A failing check is attributed before anything is billed for it, at submit
+ * and at merge alike (§ Attribution): the same check again in the change's own
+ * worktree, and at the target. Only a failure that repeats there and passes at
+ * the target is the submitter's; a coin flip or a red target ends the change
+ * stuck, the queue's. One reading for both phases, so where in the run a
+ * failure happened to show can never decide whose it is.
  *
  * Every worktree this run makes is prepared before anything is judged in it:
  * the target's `setup:`, once, after materialization and before the first
@@ -354,14 +360,11 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
         trailers: [["Reason", stuckOne.name], ...checkTrailers(results)],
       })
     }
-    const failedOne = results.find((result) => result.result === "fail")
-    if (failedOne !== undefined) {
-      return end(run, entry, "failed", {
-        remedy: `fix ${failedOne.name} (log: ${failedOne.log}), push, and submit again`,
-        subject: `${branch} failed ${failedOne.name}`,
-        trailers: [["Reason", failedOne.name], ...checkTrailers(results)],
-      })
-    }
+    const failing = results.filter((result) => result.result === "fail")
+    // Awaited, not returned: the attribution runs the check again in THIS
+    // worktree, and an async function runs its `finally` before it settles a
+    // returned promise, so a bare return would remove the tree out from under it.
+    if (failing.length > 0) return await endFailing(run, entry, results, failing, worktree.path, "submit")
     await appendFact(run.git, {
       branch,
       head,
@@ -485,20 +488,9 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       })
     }
     const failing = results.filter((result) => result.result === "fail")
-    if (failing.length > 0) {
-      const verdict = await attribute(run, entry, failing, worktree.path)
-      if (verdict.result === "stuck") {
-        return end(run, entry, "stuck", {
-          subject: `${branch}: ${verdict.why}`,
-          trailers: [["Reason", verdict.kind], ...checkTrailers(results)],
-        })
-      }
-      return end(run, entry, "failed", {
-        remedy: `fix ${failing[0]?.name ?? "the check"} (log: ${failing[0]?.log ?? ""}), push, and submit again`,
-        subject: `${branch} failed ${failing.map((result) => result.name).join(", ")} at merge`,
-        trailers: [["Reason", failing[0]?.name ?? "check"], ...checkTrailers(results)],
-      })
-    }
+    // Awaited for the same reason as at submit: the attribution judges in this
+    // worktree, and the `finally` below must not remove it first.
+    if (failing.length > 0) return await endFailing(run, entry, results, failing, worktree.path, "merge")
     // Pass. The merge is ours to make only while the target is still where this
     // change was checked against and the branch still at the head; otherwise the
     // change keeps its place and is checked again at the new target next run.
@@ -538,21 +530,62 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
 }
 
 /**
+ * What one phase's failing checks end the change as, at submit and at merge
+ * alike: the attribution decides whose the failure is, and only the
+ * submitter's ends failed. The two phases share this reading, so which phase a
+ * failure happened to show in can never decide who is billed for it — an
+ * on-submit check that fails on a defect of the environment used to send the
+ * change back the moment it failed, with no second reading at all.
+ */
+async function endFailing(
+  run: Run,
+  entry: QueueEntry,
+  results: readonly CheckResult[],
+  failing: readonly CheckResult[],
+  changeWorktree: string,
+  phase: "submit" | "merge",
+): Promise<Ended> {
+  const { branch } = entry
+  const verdict = await attribute(run, entry, failing, changeWorktree)
+  if (verdict.result === "stuck") {
+    // `Reason` is the attribution's own word for why nobody is billed —
+    // `inherited`, `flake`, `no-evidence` — and the check that produced it is
+    // in the subject and in this fact's `Check:` trailers.
+    return end(run, entry, "stuck", {
+      subject: `${branch}: ${verdict.why}`,
+      trailers: [["Reason", verdict.kind], ...checkTrailers(results)],
+    })
+  }
+  const first = failing[0]
+  return end(run, entry, "failed", {
+    remedy: `fix ${first?.name ?? "the check"} (log: ${first?.log ?? ""}), push, and submit again`,
+    subject: `${branch} failed ${failing.map((result) => result.name).join(", ")}${phase === "merge" ? " at merge" : ""}`,
+    trailers: [["Reason", first?.name ?? "check"], ...checkTrailers(results)],
+  })
+}
+
+/**
  * A failing check is the submitter's only if it fails again in the change's
  * worktree and does not fail at the target on the same check; otherwise the
  * change ends stuck, the queue's. Nobody is billed for a coin flip or for a
  * red target.
+ *
+ * `changeWorktree` is whichever tree the failure came from — the head alone on
+ * the submit path, the target plus the head on the merge path — because the
+ * question is whether the failure is in the change, and the change is what
+ * that tree carries either way. The second run and the target run cost two
+ * more check runs, and they happen only for a check that already failed.
  */
 async function attribute(
   run: Run,
   entry: QueueEntry,
   failing: readonly CheckResult[],
-  mergeWorktree: string,
+  changeWorktree: string,
 ): Promise<Readonly<{ result: "fail" | "stuck"; kind: string; why: string }>> {
   for (const first of failing) {
     const spec = run.options.checks.find((check) => check.name === first.name)
     if (spec === undefined) return { kind: "no-evidence", result: "stuck", why: `${first.name} is not a declared check` }
-    const again = await check(run, entry, spec, mergeWorktree, "again")
+    const again = await check(run, entry, spec, changeWorktree, "again")
     if (again.result !== "fail") {
       return { kind: "flake", result: "stuck", why: `${first.name} failed once and passed once in the change's worktree; the queue does not merge on a coin flip; fix or remove the test` }
     }
