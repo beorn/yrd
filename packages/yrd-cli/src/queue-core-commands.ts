@@ -17,11 +17,11 @@ import type { ConditionalLogger } from "loggily"
 import {
   gitIn,
   hintsIn,
-  lane,
   list,
   queueRun,
   readConfig,
   readHints,
+  readQueue,
   resolveRemote,
   runCheck,
   show,
@@ -191,7 +191,7 @@ export async function coreQueueCommand(
       }
     }
     case "list": {
-      const rows = list(await lane(git, config.remote, config.target))
+      const rows = list(await readQueue(git, config.remote, config.target))
       emit(io, options.json, { changes: rows }, table(rows))
       return 0
     }
@@ -218,7 +218,7 @@ export async function coreQueueCommand(
       return results.some((result) => result.result === "stuck") ? 2 : results.some((result) => result.result === "fail") ? 1 : 0
     }
     case "show": {
-      const changes = show(await lane(git, config.remote, config.target), request.branch)
+      const changes = show(await readQueue(git, config.remote, config.target), request.branch)
       emit(
         io,
         options.json,

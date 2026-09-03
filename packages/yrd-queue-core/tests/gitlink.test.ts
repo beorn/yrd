@@ -16,7 +16,7 @@
  * and 13.7 s per judged change.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
@@ -167,6 +167,18 @@ async function submitPin(w: World, branch: string, sha: string): Promise<string>
   return head
 }
 
+/** The component's pin moved on main itself, by hand, and pushed: the case the gitlink check never sees (E5). */
+async function pinByHand(w: World, sha: string): Promise<string> {
+  await w.git(["checkout", "--quiet", "main"])
+  const sub = gitIn(join(w.work, "component"))
+  await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+  await sub(["checkout", "--quiet", sha])
+  await w.git(["add", "component"])
+  await w.git(["commit", "--quiet", "-m", `pin the component at ${sha.slice(0, 12)} by hand`])
+  await w.git(["push", "--quiet", "origin", "main"])
+  return (await w.git(["rev-parse", "HEAD"])).trim()
+}
+
 /** A change that touches a file and no gitlink, submitted. */
 async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
@@ -216,6 +228,27 @@ describe("the built-in gitlink check", () => {
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/file"])
+    expect(w.fetches()).toBe(0)
+  })
+
+  it("a pin moved on the target by hand is reported with its path, and no component is asked about it (E5)", async () => {
+    const w = await world()
+    const hand = await pinByHand(w, w.offMain)
+
+    const outcome = await queueRun(w.options())
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.outside).toEqual([hand])
+    const log = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(log.filter((record) => record.kind === "outside")).toMatchObject([{ commit: hand, gitlinks: ["component"] }])
+    const told = log.filter((record) => record.kind === "message")
+    expect(told).toMatchObject([{ id: hand, says: "outside", to: "@cto" }])
+    expect(told[0]?.text).toContain(`main moved by hand at ${hand.slice(0, 12)}`)
+    expect(told[0]?.text).toContain("it moved the pin at component")
+    // The report reads the commit; it never judges the pin, so no component is asked.
     expect(w.fetches()).toBe(0)
   })
 

@@ -2,7 +2,8 @@
  * A change's facts, which are its commits ([plan](../../../../pm/@i/10-yrd/plan.md)
  * § The final design, The change).
  *
- * A change is the ref `refs/yrd/changes/<branch>/<sha>`. Its commits are the
+ * A change is the ref `refs/yrd/changes/<branch>@<sha>`, its name under the
+ * one prefix. Its commits are the
  * only record the queue keeps: opened, then checked, then ended, then sent.
  * Each fact is ONE commit, written once and never amended, so the ref only
  * moves forward and a reader can prove what happened from git alone.
@@ -19,7 +20,9 @@
  * - the message is a prose first line, then trailers, one meaning each, with
  *   `Fact:` naming the kind and `Branch:`, `Head:`, `Target:` on every fact,
  *   `Opened:`, `Submitter:` and `Work-Item:` carried forward from the first
- *   fact, and an ended fact's result carried onto its sent fact, so the tip
+ *   fact, a sent fact naming who it went to (`To:`) and how it went
+ *   (`Delivery: sent`, `logged` or `failed`), and an ended fact's result
+ *   carried onto its sent fact, so the tip
  *   fact's trailers are the whole answer about the change and one
  *   `for-each-ref` answers `yrd queue list` with no history walk.
  *
@@ -159,6 +162,13 @@ export function trailer(fact: Fact, name: string): string | undefined {
 /** Every value of a trailer, in order. */
 export function trailers(fact: Fact, name: string): readonly string[] {
   return fact.trailers.filter(([key]) => key === name).map(([, value]) => value)
+}
+
+/** The kind a tip stands for: a sent fact stands for the ended state it repeats (`State:`, ruling A2). */
+export function endedKind(tip: Fact): FactKind {
+  if (tip.kind !== "sent") return tip.kind
+  const state = trailer(tip, "State")
+  return state === "merged" || state === "failed" || state === "stuck" ? state : "sent"
 }
 
 /** The fact a commit is, from its sha, committer date and message; undefined when the commit is not one. */

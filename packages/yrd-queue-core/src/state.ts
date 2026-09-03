@@ -58,7 +58,7 @@ export function readChange(change: ChangeFacts): ChangeReading {
   if (change.branchHead !== change.head) return { state: "failed", reason: "replaced" }
 
   const last = change.facts.at(-1)
-  // A change exists only when submitted (E2): the lane lists change refs and
+  // A change exists only when submitted (E2): the queue read lists change refs and
   // nothing else, and every change ref ends in a fact. Nothing without facts
   // can reach here, and a reading of one would be a state made up on the spot.
   if (last === undefined) {
@@ -119,7 +119,12 @@ export function openedAt(change: ChangeFacts): number {
   return time
 }
 
-/** A failed fact's `Reason` (a check's name, conflict, config-invalid, replaced, deleted); a stuck fact's `Reason` (flake, inherited, no-evidence) or its `Cause`. */
+/**
+ * A failed fact's `Reason` (a check's name, conflict, config-invalid,
+ * unrelated-history, gitlink-off-main, replaced, deleted) or a stuck fact's
+ * (a check's name, flake, inherited, no-evidence, crash): one key on both,
+ * because stuck is always the queue's and needs no second word for it.
+ */
 function reasonOf(fact: Fact): string | undefined {
-  return fact.trailers.find(([name]) => name === "Reason")?.[1] ?? fact.trailers.find(([name]) => name === "Cause")?.[1]
+  return fact.trailers.find(([name]) => name === "Reason")?.[1]
 }

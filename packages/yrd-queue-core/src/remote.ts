@@ -1,22 +1,22 @@
 /**
- * The lane: every change at the queue's remote, read
- * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, Store and The
- * change; ruling E3, which amends D8).
+ * The queue read: one reading of the remote that yields the queue, the
+ * changes and where each stands ([plan](../../../../pm/@i/10-yrd/plan.md)
+ * § The final design, Store and The change; ruling E3, which amends D8).
  *
  * A branch is its ref at the `yrd` remote. A change is the ref
- * `refs/yrd/changes/<branch>/<sha>` beside it, and a branch with no change is
- * not a change (E2): the lane lists what was submitted and nothing else. The
- * remote is the one store; a working repository is a reader that fetches those
- * refs before it reads. Nothing here stores a status: the lane is recomputed
- * from the remote's refs every time it is asked for, in a fixed number of git
- * invocations however many changes there are — one `ls-remote`, one fetch of
- * the change refs, one fetch of exactly the branches they name (the target
- * among them), one `for-each-ref` for every change's tip fact, one for
- * ancestry — because the tip fact's trailers are the whole derived state and
- * no history is walked. The change refs are read FIRST and the branches follow
- * from them, so a remote with thousands of branches the queue has nothing to
- * do with is never fetched (E3; measured 2026-09-02: the root's origin holds
- * 7,387 branches, and fetching them all cost 17 s a round).
+ * `refs/yrd/changes/<branch>@<sha>` beside it, and a branch with no change is
+ * not a change (E2): the queue read lists what was submitted and nothing
+ * else. The remote is the one store; a working repository is a reader that
+ * fetches those refs before it reads. Nothing here stores a status: the queue
+ * is read again from the remote's refs every time it is asked for, in a fixed
+ * number of git invocations however many changes there are — one `ls-remote`,
+ * one fetch of the change refs, one fetch of exactly the branches they name
+ * (the target among them), one `for-each-ref` for every change's tip fact,
+ * one for ancestry — because the tip fact's trailers are the whole derived
+ * state and no history is walked. The change refs are read FIRST and the
+ * branches follow from them, so a remote with thousands of branches the queue
+ * has nothing to do with is never fetched (E3; measured 2026-09-02: the root's
+ * origin holds 7,387 branches, and fetching them all cost 17 s a round).
  */
 
 import { factFrom, type Fact, type Git } from "./facts.ts"
@@ -24,12 +24,15 @@ import { isAncestor } from "./git.ts"
 import { CHANGES, changeRef, parseChangeRef } from "./refs.ts"
 import { readChange, type ChangeFacts, type ChangeReading } from "./state.ts"
 
-/** One change as the lane sees it. */
-export type LaneEntry = Readonly<{
+/** One change as the queue read sees it. */
+export type QueueEntry = Readonly<{
   branch: string
   change: ChangeFacts
   reading: ChangeReading
 }>
+
+/** What one reading of the remote yields: every change, and where each stands. */
+export type QueueRead = readonly QueueEntry[]
 
 /**
  * Every change at the remote, read: one entry per change ref, and nothing for
@@ -37,7 +40,7 @@ export type LaneEntry = Readonly<{
  * Order is not decided here; `inLine` in state.ts is the one place that knows
  * the position in line.
  */
-export async function lane(git: Git, remote: string, target: string): Promise<readonly LaneEntry[]> {
+export async function readQueue(git: Git, remote: string, target: string): Promise<QueueRead> {
   // Where every branch and every change stands at the remote, in one reading.
   // Branch heads are read from here and never from a tracking ref, so a stale
   // local ref can never speak for the remote.
@@ -96,14 +99,14 @@ export async function lane(git: Git, remote: string, target: string): Promise<re
       .filter((line) => line !== ""),
   )
 
-  const entries: LaneEntry[] = []
+  const entries: QueueEntry[] = []
   for (const { branch, head } of changeRefs) {
     const branchHead = heads.get(branch)
     const tip = tips.get(changeRef(branch, head))
     // The ls-remote listed this change and the fetch was to bring it: a change
-    // gone between the two readings is two moments, not a lane, and is loud.
+    // gone between the two readings is two moments, not one reading, and is loud.
     if (tip === undefined) {
-      throw new Error(`${changeRef(branch, head)} was at ${remote} but not here after the fetch; read the lane again`)
+      throw new Error(`${changeRef(branch, head)} was at ${remote} but not here after the fetch; read the queue again`)
     }
     // A head that is a branch tip was answered by the one reading above; an
     // older head of a branch that moved on, or whose branch is gone, is asked

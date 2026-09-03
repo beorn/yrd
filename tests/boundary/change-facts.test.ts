@@ -1,6 +1,6 @@
 /**
  * @failure A change's facts are the queue's whole store. The plan says a
- *          submit opens `refs/yrd/changes/<branch>/<head>`, that each fact is
+ *          submit opens `refs/yrd/changes/<branch>@<head>`, that each fact is
  *          one commit written once and never amended, that the ref only moves
  *          forward — opened, then checked, then ended, then sent — and that
  *          the tip fact's trailers are the entire answer for that change.
@@ -116,15 +116,16 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
     // carries any ref under refs/yrd/. The change's record is a row in the
     // local clone's .git/yrd, so a fresh clone of the shared repository knows
     // nothing about it.
-    it("a submit opens refs/yrd/changes/<branch>/<head> in the shared repository", async () => {
+    it("a submit opens refs/yrd/changes/<branch>@<head> in the shared repository", async () => {
       const { boundary, change } = await submitted({ exit: 0 }, "opened")
 
       const read = await readFacts(boundary, change)
 
       expect(read.exists, read.report).toBe(true)
       // The branch has a slash in it, which is the case the naming rule exists
-      // for: the head sha is the last segment, one level below the branch name.
-      expect(read.ref, read.report).toBe(`refs/yrd/changes/${change.branch}/${change.headSha}`)
+      // for: the change's name is the branch then `@` then the head sha, so
+      // the sha sits inside the branch's last segment and is read from the right.
+      expect(read.ref, read.report).toBe(`refs/yrd/changes/${change.branch}@${change.headSha}`)
       expect(change.branch, read.report).toContain("/")
     })
 
@@ -251,7 +252,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
 
     // today: red — no change ref. The queue run exits 2 (M2 landed that) but
     // writes no ref a reader can see, so nothing records WHY it stopped.
-    it("a stuck change ends with one stuck fact, the queue's fault, and its cause", async () => {
+    it("a stuck change ends with one stuck fact and its reason, with no fault line: stuck is always the queue's", async () => {
       const { boundary, change } = await submitted({ exit: 2, notify: true }, "stuck")
 
       const run = await queueRunOnce(boundary.repo)
@@ -264,8 +265,8 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
 
       const stuck = read.facts.find((fact) => fact.kind === "stuck")
       if (stuck === undefined) throw new Error(report)
-      expect(stuck.trailers.get("Fault")?.[0] ?? "", report).toBe("queue")
-      expect(stuck.trailers.get("Cause")?.[0] ?? "", report).not.toBe("")
+      expect(stuck.trailers.get("Fault"), report).toBeUndefined()
+      expect(stuck.trailers.get("Reason")?.[0] ?? "", report).not.toBe("")
     })
 
     // today: red — no change ref, so no parent chain and no merge commit to
@@ -461,7 +462,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
           `${kind} ${branch} at ${head.slice(0, 8)}\n\nFact: ${kind}\n${trailers}`,
         )
       }
-      await git(bare, "update-ref", `refs/yrd/changes/${branch}/${head}`, tip)
+      await git(bare, "update-ref", `refs/yrd/changes/${branch}@${head}`, tip)
 
       const read = await readChange(bare, { branch, headSha: head })
 

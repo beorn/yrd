@@ -391,10 +391,10 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
      * A queue run is one invocation, so it has its own log whether or not it
      * built a Run.
      *
-     * Measured 2026-09-02 on pin 0749260a: two consecutive empty-lane queue
+     * Measured 2026-09-02 on pin 0749260a: two consecutive empty-queue queue
      * runs in shared main both wrote `R700.jsonl`, because the file and the
      * `run` row were named by the last Run the incumbent had minted and an
-     * empty lane mints none. One file then held two `run` rows, both calling
+     * empty queue mints none. One file then held two `run` rows, both calling
      * themselves R700, and nothing in it said which queue run wrote which.
      */
     it("writes its own file, twice in a row", async () => {
@@ -449,7 +449,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * A completion the queue run recovered belongs to the queue run that made
    * it.
    *
-   * Measured 2026-09-02: each of two empty-lane queue runs appended the same
+   * Measured 2026-09-02: each of two empty-queue queue runs appended the same
    * seven historical change/result/merge triplets, recovered from the
    * checkpoint, so both logs claimed merges neither run made while the debug
    * log and git proved zero events. The recovery is worth one number; it is
@@ -462,7 +462,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     const merging = await queueRunOnce(repo)
     expect(ofKind((await logOfQueueRun(merging)).records, "merge"), merging.report).toHaveLength(1)
 
-    // The lane is empty now. Whatever this queue run settles from the last
+    // The queue is empty now. Whatever this queue run settles from the last
     // one, it merged nothing itself, and its log must say exactly that.
     const after = await queueRunOnce(repo)
     const { records } = await logOfQueueRun(after)
@@ -484,7 +484,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * Storage bookkeeping is plumbing, the same class as the git chatter moved
    * to trace in 8975957f, and a debug log should read as the queue's work.
    *
-   * Measured 2026-09-02 on pin 0749260a, one empty-lane queue run in shared
+   * Measured 2026-09-02 on pin 0749260a, one empty-queue queue run in shared
    * main: 565 rows at debug, of which 124 debug plus 62 span were
    * `yrd:storage:lock`, 61 each of debug, info and span were
    * `yrd:storage:append`, 64 were `yrd:core:replay` spans and 63 were
@@ -501,7 +501,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     const bookkeeping = (rows: readonly string[]): readonly string[] =>
       rows.filter((row) => /^\d\d:\d\d:\d\d [A-Z]+ (?:yrd:storage\b|yrd:core:replay\b)/u.test(row))
 
-    const emptyLaneAt = async (level: string): Promise<QueueRunResult> => {
+    const emptyQueueAt = async (level: string): Promise<QueueRunResult> => {
       const { repo } = await boundaryRepository({ exit: 0, notify: true })
       process.env.LOG_LEVEL = level
       try {
@@ -512,7 +512,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     }
 
     it("is absent at debug and present at trace", async () => {
-      const debug = await emptyLaneAt("debug")
+      const debug = await emptyQueueAt("debug")
       expect(debug.exitCode, debug.report).toBe(0)
       const debugRows = logRows(debug.stderr)
 
@@ -526,13 +526,13 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
 
       // The rows are moved, not deleted: a mechanic who wants the plumbing
       // asks for trace and gets all of it.
-      const trace = await emptyLaneAt("trace")
+      const trace = await emptyQueueAt("trace")
       expect(trace.exitCode, trace.report).toBe(0)
       expect(bookkeeping(logRows(trace.stderr)).length, trace.report).toBeGreaterThan(0)
     })
 
-    it("leaves an empty-lane run well under the plan's bound at debug", async () => {
-      const run = await emptyLaneAt("debug")
+    it("leaves an empty-queue run well under the plan's bound at debug", async () => {
+      const run = await emptyQueueAt("debug")
 
       const rows = logRows(run.stderr)
       expect(rows.length, run.report).toBeGreaterThan(3)

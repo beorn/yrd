@@ -329,9 +329,9 @@ export async function checkAttempts(checkLog: string): Promise<number> {
  * journal, a database or a module.
  * ------------------------------------------------------------------------- */
 
-/** Where a change's facts live: the branch name, then the head sha. */
+/** Where a change's facts live: the change's name, the branch then `@` then the head sha, under the one prefix. */
 export function changeRefName(branch: string, headSha: string): string {
-  return `refs/yrd/changes/${branch}/${headSha}`
+  return `refs/yrd/changes/${branch}@${headSha}`
 }
 
 /** Every change ref a repository carries, as `<sha> <name>` lines. */
@@ -363,7 +363,7 @@ export type ChangeFact = Readonly<{
 
 /** A change's ref as a reader sees it. */
 export type ChangeReading = Readonly<{
-  /** `refs/yrd/changes/<branch>/<head>`. */
+  /** `refs/yrd/changes/<branch>@<head>`. */
   ref: string
   exists: boolean
   /** The ref's tip sha, or "" when there is no such ref. */
@@ -590,9 +590,9 @@ function expectZero(
 /** The remote the plan pushes branches and their changes to. */
 export const YRD_REMOTE = "yrd"
 
-/** The ref a change is: `refs/yrd/changes/<branch>/<head sha>`. */
+/** The ref a change is: `refs/yrd/changes/<branch>@<head sha>`, the change's name under the one prefix. */
 export function changeRef(branch: string, headSha: string): string {
-  return `refs/yrd/changes/${branch}/${headSha}`
+  return `refs/yrd/changes/${branch}@${headSha}`
 }
 
 /** A git command that is allowed to fail — for asking whether a ref is there. */

@@ -219,16 +219,16 @@ describe("the submit path", { timeout: 120_000 }, () => {
   })
 
   /**
-   * The one collision the plan does refuse: git refs are file paths, so the
-   * change ref `refs/yrd/changes/<branch>/<sha>` forbids any ref under that
-   * name, and a branch NAMED like an existing change's `<branch>/<sha>` cannot
-   * open its own change. It is reachable only after the first branch is taken
-   * out — while it stands, `refs/heads/` refuses the name first.
-   *
-   * today: red — the first submit writes no change ref, so there is nothing
-   * for the second to collide with.
+   * Git refs are file paths, so a ref at a name forbids any ref under it. A
+   * change is named `<branch>@<sha>`, and that name is the ref's last part
+   * (operator, 2026-09-02): the sha sits inside the branch's last segment, so
+   * one change's ref is never a directory of another's, and a branch named
+   * like another change's `<branch>/<sha>` — the collision the earlier naming
+   * refused — opens its own change beside the first. It is reachable only
+   * after the first branch is taken out, because `refs/heads/` refuses the
+   * name first while it stands.
    */
-  it("a branch named like another change's <branch>/<sha> is refused at submit, and nothing lands", async () => {
+  it("a branch named like another change's <branch>/<sha> opens its own change beside it: the change's name is one segment", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0 })
     await addYrdRemote(repo, origin)
     const branch = "24099-widget"
@@ -238,21 +238,19 @@ describe("the submit path", { timeout: 120_000 }, () => {
     const changeTip = await refSha(origin, changeRef(branch, head1))
     expect(changeTip, first.report).toBeDefined()
 
-    // Take the branch out, so `refs/heads/` has room for the colliding name.
+    // Take the branch out, so `refs/heads/` has room for the second name.
     await git(repo, "push", "-q", "yrd", `:${branch}`)
 
     const other = await secondWorkingRepo(origin, "Bo Submitter", "bo@example.invalid")
-    const colliding = `${branch}/${head1}`
-    const head2 = await commitOnBranch(other, colliding)
+    const beside = `${branch}/${head1}`
+    const head2 = await commitOnBranch(other, beside)
 
-    const submit = await queueSubmit(other, colliding)
+    const submit = await queueSubmit(other, beside)
 
-    expect(submit.exitCode, submit.report).not.toBe(0)
-    // Loud: the refusal names the branch that cannot be opened.
-    expect(`${submit.stdout}${submit.stderr}`, submit.report).toContain(colliding)
-    // And atomic: neither half of the push is left behind.
-    expect(await refExists(origin, `refs/heads/${colliding}`), submit.report).toBe(false)
-    expect(await refExists(origin, changeRef(colliding, head2)), submit.report).toBe(false)
+    expect(submit.exitCode, submit.report).toBe(0)
+    // Both changes stand, each under its own name, and the first is untouched.
+    expect(await refExists(origin, `refs/heads/${beside}`), submit.report).toBe(true)
+    expect(await refExists(origin, changeRef(beside, head2)), submit.report).toBe(true)
     expect(await refSha(origin, changeRef(branch, head1)), submit.report).toBe(changeTip)
   })
 })
