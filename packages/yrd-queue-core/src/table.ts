@@ -24,7 +24,7 @@ export type Row = Readonly<{
   workItem?: string
   submitter?: string
   reason?: string
-  /** When the change was opened; absent for a branch pushed but never submitted. */
+  /** When the change was opened, from its first fact's `Opened:`. */
   since?: Date
   /** When the change's last fact was written: an ended change is as recent as its ending. */
   at?: Date

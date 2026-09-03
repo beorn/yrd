@@ -8,9 +8,9 @@
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { changeRef, gitIn, inLine, lane, readFacts, submit } from "../src/index.ts"
+import { changeRef, gitIn, inLine, lane, readFacts, refAt, submit } from "../src/index.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -116,17 +116,82 @@ describe("submit is one atomic push of the branch and its opened fact", () => {
   })
 })
 
-describe("the lane is every change at the remote, read", () => {
-  it("a bare push is queued, not invisible", async () => {
+describe("the lane is every submitted change at the remote, read", () => {
+  // Until ruling E2 (2026-09-02 evening) this asserted the opposite: a bare
+  // push read as a change in state queued, opened by the next run.
+  it("a branch pushed without a submit is not a change: the lane does not list it, and a submit later opens it (E2)", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/bare", "bare.txt")
     await w.git(["push", "--quiet", "origin", "task/bare"])
 
+    expect((await lane(w.git, "origin", "main")).find((entry) => entry.branch === "task/bare")).toBeUndefined()
+    // Nothing is lost: the branch stands at the remote until its author says so.
+    expect(await remoteRefs(w)).toContain("refs/heads/task/bare")
+
+    await submit(w.git, "origin", { branch: "task/bare", submitter: "@dev/2", target: "main" })
+    const opened = (await lane(w.git, "origin", "main")).find((entry) => entry.branch === "task/bare")
+    expect(opened?.change.head).toBe(head)
+    expect(opened?.reading.state).toBe("queued")
+  })
+
+  it("reads the change refs first and fetches only the branches they name: 200 unrelated branches are never fetched (E3)", async () => {
+    const w = await world()
+    // Another clone puts a commit this clone has never seen on 200 branches.
+    const other = join(dirname(w.work), "other")
+    await gitIn(dirname(w.work))(["clone", "--quiet", w.remote, other])
+    const og = gitIn(other)
+    await og(["config", "user.email", "bulk@yrd.test"])
+    await og(["config", "user.name", "bulk"])
+    writeFileSync(join(other, "bulk.txt"), "bulk\n")
+    await og(["add", "bulk.txt"])
+    await og(["commit", "--quiet", "-m", "bulk"])
+    const bulk = (await og(["rev-parse", "HEAD"])).trim()
+    await og(["push", "--quiet", "origin", "HEAD:refs/heads/bulk/0"])
+    await gitIn(w.remote)(
+      ["update-ref", "--stdin"],
+      Array.from({ length: 199 }, (_, index) => `create refs/heads/bulk/${index + 1} ${bulk}\n`).join(""),
+    )
+    await branchWithCommit(w, "task/one", "one.txt")
+    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: "main" })
+    await branchWithCommit(w, "task/two", "two.txt")
+    await submit(w.git, "origin", { branch: "task/two", submitter: "@dev/3", target: "main" })
+    // The submits' own pushes left tracking refs for the two; forget them, so
+    // that what stands after the lane is what the lane fetched.
+    await w.git(["update-ref", "-d", "refs/remotes/origin/task/one"])
+    await w.git(["update-ref", "-d", "refs/remotes/origin/task/two"])
+    expect((await remoteRefs(w)).filter((ref) => ref.startsWith("refs/heads/bulk/"))).toHaveLength(200)
+
     const entries = await lane(w.git, "origin", "main")
-    const bare = entries.find((entry) => entry.branch === "task/bare")
-    expect(bare?.change.head).toBe(head)
-    expect(bare?.change.facts).toEqual([])
-    expect(bare?.reading.state).toBe("queued")
+
+    expect(entries.map((entry) => entry.branch).sort()).toEqual(["task/one", "task/two"])
+    const tracked = (await w.git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"]))
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && line !== "refs/remotes/origin/HEAD")
+      .sort()
+    expect(tracked).toEqual([
+      "refs/remotes/origin/main",
+      "refs/remotes/origin/task/one",
+      "refs/remotes/origin/task/two",
+    ])
+    // Never fetched means not here at all: the bulk commit's object never arrived.
+    await expect(w.git(["cat-file", "-e", bulk])).rejects.toThrow(/exited 1/u)
+  })
+
+  it("a change whose branch is gone reads failed, deleted, and the tracking ref left behind is forgotten (E3)", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/gone", "gone.txt")
+    await submit(w.git, "origin", { branch: "task/gone", submitter: "@dev/2", target: "main" })
+    expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBe(head)
+    // Taken out at the remote by another hand, so this clone's tracking ref lingers.
+    await gitIn(w.remote)(["update-ref", "-d", "refs/heads/task/gone"])
+
+    const entries = await lane(w.git, "origin", "main")
+
+    const gone = entries.find((entry) => entry.branch === "task/gone")
+    expect(gone?.change.head).toBe(head)
+    expect(gone?.reading).toEqual({ reason: "deleted", state: "failed" })
+    expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBeUndefined()
   })
 
   it("orders by the first opened fact, and a superseded head reads failed, replaced", async () => {
