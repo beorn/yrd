@@ -13,13 +13,14 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
-import { mkdirSync } from "node:fs"
+import { mkdirSync, rmSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
   byHandCommits,
   changeName,
+  claimWorktrees,
   configValue,
   handMovedLine,
   prepareWorktree,
@@ -29,6 +30,7 @@ import {
   queueRun,
   readConfig,
   readQueue,
+  runId,
   targetName,
   refAt,
   resolveRemote,
@@ -299,15 +301,30 @@ export async function coreQueueCommand(
       // the same class of mismatch this command exists to remove.
       const dirty = (await git(["status", "--porcelain", "--untracked-files=no"])).trim()
       const unjudged = dirty === "" ? "" : `\n${String(dirty.split("\n").length)} uncommitted path(s) were NOT judged; this measured HEAD ${head.slice(0, 12)}`
-      // Every invocation writes its logs under a directory of its own, named by
-      // the instant it started and printed with each result: a check log is
-      // written once and never replaced, here as in a queue run, so two seats
-      // checking at once — or one seat checking twice — keep both readings
-      // instead of the second silently overwriting the first (24101).
-      const logDir = join(workdir, "checks", "head", new Date().toISOString())
+      // One run of checks, under the one layout a queue run writes (run.ts):
+      // its worktree at `<workdir>/worktrees/<run>/check/<sha12>`, its logs at
+      // `<workdir>/checks/<change>/<run>/check/<name>.log`, its temporary files
+      // under `<workdir>/tmp`. The run id is what keeps two of them apart, so a
+      // check log is written once and never replaced — two seats checking at
+      // once, or one seat checking twice, keep both readings instead of the
+      // second silently overwriting the first (24101).
+      //
+      // The change is the one this checkout would submit: the branch it stands
+      // on at the head it stands at, so a seat's own check and the queue's own
+      // read of the same change sit at the same path. A detached HEAD says
+      // `HEAD` and is still a name nothing else takes.
+      const run = runId()
+      const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
+      const logDir = join(workdir, "checks", changeName({ branch, head }), run, "check")
+      // The worktrees root of this run, claimed before anything is made in it:
+      // a queue run reaps the worktrees of runs that are no longer alive, and
+      // reads a directory with no pid file as one of them (worktree.ts).
+      const worktrees = join(workdir, "worktrees", run)
+      mkdirSync(worktrees, { recursive: true })
+      claimWorktrees(worktrees)
       // Prepared exactly as a queue run prepares one: materialized, the
       // declaration's setup run once, and told the same three values.
-      const prepared = await prepareWorktree(git, repo, head, join(workdir, "check", `${head.slice(0, 12)}-${String(globalThis.process.pid)}`), {
+      const prepared = await prepareWorktree(git, repo, head, join(worktrees, "check", head.slice(0, 12)), {
         env: options.env,
         plumbing: options.log?.child("worktree"),
         ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
@@ -322,6 +339,7 @@ export async function coreQueueCommand(
         }
       } finally {
         await prepared.remove()
+        rmSync(worktrees, { force: true, recursive: true })
       }
       emit(
         io,

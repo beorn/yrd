@@ -13,7 +13,7 @@
  *           expects it to say what the queue will say
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -147,6 +147,25 @@ describe("yrd check judges HEAD, never the invoking tree", () => {
     expect(out).not.toContain("NOT judged")
   })
 
+  it("writes under the same four directories a queue run writes, keyed by a run id of its own", async () => {
+    // One layout, so a reader looking for a check's log looks in one place
+    // whether the queue ran it or a seat did:
+    // `<workdir>/checks/<change>/<run id>/<phase>/<name>.log`, beside
+    // `worktrees/`, `logs/` and `tmp/`.
+    const w = await world()
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+
+    const { exit, out } = await check(w)
+
+    expect(exit).toBe(0)
+    const log = /\(log ([^)]+)\)/u.exec(out)?.[1] ?? ""
+    expect(log).toContain(join(w.workdir, "checks", `main@${head}`))
+    expect(log.endsWith(join("check", "no-marker.log"))).toBe(true)
+    // The worktree it made is gone, and so is the run's own directory under it.
+    expect(existsSync(join(w.workdir, "worktrees"))).toBe(true)
+    expect(readdirSync(join(w.workdir, "worktrees"))).toEqual([])
+  })
+
   it("an unknown check refuses before any worktree is built", async () => {
     const w = await world()
     const run = capture(w.work)
@@ -154,6 +173,6 @@ describe("yrd check judges HEAD, never the invoking tree", () => {
       coreQueueCommand(w.work, run.io, { command: "check", names: ["nope"] }, { workdir: w.workdir }),
     ).rejects.toThrow(/is not a check the target declares/u)
     // Nothing was materialized for a name that was never going to run.
-    expect(existsSync(join(w.workdir, "check"))).toBe(false)
+    expect(existsSync(join(w.workdir, "worktrees"))).toBe(false)
   })
 })

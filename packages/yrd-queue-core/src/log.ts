@@ -29,6 +29,19 @@
 import { appendFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 
+/**
+ * A run's own id: the instant it started, then a random tail, so two runs never
+ * write one path however close together they start.
+ *
+ * Minted here because the queue's whole working directory is keyed by it — the
+ * log, the worktrees, the check logs — and `yrd check` is a run of checks too:
+ * it takes an id from the same minter and writes under the same directories,
+ * rather than a second scheme that a reader would have to learn.
+ */
+export function runId(started: Date = new Date()): string {
+  return `q-${started.toISOString().replace(/[-:.]/gu, "")}-${Math.random().toString(16).slice(2, 10)}`
+}
+
 export const LOG_KINDS = ["run", "change", "check", "result", "merge", "message", "by-hand", "reap"] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]
@@ -64,8 +77,7 @@ export type QueueRunLog = Readonly<{
  */
 export function openLog(directory: string, now: () => Date = () => new Date(), render?: (record: LogRecord) => void): QueueRunLog {
   mkdirSync(directory, { recursive: true })
-  const started = now()
-  const id = `q-${started.toISOString().replace(/[-:.]/gu, "")}-${Math.random().toString(16).slice(2, 10)}`
+  const id = runId(now())
   const path = join(directory, `${id}.jsonl`)
   return {
     id,
