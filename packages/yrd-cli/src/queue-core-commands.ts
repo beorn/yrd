@@ -73,9 +73,25 @@ export async function coreQueueCommand(
   options: Readonly<{ json?: boolean; env?: NodeJS.ProcessEnv; workdir?: string; log?: ConditionalLogger }> = {},
 ): Promise<YrdCliExitCode | undefined> {
   // The switch: the declaration checked out where the command stands names
-  // `remote:`, or this queue is not selected and no git runs at all.
+  // `remote:`, or this queue is not selected and no git runs at all. The
+  // PARSED declaration is that switch, and the only reader of this file: a
+  // regex for `^remote:` used to answer first and the parser two lines below
+  // answered again, so a `.yrd.yml` that named `remote:` and did not parse
+  // passed the regex, lost its `remote` to the parser, and went on against
+  // origin/main with the problem said once at debug level.
+  //
+  // A file that does not parse hints NOTHING and says so on stderr, once: the
+  // defaults stand, because the local declaration is a hint and the target's
+  // is the authority — a branch that breaks its own `.yrd.yml` still submits,
+  // and D2 bills it at merge (config.ts). What it may not do is go quiet.
   const here = declarationHere(repo)
-  if (here === undefined || !/^remote:/mu.test(here.text)) return undefined
+  if (here === undefined) return undefined
+  const hints = hintsIn(here.text, join(here.root, ".yrd.yml"))
+  if (hints.problem !== undefined) {
+    io.stderr(`yrd: ${hints.problem}; it hints nothing, so this asks origin/main, which must declare the queue itself\n`)
+  } else if (hints.remote === undefined) {
+    return undefined
+  }
   const git = gitIn(here.root)
   const log = options.log?.child("queue")
   // The declaration here only hints where the queue is (`remote:`, `target:`);
@@ -83,8 +99,6 @@ export async function coreQueueCommand(
   // to name `remote:` itself, or a branch alone could opt into this core. A
   // branch that rewrote or broke its own `.yrd.yml` is judged by the target's
   // rules all the same (ruling D2 bills it at merge).
-  const hints = hintsIn(here.text)
-  if (hints.problem !== undefined) log?.debug?.(`${hints.problem}; asking the target`)
   const hinted = await resolveRemote(git, hints.remote ?? "origin")
   const hintedTarget = hints.target ?? "main"
   const targetRef = `${hinted}/${hintedTarget}`
