@@ -42,7 +42,7 @@ import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
-import { appendFact, endedKind, readFact, readFacts, type Fact, type Git } from "./facts.ts"
+import { appendFact, endedKind, readFact, type Fact, type Git, type WriteFact } from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
@@ -50,7 +50,16 @@ import { byHandCommits, handMovedLine } from "./by-hand.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine } from "./state.ts"
-import { checkedTree, claimWorktrees, prepareWorktree, reapWorktrees, SETUP, SetupFailed, type PlumbingLog, type PreparedWorktree } from "./worktree.ts"
+import {
+  checkedTree,
+  claimWorktrees,
+  prepareWorktree,
+  reapWorktrees,
+  SETUP,
+  SetupFailed,
+  type PlumbingLog,
+  type PreparedWorktree,
+} from "./worktree.ts"
 
 export type QueueCheck = CheckSpec &
   Readonly<{
@@ -196,7 +205,9 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // here; so does a checked change whose checks ran under a check config the
   // target no longer declares (§ The queue run: a checked fact is reused only
   // while the config blob is the one it names).
-  for (const entry of ordered(entries, "queued", "stuck", "checked").filter((entry) => entry.reading.state !== "checked" || staleChecked(run, entry))) {
+  for (const entry of ordered(entries, "queued", "stuck", "checked").filter(
+    (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
+  )) {
     const outcome = await guarded(run, entry, () => judge(run, entry))
     if (outcome === "stuck") {
       stuck.push(entry.branch)
@@ -223,7 +234,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 /** A checked change whose checked fact names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
   const tip = entry.change.facts.at(-1)
-  return tip !== undefined && tip.kind === "checked" && trailerOf(tip, "Config") !== run.options.configBlob
+  return tip?.kind === "checked" && trailerOf(tip, "Config") !== run.options.configBlob
 }
 
 /** The entries in the named states, in line order. */
@@ -326,7 +337,13 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
  * recorded in the check's shape: what ran, then how it ended, billed to the
  * queue whichever way it went.
  */
-async function prepare(run: Run, entry: QueueEntry, commit: string, path: string, phase: string): Promise<PreparedWorktree> {
+async function prepare(
+  run: Run,
+  entry: QueueEntry,
+  commit: string,
+  path: string,
+  phase: string,
+): Promise<PreparedWorktree> {
   const logDir = join(run.options.workdir, "checks", run.log.id, phase)
   const about = { branch: entry.branch, head: entry.change.head, name: SETUP, phase }
   return prepareWorktree(run.git, run.options.repo, commit, path, {
@@ -361,16 +378,19 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     // component's main (E4).
     const offMain = await gitlinkOffMain(run, head, worktree.path)
     if (offMain !== undefined) {
-      return end(run, entry, "failed", {
+      return await end(run, entry, "failed", {
         remedy: `land ${offMain.path}'s commit on its main first, pin that, and submit again`,
         subject: `${branch} pins ${offMain.path} at ${offMain.sha.slice(0, 12)}, which its main does not carry`,
-        trailers: [["Reason", "gitlink-off-main"], ["Gitlink", `${offMain.path} ${offMain.sha}`]],
+        trailers: [
+          ["Reason", "gitlink-off-main"],
+          ["Gitlink", `${offMain.path} ${offMain.sha}`],
+        ],
       })
     }
     const results = await runPhase(run, entry, "submit", worktree.path, worktree.tree)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
-      return end(run, entry, "stuck", {
+      return await end(run, entry, "stuck", {
         subject: `the queue could not judge ${branch}: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
         trailers: [["Reason", stuckOne.name], ...checkTrailers(results)],
       })
@@ -379,8 +399,10 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     // Awaited, not returned: the attribution runs the check again in THIS
     // worktree, and an async function runs its `finally` before it settles a
     // returned promise, so a bare return would remove the tree out from under it.
-    if (failing.length > 0) return await endFailing(run, entry, results, failing, worktree.path, worktree.tree, "submit")
-    await appendFact(run.git, {
+    if (failing.length > 0) {
+      return await endFailing(run, entry, results, failing, worktree.path, worktree.tree, "submit")
+    }
+    const checkedFact = await appendFact(run.git, {
       branch,
       head,
       kind: "checked",
@@ -388,7 +410,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
       target: run.options.target,
       trailers: [["Config", run.options.configBlob], ["Base", run.targetSha], ...checkTrailers(results)],
     })
-    await pushChange(run, branch, head)
+    await pushChange(run, branch, head, checkedFact)
     return "checked"
   } finally {
     await worktree.remove()
@@ -470,7 +492,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       // said is the detail, on one line: a trailer is one line, and the merge
       // command's own message spans several.
       const said = error instanceof GitExit ? error.detail : error instanceof Error ? error.message : String(error)
-      return end(run, entry, "failed", {
+      return await end(run, entry, "failed", {
         remedy: `rebase ${branch} onto ${run.options.target}, resolve the conflict, push, and submit again`,
         subject: `${branch} conflicts with ${run.options.target}`,
         trailers: [
@@ -488,7 +510,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       unreadable = String(error instanceof Error ? error.message : error).slice(0, 160)
     }
     if (unreadable !== undefined) {
-      return end(run, entry, "failed", {
+      return await end(run, entry, "failed", {
         remedy: `fix .yrd.yml on ${branch} (${unreadable}), push, and submit again`,
         subject: `${branch} would land a declaration the queue cannot read`,
         trailers: [["Reason", "config-invalid"]],
@@ -501,7 +523,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     const results = await runPhase(run, entry, "merge", worktree.path, merged)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
-      return end(run, entry, "stuck", {
+      return await end(run, entry, "stuck", {
         subject: `the queue could not judge ${branch} at merge: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
         trailers: [["Reason", stuckOne.name], ...checkTrailers(results)],
       })
@@ -515,7 +537,13 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     // change keeps its place and is checked again at the new target next run.
     const remoteNow = await remoteHeads(run, branch)
     if (remoteNow.target !== run.targetSha || remoteNow.branch !== head) {
-      run.log.write({ branch, decision: "checked", head, kind: "change", reason: remoteNow.target !== run.targetSha ? "target-moved" : "branch-moved" })
+      run.log.write({
+        branch,
+        decision: "checked",
+        head,
+        kind: "change",
+        reason: remoteNow.target !== run.targetSha ? "target-moved" : "branch-moved",
+      })
       return "checked"
     }
     await run.git(["fetch", "--quiet", worktree.path, mergeCommit])
@@ -537,11 +565,17 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       `--force-with-lease=refs/heads/${run.options.target}:${run.targetSha}`,
       run.options.remote,
       `${mergeCommit}:refs/heads/${run.options.target}`,
-      `${ref}:${ref}`,
+      `${mergedFact}:${ref}`,
     ])
     run.log.write({ branch, change: name, commit: mergeCommit, head, kind: "merge", tip: mergeCommit })
     run.log.write({ branch, decision: "merged", head, kind: "change" })
-    await send(run, entry, mergedFact, "merged", messageFor("merged", { branch, head, merge: mergeCommit, subject: "" }))
+    await send(
+      run,
+      entry,
+      mergedFact,
+      "merged",
+      messageFor("merged", { branch, head, merge: mergeCommit, subject: "" }),
+    )
     return "merged"
   } finally {
     await worktree.remove()
@@ -605,16 +639,26 @@ async function attribute(
 ): Promise<Readonly<{ result: "fail" | "stuck"; kind: string; why: string }>> {
   for (const first of failing) {
     const spec = run.options.checks.find((check) => check.name === first.name)
-    if (spec === undefined) return { kind: "no-evidence", result: "stuck", why: `${first.name} is not a declared check` }
+    if (spec === undefined) {
+      return { kind: "no-evidence", result: "stuck", why: `${first.name} is not a declared check` }
+    }
     const again = await check(run, entry, spec, changeWorktree, changeTree, "again")
     if (again.result !== "fail") {
-      return { kind: "flake", result: "stuck", why: `${first.name} failed once and passed once in the change's worktree; the queue does not merge on a coin flip; fix or remove the test` }
+      return {
+        kind: "flake",
+        result: "stuck",
+        why: `${first.name} failed once and passed once in the change's worktree; the queue does not merge on a coin flip; fix or remove the test`,
+      }
     }
     const targetTree = await prepare(run, entry, run.targetSha, join(run.worktrees, "target", first.name), "target")
     try {
       const atTarget = await check(run, entry, spec, targetTree.path, targetTree.tree, "target")
       if (atTarget.result !== "pass") {
-        return { kind: "inherited", result: "stuck", why: `${first.name} fails at the target ${run.targetSha.slice(0, 12)} too; the target is red, not the change; fix the target first, then the queue resumes` }
+        return {
+          kind: "inherited",
+          result: "stuck",
+          why: `${first.name} fails at the target ${run.targetSha.slice(0, 12)} too; the target is red, not the change; fix the target first, then the queue resumes`,
+        }
       }
     } finally {
       await targetTree.remove()
@@ -637,15 +681,18 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
   if (endedAs === "failed" || endedAs === "merged") return
   const { branch } = entry
   const head = entry.change.head
-  await appendFact(run.git, {
+  const retiredFact = await appendFact(run.git, {
     branch,
     head,
     kind: "failed",
-    subject: reason === "deleted" ? `${branch} was deleted by its submitter` : `${branch} moved off ${head.slice(0, 12)}; its submitter replaced it`,
+    subject:
+      reason === "deleted"
+        ? `${branch} was deleted by its submitter`
+        : `${branch} moved off ${head.slice(0, 12)}; its submitter replaced it`,
     target: run.options.target,
     trailers: [["Reason", reason]],
   })
-  await pushChange(run, branch, head)
+  await pushChange(run, branch, head, retiredFact)
   run.log.write({ branch, decision: "failed", head, kind: "change", reason })
 }
 
@@ -668,9 +715,13 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   const head = entry.change.head
   // The first commit on the target's first-parent line that descends from the
   // head is the one that landed it; none means the head was fast-forwarded.
-  const landing = (await run.git(["rev-list", "--reverse", "--first-parent", "--ancestry-path", `${head}..${run.targetSha}`])).trim().split("\n")[0]
+  const landing = (
+    await run.git(["rev-list", "--reverse", "--first-parent", "--ancestry-path", `${head}..${run.targetSha}`])
+  )
+    .trim()
+    .split("\n")[0]
   const merge = landing === undefined || landing === "" ? head : landing
-  const mergedFact = await appendFact(run.git, {
+  const mergedFact = await appendAfterLanded(run, {
     branch,
     head,
     kind: "merged",
@@ -682,7 +733,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
       ["Merged-By", "hand"],
     ],
   })
-  await pushChange(run, branch, head)
+  if (mergedFact === undefined) return
   run.log.write({ branch, decision: "merged", head, kind: "change", reason: "already on the target" })
   await send(run, entry, mergedFact, "merged", messageFor("merged", { branch, head, merge, subject: "" }))
 }
@@ -703,7 +754,9 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   const reason = trailerOf(tip, "Reason")
   if (reason === "replaced" || reason === "deleted") return
   const endedSha = tip.kind === "sent" ? trailerOf(tip, "For") : tip.sha
-  if (endedSha === undefined) throw new Error(`${entry.branch}: sent fact ${tip.sha.slice(0, 12)} names no ended fact to send again`)
+  if (endedSha === undefined) {
+    throw new Error(`${entry.branch}: sent fact ${tip.sha.slice(0, 12)} names no ended fact to send again`)
+  }
   const ended = tip.kind === "sent" ? await readFact(run.git, endedSha) : tip
   if (ended.kind !== "failed" && ended.kind !== "stuck" && ended.kind !== "merged") {
     throw new Error(`${entry.branch}: ${endedSha.slice(0, 12)} is a ${ended.kind} fact, not an ended one`)
@@ -713,7 +766,13 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
     entry,
     ended.sha,
     ended.kind,
-    messageFor(ended.kind, { branch: entry.branch, head: entry.change.head, merge: trailerOf(ended, "Merge") ?? "", remedy: trailerOf(ended, "Remedy"), subject: ended.subject }),
+    messageFor(ended.kind, {
+      branch: entry.branch,
+      head: entry.change.head,
+      merge: trailerOf(ended, "Merge") ?? "",
+      remedy: trailerOf(ended, "Remedy"),
+      subject: ended.subject,
+    }),
   )
 }
 
@@ -723,7 +782,10 @@ function short(branch: string, head: string): string {
 }
 
 /** The one message an ended change sends, in the plan's three shapes (§ Commands). */
-function messageFor(kind: "merged" | "failed" | "stuck", about: Readonly<{ branch: string; head: string; subject: string; merge?: string; remedy?: string }>): string {
+function messageFor(
+  kind: "merged" | "failed" | "stuck",
+  about: Readonly<{ branch: string; head: string; subject: string; merge?: string; remedy?: string }>,
+): string {
   switch (kind) {
     case "merged":
       return `close your bead: ${short(about.branch, about.head)} merged as ${(about.merge ?? "").slice(0, 12)}`
@@ -749,8 +811,13 @@ async function restoreScripts(run: Run, spec: QueueCheck, cwd: string): Promise<
   if (scripts.length === 0) return
   const wt = gitIn(cwd, run.options.process)
   for (const path of scripts) {
-    if ((await refAt(run.git, `${run.targetSha}:${path}`, "blob")) === undefined && (await refAt(run.git, `${run.targetSha}:${path}`, "tree")) === undefined) {
-      throw new Error(`check ${spec.name} declares scripts: ${path}, which the target ${run.targetSha.slice(0, 12)} does not carry`)
+    if (
+      (await refAt(run.git, `${run.targetSha}:${path}`, "blob")) === undefined &&
+      (await refAt(run.git, `${run.targetSha}:${path}`, "tree")) === undefined
+    ) {
+      throw new Error(
+        `check ${spec.name} declares scripts: ${path}, which the target ${run.targetSha.slice(0, 12)} does not carry`,
+      )
     }
     await wt(["checkout", "--quiet", run.targetSha, "--", path])
   }
@@ -771,7 +838,14 @@ async function runPhase(
   return results
 }
 
-async function check(run: Run, entry: QueueEntry, spec: QueueCheck, cwd: string, tree: CheckedTree, phase: string): Promise<CheckResult> {
+async function check(
+  run: Run,
+  entry: QueueEntry,
+  spec: QueueCheck,
+  cwd: string,
+  tree: CheckedTree,
+  phase: string,
+): Promise<CheckResult> {
   await restoreScripts(run, spec, cwd)
   const logDir = join(run.options.workdir, "checks", run.log.id, phase)
   const about = {
@@ -810,7 +884,15 @@ async function check(run: Run, entry: QueueEntry, spec: QueueCheck, cwd: string,
  */
 function started(
   run: Run,
-  about: Readonly<{ branch: string; head: string; name: string; phase: string; start: string; log: string; scripts?: readonly string[] }>,
+  about: Readonly<{
+    branch: string
+    head: string
+    name: string
+    phase: string
+    start: string
+    log: string
+    scripts?: readonly string[]
+  }>,
 ): void {
   run.log.write({ ...about, kind: "check" })
 }
@@ -825,12 +907,29 @@ function started(
  */
 function record(
   run: Run,
-  about: Readonly<{ branch: string; head: string; name: string; phase: string; start: string; end: string; scripts?: readonly string[] }>,
+  about: Readonly<{
+    branch: string
+    head: string
+    name: string
+    phase: string
+    start: string
+    end: string
+    scripts?: readonly string[]
+  }>,
   result: CheckResult,
 ): void {
   const common = { branch: about.branch, head: about.head, name: about.name, phase: about.phase }
-  run.log.write({ ...common, end: about.end, kind: "check", log: result.log, ms: result.durationMs, ...(about.scripts === undefined ? {} : { scripts: about.scripts }), start: about.start })
-  const whose = result.result === "pass" ? undefined : result.result === "stuck" || about.name === SETUP ? "queue" : "submitter"
+  run.log.write({
+    ...common,
+    end: about.end,
+    kind: "check",
+    log: result.log,
+    ms: result.durationMs,
+    ...(about.scripts === undefined ? {} : { scripts: about.scripts }),
+    start: about.start,
+  })
+  const whose =
+    result.result === "pass" ? undefined : result.result === "stuck" || about.name === SETUP ? "queue" : "submitter"
   run.log.write({ ...common, exit: String(result.exit), kind: "result", result: result.result, whose })
 }
 
@@ -849,10 +948,29 @@ async function end(
     ...(kind === "failed" ? [["Fault", "submitter"] as const] : []),
     ...(ended.remedy === undefined ? [] : [["Remedy", ended.remedy] as const]),
   ]
-  const fact = await appendFact(run.git, { branch: entry.branch, head: entry.change.head, kind, subject: ended.subject, target: run.options.target, trailers })
-  await pushChange(run, entry.branch, entry.change.head)
-  run.log.write({ branch: entry.branch, decision: kind, head: entry.change.head, kind: "change", reason: ended.subject })
-  await send(run, entry, fact, kind, messageFor(kind, { branch: entry.branch, head: entry.change.head, remedy: ended.remedy, subject: ended.subject }))
+  const fact = await appendFact(run.git, {
+    branch: entry.branch,
+    head: entry.change.head,
+    kind,
+    subject: ended.subject,
+    target: run.options.target,
+    trailers,
+  })
+  await pushChange(run, entry.branch, entry.change.head, fact)
+  run.log.write({
+    branch: entry.branch,
+    decision: kind,
+    head: entry.change.head,
+    kind: "change",
+    reason: ended.subject,
+  })
+  await send(
+    run,
+    entry,
+    fact,
+    kind,
+    messageFor(kind, { branch: entry.branch, head: entry.change.head, remedy: ended.remedy, subject: ended.subject }),
+  )
   return kind
 }
 
@@ -864,14 +982,13 @@ async function send(
   kind: "merged" | "failed" | "stuck",
   text: string,
 ): Promise<void> {
-  const facts = await readFacts(run.git, entry.branch, entry.change.head)
-  const opened = facts.find((fact) => fact.kind === "opened")
-  const ended = [...facts].reverse().find((fact) => fact.sha === endedFact)
+  const ended = await readFact(run.git, endedFact)
   // A stuck change is the queue owner's to hear about; so is a change whose
   // submitter is `unknown` — a submit with neither `--notify` nor
   // `YRD_DEFAULT_SUBMITTER` (rulings B6 and D9) — never a seat named `unknown`.
-  const submitter = trailerOf(opened, "Submitter")
-  const recipient = kind === "stuck" || submitter === undefined || submitter === "unknown" ? run.options.owner : submitter
+  const submitter = trailerOf(ended, "Submitter")
+  const recipient =
+    kind === "stuck" || submitter === undefined || submitter === "unknown" ? run.options.owner : submitter
   // The record the configured notifier reads, unchanged from today's contract
   // (kind, attempt_id, pr, recipient, command required; the rest optional): the
   // plan's three messages map onto its three kinds, the branch stands where a
@@ -891,12 +1008,12 @@ async function send(
     recipient,
     sha: entry.change.head,
     text,
-    workItem: trailerOf(opened, "Work-Item"),
+    workItem: trailerOf(ended, "Work-Item"),
   })
   // The sent fact repeats the ended state and carries the ended fact's result,
   // so the tip fact's trailers stay the whole answer about the change and no
   // reader has to walk to the fact before (ruling A2).
-  await appendFact(run.git, {
+  const sentWrite: WriteFact = {
     branch: entry.branch,
     head: entry.change.head,
     kind: "sent",
@@ -909,10 +1026,14 @@ async function send(
       ["For", endedFact],
       ["Delivery", delivery],
       ...(failure === undefined ? [] : [["Delivery-Error", failure] as const]),
-      ...(ended?.trailers.filter(([name]) => RESULT_TRAILERS.has(name)) ?? []),
+      ...ended.trailers.filter(([name]) => RESULT_TRAILERS.has(name)),
     ],
-  })
-  await pushChange(run, entry.branch, entry.change.head)
+  }
+  if (kind === "merged") await appendAfterLanded(run, sentWrite)
+  else {
+    const sentFact = await appendFact(run.git, sentWrite)
+    await pushChange(run, entry.branch, entry.change.head, sentFact)
+  }
   run.log.write({
     about: entry.branch,
     branch: entry.branch,
@@ -962,17 +1083,144 @@ async function deliver(
 const RESULT_TRAILERS = new Set(["Reason", "Fault", "Remedy", "Check", "Merge", "Base", "Gitlink", "Merged-By"])
 
 function checkTrailers(results: readonly CheckResult[]): readonly (readonly [string, string])[] {
-  return results.map((result) => ["Check", `${result.name} exit=${result.exit} ms=${result.durationMs} log=${result.log}`] as const)
+  return results.map(
+    (result) => ["Check", `${result.name} exit=${result.exit} ms=${result.durationMs} log=${result.log}`] as const,
+  )
 }
 
-async function pushChange(run: Run, branch: string, head: string): Promise<void> {
+async function pushChange(run: Run, branch: string, head: string, intended: string): Promise<void> {
   const ref = changeRef(branch, head)
-  await run.git(["push", "--quiet", run.options.remote, `${ref}:${ref}`])
+  // Push the fact object we just wrote, not the mutable local ref name. The
+  // shared-main updater can finish an older fetch after the remote accepts a
+  // merge and rewind the local change ref between append and push.
+  await run.git(["push", "--quiet", run.options.remote, `${intended}:${ref}`])
+}
+
+type ChangeRelation = "same" | "remote-ancestor" | "intended-ancestor" | "diverged"
+
+/**
+ * Append bookkeeping after the target has landed without letting a concurrent
+ * change-ref fetch or writer turn the successful merge into an exit 2. Each
+ * attempt starts at an observed remote tip, pushes the immutable fact object
+ * under a lease for that tip, and retries atop the winner of a genuine race.
+ */
+async function appendAfterLanded(run: Run, write: WriteFact): Promise<string | undefined> {
+  const ref = changeRef(write.branch, write.head)
+  let last: Readonly<{ error?: string; intended: string; relation: string; remote: string }> | undefined
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const remote = await fetchRemoteChange(run, ref)
+    await run.git(["update-ref", ref, remote])
+
+    let intended: string
+    try {
+      intended = await appendFact(run.git, write)
+    } catch (error) {
+      // appendFact's compare-and-swap lost to a local fetch. A different
+      // failure with the expected base still present is not a ref race.
+      if ((await refAt(run.git, ref)) === remote) throw error
+      last = {
+        error: error instanceof Error ? error.message : String(error),
+        intended: "not-written",
+        relation: "local-ref-moved",
+        remote,
+      }
+      continue
+    }
+
+    const prepared = await changeRelation(run, remote, intended)
+    if (prepared !== "remote-ancestor") {
+      last = { intended, relation: prepared, remote }
+      recordChangeConflict(run, write, remote, intended, prepared)
+      continue
+    }
+
+    try {
+      await run.git([
+        "push",
+        "--quiet",
+        `--force-with-lease=${ref}:${remote}`,
+        run.options.remote,
+        `${intended}:${ref}`,
+      ])
+      return intended
+    } catch (error) {
+      // Git's rejection text varies (`stale info`, `fetch first`, and
+      // `non-fast-forward`). The remote state, not that prose, decides whether
+      // this was a ref race. Transport/auth failures leave the lease base in
+      // place and remain loud.
+      const now = await fetchRemoteChange(run, ref)
+      if (now === remote) throw error
+      const relation = await changeRelation(run, now, intended)
+      if (relation === "same" || relation === "intended-ancestor") return intended
+      last = { intended, relation, remote: now }
+      recordChangeConflict(run, write, now, intended, relation)
+    }
+  }
+  run.log.write({
+    branch: write.branch,
+    decision: "merged",
+    head: write.head,
+    attempts: 3,
+    intended: last?.intended ?? "unknown",
+    kind: "change",
+    reason: "change-ref-retry-exhausted",
+    relation: last?.relation ?? "unknown",
+    remote: last?.remote ?? "unknown",
+    ...(last?.error === undefined ? {} : { error: last.error }),
+  })
+  return undefined
+}
+
+/** Read one authoritative remote change tip and make that exact object local. */
+async function fetchRemoteChange(run: Run, ref: string): Promise<string> {
+  // A run-private destination says which object this fetch actually received.
+  // `ls-remote` followed by a moving-ref fetch can advertise A, fetch B, then
+  // leave A unavailable for the ancestry check.
+  const fetchedRef = `refs/yrd/fetched/${run.log.id}`
+  await run.git(["fetch", "--quiet", "--no-recurse-submodules", run.options.remote, `+${ref}:${fetchedRef}`])
+  const remote = await refAt(run.git, fetchedRef)
+  if (remote === undefined) throw new Error(`${ref}: fetch completed without a change tip`)
+  await run.git(["update-ref", "-d", fetchedRef, remote])
+  return remote
+}
+
+async function changeRelation(run: Run, remote: string, intended: string): Promise<ChangeRelation> {
+  if (remote === intended) return "same"
+  if (await isAncestor(run.git, remote, intended)) return "remote-ancestor"
+  if (await isAncestor(run.git, intended, remote)) return "intended-ancestor"
+  return "diverged"
+}
+
+function recordChangeConflict(
+  run: Run,
+  write: WriteFact,
+  remote: string,
+  intended: string,
+  relation: ChangeRelation,
+): void {
+  run.log.write({
+    branch: write.branch,
+    decision: "merged",
+    head: write.head,
+    intended,
+    kind: "change",
+    reason: "change-ref-conflict",
+    relation,
+    remote,
+  })
 }
 
 /** Where the target and one branch stand at the remote right now. */
 async function remoteHeads(run: Run, branch: string): Promise<Readonly<{ target?: string; branch?: string }>> {
-  const rows = (await run.git(["ls-remote", "--refs", run.options.remote, `refs/heads/${run.options.target}`, `refs/heads/${branch}`])).split("\n")
+  const rows = (
+    await run.git([
+      "ls-remote",
+      "--refs",
+      run.options.remote,
+      `refs/heads/${run.options.target}`,
+      `refs/heads/${branch}`,
+    ])
+  ).split("\n")
   const at = new Map(rows.map((row) => row.trim().split(/\s+/u)).map(([sha, ref]) => [ref ?? "", sha ?? ""]))
   return { branch: at.get(`refs/heads/${branch}`), target: at.get(`refs/heads/${run.options.target}`) }
 }
@@ -996,7 +1244,10 @@ async function finish(
   // A push updates the remote-tracking ref it pushed to, so after a merge the
   // target as this run left it is right there; a run that merged nothing left
   // it where it found it.
-  const targetNow = lists.merged.length === 0 ? run.targetSha : ((await refAt(run.git, `refs/remotes/${run.options.remote}/${run.options.target}`)) ?? run.targetSha)
+  const targetNow =
+    lists.merged.length === 0
+      ? run.targetSha
+      : ((await refAt(run.git, `refs/remotes/${run.options.remote}/${run.options.target}`)) ?? run.targetSha)
   // A run that reaches here removed every worktree it made, so its own
   // directory and the pid file in it have nothing left to say. Taking them
   // leaves exactly the runs that did NOT end under the worktrees root, which
