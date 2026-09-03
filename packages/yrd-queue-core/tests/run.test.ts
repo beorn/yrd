@@ -6,7 +6,8 @@
  * notifier was handed. Nothing internal.
  */
 
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -265,6 +266,41 @@ function messages(w: World): readonly Record<string, string>[] {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
     throw error
   }
+}
+
+/**
+ * A process id that named a process and does not any more: a child run to
+ * completion and reaped. The only honest way to write a dead run's pid file,
+ * since any number picked out of the air could be a process that is running.
+ */
+function exitedPid(): number {
+  const child = spawnSync("git", ["--version"])
+  const pid = child.pid
+  if (pid === undefined) throw new Error("could not spawn a child to take an exited process id from")
+  if (processIsRunning(pid)) throw new Error(`pid ${String(pid)} is still running, so it cannot stand for a dead run`)
+  return pid
+}
+
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+/** A worktree of `main` registered under `<workdir>/worktrees/<run>/`, as a queue run makes one, with a pid file claiming it for `pid`. */
+async function worktreeOfRun(w: World, run: string, pid: number): Promise<string> {
+  const directory = join(w.workdir, "worktrees", run)
+  const path = join(directory, "submit", run)
+  mkdirSync(directory, { recursive: true })
+  await w.git(["worktree", "add", "--quiet", "--detach", path, "main"])
+  // A check writes into the tree it judges, so no worktree a run left behind
+  // is ever clean; `git worktree remove` refuses exactly this.
+  writeFileSync(join(path, "what-a-check-left.txt"), "output\n")
+  writeFileSync(join(directory, ".pid"), `${String(pid)}\n`)
+  return path
 }
 
 describe("a queue run", () => {
@@ -631,6 +667,47 @@ describe("the target's setup", () => {
     const setupRows = records(outcome).filter((record) => record.kind === "check" && record.name === "setup")
     expect(setupRows).toHaveLength(4)
     expect(setupRows.filter((record) => record.end === undefined)).toHaveLength(2)
+  })
+
+  /**
+   * A run that dies removes nothing, so its worktrees stay registered in the
+   * repository and on disk, and every later `git worktree list` carries them:
+   * R8's did (plan § Owed after M5). The next run takes them down.
+   *
+   * Alive means this run, or a pid file naming a process that is running —
+   * nothing else, because a worktree registration outlives the process that
+   * made it and git has no other answer. The pair below is the discriminating
+   * read: two worktrees, identical but for whose pid claims them.
+   */
+  it("removes the worktrees of runs that are no longer alive, and leaves a living run's alone", async () => {
+    const w = await world()
+    const dead = await worktreeOfRun(w, "q-dead", exitedPid())
+    const alive = await worktreeOfRun(w, "q-alive", process.pid)
+
+    const outcome = await queueRun(w.options({ exit: 0 }))
+
+    expect(existsSync(dead)).toBe(false)
+    expect(existsSync(join(w.workdir, "worktrees", "q-dead"))).toBe(false)
+    expect(existsSync(alive)).toBe(true)
+    const registered = await w.git(["worktree", "list", "--porcelain"])
+    expect(registered).not.toContain(dead)
+    expect(registered).toContain(alive)
+
+    // One row per worktree taken, naming it, whose it was and why it went.
+    expect(records(outcome).filter((record) => record.kind === "reap")).toEqual([
+      expect.objectContaining({ of: "q-dead", path: dead, why: expect.stringContaining("is not running") }),
+    ])
+  })
+
+  /** A run that ends takes its own directory with it, so the reap reads exactly the runs that did not end. */
+  it("leaves nothing of its own under the worktrees root when it ends", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(w.options({ exit: 0 }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(existsSync(join(w.workdir, "worktrees", outcome.run))).toBe(false)
   })
 
   it("runs again in the target worktree the attribution builds", async () => {

@@ -38,7 +38,7 @@
  * could not do its own job, and the next thing to happen is a person.
  */
 
-import { mkdirSync } from "node:fs"
+import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
@@ -50,7 +50,7 @@ import { byHandCommits, handMovedLine } from "./by-hand.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine } from "./state.ts"
-import { checkedTree, prepareWorktree, SETUP, SetupFailed, type PlumbingLog, type PreparedWorktree } from "./worktree.ts"
+import { checkedTree, claimWorktrees, prepareWorktree, reapWorktrees, SETUP, SetupFailed, type PlumbingLog, type PreparedWorktree } from "./worktree.ts"
 
 export type QueueCheck = CheckSpec &
   Readonly<{
@@ -141,6 +141,9 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     worktrees: join(options.workdir, "worktrees", log.id),
   }
   mkdirSync(run.worktrees, { recursive: true })
+  // This run's own claim first, so a run starting alongside this one never
+  // reads the absence of a pid file as this run's death.
+  claimWorktrees(run.worktrees)
   const merged: string[] = []
   const failed: string[] = []
   const stuck: string[] = []
@@ -162,6 +165,16 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     pin: targetSha,
     target: options.target,
   })
+
+  // The worktrees of runs that are no longer alive, taken down before this run
+  // makes any of its own: a killed run removes nothing, so its worktrees stay
+  // registered in the repository and on disk until some later run clears them
+  // (plan § Owed after M5; R8's stayed). One row per worktree, because a
+  // directory that vanishes with nothing said about it is the silent kind of
+  // cleanup nobody can audit.
+  for (const taken of await reapWorktrees(git, join(options.workdir, "worktrees"), log.id)) {
+    log.write({ kind: "reap", of: taken.of, path: taken.path, why: taken.why })
+  }
 
   // The target moved by hand? Read before any fact is written, so a hand merge
   // of a submitted head is reported before the catch-up below accounts for it
@@ -984,6 +997,13 @@ async function finish(
   // target as this run left it is right there; a run that merged nothing left
   // it where it found it.
   const targetNow = lists.merged.length === 0 ? run.targetSha : ((await refAt(run.git, `refs/remotes/${run.options.remote}/${run.options.target}`)) ?? run.targetSha)
+  // A run that reaches here removed every worktree it made, so its own
+  // directory and the pid file in it have nothing left to say. Taking them
+  // leaves exactly the runs that did NOT end under the worktrees root, which
+  // is what the next run's reap reads. `queue up` is one process running many
+  // rounds, so without this every round of a day-long service would leave a
+  // directory behind that no reap may touch: its pid is alive.
+  rmSync(run.worktrees, { force: true, recursive: true })
   return {
     base: run.targetSha,
     config: run.options.configBlob,

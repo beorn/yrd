@@ -21,7 +21,8 @@
  * git transcript. The caller hands in a logger only when trace is on.
  */
 
-import { rmSync } from "node:fs"
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { join, relative, sep } from "node:path"
 import { materializeSubmodulesFromLocalWorktreeParallel } from "git-super/submodules"
 import type { Process } from "@yrd/process"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
@@ -64,6 +65,133 @@ export async function freshWorktree(git: Git, repo: string, commit: string, path
       await removeWorktree(git, path)
       plumbing?.trace?.("released worktree", { commit, path })
     },
+  }
+}
+
+/**
+ * The file a run writes beside its own worktrees, holding its process id.
+ *
+ * The queue remembers nothing, and this is not a memory: nothing reads it as
+ * status, it says nothing about any change, and it is removed with the
+ * worktrees it stands among. It answers the one question a later run cannot
+ * answer any other way — is the process that made these worktrees still
+ * running — which git has no answer for, since a worktree registration
+ * outlives the process that made it by design.
+ */
+export const RUN_PID = ".pid"
+
+/** The pid file a run writes at its start, before it makes any worktree, so no later run can read its absence as death. */
+export function claimWorktrees(directory: string, pid: number = process.pid): void {
+  writeFileSync(join(directory, RUN_PID), `${String(pid)}\n`)
+}
+
+/** One worktree a reap took down, as the caller reports it. */
+export type Reaped = Readonly<{
+  /** The run that made it: the directory under the worktrees root, which is that run's log id. */
+  of: string
+  path: string
+  /** Why that run is not alive, in plain words. */
+  why: string
+}>
+
+/**
+ * The worktrees of runs that are no longer alive, removed
+ * ([plan](../../../../pm/@i/10-yrd/plan.md) § Owed after M5).
+ *
+ * A run makes its worktrees under `<root>/<run id>/` and removes them when it
+ * ends. A run that is killed or crashes removes nothing, so its worktrees stay
+ * registered in the repository and on disk, and every later `git worktree
+ * list` carries them: R8's did. Nothing else ever cleans them up, because the
+ * run that owned them is gone.
+ *
+ * A run is alive if it is this one, or if the pid file it wrote at its start
+ * names a process that is running. Anything else is dead and its worktrees go.
+ * The one error this can make is a process id reused by an unrelated process,
+ * which reads as alive and leaves a stale worktree standing one run longer —
+ * never a live run's worktree taken from under it, which is the direction that
+ * would break a run mid-judgement.
+ *
+ * Removal is the one `Worktree.remove` already does — the directory first,
+ * then `git worktree prune` to forget the registration — because `git worktree
+ * remove` refuses a tree with untracked files it did not make, which is every
+ * tree a dead run left a check to write in. `prune` runs once, and runs whether
+ * or not a run died, because a registration whose directory is gone is stale
+ * however it got that way. The dead run's own directory goes with its
+ * worktrees, so whatever git never registered under it goes too.
+ */
+export async function reapWorktrees(git: Git, root: string, thisRun: string): Promise<readonly Reaped[]> {
+  const dead = new Map<string, string>()
+  for (const run of directoriesIn(root)) {
+    if (run === thisRun) continue
+    const why = notRunning(join(root, run))
+    if (why !== undefined) dead.set(run, why)
+  }
+  const reaped: Reaped[] = []
+  if (dead.size > 0) {
+    for (const path of await registeredWorktrees(git)) {
+      const of = runOwning(root, path)
+      const why = of === undefined ? undefined : dead.get(of)
+      if (of === undefined || why === undefined) continue
+      rmSync(path, { force: true, recursive: true })
+      reaped.push({ of, path, why })
+    }
+    for (const run of dead.keys()) rmSync(join(root, run), { force: true, recursive: true })
+  }
+  // Always, dead runs or none: a registration whose directory is gone is stale
+  // however it got that way, and forgetting it is one cheap git call.
+  await git(["worktree", "prune"])
+  return reaped
+}
+
+/** Why the run that wrote `directory` is not running, or undefined when it is. */
+function notRunning(directory: string): string | undefined {
+  let written: string
+  try {
+    written = readFileSync(join(directory, RUN_PID), "utf8").trim()
+  } catch {
+    return `it left no ${RUN_PID}`
+  }
+  const pid = Number.parseInt(written, 10)
+  if (!Number.isInteger(pid) || pid <= 0) return `its ${RUN_PID} does not hold a process id`
+  return running(pid) ? undefined : `pid ${String(pid)} is not running`
+}
+
+/** Whether a process id names a process that is running now. */
+function running(pid: number): boolean {
+  try {
+    // Signal 0 asks the kernel about the process and sends nothing.
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM is a live process this user may not signal; only ESRCH is absence.
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+/** The run directory a worktree path sits under, or undefined when it is not under `root` at all. */
+function runOwning(root: string, path: string): string | undefined {
+  const within = relative(root, path)
+  if (within === "" || within.startsWith("..") || within.startsWith(sep)) return undefined
+  return within.split(sep)[0]
+}
+
+/** Every worktree the repository has registered, by path. The main worktree is among them and never under the root, so it is never a candidate. */
+async function registeredWorktrees(git: Git): Promise<readonly string[]> {
+  return (await git(["worktree", "list", "--porcelain"]))
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length).trim())
+    .filter((path) => path !== "")
+}
+
+/** The directories directly under `root`, or none when there is no root yet. */
+function directoriesIn(root: string): readonly string[] {
+  try {
+    return readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+  } catch {
+    return []
   }
 }
 

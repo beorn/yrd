@@ -413,6 +413,8 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `${where} merged as ${String(rest.commit).slice(0, 12)}`
     case "message":
       return `told ${String(rest.to)} about ${where}`
+    case "reap":
+      return `reaped the worktree ${String(rest.path)} of the run ${String(rest.of)}: ${String(rest.why)}`
     case "by-hand": {
       const pins =
         Array.isArray(rest.gitlinks) && rest.gitlinks.length > 0
