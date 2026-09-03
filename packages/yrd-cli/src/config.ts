@@ -352,6 +352,10 @@ const ProjectFields = {
    * `.yrd.yml` can carry both cores across flag day. */
   remote: TextSchema.optional(),
   target: TextSchema.optional(),
+  /** The new core's `setup:` (2026-09-03): one command the core runs once per
+   * fresh worktree before any check. Accepted and ignored here for the same
+   * reason as `remote:` and `target:`; the core's own parser reads it. */
+  setup: TextSchema.optional(),
   base: TextSchema.optional(),
   batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
   checks: ChecksSchema,
