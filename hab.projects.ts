@@ -1,8 +1,8 @@
-// Mechanical queue runners — never ambient @chief (22728). State-write
-// authority requires a verified managed-launch proof; each service is a
-// non-chief actor with its own tribe name for attribution only. Supervision
-// and installed multi-repository queue reads consume this registry so another
-// queue cannot be declared on only one side of the liveness contract.
+// The one mechanical queue runner — never ambient @chief (22728). State-write
+// authority requires a verified managed-launch proof; the service is a
+// non-chief actor with its own tribe name for attribution only. The
+// superproject's fleet scan and Hab composition both read the row below, so it
+// stays a named export rather than being inlined into the service entry.
 
 export type YrdQueueRunnerDeclaration = Readonly<{
   serviceName: string
@@ -21,35 +21,9 @@ export type YrdQueueRunnerDeclaration = Readonly<{
   owner: string
 }>
 
-function requiredText(value: string, label: string): string {
-  if (value.trim() === "") throw new Error(`Yrd queue runner ${label} requires text`)
-  return value
-}
-
-export function defineYrdQueueRunnerDeclarations<const Rows extends readonly YrdQueueRunnerDeclaration[]>(
-  rows: Rows,
-): Rows {
-  const services = new Set<string>()
-  const repositories = new Set<string>()
-  for (const row of rows) {
-    requiredText(row.serviceName, "service name")
-    requiredText(row.repository.name, "repository name")
-    requiredText(row.repository.path, "repository path")
-    requiredText(row.queue.base, "queue base")
-    requiredText(row.owner, "owner")
-    if (services.has(row.serviceName)) throw new Error(`duplicate service name '${row.serviceName}'`)
-    if (repositories.has(row.repository.name)) {
-      throw new Error(`duplicate repository name '${row.repository.name}'`)
-    }
-    services.add(row.serviceName)
-    repositories.add(row.repository.name)
-  }
-  return Object.freeze(rows)
-}
-
-export const yrdQueueRunnerDeclarations = defineYrdQueueRunnerDeclarations([
+export const yrdQueueRunnerDeclarations: readonly YrdQueueRunnerDeclaration[] = Object.freeze([
   { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
-] as const)
+])
 
 export default {
   name: "yrd",
