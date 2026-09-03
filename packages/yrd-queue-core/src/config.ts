@@ -12,7 +12,7 @@
  * guessed at its own configuration would judge every change by that guess.
  */
 
-import type { Git } from "./facts.ts"
+import type { Git } from "./events.ts"
 import { refAt } from "./git.ts"
 import type { CheckSpec } from "./check.ts"
 
@@ -118,7 +118,7 @@ export type QueueConfig = Readonly<{
   setup?: string
   /** What the queue notifies, per ending; empty when the declaration names none. */
   notify: readonly Notifier[]
-  /** The blob the declaration was read from, recorded on every checked fact. */
+  /** The blob the declaration was read from, recorded on every checked event. */
   blob: string
 }>
 

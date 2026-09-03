@@ -26,7 +26,7 @@ import { join, relative, sep } from "node:path"
 import { materializeSubmodulesFromLocalWorktreeParallel } from "git-super/submodules"
 import type { Process } from "@yrd/process"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
-import type { Git } from "./facts.ts"
+import type { Git } from "./events.ts"
 import { gitIn, mergeBase } from "./git.ts"
 
 /** The logger git-super narrates to; the queue hands one over only at trace. */
@@ -250,7 +250,7 @@ export type PreparedWorktree = Worktree & Readonly<{ tree: CheckedTree }>
  * HEAD checked out there, and the merge base of that HEAD and the target.
  *
  * Read from the tree itself rather than carried in by the caller, so it is a
- * fact about what is checked out; read once per worktree, because it costs two
+ * event about what is checked out; read once per worktree, because it costs two
  * git calls and every check in that worktree is judging the same thing. A HEAD
  * that shares no history with the target throws: a base that is not an
  * ancestor of the candidate is a lie a check would compute a diff from.

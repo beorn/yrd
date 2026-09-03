@@ -107,7 +107,7 @@ export function checkLogPath(logDir: string, name: string): string {
 }
 
 /**
- * One check result packed onto a fact's `Check:` trailer, and the reading of
+ * One check result packed onto an event's `Check:` trailer, and the reading of
  * it. They live together because they are one format: the table used to pick
  * the name off with a `split(" ")` and the log path off with a regex of its
  * own, neither of them anywhere near the line that wrote them.

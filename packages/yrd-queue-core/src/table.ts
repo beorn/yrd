@@ -4,12 +4,12 @@
  * time from the queue read. Nothing here is stored and nothing here is a
  * second reader: both views are the queue read rendered, so they can never
  * disagree with a queue run or with each other. Every row is read off one
- * fact, the change's tip, whose trailers are the whole derived state — except
+ * event, the change's tip, whose trailers are the whole derived state — except
  * the row for a commit the queue did not put on the target, a BYPASS, which is
  * read off the target itself (E5).
  */
 
-import { endedKind, trailer, trailers, type Fact } from "./facts.ts"
+import { endedKind, trailer, trailers, type Event } from "./events.ts"
 import { readCheckTrailer } from "./check.ts"
 import { bypassLine, type Bypass } from "./bypass.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
@@ -32,13 +32,13 @@ export type Row = Readonly<{
   submitter?: string
   /** Why: `replaced`, `deleted`, a check's code, or for a `bypass` row the one line about that commit. */
   reason?: string
-  /** When the change was opened, from its first fact's `Opened:`. */
+  /** When the change was opened, from its first event's `Opened:`. */
   since?: Date
-  /** When the change's last fact was written: an ended change is as recent as its ending. A hand commit is as recent as its commit. */
+  /** When the change's last event was written: an ended change is as recent as its ending. A hand commit is as recent as its commit. */
   at?: Date
-  /** The merge commit on the target, full sha, from the merged fact's `Merge:` (carried by the sent fact too); absent until merged. */
+  /** The merge commit on the target, full sha, from the merged event's `Merge:` (carried by the sent event too); absent until merged. */
   merge?: string
-  /** The target commit the change was merged or judged at, full sha, from the fact's `Base:`. */
+  /** The target commit the change was merged or judged at, full sha, from the event's `Base:`. */
   base?: string
 }>
 
@@ -80,10 +80,10 @@ export function list(entries: QueueRead, options: ListOptions = {}): readonly Ro
 export function show(
   entries: QueueRead,
   branch: string,
-): readonly Readonly<{ row: Row; checks: readonly string[]; facts: readonly Fact[] }>[] {
+): readonly Readonly<{ row: Row; checks: readonly string[]; events: readonly Event[] }>[] {
   return entries
     .filter((entry) => entry.change.branch === branch)
-    .map((entry) => ({ checks: trailers(tipOf(entry.change), "Check"), facts: entry.change.facts, row: row(entry) }))
+    .map((entry) => ({ checks: trailers(tipOf(entry.change), "Check"), events: entry.change.events, row: row(entry) }))
     .sort((left, right) => (right.row.since?.getTime() ?? 0) - (left.row.since?.getTime() ?? 0))
 }
 
@@ -114,7 +114,7 @@ function bypassesRow(commit: Bypass): Row {
   return { at: commit.at, branch: commit.target, head: commit.commit, reason: bypassLine(commit), state: "bypass" }
 }
 
-function resultOf(kind: Fact["kind"], check: string | undefined): string {
+function resultOf(kind: Event["kind"], check: string | undefined): string {
   switch (kind) {
     case "checked":
     case "merged":

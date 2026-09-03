@@ -10,17 +10,17 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { appendFact, changeRef, gitIn, readChange, readFact, readFacts, trailer } from "../src/index.ts"
-import type { Fact, Git } from "../src/index.ts"
+import { appendEvent, changeRef, gitIn, readChange, readEvent, readEvents, trailer } from "../src/index.ts"
+import type { Event, Git } from "../src/index.ts"
 
 /**
- * The facts of a change that certainly has some. `ChangeFacts.facts` is a
- * non-empty list by type, and `readFacts` answers an unknown change with none,
+ * The events of a change that certainly has some. `ChangeEvents.events` is a
+ * non-empty list by type, and `readEvents` answers an unknown change with none,
  * so the fixture says out loud which of the two it wrote.
  */
-function written(facts: readonly Fact[]): readonly [Fact, ...Fact[]] {
-  const [first, ...rest] = facts
-  if (first === undefined) throw new Error("the fixture wrote no facts to read a change from")
+function written(events: readonly Event[]): readonly [Event, ...Event[]] {
+  const [first, ...rest] = events
+  if (first === undefined) throw new Error("the fixture wrote no events to read a change from")
   return [first, ...rest]
 }
 
@@ -51,10 +51,10 @@ async function repository(): Promise<Readonly<{ git: Git; root: string; head: st
   return { git, head, root, target }
 }
 
-describe("a change's facts are its commits", () => {
-  it("opened writes one fact, reachable with its head, readable back", async () => {
+describe("a change's events are its commits", () => {
+  it("opened writes one event, reachable with its head, readable back", async () => {
     const { git, head } = await repository()
-    const sha = await appendFact(git, {
+    const sha = await appendEvent(git, {
       change: { branch: "task/one", head },
       kind: "opened",
       subject: "@dev/2 submitted task/one to main",
@@ -65,24 +65,24 @@ describe("a change's facts are its commits", () => {
       ],
     })
 
-    const facts = await readFacts(git, { branch: "task/one", head })
-    expect(facts).toHaveLength(1)
-    expect(facts[0]?.kind).toBe("opened")
-    expect(facts[0]?.sha).toBe(sha)
-    expect(trailer(facts[0]!, "Submitter")).toBe("@dev/2")
-    expect(trailer(facts[0]!, "Issue")).toBe("@i/10-yrd/24061")
+    const events = await readEvents(git, { branch: "task/one", head })
+    expect(events).toHaveLength(1)
+    expect(events[0]?.kind).toBe("opened")
+    expect(events[0]?.sha).toBe(sha)
+    expect(trailer(events[0]!, "Submitter")).toBe("@dev/2")
+    expect(trailer(events[0]!, "Issue")).toBe("@i/10-yrd/24061")
 
-    // The head is the fact's parent, so the content stays reachable from the
+    // The head is the event's parent, so the content stays reachable from the
     // change ref alone: a prune of the branch cannot orphan what was judged.
     const parents = (await git(["rev-list", "--parents", "-n", "1", sha])).trim().split(/\s+/u)
     expect(parents.slice(1)).toContain(head)
     expect((await git(["rev-parse", changeRef({ branch: "task/one", head })])).trim()).toBe(sha)
   })
 
-  it("keeps the facts in the order they happened", async () => {
+  it("keeps the events in the order they happened", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
-    await appendFact(git, {
+    await appendEvent(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
+    await appendEvent(git, {
       change: { branch: "task/one", head },
       kind: "checked",
       subject: "on-submit checks passed",
@@ -94,50 +94,70 @@ describe("a change's facts are its commits", () => {
       ],
     })
 
-    const facts = await readFacts(git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked"])
-    expect(facts[1]?.trailers.filter(([name]) => name === "Check")).toHaveLength(2)
+    const events = await readEvents(git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked"])
+    expect(events[1]?.trailers.filter(([name]) => name === "Check")).toHaveLength(2)
   })
 
   it("refuses a second writer that read the same tip, instead of interleaving", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
+    await appendEvent(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
     const ref = changeRef({ branch: "task/one", head })
     const tip = (await git(["rev-parse", ref])).trim()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "checked", subject: "checks passed", target: "origin#main" })
+    await appendEvent(git, { change: { branch: "task/one", head }, kind: "checked", subject: "checks passed", target: "origin#main" })
 
     // The loser's own update-ref, replayed with the tip it had read.
-    const stale = (await git(["commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-p", tip, "-p", head, "-m", "late\n\nFact: checked\n"])).trim()
+    const stale = (await git(["commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-p", tip, "-p", head, "-m", "late\n\nEvent: checked\n"])).trim()
     await expect(git(["update-ref", ref, stale, tip])).rejects.toThrow()
-    const facts = await readFacts(git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked"])
+    const events = await readEvents(git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked"])
   })
 
-  it("refuses facts written before the 2026-09-03 format, naming the ref and the cure", async () => {
-    // Facts written before that day spelled the change as a `Branch:` and
-    // `Head:` pair. There is no compatibility reader on purpose: two spellings
-    // of a change's name in the one store is exactly what the name exists to
-    // prevent. So a reader that meets one says which ref it is, that the facts
-    // predate the format, and what the queue mechanic does about it.
+  it("refuses events written before the 2026-09-03 format, naming the ref and the cure", async () => {
+    // Before that day an event's kind was `Fact:` and its change was a `Branch:`
+    // and `Head:` pair. There is no compatibility reader for either, on purpose:
+    // two spellings of one thing in the one store is what a name exists to
+    // prevent. So a reader that meets the old shape says which ref it is, that
+    // it predates the format, and what the queue mechanic does about it.
     const { git, head } = await repository()
-    const ref = changeRef({ branch: "task/old", head })
-    const old = (
-      await git([
-        "commit-tree",
-        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-        "-p",
-        head,
-        "-m",
-        ["@dev/2 submitted task/old to main", "", "Fact: opened", "Branch: task/old", `Head: ${head}`, "Target: main", ""].join("\n"),
-      ])
-    ).trim()
-    await git(["update-ref", ref, old])
-
-    const refused = readFacts(git, { branch: "task/old", head })
-
-    await expect(refused).rejects.toThrow(ref)
+    const oldKind = changeRef({ branch: "task/old", head })
+    await git([
+      "update-ref",
+      oldKind,
+      (
+        await git([
+          "commit-tree",
+          "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+          "-p",
+          head,
+          "-m",
+          ["@dev/2 submitted task/old to main", "", "Fact: opened", "Branch: task/old", `Head: ${head}`, "Target: main", ""].join("\n"),
+        ])
+      ).trim(),
+    ])
+    const refused = readEvents(git, { branch: "task/old", head })
+    await expect(refused).rejects.toThrow(oldKind)
+    await expect(refused).rejects.toThrow(/carries Fact: where an Event: belongs/u)
     await expect(refused).rejects.toThrow(/predate the 2026-09-03 format/u)
     await expect(refused).rejects.toThrow(/git bundle create/u)
+
+    // The other half: the kind reads, and the change does not.
+    const noChange = changeRef({ branch: "task/nameless", head })
+    await git([
+      "update-ref",
+      noChange,
+      (
+        await git([
+          "commit-tree",
+          "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+          "-p",
+          head,
+          "-m",
+          ["@dev/2 submitted task/nameless to main", "", "Event: opened", "Branch: task/nameless", `Head: ${head}`, ""].join("\n"),
+        ])
+      ).trim(),
+    ])
+    await expect(readEvents(git, { branch: "task/nameless", head })).rejects.toThrow(/carries no Change: trailer/u)
   })
 
   it("git's own parser reads the trailers: prose that looks like one is not, and a folded value reads whole", async () => {
@@ -156,7 +176,7 @@ describe("a change's facts are its commits", () => {
           "",
           "Note: fix the thing",
           "",
-          "Fact: failed",
+          "Event: failed",
           "Change: task/one@abc",
           "Target: main",
           "Detail: what git said,",
@@ -166,63 +186,63 @@ describe("a change's facts are its commits", () => {
       ])
     ).trim()
 
-    const fact = await readFact(git, sha)
+    const event = await readEvent(git, sha)
 
-    expect(fact.kind).toBe("failed")
-    expect(fact.subject).toBe("task/one failed")
-    expect(trailer(fact, "Note")).toBeUndefined()
-    expect(trailer(fact, "Detail")).toBe("what git said, wrapped onto a second line")
+    expect(event.kind).toBe("failed")
+    expect(event.subject).toBe("task/one failed")
+    expect(trailer(event, "Note")).toBeUndefined()
+    expect(trailer(event, "Detail")).toBe("what git said, wrapped onto a second line")
   })
 
-  it("reads no facts for a branch nobody submitted", async () => {
+  it("reads no events for a branch nobody submitted", async () => {
     const { git, head } = await repository()
-    expect(await readFacts(git, { branch: "task/one", head })).toEqual([])
+    expect(await readEvents(git, { branch: "task/one", head })).toEqual([])
   })
 })
 
-describe("the state is derived, and ancestry wins over any fact", () => {
-  it("queued, then checked, from the facts", async () => {
+describe("the state is derived, and ancestry wins over any event", () => {
+  it("queued, then checked, from the events", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
-    let facts = await readFacts(git, { branch: "task/one", head })
-    expect(readChange({ branch: "task/one", branchHead: head, facts: written(facts), head, headOnTarget: false }).state).toBe("queued")
+    await appendEvent(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
+    let events = await readEvents(git, { branch: "task/one", head })
+    expect(readChange({ branch: "task/one", branchHead: head, events: written(events), head, headOnTarget: false }).state).toBe("queued")
 
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "checked", subject: "checks passed", target: "origin#main" })
-    facts = await readFacts(git, { branch: "task/one", head })
-    expect(readChange({ branch: "task/one", branchHead: head, facts: written(facts), head, headOnTarget: false }).state).toBe("checked")
+    await appendEvent(git, { change: { branch: "task/one", head }, kind: "checked", subject: "checks passed", target: "origin#main" })
+    events = await readEvents(git, { branch: "task/one", head })
+    expect(readChange({ branch: "task/one", branchHead: head, events: written(events), head, headOnTarget: false }).state).toBe("checked")
   })
 
-  it("merged from ancestry alone, with no merged fact written", async () => {
+  it("merged from ancestry alone, with no merged event written", async () => {
     const { git, head, target } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
+    await appendEvent(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
     await git(["merge", "--quiet", "--no-ff", "-m", "merge task/one", head])
     expect((await git(["rev-parse", "HEAD"])).trim()).not.toBe(target)
 
-    const facts = await readFacts(git, { branch: "task/one", head })
+    const events = await readEvents(git, { branch: "task/one", head })
     const onTarget = await isAncestor(git, head, "HEAD")
     expect(onTarget).toBe(true)
     // The change ref still says `opened`. Ancestry is the stronger reading, so a
     // bypass in the garage shows as merged and nothing re-checks it.
-    expect(facts.at(-1)?.kind).toBe("opened")
-    expect(readChange({ branch: "task/one", branchHead: head, facts: written(facts), head, headOnTarget: onTarget }).state).toBe("merged")
+    expect(events.at(-1)?.kind).toBe("opened")
+    expect(readChange({ branch: "task/one", branchHead: head, events: written(events), head, headOnTarget: onTarget }).state).toBe("merged")
   })
 
   it("a branch that moved off its head is failed, replaced; a branch that is gone, deleted", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
-    const facts = await readFacts(git, { branch: "task/one", head })
+    await appendEvent(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
+    const events = await readEvents(git, { branch: "task/one", head })
 
-    const replaced = readChange({ branch: "task/one", branchHead: "0".repeat(40), facts: written(facts), head, headOnTarget: false })
+    const replaced = readChange({ branch: "task/one", branchHead: "0".repeat(40), events: written(events), head, headOnTarget: false })
     expect(replaced).toMatchObject({ reason: "replaced", state: "failed" })
 
-    const deleted = readChange({ branch: "task/one", branchHead: undefined, facts: written(facts), head, headOnTarget: false })
+    const deleted = readChange({ branch: "task/one", branchHead: undefined, events: written(events), head, headOnTarget: false })
     expect(deleted).toMatchObject({ reason: "deleted", state: "failed" })
   })
 
   it("stuck leaves the change open and carries its why", async () => {
     const { git, head } = await repository()
-    await appendFact(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
-    await appendFact(git, {
+    await appendEvent(git, { change: { branch: "task/one", head }, kind: "opened", subject: "submitted", target: "origin#main" })
+    await appendEvent(git, {
       change: { branch: "task/one", head },
       kind: "stuck",
       subject: "the queue could not judge this change",
@@ -230,8 +250,8 @@ describe("the state is derived, and ancestry wins over any fact", () => {
       trailers: [["Reason", "check-timeout"]],
     })
 
-    const facts = await readFacts(git, { branch: "task/one", head })
-    expect(readChange({ branch: "task/one", branchHead: head, facts: written(facts), head, headOnTarget: false })).toMatchObject({
+    const events = await readEvents(git, { branch: "task/one", head })
+    expect(readChange({ branch: "task/one", branchHead: head, events: written(events), head, headOnTarget: false })).toMatchObject({
       reason: "check-timeout",
       state: "stuck",
     })

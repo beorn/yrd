@@ -4,11 +4,11 @@ import { createLogger, type ConditionalLogger } from "loggily"
 import { accessSync, constants, statSync, writeSync } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
 export {
-  FailureFactSchema,
+  FailureEventSchema,
   FailureKindSchema,
   createFailure,
-  failureFact,
-  type FailureFact,
+  failureEvent,
+  type FailureEvent,
   type FailureKind,
   type YrdFailure,
 } from "./failure.ts"
@@ -84,7 +84,7 @@ type ProcessResultBase = Readonly<{
   /**
    * Set, stdout before stderr, when a stream wrote past `maxOutputBytes` and
    * its capture kept only a head and a tail. Loud and never swallowed: the same
-   * fact is written into {@link ProcessResultBase.stdout}/`stderr` where a
+   * event is written into {@link ProcessResultBase.stdout}/`stderr` where a
    * human reading a verdict sees it, and machine consumers read it from here
    * rather than by matching the notice text.
    */
@@ -768,7 +768,7 @@ function truncationNotice(truncation: OutputTruncation): string {
     `The command wrote ${totalBytes} bytes, past the ${limitBytes}-byte capture limit, ` +
     `so only ${keptBytes} bytes are kept — a head and a tail — and the middle is gone. ` +
     `Yrd still streamed every byte to this run's output observer; the queue persists that as the step's ` +
-    `${stream}.log artifact, which is where the dropped middle can be read.]\n\n`
+    `${stream}.log artievent, which is where the dropped middle can be read.]\n\n`
   )
 }
 
@@ -852,7 +852,7 @@ async function readBounded(
       // finish — the same outage in a different costume.
       //
       // onOutput is the caller's own sink, and forwarding in full is what makes
-      // the drop notice's promise true: the queue's artifact writer holds the
+      // the drop notice's promise true: the queue's artievent writer holds the
       // complete stream on disk even when this in-memory capture cannot.
       onProgress(value.byteLength)
       onOutput({ stream: name, chunk: value })

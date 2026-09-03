@@ -17,7 +17,7 @@ import {
   inLine,
   parseChangeName,
   parseChangeRef,
-  readFacts,
+  readEvents,
   readQueue,
   refAt,
   submit,
@@ -70,8 +70,8 @@ async function remoteRefs(w: World): Promise<readonly string[]> {
     .filter((ref) => ref !== "")
 }
 
-describe("submit is one atomic push of the branch and its opened fact", () => {
-  it("lands both refs at the remote, and the opened fact names who, where and what", async () => {
+describe("submit is one atomic push of the branch and its opened event", () => {
+  it("lands both refs at the remote, and the opened event names who, where and what", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/one", "one.txt")
     const submitted = await submit(w.git, "origin", {
@@ -86,9 +86,9 @@ describe("submit is one atomic push of the branch and its opened fact", () => {
     const refs = await remoteRefs(w)
     expect(refs).toContain("refs/heads/task/one")
     expect(refs).toContain(changeRef({ branch: "task/one", head }))
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened"])
-    expect(facts[0]?.trailers).toEqual(
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened"])
+    expect(events[0]?.trailers).toEqual(
       expect.arrayContaining([
         ["Change", `task/one@${head}`],
         ["Submitter", "@dev/2"],
@@ -98,15 +98,15 @@ describe("submit is one atomic push of the branch and its opened fact", () => {
     )
   })
 
-  it("at an unchanged head is a retry: a second opened fact, one change", async () => {
+  it("at an unchanged head is a retry: a second opened event, one change", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/one", "one.txt")
     await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
     const again = await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 
     expect(again.retry).toBe(true)
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "opened"])
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "opened"])
     expect((await remoteRefs(w)).filter((ref) => ref.startsWith("refs/yrd/changes/task/one@"))).toHaveLength(1)
   })
 
@@ -156,7 +156,7 @@ describe("a change is named <branch>@<sha>, and that name is the last part of it
     await submit(w.git, "origin", { branch: "task/one@v2", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 
     expect(await remoteRefs(w)).toContain(`refs/yrd/changes/task/one@v2@${head}`)
-    expect((await readFacts(w.git, { branch: "task/one@v2", head })).map((fact) => fact.kind)).toEqual(["opened"])
+    expect((await readEvents(w.git, { branch: "task/one@v2", head })).map((event) => event.kind)).toEqual(["opened"])
     expect((await readQueue(w.git, "origin", "main")).changes.map((entry) => [entry.change.branch, entry.change.head])).toEqual([
       ["task/one@v2", head],
     ])
@@ -241,7 +241,7 @@ describe("the queue read is every submitted change at the remote", () => {
     expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBeUndefined()
   })
 
-  it("orders by the first opened fact, and a superseded head reads failed, replaced", async () => {
+  it("orders by the first opened event, and a superseded head reads failed, replaced", async () => {
     const w = await world()
     const one = await branchWithCommit(w, "task/one", "one.txt")
     await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
@@ -262,7 +262,7 @@ describe("the queue read is every submitted change at the remote", () => {
     const byHead = new Map(entries.map((entry) => [entry.change.head, entry]))
     expect(byHead.get(one)?.reading).toMatchObject({ reason: "replaced", state: "failed" })
     expect(byHead.get(oneAgain)?.reading.state).toBe("queued")
-    // Position in line is the first opened fact's time OF THE CHANGE: a new
+    // Position in line is the first opened event's time OF THE CHANGE: a new
     // head is a new change (§ The change), so the re-cut task/one takes its
     // place behind task/two, and the superseded head is not in line at all.
     // Only a retry at an unchanged head keeps its place. (Until 2026-09-02
@@ -272,7 +272,7 @@ describe("the queue read is every submitted change at the remote", () => {
     expect(ordered).toEqual([(await w.git(["rev-parse", "task/two"])).trim(), oneAgain])
   })
 
-  it("a head already on the target reads merged, whatever its facts say", async () => {
+  it("a head already on the target reads merged, whatever its events say", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/one", "one.txt")
     await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })

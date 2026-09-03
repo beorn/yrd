@@ -208,7 +208,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     expect(await mergedIntoTarget(repo, change.headSha), run.report).toBe(false)
     // The author's refs stand: every ref name is still there and the branch
     // still points at the head. The change's own ref moved forward by one
-    // failed fact, which is the record of the refusal, not a loss.
+    // failed event, which is the record of the refusal, not a loss.
     const after = await refs(repo)
     const names = (lines: readonly string[]): readonly string[] => lines.map((line) => line.split(" ")[1] ?? "")
     for (const name of names(refsBefore)) expect(names(after), run.report).toContain(name)

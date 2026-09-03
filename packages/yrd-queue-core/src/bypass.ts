@@ -6,16 +6,16 @@
  * Only the queue pushes the target, by rule, and the queue proves it every
  * queue run instead of GitHub preventing it: detect and adapt, or fail loud.
  * A merge the queue made is a `--no-ff` merge commit with two parents and a
- * `Change:` trailer naming its change, whose merged fact names the commit
+ * `Change:` trailer naming its change, whose merged event names the commit
  * back in `Merge:` and says which run of which queue made it (`Merged-By:`). Anything else on the line —
  * one parent, no trailer, a trailer naming a change the queue does not know,
- * or one whose facts do not say the queue merged it there — went around the
+ * or one whose events do not say the queue merged it there — went around the
  * queue. Adapting is already built: the lease refuses the queue's next push
  * onto the old base and the queue run judges every change on the new one; a
  * rollback is a person's `git revert`, never the queue's.
  *
- * The queue's history starts at its own first fact: the oldest commit under
- * `refs/yrd/changes/`, which is the first `opened` fact anyone wrote here.
+ * The queue's history starts at its own first event: the oldest commit under
+ * `refs/yrd/changes/`, which is the first `opened` event anyone wrote here.
  * Everything on the target older than that instant belongs to whatever moved
  * the branch before this queue existed, and is never judged.
  *
@@ -23,15 +23,15 @@
  * touched the file at all, then the one that INTRODUCED the `remote:` line —
  * and both readings made a line of configuration mean "the queue starts here".
  * `remote:` is an ordinary optional key now (`origin` unless declared), so it
- * cannot carry that meaning, and the facts say it better anyway: they are the
+ * cannot carry that meaning, and the events say it better anyway: they are the
  * queue's own record, nothing else writes them, and the first of them is the
  * first moment this branch was the queue's.
  *
  * The queue remembers nothing, so what it has already reported is read from
- * git too. A commit some change's merged fact names in `Merge:` is accounted
+ * git too. A commit some change's merged event names in `Merge:` is accounted
  * for: the queue merged it, or caught up on a hand merge of a submitted head
- * and reported it in the same queue run that wrote the fact. Everything below
- * an accounted commit was on the line when that fact was written, so it was
+ * and reported it in the same queue run that wrote the event. Everything below
+ * an accounted commit was on the line when that event was written, so it was
  * judged then; the walk from the tip stops at the first accounted commit, and
  * a queue run reports exactly the hand commits above it. A hand commit with
  * nothing of the queue's on top is reported again next run, with the commit
@@ -39,7 +39,7 @@
  * at-least-once, the plan's shape for every message.
  */
 
-import { endedKind, mergedByRun, trailer, type Fact, type Git } from "./facts.ts"
+import { endedKind, mergedByRun, trailer, type Event, type Git } from "./events.ts"
 import { gitlinkRows } from "./git.ts"
 import { CHANGES, changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
@@ -71,10 +71,10 @@ export async function bypassCommits(
   entries: QueueRead,
 ): Promise<readonly Bypass[]> {
   const started = await queueStarted(git)
-  // No facts anywhere: this queue has judged nothing, so it has no history of
+  // No events anywhere: this queue has judged nothing, so it has no history of
   // its own and nothing on the target is yet its business to report.
   if (started === undefined) return []
-  const byName = new Map(entries.map((entry) => [changeName(entry.change), entry.change.facts.at(-1)]))
+  const byName = new Map(entries.map((entry) => [changeName(entry.change), entry.change.events.at(-1)]))
   const accounted = new Set<string>()
   for (const tip of byName.values()) {
     const merge = tip === undefined || endedKind(tip) !== "merged" ? undefined : trailer(tip, "Merge")
@@ -105,7 +105,7 @@ export async function bypassCommits(
     // A commit with no parent is where this branch's history begins, not
     // something pushed onto it, and there is nothing older to walk to. It can
     // only be reached at all because a committer date is whole seconds: a
-    // repository whose first commit and whose first fact share one second has
+    // repository whose first commit and whose first event share one second has
     // both at the boundary.
     const first = parents[0]
     if (first === undefined) break
@@ -116,20 +116,20 @@ export async function bypassCommits(
 }
 
 /**
- * When the queue's own history starts: the committer date of the oldest fact
- * commit under `refs/yrd/changes/`, which is the first `opened` fact anyone
+ * When the queue's own history starts: the committer date of the oldest event
+ * commit under `refs/yrd/changes/`, which is the first `opened` event anyone
  * wrote here. Undefined when there is no change at all — then the queue has
  * judged nothing and has no history to start.
  *
- * The walk is first-parent from every change tip, so it reads facts and ends
- * at the genesis (facts.ts). `--min-parents=1` drops the genesis itself, whose
+ * The walk is first-parent from every change tip, so it reads events and ends
+ * at the genesis (events.ts). `--min-parents=1` drops the genesis itself, whose
  * committer date is the epoch by construction and would put the boundary in
  * 1970. A change ref is asked for FIRST because `git log --glob` with no
  * matching ref falls back to HEAD, which would answer with the project's own
  * history — the silent wrong answer this reading exists to avoid.
  *
  * The date is handed to `git log --since`, which keeps commits at or after it:
- * a hand commit made in the same second as the first fact is reported, never
+ * a hand commit made in the same second as the first event is reported, never
  * hidden. The boundary errs towards reporting more, as the old one did.
  */
 async function queueStarted(git: Git): Promise<string | undefined> {
@@ -146,7 +146,7 @@ function notTheQueues(
   commit: string,
   parents: readonly string[],
   names: readonly string[],
-  byName: ReadonlyMap<string, Fact | undefined>,
+  byName: ReadonlyMap<string, Event | undefined>,
 ): string | undefined {
   if (parents.length !== 2)
     return parents.length === 1 ? "it is one commit, not a merge of a change" : `it has ${parents.length} parents`
@@ -156,7 +156,7 @@ function notTheQueues(
   if (!byName.has(name)) return `it names the change ${name}, which the queue does not know`
   const tip = byName.get(name)
   if (tip === undefined || endedKind(tip) !== "merged" || trailer(tip, "Merge") !== commit) {
-    return `it names the change ${name}, whose facts do not say it merged there`
+    return `it names the change ${name}, whose events do not say it merged there`
   }
   if (mergedByRun(trailer(tip, "Merged-By")) === undefined) {
     return `it names the change ${name}, which was merged around the queue`

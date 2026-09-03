@@ -16,7 +16,7 @@
 
 import { hostname } from "node:os"
 import { createProcess, type Process } from "@yrd/process"
-import type { Git } from "./facts.ts"
+import type { Git } from "./events.ts"
 
 /**
  * A git runner rooted at one repository. Non-zero exits throw, loudly.

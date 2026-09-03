@@ -2,7 +2,7 @@
  * One queue run, end to end, against a real remote and a real check script.
  *
  * Every case asserts on what the plan says a reader can see: the exit code,
- * the target's commits, the change's facts at the remote, and the message the
+ * the target's commits, the change's events at the remote, and the message the
  * notifier was handed. Nothing internal.
  */
 
@@ -13,7 +13,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   CHANGES,
-  appendFact,
+  appendEvent,
   changeName,
   changeRef,
   checkLogPath,
@@ -21,7 +21,7 @@ import {
   list,
   mergedByRun,
   queueRun,
-  readFacts,
+  readEvents,
   readQueue,
   runCheck,
   submit,
@@ -237,7 +237,7 @@ async function trailerOn(w: World, commit: string, key: string): Promise<string>
  * at 03:33 PDT. `submit` refuses that now, so the ref is written here instead.
  */
 async function plantTargetChange(w: World, head: string): Promise<void> {
-  await appendFact(w.git, {
+  await appendEvent(w.git, {
     change: { branch: "main", head },
     kind: "opened",
     subject: "unknown submitted main to main",
@@ -386,9 +386,9 @@ describe("a queue run", () => {
     const parents = (await w.git(["rev-list", "--parents", "-n", "1", after])).trim().split(/\s+/u).slice(1)
     expect(parents).toEqual([w.target, head])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
-    const facts = await readFacts(w.git, { branch: "task/one", head })
+    const events = await readEvents(w.git, { branch: "task/one", head })
     // checked after the on-submit phase, merged after the on-merge phase, sent last.
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent"])
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked", "merged", "sent"])
     // The queue list row names the merge commit and its base in full, for whoever proves a landing by ancestry.
     const row = list((await readQueue(w.git, "origin", "main")).changes).find(
       (candidate) => candidate.branch === "task/one",
@@ -398,17 +398,17 @@ describe("a queue run", () => {
     expect(row?.base).toBe(w.target)
     const sent = messages(w)
     expect(sent).toHaveLength(1)
-    // The record is the notifier's contract, unchanged: its kinds are landed, send-back and yrd-broken.
-    expect(sent[0]).toMatchObject({
-      branch: "task/one",
-      failures: 0,
-      kind: "merged",
-      pr: "task/one",
-      sha: head,
-      submitter: "@dev/2",
+    // The event a notify entry reads IS the event: which ending, which change,
+    // who submitted it, what it is for, and the merge it made. No id, because
+    // the change and the ending are the message's identity; no prose, because
+    // the entry composes what it says.
+    expect(sent[0]).toEqual({
+      change: changeName({ branch: "task/one", head }),
+      event: "merged",
       issue: "@i/10-yrd/1",
+      merge: await remoteTarget(w),
+      submitter: "@dev/2",
     })
-    expect(sent[0]?.attempt_id).toBe(facts[2]?.sha)
     expect(
       readFileSync(outcome.log, "utf8")
         .split("\n")
@@ -417,11 +417,11 @@ describe("a queue run", () => {
     ).toEqual(expect.arrayContaining(["run", "change", "check", "result", "merge", "message"]))
   })
 
-  it("a second writer that takes the change ref between the read and the push loses neither fact", async () => {
+  it("a second writer that takes the change ref between the read and the push loses neither event", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const ref = changeRef({ branch: "task/one", head })
-    const rivalPath = join(w.workdir, "..", "fact-rival")
+    const rivalPath = join(w.workdir, "..", "event-rival")
     await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
     const rival = gitIn(rivalPath)
     await rival(["config", "user.email", "rival@yrd.test"])
@@ -430,11 +430,11 @@ describe("a queue run", () => {
     let concurrent: string | undefined
     const git: Git = async (args, input) => {
       // Between the tip this run read the change at and its leased push, a
-      // second queue appends a fact of its own and pushes it first. A real
+      // second queue appends an event of its own and pushes it first. A real
       // writer at the real remote, not a reading of this one's argv.
       if (concurrent === undefined && args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))) {
         await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
-        concurrent = await appendFact(rival, {
+        concurrent = await appendEvent(rival, {
           change: { branch: "task/one", head },
           kind: "stuck",
           subject: "another queue got there first",
@@ -448,15 +448,15 @@ describe("a queue run", () => {
 
     const outcome = await queueRun({ ...w.options({ exit: 0, on: ["submit"] }), git })
 
-    // The lease refused the first push, so the rival's fact stands; the same
-    // fact was written again onto it and pushed, so neither is lost and the
+    // The lease refused the first push, so the rival's event stands; the same
+    // event was written again onto it and pushed, so neither is lost and the
     // run went on to merge.
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/one"])
     await fetchChanges(w)
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "checked", "merged", "sent"])
-    expect(facts.map((fact) => fact.sha)).toContain(concurrent)
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "stuck", "checked", "merged", "sent"])
+    expect(events.map((event) => event.sha)).toContain(concurrent)
     expect(records(outcome)).toContainEqual(
       expect.objectContaining({ decision: "checked", reason: "change-ref-taken", remote: concurrent }),
     )
@@ -472,18 +472,21 @@ describe("a queue run", () => {
     expect(outcome.failed).toEqual(["task/one"])
     expect(await remoteTarget(w)).toBe(w.target)
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "failed", "sent"])
-    expect(facts[2]?.trailers).toEqual(
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked", "failed", "sent"])
+    expect(events[2]?.trailers).toEqual(
       expect.arrayContaining([
         ["Reason", "verify"],
         ["Fault", "submitter"],
       ]),
     )
-    expect(messages(w)[0]).toMatchObject({
-      code: "verify",
-      disposition: "author",
-      kind: "failed",
+    expect(messages(w)[0]).toEqual({
+      change: changeName({ branch: "task/one", head }),
+      event: "failed",
+      failures: 1,
+      issue: "@i/10-yrd/1",
+      log: expect.stringContaining("verify.log"),
+      reason: "verify",
       submitter: "@dev/2",
     })
   })
@@ -498,20 +501,26 @@ describe("a queue run", () => {
     expect(outcome.stuck).toEqual(["task/one"])
     expect(await remoteTarget(w)).toBe(w.target)
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "stuck", "sent"])
-    // A stuck fact names the check as its reason and says nothing about fault:
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked", "stuck", "sent"])
+    // A stuck event names the check as its reason and says nothing about fault:
     // stuck is always the queue's, and a constant trailer says nothing.
-    expect(facts[2]?.trailers).toEqual(expect.arrayContaining([["Reason", "verify"]]))
-    expect(facts[2]?.trailers.filter(([name]) => name === "Fault" || name === "Cause")).toEqual([])
-    expect(facts[3]?.trailers).toEqual(
+    expect(events[2]?.trailers).toEqual(expect.arrayContaining([["Reason", "verify"]]))
+    expect(events[2]?.trailers.filter(([name]) => name === "Fault" || name === "Cause")).toEqual([])
+    expect(events[3]?.trailers).toEqual(
       expect.arrayContaining([
         ["To", "recorder"],
         ["State", "stuck"],
         ["Reason", "verify"],
       ]),
     )
-    expect(messages(w)[0]).toMatchObject({ code: "verify", kind: "stuck" })
+    expect(messages(w)[0]).toMatchObject({
+      change: changeName({ branch: "task/one", head }),
+      event: "stuck",
+      log: expect.stringContaining("verify.log"),
+      reason: expect.stringContaining("could not judge task/one"),
+    })
+    expect(messages(w)[0]?.failures).toBeUndefined()
   })
 
   it("runs every notify entry that wants this ending, once each, and writes one sent event per entry", async () => {
@@ -529,13 +538,13 @@ describe("a queue run", () => {
     })
 
     expect(outcome.merged).toEqual(["task/one"])
-    expect(messages(w).map((message) => message.kind)).toEqual(["merged", "merged"])
+    expect(messages(w).map((message) => message.event)).toEqual(["merged", "merged"])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
     // One sent event per entry, each naming the entry it is about.
-    expect(facts.slice(-2).map((fact) => trailer(fact, "To"))).toEqual(["submitter", "board"])
-    expect(facts.slice(-2).map((fact) => trailer(fact, "Delivery"))).toEqual(["sent", "sent"])
+    expect(events.slice(-2).map((event) => trailer(event, "To"))).toEqual(["submitter", "board"])
+    expect(events.slice(-2).map((event) => trailer(event, "Delivery"))).toEqual(["sent", "sent"])
   })
 
   it("an ending no entry wants is still recorded: one sent event, To: none and Delivery: none", async () => {
@@ -548,9 +557,9 @@ describe("a queue run", () => {
 
     expect(messages(w)).toEqual([])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent"])
-    expect(facts.at(-1)?.trailers).toEqual(
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked", "merged", "sent"])
+    expect(events.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
         ["To", "none"],
         ["Delivery", "none"],
@@ -566,7 +575,7 @@ describe("a queue run", () => {
     const outcome = await queueRun(w.options({ sleep: 3, timeoutMs: 500 }))
 
     expect(outcome.exitCode).toBe(2)
-    expect(messages(w)[0]?.command).toMatch(/ran past its bound/u)
+    expect(String(records(outcome).find((record) => record.kind === "message")?.text)).toMatch(/ran past its bound/u)
   })
 
   it("a check declaring a scripts: path the target does not carry is loud: the change ends stuck and names it (D5)", async () => {
@@ -584,11 +593,11 @@ describe("a queue run", () => {
     expect(outcome.exitCode).toBe(2)
     expect(outcome.stuck).toEqual(["task/one"])
     await fetchChanges(w)
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
-    expect(facts[1]?.subject).toContain("gates/absent.sh")
-    expect(messages(w)[0]).toMatchObject({ kind: "stuck" })
-    expect(messages(w)[0]?.command).toContain("does not carry")
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "stuck", "sent"])
+    expect(events[1]?.subject).toContain("gates/absent.sh")
+    expect(messages(w)[0]).toMatchObject({ event: "stuck" })
+    expect(String(records(outcome).find((record) => record.kind === "message")?.text)).toContain("does not carry")
   })
 
   it("POSITIVE CONTROL: a declared scripts: path the target does carry is restored and judged (D5)", async () => {
@@ -624,10 +633,10 @@ describe("a queue run", () => {
     expect(outcome.exitCode).toBe(2)
     expect(outcome.stuck).toEqual(["task/one"])
     await fetchChanges(w)
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
-    const wedged = facts[1]
-    if (wedged === undefined) throw new Error("no stuck fact")
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "stuck", "sent"])
+    const wedged = events[1]
+    if (wedged === undefined) throw new Error("no stuck event")
     expect(wedged.subject).toContain("held its output open")
     // The condition is named, and so is the partial log the check did write.
     const check = trailers(wedged, "Check")[0] ?? ""
@@ -667,7 +676,7 @@ describe("a queue run", () => {
     expect(outcome.merged).toEqual([])
     expect(await remoteTarget(w)).toBe(moved)
     await fetchChanges(w)
-    expect((await readFacts(w.git, { branch: "task/one", head })).map((fact) => fact.kind)).toEqual(["opened", "checked"])
+    expect((await readEvents(w.git, { branch: "task/one", head })).map((event) => event.kind)).toEqual(["opened", "checked"])
     expect(messages(w)).toEqual([])
     expect(records(outcome)).toContainEqual(
       expect.objectContaining({ decision: "checked", reason: "target-moved", saw: moved }),
@@ -686,15 +695,15 @@ describe("a queue run", () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
 
-    // The notifier is down: the merge still happens, the sent fact says the
+    // The notifier is down: the merge still happens, the sent event says the
     // delivery failed, and the run is not stuck (ruling D9).
     const down = await queueRun({ ...w.options({ exit: 0 }), notify: [{ name: "recorder", on: ["merged"], run: "sh -c 'echo the notifier is down >&2; exit 3'" }] })
     expect(down.exitCode).toBe(0)
     expect(down.merged).toEqual(["task/one"])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
-    let facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent"])
-    expect(facts.at(-1)?.trailers).toEqual(
+    let events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked", "merged", "sent"])
+    expect(events.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
         ["State", "merged"],
         ["Delivery", "failed"],
@@ -702,24 +711,23 @@ describe("a queue run", () => {
     )
     expect(messages(w)).toEqual([])
 
-    // The notifier is back: the same message, with the merged fact's sha as its id.
+    // The notifier is back: the same message, with the merged event's sha as its id.
     const again = await queueRun(w.options({ exit: 0 }))
     expect(again.exitCode).toBe(0)
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
-    facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
-    expect(facts.at(-1)?.trailers).toEqual(
+    events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
+    expect(events.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
         ["To", "recorder"],
         ["Delivery", "sent"],
       ]),
     )
-    const merged = facts.find((fact) => fact.kind === "merged")
     expect(messages(w)).toHaveLength(1)
-    expect(messages(w)[0]).toMatchObject({ attempt_id: merged?.sha, kind: "merged" })
+    expect(messages(w)[0]).toMatchObject({ event: "merged" })
   })
 
-  it("a change merged around the queue reads merged, its catch-up fact says a hand did it, and the bypass is reported once (E5)", async () => {
+  it("a change merged around the queue reads merged, its catch-up event says a hand did it, and the bypass is reported once (E5)", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     // The garage lands it around the queue: a merge commit on main, pushed.
@@ -741,7 +749,7 @@ describe("a queue run", () => {
       if (advance && leased && refspec !== undefined) {
         advance = false
         await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
-        concurrent = await appendFact(rival, {
+        concurrent = await appendEvent(rival, {
           change: { branch: "task/one", head },
           kind: "merged",
           subject: `another queue observed the bypass at ${landing.slice(0, 12)}`,
@@ -764,19 +772,19 @@ describe("a queue run", () => {
     expect(outcome.bypasses).toEqual([landing])
     expect(await remoteTarget(w)).toBe(landing)
     await fetchChanges(w)
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "merged", "merged", "sent"])
-    expect(facts.map((fact) => fact.sha)).toContain(concurrent)
-    expect(facts[2]?.subject).toBe(`merged around the queue at ${landing.slice(0, 12)}`)
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "merged", "merged", "sent"])
+    expect(events.map((event) => event.sha)).toContain(concurrent)
+    expect(events[2]?.subject).toBe(`merged around the queue at ${landing.slice(0, 12)}`)
     // `Base:` is the landing commit's first parent, a sha like every other Base.
-    expect(facts[2]?.trailers).toEqual(
+    expect(events[2]?.trailers).toEqual(
       expect.arrayContaining([
         ["Merge", landing],
         ["Base", w.target],
         ["Merged-By", "bypass"],
       ]),
     )
-    expect(facts[3]?.trailers).toEqual(
+    expect(events[3]?.trailers).toEqual(
       expect.arrayContaining([
         ["State", "merged"],
         ["Merged-By", "bypass"],
@@ -787,20 +795,21 @@ describe("a queue run", () => {
     )
     // Two records: one for the change that merged, one for the bypass, the
     // second with the merge commit as its id.
-    expect(messages(w).filter((message) => message.kind === "merged")).toMatchObject([{ submitter: "@dev/2" }])
-    const broken = messages(w).filter((message) => message.kind === "merged-bypass")
-    expect(broken).toMatchObject([{ attempt_id: landing, pr: "main", sha: landing }])
-    expect(broken[0]?.command).toContain(`main moved around the queue at ${landing.slice(0, 12)} (landed around the queue)`)
-    expect(broken[0]?.command).toContain("it carries no Change: trailer")
+    expect(messages(w).filter((message) => message.event === "merged")).toMatchObject([{ submitter: "@dev/2" }])
+    const broken = messages(w).filter((message) => message.event === "merged-bypass")
+    expect(broken).toEqual([{ change: landing, event: "merged-bypass" }])
+    const told = records(outcome).find((record) => record.kind === "message" && record.says === "merged-bypass")
+    expect(String(told?.text)).toContain(`main moved around the queue at ${landing.slice(0, 12)}`)
+    expect(String(told?.text)).toContain("it carries no Change: trailer")
     expect(records(outcome).filter((record) => record.kind === "merged-bypass")).toMatchObject([
       { commit: landing, gitlinks: [], parents: [w.target, head], subject: "landed around the queue" },
     ])
 
-    // The next run says nothing new: the catch-up fact accounts for the commit.
+    // The next run says nothing new: the catch-up event accounts for the commit.
     const again = await queueRun(w.options({ exit: 0 }))
     expect(again.bypasses).toEqual([])
     expect(records(again).filter((record) => record.kind === "merged-bypass")).toEqual([])
-    expect(messages(w).filter((message) => message.kind === "merged-bypass")).toHaveLength(1)
+    expect(messages(w).filter((message) => message.event === "merged-bypass")).toHaveLength(1)
   })
 
   it("a change that ended failed and was then merged around the queue gets one message, the merged one, and its tip says merged", async () => {
@@ -822,11 +831,15 @@ describe("a queue run", () => {
 
     expect(outcome.exitCode).toBe(0)
     await fetchChanges(w)
-    // The catch-up merged fact and its message, and no second ending on top of it.
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "failed", "sent", "merged", "sent"])
-    expect(facts.at(-1)?.trailers).toEqual(expect.arrayContaining([["State", "merged"]]))
-    expect(messages(w).filter((message) => message.branch === "task/one").map((message) => message.kind)).toEqual([
+    // The catch-up merged event and its message, and no second ending on top of it.
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked", "failed", "sent", "merged", "sent"])
+    expect(events.at(-1)?.trailers).toEqual(expect.arrayContaining([["State", "merged"]]))
+    expect(
+      messages(w)
+        .filter((message) => String(message.change).startsWith("task/one@"))
+        .map((message) => message.event),
+    ).toEqual([
       "merged",
     ])
   })
@@ -843,7 +856,7 @@ describe("a queue run", () => {
     // The queue merges the real change. The merge's first parent is the head
     // the planted ref is named after — which is what made the next run call
     // that ref merged, name the queue's own merge as its landing, and write a
-    // `Merged-By: bypass` fact on it.
+    // `Merged-By: bypass` event on it.
     const merging = await queueRun(w.options({ exit: 0 }))
     expect(merging.merged).toEqual(["task/one"])
     const merge = await remoteTarget(w)
@@ -857,19 +870,19 @@ describe("a queue run", () => {
     expect(after.merged).toEqual([])
     expect(after.bypasses).toEqual([])
     await fetchChanges(w)
-    // The planted ref still holds the one fact that was written on it, and no
-    // run considered it: no fact, no row, no message.
-    expect((await readFacts(w.git, { branch: "main", head: w.target })).map((fact) => fact.kind)).toEqual(["opened"])
+    // The planted ref still holds the one event that was written on it, and no
+    // run considered it: no event, no row, no message.
+    expect((await readEvents(w.git, { branch: "main", head: w.target })).map((event) => event.kind)).toEqual(["opened"])
     for (const outcome of [merging, after]) {
       expect(records(outcome).filter((record) => record.kind === "change" && record.branch === "main")).toEqual([])
       expect(records(outcome).filter((record) => record.kind === "merged-bypass")).toEqual([])
     }
-    expect(messages(w).filter((message) => (message.command ?? "").includes("main@"))).toEqual([])
-    expect(messages(w).filter((message) => message.kind === "merged-bypass")).toEqual([])
-    expect(messages(w).map((message) => message.kind)).toEqual(["merged"])
+    expect(messages(w).filter((message) => String(message.change).startsWith("main@"))).toEqual([])
+    expect(messages(w).filter((message) => message.event === "merged-bypass")).toEqual([])
+    expect(messages(w).map((message) => message.event)).toEqual(["merged"])
   })
 
-  it("the merge commit names its change, its submitter and its issue, and the merged fact says the queue merged it and what it checked (E5)", async () => {
+  it("the merge commit names its change, its submitter and its issue, and the merged event says the queue merged it and what it checked (E5)", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
 
@@ -882,20 +895,20 @@ describe("a queue run", () => {
       `merge task/one@${head.slice(0, 12)} into main`,
     )
     // The trailer is the change's name, which under the one prefix is its ref:
-    // `git log refs/yrd/changes/<that name>` prints the facts.
+    // `git log refs/yrd/changes/<that name>` prints the events.
     const named = await trailerOn(w, merge, "Change")
     expect(named).toBe(changeName({ branch: "task/one", head }))
     expect(`${CHANGES}/${named}`).toBe(changeRef({ branch: "task/one", head }))
     expect(await trailerOn(w, merge, "Issue")).toBe("@i/10-yrd/1")
     expect(await trailerOn(w, merge, "Submitter")).toBe("@dev/2")
     await fetchChanges(w)
-    // The facts and the genesis, on the ref's first-parent line (facts.ts).
+    // The events and the genesis, on the ref's first-parent line (events.ts).
     expect(
       (await w.git(["log", "--first-parent", "--format=%s", `${CHANGES}/${named}`])).trim().split("\n"),
     ).toHaveLength(5)
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    const merged = facts.find((fact) => fact.kind === "merged")
-    if (merged === undefined) throw new Error("no merged fact")
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    const merged = events.find((event) => event.kind === "merged")
+    if (merged === undefined) throw new Error("no merged event")
     // `Merged-By:` names the queue and the run of it that merged: the run id is
     // what a reader needs, and one formatter writes it on both the event and
     // the merge commit, so the two can never say different things.
@@ -907,9 +920,9 @@ describe("a queue run", () => {
     // with `git log` alone.
     expect((await w.git(["log", "-1", "--format=%cn <%ce>", merge])).trim()).toMatch(/^yrd-service <yrd-service@/u)
     expect(trailer(merged, "Merge")).toBe(merge)
-    // One `Check:` per on-merge check, in the shape the checked fact uses.
+    // One `Check:` per on-merge check, in the shape the checked event uses.
     expect(trailers(merged, "Check")).toEqual([expect.stringMatching(/^verify exit=0 ms=\d+ log=\S+$/u)])
-    expect(facts.at(-1)?.trailers).toEqual(
+    expect(events.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
         ["To", "recorder"],
         ["Delivery", "sent"],
@@ -932,14 +945,11 @@ describe("a queue run", () => {
     expect(records(first).filter((record) => record.kind === "merged-bypass")).toMatchObject([
       { commit: bypass, gitlinks: [], parents: [base], subject: "bypass.txt around the queue" },
     ])
-    const broken = messages(w).filter((message) => message.kind === "merged-bypass")
-    expect(broken).toMatchObject([
-      { attempt_id: bypass, kind: "merged-bypass", pr: "main", sha: bypass },
-    ])
-    expect(broken[0]?.command).toContain(
-      `main moved around the queue at ${bypass.slice(0, 12)} (bypass.txt around the queue)`,
-    )
-    expect(broken[0]?.command).toContain("it is one commit, not a merge of a change")
+    const broken = messages(w).filter((message) => message.event === "merged-bypass")
+    expect(broken).toEqual([{ change: bypass, event: "merged-bypass" }])
+    const told = records(first).find((record) => record.kind === "message" && record.says === "merged-bypass")
+    expect(String(told?.text)).toContain(`main moved around the queue at ${bypass.slice(0, 12)}`)
+    expect(String(told?.text)).toContain("it is one commit, not a merge of a change")
     // The change merged on top of the bypass, not on the base the queue read first.
     await w.git(["fetch", "--quiet", "origin", "main"])
     const parents = (await w.git(["rev-list", "--parents", "-n", "1", await remoteTarget(w)]))
@@ -952,11 +962,11 @@ describe("a queue run", () => {
     const second = await queueRun(w.options({ exit: 0 }))
     expect(second.bypasses).toEqual([])
     expect(records(second).filter((record) => record.kind === "merged-bypass")).toEqual([])
-    expect(messages(w).filter((message) => message.kind === "merged-bypass")).toHaveLength(1)
+    expect(messages(w).filter((message) => message.event === "merged-bypass")).toHaveLength(1)
   })
 
   it("a queue that has judged nothing has no history, so it judges nothing on the target (E5)", async () => {
-    // Not one change was ever submitted here, so there is no first fact and no
+    // Not one change was ever submitted here, so there is no first event and no
     // instant to start from — and every commit on the target belongs to
     // whatever moved the branch before this queue existed.
     const w = await world({ declaredLater: true })
@@ -978,10 +988,10 @@ describe("a queue run", () => {
    * first of those let a bypass hide itself: it edited the declaration,
    * became the boundary, and took every bypass under it out of the report.
    *
-   * The boundary is the queue's own first fact now, which no commit on the
+   * The boundary is the queue's own first event now, which no commit on the
    * target can move at all. A bypass that edits the declaration is judged
    * like any other first-parent commit, and everything older than that first
-   * fact belongs to whoever moved the branch before this queue existed.
+   * event belongs to whoever moved the branch before this queue existed.
    */
   it("a bypass after the queue's first change is reported, declaration edits included; anything older is not (E5)", async () => {
     const w = await world({ declaredLater: true })
@@ -1003,10 +1013,10 @@ describe("a queue run", () => {
         .filter((record) => record.kind === "merged-bypass")
         .map((record) => record.commit),
     ).toEqual([plain, edited])
-    expect(messages(w).filter((message) => message.kind === "merged-bypass")).toHaveLength(2)
+    expect(messages(w).filter((message) => message.event === "merged-bypass")).toHaveLength(2)
   })
 
-  it("a checked change is judged again when the target's check config is not the one its checked fact names", async () => {
+  it("a checked change is judged again when the target's check config is not the one its checked event names", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
     await new Promise((resolve) => setTimeout(resolve, 20))
@@ -1016,18 +1026,18 @@ describe("a queue run", () => {
     const first = await queueRun({ ...w.options({ exit: 0 }), configBlob: "config-A" })
     expect(first.merged).toEqual(["task/one"])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
-    let facts = await readFacts(w.git, { branch: "task/two", head: second })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked"])
-    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Config", "config-A"]]))
+    let events = await readEvents(w.git, { branch: "task/two", head: second })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked"])
+    expect(events[1]?.trailers).toEqual(expect.arrayContaining([["Config", "config-A"]]))
 
     // The target's declaration changed: the on-submit checks run again under B
-    // before the change lands, and the new checked fact names B.
+    // before the change lands, and the new checked event names B.
     const next = await queueRun({ ...w.options({ exit: 0 }), configBlob: "config-B" })
     expect(next.merged).toEqual(["task/two"])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
-    facts = await readFacts(w.git, { branch: "task/two", head: second })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "checked", "checked", "merged", "sent"])
-    expect(facts[2]?.trailers).toEqual(expect.arrayContaining([["Config", "config-B"]]))
+    events = await readEvents(w.git, { branch: "task/two", head: second })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked", "checked", "merged", "sent"])
+    expect(events[2]?.trailers).toEqual(expect.arrayContaining([["Config", "config-B"]]))
   })
 })
 
@@ -1134,13 +1144,13 @@ describe("the target's setup", () => {
     expect(outcome.failed).toEqual([])
     expect(await remoteTarget(w)).toBe(w.target)
     await fetchChanges(w)
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
-    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
-    expect(facts[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "stuck", "sent"])
+    expect(events[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
+    expect(events[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
     // The check never ran: there was no prepared tree to run it in.
     expect(whereRan(w).filter(([what]) => what === "check")).toEqual([])
-    expect(messages(w)[0]).toMatchObject({ code: "setup", kind: "stuck" })
+    expect(messages(w)[0]).toMatchObject({ event: "stuck", reason: expect.stringContaining("could not prepare a worktree") })
     expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "1", result: "fail", whose: "queue" },
     ])
@@ -1158,9 +1168,9 @@ describe("the target's setup", () => {
     expect(outcome.exitCode).toBe(2)
     expect(outcome.stuck).toEqual(["task/one"])
     await fetchChanges(w)
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "stuck", "sent"])
-    expect(facts[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "stuck", "sent"])
+    expect(events[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
     expect(records(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "missing", result: "stuck", whose: "queue" },
     ])
@@ -1188,26 +1198,25 @@ describe("a failing check bills the submitter at once", () => {
     expect(outcome.stuck).toEqual([])
     expect(await remoteTarget(w)).toBe(w.target)
     await fetchChanges(w)
-    const facts = await readFacts(w.git, { branch: "task/one", head })
-    expect(facts.map((fact) => fact.kind)).toEqual(["opened", "failed", "sent"])
-    expect(facts[1]?.trailers).toEqual(
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "failed", "sent"])
+    expect(events[1]?.trailers).toEqual(
       expect.arrayContaining([
         ["Reason", "verify"],
         ["Fault", "submitter"],
       ]),
     )
-    expect(facts[1]?.trailers.filter(([name]) => name === "Check").map(([, value]) => value)).toEqual([
+    expect(events[1]?.trailers.filter(([name]) => name === "Check").map(([, value]) => value)).toEqual([
       expect.stringMatching(/^verify exit=1 ms=\d+ log=\S+$/u),
     ])
     expect(messages(w)[0]).toMatchObject({
-      code: "verify",
-      disposition: "author",
+      event: "failed",
       failures: 1,
-      kind: "failed",
+      reason: "verify",
       submitter: "@dev/2",
     })
-    // The log the check wrote is named in the record, so the ball says where to look.
-    expect(messages(w)[0]?.log_path).toBe(checkLogFor(outcome, "task/one", "submit", "verify"))
+    // The log the check wrote is named in the event, so a notifier says where to look.
+    expect(messages(w)[0]?.log).toBe(checkLogFor(outcome, "task/one", "submit", "verify"))
     // ONE run of the one check. Two more — the second in the change's worktree
     // and one at a whole worktree of the target — is what this deleted.
     expect(whereRan(w)).toHaveLength(1)
@@ -1217,7 +1226,7 @@ describe("a failing check bills the submitter at once", () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
     expect((await queueRun(w.options({ exit: 1, on: ["submit"] }))).failed).toEqual(["task/one"])
-    expect(messages(w).at(-1)).toMatchObject({ failures: 1, kind: "failed" })
+    expect(messages(w).at(-1)).toMatchObject({ event: "failed", failures: 1 })
 
     // The author pushes a new head on the same branch and submits it again.
     await w.git(["checkout", "--quiet", "task/one"])
@@ -1230,7 +1239,7 @@ describe("a failing check bills the submitter at once", () => {
     expect((await queueRun(w.options({ exit: 1, on: ["submit"] }))).failed).toEqual(["task/one"])
 
     // Two: the change that failed under the old head, and this one.
-    expect(messages(w).at(-1)).toMatchObject({ failures: 2, kind: "failed" })
+    expect(messages(w).at(-1)).toMatchObject({ event: "failed", failures: 2 })
   })
 
   it("a check that is red at the target too still bills the submitter, and the queue keeps running", async () => {
@@ -1246,7 +1255,7 @@ describe("a failing check bills the submitter at once", () => {
     expect(outcome.failed).toEqual(["task/one"])
     expect(outcome.stuck).toEqual([])
     await fetchChanges(w)
-    expect((await readFacts(w.git, { branch: "task/one", head })).map((fact) => fact.kind)).toEqual(["opened", "failed", "sent"])
+    expect((await readEvents(w.git, { branch: "task/one", head })).map((event) => event.kind)).toEqual(["opened", "failed", "sent"])
     expect(whereRan(w)).toHaveLength(1)
   })
 })

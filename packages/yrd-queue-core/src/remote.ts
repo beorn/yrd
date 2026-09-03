@@ -11,23 +11,23 @@
  * is read again from the remote's refs every time it is asked for, in a fixed
  * number of git invocations however many changes there are — one `ls-remote`,
  * one fetch of the change refs, one fetch of exactly the branches they name
- * (the target among them), one `for-each-ref` for every change's tip fact,
- * one for ancestry — because the tip fact's trailers are the whole derived
+ * (the target among them), one `for-each-ref` for every change's tip event,
+ * one for ancestry — because the tip event's trailers are the whole derived
  * state and no history is walked. The change refs are read FIRST and the
  * branches follow from them, so a remote with thousands of branches the queue
  * has nothing to do with is never fetched (E3; measured 2026-09-02: the root's
  * origin holds 7,387 branches, and fetching them all cost 17 s a round).
  */
 
-import { changeOf, factFrom, type Fact, type Git } from "./facts.ts"
+import { eventFrom, tipEvent, type Event, type Git } from "./events.ts"
 import { isAncestor } from "./git.ts"
 import { CHANGES, changeRef, parseChangeRef, type Change } from "./refs.ts"
-import { readChange, type ChangeFacts, type ChangeReading } from "./state.ts"
+import { readChange, type ChangeEvents, type ChangeReading } from "./state.ts"
 
 /** One change as the queue read sees it. */
 export type QueueEntry = Readonly<{
   /** The change itself, its own branch and head included. */
-  change: ChangeFacts
+  change: ChangeEvents
   reading: ChangeReading
 }>
 
@@ -70,7 +70,7 @@ export async function readQueue(
     } else {
       const change = parseChangeRef(ref)
       // A ref named after the target is not a change, so the read yields none
-      // for it: it is never judged, never given a fact and never messaged
+      // for it: it is never judged, never given an event and never messaged
       // about, and above all it never accounts for a commit on the target's
       // own first-parent line, where an accounted commit hides every hand push
       // at or below it (bypass.ts; E5). `submit` refuses to open one, so this
@@ -80,7 +80,7 @@ export async function readQueue(
   }
   if (targetSha === undefined) throw new Error(`the target ${target} is not at ${remote}`)
 
-  // The change refs first (E3). An opened fact has its head as a parent, so
+  // The change refs first (E3). An opened event has its head as a parent, so
   // this one fetch brings every submitted head with it, whether or not the
   // branch still stands; `--prune` forgets a local change ref the remote no
   // longer holds. Nothing else is asked for: no branch, no tag.
@@ -108,7 +108,7 @@ export async function readQueue(
     await git(["update-ref", "--stdin"], gone.map((branch) => `delete refs/remotes/${remote}/${branch}\n`).join(""))
   }
 
-  const tips = await tipFacts(git)
+  const tips = await tipEvents(git)
   // Every branch tip the target already carries, in one reading.
   const merged = new Set(
     (await git(["for-each-ref", "--format=%(objectname)", `--merged=${targetSha}`, `refs/remotes/${remote}/`]))
@@ -132,10 +132,10 @@ export async function readQueue(
     const headOnTarget =
       merged.has(submitted.head) ||
       (submitted.head !== branchHead && (await isAncestor(git, submitted.head, targetSha)))
-    const change: ChangeFacts = {
+    const change: ChangeEvents = {
       ...(branchHead === undefined ? {} : { branchHead }),
       branch: submitted.branch,
-      facts: [tip],
+      events: [tip],
       head: submitted.head,
       headOnTarget,
     }
@@ -144,24 +144,21 @@ export async function readQueue(
   return { changes: entries, target: targetSha }
 }
 
-/** Every change ref's tip fact, by ref, in one reading. A change ref that does not end in a fact is loud. */
-async function tipFacts(git: Git): Promise<ReadonlyMap<string, Fact>> {
+/** Every change ref's tip event, by ref, in one reading. A change ref that does not end in an event is loud. */
+async function tipEvents(git: Git): Promise<ReadonlyMap<string, Event>> {
   const out = await git([
     "for-each-ref",
     "--format=%(objectname)%00%(refname)%00%(committerdate:iso-strict)%00%(trailers:only,unfold)%00%(contents)%01",
     `${CHANGES}/`,
   ])
-  const tips = new Map<string, Fact>()
+  const tips = new Map<string, Event>()
   for (const record of out.split("\x01")) {
     const [sha, ref, at, block, body] = record.replace(/^\n/u, "").split("\x00")
     if (sha === undefined || ref === undefined || at === undefined || block === undefined || body === undefined || sha.trim() === "")
       continue
-    const fact = factFrom(sha.trim(), at, body, block)
-    if (fact === undefined) throw new Error(`${ref} does not end in a fact; a change's ref holds only facts`)
     // Every reader of the queue comes through here, so the one check that a
-    // change's facts are in the format this code reads belongs here (facts.ts).
-    changeOf(fact, ref)
-    tips.set(ref, fact)
+    // change's events are in the format this code reads belongs here (events.ts).
+    tips.set(ref, tipEvent(eventFrom(sha.trim(), at, body, block), block, ref))
   }
   return tips
 }

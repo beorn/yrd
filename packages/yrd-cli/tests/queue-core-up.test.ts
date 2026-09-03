@@ -317,7 +317,7 @@ describe("yrd queue up, the service", () => {
 describe("yrd queue list, the table", () => {
   it("a commit the target gained around the queue is a row of its own, in the JSON and on the line (E5)", async () => {
     const w = await world()
-    // The queue's history starts at its first fact, so there is one change
+    // The queue's history starts at its first event, so there is one change
     // before the bypass: a queue that has judged nothing has no history
     // and reports nothing (by-hand.ts).
     await w.git(["checkout", "--quiet", "-b", "task/first", "main"])

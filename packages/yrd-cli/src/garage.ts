@@ -3,7 +3,7 @@
  *
  * A service in the garage has its automatic form stopped and one seat, the
  * mechanic, doing its work by hand (`CONTEXT.md` § Garage). For the merge
- * queue that fact has to be readable by yrd itself, from the queue's own
+ * queue that event has to be readable by yrd itself, from the queue's own
  * repository, with nothing else running.
  *
  * WHY IT IS A REF. The first garage recorded itself in hab's declared-stop
@@ -12,7 +12,7 @@
  * the only way to keep `hab up <seat>` from starting it — so the record
  * vanished and the status line fell back to "NO RUNNER - habitant runner [pid]
  * died ...; restart it", which is false in the garage and names the one act the
- * garage forbids. A fact whose store disappears when the service is turned off
+ * garage forbids. An event whose store disappears when the service is turned off
  * is the wrong store. Git is the truth (plan of record, principle 1), so the
  * garage is `refs/yrd/garage` in the queue's repository: a commit with no
  * parent whose message is `garage: <reason>` and whose `Opened-By:` trailer
@@ -102,7 +102,7 @@ function required(repo: string, args: readonly string[], stdin?: string): string
  * Two git reads: the ref, then the commit it names. A ref that exists but whose
  * commit does not say `garage: …`, or does not name its opener, is a LOUD
  * failure and never a quiet "no garage" — a declaration nobody can read is not
- * the same fact as no declaration (NO SILENT ERRORS).
+ * the same event as no declaration (NO SILENT ERRORS).
  */
 export function readGarageDeclaration(repo: string): GarageDeclaration | undefined {
   if (garageRefCommit(repo) === undefined) return undefined

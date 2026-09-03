@@ -8,7 +8,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createProcess, failureFact, shellCommand, type Spawn } from "@yrd/process"
+import { createProcess, failureEvent, shellCommand, type Spawn } from "@yrd/process"
 
 const silentLog = createLogger("test", [{ level: "silent" }])
 
@@ -219,7 +219,7 @@ describe("Process", () => {
     // be able to recognize "the pool already closed" and stop cleanly instead
     // of treating an expected refusal as an unclassified, fatal fault
     // (2026-08-31 SIGINT teardown race, operator terminal).
-    expect(failureFact(error)).toMatchObject({ kind: "infrastructure", code: "process-closed" })
+    expect(failureEvent(error)).toMatchObject({ kind: "infrastructure", code: "process-closed" })
     expect((error as Error).message).toBe("yrd: Process is closed")
   })
 
@@ -285,7 +285,7 @@ describe("Process", () => {
     expect(stdout.replace(notice?.[0] as string, "")).toHaveLength(100)
   })
 
-  it("reports the truncation as a structured fact as well as in the text", async () => {
+  it("reports the truncation as a structured event as well as in the text", async () => {
     const spawn: Spawn = () => ({
       pid: 4242,
       stdout: bytes("y".repeat(500)),
@@ -362,7 +362,7 @@ describe("Process", () => {
       },
     })
 
-    // What makes the notice's promise true: the queue's artifact writer holds
+    // What makes the notice's promise true: the queue's artievent writer holds
     // the complete stdout.log even though this capture kept 20 bytes.
     expect(observed).toBe(400)
     expect(result.outputTruncation?.[0]?.droppedBytes).toBe(380)

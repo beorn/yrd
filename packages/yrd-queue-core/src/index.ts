@@ -2,7 +2,7 @@
  * The queue's core: one store, which is the git repository.
  *
  * A branch is its ref at the queue's remote; a change is the ref
- * `refs/yrd/changes/<branch>@<sha>`, whose commits are its facts; a merge is
+ * `refs/yrd/changes/<branch>@<sha>`, whose commits are its events; a merge is
  * one `--no-ff` merge commit on the target, naming its change. Nothing else is
  * written and nothing is remembered: every state a reader sees is derived from
  * those refs and the target's ancestry at the moment they ask.
@@ -24,8 +24,8 @@
 
 export { CHANGES, changeName, changeRef, parseChangeName, parseChangeRef, refOfChange } from "./refs.ts"
 export type { Change } from "./refs.ts"
-export { appendFact, BYPASS_MERGE, mergedBy, mergedByRun, readFact, readFacts, trailer, trailers } from "./facts.ts"
-export type { Fact, Git } from "./facts.ts"
+export { appendEvent, BYPASS_MERGE, mergedBy, mergedByRun, readEvent, readEvents, trailer, trailers } from "./events.ts"
+export type { Event, Git } from "./events.ts"
 export { inLine, readChange } from "./state.ts"
 export { configValue, gitIn, refAt } from "./git.ts"
 export { checkLogPath, checkTrailer, readCheckTrailer, runCheck } from "./check.ts"

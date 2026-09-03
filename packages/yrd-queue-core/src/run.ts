@@ -9,7 +9,7 @@
  * worktree (a conflict is a fail, the submitter's), the on-merge checks; pass
  * with the target still at the checked base and the branch still at the head
  * fast-forwards the target to the merge commit. Every ended change sends one
- * message, after its ended fact is written, with that fact's sha as the id.
+ * message, after its ended event is written, with that event's sha as the id.
  *
  * A failing check sends the change back at once, with the check, its exit, its
  * duration and its log path. Stuck is what the queue could not judge at all —
@@ -24,7 +24,7 @@
  *
  * A branch at the remote with no change is not a change (E2): the queue read
  * never lists it, so nothing here judges, opens or messages it. `submit` is
- * the one writer of an opened fact; a run only ever appends to a change that
+ * the one writer of an opened event; a run only ever appends to a change that
  * exists.
  *
  * Only the queue pushes the target, by rule, and every run proves it before
@@ -50,19 +50,19 @@ import {
   type CheckSpec,
 } from "./check.ts"
 import {
-  appendFact,
+  appendEvent,
   BYPASS_MERGE,
   endedKind,
-  factCommit,
+  eventCommit,
   mergedBy,
-  readFact,
-  readFacts,
+  readEvent,
+  readEvents,
   trailer,
   trailers,
-  type Fact,
+  type Event,
   type Git,
-  type WriteFact,
-} from "./facts.ts"
+  type WriteEvent,
+} from "./events.ts"
 import { queueName, readConfig, targetName, type Ending, type Notifier, type Target } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
@@ -90,7 +90,7 @@ export type QueueRunOptions = Readonly<{
   checks: readonly CheckSpec[]
   /** The target's `setup:`: one shell command run in every worktree this run makes, before any check runs in it. */
   setup?: string
-  /** The blob the checks were read from, recorded on every checked fact. */
+  /** The blob the checks were read from, recorded on every checked event. */
   configBlob: string
   /** What the queue notifies, per ending; an ending no entry wants runs nothing. */
   notify?: readonly Notifier[]
@@ -202,16 +202,16 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     log.write({ kind: "reap", of: taken.of, path: taken.path, why: taken.why })
   }
 
-  // Did something go around the queue? Read before any fact is written, so a
+  // Did something go around the queue? Read before any event is written, so a
   // bypass that merged a submitted head is reported before the catch-up below
   // accounts for it (E5). Nothing stops for it: the run judges every change on
   // the base it read.
   const bypasses = await reportBypasses(run, entries)
 
-  // Bookkeeping at the edges of the facts first, so every reader below reads
-  // facts and never reconciles: a branch that is gone or moved off a head ends
+  // Bookkeeping at the edges of the events first, so every reader below reads
+  // events and never reconciles: a branch that is gone or moved off a head ends
   // that head's change failed with the reason and no message (ruling B3); a
-  // head the target already carries gets its merged fact, so the tip catches
+  // head the target already carries gets its merged event, so the tip catches
   // up with ancestry; an ended change whose message reached nobody is sent
   // again (at-least-once, § The queue run).
   for (const entry of entries) await retire(run, entry)
@@ -221,7 +221,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // On-submit: every queued change, oldest first, in a fresh worktree of its
   // head. A stuck change kept its place, and this run takes it again from
   // here; so does a checked change whose checks ran under a check config the
-  // target no longer declares (§ The queue run: a checked fact is reused only
+  // target no longer declares (§ The queue run: a checked event is reused only
   // while the config blob is the one it names).
   for (const entry of ordered(entries, "queued", "stuck", "checked").filter(
     (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
@@ -235,7 +235,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   }
 
   // On-merge: the first checked change in line, re-read so this run's own
-  // checked facts count.
+  // checked events count.
   const checked = ordered((await readQueue(git, options.target.remote, options.target.branch)).changes, "checked").find(
     (entry) => !staleChecked(run, entry),
   )
@@ -249,7 +249,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   return finish(run, stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0, { bypasses, failed, merged, stuck })
 }
 
-/** A checked change whose checked fact names a config blob the target no longer declares. */
+/** A checked change whose checked event names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
   const tip = tipOf(entry.change)
   return tip.kind === "checked" && trailer(tip, "Config") !== run.options.configBlob
@@ -271,7 +271,7 @@ function ordered(entries: QueueRead, ...states: readonly ("queued" | "checked" |
  * queue did not put there, each reported once: a log record with the commit,
  * its parents, its subject and the pins it moved, and one run of the
  * `merged-bypass` hook with the commit sha as the record's id, so a resend
- * after a crash hands over the same record (E5). No fact is written, because there is no change to
+ * after a crash hands over the same record (E5). No event is written, because there is no change to
  * write one on; what the queue has already accounted for is read from git
  * (bypass.ts), so a second run says nothing new once the queue has landed
  * on top. The run never stops for it: the queue adapts already, judging every
@@ -291,15 +291,11 @@ async function reportBypasses(run: Run, entries: QueueRead): Promise<readonly st
       why: commit.why,
     })
     const text = `${bypassLine(commit)}: ${commit.why}. The queue goes on from the new base; a rollback is a git revert, pushed through the queue.`
+    // A bypass has no change, so the commit that went around the queue stands
+    // where a change's name would (`NotifyEvent`).
     for (const { name, delivery, failure } of await notifyAll(run, BYPASS, {
-      attempt_id: commit.commit,
-      base: target,
-      branch: target,
-      code: BYPASS,
-      command: text,
-      kind: BYPASS,
-      pr: target,
-      sha: commit.commit,
+      change: commit.commit,
+      event: BYPASS,
     })) {
       run.log.write({
         about: target,
@@ -414,7 +410,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) return await endFailing(run, entry, results, failing, "submit")
-    await writeFact(run, {
+    await writeEvent(run, {
       change,
       kind: "checked",
       subject: `${branch} passed the on-submit checks at ${run.options.target.branch} ${run.targetSha.slice(0, 12)}`,
@@ -481,8 +477,8 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     try {
       // The merge commit names its change back, by the change's own name, so
       // `git log main` says which change every merge came from and
-      // `git log refs/yrd/changes/<that name>` prints its facts (E5). The
-      // submitter and the issue come with it, as the opened fact carried
+      // `git log refs/yrd/changes/<that name>` prints its events (E5). The
+      // submitter and the issue come with it, as the opened event carried
       // them forward, one trailer per line in git's own trailer format.
       const tip = tipOf(change)
       const issue = trailer(tip, "Issue")
@@ -556,9 +552,9 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       return "checked"
     }
     await run.git(["fetch", "--quiet", worktree.path, mergeCommit])
-    // The merged fact says how it was merged and what it checked: by the queue,
-    // with the on-merge checks' results, in the shape the checked fact uses.
-    const mergedFact = await appendFact(run.git, {
+    // The merged event says how it was merged and what it checked: by the queue,
+    // with the on-merge checks' results, in the shape the checked event uses.
+    const mergedEvent = await appendEvent(run.git, {
       change,
       kind: "merged",
       subject: `${branch} merged into ${run.options.target.branch} as ${mergeCommit.slice(0, 12)}`,
@@ -579,7 +575,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         `--force-with-lease=refs/heads/${run.options.target.branch}:${run.targetSha}`,
         run.options.target.remote,
         `${mergeCommit}:refs/heads/${run.options.target.branch}`,
-        `${mergedFact}:${ref}`,
+        `${mergedEvent}:${ref}`,
       ])
     } catch (error) {
       // The reading just above and this lease are two moments, and the target
@@ -605,7 +601,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     await send(
       run,
       entry,
-      mergedFact,
+      mergedEvent,
       "merged",
       messageFor("merged", { branch, head, merge: mergeCommit, subject: "" }),
     )
@@ -656,7 +652,7 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
   if (endedAs === "failed" || endedAs === "merged") return
   const { change } = entry
   const { branch, head } = change
-  const retiredFact = await writeFact(run, {
+  const retiredEvent = await writeEvent(run, {
     change,
     kind: "failed",
     subject:
@@ -666,16 +662,16 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
     target: targetName(run.options.target),
     trailers: [["Reason", reason]],
   })
-  if (retiredFact === undefined) return
+  if (retiredEvent === undefined) return
   run.log.write({ branch, decision: "failed", head, kind: "change", reason })
 }
 
 /**
- * A head the target already carries with no merged fact yet — merged around the
+ * A head the target already carries with no merged event yet — merged around the
  * queue in the garage, or by a run that crashed after its push — gets its
- * merged fact now, naming the commit that landed it and saying so, and
+ * merged event now, naming the commit that landed it and saying so, and
  * its submitter is told (§ The change: ancestry wins, and the next queue run
- * appends the merged fact so the tip catches up). A retired change is left as
+ * appends the merged event so the tip catches up). A retired change is left as
  * it ended.
  */
 async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
@@ -708,7 +704,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
     .filter((sha) => sha !== "")
   const merge = landing?.[0] ?? head
   const base = landing?.[1] ?? head
-  const mergedFact = await writeFact(run, {
+  const mergedEvent = await writeEvent(run, {
     change,
     kind: "merged",
     subject: `merged around the queue at ${merge.slice(0, 12)}`,
@@ -719,21 +715,21 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
       ["Merged-By", BYPASS_MERGE],
     ],
   })
-  if (mergedFact === undefined) return
+  if (mergedEvent === undefined) return
   run.log.write({ branch, decision: "merged", head, kind: "change", reason: "already on the target" })
-  await send(run, entry, mergedFact, "merged", messageFor("merged", { branch, head, merge, subject: "" }))
+  await send(run, entry, mergedEvent, "merged", messageFor("merged", { branch, head, merge, subject: "" }))
 }
 
 /**
  * Every ended change whose message reached nobody is sent again: an ended tip
- * with no sent fact (a crash between the two), or a sent fact whose delivery
- * failed. The id is the ended fact's sha, so whoever hears it sees one message
+ * with no sent event (a crash between the two), or a sent event whose delivery
+ * failed. The id is the ended event's sha, so whoever hears it sees one message
  * however many times it is sent (§ The queue run, at-least-once).
  */
 async function resend(run: Run, entry: QueueEntry): Promise<void> {
   const tip = tipOf(entry.change)
   // The head is on the target and this tip does not say merged: the catch-up
-  // just above owns this change — it wrote the merged fact and sent its message
+  // just above owns this change — it wrote the merged event and sent its message
   // this run, so this entry's tip is a reading from before that. Sending from
   // it would put `sent State: failed` on top of a merged change and tell its
   // submitter to fix what has already landed (ruling A2).
@@ -746,11 +742,11 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   if (reason === "replaced" || reason === "deleted") return
   const endedSha = tip.kind === "sent" ? trailer(tip, "For") : tip.sha
   if (endedSha === undefined) {
-    throw new Error(`${entry.change.branch}: sent fact ${tip.sha.slice(0, 12)} names no ended fact to send again`)
+    throw new Error(`${entry.change.branch}: sent event ${tip.sha.slice(0, 12)} names no ended event to send again`)
   }
-  const ended = tip.kind === "sent" ? await readFact(run.git, endedSha) : tip
+  const ended = tip.kind === "sent" ? await readEvent(run.git, endedSha) : tip
   if (ended.kind !== "failed" && ended.kind !== "stuck" && ended.kind !== "merged") {
-    throw new Error(`${entry.change.branch}: ${endedSha.slice(0, 12)} is a ${ended.kind} fact, not an ended one`)
+    throw new Error(`${entry.change.branch}: ${endedSha.slice(0, 12)} is a ${ended.kind} event, not an ended one`)
   }
   await send(
     run,
@@ -940,7 +936,7 @@ async function end(
   ended: Readonly<{ subject: string; trailers: readonly (readonly [string, string])[]; remedy?: string }>,
 ): Promise<Ended> {
   // Who is billed follows from the kind, once: a fail is the submitter's, and
-  // says so; a stuck is always the queue's, so its fact says nothing about
+  // says so; a stuck is always the queue's, so its event says nothing about
   // fault (a constant trailer says nothing). A `replaced` or `deleted` change
   // bills nobody and never comes through here.
   const trailers = [
@@ -948,7 +944,7 @@ async function end(
     ...(kind === "failed" ? [["Fault", "submitter"] as const] : []),
     ...(ended.remedy === undefined ? [] : [["Remedy", ended.remedy] as const]),
   ]
-  const fact = await writeFact(run, {
+  const event = await writeEvent(run, {
     change: entry.change,
     kind,
     subject: ended.subject,
@@ -962,13 +958,13 @@ async function end(
     kind: "change",
     reason: ended.subject,
   })
-  // No fact, no message: the message's id IS that fact's sha, and the next
+  // No event, no message: the message's id IS that event's sha, and the next
   // run's reading of the remote is what repairs the ending (24096).
-  if (fact !== undefined) {
+  if (event !== undefined) {
     await send(
       run,
       entry,
-      fact,
+      event,
       kind,
       messageFor(kind, { branch: entry.change.branch, head: entry.change.head, remedy: ended.remedy, subject: ended.subject }),
     )
@@ -976,89 +972,67 @@ async function end(
   return kind
 }
 
-/** One message per ended change, after its ended fact; the fact's sha is the id. */
+/** One message per ended change, after its ended event; the event's sha is the id. */
 async function send(
   run: Run,
   entry: QueueEntry,
-  endedFact: string,
+  endedEvent: string,
   kind: "merged" | "failed" | "stuck",
   text: string,
 ): Promise<void> {
-  const ended = await readFact(run.git, endedFact)
-  // The queue addresses nobody. It says what happened and runs the hook this
-  // ending declares; who hears about it is that command's own business. The
-  // submitter travels with the record as the opaque string the submit gave —
-  // `unknown` is what a submit with neither `--notify` nor
-  // `YRD_DEFAULT_SUBMITTER` records (rulings B6 and D9), and it is not a seat.
+  const ended = await readEvent(run.git, endedEvent)
+  // The queue addresses nobody. It says what happened and runs the entries that
+  // want this ending; who hears about it is their own business. The submitter
+  // travels with the event as the opaque string the submit gave — `unknown` is
+  // what a submit with neither `--notify` nor `YRD_DEFAULT_SUBMITTER` records
+  // (rulings B6 and D9), and it is not a seat.
   const submitter = trailer(ended, "Submitter")
   const known = submitter !== undefined && submitter !== "unknown"
-  // The record the configured notifier reads, and nothing besides:
-  //
-  //   kind         the ending, which is the hook's own name
-  //   attempt_id   the ended fact's sha, which is the message's id
-  //   pr           the branch (where a PR number stood)
-  //   submitter    what the submit named, absent when it named nothing
-  //   command      what to do next, in one line
-  //   branch, sha, base, code, disposition   optional, and read when present
-  //   log_path     the log of the check that decided it
-  //   failures     how many times this branch has been sent back, this one
-  //                included; the notifier raises an andon at two or more
-  //   issue     the one field the notifier ignores, because the plan says
-  //                the message names the issue
-  //
-  // Read at the root, 2026-09-03 (tools/yrd-notify.ts): it reads no `id`, no
-  // `text` and no `head`, which this record used to carry as second spellings
-  // of `attempt_id`, `command` and `sha`.
+  const issue = trailer(ended, "Issue")
   const lastCheck = trailers(ended, "Check").at(-1)
+  const log = lastCheck === undefined ? run.log.path : (readCheckTrailer(lastCheck).log ?? run.log.path)
   const handed = await notifyAll(run, kind, {
-    attempt_id: endedFact,
-    base: run.options.target.branch,
-    branch: entry.change.branch,
-    code: kind === "merged" ? undefined : trailer(ended, "Reason"),
-    command: text,
-    disposition: kind === "failed" ? "author" : undefined,
-    failures: await failuresOf(run, entry),
-    kind,
-    log_path: lastCheck === undefined ? undefined : readCheckTrailer(lastCheck).log,
-    pr: entry.change.branch,
-    sha: entry.change.head,
+    change: changeName(entry.change),
+    event: kind,
+    ...(issue === undefined ? {} : { issue }),
     ...(known ? { submitter } : {}),
-    issue: trailer(ended, "Issue"),
+    ...(kind === "merged" ? { merge: trailer(ended, "Merge") ?? "" } : { log, reason: reasonFor(kind, ended) }),
+    ...(kind === "failed" ? { failures: await failuresOf(run, entry) } : {}),
   })
   for (const { name, delivery, failure } of handed) {
-    // One sent fact per entry that fired, so a reader can see which of them the
-    // queue reached. The sent fact repeats the ended state and carries the
-    // ended fact's result, so the tip fact's trailers stay the whole answer
-    // about the change and no reader has to walk to the fact before (ruling A2).
-    const sentWrite: WriteFact = {
+    // One sent event per entry that fired, so a reader can see which of them the
+    // queue reached. The sent event repeats the ended state and carries the
+    // ended event's result, so the tip event's trailers stay the whole answer
+    // about the change and no reader has to walk to the event before (ruling A2).
+    const sentWrite: WriteEvent = {
       change: entry.change,
       kind: "sent",
       subject: `${said(delivery)} ${name}: ${text}`.slice(0, 200),
       target: targetName(run.options.target),
       trailers: [
-        ["Message-Id", endedFact],
+        ["Message-Id", endedEvent],
         ["To", name],
         ["State", kind],
-        ["For", endedFact],
+        ["For", endedEvent],
         ["Delivery", delivery],
         ...(failure === undefined ? [] : [["Delivery-Error", failure] as const]),
         ...ended.trailers.filter(([key]) => RESULT_TRAILERS.has(key)),
       ],
     }
-    const sentFact = await writeFact(run, sentWrite)
+    const sentEvent = await writeEvent(run, sentWrite)
     // `delivered` is the whole truth about this message or it is worth nothing:
-    // a record a notifier took whose sent fact never landed WILL be handed over
+    // an event a notifier took whose sent event never landed WILL be handed over
     // again by the next run, so it is not delivered, and the log says which half
     // failed rather than claiming the id is settled.
-    const unrecorded = sentFact === undefined ? `the sent fact for ${endedFact.slice(0, 12)} was not written; the next run sends it again` : undefined
+    const unrecorded = sentEvent === undefined ? `the sent event for ${endedEvent.slice(0, 12)} was not written; the next run sends it again` : undefined
     const trouble = [failure, unrecorded].filter((why): why is string => why !== undefined).join("; ")
     run.log.write({
       about: entry.change.branch,
       branch: entry.change.branch,
-      delivered: delivery === "sent" && sentFact !== undefined,
+      delivered: delivery === "sent" && sentEvent !== undefined,
       ...(trouble === "" ? {} : { error: trouble }),
       head: entry.change.head,
-      id: endedFact,
+      id: endedEvent,
       kind: "message",
       says: kind,
       text,
@@ -1067,13 +1041,43 @@ async function send(
   }
 }
 
+/**
+ * The JSON object a notify entry reads on its stdin: the event itself, the same
+ * one the change's ref stores, in the fields a reader needs and nothing else.
+ *
+ * `event` says which ending it is and `change` which change — its name, or for
+ * a bypass the commit that went around the queue. `submitter` and `issue` are
+ * there when the submit gave them. `merged` carries the merge it made; `failed`
+ * and `stuck` carry why and where to read it, and `failed` how many times this
+ * branch has been sent back, the number the root's notifier raises an andon on.
+ *
+ * No id, no subject, no remedy, no prose: an entry composes what it says, and
+ * the identity of a message is its change and its event — a resend after a
+ * crash hands over the same object.
+ */
+export type NotifyEvent = Readonly<{
+  event: Ending
+  change: string
+  submitter?: string
+  issue?: string
+  merge?: string
+  reason?: string
+  log?: string
+  failures?: number
+}>
+
+/** Why a change ended, as its event says it: the check for a fail, the sentence for a stuck. */
+function reasonFor(kind: "failed" | "stuck", ended: Event): string {
+  return kind === "failed" ? (trailer(ended, "Reason") ?? "check") : ended.subject
+}
+
 /** The ending a bypass is; the other three are how a change itself ended. */
 const BYPASS = "merged-bypass"
 
-/** The entry name a sent fact carries when the declaration wanted nobody told. */
+/** The entry name a sent event carries when the declaration wanted nobody told. */
 const NOBODY = "none"
 
-/** What a sent fact's subject says about its entry, in two words. */
+/** What a sent event's subject says about its entry, in two words. */
 function said(delivery: Delivery): string {
   return delivery === "sent" ? "told" : delivery === "none" ? "told nobody:" : "could not tell"
 }
@@ -1089,7 +1093,7 @@ const MOVED_ON = new Set(["replaced", "deleted"])
  *
  * Two readings, because a branch's failures live in two places: the tips of its
  * OTHER changes, which the queue read already holds, and this change's own
- * facts, where a retry at an unchanged head appends a second opened fact and a
+ * events, where a retry at an unchanged head appends a second opened event and a
  * second failure under one ref, so the tip alone would forget the first.
  */
 async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
@@ -1098,18 +1102,18 @@ async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
     const tip = tipOf(candidate.change)
     return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
   }).length
-  const own = await readFacts(run.git, entry.change)
-  return elsewhere + own.filter((fact) => fact.kind === "failed" && !MOVED_ON.has(trailer(fact, "Reason") ?? "")).length
+  const own = await readEvents(run.git, entry.change)
+  return elsewhere + own.filter((event) => event.kind === "failed" && !MOVED_ON.has(trailer(event, "Reason") ?? "")).length
 }
 
-/** How one notify entry went: it took the record, there was none to take it, or it exited non-zero. */
+/** How one notify entry went: it took the event, there was none to take it, or it exited non-zero. */
 type Delivery = "sent" | "none" | "failed"
 
 /** One entry's turn: which entry, and how it went. */
 type Handed = Readonly<{ name: string; delivery: Delivery; failure?: string }>
 
 /**
- * Hand one record to every `notify:` entry that wants this ending, in the order
+ * Hand one event to every `notify:` entry that wants this ending, in the order
  * the declaration lists them, and say how each went.
  *
  * An ending no entry wants is answered by one turn under the name `none` and
@@ -1117,30 +1121,26 @@ type Handed = Readonly<{ name: string; delivery: Delivery; failure?: string }>
  * to say and nobody to say it to, because an ending with no event at all reads
  * exactly like an ending nobody has got to yet.
  */
-async function notifyAll(
-  run: Run,
-  ending: Ending,
-  record: Readonly<Record<string, string | number | undefined>>,
-): Promise<readonly Handed[]> {
+async function notifyAll(run: Run, ending: Ending, event: NotifyEvent): Promise<readonly Handed[]> {
   const wanted = (run.options.notify ?? []).filter((entry) => entry.on.includes(ending))
   if (wanted.length === 0) return [{ delivery: "none", name: NOBODY }]
   const handed: Handed[] = []
-  for (const entry of wanted) handed.push({ ...(await deliver(run, entry, record)), name: entry.name })
+  for (const entry of wanted) handed.push({ ...(await deliver(run, entry, event)), name: entry.name })
   return handed
 }
 
 /**
- * Run one notify entry's command, the record a JSON object on its stdin, and
- * say how it went: `sent` when it accepted the record, `failed` with why when
- * it exited non-zero. A command that fails changes nothing about what a change
- * IS: the ended fact stands and the next run hands it the same record again
+ * Run one notify entry's command, the event a JSON object on its stdin, and
+ * say how it went: `sent` when it accepted the event, `failed` with why when it
+ * exited non-zero. A command that fails changes nothing about what a change IS:
+ * the ended event stands and the next run hands it the same event again
  * (ruling D9). Nothing here throws, so a failed notifier can never end a merged
  * change stuck.
  */
 async function deliver(
   run: Run,
   entry: Notifier,
-  record: Readonly<Record<string, string | number | undefined>>,
+  event: NotifyEvent,
 ): Promise<Readonly<{ delivery: Delivery; failure?: string }>> {
   const command = entry.run
   const runner = run.options.process ?? createProcess({ cwd: run.options.repo })
@@ -1148,7 +1148,7 @@ async function deliver(
     argv: shellCommand(command),
     cwd: run.options.repo,
     env: run.options.env,
-    stdin: `${JSON.stringify(record)}\n`,
+    stdin: `${JSON.stringify(event)}\n`,
     timeoutMs: 60_000,
   })
   if (result.exitCode === 0) return { delivery: "sent" }
@@ -1160,7 +1160,7 @@ async function deliver(
   }
 }
 
-/** An ended fact's result, as its sent fact carries it forward. */
+/** An ended event's result, as its sent event carries it forward. */
 const RESULT_TRAILERS = new Set(["Reason", "Fault", "Remedy", "Check", "Merge", "Base", "Gitlink", "Merged-By"])
 
 function checkTrailers(results: readonly CheckResult[]): readonly (readonly [string, string])[] {
@@ -1168,32 +1168,32 @@ function checkTrailers(results: readonly CheckResult[]): readonly (readonly [str
 }
 
 /**
- * The one writer of a fact: the commit object appended onto the tip the run
+ * The one writer of an event: the commit object appended onto the tip the run
  * read the change at, pushed under a lease for that same tip.
  *
  * There is nothing to align and no local ref to lose. The remote is the store,
  * `--force-with-lease` is what proves nobody else moved the ref between the
  * reading and the push, and the object being immutable is what makes a retry
- * cheap: on a refusal the run takes the winner's tip, writes the same fact onto
+ * cheap: on a refusal the run takes the winner's tip, writes the same event onto
  * it, and pushes once more. A second refusal is written down and left for the
  * next run's catch-up to repair, because a queue that spins on a contended ref
  * is a queue that is not judging anything (24096).
  */
-async function writeFact(run: Run, write: WriteFact): Promise<string | undefined> {
+async function writeEvent(run: Run, write: WriteEvent): Promise<string | undefined> {
   const ref = changeRef(write.change)
   let onto = await refAt(run.git, ref)
   if (onto === undefined) {
     throw new Error(`${ref} is not here; the queue read fetched every change ref the remote listed`)
   }
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const fact = await factCommit(run.git, write, onto)
+    const event = await eventCommit(run.git, write, onto)
     try {
-      await run.git(["push", "--quiet", `--force-with-lease=${ref}:${onto}`, run.options.target.remote, `${fact}:${ref}`])
+      await run.git(["push", "--quiet", `--force-with-lease=${ref}:${onto}`, run.options.target.remote, `${event}:${ref}`])
       // The local ref follows what the remote has just accepted, so a second
-      // fact written for this change in the same run — an ending and then its
-      // sent fact — starts from the tip that is really there.
-      await run.git(["update-ref", ref, fact])
-      return fact
+      // event written for this change in the same run — an ending and then its
+      // sent event — starts from the tip that is really there.
+      await run.git(["update-ref", ref, event])
+      return event
     } catch (error) {
       // Git's rejection text varies (`stale info`, `fetch first`,
       // `non-fast-forward`), so the remote's own tip decides whether this was a

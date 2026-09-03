@@ -21,7 +21,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, queueRun, readFacts, submit, trailer } from "../src/index.ts"
+import { gitIn, queueRun, readEvents, submit, trailer } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 
 const roots: string[] = []
@@ -197,8 +197,8 @@ describe("the built-in gitlink check", () => {
 
     expect(outcome.exitCode).toBe(1)
     expect(outcome.failed).toEqual(["task/off"])
-    const failed = (await readFacts(w.git, { branch: "task/off", head })).find((fact) => fact.kind === "failed")
-    if (failed === undefined) throw new Error("no failed fact")
+    const failed = (await readEvents(w.git, { branch: "task/off", head })).find((event) => event.kind === "failed")
+    if (failed === undefined) throw new Error("no failed event")
     expect(trailer(failed, "Reason")).toBe("gitlink-off-main")
     expect(trailer(failed, "Fault")).toBe("submitter")
     expect(failed.subject).toContain("component")
@@ -230,7 +230,7 @@ describe("the built-in gitlink check", () => {
 
   it("a pin moved on the target around the queue is reported with its path, and no component is asked about it (E5)", async () => {
     const w = await world()
-    // One change first: the queue's history starts at its own first fact, so a
+    // One change first: the queue's history starts at its own first event, so a
     // queue that has judged nothing reports nothing (by-hand.ts). Its branch is
     // then taken away, so the run retires it without building a worktree and
     // the count below stays about the by-hand reading alone.
@@ -300,7 +300,7 @@ describe("the built-in gitlink check", () => {
     // run's answer — and one merge per run lands the first (ruling D4).
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/first"])
-    expect((await readFacts(w.git, { branch: "task/second", head: second })).map((fact) => fact.kind)).toEqual(["opened", "checked"])
+    expect((await readEvents(w.git, { branch: "task/second", head: second })).map((event) => event.kind)).toEqual(["opened", "checked"])
     expect(w.fetches()).toBe(1)
   })
 })

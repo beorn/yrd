@@ -21,7 +21,7 @@
  * repository operand — refuses with exit 2 and names it. That rule is why
  * `--dry-run` exists on `submit` at all: the old wrapper took the flag from
  * its own surface, the new core's submit never saw it, and a dry run opened a
- * real change (task/owner-field-item13@22b2741a, two opened facts).
+ * real change (task/owner-field-item13@22b2741a, two opened events).
  */
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
@@ -297,7 +297,7 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
   })
   try {
     // The logger is built from the globals BEFORE any action runs, so the
-    // queue's fact stream is rendered at the level the invocation asked for
+    // queue's event stream is rendered at the level the invocation asked for
     // and at no other reading of the environment.
     program.hook("preAction", () => {
       if (logger !== undefined) return

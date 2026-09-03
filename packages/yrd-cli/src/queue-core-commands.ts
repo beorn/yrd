@@ -179,9 +179,9 @@ export async function coreQueueCommand(
       // The preview refuses exactly what the action refuses, first.
       refuseTarget(branch, config.target.branch)
       // A dry run says what it would open and touches nothing: no push, no
-      // fact, no ref anywhere. The wrapper used to take `--dry-run` on its own
+      // event, no ref anywhere. The wrapper used to take `--dry-run` on its own
       // surface and hand the core an ordinary submit, so a dry run opened a
-      // real change (task/owner-field-item13@22b2741a, two opened facts). The
+      // real change (task/owner-field-item13@22b2741a, two opened events). The
       // flag belongs to the command that pushes, or to no command at all.
       if (request.dryRun === true) {
         const head = (await git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim()
@@ -354,7 +354,7 @@ export async function coreQueueCommand(
       emit(
         io,
         options.json,
-        { changes: changes.map((change) => ({ ...change.row, checks: change.checks, facts: change.facts.map((fact) => ({ at: fact.at, kind: fact.kind, sha: fact.sha, subject: fact.subject })) })) },
+        { changes: changes.map((change) => ({ ...change.row, checks: change.checks, events: change.events.map((event) => ({ at: event.at, kind: event.kind, sha: event.sha, subject: event.subject })) })) },
         changes.length === 0 ? `no change for ${request.branch}` : changes.map((change) => [line(change.row), ...change.checks.map((check) => `  ${check}`)].join("\n")).join("\n"),
       )
       return 0
@@ -461,7 +461,7 @@ function runOptions(repo: string, config: QueueConfig, workdir: string, env?: No
 
 /**
  * The human line is a rendering of the record, and the CLI's own logger is the
- * one place it is rendered: one debug row per fact, named by the fact's kind,
+ * one place it is rendered: one debug row per event, named by the event's kind,
  * at the level the invocation resolved (`--log-level`, `LOG_LEVEL`, `-v`),
  * never a second format and never a second reading of the environment. No
  * host logger, no rendering: the JSONL file is what happened either way, and

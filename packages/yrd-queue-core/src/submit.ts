@@ -2,18 +2,18 @@
  * `yrd queue submit <branch>`: the one path in
  * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, The change).
  *
- * One atomic push of the branch and of its change's opened fact. Either both
+ * One atomic push of the branch and of its change's opened event. Either both
  * arrive at the remote or neither does, so a reader never sees a submitted
  * branch without its change or a change without its branch. A submit at an
- * unchanged head appends a new opened fact to the existing change: that is a
- * retry, and the change keeps its place in line from its first opened fact.
+ * unchanged head appends a new opened event to the existing change: that is a
+ * retry, and the change keeps its place in line from its first opened event.
  * The branch is always pushed with a lease, because a rebased branch is the
  * ordinary case and a lease is what stops it clobbering a head the submitter
  * never saw.
  */
 
 import { targetName, type Target } from "./config.ts"
-import { appendFact, type Git } from "./facts.ts"
+import { appendEvent, type Git } from "./events.ts"
 import { refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 
@@ -29,7 +29,7 @@ export type SubmitRequest = Readonly<{
 export type Submitted = Readonly<{
   branch: string
   head: string
-  /** The opened fact's sha. */
+  /** The opened event's sha. */
   opened: string
   /** True when the change already existed at this head, so this was a retry. */
   retry: boolean
@@ -51,7 +51,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // INTO the target, so submitting the target itself asks the queue to merge a
   // branch into itself. Nothing refused it before, and what it opened was a
   // change whose head the target already carried: it read merged at once, the
-  // catch-up gave it a `Merged-By: hand` fact naming whatever merge landed
+  // catch-up gave it a `Merged-By: hand` event naming whatever merge landed
   // next, its submitter was told to close a bead for a merge that was not
   // theirs, and that merge stayed accounted for in the E5 walk, where an
   // accounted commit hides every hand push at or below it
@@ -82,7 +82,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   const issue = await issueOf(git, request.branch, head, request.issue)
   const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
   if (issue !== undefined) trailers.push(["Issue", issue])
-  const opened = await appendFact(git, {
+  const opened = await appendEvent(git, {
     change,
     kind: "opened",
     subject: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
@@ -93,7 +93,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // append is: each ref must still be where this submitter just read it (the
   // zero sha means "absent"), or the whole push refuses and nothing lands —
   // and then the local change ref goes back to what the remote holds, so a
-  // refused submit leaves no opened fact for the next one to chain onto.
+  // refused submit leaves no opened event for the next one to chain onto.
   try {
     await git([
       "push",

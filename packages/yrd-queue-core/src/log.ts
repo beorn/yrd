@@ -1,8 +1,8 @@
 /**
- * The queue run's log: a JSONL fact stream
+ * The queue run's log: a JSONL event stream
  * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, Log).
  *
- * One record per fact, each carrying the queue run's id and, where there is
+ * One record per event, each carrying the queue run's id and, where there is
  * one, the branch, head and check it is about. Six kinds appear in every run:
  * the run itself (pin, target, config blob), each change considered and its
  * decision, each check's start and end with duration and log path, each merge,

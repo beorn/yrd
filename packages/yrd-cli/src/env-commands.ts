@@ -11,7 +11,7 @@
  * reads them.
  *
  * So `list` reads the worktrees git itself holds under the bays root rather
- * than a record of what was once opened. One source per fact: if git does not
+ * than a record of what was once opened. One source per event: if git does not
  * have the worktree, the environment is not there.
  */
 

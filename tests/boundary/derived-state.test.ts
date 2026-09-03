@@ -2,9 +2,9 @@
  * @failure A change's state is prose in the plan and a stored column in the
  *          code, so the rebuild at M4 could keep any status it likes and every
  *          existing test would still pass. Nothing pins that the five states
- *          are DERIVED — that ancestry beats the fact table, that a position
+ *          are DERIVED — that ancestry beats the event table, that a position
  *          renumbers when the change ahead leaves, that two readers of one
- *          fact table agree, that a reader holding only git can answer at all.
+ *          event table agree, that a reader holding only git can answer at all.
  * @level   l3
  * @consumer `yrd queue list` · `yrd queue show` · an author asking where their
  *           change stands · anyone reading the queue from a second checkout
@@ -15,18 +15,18 @@
  * WRITTEN FROM THE PLAN (`pm/@i/10-yrd/plan.md` § The final design, § The
  * change, the state rule), not from the code:
  *
- *   queued    an opened fact and no checked fact
- *   checked   a checked fact and no ended fact after it
- *   stuck     the last fact is ended with stuck; the change keeps its place
+ *   queued    an opened event and no checked event
+ *   checked   a checked event and no ended event after it
+ *   stuck     the last event is ended with stuck; the change keeps its place
  *   merged    the head is an ancestor of the target — AND ANCESTRY WINS OVER
- *             ANY FACT, so a change merged around the queue reads merged before any
- *             queue run has appended the merged fact
- *   failed    the last fact is ended with fail; the row is still listed
+ *             ANY EVENT, so a change merged around the queue reads merged before any
+ *             queue run has appended the merged event
+ *   failed    the last event is ended with fail; the row is still listed
  *
- * and: position in line is the order of the opened facts; `queue list` shows
+ * and: position in line is the order of the opened events; `queue list` shows
  * every change in line with state, position, last result and log path, work
  * item, failed rows included and merged rows below; nothing stores a status,
- * so two readers of one fact table must never disagree.
+ * so two readers of one event table must never disagree.
  *
  * Each case used to carry what it cost against the retired implementation —
  * `today: green` or `today: red — <what it did instead>`, measured on yrd main
@@ -115,7 +115,7 @@ function headIs(row: PlanRow, sha: string): boolean {
 
 /**
  * Where the branch's newest change stands, as `queue show` answers — the
- * second reader of the same fact table. § Commands: `queue show <branch>` is
+ * second reader of the same event table. § Commands: `queue show <branch>` is
  * "its changes newest first, each check's result and log", so the newest
  * change's state is the first thing it has to be able to say.
  */
@@ -205,12 +205,12 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(row.position, `a merged change holds no place in line\n${result.report}`).toBeUndefined()
   })
 
-  it("merged — ancestry wins over any fact: a bypass reads merged before any queue run", async () => {
+  it("merged — ancestry wins over any event: a bypass reads merged before any queue run", async () => {
     // The rule the whole area turns on. § The change: "merged if its head is an
-    // ancestor of the target, and ancestry wins over any fact (a change merged
+    // ancestor of the target, and ancestry wins over any event (a change merged
     // around the queue in the garage shows merged, and the next queue run appends the
-    // merged fact so the tip catches up)". The state is read from git, so the
-    // reader answers merged with the fact table still saying queued.
+    // merged event so the tip catches up)". The state is read from git, so the
+    // reader answers merged with the event table still saying queued.
     const { repo } = await boundaryRepository({ exit: 0 })
     const { branch, headSha } = await submitOneCommit(repo, "byhand")
 
@@ -242,7 +242,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ).toBe(1)
   })
 
-  it("position — the order of the opened facts is the order of the line", async () => {
+  it("position — the order of the opened events is the order of the line", async () => {
     const { repo } = await boundaryRepository({ exit: 0 })
     const first = await submitOneCommit(repo, "alpha")
     const second = await submitOneCommit(repo, "beta")
@@ -260,9 +260,9 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ])
   })
 
-  it("two readers of one fact table never disagree — queue list and queue show tell an author the same thing", async () => {
+  it("two readers of one event table never disagree — queue list and queue show tell an author the same thing", async () => {
     // § Principle 2 and § Commands: nothing stores a status, so both commands
-    // derive from the same facts. Four states, four repositories, because the
+    // derive from the same events. Four states, four repositories, because the
     // disagreement that matters is the one an author hits on a change of theirs
     // that ended badly.
     const cases: readonly { readonly bay: string; readonly exit: number; readonly run: boolean }[] = [
@@ -285,7 +285,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
   })
 
   it("nothing is stored — a reader holding only the git store derives the same states", async () => {
-    // § Principle 1: "Git is the truth. Every fact is a ref or a commit."
+    // § Principle 1: "Git is the truth. Every event is a ref or a commit."
     // § The final design: "There is one store: the git repository." A checkout
     // that never ran the queue holds nothing else, so what it can say about a
     // change is exactly what the git store holds — and that has to be the same

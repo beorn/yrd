@@ -6,9 +6,9 @@
  * @consumer the mechanic working the queue around the queue · hab starting the service
  *
  * Black box on a throwaway repository: the CLI opens and closes the garage, and
- * every fact is read back off the ref with plain git — proving yrd needs
+ * every event is read back off the ref with plain git — proving yrd needs
  * nothing of its own booted to see a garage, which is the whole reason the
- * fact lives in git.
+ * event lives in git.
  *
  * The old core's `queue status` projection of the garage went with it at M6;
  * what a queue run stamps on its own record is `tests/boundary/
@@ -146,7 +146,7 @@ describe("the garage is a declaration in git", () => {
   it("stops the service on one line, before it reads a remote or writes anything", async () => {
     const repo = await repository()
     // Written with plain git, in a repository yrd has never run in: the garage
-    // is a fact of the repository, not of yrd's state.
+    // is an event of the repository, not of yrd's state.
     const tree = await git(repo, "mktree")
     const commit = await git(repo, "commit-tree", tree, "-m", "garage: rebuilding the core\n\nOpened-By: @cto\n")
     await git(repo, "update-ref", GARAGE_REF, commit)

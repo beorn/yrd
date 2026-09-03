@@ -185,7 +185,7 @@ type SubmitAttempt = Readonly<{
 
 /**
  * One submit, run standing in the Bay, exactly as an author does:
- * `yrd queue submit` — one atomic push of the branch and its opened fact.
+ * `yrd queue submit` — one atomic push of the branch and its opened event.
  */
 export async function submitFromBay(repo: string, bayPath: string): Promise<SubmitAttempt> {
   const submitted = capture(bayPath)
@@ -272,7 +272,7 @@ export async function checkAttempts(checkLog: string): Promise<number> {
 }
 
 /* ---------------------------------------------------------------------------
- * The change and its facts.
+ * The change and its events.
  *
  * Still black box: git is the store the plan names, so reading a change's ref
  * out of the shared repository with `git for-each-ref` and `git log` is
@@ -294,7 +294,7 @@ async function yrdRefs(repo: string): Promise<readonly string[]> {
 }
 
 /** One commit on a change's ref. */
-type ChangeFact = Readonly<{
+type ChangeEvent = Readonly<{
   sha: string
   parents: readonly string[]
   /** Line one, prose, never parsed by a reader. */
@@ -303,7 +303,7 @@ type ChangeFact = Readonly<{
   trailerLines: readonly string[]
   /** Values by trailer key, repeats kept. */
   trailers: ReadonlyMap<string, readonly string[]>
-  /** The `Fact:` value, or "" when the commit carries none. */
+  /** The `Event:` value, or "" when the commit carries none. */
   kind: string
 }>
 
@@ -314,15 +314,15 @@ export type ChangeReading = Readonly<{
   exists: boolean
   /** The ref's tip sha, or "" when there is no such ref. */
   tip: string
-  /** The facts, oldest first, along the ref's first-parent line, with the
+  /** The events, oldest first, along the ref's first-parent line, with the
    * parentless genesis commit at the end of that line left out. */
-  facts: readonly ChangeFact[]
-  /** The `Fact:` value of each, oldest first. */
+  events: readonly ChangeEvent[]
+  /** The `Event:` value of each, oldest first. */
   kinds: readonly string[]
   /** The parentless commit the first-parent line ends at, when there is one. */
-  genesis?: ChangeFact
+  genesis?: ChangeEvent
   /** Every commit on the first-parent line, newest first — including whatever
-   * is NOT a fact, which is the point of the "reads exactly the facts" case. */
+   * is NOT an event, which is the point of the "reads exactly the events" case. */
   firstParentLine: readonly string[]
   /** Everything a failing assertion should print. */
   report: string
@@ -346,7 +346,7 @@ const FIELD = "\u001f"
 const RECORD = "\u001e"
 
 /** The commits on a ref's first-parent line, newest first. */
-async function firstParentCommits(repo: string, ref: string): Promise<readonly ChangeFact[]> {
+async function firstParentCommits(repo: string, ref: string): Promise<readonly ChangeEvent[]> {
   const raw = await git(
     repo,
     "log",
@@ -368,7 +368,7 @@ async function firstParentCommits(repo: string, ref: string): Promise<readonly C
         subject,
         trailerLines,
         trailers,
-        kind: trailers.get("Fact")?.[0] ?? "",
+        kind: trailers.get("Event")?.[0] ?? "",
       }
     })
 }
@@ -392,7 +392,7 @@ export async function readChange(
       ref,
       exists: false,
       tip: "",
-      facts: [],
+      events: [],
       kinds: [],
       firstParentLine: [],
       report: `no change ref ${ref} in ${repo}\nrefs/yrd/** there:\n${carried}`,
@@ -401,19 +401,19 @@ export async function readChange(
   const tip = tipLine.split(" ")[0] ?? ""
   const line = await firstParentCommits(repo, ref)
   const genesis = line.find((commit) => commit.parents.length === 0)
-  const facts = [...line].reverse().filter((commit) => commit.kind !== "")
+  const events = [...line].reverse().filter((commit) => commit.kind !== "")
   const shown = line
     .map(
       (commit) =>
-        `  ${commit.sha.slice(0, 8)} [${commit.parents.length}p] ${commit.kind || "(no Fact:)"} — ${commit.subject}`,
+        `  ${commit.sha.slice(0, 8)} [${commit.parents.length}p] ${commit.kind || "(no Event:)"} — ${commit.subject}`,
     )
     .join("\n")
   return {
     ref,
     exists: true,
     tip,
-    facts,
-    kinds: facts.map((fact) => fact.kind),
+    events,
+    kinds: events.map((event) => event.kind),
     genesis,
     firstParentLine: line.map((commit) => commit.sha),
     report: `${ref} at ${tip}\nfirst-parent line, newest first:\n${shown}`,
@@ -647,16 +647,16 @@ export function queueSubmit(repo: string, branch: string): Promise<QueueRunResul
 }
 
 /**
- * A change's facts, newest first, as their commit messages on the change ref.
- * A fact carries `Fact:`; the genesis commit that ends the first-parent walk
+ * A change's events, newest first, as their commit messages on the change ref.
+ * An event carries `Event:`; the genesis commit that ends the first-parent walk
  * carries none and is not one.
  */
-export async function factMessages(dir: string, ref: string): Promise<readonly string[]> {
+export async function eventMessages(dir: string, ref: string): Promise<readonly string[]> {
   const log = await git(dir, "log", "--first-parent", "--format=%B%x00", ref)
   return log
     .split("\0")
     .map((message) => message.trim())
-    .filter((message) => /^Fact: /mu.test(message))
+    .filter((message) => /^Event: /mu.test(message))
 }
 
 /** Every record a hook was handed, as one blob; empty when none ran. */

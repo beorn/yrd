@@ -3,7 +3,7 @@ import * as z from "zod"
 export const FailureKindSchema = z.enum(["usage", "configuration", "refusal", "infrastructure"])
 export type FailureKind = z.infer<typeof FailureKindSchema>
 
-export const FailureFactSchema = z
+export const FailureEventSchema = z
   .object({
     kind: FailureKindSchema,
     code: z.string().regex(/^[a-z][a-z0-9._-]*$/u),
@@ -16,23 +16,23 @@ export const FailureFactSchema = z
      * so every consumer that needs to act on the guilty member has to parse
      * prose — and a consumer that cannot parse it punishes the whole batch
      * instead. Absent means "not attributable to a single member", which is a
-     * different fact from "attributable to a member we did not name".
+     * different event from "attributable to a member we did not name".
      */
     pr: z.string().min(1).optional(),
   })
   .strict()
-export type FailureFact = Readonly<z.infer<typeof FailureFactSchema>>
+export type FailureEvent = Readonly<z.infer<typeof FailureEventSchema>>
 
-export type YrdFailure = Error & Readonly<{ name: "YrdFailure"; failure: FailureFact }>
+export type YrdFailure = Error & Readonly<{ name: "YrdFailure"; failure: FailureEvent }>
 
-export function createFailure(input: FailureFact, cause?: unknown): YrdFailure {
-  const failure = Object.freeze(FailureFactSchema.parse(input))
+export function createFailure(input: FailureEvent, cause?: unknown): YrdFailure {
+  const failure = Object.freeze(FailureEventSchema.parse(input))
   const error = cause === undefined ? new Error(failure.message) : new Error(failure.message, { cause })
   return Object.assign(error, { name: "YrdFailure" as const, failure })
 }
 
-export function failureFact(error: unknown): FailureFact | undefined {
+export function failureEvent(error: unknown): FailureEvent | undefined {
   if (!(error instanceof Error) || error.name !== "YrdFailure" || !("failure" in error)) return undefined
-  const parsed = FailureFactSchema.safeParse(error.failure)
+  const parsed = FailureEventSchema.safeParse(error.failure)
   return parsed.success ? Object.freeze(parsed.data) : undefined
 }

@@ -7,7 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createProcess, failureFact } from "@yrd/process"
+import { createProcess, failureEvent } from "@yrd/process"
 
 async function absentDirectory(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "yrd-absent-cwd-"))
@@ -27,8 +27,8 @@ describe("Process — an absent working directory", () => {
     )
 
     // Typed, not a bare posix_spawn ENOENT: every recovery path in Yrd
-    // classifies on the FailureFact, and an untyped throw is unclassifiable.
-    expect(failureFact(error)).toMatchObject({ kind: "infrastructure", code: "spawn-cwd-missing" })
+    // classifies on the FailureEvent, and an untyped throw is unclassifiable.
+    expect(failureEvent(error)).toMatchObject({ kind: "infrastructure", code: "spawn-cwd-missing" })
     // Loud enough to act on without a stack trace: the missing directory and the
     // command that wanted it.
     expect((error as Error).message).toContain(cwd)
@@ -57,7 +57,7 @@ describe("Process — an absent working directory", () => {
       (cause: unknown) => cause,
     )
 
-    expect(failureFact(error)).toMatchObject({ kind: "infrastructure", code: "spawn-cwd-missing" })
+    expect(failureEvent(error)).toMatchObject({ kind: "infrastructure", code: "spawn-cwd-missing" })
     expect((error as Error).message).toContain(cwd)
   })
 })
