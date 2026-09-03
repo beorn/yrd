@@ -63,16 +63,9 @@ export default {
         // stale installed plan (13) were the incumbent resident's
         // self-supervision and went with it at M6 with `habitant-exit.ts`.
         //
-        // OPEN, @cto's to settle (2026-09-03): a moved pin exits 0 because hab
-        // classifies every non-zero exit as a crash and spends the
-        // three-per-600-s restart budget on it, so three pin advances in ten
-        // minutes would stop the queue. Under `on-failure` a 0 is a clean
-        // ending and hab does NOT bring the loop back, so the relaunch onto the
-        // new pin is a person's hand again — the very ritual the 2026-09-02
-        // ruling ended. Keeping it automatic wants `restart: "always"` with
-        // `permanentExitCodes: [2]`, which also relaunches after a deliberate
-        // stop. Not changed here: the value is a supervision contract, not this
-        // change's to pick.
+        // A pin move exits 0, and under `on-failure` a clean ending is not
+        // relaunched, so the policy is `always`. The one permanent exit is 2,
+        // stuck. Ruled by @cto 2026-09-03.
         //
         // Was `restart: "never"` (andon ruling, operator 2026-09-01: a crashed
         // runner stays exited and pages once). Under that value the entire
@@ -88,7 +81,7 @@ export default {
         // Exit 2 means the queue is stuck and needs its garage, so relaunching
         // repeats the same fault: it is the one permanent exit. Retired exits
         // 16/17/18 are not part of this runner's permanent-exit policy.
-        restart: "on-failure" as const,
+        restart: "always" as const,
         permanentExitCodes: [2],
         // Wired 2026-09-01: `HabServiceDefinition.owner` (ag/packages/hab-config,
         // src/index.ts) now lists "owner" in `SERVICE_KEYS`, and a resident with

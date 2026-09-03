@@ -18,11 +18,11 @@ describe("Yrd Hab runner declarations", () => {
         // Exit 2 (the queue is stuck) stays down for its garage; everything the
         // loop ends on purpose — a signal, and a pin that moved under it — is a
         // 0, because hab reads every non-zero exit as a crash and spends a
-        // restart budget on it. Whether `on-failure` then has to become
-        // `always`, so a moved pin still relaunches, is @cto's to settle
-        // (hab.projects.ts says so where the value is).
+        // restart budget on it. `always` is what then brings it back on the new
+        // pin: a clean ending is not relaunched under `on-failure` (@cto,
+        // 2026-09-03).
         // No health probe: the loop's process and journal are its liveness (M7).
-        restart: "on-failure",
+        restart: "always",
         permanentExitCodes: [2],
         owner: "@cto",
       },
