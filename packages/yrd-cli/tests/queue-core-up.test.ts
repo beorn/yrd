@@ -303,3 +303,25 @@ describe("yrd queue up, the service", () => {
     ])
   })
 })
+
+describe("yrd queue list, the table", () => {
+  it("a commit the target gained by hand is a row of its own, in the JSON and on the line (E5)", async () => {
+    const w = await world()
+    // The target moves by hand: one commit after the declaration, pushed.
+    writeFileSync(join(w.work, "hand.txt"), "hand\n")
+    await w.git(["add", "hand.txt"])
+    await w.git(["commit", "--quiet", "-m", "hand.txt by hand"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const hand = (await w.git(["rev-parse", "HEAD"])).trim()
+    const sentence = `main moved by hand at ${hand.slice(0, 12)} (hand.txt by hand)`
+
+    const asJson = capture(w.work)
+    expect(await coreQueueCommand(w.work, asJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const listed = records(asJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
+    expect(listed.changes).toMatchObject([{ branch: "main", head: hand, reason: sentence, state: "by hand" }])
+
+    const asText = capture(w.work)
+    expect(await coreQueueCommand(w.work, asText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(asText.stdout()).toBe(`   by hand main ${hand.slice(0, 12)} ${sentence}\n`)
+  })
+})

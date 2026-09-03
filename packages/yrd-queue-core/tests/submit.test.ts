@@ -1,5 +1,5 @@
 /**
- * Submit and the lane, against a real remote.
+ * Submit and the queue read, against a real remote.
  *
  * A bare repository plays the queue's remote; a working clone plays the
  * submitter. Every assertion reads the remote's refs back through git, because
@@ -10,7 +10,18 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { changeRef, gitIn, inLine, lane, readFacts, refAt, submit } from "../src/index.ts"
+import {
+  changeName,
+  changeRef,
+  gitIn,
+  inLine,
+  parseChangeName,
+  parseChangeRef,
+  readFacts,
+  readQueue,
+  refAt,
+  submit,
+} from "../src/index.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -95,7 +106,7 @@ describe("submit is one atomic push of the branch and its opened fact", () => {
     expect(again.retry).toBe(true)
     const facts = await readFacts(w.git, "task/one", head)
     expect(facts.map((fact) => fact.kind)).toEqual(["opened", "opened"])
-    expect((await remoteRefs(w)).filter((ref) => ref.startsWith("refs/yrd/changes/task/one/"))).toHaveLength(1)
+    expect((await remoteRefs(w)).filter((ref) => ref.startsWith("refs/yrd/changes/task/one@"))).toHaveLength(1)
   })
 
   it("a new head is a new change beside the old one", async () => {
@@ -116,20 +127,46 @@ describe("submit is one atomic push of the branch and its opened fact", () => {
   })
 })
 
-describe("the lane is every submitted change at the remote, read", () => {
+describe("a change is named <branch>@<sha>, and that name is the last part of its ref", () => {
+  it("is read from the right, so a branch may itself carry @ and slashes, and a tail that is not a full sha is not a change", () => {
+    const head = "0123456789abcdef0123456789abcdef01234567"
+    expect(changeName("task/one", head)).toBe(`task/one@${head}`)
+    expect(changeRef("task/one", head)).toBe(`refs/yrd/changes/task/one@${head}`)
+    expect(parseChangeRef(changeRef("task/one", head))).toEqual({ branch: "task/one", head })
+    expect(parseChangeName(changeName("a@b/c@d", head))).toEqual({ branch: "a@b/c@d", head })
+    expect(parseChangeName(`task/one/${head}`)).toBeUndefined()
+    expect(parseChangeName("a@bb/c")).toBeUndefined()
+    expect(parseChangeName(`@${head}`)).toBeUndefined()
+    expect(parseChangeRef(`refs/heads/task/one@${head}`)).toBeUndefined()
+  })
+
+  it("is a ref git accepts and reads back, @ included", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/one@v2", "one.txt")
+    await submit(w.git, "origin", { branch: "task/one@v2", submitter: "@dev/2", target: "main" })
+
+    expect(await remoteRefs(w)).toContain(`refs/yrd/changes/task/one@v2@${head}`)
+    expect((await readFacts(w.git, "task/one@v2", head)).map((fact) => fact.kind)).toEqual(["opened"])
+    expect((await readQueue(w.git, "origin", "main")).map((entry) => [entry.branch, entry.change.head])).toEqual([
+      ["task/one@v2", head],
+    ])
+  })
+})
+
+describe("the queue read is every submitted change at the remote", () => {
   // Until ruling E2 (2026-09-02 evening) this asserted the opposite: a bare
   // push read as a change in state queued, opened by the next run.
-  it("a branch pushed without a submit is not a change: the lane does not list it, and a submit later opens it (E2)", async () => {
+  it("a branch pushed without a submit is not a change: the queue read does not list it, and a submit later opens it (E2)", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/bare", "bare.txt")
     await w.git(["push", "--quiet", "origin", "task/bare"])
 
-    expect((await lane(w.git, "origin", "main")).find((entry) => entry.branch === "task/bare")).toBeUndefined()
+    expect((await readQueue(w.git, "origin", "main")).find((entry) => entry.branch === "task/bare")).toBeUndefined()
     // Nothing is lost: the branch stands at the remote until its author says so.
     expect(await remoteRefs(w)).toContain("refs/heads/task/bare")
 
     await submit(w.git, "origin", { branch: "task/bare", submitter: "@dev/2", target: "main" })
-    const opened = (await lane(w.git, "origin", "main")).find((entry) => entry.branch === "task/bare")
+    const opened = (await readQueue(w.git, "origin", "main")).find((entry) => entry.branch === "task/bare")
     expect(opened?.change.head).toBe(head)
     expect(opened?.reading.state).toBe("queued")
   })
@@ -156,12 +193,12 @@ describe("the lane is every submitted change at the remote, read", () => {
     await branchWithCommit(w, "task/two", "two.txt")
     await submit(w.git, "origin", { branch: "task/two", submitter: "@dev/3", target: "main" })
     // The submits' own pushes left tracking refs for the two; forget them, so
-    // that what stands after the lane is what the lane fetched.
+    // that what stands after the reading is what the reading fetched.
     await w.git(["update-ref", "-d", "refs/remotes/origin/task/one"])
     await w.git(["update-ref", "-d", "refs/remotes/origin/task/two"])
     expect((await remoteRefs(w)).filter((ref) => ref.startsWith("refs/heads/bulk/"))).toHaveLength(200)
 
-    const entries = await lane(w.git, "origin", "main")
+    const entries = await readQueue(w.git, "origin", "main")
 
     expect(entries.map((entry) => entry.branch).sort()).toEqual(["task/one", "task/two"])
     const tracked = (await w.git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"]))
@@ -186,7 +223,7 @@ describe("the lane is every submitted change at the remote, read", () => {
     // Taken out at the remote by another hand, so this clone's tracking ref lingers.
     await gitIn(w.remote)(["update-ref", "-d", "refs/heads/task/gone"])
 
-    const entries = await lane(w.git, "origin", "main")
+    const entries = await readQueue(w.git, "origin", "main")
 
     const gone = entries.find((entry) => entry.branch === "task/gone")
     expect(gone?.change.head).toBe(head)
@@ -211,7 +248,7 @@ describe("the lane is every submitted change at the remote, read", () => {
     await w.git(["checkout", "--quiet", "main"])
     await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: "main" })
 
-    const entries = await lane(w.git, "origin", "main")
+    const entries = await readQueue(w.git, "origin", "main")
     const byHead = new Map(entries.map((entry) => [entry.change.head, entry]))
     expect(byHead.get(one)?.reading).toMatchObject({ reason: "replaced", state: "failed" })
     expect(byHead.get(oneAgain)?.reading.state).toBe("queued")
@@ -232,7 +269,7 @@ describe("the lane is every submitted change at the remote, read", () => {
     await w.git(["merge", "--quiet", "--no-ff", "-m", "merge task/one", head])
     await w.git(["push", "--quiet", "origin", "main"])
 
-    const entries = await lane(w.git, "origin", "main")
+    const entries = await readQueue(w.git, "origin", "main")
     expect(entries.find((entry) => entry.branch === "task/one")?.reading.state).toBe("merged")
   })
 })

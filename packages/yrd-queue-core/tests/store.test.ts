@@ -158,7 +158,7 @@ describe("the state is derived, and ancestry wins over any fact", () => {
       kind: "stuck",
       subject: "the queue could not judge this change",
       target: "main",
-      trailers: [["Cause", "check-timeout"]],
+      trailers: [["Reason", "check-timeout"]],
     })
 
     const facts = await readFacts(git, "task/one", head)

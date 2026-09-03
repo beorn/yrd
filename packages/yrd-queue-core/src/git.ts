@@ -34,7 +34,8 @@ export class GitExit extends Error {
     readonly args: readonly string[],
     readonly cwd: string,
     readonly exitCode: number,
-    detail: string,
+    /** What git itself said: its stderr, or its stdout when stderr was empty. */
+    readonly detail: string,
   ) {
     super(`git ${args.join(" ")} in ${cwd} exited ${exitCode}: ${detail}`)
     this.name = "GitExit"
@@ -81,4 +82,29 @@ export async function mergeBase(git: Git, left: string, right: string): Promise<
 
 function isExit(error: unknown, code: number): boolean {
   return error instanceof GitExit && error.exitCode === code
+}
+
+/**
+ * The gitlink rows of one tree-to-tree diff, read as git prints it with `-z`
+ * — `:<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0` per entry
+ * — for every path a gitlink stands at on either side: added, moved, or taken
+ * out. `sha` is the new side's, the zero sha for a gitlink taken out.
+ */
+export async function gitlinkRows(
+  git: Git,
+  from: string,
+  to: string,
+): Promise<readonly Readonly<{ path: string; oldMode: string; newMode: string; sha: string }>[]> {
+  const fields = (await git(["diff-tree", "-r", "-z", "--no-renames", from, to])).split("\0")
+  const rows: { path: string; oldMode: string; newMode: string; sha: string }[] = []
+  for (let at = 0; at + 1 < fields.length; at += 2) {
+    const [colonOldMode, newMode, , newSha] = (fields[at] ?? "").split(" ")
+    const oldMode = colonOldMode?.replace(/^:/u, "")
+    const path = fields[at + 1]
+    if (oldMode === undefined || newMode === undefined || newSha === undefined || path === undefined || path === "")
+      continue
+    if (oldMode !== "160000" && newMode !== "160000") continue
+    rows.push({ newMode, oldMode, path, sha: newSha })
+  }
+  return rows
 }

@@ -15,13 +15,15 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
+  byHandCommits,
   gitIn,
   hintsIn,
-  lane,
   list,
   queueRun,
   readConfig,
   readHints,
+  readQueue,
+  refAt,
   resolveRemote,
   runCheck,
   show,
@@ -121,7 +123,7 @@ export async function coreQueueCommand(
       return 0
     }
     case "run": {
-      // The one exit site, from the outside: a run that could not even judge
+      // The one exit site, from the caller's side: a run that could not even judge
       // (a bad invocation, a remote that cannot be read) is stuck, exit 2.
       let outcome
       try {
@@ -191,7 +193,17 @@ export async function coreQueueCommand(
       }
     }
     case "list": {
-      const rows = list(await lane(git, config.remote, config.target))
+      const entries = await readQueue(git, config.remote, config.target)
+      // The commits the target gained by hand are rows too (E5), judged at the
+      // target as the queue read just fetched it, so the rows and the reading
+      // are about one and the same tip.
+      const targetSha = await refAt(git, `refs/remotes/${config.remote}/${config.target}`)
+      if (targetSha === undefined) {
+        throw new Error(
+          `${config.target} is not here after the queue read: refs/remotes/${config.remote}/${config.target} is absent`,
+        )
+      }
+      const rows = list(entries, { byHand: await byHandCommits(git, config.target, targetSha, entries) })
       emit(io, options.json, { changes: rows }, table(rows))
       return 0
     }
@@ -218,7 +230,7 @@ export async function coreQueueCommand(
       return results.some((result) => result.result === "stuck") ? 2 : results.some((result) => result.result === "fail") ? 1 : 0
     }
     case "show": {
-      const changes = show(await lane(git, config.remote, config.target), request.branch)
+      const changes = show(await readQueue(git, config.remote, config.target), request.branch)
       emit(
         io,
         options.json,
@@ -354,17 +366,37 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `${where} merged as ${String(rest.commit).slice(0, 12)}`
     case "message":
       return `told ${String(rest.to)} about ${where}`
+    case "by-hand": {
+      const pins =
+        Array.isArray(rest.gitlinks) && rest.gitlinks.length > 0
+          ? `; it moved the pin at ${rest.gitlinks.join(", ")}`
+          : ""
+      return `${String(rest.branch)} moved by hand at ${String(rest.commit).slice(0, 12)} (${String(rest.subject)})${pins}`
+    }
     default:
       return kind
   }
 }
 
-function describeRun(outcome: Readonly<{ exitCode: number; merged: readonly string[]; failed: readonly string[]; stuck: readonly string[]; log: string; garage?: string }>): string {
+function describeRun(
+  outcome: Readonly<{
+    exitCode: number
+    merged: readonly string[]
+    failed: readonly string[]
+    stuck: readonly string[]
+    byHand: readonly string[]
+    log: string
+    garage?: string
+  }>,
+): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
   const parts = [
     outcome.merged.length > 0 ? `merged ${outcome.merged.join(", ")}` : undefined,
     outcome.failed.length > 0 ? `failed ${outcome.failed.join(", ")}` : undefined,
     outcome.stuck.length > 0 ? `stuck ${outcome.stuck.join(", ")}` : undefined,
+    outcome.byHand.length > 0
+      ? `${String(outcome.byHand.length)} ${outcome.byHand.length === 1 ? "commit" : "commits"} by hand at ${outcome.byHand.map((sha) => sha.slice(0, 12)).join(", ")}`
+      : undefined,
   ].filter((part): part is string => part !== undefined)
   const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`

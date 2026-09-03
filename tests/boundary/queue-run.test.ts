@@ -4,8 +4,8 @@
  *          caller — the exit code, whether the target moved, whether a failed
  *          change's refs survive — and every existing test still passes. Those
  *          facts are the whole contract a supervisor, a CI wrapper and an
- *          author read; nothing else about a queue run is observable from
- *          outside.
+ *          author read; nothing else about a queue run is observable at the
+ *          boundary.
  * @level   l3
  * @consumer `yrd queue run --once` · Hab supervision · any caller of the CLI
  *

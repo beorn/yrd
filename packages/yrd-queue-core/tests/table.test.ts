@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, lane, list, readConfig, readHints, show, submit } from "../src/index.ts"
+import { gitIn, list, byHandCommits, readConfig, readHints, readQueue, show, submit } from "../src/index.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -85,18 +85,44 @@ describe("the declaration is read from the target commit", () => {
   })
 })
 
-describe("the table is the lane rendered", () => {
+describe("the table is the queue read rendered", () => {
   it("lists changes in line with their position, then the ended ones", async () => {
     const w = await world("remote: origin\n")
     const one = await submitCommit(w, "task/one", "one.txt")
     await new Promise((resolve) => setTimeout(resolve, 1100))
     const two = await submitCommit(w, "task/two", "two.txt")
-    const rows = list(await lane(w.git, "origin", "main"))
+    const rows = list(await readQueue(w.git, "origin", "main"))
     expect(rows.map((row) => [row.branch, row.position, row.state, row.workItem])).toEqual([
       ["task/one", 1, "queued", "@i/1/one.txt"],
       ["task/two", 2, "queued", "@i/1/two.txt"],
     ])
     expect(rows.map((row) => row.head)).toEqual([one, two])
+  })
+
+  it("lists a commit the target gained by hand as its own row, as recent as it was committed (E5)", async () => {
+    const w = await world("remote: origin\n")
+    await submitCommit(w, "task/one", "one.txt")
+    await w.git(["checkout", "--quiet", "main"])
+    writeFileSync(join(w.work, "hand.txt"), "hand\n")
+    await w.git(["add", "hand.txt"])
+    await w.git(["commit", "--quiet", "-m", "hand.txt by hand"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const hand = (await w.git(["rev-parse", "HEAD"])).trim()
+
+    const entries = await readQueue(w.git, "origin", "main")
+    const byHand = await byHandCommits(w.git, "main", hand, entries)
+    expect(byHand.map((commit) => [commit.commit, commit.subject, commit.gitlinks, commit.why])).toEqual([
+      [hand, "hand.txt by hand", [], "it is one commit, not a merge of a change"],
+    ])
+    const rows = list(entries, { byHand })
+    expect(rows.map((row) => [row.state, row.branch, row.head, row.position, row.reason])).toEqual([
+      ["queued", "task/one", rows[0]?.head, 1, undefined],
+      ["by hand", "main", hand, undefined, `main moved by hand at ${hand.slice(0, 12)} (hand.txt by hand)`],
+    ])
+    // Windowed like every ended row: an old hand commit is not this week's news.
+    expect(list(entries, { byHand, sinceMs: 0, now: new Date(Date.now() + 60_000) }).map((row) => row.state)).toEqual([
+      "queued",
+    ])
   })
 
   it("shows one branch's changes newest first", async () => {
@@ -110,7 +136,7 @@ describe("the table is the lane rendered", () => {
     await w.git(["checkout", "--quiet", "main"])
     await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: "main" })
 
-    const shown = show(await lane(w.git, "origin", "main"), "task/one")
+    const shown = show(await readQueue(w.git, "origin", "main"), "task/one")
     expect(shown.map((entry) => [entry.row.head, entry.row.state, entry.row.reason])).toEqual([
       [second, "queued", undefined],
       [first, "failed", "replaced"],
