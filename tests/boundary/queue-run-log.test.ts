@@ -64,6 +64,7 @@ import {
   queueRunOnce,
   removeScratchRoots,
   submitOneCommit,
+  measuringNewCore,
 } from "./fixture.ts"
 
 afterEach(removeScratchRoots)
@@ -363,7 +364,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // A positive control: a debug log that says nothing at all would satisfy
     // every bound below and tell a reader nothing. The new core renders exactly
     // its records, six kinds on a merging run; the incumbent narrates more.
-    expect(rows.length, run.report).toBeGreaterThan(process.env.YRD_BOUNDARY_CORE === "new" ? 5 : 20)
+    expect(rows.length, run.report).toBeGreaterThan(measuringNewCore() ? 5 : 20)
     expect(rows.length, run.report).toBeLessThan(200)
 
     // No git invocation and no git span, at any level above trace.
@@ -430,7 +431,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     const built = theOne(records, "run").built
     // The incumbent mints a Run record per merge and names it here; the new
     // core mints none, and says so with an empty list rather than a missing field.
-    if (process.env.YRD_BOUNDARY_CORE === "new") {
+    if (measuringNewCore()) {
       expect(built, run.report).toEqual([])
       // The file is named by the queue run's own id, and by nothing else.
       expect(basename(path), run.report).toBe(`${String(records[0]?.run)}.jsonl`)

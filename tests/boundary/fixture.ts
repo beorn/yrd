@@ -135,14 +135,15 @@ export async function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryR
   await git(repo, "remote", "add", "origin", origin)
   await installDeclaredYrdEntry(repo)
   await writeFile(join(repo, "README.md"), "main\n")
-  // YRD_BOUNDARY_CORE=new declares the queue's remote, which is the one line
-  // that selects the new core (plan § Cutover): the same black-box cases then
-  // judge both cores, and the gate runs this suite once per core.
-  const core = process.env.YRD_BOUNDARY_CORE === "new" ? "remote: origin\n" : ""
+  // `remote:` is the one line that selects the new core (plan § Cutover). A
+  // case that asks for the yrd remote by name gets the shared repository's
+  // path; otherwise YRD_BOUNDARY_CORE=new names `origin`, so the same
+  // black-box cases judge both cores and the gate runs this suite once per core.
+  const core =
+    plan.yrdRemote === true ? remoteStep(plan, origin) : coreDeclaration()
   await writeFile(
     join(repo, ".yrd.yml"),
     `${core}base: main\nbatch: 1\n${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
-    `base: main\nbatch: 1\n${remoteStep(plan, origin)}${notifyStep(plan, notifyLog)}${checkStep(plan, checkLog)}\n`,
   )
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "main")
@@ -204,31 +205,41 @@ export type SubmitAttempt = Readonly<{
   report: string
 }>
 
-/** One `yrd bay submit`, run standing in the Bay, exactly as an author does. */
+/** Which core the suite measures: `YRD_BOUNDARY_CORE=new` selects the new one (plan § Cutover). */
+export function measuringNewCore(): boolean {
+  return process.env.YRD_BOUNDARY_CORE === "new"
+}
+
+/** The `.yrd.yml` line that selects the new core (ruling A5); the incumbent needs none. */
+function coreDeclaration(): string {
+  return measuringNewCore() ? "remote: origin\n" : ""
+}
+
+/**
+ * One submit, run standing in the Bay, exactly as an author does: the
+ * incumbent's `yrd bay submit`, or the new core's `yrd queue submit` (one atomic
+ * push of the branch and its opened fact) when YRD_BOUNDARY_CORE=new selects it.
+ */
 export async function submitFromBay(repo: string, bayPath: string): Promise<SubmitAttempt> {
   const submitted = capture(bayPath)
-  if (process.env.YRD_BOUNDARY_CORE === "new") {
-    // The new core's one path in: one atomic push of the branch and its opened fact.
-    expectZero(await yrd(repo, submitted.io, "queue", "submit", "--json"), "queue submit", submitted)
-    const opened = JSON.parse(submitted.stdout()) as { branch: string; head: string; opened: string }
-    if (opened.branch !== branch || opened.head !== headSha) {
-      throw new Error(`queue submit did not record ${branch} at ${headSha}: ${submitted.stdout()}`)
-    }
-    return { branch, headSha, id: opened.opened }
-  }
-  expectZero(await yrd(repo, submitted.io, "bay", "submit", "--json"), "bay submit", submitted)
-  const parsed = JSON.parse(submitted.stdout()) as {
-    prs: readonly { id: string; branch: string; status: string }[]
-  const exitCode = await yrd(repo, submitted.io, "bay", "submit", "--json")
-  const report = `bay submit exited ${String(exitCode)}\n--- stdout ---\n${submitted.stdout()}\n--- stderr ---\n${submitted.stderr()}`
+  const newCore = measuringNewCore()
+  const exitCode = newCore
+    ? await yrd(repo, submitted.io, "queue", "submit", "--json")
+    : await yrd(repo, submitted.io, "bay", "submit", "--json")
+  const verb = newCore ? "queue submit" : "bay submit"
+  const report = `${verb} exited ${String(exitCode)}\n--- stdout ---\n${submitted.stdout()}\n--- stderr ---\n${submitted.stderr()}`
   let id: string | undefined
   let branch: string | undefined
   try {
-    const parsed = JSON.parse(submitted.stdout()) as {
-      prs?: readonly { id?: string; branch?: string }[]
+    if (newCore) {
+      const opened = JSON.parse(submitted.stdout()) as { branch?: string; opened?: string }
+      id = opened.opened
+      branch = opened.branch
+    } else {
+      const parsed = JSON.parse(submitted.stdout()) as { prs?: readonly { id?: string; branch?: string }[] }
+      id = parsed.prs?.[0]?.id
+      branch = parsed.prs?.[0]?.branch
     }
-    id = parsed.prs?.[0]?.id
-    branch = parsed.prs?.[0]?.branch
   } catch {
     // Not JSON — the exit code and the text are the evidence.
   }
@@ -462,6 +473,8 @@ export async function readChange(
     firstParentLine: line.map((commit) => commit.sha),
     report: `${ref} at ${tip}\nfirst-parent line, newest first:\n${shown}`,
   }
+}
+
 export type YrdJsonResult = Readonly<{
   exitCode: number
   /** The parsed `--json` answer, or `undefined` when the CLI printed something else. */
@@ -710,6 +723,8 @@ export async function secondWorkingRepo(origin: string, name: string, email: str
   await setSubmitter(repo, name, email)
   await addYrdRemote(repo, origin)
   return repo
+}
+
 /* ------------------------------------------------------------------ *
  * Additions for the run-and-merge area (§ The queue run).
  *
@@ -802,7 +817,7 @@ export async function boundaryRepositoryWith(plan: BoundaryPlan): Promise<Bounda
 
   const notify =
     plan.notify === true ? `notify: ${JSON.stringify(`cat >>${notifyLog}; echo '{"ball_id":"b1"}'`)}\n` : ""
-  await writeFile(join(repo, ".yrd.yml"), `base: main\nbatch: 1\n${notify}${phasedChecks(plan.checks)}\n`)
+  await writeFile(join(repo, ".yrd.yml"), `${coreDeclaration()}base: main\nbatch: 1\n${notify}${phasedChecks(plan.checks)}\n`)
 
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")
@@ -829,14 +844,11 @@ export async function submitCommitWriting(
   await git(bayPath, "commit", "-qm", `${bay}: one commit`)
   const headSha = await git(bayPath, "rev-parse", "HEAD")
 
-  const submitted = capture(bayPath)
-  expectZero(await yrd(repo, submitted.io, "bay", "submit", "--json"), "bay submit", submitted)
-  const parsed = JSON.parse(submitted.stdout()) as { prs: readonly { id: string; branch: string }[] }
-  const id = parsed.prs[0]?.id
-  if (id === undefined || parsed.prs[0]?.branch !== branch) {
-    throw new Error(`bay submit did not record ${branch}: ${submitted.stdout()}`)
+  const submitted = await submitFromBay(repo, bayPath)
+  if (submitted.exitCode !== 0 || submitted.id === undefined || submitted.branch !== branch) {
+    throw new Error(`submit did not record ${branch}:\n${submitted.report}`)
   }
-  return { branch, headSha, id }
+  return { branch, headSha, id: submitted.id }
 }
 
 /** A second branch name at an existing head: one fast-forward, then a submit.
@@ -851,12 +863,11 @@ export async function submitSameHead(repo: string, bay: string, headSha: string)
   await git(bayPath, "fetch", "-q", "origin")
   await git(bayPath, "merge", "--ff-only", "-q", headSha)
 
-  const submitted = capture(bayPath)
-  expectZero(await yrd(repo, submitted.io, "bay", "submit", "--json"), "bay submit", submitted)
-  const parsed = JSON.parse(submitted.stdout()) as { prs: readonly { id: string; branch: string }[] }
-  const id = parsed.prs[0]?.id
-  if (id === undefined) throw new Error(`bay submit did not record ${branch}: ${submitted.stdout()}`)
-  return { branch, headSha, id }
+  const submitted = await submitFromBay(repo, bayPath)
+  if (submitted.exitCode !== 0 || submitted.id === undefined) {
+    throw new Error(`submit did not record ${branch}:\n${submitted.report}`)
+  }
+  return { branch, headSha, id: submitted.id }
 }
 
 /** A throwaway clone of the shared repository, for the cases where something
