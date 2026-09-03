@@ -637,6 +637,45 @@ describe("a queue run", () => {
     expect(existsSync(check.match(/log=(\S+)/u)?.[1] ?? "")).toBe(true)
   }, 30_000)
 
+  it("the target moving between the merge reading and the lease keeps the change checked, not stuck (D4)", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const rivalPath = join(w.workdir, "..", "target-mover")
+    await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
+    const rival = gitIn(rivalPath)
+    await rival(["config", "user.email", "rival@yrd.test"])
+    await rival(["config", "user.name", "rival"])
+
+    let moved: string | undefined
+    const git: Git = async (args, input) => {
+      // The window the lease exists for: the run has read the remote heads and
+      // is about to push, and somebody else lands on the target in between.
+      if (moved === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+        writeFileSync(join(rivalPath, "rival.txt"), "rival\n")
+        await rival(["add", "rival.txt"])
+        await rival(["commit", "--quiet", "-m", "the target moved under the change"])
+        await rival(["push", "--quiet", "origin", "main"])
+        moved = (await rival(["rev-parse", "HEAD"])).trim()
+      }
+      return w.git(args, input)
+    }
+
+    const outcome = await queueRun({ ...w.options({ exit: 0 }), git })
+
+    // The change keeps its place and is judged again at the new target next
+    // run: nothing landed, nothing ended, and nobody was told anything.
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.stuck).toEqual([])
+    expect(outcome.merged).toEqual([])
+    expect(await remoteTarget(w)).toBe(moved)
+    await fetchChanges(w)
+    expect((await readFacts(w.git, "task/one", head)).map((fact) => fact.kind)).toEqual(["opened", "checked"])
+    expect(messages(w)).toEqual([])
+    expect(records(outcome)).toContainEqual(
+      expect.objectContaining({ decision: "checked", reason: "target-moved", saw: moved }),
+    )
+  })
+
   it("nothing submitted is nothing to do", async () => {
     const w = await world()
     const outcome = await queueRun(w.options({}))

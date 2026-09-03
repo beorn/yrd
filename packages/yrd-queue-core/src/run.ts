@@ -560,15 +560,35 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       trailers: [["Merge", mergeCommit], ["Base", run.targetSha], ["Merged-By", "queue"], ...checkTrailers(results)],
     })
     const ref = changeRef(branch, head)
-    await run.git([
-      "push",
-      "--quiet",
-      "--atomic",
-      `--force-with-lease=refs/heads/${run.options.target}:${run.targetSha}`,
-      run.options.remote,
-      `${mergeCommit}:refs/heads/${run.options.target}`,
-      `${mergedFact}:${ref}`,
-    ])
+    try {
+      await run.git([
+        "push",
+        "--quiet",
+        "--atomic",
+        `--force-with-lease=refs/heads/${run.options.target}:${run.targetSha}`,
+        run.options.remote,
+        `${mergeCommit}:refs/heads/${run.options.target}`,
+        `${mergedFact}:${ref}`,
+      ])
+    } catch (error) {
+      // The reading just above and this lease are two moments, and the target
+      // can move between them: the lease then refuses the push and nothing
+      // lands. That is ruling D4 — a target that moved under a checked change
+      // keeps its place and is judged again at the new target next run — not a
+      // queue that could not do its job, so it must not end the change stuck.
+      // The remote decides which it was; git's rejection prose does not.
+      const moved = await remoteHeads(run, branch)
+      if (moved.target === run.targetSha && moved.branch === head) throw error
+      run.log.write({
+        branch,
+        decision: "checked",
+        head,
+        kind: "change",
+        reason: moved.target !== run.targetSha ? "target-moved" : "branch-moved",
+        saw: moved.target ?? "gone",
+      })
+      return "checked"
+    }
     run.log.write({ branch, change: name, commit: mergeCommit, head, kind: "merge", tip: mergeCommit })
     run.log.write({ branch, decision: "merged", head, kind: "change" })
     await send(
