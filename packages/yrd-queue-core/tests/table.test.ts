@@ -6,7 +6,18 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, list, byHandCommits, readConfig, readHints, readQueue, show, submit } from "../src/index.ts"
+import {
+  checkTrailer,
+  gitIn,
+  list,
+  byHandCommits,
+  readCheckTrailer,
+  readConfig,
+  readHints,
+  readQueue,
+  show,
+  submit,
+} from "../src/index.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -158,5 +169,25 @@ describe("the table is the queue read rendered", () => {
       [second, "queued", undefined],
       [first, "failed", "replaced"],
     ])
+  })
+})
+
+describe("a packed Check: trailer", () => {
+  it("reads back the name and the log the writer put in it, log path and all", () => {
+    // The table renders a row off this trailer, so the pair is the contract:
+    // whatever the run writes, the reader has to give back.
+    const packed = checkTrailer({
+      durationMs: 1234,
+      exit: 1,
+      log: "/queue/checks/task~one@abc/q-1/merge/type=check.log",
+      name: "verify",
+      result: "fail",
+    })
+
+    expect(packed).toBe("verify exit=1 ms=1234 log=/queue/checks/task~one@abc/q-1/merge/type=check.log")
+    expect(readCheckTrailer(packed)).toEqual({
+      log: "/queue/checks/task~one@abc/q-1/merge/type=check.log",
+      name: "verify",
+    })
   })
 })

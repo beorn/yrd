@@ -16,6 +16,7 @@ import type { ConditionalLogger } from "loggily"
 import {
   byHandCommits,
   changeName,
+  handMovedLine,
   prepareWorktree,
   gitIn,
   hintsIn,
@@ -464,13 +465,13 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `told ${String(rest.to)} about ${where}`
     case "reap":
       return `reaped the worktree ${String(rest.path)} of the run ${String(rest.of)}: ${String(rest.why)}`
-    case "by-hand": {
-      const pins =
-        Array.isArray(rest.gitlinks) && rest.gitlinks.length > 0
-          ? `; it moved the pin at ${rest.gitlinks.join(", ")}`
-          : ""
-      return `${String(rest.branch)} moved by hand at ${String(rest.commit).slice(0, 12)} (${String(rest.subject)})${pins}`
-    }
+    case "by-hand":
+      return handMovedLine({
+        commit: String(rest.commit),
+        gitlinks: Array.isArray(rest.gitlinks) ? rest.gitlinks.map(String) : [],
+        subject: String(rest.subject),
+        target: String(rest.branch),
+      })
     default:
       return kind
   }

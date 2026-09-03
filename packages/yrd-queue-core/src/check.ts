@@ -106,6 +106,25 @@ export function checkLogPath(logDir: string, name: string): string {
   return join(logDir, `${name}.log`)
 }
 
+/**
+ * One check result packed onto a fact's `Check:` trailer, and the reading of
+ * it. They live together because they are one format: the table used to pick
+ * the name off with a `split(" ")` and the log path off with a regex of its
+ * own, neither of them anywhere near the line that wrote them.
+ */
+export function checkTrailer(result: CheckResult): string {
+  return `${result.name} exit=${String(result.exit)} ms=${String(result.durationMs)} log=${result.log}`
+}
+
+/** What a packed `Check:` trailer says: the check's name, and where its log went. */
+export function readCheckTrailer(packed: string): Readonly<{ name: string; log?: string }> {
+  const name = packed.split(" ")[0] ?? ""
+  // `log=` is written last, so its value runs to the end and a path with an
+  // `=` in it survives the reading.
+  const log = /(?:^| )log=(.+)$/u.exec(packed)?.[1]
+  return { name, ...(log === undefined ? {} : { log }) }
+}
+
 export async function runCheck(run: RunCheck): Promise<CheckResult> {
   mkdirSync(run.logDir, { recursive: true })
   mkdirSync(run.scratch, { recursive: true })

@@ -41,7 +41,7 @@
 import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
-import { checkLogPath, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
+import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import { appendFact, endedKind, factCommit, readFact, trailer, type Fact, type Git, type WriteFact } from "./facts.ts"
 import { readConfig } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
@@ -334,7 +334,7 @@ async function prepare(
   path: string,
   phase: string,
 ): Promise<PreparedWorktree> {
-  const logDir = join(run.options.workdir, "checks", changeName(entry.branch, entry.change.head), run.log.id, phase)
+  const logDir = checkLogDir(run, entry, phase)
   const about = { branch: entry.branch, head: entry.change.head, name: SETUP, phase }
   return prepareWorktree(run.git, run.options.repo, commit, path, {
     env: run.options.env,
@@ -851,6 +851,16 @@ async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<v
   }
 }
 
+/**
+ * Where every log of one change's phase goes: keyed by the change, this run and
+ * the phase, so no two writes can name one file and every log is written once
+ * (check.ts opens them create-only). The setup and the checks that follow it
+ * share the directory, and both used to spell it out for themselves.
+ */
+function checkLogDir(run: Run, entry: QueueEntry, phase: string): string {
+  return join(run.options.workdir, "checks", changeName(entry.branch, entry.change.head), run.log.id, phase)
+}
+
 async function runPhase(
   run: Run,
   entry: QueueEntry,
@@ -875,7 +885,7 @@ async function check(
   phase: string,
 ): Promise<CheckResult> {
   await restoreScripts(run, spec, cwd)
-  const logDir = join(run.options.workdir, "checks", changeName(entry.branch, entry.change.head), run.log.id, phase)
+  const logDir = checkLogDir(run, entry, phase)
   const about = {
     branch: entry.branch,
     head: entry.change.head,
@@ -1118,9 +1128,7 @@ async function deliver(
 const RESULT_TRAILERS = new Set(["Reason", "Fault", "Remedy", "Check", "Merge", "Base", "Gitlink", "Merged-By"])
 
 function checkTrailers(results: readonly CheckResult[]): readonly (readonly [string, string])[] {
-  return results.map(
-    (result) => ["Check", `${result.name} exit=${result.exit} ms=${result.durationMs} log=${result.log}`] as const,
-  )
+  return results.map((result) => ["Check", checkTrailer(result)] as const)
 }
 
 /**

@@ -10,6 +10,7 @@
  */
 
 import { endedKind, trailer, trailers, type Fact } from "./facts.ts"
+import { readCheckTrailer } from "./check.ts"
 import { handMovedLine, type ByHandCommit } from "./by-hand.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
 import { inLine, tipOf, type ChangeState } from "./state.ts"
@@ -88,16 +89,17 @@ export function show(
 
 function row(entry: QueueEntry, position?: number): Row {
   const tip = tipOf(entry.change)
-  const lastCheck = trailers(tip, "Check").at(-1)
+  const packed = trailers(tip, "Check").at(-1)
+  const lastCheck = packed === undefined ? undefined : readCheckTrailer(packed)
   const opened = trailer(tip, "Opened")
   return {
     at: tip.at,
     branch: entry.branch,
     head: entry.change.head,
-    log: lastCheck?.match(/log=(\S+)/u)?.[1],
+    log: lastCheck?.log,
     position,
     reason: entry.reading.reason,
-    result: tip.kind === "opened" ? undefined : resultOf(endedKind(tip), lastCheck),
+    result: tip.kind === "opened" ? undefined : resultOf(endedKind(tip), lastCheck?.name),
     since: opened === undefined ? undefined : new Date(opened),
     state: entry.reading.state,
     submitter: trailer(tip, "Submitter"),
@@ -112,8 +114,7 @@ function byHandRow(commit: ByHandCommit): Row {
   return { at: commit.at, branch: commit.target, head: commit.commit, reason: handMovedLine(commit), state: "by hand" }
 }
 
-function resultOf(kind: Fact["kind"], lastCheck: string | undefined): string {
-  const check = lastCheck?.split(" ")[0]
+function resultOf(kind: Fact["kind"], check: string | undefined): string {
   switch (kind) {
     case "checked":
     case "merged":

@@ -164,8 +164,16 @@ function notTheQueues(
   return undefined
 }
 
-/** The one line a reader gets about a hand commit: the target, the commit, its subject, and the pins it moved. */
-export function handMovedLine(commit: ByHandCommit): string {
+/**
+ * The one line a reader gets about a hand commit: the target, the commit, its
+ * subject, and the pins it moved. It takes only the four values it says, so the
+ * `list` row, the queue run's message and the log's human rendering are all one
+ * sentence written once — the rendering used to spell it out a second time from
+ * the log record's own fields.
+ */
+export function handMovedLine(
+  commit: Readonly<{ target: string; commit: string; subject: string; gitlinks: readonly string[] }>,
+): string {
   const pins = commit.gitlinks.length === 0 ? "" : `; it moved the pin at ${commit.gitlinks.join(", ")}`
   return `${commit.target} moved by hand at ${commit.commit.slice(0, 12)} (${commit.subject})${pins}`
 }
