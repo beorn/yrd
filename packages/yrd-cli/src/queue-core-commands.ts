@@ -123,6 +123,28 @@ export async function coreQueueCommand(
   const workdir = options.workdir ?? join(commonDir, "yrd-core")
   mkdirSync(workdir, { recursive: true })
 
+  /** The one shape a command that could not judge answers with (plan § The queue run). */
+  const stuck = (why: string): YrdCliExitCode => {
+    emit(io, options.json, { exitCode: 2, failed: [], merged: [], stuck: [], why }, `stuck: ${why}`)
+    return 2
+  }
+  /**
+   * One queue run, emitted. Undefined is the one exit site from the caller's
+   * side: a run that could not even judge — a bad invocation, a remote that
+   * cannot be read — is stuck, and has already said so.
+   */
+  const oneRound = async (declared: QueueConfig): Promise<QueueRunOutcome | undefined> => {
+    let outcome: QueueRunOutcome
+    try {
+      outcome = await queueRun(runOptions(repo, declared, workdir, options.env, options.log))
+    } catch (error) {
+      stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+    emit(io, options.json, outcome, describeRun(outcome))
+    return outcome
+  }
+
   switch (request.command) {
     case "submit": {
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
@@ -161,18 +183,8 @@ export async function coreQueueCommand(
       return 0
     }
     case "run": {
-      // The one exit site, from the caller's side: a run that could not even judge
-      // (a bad invocation, a remote that cannot be read) is stuck, exit 2.
-      let outcome
-      try {
-        outcome = await queueRun(runOptions(repo, config, workdir, options.env, options.log))
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        emit(io, options.json, { exitCode: 2, failed: [], merged: [], stuck: [], why: message }, `stuck: the queue run could not judge: ${message}`)
-        return 2
-      }
-      emit(io, options.json, outcome, describeRun(outcome))
-      return outcome.exitCode
+      const outcome = await oneRound(config)
+      return outcome?.exitCode ?? 2
     }
     case "up": {
       // The service: the same round on a loop, what hab runs. It has ONE
@@ -201,21 +213,10 @@ export async function coreQueueCommand(
           } catch (error) {
             why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
           }
-          if (why !== undefined) {
-            emit(io, options.json, { exitCode: 2, failed: [], merged: [], stuck: [], why }, `stuck: ${why}`)
-            return 2
-          }
+          if (why !== undefined) return stuck(why)
         }
-        let outcome: QueueRunOutcome
-        try {
-          outcome = await queueRun(runOptions(repo, current, workdir, options.env, options.log))
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          emit(io, options.json, { exitCode: 2, failed: [], merged: [], stuck: [], why: message }, `stuck: the queue run could not judge: ${message}`)
-          return 2
-        }
-        emit(io, options.json, outcome, describeRun(outcome))
-        if (outcome.exitCode === 2) return 2
+        const outcome = await oneRound(current)
+        if (outcome === undefined || outcome.exitCode === 2) return 2
         await request.afterRound?.(outcome)
         // The pin, at the target as this round left it: the round that merged
         // the change moving this yrd's own gitlink is the last one this code runs.
