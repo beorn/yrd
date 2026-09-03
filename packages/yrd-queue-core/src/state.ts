@@ -126,8 +126,8 @@ export function openedAt(change: ChangeFacts): number {
 /**
  * A failed fact's `Reason` (a check's name, conflict, config-invalid,
  * unrelated-history, gitlink-off-main, replaced, deleted) or a stuck fact's
- * (a check's name, flake, inherited, no-evidence, crash): one key on both,
- * because stuck is always the queue's and needs no second word for it.
+ * (a check's name, setup, crash): one key on both, because stuck is always the
+ * queue's and needs no second word for it.
  */
 function reasonOf(fact: Fact): string | undefined {
   return fact.trailers.find(([name]) => name === "Reason")?.[1]

@@ -8,7 +8,7 @@ Yrd is a merge queue for a Git repository. You push a branch and submit it; the 
 - **submitter**: whoever ran `yrd submit`, a person or an agent, named by the seat given with `--notify`. Every message about the change goes to them.
 - **fact**: one commit on the change's own ref recording what happened to it: opened, checked, merged, failed, stuck, sent. Facts are written once and never rewritten.
 - **check**: one test the queue runs, on submit or on merge, declared in `.yrd.yml` at the target.
-- **result**: pass, fail or stuck. A fail is the submitter's fault only when the rule in step 4 below proves it. Stuck means the queue itself cannot go on (a crash, a missing script, a check past its time limit); it stops the queue, is nobody's fault, and goes to the owner.
+- **result**: pass, fail or stuck. A fail is the submitter's. Stuck means the queue itself cannot go on (a crash, a missing script, a check past its time limit, a check that exits 2, a check the driver could not measure, a submodule's remote that cannot be asked); it stops the queue, is nobody's fault, and goes to the owner.
 - **queue run**: one pass over the queue. `yrd queue run` does one; `yrd queue up` does one every interval, and that loop is the service hab runs.
 - **target**: the branch changes merge into, `main` unless the declaration says otherwise.
 - **pin**: the commit of Yrd that the parent repository's `vendor/yrd` submodule points at. The queue runs that commit's code, and moves to a new one only through its own merge of the submodule pointer.
@@ -54,7 +54,7 @@ A key the queue does not read is refused, never ignored. A check's environment i
 1. **Submit.** One atomic push of the branch and of the change's first fact. The branch is pushed with `--force-with-lease`, so a push that would overwrite another submitter's head is refused, loudly.
 2. **Check.** The next queue run takes every queued change, oldest first, into a fresh checkout of its head. Three built-in checks run first: the change shares history with the target; every submodule pointer it moved points at a commit on that submodule's `main`; and the `.yrd.yml` that would result from the merge still parses. Then the `on: submit` checks run.
 3. **Merge.** The first checked change in line is merged with the target in a fresh checkout and the `on: merge` checks run there. A pass moves the target to one merge commit (`--no-ff`, so the merge is visible in history) that names the change in its message (`Change: <branch>@<sha>`). Only one change merges per run; the rest are checked again at the new target on the next run.
-4. **Decide whose fault a failure is.** A failing check is run again in the change's checkout, then once at the target without the change. It is the submitter's fail only if it failed both times in the change and did not fail at the target. Anything else is stuck: a crash, a missing script, a check past its time limit, a check that exits 2, a submodule's remote that cannot be asked.
+4. **Send a failure back.** A failing check sends the change back at once with its log; a flake is the author's to retry, and the target is proven green by its own last merge.
 5. **Send.** Every ended change sends one message through the `notify` command: fail to the submitter with what to do next, stuck to the owner, merged to the submitter. The message id is the sha of the fact that ended the change, so sending it again after a crash is the same message, not a second one.
 
 ## Facts

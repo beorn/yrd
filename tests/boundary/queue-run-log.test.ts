@@ -53,9 +53,9 @@
  *              about    the branch it is about
  *              says     merged, fail or stuck
  *
- * `worktree`, `target` and `whose` on a result are the inputs the attribution
- * rule used and the answer it reached; a passing result carries the result and
- * needs no inputs, so only the stuck case below reads them.
+ * `whose` on a result says who it is billed to: a stuck result and anything
+ * the setup did are the queue's, a failing check the submitter's. A passing
+ * result is nobody's, so only the stuck case below reads it.
  */
 import { readdir, readFile } from "node:fs/promises"
 import { basename, dirname } from "node:path"

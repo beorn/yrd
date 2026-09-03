@@ -99,9 +99,8 @@ describe("the queue run", { timeout: 180_000 }, () => {
         // The check names its script, and the queue restores it from the base
         // before the check runs (ruling D5, the declared `scripts:` list).
         checks: [{ name: "gate", run: `GATE_LOG=${log} sh gate.sh`, scripts: ["gate.sh"] }],
-        // The target's gate is red only where the change's marker is. A gate red
-        // at the target too would be the target's fault under § Attribution,
-        // and the change stuck, not failed.
+        // The target's gate is red only where the change's marker is, so this
+        // case is about WHOSE gate ran and not about whose fault a red one is.
         files: { "gate.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$GATE_LOG\"\nif [ -e script.txt ]; then exit 1; fi\nexit 0\n" },
       })
       const before = await targetTip(repo)

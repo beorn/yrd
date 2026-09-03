@@ -213,7 +213,7 @@ describe("a change and its facts", { timeout: 120_000 }, () => {
     // today: red — no change ref. A failure leaves no record a git reader can
     // see: queue-run.test.ts measures that `pr list` reports a failed change
     // and a stuck one identically, both still `submitted`.
-    it("a failed change ends with one failed fact carrying the check, the attribution and the remedy", async () => {
+    it("a failed change ends with one failed fact carrying the check, the fault and the remedy", async () => {
       const { boundary, change } = await submitted({ exit: 1, notify: true }, "red")
 
       const run = await queueRunOnce(boundary.repo)
