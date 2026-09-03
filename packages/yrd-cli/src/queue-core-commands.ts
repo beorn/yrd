@@ -19,10 +19,12 @@ import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
   bypassCommits,
+  activeFreeze,
   changeName,
   claimWorktrees,
   configValue,
   bypassLine,
+  freezeLine,
   prepareWorktree,
   gitIn,
   hintsIn,
@@ -39,7 +41,12 @@ import {
   refuseTarget,
   submit,
   issueOf,
+  QueueFrozen,
+  QueueNotFrozen,
+  requireUnfrozen,
+  writeFreeze,
   type CheckResult,
+  type FreezeEvent,
   type Git,
   type LogRecord,
   type QueueConfig,
@@ -52,6 +59,8 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 export type CoreQueueCommand =
   | Readonly<{ command: "submit"; branch?: string; submitter: string; issue?: string; dryRun?: boolean }>
+  | Readonly<{ command: "freeze"; by: string; reason: string }>
+  | Readonly<{ command: "unfreeze"; by: string; reason?: string }>
   | Readonly<{ command: "run" }>
   | Readonly<{
       command: "up"
@@ -73,10 +82,12 @@ export type CoreQueueCommand =
 /** What each command is called when it has to say it needs a queue. */
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
+  freeze: "queue freeze",
   list: "queue list",
   run: "queue run",
   show: "queue show",
   submit: "submit",
+  unfreeze: "queue unfreeze",
   up: "queue up",
 }
 
@@ -121,7 +132,9 @@ export async function coreQueueCommand(
   if (here === undefined) return noDeclarationHere()
   const hints = hintsIn(here.text, join(here.root, ".yrd.yml"))
   if (hints.problem !== undefined) {
-    io.stderr(`yrd: ${hints.problem}; it hints nothing, so this asks origin/main, which must carry the declaration itself\n`)
+    io.stderr(
+      `yrd: ${hints.problem}; it hints nothing, so this asks origin/main, which must carry the declaration itself\n`,
+    )
   }
   const git = gitIn(here.root)
   const log = options.log?.child("queue")
@@ -174,10 +187,39 @@ export async function coreQueueCommand(
   }
 
   switch (request.command) {
+    case "freeze":
+    case "unfreeze": {
+      try {
+        const freeze = await writeFreeze(git, config.target.remote, {
+          by: request.by,
+          kind: request.command === "freeze" ? "frozen" : "unfrozen",
+          reason: request.command === "freeze" ? request.reason : (request.reason ?? "freeze lifted"),
+        })
+        emit(io, options.json, freeze, freezeLine(freeze))
+        return 0
+      } catch (error) {
+        if (error instanceof QueueFrozen || error instanceof QueueNotFrozen) {
+          io.stderr(`yrd: ${error.message}\n`)
+          return 1
+        }
+        throw error
+      }
+    }
     case "submit": {
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       // The preview refuses exactly what the action refuses, first.
       refuseTarget(branch, config.target.branch)
+      if (request.dryRun === true) {
+        try {
+          await requireUnfrozen(git, config.target.remote)
+        } catch (error) {
+          if (error instanceof QueueFrozen) {
+            io.stderr(`yrd: ${error.message}\n`)
+            return 1
+          }
+          throw error
+        }
+      }
       // A dry run says what it would open and touches nothing: no push, no
       // event, no ref anywhere. The wrapper used to take `--dry-run` on its own
       // surface and pass the core an ordinary submit, so a dry run opened a
@@ -201,13 +243,27 @@ export async function coreQueueCommand(
         )
         return 0
       }
-      const submitted = await submit(git, config.target.remote, {
-        branch,
-        submitter: request.submitter,
-        target: config.target,
-        ...(request.issue === undefined ? {} : { issue: request.issue }),
-      })
-      emit(io, options.json, submitted, `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}`)
+      let submitted
+      try {
+        submitted = await submit(git, config.target.remote, {
+          branch,
+          submitter: request.submitter,
+          target: config.target,
+          ...(request.issue === undefined ? {} : { issue: request.issue }),
+        })
+      } catch (error) {
+        if (error instanceof QueueFrozen) {
+          io.stderr(`yrd: ${error.message}\n`)
+          return 1
+        }
+        throw error
+      }
+      emit(
+        io,
+        options.json,
+        submitted,
+        `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}`,
+      )
       return 0
     }
     case "run": {
@@ -258,7 +314,9 @@ export async function coreQueueCommand(
           }
         }
         if (stopped()) return 0
-        await new Promise((resolve) => setTimeout(resolve, interval))
+        await new Promise((resolve) => {
+          setTimeout(resolve, interval)
+        })
         if (stopped()) return 0
       }
     }
@@ -270,7 +328,15 @@ export async function coreQueueCommand(
       const rows = list(queue.changes, {
         bypasses: await bypassCommits(git, config.target.branch, queue.target, queue.changes),
       })
-      emit(io, options.json, { changes: rows }, table(rows))
+      const freeze = await activeFreeze(git, config.target.remote)
+      emit(
+        io,
+        options.json,
+        { changes: rows, ...(freeze === undefined ? {} : { freeze }) },
+        [freeze === undefined ? undefined : freezeLine(freeze), table(rows)]
+          .filter((line): line is string => line !== undefined)
+          .join("\n"),
+      )
       return 0
     }
     case "check": {
@@ -289,7 +355,9 @@ export async function coreQueueCommand(
       const specs = request.names.map((name) => {
         const spec = config.checks.find((check) => check.name === name)
         if (spec === undefined) {
-          throw new Error(`${name} is not a check the target declares (declared: ${config.checks.map((check) => check.name).join(", ") || "none"})`)
+          throw new Error(
+            `${name} is not a check the target declares (declared: ${config.checks.map((check) => check.name).join(", ") || "none"})`,
+          )
         }
         return spec
       })
@@ -300,7 +368,10 @@ export async function coreQueueCommand(
       // measuring HEAD while a seat believes its working tree was checked is
       // the same class of mismatch this command exists to remove.
       const dirty = (await git(["status", "--porcelain", "--untracked-files=no"])).trim()
-      const unjudged = dirty === "" ? "" : `\n${String(dirty.split("\n").length)} uncommitted path(s) were NOT judged; this measured HEAD ${head.slice(0, 12)}`
+      const unjudged =
+        dirty === ""
+          ? ""
+          : `\n${String(dirty.split("\n").length)} uncommitted path(s) were NOT judged; this measured HEAD ${head.slice(0, 12)}`
       // One run of checks, under the one layout a queue run writes (run.ts):
       // its worktree at `<workdir>/worktrees/<run>/check/<sha12>`, its logs at
       // `<workdir>/checks/<change>/<run>/check/<name>.log`, its temporary files
@@ -333,7 +404,14 @@ export async function coreQueueCommand(
       const results: CheckResult[] = []
       try {
         for (const spec of specs) {
-          const result = await runCheck({ cwd: prepared.path, env: options.env, logDir, spec, tmpdir: join(workdir, "tmp"), tree: prepared.tree })
+          const result = await runCheck({
+            cwd: prepared.path,
+            env: options.env,
+            logDir,
+            spec,
+            tmpdir: join(workdir, "tmp"),
+            tree: prepared.tree,
+          })
           results.push(result)
           if (result.result !== "pass") break
         }
@@ -347,15 +425,34 @@ export async function coreQueueCommand(
         { checks: results, command: "check", head, ...(dirty === "" ? {} : { uncommitted: dirty.split("\n").length }) },
         `${results.map((result) => `${result.name} ${result.result} exit=${String(result.exit)} ${String(result.durationMs)} ms (log ${result.log})${result.why === undefined ? "" : `: ${result.why}`}`).join("\n")}${unjudged}`,
       )
-      return results.some((result) => result.result === "stuck") ? 2 : results.some((result) => result.result === "fail") ? 1 : 0
+      return results.some((result) => result.result === "stuck")
+        ? 2
+        : results.some((result) => result.result === "fail")
+          ? 1
+          : 0
     }
     case "show": {
       const changes = show((await readQueue(git, config.target.remote, config.target.branch)).changes, request.branch)
       emit(
         io,
         options.json,
-        { changes: changes.map((change) => ({ ...change.row, checks: change.checks, events: change.events.map((event) => ({ at: event.at, kind: event.kind, sha: event.sha, subject: event.subject })) })) },
-        changes.length === 0 ? `no change for ${request.branch}` : changes.map((change) => [line(change.row), ...change.checks.map((check) => `  ${check}`)].join("\n")).join("\n"),
+        {
+          changes: changes.map((change) => ({
+            ...change.row,
+            checks: change.checks,
+            events: change.events.map((event) => ({
+              at: event.at,
+              kind: event.kind,
+              sha: event.sha,
+              subject: event.subject,
+            })),
+          })),
+        },
+        changes.length === 0
+          ? `no change for ${request.branch}`
+          : changes
+              .map((change) => [line(change.row), ...change.checks.map((check) => `  ${check}`)].join("\n"))
+              .join("\n"),
       )
       return 0
     }
@@ -404,12 +501,18 @@ async function targetAt(git: Git, config: QueueConfig): Promise<string> {
  * no gitlink at its commit; then no round can see the pin move, and the
  * relaunch onto a new pin is a person's again.
  */
-async function pinOf(git: Git, targetRef: string, log: ConditionalLogger | undefined): Promise<Readonly<{ path: string; sha: string }> | undefined> {
+async function pinOf(
+  git: Git,
+  targetRef: string,
+  log: ConditionalLogger | undefined,
+): Promise<Readonly<{ path: string; sha: string }> | undefined> {
   let running: string
   try {
     running = (await gitIn(dirname(fileURLToPath(import.meta.url)))(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
   } catch (error) {
-    log?.info?.("the pin exit is off: this yrd runs from no git checkout", { error: error instanceof Error ? error.message : String(error) })
+    log?.info?.("the pin exit is off: this yrd runs from no git checkout", {
+      error: error instanceof Error ? error.message : String(error),
+    })
     return undefined
   }
   const pinned = gitlinks(await git(["ls-tree", "-r", "-z", targetRef])).find((row) => row.sha === running)
@@ -436,7 +539,13 @@ function gitlinks(listing: string): readonly Readonly<{ path: string; sha: strin
   return rows
 }
 
-function runOptions(repo: string, config: QueueConfig, workdir: string, env?: NodeJS.ProcessEnv, log?: ConditionalLogger) {
+function runOptions(
+  repo: string,
+  config: QueueConfig,
+  workdir: string,
+  env?: NodeJS.ProcessEnv,
+  log?: ConditionalLogger,
+) {
   // A round made while the garage is open says so on its own record, so a
   // reader of the log can tell the mechanic's rounds from the service's.
   const garage = readGarageDeclaration(repo)
@@ -485,10 +594,12 @@ function renderer(root: ConditionalLogger | undefined): (record: LogRecord) => v
 }
 
 function summarize(kind: string, rest: Readonly<Record<string, unknown>>): string {
-  const where = [rest.branch, typeof rest.head === "string" ? rest.head.slice(0, 12) : undefined].filter(Boolean).join(" at ")
+  const where = [rest.branch, typeof rest.head === "string" ? rest.head.slice(0, 12) : undefined]
+    .filter(Boolean)
+    .join(" at ")
   switch (kind) {
     case "run":
-      return `queue run at ${rest.target} ${String(rest.pin).slice(0, 12)}`
+      return `queue run at ${String(rest.target)} ${String(rest.pin).slice(0, 12)}`
     case "change":
       return `${where}: ${String(rest.decision ?? rest.state)}`
     case "check":
@@ -505,6 +616,8 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `told ${String(rest.to)} about ${where}`
     case "reap":
       return `reaped the worktree ${String(rest.path)} of the run ${String(rest.of)}: ${String(rest.why)}`
+    case "freeze":
+      return `${String(rest.state)} by ${String(rest.by)} since ${String(rest.since)}: ${String(rest.reason)}`
     case "merged-bypass":
       return bypassLine({
         commit: String(rest.commit),
@@ -526,8 +639,12 @@ function describeRun(
     bypasses: readonly string[]
     log: string
     garage?: string
+    freeze?: FreezeEvent
   }>,
 ): string {
+  if (outcome.freeze !== undefined) {
+    return `${freezeLine(outcome.freeze)}; no merge was made (log ${outcome.log})`
+  }
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
   const parts = [
     outcome.merged.length > 0 ? `merged ${outcome.merged.join(", ")}` : undefined,

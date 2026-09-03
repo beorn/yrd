@@ -2,7 +2,7 @@
  * The whole command surface ([plan](../../../../pm/@i/10-yrd/plan.md)
  * § The final design, Commands).
  *
- * Seven commands and nothing else: `yrd queue submit|run|up|list|show`,
+ * The command surface is `yrd queue submit|run|up|freeze|unfreeze|list|show`,
  * `yrd check`, `yrd env open|list`, with `yrd submit` as the alias of the one
  * used most and `yrd bay` as `env`'s until flag day's word is retired. Every
  * queue command is `@yrd/queue-core` through `coreQueueCommand`; nothing here
@@ -47,6 +47,7 @@ const DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER"
 type GlobalOptions = YrdObservabilityFlags
 
 type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean }>
+type FreezeOptions = Readonly<{ json?: boolean; notify?: string }>
 
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
@@ -103,6 +104,42 @@ function buildProgram(
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
+  queue
+    .command("freeze <reason>")
+    .description("stop checking and merging while the service keeps the queue visible")
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", "name who froze the queue")
+    .action(async (reason, options) => {
+      const declared = options as FreezeOptions
+      setExit(
+        await coreQueueCommand(
+          cwd(),
+          io,
+          { by: resolveSubmitter(declared.notify, env), command: "freeze", reason: reason as string },
+          { json: declared.json, env, log: log() },
+        ),
+      )
+    })
+  queue
+    .command("unfreeze [reason]")
+    .description("resume checking and merging on the next service interval")
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", "name who unfroze the queue")
+    .action(async (reason, options) => {
+      const declared = options as FreezeOptions
+      setExit(
+        await coreQueueCommand(
+          cwd(),
+          io,
+          {
+            by: resolveSubmitter(declared.notify, env),
+            command: "unfreeze",
+            ...(reason === undefined ? {} : { reason: reason as string }),
+          },
+          { json: declared.json, env, log: log() },
+        ),
+      )
+    })
   queue
     .command("run")
     .description("one round of queue work, run now rather than by the service")
@@ -164,7 +201,9 @@ function buildProgram(
   // surface reads it. These two spellings stay because the queue is IN the
   // garage: they are the only non-plumbing way to open and close it, and
   // `readGarageDeclaration` is already on the run path above.
-  const garage = queue.command("garage", { hidden: true }).description("stop the service and work on the queue yourself")
+  const garage = queue
+    .command("garage", { hidden: true })
+    .description("stop the service and work on the queue yourself")
   garage.helpCommand(false)
   garage
     .command("open")
@@ -307,8 +346,9 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
     return exit
   } catch (error) {
     if (error instanceof CommanderError) {
-      if (error.exitCode === 0 || error.code === "commander.helpDisplayed" || error.code === "commander.version")
+      if (error.exitCode === 0 || error.code === "commander.helpDisplayed" || error.code === "commander.version") {
         return 0
+      }
       // Commander already printed the refusal, and it names the option or the
       // operand. Exit 2 is what an invocation this program cannot judge is.
       return 2

@@ -16,6 +16,7 @@ import { targetName, type Target } from "./config.ts"
 import { appendEvent, type Git } from "./events.ts"
 import { refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
+import { requireUnfrozen } from "./freeze.ts"
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -57,6 +58,10 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // accounted commit hides every bypass at or below it
   // (2026-09-03: `main@0a9db9daf7eb`, named for the queue's own merge 005a622156c7).
   refuseTarget(request.branch, request.target.branch)
+  // This is the early courtesy refusal. The run is the enforcement point: a
+  // freeze that races this read may let the change open, but it cannot let it
+  // be checked or merged while the freeze stands.
+  await requireUnfrozen(git, remote)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const change = { branch: request.branch, head }
   const ref = changeRef(change)
@@ -120,7 +125,9 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
  */
 export async function issueOf(git: Git, branch: string, head: string, declared?: string): Promise<string | undefined> {
   if (declared !== undefined) return declared
-  const fromTrailer = (await git(["log", "-1", "--format=%(trailers:key=Resolves,key=Refs,valueonly,separator=%x00)", head]))
+  const fromTrailer = (
+    await git(["log", "-1", "--format=%(trailers:key=Resolves,key=Refs,valueonly,separator=%x00)", head])
+  )
     .split("\0")
     .map((value) => value.trim())
     .find((value) => value !== "")

@@ -211,6 +211,147 @@ async function thisCheckout(): Promise<string> {
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
+  it("stays alive through a frozen round and resumes the queued change after unfreeze", async () => {
+    const w = await world()
+    await w.git(["checkout", "--quiet", "-b", "task/one", "main"])
+    writeFileSync(join(w.work, "one.txt"), "one\n")
+    await w.git(["add", "one.txt"])
+    await w.git(["commit", "--quiet", "-m", "one"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    expect(
+      await coreQueueCommand(
+        w.work,
+        capture(w.work).io,
+        { by: "@chief", command: "freeze", reason: "repair main" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(0)
+
+    const stop = new AbortController()
+    let rounds = 0
+    const service = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        service.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterRound: async () => {
+            rounds += 1
+            if (rounds === 1) {
+              await coreQueueCommand(
+                w.work,
+                capture(w.work).io,
+                { by: "@chief", command: "unfreeze", reason: "repair landed" },
+                { workdir: w.workdir },
+              )
+            } else {
+              stop.abort()
+            }
+          },
+        },
+        { json: true, workdir: w.workdir },
+      ),
+    ).toBe(0)
+    expect(rounds).toBe(2)
+    expect(records(service)[0]).toMatchObject({ exitCode: 0, freeze: { kind: "frozen" }, merged: [] })
+    expect(records(service)[1]).toMatchObject({ exitCode: 0, merged: ["task/one"] })
+  })
+
+  it("freeze is visible, refuses live and dry-run submit, and unfreeze admits the same branch", async () => {
+    const w = await world()
+    await w.git(["checkout", "--quiet", "-b", "task/one", "main"])
+    writeFileSync(join(w.work, "one.txt"), "one\n")
+    await w.git(["add", "one.txt"])
+    await w.git(["commit", "--quiet", "-m", "one"])
+    await w.git(["checkout", "--quiet", "main"])
+
+    const opened = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        opened.io,
+        { by: "@chief", command: "freeze", reason: "49 new failures on main" },
+        { json: true, workdir: w.workdir },
+      ),
+    ).toBe(0)
+    expect(records(opened)[0]).toMatchObject({ by: "@chief", kind: "frozen", reason: "49 new failures on main" })
+
+    for (const dryRun of [true, false]) {
+      const refused = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          refused.io,
+          { branch: "task/one", command: "submit", dryRun, submitter: "@dev/2" },
+          { workdir: w.workdir },
+        ),
+      ).toBe(1)
+      expect(refused.stderr()).toContain("frozen by @chief")
+      expect(refused.stderr()).toContain("49 new failures on main")
+      expect(refused.stderr()).toContain("yrd queue unfreeze")
+    }
+    expect(await w.git(["ls-remote", "--heads", "origin", "task/one"])).toBe("")
+
+    const listed = capture(w.work)
+    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(listed.stdout().split("\n")[0]).toContain("frozen by @chief")
+    const listedJson = capture(w.work)
+    expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
+      0,
+    )
+    expect(records(listedJson)[0]).toMatchObject({
+      freeze: { by: "@chief", kind: "frozen", reason: "49 new failures on main" },
+    })
+
+    const closed = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        closed.io,
+        { by: "@chief", command: "unfreeze", reason: "repair landed" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(0)
+    const submitted = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        submitted.io,
+        { branch: "task/one", command: "submit", submitter: "@dev/2" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(0)
+    const beforeRetry = await w.git(["ls-remote", "--refs", "origin", "refs/yrd/changes/*"])
+    const refrozen = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        refrozen.io,
+        { by: "@chief", command: "freeze", reason: "retry must wait too" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(0)
+    const retried = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        retried.io,
+        { branch: "task/one", command: "submit", submitter: "@dev/2" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(1)
+    expect(retried.stderr()).toContain("retry must wait too")
+    expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/changes/*"])).toBe(beforeRetry)
+  })
+
   it("reads the target's declaration again every round: a key the target's edit mistyped ends it stuck, naming the key", async () => {
     const w = await world()
     const run = capture(w.work)
@@ -325,7 +466,11 @@ describe("yrd queue list, the table", () => {
     await w.git(["add", "first.txt"])
     await w.git(["commit", "--quiet", "-m", "task/first"])
     await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", { branch: "task/first", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
+    await submit(w.git, "origin", {
+      branch: "task/first",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
     // The target moves around the queue: one commit after that, pushed.
     writeFileSync(join(w.work, "bypass.txt"), "bypass\n")
     await w.git(["add", "bypass.txt"])

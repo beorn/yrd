@@ -9,7 +9,8 @@
  * and each message sent. A seventh, `merged-bypass`, appears only when
  * something went around the queue: one record per commit on the target the
  * queue did not put there (E5). An
- * eighth, `reap`, appears only when a run before this one died without removing
+ * eighth, `freeze`, appears only when an active freeze stops a run before a
+ * merge. A ninth, `reap`, appears only when a run before this one died without removing
  * its worktrees: one record per worktree taken down. The human line is a
  * rendering of the record, never a second source: whatever a reader prints, the
  * file is what happened.
@@ -43,7 +44,17 @@ export function runId(started: Date = new Date()): string {
   return `q-${started.toISOString().replace(/[-:.]/gu, "")}-${Math.random().toString(16).slice(2, 10)}`
 }
 
-export const LOG_KINDS = ["run", "change", "check", "result", "merge", "message", "merged-bypass", "reap"] as const
+export const LOG_KINDS = [
+  "run",
+  "freeze",
+  "change",
+  "check",
+  "result",
+  "merge",
+  "message",
+  "merged-bypass",
+  "reap",
+] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]
 
@@ -76,7 +87,11 @@ export type QueueRunLog = Readonly<{
  * as it is written: the human line is a rendering of the record, and this is
  * the one place a rendering can come from.
  */
-export function openLog(directory: string, now: () => Date = () => new Date(), render?: (record: LogRecord) => void): QueueRunLog {
+export function openLog(
+  directory: string,
+  now: () => Date = () => new Date(),
+  render?: (record: LogRecord) => void,
+): QueueRunLog {
   mkdirSync(directory, { recursive: true })
   const id = runId(now())
   const path = join(directory, `${id}.jsonl`)

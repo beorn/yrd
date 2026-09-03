@@ -67,6 +67,7 @@ import { queueName, readConfig, targetName, type Ending, type Notifier, type Tar
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { bypassCommits, bypassLine } from "./bypass.ts"
+import { activeFreeze, type FreezeEvent } from "./freeze.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine, tipOf } from "./state.ts"
@@ -118,6 +119,8 @@ export type QueueRunOutcome = Readonly<{
   target: string
   /** The garage's reason, when the round was made in the garage. */
   garage?: string
+  /** The active merge freeze that made this run stop before a merge. */
+  freeze?: FreezeEvent
   merged: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
@@ -126,7 +129,7 @@ export type QueueRunOutcome = Readonly<{
 }>
 
 /** Everything one run's steps share. */
-type Run = Readonly<{
+type Run = {
   options: QueueRunOptions
   git: Git
   log: QueueRunLog
@@ -139,13 +142,15 @@ type Run = Readonly<{
   name: string
   /** The queue as this run read it: every change at the remote, and where each stood. */
   queue: QueueRead
+  /** Set only when this run observed an active freeze. */
+  freeze?: FreezeEvent
   /**
    * Gitlinks proven on their component's `main` this run, as `<path>@<sha>`:
    * a positive answer can only stay true, so the same pin is asked about at
    * most once per run however many changes move it (E4).
    */
   onMain: Set<string>
-}>
+}
 
 type Ended = "checked" | "failed" | "stuck" | "merged"
 
@@ -191,6 +196,15 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     queue: run.name,
     target: options.target.branch,
   })
+
+  // A freeze already active when the round starts stops before worktree
+  // cleanup, change retirement, checks or merge. It is normal queue state:
+  // exit 0 keeps `queue up` ticking so an unfreeze is seen next interval.
+  const frozenAtStart = await activeFreeze(git, options.target.remote)
+  if (frozenAtStart !== undefined) {
+    recordFreeze(run, frozenAtStart)
+    return finish(run, 0, { bypasses: [], failed, merged, stuck })
+  }
 
   // The worktrees of runs that are no longer alive, taken down before this run
   // makes any of its own: a killed run removes nothing, so its worktrees stay
@@ -362,9 +376,7 @@ async function prepare(
     plumbing: run.options.plumbing,
     process: run.options.process,
     record: ({ result, start, end: ended }) => record(run, { ...about, end: ended, start }, result),
-    ...(run.options.setup === undefined
-      ? {}
-      : { setup: { logDir, run: run.options.setup, tmpdir: run.tmpdir } }),
+    ...(run.options.setup === undefined ? {} : { setup: { logDir, run: run.options.setup, tmpdir: run.tmpdir } }),
     starting: ({ log, start }) => started(run, { ...about, log, start }),
     targetSha: run.targetSha,
   })
@@ -566,6 +578,15 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         ...checkTrailers(results),
       ],
     })
+    // The last authority read before the merge push. A freeze placed while
+    // checks were running leaves the change checked and in line; the service
+    // sees an unfreeze on its next interval without ever stopping.
+    const frozenBeforeMerge = await activeFreeze(run.git, run.options.target.remote)
+    if (frozenBeforeMerge !== undefined) {
+      recordFreeze(run, frozenBeforeMerge)
+      run.log.write({ branch, decision: "checked", head, kind: "change", reason: "frozen" })
+      return "checked"
+    }
     const ref = changeRef(change)
     try {
       await run.git([
@@ -966,7 +987,12 @@ async function end(
       entry,
       event,
       kind,
-      messageFor(kind, { branch: entry.change.branch, head: entry.change.head, remedy: ended.remedy, subject: ended.subject }),
+      messageFor(kind, {
+        branch: entry.change.branch,
+        head: entry.change.head,
+        remedy: ended.remedy,
+        subject: ended.subject,
+      }),
     )
   }
   return kind
@@ -1024,7 +1050,10 @@ async function send(
     // an event a notifier took whose sent event never landed WILL be handed over
     // again by the next run, so it is not delivered, and the log says which half
     // failed rather than claiming the id is settled.
-    const unrecorded = sentEvent === undefined ? `the sent event for ${endedEvent.slice(0, 12)} was not written; the next run sends it again` : undefined
+    const unrecorded =
+      sentEvent === undefined
+        ? `the sent event for ${endedEvent.slice(0, 12)} was not written; the next run sends it again`
+        : undefined
     const trouble = [failure, unrecorded].filter((why): why is string => why !== undefined).join("; ")
     run.log.write({
       about: entry.change.branch,
@@ -1103,7 +1132,9 @@ async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
     return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
   }).length
   const own = await readEvents(run.git, entry.change)
-  return elsewhere + own.filter((event) => event.kind === "failed" && !MOVED_ON.has(trailer(event, "Reason") ?? "")).length
+  return (
+    elsewhere + own.filter((event) => event.kind === "failed" && !MOVED_ON.has(trailer(event, "Reason") ?? "")).length
+  )
 }
 
 /** How one notify entry went: it took the event, there was none to take it, or it exited non-zero. */
@@ -1188,7 +1219,13 @@ async function writeEvent(run: Run, write: WriteEvent): Promise<string | undefin
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const event = await eventCommit(run.git, write, onto)
     try {
-      await run.git(["push", "--quiet", `--force-with-lease=${ref}:${onto}`, run.options.target.remote, `${event}:${ref}`])
+      await run.git([
+        "push",
+        "--quiet",
+        `--force-with-lease=${ref}:${onto}`,
+        run.options.target.remote,
+        `${event}:${ref}`,
+      ])
       // The local ref follows what the remote has just accepted, so a second
       // event written for this change in the same run — an ending and then its
       // sent event — starts from the tip that is really there.
@@ -1275,7 +1312,8 @@ async function finish(
   const targetNow =
     lists.merged.length === 0
       ? run.targetSha
-      : ((await refAt(run.git, `refs/remotes/${run.options.target.remote}/${run.options.target.branch}`)) ?? run.targetSha)
+      : ((await refAt(run.git, `refs/remotes/${run.options.target.remote}/${run.options.target.branch}`)) ??
+        run.targetSha)
   // A run that reaches here removed every worktree it made, so its own
   // directory and the pid file in it have nothing left to say. Taking them
   // leaves exactly the runs that did NOT end under the worktrees root, which
@@ -1288,9 +1326,22 @@ async function finish(
     config: run.options.configBlob,
     exitCode,
     ...(run.options.garage === undefined ? {} : { garage: run.options.garage }),
+    ...(run.freeze === undefined ? {} : { freeze: run.freeze }),
     log: run.log.path,
     run: run.log.id,
     target: targetNow,
     ...lists,
   }
+}
+
+/** Record one active freeze in the run's structured log and outcome. */
+function recordFreeze(run: Run, freeze: FreezeEvent): void {
+  run.freeze = freeze
+  run.log.write({
+    by: freeze.by,
+    kind: "freeze",
+    reason: freeze.reason,
+    since: freeze.at.toISOString(),
+    state: freeze.kind,
+  })
 }

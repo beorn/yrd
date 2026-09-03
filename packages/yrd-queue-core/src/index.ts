@@ -42,3 +42,14 @@ export type { Row } from "./table.ts"
 export { readQueue, resolveRemote } from "./remote.ts"
 export { bypassCommits, bypassLine } from "./bypass.ts"
 export { refuseTarget, submit, issueOf } from "./submit.ts"
+export {
+  FREEZE_REF,
+  QueueFrozen,
+  QueueNotFrozen,
+  activeFreeze,
+  freezeLine,
+  readFreeze,
+  requireUnfrozen,
+  writeFreeze,
+} from "./freeze.ts"
+export type { FreezeEvent, FreezeKind, WriteFreeze } from "./freeze.ts"
