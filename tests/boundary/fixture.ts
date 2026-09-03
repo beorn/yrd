@@ -710,4 +710,226 @@ export async function secondWorkingRepo(origin: string, name: string, email: str
   await setSubmitter(repo, name, email)
   await addYrdRemote(repo, origin)
   return repo
+/* ------------------------------------------------------------------ *
+ * Additions for the run-and-merge area (§ The queue run).
+ *
+ * Everything below is new; nothing above it changed, because four units
+ * write beside each other on this file. The shapes this area needs and
+ * `boundaryRepository` cannot make: a target whose checks the case writes
+ * itself (so a check can carry the plan's `on:` phase, or live inside the
+ * repository), a second change, a target that moved without the queue, and
+ * two branch names at one head.
+ * ------------------------------------------------------------------ */
+
+/** One check as the PLAN spells it: a name, a phase and a command. */
+export type PhasedCheck = Readonly<{
+  name: string
+  /** `on: submit` or `on: merge`. Omitted writes no phase at all. */
+  on?: "submit" | "merge"
+  /** The command, verbatim — the case owns it. */
+  run: string
+  timeoutMs?: number
+}>
+
+export type BoundaryPlan = Readonly<{
+  /** The target's checks, in order. */
+  checks: readonly PhasedCheck[]
+  /** Declare a notifier, as `FakeCheckPlan.notify` does. */
+  notify?: boolean
+  /** Files committed on the target alongside `README.md` and `.yrd.yml`.
+   * A path ending in `.sh` is committed executable. */
+  files?: Readonly<Record<string, string>>
+}>
+
+/**
+ * A check written INTO a repository, so a case can ask what the check could
+ * SEE. It records its name, its working directory and every tracked file at
+ * that directory, then exits.
+ *
+ *   PROBE_LOG          file to append one line to (required)
+ *   PROBE_NAME         the name to record (default `check`)
+ *   PROBE_EXIT         status to exit with (default 0)
+ *   PROBE_FAIL_IF_ALL  space-separated paths; exit 1 when all of them exist
+ */
+export const PROBE_SCRIPT = `#!/bin/sh
+set -u
+: "\${PROBE_LOG:?probe needs a log}"
+files=$(git ls-files 2>/dev/null | tr '\\n' ' ')
+printf '%s cwd=%s files=%s\\n' "\${PROBE_NAME:-check}" "$(pwd)" "$files" >>"\${PROBE_LOG}"
+if [ -n "\${PROBE_FAIL_IF_ALL:-}" ]; then
+  all=1
+  for f in \${PROBE_FAIL_IF_ALL}; do
+    [ -e "$f" ] || all=0
+  done
+  if [ "$all" = 1 ]; then exit 1; fi
+fi
+exit "\${PROBE_EXIT:-0}"
+`
+
+/** The `checks:` block for a plan, in `.yrd.yml`'s own YAML. */
+function phasedChecks(checks: readonly PhasedCheck[]): string {
+  const entries = checks.map((check) => {
+    const fields = [`run: ${JSON.stringify(check.run)}`]
+    if (check.on !== undefined) fields.push(`on: ${check.on}`)
+    if (check.timeoutMs !== undefined) fields.push(`timeoutMs: ${String(check.timeoutMs)}`)
+    return `{${check.name}: {${fields.join(", ")}}}`
+  })
+  return `checks: [${entries.join(", ")}]`
+}
+
+/** A scratch repository whose target carries the checks and files the case names. */
+export async function boundaryRepositoryWith(plan: BoundaryPlan): Promise<BoundaryRepository> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-boundary-"))
+  roots.push(root)
+  const repoPath = join(root, "repo")
+  const origin = join(root, "origin.git")
+  const checkLog = join(root, "fake-check.log")
+  const notifyLog = join(root, "notify.log")
+
+  await git(root, "init", "-q", "--bare", origin)
+  await git(root, "init", "-q", "-b", "main", repoPath)
+  const repo = await realpath(repoPath)
+  await git(repo, "config", "user.name", "Yrd Boundary")
+  await git(repo, "config", "user.email", "yrd@example.invalid")
+  await git(repo, "remote", "add", "origin", origin)
+  await installDeclaredYrdEntry(repo)
+  await writeFile(join(repo, "README.md"), "main\n")
+
+  const extra = Object.entries(plan.files ?? {})
+  for (const [path, content] of extra) {
+    await writeFile(join(repo, path), content, path.endsWith(".sh") ? { mode: 0o755 } : {})
+  }
+
+  const notify =
+    plan.notify === true ? `notify: ${JSON.stringify(`cat >>${notifyLog}; echo '{"ball_id":"b1"}'`)}\n` : ""
+  await writeFile(join(repo, ".yrd.yml"), `base: main\nbatch: 1\n${notify}${phasedChecks(plan.checks)}\n`)
+
+  await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
+  await git(repo, "commit", "-qm", "main")
+  await git(repo, "push", "-q", "-u", "origin", "main")
+  return { repo, origin, checkLog, notifyLog }
+}
+
+/** `submitOneCommit`, but the case chooses what the one commit writes — so
+ * two changes can touch one path, or leave a marker a check looks for. */
+export async function submitCommitWriting(
+  repo: string,
+  bay: string,
+  files: Readonly<Record<string, string>>,
+): Promise<Change> {
+  const opened = capture(repo)
+  expectZero(await yrd(repo, opened.io, "bay", "open", "--bay", bay), "bay open", opened)
+  const bayPath = opened.stdout().trim()
+  const branch = await git(bayPath, "branch", "--show-current")
+
+  for (const [path, content] of Object.entries(files)) {
+    await writeFile(join(bayPath, path), content, path.endsWith(".sh") ? { mode: 0o755 } : {})
+    await git(bayPath, "add", path)
+  }
+  await git(bayPath, "commit", "-qm", `${bay}: one commit`)
+  const headSha = await git(bayPath, "rev-parse", "HEAD")
+
+  const submitted = capture(bayPath)
+  expectZero(await yrd(repo, submitted.io, "bay", "submit", "--json"), "bay submit", submitted)
+  const parsed = JSON.parse(submitted.stdout()) as { prs: readonly { id: string; branch: string }[] }
+  const id = parsed.prs[0]?.id
+  if (id === undefined || parsed.prs[0]?.branch !== branch) {
+    throw new Error(`bay submit did not record ${branch}: ${submitted.stdout()}`)
+  }
+  return { branch, headSha, id }
+}
+
+/** A second branch name at an existing head: one fast-forward, then a submit.
+ * No commit of its own, so the two changes are the same content under two
+ * names — the shape that billed a submitter on 2026-09-02. */
+export async function submitSameHead(repo: string, bay: string, headSha: string): Promise<Change> {
+  const opened = capture(repo)
+  expectZero(await yrd(repo, opened.io, "bay", "open", "--bay", bay), "bay open", opened)
+  const bayPath = opened.stdout().trim()
+  const branch = await git(bayPath, "branch", "--show-current")
+
+  await git(bayPath, "fetch", "-q", "origin")
+  await git(bayPath, "merge", "--ff-only", "-q", headSha)
+
+  const submitted = capture(bayPath)
+  expectZero(await yrd(repo, submitted.io, "bay", "submit", "--json"), "bay submit", submitted)
+  const parsed = JSON.parse(submitted.stdout()) as { prs: readonly { id: string; branch: string }[] }
+  const id = parsed.prs[0]?.id
+  if (id === undefined) throw new Error(`bay submit did not record ${branch}: ${submitted.stdout()}`)
+  return { branch, headSha, id }
+}
+
+/** A throwaway clone of the shared repository, for the cases where something
+ * OTHER than the queue moves the target. */
+async function handClone(origin: string): Promise<string> {
+  const work = await mkdtemp(join(tmpdir(), "yrd-boundary-hand-"))
+  roots.push(work)
+  const clone = join(work, "clone")
+  // `--branch main`, because the bare repository was made by `git init --bare`
+  // and its HEAD still names the host's default branch, not the target.
+  await git(work, "clone", "-q", "--branch", "main", origin, clone)
+  await git(clone, "config", "user.name", "Yrd Boundary")
+  await git(clone, "config", "user.email", "yrd@example.invalid")
+  return clone
+}
+
+/** The target moves without the queue: one commit, pushed to `main`. */
+export async function advanceTargetByHand(
+  origin: string,
+  files: Readonly<Record<string, string>>,
+  message = "the target moved",
+): Promise<string> {
+  const clone = await handClone(origin)
+  for (const [path, content] of Object.entries(files)) {
+    await writeFile(join(clone, path), content, path.endsWith(".sh") ? { mode: 0o755 } : {})
+    await git(clone, "add", path)
+  }
+  await git(clone, "commit", "-qm", message)
+  await git(clone, "push", "-q", "origin", "main")
+  return git(clone, "rev-parse", "HEAD")
+}
+
+/** A change landed by hand in the garage: its head merged into the target and
+ * pushed, with no queue run involved. `from` is the working repository the
+ * change was submitted in — a submitted head is not at the shared repository
+ * until the queue puts it there, so the hand-clone has to fetch it. */
+export async function landByHand(origin: string, headSha: string, from: string): Promise<string> {
+  const clone = await handClone(origin)
+  await git(clone, "fetch", "-q", from, "+refs/heads/*:refs/remotes/submitted/*")
+  await git(clone, "merge", "--no-ff", "--no-edit", "-q", headSha, "-m", `landed ${headSha.slice(0, 8)} by hand`)
+  await git(clone, "push", "-q", "origin", "main")
+  return git(clone, "rev-parse", "HEAD")
+}
+
+/** `origin/main` as the working repository sees it after a fetch — needed
+ * whenever something other than the queue moved the target. */
+export async function refreshTarget(repo: string): Promise<string> {
+  await git(repo, "fetch", "-q", "origin")
+  return targetTip(repo)
+}
+
+/** Whether a head is in the target's history — the plan's own merged test. */
+export async function mergedIntoTarget(repo: string, sha: string): Promise<boolean> {
+  const child = Bun.spawn(["git", "-C", repo, "merge-base", "--is-ancestor", sha, "origin/main"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  return (await child.exited) === 0
+}
+
+/** Every line a check log carries, so a case can read WHAT ran, not just how
+ * many times. */
+export async function checkLines(log: string): Promise<readonly string[]> {
+  const file = Bun.file(log)
+  if (!(await file.exists())) return []
+  return (await file.text()).trimEnd().split("\n").filter(Boolean)
+}
+
+/** A path for a log the CASE owns, under a scratch root this file removes.
+ * A check's `run:` string has to name its log before the repository that
+ * declares the check exists, so the log cannot come from the repository. */
+export async function scratchLog(name: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-boundary-log-"))
+  roots.push(root)
+  return join(root, `${name}.log`)
 }
