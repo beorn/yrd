@@ -59,7 +59,8 @@ export type Event = Readonly<{
 export type Git = (args: readonly string[], input?: string) => Promise<string>
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-const ABSENT = "0".repeat(40)
+/** Git's expected-old value for a ref that must not exist yet. */
+export const ABSENT = "0".repeat(40)
 /** The one genesis object, byte for byte as git stores it; its sha follows from these bytes. */
 const GENESIS_OBJECT = `tree ${EMPTY_TREE}\nauthor yrd <yrd@yrd> 0 +0000\ncommitter yrd <yrd@yrd> 0 +0000\n\nyrd: genesis\n`
 
@@ -86,7 +87,7 @@ const CARRIED = ["Opened", "Submitter", "Issue"] as const
  * date, git's own reading of the trailer block, and the raw message. `%B` is
  * last because it is the one field that holds newlines. `%x00` separates them.
  */
-const EVENT_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
+export const EVENT_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
 
 /**
  * The commit one event IS, written onto `parent` — the event the caller read this
@@ -100,9 +101,13 @@ const EVENT_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
  */
 export async function eventCommit(git: Git, write: WriteEvent, parent: string | undefined): Promise<string> {
   const parents = parent === undefined ? [await genesis(git), write.change.head] : [parent]
-  const carried = parent === undefined ? [["Opened", new Date().toISOString()] as const] : await carriedFrom(git, parent)
+  const carried =
+    parent === undefined ? [["Opened", new Date().toISOString()] as const] : await carriedFrom(git, parent)
   const named = new Set((write.trailers ?? []).map(([name]) => name))
-  const message = eventMessage({ ...write, trailers: [...carried.filter(([name]) => !named.has(name)), ...(write.trailers ?? [])] })
+  const message = eventMessage({
+    ...write,
+    trailers: [...carried.filter(([name]) => !named.has(name)), ...(write.trailers ?? [])],
+  })
   const args = ["commit-tree", EMPTY_TREE]
   for (const on of parents) args.push("-p", on)
   return (await git([...args, "-m", message])).trim()
@@ -181,7 +186,13 @@ export async function readEvents(git: Git, change: Change): Promise<readonly Eve
 
 /** The message one event commit carries. */
 export function eventMessage(write: WriteEvent): string {
-  const lines = [write.subject, "", `Event: ${write.kind}`, `Change: ${changeName(write.change)}`, `Target: ${write.target}`]
+  const lines = [
+    write.subject,
+    "",
+    `Event: ${write.kind}`,
+    `Change: ${changeName(write.change)}`,
+    `Target: ${write.target}`,
+  ]
   for (const [name, value] of write.trailers ?? []) {
     if (value.includes("\n")) throw new Error(`trailer ${name} carries a newline; one trailer is one line`)
     lines.push(`${name}: ${value}`)
@@ -274,17 +285,8 @@ export function endedKind(tip: Event): EventKind {
   return state === "merged" || state === "failed" || state === "stuck" ? state : "sent"
 }
 
-/**
- * The event a commit is, from its sha, committer date, message and the trailer
- * block GIT read out of it; undefined when the commit is not one.
- *
- * The trailers are git's own reading, never a second parser of the same
- * bytes: a `^Key: value$` scan written here called every prose line that looks
- * like a trailer one — `Note: fix` in the middle of a body became a `Note`
- * trailer and stood in the derived state — while git knows a trailer block is
- * the LAST paragraph and folds a wrapped value back into one line.
- */
-export function eventFrom(sha: string, at: string, body: string, trailerBlock: string): Event | undefined {
+/** Parse Git's already-isolated, unfolded trailer block into ordered pairs. */
+export function commitTrailers(trailerBlock: string): readonly (readonly [string, string])[] {
   const found: (readonly [string, string])[] = []
   for (const line of trailerBlock.split("\n")) {
     // git's own output, one trailer per line after `unfold`: the key is
@@ -293,6 +295,16 @@ export function eventFrom(sha: string, at: string, body: string, trailerBlock: s
     if (colon <= 0) continue
     found.push([line.slice(0, colon), line.slice(colon + 1).replace(/^ /u, "")] as const)
   }
+  return found
+}
+
+/**
+ * The event a commit is, from its sha, date, body, and Git-read trailers;
+ * undefined when the commit is not one. Git decides which body lines form the
+ * final trailer block and unfolds wrapped values before this parser sees it.
+ */
+export function eventFrom(sha: string, at: string, body: string, trailerBlock: string): Event | undefined {
+  const found = commitTrailers(trailerBlock)
   const kind = found.find(([name]) => name === "Event")?.[1]
   if (kind === undefined || !isEventKind(kind)) return undefined
   return { at: new Date(at), kind, sha, subject: body.split("\n")[0]?.trim() ?? "", trailers: found }

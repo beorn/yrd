@@ -67,7 +67,15 @@ import { queueName, readConfig, targetName, type Ending, type Notifier, type Tar
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { bypassCommits, bypassLine } from "./bypass.ts"
-import { activeFreeze, type FreezeEvent } from "./freeze.ts"
+import {
+  activeFreeze,
+  FREEZE_REF,
+  QueueFrozen,
+  readFreeze,
+  unfrozenFence,
+  type FreezeEvent,
+  type UnfrozenFence,
+} from "./freeze.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine, tipOf } from "./state.ts"
@@ -129,7 +137,7 @@ export type QueueRunOutcome = Readonly<{
 }>
 
 /** Everything one run's steps share. */
-type Run = {
+type Run = Readonly<{
   options: QueueRunOptions
   git: Git
   log: QueueRunLog
@@ -142,17 +150,23 @@ type Run = {
   name: string
   /** The queue as this run read it: every change at the remote, and where each stood. */
   queue: QueueRead
-  /** Set only when this run observed an active freeze. */
-  freeze?: FreezeEvent
   /**
    * Gitlinks proven on their component's `main` this run, as `<path>@<sha>`:
    * a positive answer can only stay true, so the same pin is asked about at
    * most once per run however many changes move it (E4).
    */
   onMain: Set<string>
-}
+}>
 
 type Ended = "checked" | "failed" | "stuck" | "merged"
+
+/** An authority read failed outside any one change's responsibility. */
+class QueueAuthorityUnreadable extends Error {
+  constructor(authority: string, error: unknown) {
+    super(`${authority} could not be read: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+    this.name = "QueueAuthorityUnreadable"
+  }
+}
 
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   const git = options.git ?? gitIn(options.repo, options.process)
@@ -197,15 +211,6 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     target: options.target.branch,
   })
 
-  // A freeze already active when the round starts stops before worktree
-  // cleanup, change retirement, checks or merge. It is normal queue state:
-  // exit 0 keeps `queue up` ticking so an unfreeze is seen next interval.
-  const frozenAtStart = await activeFreeze(git, options.target.remote)
-  if (frozenAtStart !== undefined) {
-    recordFreeze(run, frozenAtStart)
-    return finish(run, 0, { bypasses: [], failed, merged, stuck })
-  }
-
   // The worktrees of runs that are no longer alive, taken down before this run
   // makes any of its own: a killed run removes nothing, so its worktrees stay
   // registered in the repository and on disk until some later run clears them
@@ -221,6 +226,16 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // accounts for it (E5). Nothing stops for it: the run judges every change on
   // the base it read.
   const bypasses = await reportBypasses(run, entries)
+
+  // A freeze stops here. Reaping only cleans local scratch, and bypass
+  // reporting only observes work already done outside the queue. Everything
+  // below writes a change event or notifies about one, so a frozen round leaves
+  // every change exactly as it found it while still surfacing bypasses.
+  const frozenAtStart = await activeFreeze(git, options.target.remote)
+  if (frozenAtStart !== undefined) {
+    recordFreeze(run, frozenAtStart)
+    return finish(run, 0, { bypasses, failed, merged, stuck }, frozenAtStart)
+  }
 
   // Bookkeeping at the edges of the events first, so every reader below reads
   // events and never reconciles: a branch that is gone or moved off a head ends
@@ -253,14 +268,24 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const checked = ordered((await readQueue(git, options.target.remote, options.target.branch)).changes, "checked").find(
     (entry) => !staleChecked(run, entry),
   )
+  let observedFreeze: FreezeEvent | undefined
   if (checked !== undefined) {
-    const outcome = await guarded(run, checked, () => land(run, checked))
+    const outcome = await guarded(run, checked, () =>
+      land(run, checked, (freeze) => {
+        observedFreeze = freeze
+      }),
+    )
     if (outcome === "stuck") stuck.push(checked.change.branch)
     else if (outcome === "failed") failed.push(checked.change.branch)
     else if (outcome === "merged") merged.push(checked.change.branch)
   }
 
-  return finish(run, stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0, { bypasses, failed, merged, stuck })
+  return finish(
+    run,
+    stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0,
+    { bypasses, failed, merged, stuck },
+    observedFreeze,
+  )
 }
 
 /** A checked change whose checked event names a config blob the target no longer declares. */
@@ -338,6 +363,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
   try {
     return await step()
   } catch (error) {
+    if (error instanceof QueueAuthorityUnreadable) throw error
     const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim()
     // A setup that did not pass is the one crash with a name: the queue could
     // not build the ground a judgement stands on, which is never the
@@ -478,7 +504,7 @@ async function movedGitlinks(run: Run, head: string): Promise<readonly Readonly<
 }
 
 /** The on-merge phase for the first checked change. */
-async function land(run: Run, entry: QueueEntry): Promise<Ended> {
+async function land(run: Run, entry: QueueEntry, observedFreeze: (freeze: FreezeEvent) => void): Promise<Ended> {
   const { change } = entry
   const { branch, head } = change
   const name = changeName(change)
@@ -578,14 +604,23 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         ...checkTrailers(results),
       ],
     })
-    // The last authority read before the merge push. A freeze placed while
-    // checks were running leaves the change checked and in line; the service
-    // sees an unfreeze on its next interval without ever stopping.
-    const frozenBeforeMerge = await activeFreeze(run.git, run.options.target.remote)
-    if (frozenBeforeMerge !== undefined) {
-      recordFreeze(run, frozenBeforeMerge)
-      run.log.write({ branch, decision: "checked", head, kind: "change", reason: "frozen" })
-      return "checked"
+    // The merge transaction advances the freeze ref as an unfrozen event under
+    // lease. That makes this read and the atomic push one ordering point with a
+    // concurrent `queue freeze`: whichever lease wins happened first.
+    let fence: UnfrozenFence
+    try {
+      fence = await unfrozenFence(run.git, run.options.target.remote, {
+        by: mergedBy(run.name, run.log.id),
+        reason: `merge ${name}`,
+      })
+    } catch (error) {
+      if (error instanceof QueueFrozen) {
+        recordFreeze(run, error.freeze)
+        observedFreeze(error.freeze)
+        run.log.write({ branch, decision: "checked", head, kind: "change", reason: "frozen" })
+        return "checked"
+      }
+      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${FREEZE_REF}`, error)
     }
     const ref = changeRef(change)
     try {
@@ -594,26 +629,39 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         "--quiet",
         "--atomic",
         `--force-with-lease=refs/heads/${run.options.target.branch}:${run.targetSha}`,
+        `--force-with-lease=${FREEZE_REF}:${fence.expected}`,
         run.options.target.remote,
         `${mergeCommit}:refs/heads/${run.options.target.branch}`,
         `${mergedEvent}:${ref}`,
+        `${fence.sha}:${FREEZE_REF}`,
       ])
     } catch (error) {
-      // The reading just above and this lease are two moments, and the target
-      // can move between them: the lease then refuses the push and nothing
-      // lands. That is ruling D4 — a target that moved under a checked change
-      // keeps its place and is judged again at the new target next run — not a
-      // queue that could not do its job, so it must not end the change stuck.
-      // The remote decides which it was; git's rejection prose does not.
+      // A target, branch, or freeze writer can win after our reads. The atomic
+      // leases then reject every update, and the remote — never Git's prose —
+      // identifies the authority that moved. The change remains checked.
+      let freezeNow: FreezeEvent | undefined
+      try {
+        freezeNow = await readFreeze(run.git, run.options.target.remote)
+      } catch (authorityError) {
+        throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${FREEZE_REF}`, authorityError)
+      }
       const moved = await remoteHeads(run, branch)
-      if (moved.target === run.targetSha && moved.branch === head) throw error
+      if (freezeNow?.kind === "frozen") {
+        recordFreeze(run, freezeNow)
+        observedFreeze(freezeNow)
+        run.log.write({ branch, decision: "checked", head, kind: "change", reason: "frozen" })
+        return "checked"
+      }
+      const authorityMoved = freezeNow?.sha !== fence.previous?.sha
+      if (moved.target === run.targetSha && moved.branch === head && !authorityMoved) throw error
       run.log.write({
         branch,
         decision: "checked",
         head,
         kind: "change",
-        reason: moved.target !== run.targetSha ? "target-moved" : "branch-moved",
-        saw: moved.target ?? "gone",
+        reason:
+          moved.target !== run.targetSha ? "target-moved" : moved.branch !== head ? "branch-moved" : "freeze-moved",
+        saw: moved.target !== run.targetSha ? (moved.target ?? "gone") : (freezeNow?.sha ?? "absent"),
       })
       return "checked"
     }
@@ -1305,6 +1353,7 @@ async function finish(
   run: Run,
   exitCode: 0 | 1 | 2,
   lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[]; bypasses: readonly string[] }>,
+  freeze?: FreezeEvent,
 ): Promise<QueueRunOutcome> {
   // A push updates the remote-tracking ref it pushed to, so after a merge the
   // target as this run left it is right there; a run that merged nothing left
@@ -1326,7 +1375,7 @@ async function finish(
     config: run.options.configBlob,
     exitCode,
     ...(run.options.garage === undefined ? {} : { garage: run.options.garage }),
-    ...(run.freeze === undefined ? {} : { freeze: run.freeze }),
+    ...(freeze === undefined ? {} : { freeze }),
     log: run.log.path,
     run: run.log.id,
     target: targetNow,
@@ -1334,9 +1383,8 @@ async function finish(
   }
 }
 
-/** Record one active freeze in the run's structured log and outcome. */
+/** Record one active freeze in the run's structured log. */
 function recordFreeze(run: Run, freeze: FreezeEvent): void {
-  run.freeze = freeze
   run.log.write({
     by: freeze.by,
     kind: "freeze",

@@ -284,6 +284,18 @@ describe("yrd queue up, the service", () => {
     ).toBe(0)
     expect(records(opened)[0]).toMatchObject({ by: "@chief", kind: "frozen", reason: "49 new failures on main" })
 
+    const duplicateFreeze = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        duplicateFreeze.io,
+        { by: "operator", command: "freeze", reason: "replace the active freeze" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(1)
+    expect(duplicateFreeze.stderr()).toContain("frozen by @chief")
+    expect(duplicateFreeze.stderr()).toContain("49 new failures on main")
+
     for (const dryRun of [true, false]) {
       const refused = capture(w.work)
       expect(
@@ -308,6 +320,7 @@ describe("yrd queue up, the service", () => {
       0,
     )
     expect(records(listedJson)[0]).toMatchObject({
+      changes: [],
       freeze: { by: "@chief", kind: "frozen", reason: "49 new failures on main" },
     })
 
@@ -329,6 +342,12 @@ describe("yrd queue up, the service", () => {
         { workdir: w.workdir },
       ),
     ).toBe(0)
+    const listedUnfrozen = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, listedUnfrozen.io, { command: "list" }, { json: true, workdir: w.workdir }),
+    ).toBe(0)
+    const unfrozenList = records(listedUnfrozen)[0]
+    expect(unfrozenList).toMatchObject({ changes: [{ branch: "task/one" }], freeze: null })
     const beforeRetry = await w.git(["ls-remote", "--refs", "origin", "refs/yrd/changes/*"])
     const refrozen = capture(w.work)
     expect(
@@ -339,6 +358,15 @@ describe("yrd queue up, the service", () => {
         { workdir: w.workdir },
       ),
     ).toBe(0)
+    const listedRefrozen = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, listedRefrozen.io, { command: "list" }, { json: true, workdir: w.workdir }),
+    ).toBe(0)
+    const refrozenList = records(listedRefrozen)[0]
+    expect(refrozenList).toMatchObject({
+      freeze: { by: "@chief", kind: "frozen", reason: "retry must wait too" },
+    })
+    expect(refrozenList?.changes).toEqual(unfrozenList?.changes)
     const retried = capture(w.work)
     expect(
       await coreQueueCommand(

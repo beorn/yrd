@@ -332,7 +332,7 @@ export async function coreQueueCommand(
       emit(
         io,
         options.json,
-        { changes: rows, ...(freeze === undefined ? {} : { freeze }) },
+        { changes: rows, freeze: freeze ?? null },
         [freeze === undefined ? undefined : freezeLine(freeze), table(rows)]
           .filter((line): line is string => line !== undefined)
           .join("\n"),
@@ -642,9 +642,6 @@ function describeRun(
     freeze?: FreezeEvent
   }>,
 ): string {
-  if (outcome.freeze !== undefined) {
-    return `${freezeLine(outcome.freeze)}; no merge was made (log ${outcome.log})`
-  }
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
   const parts = [
     outcome.merged.length > 0 ? `merged ${outcome.merged.join(", ")}` : undefined,
@@ -653,6 +650,7 @@ function describeRun(
     outcome.bypasses.length > 0
       ? `${String(outcome.bypasses.length)} ${outcome.bypasses.length === 1 ? "commit" : "commits"} around the queue at ${outcome.bypasses.map((sha) => sha.slice(0, 12)).join(", ")}`
       : undefined,
+    outcome.freeze === undefined ? undefined : `${freezeLine(outcome.freeze)}; no merge was made`,
   ].filter((part): part is string => part !== undefined)
   const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`

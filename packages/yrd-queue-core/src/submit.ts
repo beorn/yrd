@@ -13,7 +13,7 @@
  */
 
 import { targetName, type Target } from "./config.ts"
-import { appendEvent, type Git } from "./events.ts"
+import { ABSENT, appendEvent, type Git } from "./events.ts"
 import { refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 import { requireUnfrozen } from "./freeze.ts"
@@ -134,5 +134,3 @@ export async function issueOf(git: Git, branch: string, head: string, declared?:
   if (fromTrailer !== undefined) return fromTrailer
   return /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
 }
-
-const ABSENT = "0".repeat(40)

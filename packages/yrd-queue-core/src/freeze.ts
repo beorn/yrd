@@ -6,7 +6,7 @@
  * missing ref is the one honest unfrozen default; an unreadable ref is loud.
  */
 
-import type { Git } from "./events.ts"
+import { ABSENT, EVENT_FORMAT, commitTrailers, type Git } from "./events.ts"
 import { refAt } from "./git.ts"
 
 export const FREEZE_REF = "refs/yrd/freeze"
@@ -27,6 +27,13 @@ export type WriteFreeze = Readonly<{
   by: string
 }>
 
+/** The unfrozen event and expected tip one atomic merge push must carry. */
+export type UnfrozenFence = Readonly<{
+  sha: string
+  expected: string
+  previous?: FreezeEvent
+}>
+
 /** A normal operational refusal: the queue is intentionally frozen. */
 export class QueueFrozen extends Error {
   readonly freeze: FreezeEvent
@@ -45,9 +52,6 @@ export class QueueNotFrozen extends Error {
     this.name = "QueueNotFrozen"
   }
 }
-
-const ABSENT = "0".repeat(40)
-const FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%s"
 
 /** The active freeze, or undefined when the ref is absent or ends unfrozen. */
 export async function activeFreeze(git: Git, remote: string): Promise<FreezeEvent | undefined> {
@@ -84,12 +88,7 @@ export async function writeFreeze(git: Git, remote: string, write: WriteFreeze):
   const previous = await readFreeze(git, remote)
   if (write.kind === "frozen" && previous?.kind === "frozen") throw new QueueFrozen(previous)
   if (write.kind === "unfrozen" && previous?.kind !== "frozen") throw new QueueNotFrozen()
-  const tree = (await git(["mktree"], "")).trim()
-  const byTrailer = write.kind === "frozen" ? "Frozen-By" : "Unfrozen-By"
-  const message = `${reason}\n\nFreeze: ${write.kind}\n${byTrailer}: ${by}\n`
-  const args = ["commit-tree", tree]
-  if (previous !== undefined) args.push("-p", previous.sha)
-  const commit = (await git([...args, "-m", message])).trim()
+  const commit = await freezeCommit(git, previous, { ...write, by, reason })
   await git([
     "push",
     "--quiet",
@@ -101,9 +100,30 @@ export async function writeFreeze(git: Git, remote: string, write: WriteFreeze):
   return parseFreeze(git, commit, `${remote} ${FREEZE_REF}`)
 }
 
+/**
+ * Prepare the event that linearizes one merge against `queue freeze`.
+ *
+ * Preparation moves no ref. The caller must include both the lease and
+ * `${sha}:${FREEZE_REF}` in the SAME atomic push as the target and change
+ * updates. An active freeze is a normal refusal; unreadable authority is loud.
+ */
+export async function unfrozenFence(
+  git: Git,
+  remote: string,
+  write: Readonly<{ reason: string; by: string }>,
+): Promise<UnfrozenFence> {
+  const reason = oneLine(write.reason, "a freeze fence needs a reason")
+  const by = oneLine(write.by, "a freeze fence needs an actor")
+  const previous = await readFreeze(git, remote)
+  if (previous?.kind === "frozen") throw new QueueFrozen(previous)
+  const sha = await freezeCommit(git, previous, { by, kind: "unfrozen", reason })
+  return { expected: previous?.sha ?? ABSENT, previous, sha }
+}
+
 /** The operator-facing line shared by list, submit refusal and freeze commands. */
 export function freezeLine(event: FreezeEvent): string {
-  return `${event.kind} by ${event.by} since ${event.at.toISOString()}: ${event.reason}`
+  const since = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "long" }).format(event.at)
+  return `${event.kind} by ${event.by} since ${since}: ${event.reason}`
 }
 
 async function freezeTip(git: Git, remote: string): Promise<string | undefined> {
@@ -121,18 +141,19 @@ async function freezeTip(git: Git, remote: string): Promise<string | undefined> 
 }
 
 async function parseFreeze(git: Git, sha: string, where: string): Promise<FreezeEvent> {
-  const [commit, atText, block, subject] = (await git(["log", "-1", `--format=${FORMAT}`, sha])).split("\x00")
+  const [commit, atText, block, body] = (await git(["log", "-1", `--format=${EVENT_FORMAT}`, sha])).split("\x00")
   const id = commit?.trim()
-  const kinds = trailerValues(block, "Freeze")
+  const parsed = commitTrailers(block ?? "")
+  const kinds = parsed.filter(([name]) => name === "Event").map(([, value]) => value)
   const kind = kinds[0]
   if (kinds.length !== 1 || (kind !== "frozen" && kind !== "unfrozen")) {
     throw new Error(
-      `${where} at ${sha.slice(0, 12)} carries no valid Freeze: frozen|unfrozen trailer ` +
+      `${where} at ${sha.slice(0, 12)} carries no valid Event: frozen|unfrozen trailer ` +
         `(found ${String(kinds.length)}; exactly one is required)`,
     )
   }
-  const byKey = kind === "frozen" ? "Frozen-By" : "Unfrozen-By"
-  const actors = trailerValues(block, byKey)
+  const byKey = "Frozen-By"
+  const actors = parsed.filter(([name]) => name === byKey).map(([, value]) => value)
   const by = actors[0]
   if (actors.length !== 1 || by === undefined || by === "") {
     throw new Error(
@@ -140,7 +161,7 @@ async function parseFreeze(git: Git, sha: string, where: string): Promise<Freeze
         `(found ${String(actors.length)})`,
     )
   }
-  const reason = subject?.trim()
+  const reason = body?.split("\n")[0]?.trim()
   if (id === undefined || id === "" || atText === undefined || reason === undefined || reason === "") {
     throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable freeze event`)
   }
@@ -151,12 +172,12 @@ async function parseFreeze(git: Git, sha: string, where: string): Promise<Freeze
   return Object.freeze({ at, by, kind, reason, sha: id })
 }
 
-function trailerValues(block: string | undefined, key: string): readonly string[] {
-  const prefix = `${key}:`
-  return (block ?? "")
-    .split("\n")
-    .filter((line) => line.startsWith(prefix))
-    .map((line) => line.slice(prefix.length).trim())
+async function freezeCommit(git: Git, previous: FreezeEvent | undefined, write: WriteFreeze): Promise<string> {
+  const tree = (await git(["mktree"], "")).trim()
+  const message = `${write.reason}\n\nEvent: ${write.kind}\nFrozen-By: ${write.by}\n`
+  const args = ["commit-tree", tree]
+  if (previous !== undefined) args.push("-p", previous.sha)
+  return (await git([...args, "-m", message])).trim()
 }
 
 function oneLine(value: string, missing: string): string {

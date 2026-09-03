@@ -719,37 +719,148 @@ describe("a queue run", () => {
     expect(resumed.merged).toEqual(["task/one"])
   })
 
-  it("a freeze placed after the run starts is re-read immediately before merge and leaves the change checked", async () => {
+  it("a frozen run reaps and reports bypasses without retiring, catching up, resending, or judging changes", async () => {
+    const w = await world()
+    const queued = await submitCommit(w, "task/queued", "queued.txt")
+    const deleted = await submitCommit(w, "task/deleted", "deleted.txt")
+    const caughtUp = await submitCommit(w, "task/caught-up", "caught-up.txt")
+
+    // One change is already on the target but has no merged event, so catch-up
+    // would mutate it; the merge itself is also a bypass the frozen run owes.
+    await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "landed around the queue", caughtUp])
+    const bypass = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["push", "--quiet", "origin", "main"])
+
+    // One ended change has no sent event, so resend would mutate it.
+    const unsent = await submitCommit(w, "task/unsent", "unsent.txt")
+    const unsentRef = changeRef({ branch: "task/unsent", head: unsent })
+    const failed = await appendEvent(w.git, {
+      change: { branch: "task/unsent", head: unsent },
+      kind: "failed",
+      subject: "task/unsent failed verify",
+      target: "origin#main",
+      trailers: [["Reason", "verify"]],
+    })
+    await w.git(["push", "--quiet", "origin", `${failed}:${unsentRef}`])
+
+    // One admitted branch is gone, so retirement would append a failed event;
+    // another remains queued, so the submit phase would judge it.
+    await w.git(["push", "--quiet", "origin", ":refs/heads/task/deleted"])
+    const dead = await worktreeOfRun(w, "q-dead-frozen", exitedPid())
+    const frozen = await writeFreeze(w.git, "origin", {
+      by: "@chief",
+      kind: "frozen",
+      reason: "inspect the target",
+    })
+
+    const held = await queueRun(w.options({ exit: 0 }))
+
+    expect(held).toMatchObject({ bypasses: [bypass], exitCode: 0, failed: [], freeze: frozen, merged: [], stuck: [] })
+    expect(existsSync(dead)).toBe(false)
+    expect(records(held).filter((record) => record.kind === "reap")).toHaveLength(1)
+    expect(records(held).filter((record) => record.kind === "merged-bypass")).toHaveLength(1)
+    expect(records(held).filter((record) => record.kind === "change")).toEqual([])
+    expect(whereRan(w)).toEqual([])
+    expect(await remoteTarget(w)).toBe(bypass)
+    await fetchChanges(w)
+    expect((await readEvents(w.git, { branch: "task/queued", head: queued })).map((event) => event.kind)).toEqual([
+      "opened",
+    ])
+    expect((await readEvents(w.git, { branch: "task/deleted", head: deleted })).map((event) => event.kind)).toEqual([
+      "opened",
+    ])
+    expect((await readEvents(w.git, { branch: "task/caught-up", head: caughtUp })).map((event) => event.kind)).toEqual([
+      "opened",
+    ])
+    expect((await readEvents(w.git, { branch: "task/unsent", head: unsent })).map((event) => event.kind)).toEqual([
+      "opened",
+      "failed",
+    ])
+    expect(messages(w)).toEqual([{ change: bypass, event: "merged-bypass" }])
+  })
+
+  it("a freeze placed after the last read but before the atomic merge push blocks every ref advance", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef({ branch: "task/one", head })
     const rivalPath = join(w.workdir, "..", "freeze-rival")
     await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
     const rival = gitIn(rivalPath)
     await rival(["config", "user.email", "rival@yrd.test"])
     await rival(["config", "user.name", "rival"])
 
-    let reads = 0
+    let frozen: QueueRunOutcome["freeze"]
+    let targetBeforePush = ""
+    let changeBeforePush = ""
     const git: Git = async (args, input) => {
-      if (args[0] === "ls-remote" && args.includes(FREEZE_REF)) {
-        reads += 1
-        if (reads === 2) {
-          await writeFreeze(rival, "origin", { by: "operator", kind: "frozen", reason: "stop before merge" })
-        }
+      if (frozen === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+        targetBeforePush = await remoteTarget(w)
+        changeBeforePush = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
+        frozen = await writeFreeze(rival, "origin", {
+          by: "operator",
+          kind: "frozen",
+          reason: "stop before merge",
+        })
       }
       return await w.git(args, input)
     }
 
     const outcome = await queueRun({ ...w.options({ exit: 0 }), git })
 
-    expect(outcome.freeze).toMatchObject({ by: "operator", reason: "stop before merge" })
+    expect(frozen).toBeDefined()
+    expect(outcome.freeze).toEqual(frozen)
     expect(outcome.merged).toEqual([])
-    expect(await remoteTarget(w)).toBe(w.target)
+    expect(await remoteTarget(w)).toBe(targetBeforePush)
+    expect((await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]).toBe(changeBeforePush)
     await fetchChanges(w)
     expect((await readEvents(w.git, { branch: "task/one", head })).map((event) => event.kind)).toEqual([
       "opened",
       "checked",
     ])
     expect(records(outcome)).toContainEqual(expect.objectContaining({ decision: "checked", reason: "frozen" }))
+  })
+
+  it("an unreadable freeze at the pre-merge authority read faults the run without ending the change", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const rivalPath = join(w.workdir, "..", "malformed-freeze-rival")
+    await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
+    const rival = gitIn(rivalPath)
+    await rival(["config", "user.email", "rival@yrd.test"])
+    await rival(["config", "user.name", "rival"])
+
+    let reads = 0
+    let malformed = ""
+    const git: Git = async (args, input) => {
+      if (args[0] === "ls-remote" && args.includes(FREEZE_REF)) {
+        reads += 1
+        if (reads === 2) {
+          const tree = (await rival(["mktree"], "")).trim()
+          malformed = (
+            await rival([
+              "commit-tree",
+              tree,
+              "-m",
+              "authority cannot be parsed\n\nEvent: wedged\nFrozen-By: operator\n",
+            ])
+          ).trim()
+          await rival(["push", "--quiet", "origin", `${malformed}:${FREEZE_REF}`])
+        }
+      }
+      return await w.git(args, input)
+    }
+
+    await expect(queueRun({ ...w.options({ exit: 0 }), git })).rejects.toThrow(
+      `origin ${FREEZE_REF} could not be read: origin ${FREEZE_REF} at`,
+    )
+
+    expect(malformed).not.toBe("")
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const events = await readEvents(w.git, { branch: "task/one", head })
+    expect(events.map((event) => event.kind)).toEqual(["opened", "checked"])
+    expect(events.some((event) => event.kind === "stuck" || event.kind === "failed")).toBe(false)
+    expect(messages(w)).toEqual([])
   })
 
   it("nothing submitted is nothing to do", async () => {
