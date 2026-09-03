@@ -11,7 +11,18 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { appendFact, changeRef, gitIn, readChange, readFact, readFacts, trailer } from "../src/index.ts"
-import type { Git } from "../src/index.ts"
+import type { Fact, Git } from "../src/index.ts"
+
+/**
+ * The facts of a change that certainly has some. `ChangeFacts.facts` is a
+ * non-empty list by type, and `readFacts` answers an unknown change with none,
+ * so the fixture says out loud which of the two it wrote.
+ */
+function written(facts: readonly Fact[]): readonly [Fact, ...Fact[]] {
+  const [first, ...rest] = facts
+  if (first === undefined) throw new Error("the fixture wrote no facts to read a change from")
+  return [first, ...rest]
+}
 
 const roots: string[] = []
 
@@ -150,11 +161,11 @@ describe("the state is derived, and ancestry wins over any fact", () => {
     const { git, head } = await repository()
     await appendFact(git, { branch: "task/one", head, kind: "opened", subject: "submitted", target: "main" })
     let facts = await readFacts(git, "task/one", head)
-    expect(readChange({ branchHead: head, facts, head, headOnTarget: false }).state).toBe("queued")
+    expect(readChange({ branchHead: head, facts: written(facts), head, headOnTarget: false }).state).toBe("queued")
 
     await appendFact(git, { branch: "task/one", head, kind: "checked", subject: "checks passed", target: "main" })
     facts = await readFacts(git, "task/one", head)
-    expect(readChange({ branchHead: head, facts, head, headOnTarget: false }).state).toBe("checked")
+    expect(readChange({ branchHead: head, facts: written(facts), head, headOnTarget: false }).state).toBe("checked")
   })
 
   it("merged from ancestry alone, with no merged fact written", async () => {
@@ -169,7 +180,7 @@ describe("the state is derived, and ancestry wins over any fact", () => {
     // The change ref still says `opened`. Ancestry is the stronger reading, so a
     // hand merge in the garage shows as merged and nothing re-checks it.
     expect(facts.at(-1)?.kind).toBe("opened")
-    expect(readChange({ branchHead: head, facts, head, headOnTarget: onTarget }).state).toBe("merged")
+    expect(readChange({ branchHead: head, facts: written(facts), head, headOnTarget: onTarget }).state).toBe("merged")
   })
 
   it("a branch that moved off its head is failed, replaced; a branch that is gone, deleted", async () => {
@@ -177,10 +188,10 @@ describe("the state is derived, and ancestry wins over any fact", () => {
     await appendFact(git, { branch: "task/one", head, kind: "opened", subject: "submitted", target: "main" })
     const facts = await readFacts(git, "task/one", head)
 
-    const replaced = readChange({ branchHead: "0".repeat(40), facts, head, headOnTarget: false })
+    const replaced = readChange({ branchHead: "0".repeat(40), facts: written(facts), head, headOnTarget: false })
     expect(replaced).toMatchObject({ reason: "replaced", state: "failed" })
 
-    const deleted = readChange({ branchHead: undefined, facts, head, headOnTarget: false })
+    const deleted = readChange({ branchHead: undefined, facts: written(facts), head, headOnTarget: false })
     expect(deleted).toMatchObject({ reason: "deleted", state: "failed" })
   })
 
@@ -197,7 +208,7 @@ describe("the state is derived, and ancestry wins over any fact", () => {
     })
 
     const facts = await readFacts(git, "task/one", head)
-    expect(readChange({ branchHead: head, facts, head, headOnTarget: false })).toMatchObject({
+    expect(readChange({ branchHead: head, facts: written(facts), head, headOnTarget: false })).toMatchObject({
       reason: "check-timeout",
       state: "stuck",
     })

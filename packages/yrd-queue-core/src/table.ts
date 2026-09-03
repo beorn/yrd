@@ -12,7 +12,7 @@
 import { endedKind, trailer, trailers, type Fact } from "./facts.ts"
 import { handMovedLine, type ByHandCommit } from "./by-hand.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
-import { inLine, type ChangeState } from "./state.ts"
+import { inLine, tipOf, type ChangeState } from "./state.ts"
 
 export type Row = Readonly<{
   /** The change's branch; for a `by hand` row, the target the hand commit moved. */
@@ -82,31 +82,28 @@ export function show(
 ): readonly Readonly<{ row: Row; checks: readonly string[]; facts: readonly Fact[] }>[] {
   return entries
     .filter((entry) => entry.branch === branch)
-    .map((entry) => {
-      const tip = entry.change.facts.at(-1)
-      return { checks: tip === undefined ? [] : trailers(tip, "Check"), facts: entry.change.facts, row: row(entry) }
-    })
+    .map((entry) => ({ checks: trailers(tipOf(entry.change), "Check"), facts: entry.change.facts, row: row(entry) }))
     .sort((left, right) => (right.row.since?.getTime() ?? 0) - (left.row.since?.getTime() ?? 0))
 }
 
 function row(entry: QueueEntry, position?: number): Row {
-  const tip = entry.change.facts.at(-1)
-  const lastCheck = tip === undefined ? undefined : trailers(tip, "Check").at(-1)
-  const opened = tip === undefined ? undefined : trailer(tip, "Opened")
+  const tip = tipOf(entry.change)
+  const lastCheck = trailers(tip, "Check").at(-1)
+  const opened = trailer(tip, "Opened")
   return {
-    at: tip?.at,
+    at: tip.at,
     branch: entry.branch,
     head: entry.change.head,
     log: lastCheck?.match(/log=(\S+)/u)?.[1],
     position,
     reason: entry.reading.reason,
-    result: tip === undefined || tip.kind === "opened" ? undefined : resultOf(endedKind(tip), lastCheck),
+    result: tip.kind === "opened" ? undefined : resultOf(endedKind(tip), lastCheck),
     since: opened === undefined ? undefined : new Date(opened),
     state: entry.reading.state,
-    submitter: tip === undefined ? undefined : trailer(tip, "Submitter"),
-    workItem: tip === undefined ? undefined : trailer(tip, "Work-Item"),
-    merge: tip === undefined ? undefined : trailer(tip, "Merge"),
-    base: tip === undefined ? undefined : trailer(tip, "Base"),
+    submitter: trailer(tip, "Submitter"),
+    workItem: trailer(tip, "Work-Item"),
+    merge: trailer(tip, "Merge"),
+    base: trailer(tip, "Base"),
   }
 }
 

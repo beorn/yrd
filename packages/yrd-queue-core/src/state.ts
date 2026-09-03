@@ -36,10 +36,12 @@ export type ChangeReading = Readonly<{
 export type ChangeFacts = Readonly<{
   /**
    * The change's facts, oldest first, or only its tip: every reading here uses
-   * the last one, whose trailers are the whole derived state. Never empty: a
-   * change exists only when submitted, and the submit is its first fact (E2).
+   * the last one, whose trailers are the whole derived state. Never empty, and
+   * the type says so: a change exists only when submitted, and the submit is
+   * its first fact (E2). Every reader used to ask anyway and invent an answer
+   * for a case no constructor can build.
    */
-  facts: readonly Fact[]
+  facts: readonly [Fact, ...Fact[]]
   /** Whether the head is an ancestor of the target, read from git. */
   headOnTarget: boolean
   /** Where the branch points now, or undefined when the branch is gone. */
@@ -47,6 +49,18 @@ export type ChangeFacts = Readonly<{
   /** The head this change is about. */
   head: string
 }>
+
+/**
+ * The change's tip: the fact whose trailers are the whole derived state.
+ *
+ * The `??` is what the language costs to say what the type already knows —
+ * `at(-1)` is `Fact | undefined` for any tuple, while the tuple's first
+ * element is a `Fact` outright, and on a change with one fact they are the
+ * same fact.
+ */
+export function tipOf(change: ChangeFacts): Fact {
+  return change.facts.at(-1) ?? change.facts[0]
+}
 
 /** Read one change's state. Pure: every input is a fact or a git reading. */
 export function readChange(change: ChangeFacts): ChangeReading {
@@ -57,14 +71,7 @@ export function readChange(change: ChangeFacts): ChangeReading {
   if (change.branchHead === undefined) return { state: "failed", reason: "deleted" }
   if (change.branchHead !== change.head) return { state: "failed", reason: "replaced" }
 
-  const last = change.facts.at(-1)
-  // A change exists only when submitted (E2): the queue read lists change refs and
-  // nothing else, and every change ref ends in a fact. Nothing without facts
-  // can reach here, and a reading of one would be a state made up on the spot.
-  if (last === undefined) {
-    throw new Error(`${change.head.slice(0, 12)} has no facts; a change exists only when submitted`)
-  }
-
+  const last = tipOf(change)
   switch (last.kind) {
     case "merged":
       return { state: "merged" }
@@ -109,10 +116,7 @@ export function inLine(changes: readonly ChangeFacts[]): readonly ChangeFacts[] 
 
 /** When the change was first opened, carried on every fact as `Opened:`. A change with no facts has no place in line, and no existence (E2). */
 export function openedAt(change: ChangeFacts): number {
-  const last = change.facts.at(-1)
-  if (last === undefined) {
-    throw new Error(`${change.head.slice(0, 12)} has no facts; a change exists only when submitted`)
-  }
+  const last = tipOf(change)
   const opened = last.trailers.find(([name]) => name === "Opened")?.[1]
   const time = opened === undefined ? Number.NaN : Date.parse(opened)
   if (Number.isNaN(time)) throw new Error(`fact ${last.sha.slice(0, 12)} carries no readable Opened: (${opened ?? "absent"})`)

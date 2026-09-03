@@ -49,7 +49,7 @@ import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { byHandCommits, handMovedLine } from "./by-hand.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
-import { inLine } from "./state.ts"
+import { inLine, tipOf } from "./state.ts"
 import {
   checkedTree,
   claimWorktrees,
@@ -229,8 +229,8 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
 /** A checked change whose checked fact names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
-  const tip = entry.change.facts.at(-1)
-  return tip?.kind === "checked" && trailer(tip, "Config") !== run.options.configBlob
+  const tip = tipOf(entry.change)
+  return tip.kind === "checked" && trailer(tip, "Config") !== run.options.configBlob
 }
 
 /** The entries in the named states, in line order. */
@@ -472,9 +472,9 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       // `git log refs/yrd/changes/<that name>` prints its facts (E5). The
       // submitter and the work item come with it, as the opened fact carried
       // them forward, one trailer per line in git's own trailer format.
-      const tip = change.facts.at(-1)
-      const workItem = tip === undefined ? undefined : trailer(tip, "Work-Item")
-      const submitter = tip === undefined ? undefined : trailer(tip, "Submitter")
+      const tip = tipOf(change)
+      const workItem = trailer(tip, "Work-Item")
+      const submitter = trailer(tip, "Submitter")
       const message = [
         `merge ${short(branch, head)} into ${run.options.target}`,
         "",
@@ -694,8 +694,7 @@ async function attribute(
 async function retire(run: Run, entry: QueueEntry): Promise<void> {
   const reason = entry.reading.reason
   if (entry.reading.state !== "failed" || (reason !== "deleted" && reason !== "replaced")) return
-  const tip = entry.change.facts.at(-1)
-  const endedAs = tip === undefined ? undefined : endedKind(tip)
+  const endedAs = endedKind(tipOf(entry.change))
   if (endedAs === "failed" || endedAs === "merged") return
   const { branch } = entry
   const head = entry.change.head
@@ -724,10 +723,9 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
  */
 async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   if (!entry.change.headOnTarget) return
-  const tip = entry.change.facts.at(-1)
-  const endedAs = tip === undefined ? undefined : endedKind(tip)
-  if (endedAs === "merged") return
-  const reason = tip === undefined ? undefined : trailer(tip, "Reason")
+  const tip = tipOf(entry.change)
+  if (endedKind(tip) === "merged") return
+  const reason = trailer(tip, "Reason")
   if (reason === "replaced" || reason === "deleted") return
   const { branch } = entry
   const head = entry.change.head
@@ -777,8 +775,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
  * however many times it is sent (§ The queue run, at-least-once).
  */
 async function resend(run: Run, entry: QueueEntry): Promise<void> {
-  const tip = entry.change.facts.at(-1)
-  if (tip === undefined) return
+  const tip = tipOf(entry.change)
   // The head is on the target and this tip does not say merged: the catch-up
   // just above owns this change — it wrote the merged fact and sent its message
   // this run, so this entry's tip is a reading from before that. Sending from
