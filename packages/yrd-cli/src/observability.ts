@@ -75,7 +75,7 @@ function setting(value: string | undefined): string | undefined {
  * An explicit level still wins, from any of the three sources that count as an
  * operator choice (`--log-level`, `-v`/`-q`, `LOG_LEVEL`), and `explicitLevel`
  * deliberately stays false here — DEBUG selects a default, it is not the
- * operator pinning a level, and `habitantObservability` keys off that. */
+ * operator pinning a level. */
 export function resolveYrdObservability(
   flags: YrdObservabilityFlags,
   env: Readonly<Record<string, string | undefined>>,
@@ -127,17 +127,6 @@ export function resolveYrdObservability(
     spanRows: trace !== undefined || selected === "trace" || (selected === "debug" && explicitLevel),
     explicitLevel,
   })
-}
-
-/** The habitant follow-runner's stderr IS a narration stream, so at the default
- * `warn` it would lose run/step starts and successful completions. Bump the
- * resolved policy to `debug` at the habitant entry, but ONLY when the operator
- * left the level at its default (never overriding an explicit
- * `--log-level`/`LOG_LEVEL`/`-v`/`-q`). The habitant human formatter admits only
- * concise lifecycle highlights; JSONL retains the full structured stream. */
-export function habitantObservability(config: YrdObservability): YrdObservability {
-  if (config.explicitLevel || config.level !== "warn") return config
-  return Object.freeze({ ...config, level: "debug" })
 }
 
 /** The namespaces whose narration the habitant follow-runner shows. These are

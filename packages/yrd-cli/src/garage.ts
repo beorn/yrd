@@ -72,20 +72,6 @@ export function garageServiceRefusal(garage: GarageDeclaration): string {
   return `garage: ${garage.reason}; the service stays down until the garage closes`
 }
 
-/**
- * The resident refused because the garage is open.
- *
- * Its own type because the refusal has already said everything it has to say,
- * on one line, and the ordinary diagnostic would print a second, longer account
- * of the same fact over the top of it.
- */
-export class GarageServiceRefusal extends Error {
-  constructor(readonly garage: GarageDeclaration) {
-    super(garageServiceRefusal(garage))
-    this.name = "GarageServiceRefusal"
-  }
-}
-
 type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
 
 function git(repo: string, args: readonly string[], stdin?: string): GitResult {

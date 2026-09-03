@@ -22,23 +22,6 @@ export {
   type GitSyncReader,
   type YrdGitProcess,
 } from "./git-super.ts"
-export { runWithGitTimeoutRetry, withGitTimeoutRetry } from "./git-timeout-retry.ts"
-
-export {
-  classifyRecordedPid,
-  observePid,
-  observePidSync,
-  parseElapsedTime,
-  recordedPidIsRunning,
-  recordedPidLiveness,
-  recordedPidLivenessSync,
-  PID_IDENTITY_RECYCLE_MARGIN_MS,
-  type PidIdentity,
-  type PidLiveness,
-  type PidLivenessReport,
-  type PidObservation,
-  type RecordedPidOwner,
-} from "./pid-identity.ts"
 
 export {
   certifyPathReapDeletion,

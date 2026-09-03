@@ -1856,15 +1856,13 @@ The low-level packages remain usable by a single developer with no agent fleet.
 
 ## Packages
 
-| Package           | Responsibility                                                     |
-| ----------------- | ------------------------------------------------------------------ |
+| Package           | Responsibility                                                      |
+| ----------------- | ------------------------------------------------------------------- |
 | `@yrd/queue-core` | The queue: change refs and their facts, one run, the merge, the log |
 | `@yrd/cli`        | `yrd` and `git-yrd` — the seven commands and nothing else           |
 | `@yrd/bay`        | An environment for one branch: a git worktree, and its vocabulary   |
 | `@yrd/core`       | Immutable definition, Commands, Events, ordering, observability     |
 | `@yrd/process`    | Scope-owned subprocess execution, bounds, cancellation, evidence    |
-| `@yrd/issue`      | Issue references, snapshots, and source adapters                    |
-| `@yrd/config`     | Declaration file location and reading                               |
 
 Deleted at M6 with the core they served: `@yrd/queue` (admission, typed steps,
 merge proof, batching, status), `@yrd/persistence` (the WAL SQLite journal, its
