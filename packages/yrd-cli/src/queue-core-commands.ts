@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
   byHandCommits,
+  freshWorktree,
   gitIn,
   hintsIn,
   list,
@@ -209,23 +210,48 @@ export async function coreQueueCommand(
     }
     case "check": {
       // `yrd check <name>`: the named checks as the target declares them, run
-      // here in this tree, in the queue's order and stopping where the queue
-      // would stop. The exit is the result: 0 pass, 1 fail, 2 stuck.
-      const results: CheckResult[] = []
-      for (const name of request.names) {
+      // in a FRESH WORKTREE OF HEAD exactly as a queue run does, in the
+      // queue's order and stopping where the queue would stop. The exit is the
+      // result: 0 pass, 1 fail, 2 stuck.
+      //
+      // It ran in the invoking tree until this was measured. A checkout whose
+      // dependencies are symlinked from elsewhere judges that checkout rather
+      // than the commit: an uncommitted `error TS2322` there failed
+      // `yrd check typecheck` while HEAD was clean, and a worktree of HEAD
+      // would have passed. That is the whole point of the command — a seat
+      // must be able to see what the queue will see — so the invoking tree is
+      // exactly the one place it must not look.
+      const specs = request.names.map((name) => {
         const spec = config.checks.find((check) => check.name === name)
         if (spec === undefined) {
           throw new Error(`${name} is not a check the target declares (declared: ${config.checks.map((check) => check.name).join(", ") || "none"})`)
         }
-        const result = await runCheck({ cwd: repo, env: options.env, logDir: join(workdir, "checks", "here"), scratch: join(workdir, "scratch"), spec })
-        results.push(result)
-        if (result.result !== "pass") break
+        return spec
+      })
+      // Every name is resolved before a worktree is built: an unknown check
+      // should refuse instantly, not after materializing submodules.
+      const head = (await git(["rev-parse", "HEAD"])).trim()
+      // Uncommitted work is NOT judged, and saying so is the point. Silently
+      // measuring HEAD while a seat believes its working tree was checked is
+      // the same class of mismatch this command exists to remove.
+      const dirty = (await git(["status", "--porcelain", "--untracked-files=no"])).trim()
+      const unjudged = dirty === "" ? "" : `\n${String(dirty.split("\n").length)} uncommitted path(s) were NOT judged; this measured HEAD ${head.slice(0, 12)}`
+      const worktree = await freshWorktree(git, repo, head, join(workdir, "check", `${head.slice(0, 12)}-${String(globalThis.process.pid)}`), options.log?.child("worktree"))
+      const results: CheckResult[] = []
+      try {
+        for (const spec of specs) {
+          const result = await runCheck({ cwd: worktree.path, env: options.env, logDir: join(workdir, "checks", "head"), scratch: join(workdir, "scratch"), spec })
+          results.push(result)
+          if (result.result !== "pass") break
+        }
+      } finally {
+        await worktree.remove()
       }
       emit(
         io,
         options.json,
-        { checks: results, command: "check" },
-        results.map((result) => `${result.name} ${result.result} exit=${String(result.exit)} ${String(result.durationMs)} ms (log ${result.log})${result.why === undefined ? "" : `: ${result.why}`}`).join("\n"),
+        { checks: results, command: "check", head, ...(dirty === "" ? {} : { uncommitted: dirty.split("\n").length }) },
+        `${results.map((result) => `${result.name} ${result.result} exit=${String(result.exit)} ${String(result.durationMs)} ms (log ${result.log})${result.why === undefined ? "" : `: ${result.why}`}`).join("\n")}${unjudged}`,
       )
       return results.some((result) => result.result === "stuck") ? 2 : results.some((result) => result.result === "fail") ? 1 : 0
     }
