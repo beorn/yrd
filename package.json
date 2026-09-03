@@ -19,8 +19,7 @@
     "LICENSE",
     "README.md",
     "bin",
-    "dist",
-    "scripts/verify-public-dependencies.ts"
+    "dist"
   ],
   "type": "module",
   "exports": {
@@ -29,9 +28,7 @@
   "scripts": {
     "yrd": "bun ./bin/yrd",
     "git-yrd": "bun ./bin/git-yrd",
-    "storybook:queue": "bun ./packages/yrd-cli/dev/queue-timeline-storybook.tsx",
     "build": "bun ./scripts/build.ts",
-    "postinstall": "bun ./scripts/verify-public-dependencies.ts",
     "prepack": "bun run build",
     "test": "NODE_ENV=test BUN_RUNTIME_TRANSPILER_CACHE_PATH=\"${HOME}/.cache/silvercode/bun-transpiler-yrd-test\" bun --bun x vitest run",
     "test:slow": "NODE_ENV=test BUN_RUNTIME_TRANSPILER_CACHE_PATH=\"${HOME}/.cache/silvercode/bun-transpiler-yrd-test\" bun --bun x vitest run --config vitest.slow.config.ts",
@@ -41,14 +38,9 @@
     "check:hh": "bun run typecheck:hh && bun run test"
   },
   "dependencies": {
-    "@silvery/ansi": "^0.24.0",
-    "@silvery/command": "^0.24.0",
     "@silvery/commander": "^0.24.0",
     "@silvery/scope": "^0.24.0",
-    "@silvery/signals": "^0.24.0",
     "loggily": "^0.10.2",
-    "react": "^19.2.0",
-    "silvery": "^0.24.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
