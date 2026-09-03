@@ -1,5 +1,5 @@
 import { createFailure, type FailureKind } from "@yrd/process"
-import { createLogger, type ConditionalLogger, type ConfigElement, type Event, type LogLevel } from "loggily"
+import { createLogger, type ConditionalLogger, type ConfigElement, type LogLevel } from "loggily"
 import { LOG_LEVEL_PRIORITY, resolveVerbosityLevel } from "loggily"
 import { enableContextPropagation } from "loggily/context"
 
@@ -25,7 +25,7 @@ export type YrdObservability = Readonly<{
    * one `DEBUG=` should answer no to. */
   spanRows: boolean
   /** True when the operator chose the level (--log-level / LOG_LEVEL / -v / -q).
-   * The habitant follow-runner only bumps its default level when this is false. */
+   * `-vv` and `--log-level debug` print span rows; a bare `DEBUG=` does not. */
   explicitLevel: boolean
 }>
 
@@ -123,136 +123,26 @@ export function resolveYrdObservability(
   })
 }
 
-/** The namespaces whose narration the habitant follow-runner shows. These are
- * matched against the namespace a logger ACTUALLY has, so an entry naming a
- * namespace nothing creates silently deletes the diagnostics it was added to
- * show. `yrd:queue:run` was such an entry: the queue plugin logs on
- * `yrd.log.child("queue")` and no `child("run")` exists anywhere in src, so
- * every `log.info` the queue emitted to explain an empty run was dropped — 427
- * WARN and 0 INFO on `yrd:queue` across the runner's last twelve log files.
- * That silenced `queue-run-no-submitted-prs`, which exists precisely so that
- * "I found nothing submitted" and "I never looked" stop being the same bytes. */
-export const HABITANT_LIFECYCLE_NAMESPACES = ["yrd:jobs", "yrd:queue", "yrd:runner"] as const
-
-function habitantLifecycleNamespace(namespace: string): boolean {
-  return HABITANT_LIFECYCLE_NAMESPACES.some(
-    (candidate) => namespace === candidate || namespace.startsWith(`${candidate}:`),
-  )
-}
-
-/** Preserve loggily's zero-cost conditional calls for the implicit habitant
- * policy: an unrelated child must not expose `debug`/`trace`, or every process,
- * Git, and projection payload is eagerly built and discarded downstream.
- *
- * `info` is deliberately NOT gated here, and that asymmetry is the point. This
- * proxy deletes the METHOD, so a gated call is `log.info?.(…)` against
- * `undefined` — a no-op with no error, no warning, and nothing in any stream.
- * Yrd spends its INFO budget on the lines that distinguish an honest zero from
- * a surface that never looked, so deleting one silently is the exact failure
- * those lines were written to end. The cost of not gating it is bounded and
- * small: 22 `info` call sites across all of src against 13 `debug`/`trace`, and
- * the heavy payloads the optimisation was written for are all in the latter.
- * Which namespaces the operator SEES stays one decision, made at the sink. */
-function gateImplicitHabitantLogger(logger: ConditionalLogger): ConditionalLogger {
-  return new Proxy(logger, {
-    get(target, property, receiver): unknown {
-      if ((property === "debug" || property === "trace") && !habitantLifecycleNamespace(target.name)) {
-        return undefined
-      }
-      if (property === "child" || property === "logger") {
-        const createChild = Reflect.get(target, property, target) as (...args: unknown[]) => ConditionalLogger
-        return (...args: unknown[]) => gateImplicitHabitantLogger(createChild.apply(target, args))
-      }
-      return Reflect.get(target, property, receiver) as unknown
-    },
-  })
-}
-
-/** Create the one host-owned logger fan-out. The file sink is structured JSONL.
- * When a `human` formatter is supplied (the habitant follow-runner), the stderr
- * sink renders each Event through it — a scannable timeline row, or `undefined`
- * to suppress that row from the human stream. Without it, the default console
- * format is used.
- *
- * The implicit habitant default is deliberately a branched policy: every
- * WARN/ERROR reaches the human sink, while DEBUG/INFO is admitted only from the
- * three lifecycle namespaces that form the narration. An explicitly selected
- * level/DEBUG filter keeps the ordinary single policy. A configured JSONL file
- * is an explicit request for the full structured DEBUG stream.
- *
- * `onError` sees every ERROR-level log row this tree emits, AFTER the sinks
- * above it wrote the row. It is the one seam the queue pass's fatal-error rule
- * hangs on (operator ruling 2026-09-01: any ERROR ends the pass): a last
- * pipeline branch rather than a wrapper around `log.error`, because every
- * child logger — `yrd:queue`, `yrd:jobs:<step>`, `yrd:storage:*`, a lifecycle's
- * `emitLifecycle` — dispatches through this same pipeline, and a wrapper would
- * have to be re-applied at every `child()` to see them all. The branch
- * inherits the tree's level/namespace policy, so a row the operator's own
- * filter drops never reaches it either: "no row, no death" is the contract. */
-export function createYrdLogger(
-  config: YrdObservability,
-  stderr: (text: string) => unknown,
-  human?: (event: Event) => string | undefined,
-  onError?: (event: Extract<Event, { kind: "log" }>) => void,
-): ConditionalLogger {
+/** Create the one host-owned logger fan-out: the operator's stderr stream, plus
+ * the structured JSONL file when one is configured. */
+export function createYrdLogger(config: YrdObservability, stderr: (text: string) => unknown): ConditionalLogger {
   enableContextPropagation()
   const scope = {
     level: config.level,
     ...(config.debug === undefined ? {} : { ns: config.debug }),
     spans: config.spans,
   }
-  const stderrSink: ConfigElement =
-    human === undefined
-      ? { write: stderr, objectMode: false }
-      : {
-          write: (event: Event) => {
-            const row = human(event)
-            if (row !== undefined) stderr(`${row}\n`)
-          },
-          objectMode: true,
-        }
-  const implicitHabitant =
-    human !== undefined && config.level === "debug" && !config.explicitLevel && config.debug === undefined
-  const lifecycleLevel = (event: Event): Event | null =>
-    event.kind === "log" && (event.level === "debug" || event.level === "info") ? event : null
-  const pipeline: ConfigElement[] = implicitHabitant
-    ? [
-        { level: "debug", spans: false },
-        [{ level: "warn", spans: false }, stderrSink],
-        [{ level: "debug", ns: [...HABITANT_LIFECYCLE_NAMESPACES], spans: false }, lifecycleLevel, stderrSink],
-      ]
-    : config.spanRows
-      ? [scope, stderrSink]
-      : // A branch inherits `scope` and overrides only `spans`: rows stop at
-        // the human stream while `logger.span` keeps working for stage
-        // accounting and the JSONL sink below still records them.
-        [scope, [{ spans: false }, stderrSink]]
+  const stderrSink: ConfigElement = { write: stderr, objectMode: false }
+  const pipeline: ConfigElement[] = config.spanRows
+    ? [scope, stderrSink]
+    : // A branch inherits `scope` and overrides only `spans`: rows stop at the
+      // human stream while the JSONL sink below still records them.
+      [scope, [{ spans: false }, stderrSink]]
   if (config.file !== undefined) {
-    pipeline.push(
-      implicitHabitant
-        ? [
-            { level: "debug", spans: config.spans },
-            { file: config.file, format: "json" },
-          ]
-        : { file: config.file, format: "json" },
-    )
-  }
-  if (onError !== undefined) {
-    // LAST, so the row has already reached stderr (and the JSONL file) when the
-    // listener runs: "after the row is flushed" is the ordering the fatal rule
-    // specifies, and pipeline outputs run in declaration order.
-    pipeline.push([
-      { level: "error", spans: false },
-      {
-        write: (event: Event) => {
-          if (event.kind === "log" && event.level === "error") onError(event)
-        },
-        objectMode: true,
-      },
-    ])
+    pipeline.push({ file: config.file, format: "json" })
   }
   const created = createLogger("yrd", pipeline)
-  const logger = implicitHabitant && config.file === undefined ? gateImplicitHabitantLogger(created) : created
+  const logger = created
   let disposed = false
   const dispose = (): void => {
     if (disposed) return

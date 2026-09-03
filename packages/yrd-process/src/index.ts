@@ -13,17 +13,7 @@ export {
   type YrdFailure,
 } from "./failure.ts"
 
-export {
-  adaptProcessGit,
-  cleanGitEnvironment,
-  gitFailure,
-  gitSuperFailureDetail,
-  type GitProcessDefaults,
-  type GitSyncReadCommand,
-  type GitSyncReadRequest,
-  type GitSyncReader,
-  type YrdGitProcess,
-} from "./git-super.ts"
+export { adaptProcessGit, cleanGitEnvironment, gitFailure, type GitProcessDefaults } from "./git-super.ts"
 
 export {
   inspectPathHolderCensus,
@@ -43,12 +33,6 @@ export type ProcessRequest = Readonly<{
   cwd?: string
   env?: NodeJS.ProcessEnv
   stdin?: string | Uint8Array
-  /** Inherit the caller's stdin while keeping stdout/stderr captured. */
-  inheritStdin?: boolean
-  /** Attach the child directly to the invoking terminal. Interactive runs
-   * inherit stdin/stdout/stderr and stay in the foreground process group so
-   * editors and agent harnesses receive ordinary terminal input. */
-  interactive?: boolean
   /** Observe the direct child PID synchronously after spawn and before run()
    * awaits output or exit. A thrown observer error terminates and settles the
    * child before the error is propagated. */
@@ -175,17 +159,15 @@ export function shellCommand(script: string): readonly ["sh", "-c", string] {
   return Object.freeze(["sh", "-c", script])
 }
 
-type SpawnOptions = Readonly<
-  {
-    cwd: string
-    env: Record<string, string>
-    signal: AbortSignal
-    detached: boolean
-  } & (
-    | Readonly<{ stdin: "ignore" | "inherit" | Blob; stdout: "pipe"; stderr: "pipe" }>
-    | Readonly<{ stdin: "inherit"; stdout: "inherit"; stderr: "inherit" }>
-  )
->
+type SpawnOptions = Readonly<{
+  cwd: string
+  env: Record<string, string>
+  signal: AbortSignal
+  detached: boolean
+  stdin: "ignore" | Blob
+  stdout: "pipe"
+  stderr: "pipe"
+}>
 
 type Spawned = Readonly<{
   /** Child pid — the process-GROUP id when the spawn established leadership. */
@@ -309,7 +291,6 @@ export function createProcess(
     env?: NodeJS.ProcessEnv
     maxOutputBytes?: number
     killGraceMs?: number
-    postExitDrainGraceMs?: number
     postKillReapGraceMs?: number
     inject?: Readonly<{
       scope?: Scope
@@ -327,10 +308,6 @@ export function createProcess(
   const env = definedEnv(options.env ?? process.env)
   const maxOutputBytes = positiveInteger(options.maxOutputBytes ?? 16 * 1024 * 1024, "maxOutputBytes")
   const killGraceMs = positiveInteger(options.killGraceMs ?? 5_000, "killGraceMs")
-  const defaultPostExitDrainGraceMs = positiveInteger(
-    options.postExitDrainGraceMs ?? DEFAULT_POST_EXIT_DRAIN_GRACE_MS,
-    "postExitDrainGraceMs",
-  )
   const postKillReapGraceMs = positiveInteger(
     options.postKillReapGraceMs ?? DEFAULT_POST_KILL_REAP_GRACE_MS,
     "postKillReapGraceMs",
@@ -389,22 +366,7 @@ export function createProcess(
       ) {
         throw new RangeError("yrd: Process postExitDrainGraceMs must be a positive integer")
       }
-      if (request.interactive === true && request.stdin !== undefined) {
-        throw new TypeError("yrd: Process interactive runs inherit stdin and cannot provide buffered input")
-      }
-      if (request.inheritStdin === true && request.stdin !== undefined) {
-        throw new TypeError("yrd: Process cannot inherit stdin and provide buffered input")
-      }
-      if (request.interactive === true && request.inheritStdin === true) {
-        throw new TypeError("yrd: Process cannot combine inheritStdin with interactive")
-      }
-      if (request.interactive === true && request.onOutput !== undefined) {
-        throw new TypeError("yrd: Process interactive runs inherit output and cannot capture onOutput")
-      }
-      if (request.interactive === true && request.noProgressTimeoutMs !== undefined) {
-        throw new TypeError("yrd: Process interactive runs cannot measure piped output progress")
-      }
-      const postExitDrainGraceMs = request.postExitDrainGraceMs ?? defaultPostExitDrainGraceMs
+      const postExitDrainGraceMs = request.postExitDrainGraceMs ?? DEFAULT_POST_EXIT_DRAIN_GRACE_MS
       requireSpawnDirectory(argv, request.cwd ?? cwd)
 
       // Keep the run scope independent: parent Scope disposal is child-first,
@@ -439,45 +401,20 @@ export function createProcess(
       const chatter = isGitInvocation(argv)
       using span = chatter && log.trace === undefined ? undefined : log.span?.("run", { argv, cwd: request.cwd ?? cwd })
       try {
-        const interactive = request.interactive === true
-        const child = spawn(
-          argv,
-          interactive
-            ? {
-                cwd: request.cwd ?? cwd,
-                env: request.env === undefined ? env : definedEnv(request.env),
-                stdin: "inherit",
-                stdout: "inherit",
-                stderr: "inherit",
-                signal,
-                detached: false,
-              }
-            : {
-                cwd: request.cwd ?? cwd,
-                env: request.env === undefined ? env : definedEnv(request.env),
-                stdin:
-                  request.inheritStdin === true
-                    ? "inherit"
-                    : request.stdin === undefined
-                      ? "ignore"
-                      : inputBlob(request.stdin),
-                stdout: "pipe",
-                stderr: "pipe",
-                signal,
-                detached: true,
-              },
-        )
-        // Pipe-mode default children lead a process group so cancellation
-        // settles their full tree. Interactive children must remain in the
-        // invoking foreground group for terminal job control, so their child
-        // harness owns descendant settlement and Yrd signals the direct child.
-        const groupSettlement = !interactive && options.inject?.spawn === undefined
+        const child = spawn(argv, {
+          cwd: request.cwd ?? cwd,
+          env: request.env === undefined ? env : definedEnv(request.env),
+          stdin: request.stdin === undefined ? "ignore" : inputBlob(request.stdin),
+          stdout: "pipe",
+          stderr: "pipe",
+          signal,
+          detached: true,
+        })
+        // Children lead a process group so cancellation settles their full tree.
+        const groupSettlement = options.inject?.spawn === undefined
         // Registered the moment leadership exists, released in this run's
         // `finally`: between those two points an exit of THIS process would
-        // otherwise strand the group. Interactive children are deliberately
-        // excluded here for the same reason they are excluded from
-        // `signalTree` — they sit in the invoking foreground group, and
-        // signalling that group would kill the operator's own shell.
+        // otherwise strand the group.
         if (groupSettlement) untrackGroup = trackProcessGroup(child.pid)
         let terminating = false
         let sweepFailure: string | undefined
@@ -926,28 +863,12 @@ async function readBounded(
 }
 
 function spawnProcess(argv: readonly string[], options: SpawnOptions): Spawned {
-  // detached:true in pipe mode makes the child a process-GROUP leader, which
-  // lets settlement signal the whole tree via -pid. Interactive mode passes
-  // detached:false so the child remains attached to terminal job control.
-  // Bun's NATIVE spawn honors this; node:child_process does not.
+  // detached:true makes the child a process-GROUP leader, which lets settlement
+  // signal the whole tree via -pid. Bun's NATIVE spawn honors this;
+  // node:child_process does not.
   const [command, ...args] = argv
   if (command === undefined) throw new TypeError("yrd: process argv must contain an executable")
-  const executable = resolveExecutable(command, options.env)
-  const resolvedArgv = [executable, ...args]
-  if (options.stdout === "pipe") return Bun.spawn(resolvedArgv, options)
-  const child = Bun.spawn(resolvedArgv, options)
-  return {
-    pid: child.pid,
-    stdout: null,
-    stderr: null,
-    exited: child.exited,
-    get signalCode() {
-      return child.signalCode
-    },
-    kill(signal) {
-      child.kill(signal)
-    },
-  }
+  return Bun.spawn([resolveExecutable(command, options.env), ...args], options)
 }
 
 function resolveExecutable(command: string, env: Readonly<Record<string, string>>): string {

@@ -1,4 +1,4 @@
-import { adaptProcessGit, gitFailure } from "@yrd/process"
+import { cleanGitEnvironment, gitFailure } from "@yrd/process"
 import { accessSync, constants, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import distribution from "../../../package.json" with { type: "json" }
@@ -40,11 +40,30 @@ function sourceGit(args: readonly string[]): { status: number; stdout: string } 
   }
   const [verb, ...rest] = args
   if (verb !== "rev-parse" && verb !== "status") throw new Error(`yrd: unsupported source Git read '${verb ?? ""}'`)
-  const result = adaptProcessGit(undefined, { timeoutMs: GIT_TIMEOUT_MS }).readSync({
-    repo: root,
-    command: { verb, args: rest },
+  const spawned = Bun.spawnSync(["git", "-C", root, verb, ...rest], {
+    // Let `git -C` report a missing/non-repository target as a normal Git exit.
+    // Anchoring the OS spawn there turns that domain result into an unrelated
+    // ENOENT before Git can run.
+    cwd: process.cwd(),
+    env: { ...cleanGitEnvironment(process.env), GIT_TERMINAL_PROMPT: "0", LC_ALL: "C", TZ: "UTC" },
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: GIT_TIMEOUT_MS,
   })
-  if (result.failure !== undefined) {
+  const decode = (output: Uint8Array | undefined): string =>
+    output === undefined ? "" : new TextDecoder().decode(output)
+  const signal = spawned.signalCode == null ? null : String(spawned.signalCode)
+  const timedOut = spawned.exitedDueToTimeout === true
+  const failure = timedOut ? "source git read timed out" : signal === null ? undefined : `source git read ended on ${signal}`
+  const result = {
+    code: typeof spawned.exitCode === "number" ? spawned.exitCode : 1,
+    stdout: decode(spawned.stdout),
+    stderr: decode(spawned.stderr),
+    signal,
+    timedOut,
+    ...(failure === undefined ? {} : { failure }),
+  }
+  if (failure !== undefined) {
     throw new Error(`yrd: git ${args.join(" ")} ${gitFailure(result, GIT_TIMEOUT_MS)}`)
   }
   return { status: result.code, stdout: result.stdout }

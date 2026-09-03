@@ -97,64 +97,6 @@ describe("Process", () => {
     await expect(process.run({ argv: "printf unsafe" as never })).rejects.toThrow("argv")
   })
 
-  it("inherits terminal stdio without detaching interactive children", async () => {
-    let observed: Parameters<Spawn>[1] | undefined
-    const spawn: Spawn = (_argv, options) => {
-      observed = options
-      return {
-        pid: 4242,
-        stdout: bytes(""),
-        stderr: bytes(""),
-        exited: Promise.resolve(0),
-        signalCode: null,
-        kill() {},
-      }
-    }
-    await using process = createProcess({ inject: { spawn } })
-
-    const result = await process.run({ argv: ["editor"], interactive: true })
-
-    expect(observed).toMatchObject({
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-      detached: false,
-    })
-    expect(result).toMatchObject({ exitCode: 0, stdout: "", stderr: "" })
-  })
-
-  it("can inherit piped input while retaining captured output and process-group ownership", async () => {
-    let observed: Parameters<Spawn>[1] | undefined
-    const spawn: Spawn = (_argv, options) => {
-      observed = options
-      return {
-        pid: 4242,
-        stdout: bytes("output"),
-        stderr: bytes(""),
-        exited: Promise.resolve(0),
-        signalCode: null,
-        kill() {},
-      }
-    }
-    await using process = createProcess({ inject: { spawn } })
-
-    const result = await process.run({ argv: ["filter"], inheritStdin: true })
-
-    expect(observed).toMatchObject({
-      stdin: "inherit",
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: true,
-    })
-    expect(result).toMatchObject({ exitCode: 0, stdout: "output" })
-    await expect(process.run({ argv: ["filter"], inheritStdin: true, stdin: "buffered" })).rejects.toThrow(
-      "cannot inherit stdin and provide buffered input",
-    )
-    await expect(process.run({ argv: ["filter"], inheritStdin: true, interactive: true })).rejects.toThrow(
-      "cannot combine inheritStdin with interactive",
-    )
-  })
-
   it("reports the spawned child PID before awaiting its exit", async () => {
     const exited = Promise.withResolvers<number>()
     const events: string[] = []
