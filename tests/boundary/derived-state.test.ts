@@ -351,6 +351,7 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     const next = await queueRunOnce(repo)
     expect(next.exitCode, next.report).toBe(0)
 
+    // Default history is separately broken: historical-run-rows-use-latest-result pairs old rows with the latest result.
     const { rows, result } = await changesListed(repo, true)
     const failed = rowFor(rows, red.branch, result.report)
     const passed = rowFor(rows, green.branch, result.report)
