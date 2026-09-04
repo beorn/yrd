@@ -6,9 +6,19 @@
  * @consumer every seat opening a fresh environment through `yrd env open`
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, type Git } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
@@ -43,8 +53,9 @@ type World = Readonly<{ git: Git; work: string }>
 async function command(
   cwd: string,
   argv: readonly string[],
+  env?: NodeJS.ProcessEnv,
 ): Promise<Readonly<{ exit: number; stderr: string; stdout: string }>> {
-  const child = Bun.spawn([...argv], { cwd, stderr: "pipe", stdin: "ignore", stdout: "pipe" })
+  const child = Bun.spawn([...argv], { cwd, env, stderr: "pipe", stdin: "ignore", stdout: "pipe" })
   const [exit, stderr, stdout] = await Promise.all([
     child.exited,
     new Response(child.stderr).text(),
@@ -94,6 +105,95 @@ async function addMaterializedDependency(w: World): Promise<void> {
 }
 
 describe("yrd env open prepares the retained environment", () => {
+  it("resolves a configured relative workdir against the repository, not the caller's subdirectory", async () => {
+    const w = await world(":")
+    await w.git(["config", "yrd.workdir", "relative-state"])
+    const nested = join(w.work, "nested")
+    mkdirSync(nested)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
+    const run = await command(nested, [process.execPath, cli, "env", "open", selected, "--json"])
+    expect(run, run.stderr).toMatchObject({ exit: 0 })
+    const { path } = JSON.parse(run.stdout) as { path: string }
+    expect(path.startsWith(join(w.work, "relative-state", "environments") + "/")).toBe(true)
+    const listed = await command(nested, [process.execPath, cli, "env", "list", "--json"])
+    expect(listed, listed.stderr).toMatchObject({ exit: 0 })
+    expect(JSON.parse(listed.stdout)).toMatchObject({ environments: [{ path, head: selected }] })
+  })
+
+  // The library materializer cannot prove this process boundary: a plain
+  // commit needs no tool, and a required CLI must return a trustworthy result.
+  it.each(["plain", "missing", "malformed", "partial", "mismatched"])(
+    "honours the git-super boundary when %s",
+    async (mode) => {
+      const w = await world(":")
+      const plain = (await w.git(["rev-parse", "HEAD"])).trim()
+      await addMaterializedDependency(w)
+      const selected = mode === "plain" ? plain : (await w.git(["rev-parse", "HEAD"])).trim()
+      const bin = join(w.work, "fixture-bin")
+      mkdirSync(bin)
+      const git = Bun.which("git")
+      const sh = Bun.which("sh")
+      expect(git).not.toBeNull()
+      expect(sh).not.toBeNull()
+      symlinkSync(git!, join(bin, "git"))
+      symlinkSync(sh!, join(bin, "sh"))
+      if (mode === "malformed") {
+        writeFileSync(join(bin, "git-super"), "#!/bin/sh\nprintf 'not-json\\n'\n")
+        chmodSync(join(bin, "git-super"), 0o755)
+      } else if (mode === "partial" || mode === "mismatched") {
+        // Valid JSON and exit zero are insufficient: the external report must
+        // attest this exact path/commit and complete, not partial, success.
+        writeFileSync(
+          join(bin, "git-super"),
+          `#!${process.execPath}\nconsole.log(JSON.stringify({
+        state: "updated", partial: ${mode === "partial"},
+        path: process.argv[5], requested: process.argv[6],
+        commit: ${mode === "mismatched" ? '"0".repeat(40)' : "process.argv[6]"},
+        gitmodules: true,
+        gitlinks: {considered: 1, borrowed: 1, fetched: 0, absent: 0},
+        repositories: [{repository: process.cwd(), state: "updated", refs: []}]
+      }))\n`,
+        )
+        chmodSync(join(bin, "git-super"), 0o755)
+      }
+      const cli = join(dirname(fileURLToPath(import.meta.url)), "../../../bin/yrd.ts")
+      const run = await command(w.work, [process.execPath, cli, "env", "open", selected, "--json"], {
+        ...process.env,
+        PATH: bin,
+      })
+      if (mode === "plain") {
+        expect(run, run.stderr).toMatchObject({ exit: 0 })
+        const { path } = JSON.parse(run.stdout) as { path: string }
+        expect(existsSync(join(path, ".gitmodules"))).toBe(false)
+        expect((await gitIn(path)(["rev-parse", "HEAD"])).trim()).toBe(plain)
+      } else {
+        expect(run, run.stderr).toMatchObject({ exit: 2, stdout: "" })
+        expect(run.stderr).toContain(mode === "missing" ? "requires git-super" : "malformed git-super")
+        const listed = capture(w.work)
+        expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
+        expect(JSON.parse(listed.stdout())).toEqual({ environments: [] })
+      }
+    },
+  )
+
+  it.each(["branch", "unknown", "blob"])("refuses a %s before creating an environment", async (kind) => {
+    const w = await world(":")
+    const operand =
+      kind === "branch"
+        ? "main"
+        : kind === "unknown"
+          ? "0".repeat(40)
+          : (await w.git(["rev-parse", "HEAD:.yrd.yml"])).trim()
+    const run = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", operand, "--json"], run.io)).toBe(2)
+    expect(run.stderr()).toContain(operand)
+    expect(run.stdout()).toBe("")
+    const listed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
+    expect(JSON.parse(listed.stdout())).toEqual({ environments: [] })
+  })
+
   it("opens the exact commit detached and runs that commit's setup", async () => {
     const w = await world("printf 'selected commit\\n' > selected-setup.txt")
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
@@ -118,12 +218,12 @@ describe("yrd env open prepares the retained environment", () => {
     await addMaterializedDependency(w)
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "ready"], run.io), run.stderr()).toBe(0)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected], run.io), run.stderr()).toBe(0)
 
-    const bay = join(w.work, ".bays", "ready")
-    expect(run.stdout().trim()).toBe(bay)
+    const bay = run.stdout().trim()
     expect(readFileSync(join(bay, "setup-ready.txt"), "utf8")).toBe(`${bay}\n`)
-    expect((await gitIn(bay)(["branch", "--show-current"])).trim()).toBe("task/ready")
+    expect((await gitIn(bay)(["branch", "--show-current"])).trim()).toBe("")
   })
 
   it("opens from clean and makes the declared root typecheck runnable without a hand install", async () => {
@@ -154,17 +254,17 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "typecheck-ready"], run.io), run.stderr()).toBe(0)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected], run.io), run.stderr()).toBe(0)
 
-    const bay = join(w.work, ".bays", "typecheck-ready")
+    const bay = run.stdout().trim()
     const typecheck = await command(bay, ["bun", "run", "typecheck"])
     expect(typecheck, typecheck.stderr).toMatchObject({ exit: 0 })
     expect(typecheck.stdout).toContain("declared root typecheck ran")
   })
 
-  it("derives setup's tree from a reopened branch and the current target", async () => {
+  it("opens the same exact commit twice without attaching or moving its branch", async () => {
     const w = await world('printf \'%s\\n%s\\n\' "$YRD_BASE_SHA" "$YRD_CANDIDATE_SHA" > setup-tree.txt')
-    const mergeBase = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "-b", "task/reopened"])
     writeFileSync(join(w.work, "branch.txt"), "branch change\n")
     await w.git(["add", "branch.txt"])
@@ -177,18 +277,16 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "reopened"], run.io), run.stderr()).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", candidate], run.io), run.stderr()).toBe(0)
 
-    const bay = join(w.work, ".bays", "reopened")
-    expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${candidate}\n`)
+    const bay = run.stdout().trim()
+    expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${candidate}\n${candidate}\n`)
 
-    await w.git(["worktree", "remove", "--force", bay])
     const reopened = capture(w.work)
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "reopened"], reopened.io),
-      reopened.stderr(),
-    ).toBe(0)
-    expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${candidate}\n`)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", candidate], reopened.io), reopened.stderr()).toBe(0)
+    expect(reopened.stdout().trim()).not.toBe(bay)
+    expect(readFileSync(join(reopened.stdout().trim(), "setup-tree.txt"), "utf8")).toBe(`${candidate}\n${candidate}\n`)
+    expect((await w.git(["rev-parse", "refs/heads/task/reopened"])).trim()).toBe(candidate)
   })
 
   it("keeps a failed environment and reports its command and output", async () => {
@@ -196,13 +294,18 @@ describe("yrd env open prepares the retained environment", () => {
     const w = await world(command)
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "broken"], run.io)).toBe(2)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected], run.io)).toBe(2)
 
-    const bay = join(w.work, ".bays", "broken")
+    const listed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io), listed.stderr()).toBe(0)
+    const rows = JSON.parse(listed.stdout()) as { environments: { path: string }[] }
+    expect(rows.environments).toHaveLength(1)
+    const bay = rows.environments[0]!.path
     expect(run.stdout()).toBe("")
     expect(existsSync(bay)).toBe(true)
     expect(await w.git(["worktree", "list", "--porcelain"])).toContain(bay)
-    expect((await gitIn(bay)(["branch", "--show-current"])).trim()).toBe("task/broken")
+    expect((await gitIn(bay)(["branch", "--show-current"])).trim()).toBe("")
     expect(run.stderr()).toContain(command)
     expect(run.stderr()).toContain("exit 23")
     expect(run.stderr()).toContain("exit 23 is not a verdict")

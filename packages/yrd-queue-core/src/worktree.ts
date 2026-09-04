@@ -22,15 +22,14 @@
  */
 
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { join, relative, sep } from "node:path"
-import { materializeSubmodulesFromLocalWorktreeParallel } from "git-super/submodules"
+import { join, relative, resolve, sep } from "node:path"
 import type { Process } from "@yrd/process"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import type { Git } from "./records.ts"
 import { gitIn, mergeBase } from "./git.ts"
 
 /** The logger git-super narrates to; the queue hands one over only at trace. */
-export type PlumbingLog = NonNullable<Parameters<typeof materializeSubmodulesFromLocalWorktreeParallel>[0]["log"]>
+export type PlumbingLog = Readonly<{ trace?: (message: string, detail: Readonly<Record<string, unknown>>) => void }>
 
 export type Worktree = Readonly<{
   /** The directory the commit is checked out in. */
@@ -54,21 +53,38 @@ export async function freshWorktree(
   path: string,
   plumbing?: PlumbingLog,
 ): Promise<Worktree> {
-  await git(["worktree", "add", "--quiet", "--detach", path, commit])
-  const materialized = await materializeSubmodulesFromLocalWorktreeParallel({
-    ...(plumbing === undefined ? {} : { log: plumbing }),
-    // A gitlink the reference checkout has never fetched is fetched from the
-    // component's remote. git-super's default (0) refuses the network and the
-    // queue stuck on a change whose km gitlink was on km's main but not yet in
-    // the reference's store (2026-09-03 10:52 PDT, @dev/2's 24089); a gitlink
-    // that is not on its component's main is classified by git-super merge.
-    maxRemoteFallbacks: Number.POSITIVE_INFINITY,
-    referenceWorktree: repo,
-    worktree: path,
-  })
-  if (materialized.exitCode !== 0) {
-    await removeWorktree(git, path)
-    throw new Error(`submodules of ${commit.slice(0, 12)} did not materialize at ${path}: ${describe(materialized)}`)
+  // Query the selected commit, not the reference checkout's working tree.
+  // An invalid commit makes ls-tree fail; only empty output means absence.
+  const modules = await git(["ls-tree", commit, "--", ".gitmodules"])
+  if (modules.trim() === "") {
+    await git(["worktree", "add", "--quiet", "--detach", path, commit])
+  } else {
+    let output: string
+    try {
+      output = await git(["super", "--json", "worktree", "add", path, commit, "--reference", repo])
+    } catch (error) {
+      throw new Error(
+        `worktree ${path} at ${commit} requires git-super because that commit records .gitmodules; ` +
+          `git super worktree add failed: ${error instanceof Error ? error.message : String(error)}. ` +
+          "Ensure git-super is available on PATH and resolve the reported condition before retrying; no plain-git fallback was attempted",
+        { cause: error },
+      )
+    }
+    let result: unknown
+    try {
+      result = JSON.parse(output)
+    } catch (error) {
+      throw new Error(
+        `malformed git-super output for worktree ${path} at ${commit}: expected one JSON result; inspect git worktree list before retrying`,
+        { cause: error },
+      )
+    }
+    if (!materializedWorktree(result, resolve(repo, path), commit)) {
+      throw new Error(
+        `malformed git-super result for worktree ${path} at ${commit}: no complete matching materialization; inspect git worktree list before retrying`,
+      )
+    }
+    plumbing?.trace?.("materialized worktree", { commit, path, result })
   }
   return {
     commit,
@@ -386,6 +402,42 @@ async function removeWorktree(git: Git, path: string): Promise<void> {
   await git(["worktree", "prune"])
 }
 
-function describe(result: Readonly<{ stderr?: string; stdout?: string; message?: string }>): string {
-  return (result.message ?? result.stderr ?? result.stdout ?? "no detail").trim()
+/** Validate the external command's success claim before admitting its tree. */
+function materializedWorktree(value: unknown, path: string, commit: string): boolean {
+  if (typeof value !== "object" || value === null) return false
+  const result = value as Record<string, unknown>
+  if (
+    result.state !== "updated" ||
+    result.partial !== false ||
+    result.path !== path ||
+    result.requested !== commit ||
+    result.commit !== commit ||
+    result.gitmodules !== true
+  )
+    return false
+  if (
+    !Array.isArray(result.repositories) ||
+    result.repositories.length === 0 ||
+    !result.repositories.every((entry: unknown) => {
+      if (typeof entry !== "object" || entry === null) return false
+      const repository = entry as Record<string, unknown>
+      return (
+        typeof repository.repository === "string" &&
+        (repository.state === "updated" || repository.state === "unchanged") &&
+        Array.isArray(repository.refs) &&
+        repository.refs.length === 0
+      )
+    })
+  )
+    return false
+  if (typeof result.gitlinks !== "object" || result.gitlinks === null) return false
+  const counts = result.gitlinks as Record<string, unknown>
+  const { considered, borrowed, fetched, absent } = counts
+  if (
+    ![considered, borrowed, fetched, absent].every(
+      (count) => typeof count === "number" && Number.isSafeInteger(count) && count >= 0,
+    )
+  )
+    return false
+  return considered === (borrowed as number) + (fetched as number) + (absent as number)
 }

@@ -4,7 +4,7 @@
  *
  * The command surface is `yrd queue submit|run|up|pause|resume|list|show`,
  * `yrd check`, `yrd env open|list`, with `yrd submit` as the alias of the one
- * used most and `yrd bay` as `env`'s until flag day's word is retired. Every
+ * used most. Every
  * queue command is `@yrd/queue-core` through `coreQueueCommand`; nothing here
  * holds queue state, and nothing here parses `.yrd.yml` past the one line
  * that selects the core.
@@ -323,16 +323,15 @@ function buildProgram(
       setExit(taken)
     })
 
-  // `env` is the printed name; `bay` is today's word, kept as its alias.
-  const env_ = program.command("env").alias("bay").description("an environment for one branch")
+  const env_ = program.command("env").description("retained detached environments at exact commits")
   env_.helpCommand(false)
   env_
-    .command("open")
-    .description("open an environment for one branch and keep it; prints its path")
-    .option("--bay <name>", "name the environment")
-    .option("--issue <ref>", "the issue this environment is for")
+    .command("open <commit>")
+    .description("open an exact commit detached and keep it; prints its path")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await openEnvironment(options as Parameters<typeof openEnvironment>[0], io)))
+    .action(async (commit, options) =>
+      setExit(await openEnvironment(commit, options as Parameters<typeof openEnvironment>[1], io)),
+    )
   env_
     .command("list", { isDefault: true })
     .description("the environments this repository holds")
@@ -344,17 +343,14 @@ function buildProgram(
 }
 
 function addExamples(program: CliCommand, name: string): void {
-  program.addHelpSection("Aliases:", [
-    [`${name} submit`, `${name} queue submit`],
-    [`${name} bay`, `${name} env (today's word)`],
-  ])
+  program.addHelpSection("Aliases:", [[`${name} submit`, `${name} queue submit`]])
   program.addHelpSection("Examples:", [
     [`$ ${name} submit fix-login`, "push the branch and open its change"],
     [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
     [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
     [`$ ${name} queue run`, "one round of queue work, run now"],
     [`$ ${name} check affected-tests`, "run one of the queue's checks here, now"],
-    [`$ ${name} env open --bay fix`, "open an environment and keep it"],
+    [`$ ${name} env open <commit>`, "open an exact commit detached and keep it"],
   ])
 }
 

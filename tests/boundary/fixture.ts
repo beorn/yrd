@@ -138,18 +138,19 @@ export type Change = Readonly<{
   bayPath: string
 }>
 
-/**
- * One commit on top of the target, submitted the way the queue wants it:
- * committed inside a real Bay and delivered with `yrd bay submit` from that
- * Bay. The Bay's own commit needs no `Change-Id` trailer — `bay submit`
- * records the change, and the trailer is only what a recordless `refs/for`
- * tip must carry.
- */
-export async function submitOneCommit(repo: string, bay: string): Promise<Change> {
+/** The fixture, not Yrd, attaches an authoring branch to the detached tree. */
+async function openAuthorEnvironment(repo: string, branch: string, commit: string): Promise<string> {
   const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "env", "open", "--bay", bay), "env open", opened)
-  const bayPath = opened.stdout().trim()
-  const branch = await git(bayPath, "branch", "--show-current")
+  expectZero(await yrd(repo, opened.io, "env", "open", commit), "env open", opened)
+  const path = opened.stdout().trim()
+  await git(path, "checkout", "--quiet", "-b", branch)
+  return path
+}
+
+/** One commit on top of the target, authored in a real worktree and submitted through Yrd. */
+export async function submitOneCommit(repo: string, bay: string): Promise<Change> {
+  const branch = `task/${bay}`
+  const bayPath = await openAuthorEnvironment(repo, branch, await git(repo, "rev-parse", "refs/remotes/origin/main"))
 
   await writeFile(join(bayPath, `${bay}.txt`), `${bay}\n`)
   await git(bayPath, "add", `${bay}.txt`)
@@ -810,10 +811,8 @@ export async function submitCommitWriting(
   bay: string,
   files: Readonly<Record<string, string>>,
 ): Promise<Change> {
-  const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "env", "open", "--bay", bay), "env open", opened)
-  const bayPath = opened.stdout().trim()
-  const branch = await git(bayPath, "branch", "--show-current")
+  const branch = `task/${bay}`
+  const bayPath = await openAuthorEnvironment(repo, branch, await git(repo, "rev-parse", "refs/remotes/origin/main"))
 
   for (const [path, content] of Object.entries(files)) {
     await writeFile(join(bayPath, path), content, path.endsWith(".sh") ? { mode: 0o755 } : {})
@@ -833,13 +832,8 @@ export async function submitCommitWriting(
  * No commit of its own, so the two changes are the same content under two
  * names — the shape that billed a submitter on 2026-09-02. */
 export async function submitSameHead(repo: string, bay: string, headSha: string): Promise<Change> {
-  const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "env", "open", "--bay", bay), "env open", opened)
-  const bayPath = opened.stdout().trim()
-  const branch = await git(bayPath, "branch", "--show-current")
-
-  await git(bayPath, "fetch", "-q", "origin")
-  await git(bayPath, "merge", "--ff-only", "-q", headSha)
+  const branch = `task/${bay}`
+  const bayPath = await openAuthorEnvironment(repo, branch, headSha)
 
   const submitted = await submitFromBay(repo, bayPath)
   if (submitted.exitCode !== 0 || submitted.id === undefined) {

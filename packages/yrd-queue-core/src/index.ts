@@ -53,7 +53,7 @@ export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck } from
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
 export { journalKey, readJournals, readRunLog, runId, runStartedAt } from "./log.ts"
 export type { JournalCheck, JournalRun, Journals, LogRecord } from "./log.ts"
-export { checkedTree, claimWorktrees, prepareWorktree, runSetup, SetupFailed } from "./worktree.ts"
+export { checkedTree, claimWorktrees, freshWorktree, prepareWorktree, runSetup, SetupFailed } from "./worktree.ts"
 export { queueRun } from "./run.ts"
 export type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
