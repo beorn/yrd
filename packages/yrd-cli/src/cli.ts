@@ -25,7 +25,7 @@
  */
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
-import { coreQueueCommand } from "./queue-core-commands.ts"
+import { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
 import { listEnvironments, openEnvironment } from "./env-commands.ts"
 import {
   closeGarage,
@@ -174,15 +174,48 @@ function buildProgram(
       )
       setExit(taken)
     })
-  queue
-    .command("list")
-    .description("every change in line, then the failed and the merged")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => {
-      const json = (options as { json?: boolean }).json
-      const taken = await coreQueueCommand(cwd(), io, { command: "list" }, { json, env, log: log() })
-      setExit(taken)
-    })
+  /**
+   * `queue list` and `yrd watch` are ONE command (README 1069): the alias is
+   * the same action with `--watch` implied, so the two can never grow apart.
+   * Both take the same positional filters and the same lens.
+   */
+  const listRequest = (
+    filters: readonly string[],
+    options: Readonly<{ latest?: boolean; watch?: boolean; interval?: number }>,
+  ): CoreQueueCommand => ({
+    command: "list",
+    ...(filters.length === 0 ? {} : { terms: filters }),
+    ...(options.latest === true ? { latest: true } : {}),
+    ...(options.watch === true ? { watch: true } : {}),
+    ...(options.interval === undefined ? {} : { intervalSeconds: options.interval }),
+  })
+  const listOptions = <T extends { option: (flags: string, description: string, parser?: unknown) => T }>(
+    command: T,
+  ): T =>
+    command
+      .option("--latest", "one row per change; the default keeps every run that touched it")
+      .option("--json", "emit stable JSON")
+      .option("--interval <seconds>", "seconds between refreshes while watching (default 5)", int)
+  listOptions(
+    queue
+      .command("list [filter...]")
+      .description("every change in line, then the failed and the merged; filters are case-insensitive OR terms")
+      .option("--watch", "refresh until the selected change ends, exiting with its code as yrd check does"),
+  ).action(async (filters, options) => {
+    const { interval, json, latest, watch } = options as {
+      interval?: number
+      json?: boolean
+      latest?: boolean
+      watch?: boolean
+    }
+    const taken = await coreQueueCommand(
+      cwd(),
+      io,
+      listRequest((filters as string[] | undefined) ?? [], { interval, latest, watch }),
+      { json, env, log: log() },
+    )
+    setExit(taken)
+  })
   queue
     .command("show <branch>")
     .description("the branch's changes, each check's result and log")
@@ -201,6 +234,24 @@ function buildProgram(
   // surface reads it. These two spellings stay because the queue is IN the
   // garage: they are the only non-plumbing way to open and close it, and
   // `readGarageDeclaration` is already on the run path above.
+  listOptions(
+    program
+      .command("watch [filter...]")
+      .description(
+        "queue list with --watch implied: refresh until the selected change ends. " +
+          "The run journal is local to the machine the queue runs on, so off it the check running now, " +
+          "the run id and the check clocks are absent and the watch says where it looked.",
+      ),
+  ).action(async (filters, options) => {
+    const { interval, json, latest } = options as { interval?: number; json?: boolean; latest?: boolean }
+    const taken = await coreQueueCommand(
+      cwd(),
+      io,
+      listRequest((filters as string[] | undefined) ?? [], { interval, latest, watch: true }),
+      { json, env, log: log() },
+    )
+    setExit(taken)
+  })
   const garage = queue
     .command("garage", { hidden: true })
     .description("stop the service and work on the queue yourself")
