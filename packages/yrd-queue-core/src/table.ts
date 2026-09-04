@@ -41,10 +41,8 @@ export type Row = Readonly<{
   state: ChangeState | "direct"
   /** 1-based place in line for queued, checked and stuck rows; absent otherwise. */
   position?: number
-  /** The last result: pass, fail or stuck, with the check that decided it. */
+  /** The result of the run named by `run`: pass, fail or stuck, with its deciding check. */
   result?: string
-  /** Selected journal run's measured result; `state` remains the change's CURRENT state. */
-  runResult?: string
   /** The log path of the deciding check, when there is one. */
   log?: string
   /** The complete queue-owned incident stored on a stuck record. */
@@ -102,6 +100,12 @@ export type WatchRowOptions = Readonly<{
   journals?: Journals
 }>
 
+/** The same identity for selection and detail: branch, head, and journal run. */
+export function watchRowKey(row: WatchRow): string {
+  const change = journalKey(row.row.branch, row.row.head)
+  return row.run === undefined ? change : `${change}@${row.run.id}`
+}
+
 /**
  * The rows a watch shows, in the order `list()` already put them: in line
  * first by position, then the ended, newest first. A change with runs keeps
@@ -114,12 +118,12 @@ export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): 
   return rows.flatMap((row) => {
     const runs = journals.runs.get(journalKey(row.branch, row.head)) ?? []
     if (runs.length === 0) return [{ row }]
-    return runs.map((run) => ({ row: runRow(row, run), run }))
+    return runs.map((run, index) => ({ row: runRow(row, run, index === 0), run }))
   })
 }
 
 /** Join already-recorded run facts; never rederive the change's state. */
-function runRow(current: Row, run: JournalRun): Row {
+function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   const check = run.decision === "failed" ? run.checks.findLast((check) => check.result === "fail") : run.checks.at(-1)
   const result =
     run.incident === undefined
@@ -129,7 +133,9 @@ function runRow(current: Row, run: JournalRun): Row {
           ? undefined
           : `${check.result} ${check.name}`
       : incidentLine(run.incident)
-  const live = run.running
+  // Runs are serialized per change: a newer run proves an abandoned older
+  // check is no longer running, even when no decision was recorded for it.
+  const live = newest ? run.running : undefined
   return {
     ...current,
     // Assign absent values too: no later run's facts may survive this join.
@@ -139,7 +145,6 @@ function runRow(current: Row, run: JournalRun): Row {
     reason: run.incident?.code ?? run.reason,
     incident: run.incident,
     result,
-    runResult: result,
     log: check?.log,
     run: run.id,
     startedAt: run.checks[0]?.startedAt,

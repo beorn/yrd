@@ -448,7 +448,7 @@ export async function coreQueueCommand(
         }
         return {
           data: {
-            changes: rows.map((row) => ({ ...row.row, ...(row.run === undefined ? {} : { runOf: row.run.id }) })),
+            changes: rows.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
           },
@@ -470,7 +470,9 @@ export async function coreQueueCommand(
             scope,
             rowTable(rows),
             ...(rows.length === 1 && rows[0] !== undefined
-              ? [noticeLine(rows[0].row), clocksLine(rows[0].row)].filter((part) => part !== "")
+              ? [noticeLine(rows[0].row, rows[0].run !== undefined), clocksLine(rows[0].row)].filter(
+                  (part) => part !== "",
+                )
               : []),
           ]
             .filter((part): part is string => part !== undefined)

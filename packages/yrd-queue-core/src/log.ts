@@ -307,6 +307,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
           throw new Error(`run journal ${id} has an incomplete incident for ${journalKey(branch, head)}`)
         }
         const incident = { code, subject, via, evidence, next, owner }
+        // Reuse the writer's validator: malformed incident values must throw on read too.
         incidentTrailers(incident)
         change.incident = incident
       }

@@ -410,7 +410,7 @@ describe("settling gitlinks", () => {
     const journals = readJournals(dirname(outcome.log))
     const queue = await readQueue(w.git, "origin", "main")
     const shown = watchRows(list(queue.changes, { journals }), { journals }).find((row) => row.row.head === head)!
-    expect(shown.row.runResult).toBe("fail component-check")
+    expect(shown.row.result).toBe("fail component-check")
     expect(readFileSync(shown.row.log!, "utf8")).toBe("CANDIDATE_FAIL\n")
     const detail = checksOf([], "failed", [], shown.run?.running, shown.run?.checks)
     expect(detail.map((check) => [check.phase, check.state, readFileSync(check.log!, "utf8")])).toEqual([

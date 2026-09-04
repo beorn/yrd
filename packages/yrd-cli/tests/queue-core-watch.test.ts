@@ -327,16 +327,16 @@ describe("what a watch says it looked at", () => {
       (row) => row.branch === "task/history",
     )
     expect(rows).toHaveLength(2)
-    const old = rows.find((row) => row.runOf === firstId)!
-    const latest = rows.find((row) => row.runOf === secondId)!
+    const old = rows.find((row) => row.run === firstId)!
+    const latest = rows.find((row) => row.run === secondId)!
     expect(old, listed.stdout()).toMatchObject({
       state: "failed",
       run: firstId,
-      runResult: original.result,
       result: original.result,
       log: original.log,
     })
-    expect(latest).toMatchObject({ state: "failed", run: secondId, runResult: "fail verify", result: "fail verify" })
+    expect(latest).toMatchObject({ state: "failed", run: secondId, result: "fail verify" })
+    expect(rows.some((row) => "runResult" in row || "runOf" in row)).toBe(false)
     expect(old.endedAt).toBe(original.endedAt)
     expect(latest.incident).toBeUndefined()
     expect(readFileSync(String(old.log), "utf8")).toBe("FIRST_RUN_MISSING\n")

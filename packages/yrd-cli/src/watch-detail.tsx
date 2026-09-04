@@ -72,11 +72,13 @@ const TAB_COLOR: Readonly<Record<CheckView["state"], string>> = {
 
 export function WatchDetail({
   detail,
+  joinedRun = false,
   now,
   selected,
   onSelect,
 }: {
   detail: ChangeDetail | undefined
+  joinedRun?: boolean
   now: Date
   selected?: number
   onSelect?: (index: number) => void
@@ -103,7 +105,7 @@ export function WatchDetail({
           {row.subject}
         </Text>
       )}
-      <Text wrap="truncate">{noticeLine(row)}</Text>
+      <Text wrap="truncate">{noticeLine(row, joinedRun)}</Text>
       {/* Then the clocks. A clock nothing measured is left out, never zero. */}
       {clocks === "" ? null : <Text color="$fg-muted">{clocks}</Text>}
       <Box flexDirection="row" columnGap={2} flexShrink={0}>

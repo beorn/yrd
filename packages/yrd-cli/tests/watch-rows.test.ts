@@ -90,18 +90,7 @@ describe("the rows a watch shows", () => {
     const options = { journals: journals({ [journalKey(current.branch, current.head)]: ["old"] }) }
     const historical = watchRows([current], options)[0]!
     expect(historical.row).toMatchObject({ state: "failed", next: current.next, run: "old" })
-    for (const key of [
-      "result",
-      "runResult",
-      "reason",
-      "log",
-      "base",
-      "merge",
-      "incident",
-      "startedAt",
-      "endedAt",
-      "live",
-    ] as const)
+    for (const key of ["result", "reason", "log", "base", "merge", "incident", "startedAt", "endedAt", "live"] as const)
       expect(historical.row[key], key).toBeUndefined()
     expect(filterRows([historical], ["later"])).toHaveLength(0)
     expect(watchRows([current], { ...options, latest: true })[0]?.row).toBe(current)
@@ -144,9 +133,15 @@ describe("the filter terms", () => {
 
 describe("the one row renderer", () => {
   it("draws the plain list's line unchanged when there is no subject, run or live check to add", () => {
-    expect(rowLine({ row: row({ head: "abcdef0123456789", issue: "@i/1", position: 1, result: "pass" }) })).toBe(
-      " 1 queued  task/one abcdef012345 pass @i/1",
-    )
+    const current = row({ head: "abcdef0123456789", issue: "@i/1", position: 1, result: "pass" })
+    expect(rowLine({ row: current })).toBe(" 1 queued  task/one abcdef012345 pass @i/1")
+    // Joined and record-only rows share fixed columns; only the run suffix differs.
+    expect(
+      rowLine({
+        row: current,
+        run: { id: "q-1", branch: current.branch, head: current.head, startedAt: now, at: now, checks: [] },
+      }),
+    ).toBe(" 1 queued  task/one abcdef012345 pass @i/1 [q-1]")
   })
 
   it("adds the subject, the run and the check running now when there is something to put there", () => {
@@ -196,6 +191,10 @@ describe("the notice", () => {
 
   it("carries the queue position in the notice, where a live fact belongs", () => {
     expect(watchNotice(row({ position: 3 })).word).toBe("queued #3")
+    const historical = row({ state: "failed", position: 1, result: "stuck verify", run: "q-1" })
+    expect(watchNotice(historical, true)).toMatchObject({ word: "change failed #1", cause: "run result: stuck verify" })
+    // The join is a caller's fact, not inferred from a result or run identifier.
+    expect(watchNotice(historical).word).toBe("failed #1")
   })
 })
 

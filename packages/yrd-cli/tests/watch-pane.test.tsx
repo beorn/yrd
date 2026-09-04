@@ -158,56 +158,61 @@ describe("which check a reader lands on", () => {
 })
 
 describe("the pane's keys", () => {
-  it("opens the selected historical run's output when two rows have the same head", async () => {
-    // Head-only detail identity passed all single-run fixtures but opened the
-    // latest output when the operator selected the older attempt.
-    const rows: WatchRow[] = ["second", "first"].map((id) => ({
-      row: row({ run: id, state: "failed" }),
-      run: { id, branch: "task/one", head: row().head, startedAt: NOW, at: NOW, checks: [] },
-    }))
-    rows.push({
-      row: row({ branch: "task/other", run: "first", state: "failed" }),
-      run: { ...rows[1]!.run!, branch: "task/other" },
-    })
-    const detail = new Map(
-      rows.map((item) => [
-        watchRowKey(item),
-        {
-          row: item.row,
-          checks: [
-            {
-              name: "verify",
-              state: "failed" as const,
-              output: `${item.row.branch} ${item.run?.id} RUN OUTPUT`,
-              log: `/w/${item.run?.id}.log`,
-            },
-          ],
-        },
-      ]),
-    )
-    const app = render(<WatchPane snapshot={snapshot({ rows, detail })} live={false} />, { cols: 120, rows: 40 })
-    await app.waitForLayoutStable()
-    app.press("Enter")
-    await app.waitForLayoutStable()
-    expect(app.text).toContain("second RUN OUTPUT")
-    app.press("Escape")
-    await app.waitForLayoutStable()
-    app.press("j")
-    await app.waitForLayoutStable()
-    app.press("Enter")
-    await app.waitForLayoutStable()
-    expect(app.text).toContain("first RUN OUTPUT")
-    expect(app.text).not.toContain("second RUN OUTPUT")
-    app.press("Escape")
-    await app.waitForLayoutStable()
-    app.press("j")
-    await app.waitForLayoutStable()
-    app.press("Enter")
-    await app.waitForLayoutStable()
-    expect(app.text).toContain("task/other first RUN OUTPUT")
-    expect(app.text).not.toContain("task/one first RUN OUTPUT")
-    app.unmount()
-  })
+  it.each([120, 220])(
+    "opens the selected historical run's output when two rows have the same head at %i columns",
+    async (cols) => {
+      // Head-only detail identity passed all single-run fixtures but opened the
+      // latest output when the operator selected the older attempt.
+      const rows: WatchRow[] = ["second", "first"].map((id) => ({
+        row: row({ run: id, state: "failed", result: id === "first" ? "stuck verify" : "fail verify" }),
+        run: { id, branch: "task/one", head: row().head, startedAt: NOW, at: NOW, checks: [] },
+      }))
+      rows.push({
+        row: row({ branch: "task/other", run: "first", state: "failed" }),
+        run: { ...rows[1]!.run!, branch: "task/other" },
+      })
+      const detail = new Map(
+        rows.map((item) => [
+          watchRowKey(item),
+          {
+            row: item.row,
+            checks: [
+              {
+                name: "verify",
+                state: "failed" as const,
+                output: `${item.row.branch} ${item.run?.id} RUN OUTPUT`,
+                log: `/w/${item.run?.id}.log`,
+              },
+            ],
+          },
+        ]),
+      )
+      const app = render(<WatchPane snapshot={snapshot({ rows, detail })} live={false} />, { cols, rows: 40 })
+      await app.waitForLayoutStable()
+      app.press("Enter")
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("second RUN OUTPUT")
+      app.press("Escape")
+      await app.waitForLayoutStable()
+      app.press("j")
+      await app.waitForLayoutStable()
+      app.press("Enter")
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("first RUN OUTPUT")
+      expect(app.text).not.toContain("second RUN OUTPUT")
+      expect(app.text).toContain("change failed")
+      expect(app.text).toContain("run result: stuck verify")
+      app.press("Escape")
+      await app.waitForLayoutStable()
+      app.press("j")
+      await app.waitForLayoutStable()
+      app.press("Enter")
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("task/other first RUN OUTPUT")
+      expect(app.text).not.toContain("task/one first RUN OUTPUT")
+      app.unmount()
+    },
+  )
 
   it("opens the help on ? and closes it on Escape", async () => {
     const app = render(<WatchPane snapshot={snapshot()} live={false} />, { cols: 120, rows: 40 })

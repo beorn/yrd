@@ -207,6 +207,7 @@ export function WatchPane({
       open ? (
         <WatchDetail
           detail={detail}
+          joinedRun={selected?.run !== undefined}
           now={now}
           {...(checkTab === undefined ? {} : { selected: checkTab })}
           onSelect={setCheckTab}
@@ -226,6 +227,7 @@ export function WatchPane({
         secondary={
           <WatchDetail
             detail={detail}
+            joinedRun={selected?.run !== undefined}
             now={now}
             {...(checkTab === undefined ? {} : { selected: checkTab })}
             onSelect={setCheckTab}

@@ -140,6 +140,48 @@ describe("a run's journal, read back", () => {
     expect(views[0]?.result).toBeUndefined()
   })
 
+  it("an abandoned older run is unmeasured after a newer run, while the newest unended run stays live", () => {
+    // A single decided-run fixture misses a process that died before writing
+    // its decision. Serialization makes a subsequent run proof it is no longer live.
+    const start = new Date("2026-09-03T19:00:00.000Z")
+    const later = new Date("2026-09-03T20:00:00.000Z")
+    const check = {
+      branch: "task/one",
+      head: "abc123",
+      kind: "check" as const,
+      name: "test",
+      phase: "merge",
+      log: "/w/old/test.log",
+      start: start.toISOString(),
+    }
+    const { dir, run: oldId } = journalDir([check], start)
+    const current: Row = { branch: check.branch, head: check.head, state: "failed" }
+    const newestUnended = watchRows([current], { journals: readJournals(dir, { now: later }) })[0]!
+    expect(newestUnended.row.live?.run).toBe(oldId)
+    const log = openLog(dir, () => later)
+    log.write({ ...check, log: "/w/new/test.log", start: later.toISOString() })
+    log.write({ ...check, kind: "result", result: "fail", exit: "1" })
+    log.write({ branch: check.branch, head: check.head, kind: "change", decision: "failed", reason: "test" })
+    const rows = watchRows([current], { journals: readJournals(dir, { now: later }) })
+    expect(rows.map(({ row }) => row.run)).toEqual([log.id, oldId])
+    const old = rows[1]!
+    expect(old.row.live).toBeUndefined()
+    const views = checksOf(
+      [],
+      "failed",
+      [],
+      old.row.live === undefined
+        ? undefined
+        : {
+            name: old.row.live.check,
+            log: old.row.live.log,
+          },
+      old.run?.checks,
+    )
+    expect(views[0]?.state).toBe("unmeasured")
+    expect(rows[0]?.row).toMatchObject({ result: "fail test", run: log.id, log: "/w/new/test.log" })
+  })
+
   it("says where it looked when there is no journal there at all, and never returns an empty answer silently", () => {
     const dir = join(scratch("nowhere"), "logs")
 
@@ -236,7 +278,7 @@ describe("the declared checks, joined to what ran", () => {
       },
     })
     expect(projected[0]?.row.log).toBe("/candidate/test.log")
-    expect(projected[0]?.row.runResult).toBe("fail test")
+    expect(projected[0]?.row.result).toBe("fail test")
   })
 
   it("renders every check after a failing one as NOT RUN, with the command that would have run it", () => {
