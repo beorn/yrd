@@ -19,9 +19,9 @@
  * origin holds 7,387 branches, and fetching them all cost 17 s a round).
  */
 
-import { recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
+import { readRecords, recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
 import { isAncestor } from "./git.ts"
-import { CHANGES, changeRef, parseChangeRef, type Change } from "./refs.ts"
+import { CHANGES, changeName, changeRef, parseChangeRef, type Change } from "./refs.ts"
 import { readChange, type ChangeRecords, type ChangeReading } from "./state.ts"
 
 /** One change as the queue read sees it. */
@@ -144,6 +144,26 @@ export async function readQueue(
   return { changes: entries, target: targetSha }
 }
 
+/**
+ * Expand selected queue entries from their fixed-cost tip reading to their
+ * full record histories. Call this only for the entries a detail view opens;
+ * the queue-wide read deliberately stays tip-only.
+ */
+export async function readHistories(git: Git, entries: QueueRead, remote: string): Promise<QueueRead> {
+  const hydrated: QueueEntry[] = []
+  for (const entry of entries) {
+    const records = await readRecords(git, entry.change)
+    const first = records[0]
+    if (first === undefined) {
+      throw new Error(
+        `${changeName(entry.change)} was listed at ${remote} but its record history was absent after the queue read; run yrd queue show ${entry.change.branch} again`,
+      )
+    }
+    hydrated.push({ ...entry, change: { ...entry.change, records: [first, ...records.slice(1)] } })
+  }
+  return hydrated
+}
+
 /** Every change ref's tip record, by ref, in one reading. A change ref that does not end in a record is loud. */
 async function tipRecords(git: Git): Promise<ReadonlyMap<string, ChangeRecord>> {
   const out = await git([
@@ -154,8 +174,15 @@ async function tipRecords(git: Git): Promise<ReadonlyMap<string, ChangeRecord>> 
   const tips = new Map<string, ChangeRecord>()
   for (const record of out.split("\x01")) {
     const [sha, ref, at, block, body] = record.replace(/^\n/u, "").split("\x00")
-    if (sha === undefined || ref === undefined || at === undefined || block === undefined || body === undefined || sha.trim() === "")
-      continue
+    if (
+      sha === undefined ||
+      ref === undefined ||
+      at === undefined ||
+      block === undefined ||
+      body === undefined ||
+      sha.trim() === ""
+    )
+      {continue}
     // Every reader of the queue comes through here, so the one check that a
     // change's records are in the format this code reads belongs here (records.ts).
     tips.set(ref, tipRecord(recordFrom(sha.trim(), at, body, block), sha.trim(), ref))

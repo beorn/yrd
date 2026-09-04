@@ -24,7 +24,16 @@
 
 export { CHANGES, changeName, changeRef, parseChangeName, parseChangeRef, refOfChange } from "./refs.ts"
 export type { Change } from "./refs.ts"
-export { appendRecord, DIRECT_MERGE, mergedBy, mergedByRun, readRecord, readRecords, trailer, trailers } from "./records.ts"
+export {
+  appendRecord,
+  DIRECT_MERGE,
+  mergedBy,
+  mergedByRun,
+  readRecord,
+  readRecords,
+  trailer,
+  trailers,
+} from "./records.ts"
 export type { ChangeRecord, Git } from "./records.ts"
 export { inLine, nextOwner, readChange, tipOf } from "./state.ts"
 export type { NextOwner } from "./state.ts"
@@ -40,7 +49,7 @@ export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from
 export type { Ending, Notifier, QueueConfig, Target } from "./config.ts"
 export { clocks, list, show, subjects } from "./table.ts"
 export type { Clocks, ListOptions, Row } from "./table.ts"
-export { readQueue, resolveRemote } from "./remote.ts"
+export { readHistories, readQueue, resolveRemote } from "./remote.ts"
 export { directMergeCommits, directMergeLine } from "./direct.ts"
 export { refuseTarget, submit, issueOf } from "./submit.ts"
 export {

@@ -32,9 +32,8 @@ import {
   queueName,
   queueRun,
   readConfig,
-  tipOf,
-  trailers,
   readJournals,
+  readHistories,
   readQueue,
   runId,
   subjects,
@@ -340,7 +339,12 @@ export async function coreQueueCommand(
           if (now !== gitlink.sha) {
             const moved = `gitlink moved from ${gitlink.sha.slice(0, 12)} to ${now === undefined ? "no gitlink" : now.slice(0, 12)}: exiting for relaunch`
             log?.info?.(moved, { from: gitlink.sha, gitlink: gitlink.path, to: now })
-            emit(io, options.json, { exitCode: 0, from: gitlink.sha, gitlink: gitlink.path, reason: "gitlink-moved", to: now }, moved)
+            emit(
+              io,
+              options.json,
+              { exitCode: 0, from: gitlink.sha, gitlink: gitlink.path, reason: "gitlink-moved", to: now },
+              moved,
+            )
             return 0
           }
         }
@@ -404,8 +408,16 @@ export async function coreQueueCommand(
         // them: the text round never opens a log file.
         const detail = new Map<string, ChangeDetail>()
         if (options.interactive === true && options.json !== true) {
+          const heads = new Set(rows.map((row) => row.row.head))
+          const histories = await readHistories(
+            git,
+            queue.changes.filter((entry) => heads.has(entry.change.head)),
+            config.target.remote,
+          )
           const packed = new Map(
-            queue.changes.map((entry) => [entry.change.head, trailers(tipOf(entry.change), "Check")] as const),
+            histories.flatMap((entry) =>
+              show([entry], entry.change.branch).map((change) => [entry.change.head, change.checks] as const),
+            ),
           )
           for (const row of rows) {
             if (detail.has(row.row.head)) continue
@@ -629,11 +641,13 @@ export async function coreQueueCommand(
     case "show": {
       const queue = await readQueue(git, config.target.remote, config.target.branch)
       const journals = readJournals(join(workdir, "logs"))
-      const changes = show(queue.changes, request.branch, {
+      const matching = queue.changes.filter((entry) => entry.change.branch === request.branch)
+      const hydrated = await readHistories(git, matching, config.target.remote)
+      const changes = show(hydrated, request.branch, {
         journals,
         subjects: await subjects(
           git,
-          queue.changes.map((entry) => entry.change.head),
+          matching.map((entry) => entry.change.head),
         ),
       })
       // The checks a change was JUDGED BY: the declaration at the commit its
@@ -649,7 +663,12 @@ export async function coreQueueCommand(
             change.checks,
             endingOf(change.row),
             declared.checks,
-            change.row.live === undefined ? undefined : { name: change.row.live.check, ...(change.row.live.log === undefined ? {} : { log: change.row.live.log }) },
+            change.row.live === undefined
+              ? undefined
+              : {
+                  name: change.row.live.check,
+                  ...(change.row.live.log === undefined ? {} : { log: change.row.live.log }),
+                },
           ),
           ...(declared.note === undefined ? {} : { note: declared.note }),
         })

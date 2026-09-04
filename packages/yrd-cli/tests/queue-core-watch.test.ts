@@ -14,10 +14,23 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import { gitIn, submit, type Git } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import type { WatchSnapshot } from "../src/watch-pane.tsx"
+
+const rendered: { snapshot: WatchSnapshot | undefined } = vi.hoisted(() => ({ snapshot: undefined }))
+vi.mock("silvery/runtime", () => ({
+  run: async (element: Readonly<{ props: Readonly<{ snapshot: WatchSnapshot }> }>) => {
+    rendered.snapshot = element.props.snapshot
+    return { waitUntilExit: async () => {} }
+  },
+}))
+
+function renderedSnapshot(): WatchSnapshot | undefined {
+  return rendered.snapshot
+}
 
 const roots: string[] = []
 
@@ -223,5 +236,51 @@ describe("what a watch says it looked at", () => {
     const listed = JSON.parse(run.stdout().trim()) as Readonly<{ journal: Readonly<{ dir: string; absent?: string }> }>
     expect(listed.journal.dir).toBe(join(w.workdir, "logs"))
     expect(listed.journal.absent).toContain("there is no such directory")
+  })
+
+  it("puts submit- and merge-round checks into a merged change's interactive detail", async () => {
+    const w = await world()
+    writeFileSync(
+      join(w.work, ".yrd.yml"),
+      [
+        "target: origin#main",
+        "checks:",
+        "  - repeated:",
+        "      run: test -f pass.txt",
+        "      on: [submit, merge]",
+        "  - submit-only:",
+        "      run: test -f pass.txt",
+        "      on: submit",
+        "  - merge-only:",
+        "      run: test -f pass.txt",
+        "      on: merge",
+        "",
+      ].join("\n"),
+    )
+    await w.git(["commit", "--quiet", "-am", "declare checks in both phases"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await change(w, "task/good", true)
+    await drain(w)
+    rendered.snapshot = undefined
+
+    const run = capture(w.work)
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", terms: ["task/good"], watch: true },
+      { interactive: true, workdir: w.workdir },
+    )
+
+    expect(exit).toBe(0)
+    const snapshot = renderedSnapshot()
+    if (snapshot === undefined) throw new Error("interactive watch rendered no snapshot")
+    const detail = snapshot.detail.values().next().value
+    if (detail === undefined) throw new Error("interactive watch rendered no change detail")
+    expect(detail.checks.map((check) => [check.name, check.state])).toEqual([
+      ["repeated", "passed"],
+      ["submit-only", "passed"],
+      ["merge-only", "passed"],
+    ])
+    expect(detail.checks.find((check) => check.name === "repeated")?.log).toContain("/merge/")
   })
 })

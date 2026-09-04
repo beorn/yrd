@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, submit, type Git } from "@yrd/queue-core"
+import { appendRecord, changeRef, gitIn, submit, type Git } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -522,5 +522,108 @@ describe("yrd queue list, the table", () => {
     const asText = capture(w.work)
     expect(await coreQueueCommand(w.work, asText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
     expect(asText.stdout()).toContain(`   direct  main ${direct.slice(0, 12)} ${sentence}\n`)
+  })
+})
+
+describe("yrd queue show, one change's evidence", () => {
+  it("hydrates the checked-to-sent history and leaves a genuinely missing check not run", async () => {
+    const w = await world()
+    await redeclare(
+      w,
+      [
+        "target: origin#main",
+        "checks:",
+        "  - typecheck:",
+        "      run: bun run typecheck",
+        "  - manifest-co-change:",
+        "      run: bun run manifest-co-change",
+        "  - substrate-pair:",
+        "      run: bun run substrate-pair",
+        "  - affected-tests:",
+        "      run: bun run affected-tests",
+        "  - never-ran:",
+        "      run: bun run never-ran",
+        "",
+      ].join("\n"),
+    )
+    const base = (await w.git(["rev-parse", "main"])).trim()
+    await w.git(["checkout", "--quiet", "-b", "task/evidence", "main"])
+    writeFileSync(join(w.work, "evidence.txt"), "evidence\n")
+    await w.git(["add", "evidence.txt"])
+    await w.git(["commit", "--quiet", "-m", "evidence"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    const change = { branch: "task/evidence", head }
+    await submit(w.git, "origin", {
+      branch: change.branch,
+      submitter: "@dev/3",
+      target: { branch: "main", remote: "origin" },
+    })
+    await appendRecord(w.git, {
+      change,
+      kind: "checked",
+      subject: "on-submit checks passed",
+      target: "origin#main",
+      trailers: [
+        ["Base", base],
+        ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
+        ["Check", "manifest-co-change exit=0 ms=13 log=/tmp/manifest.log"],
+        ["Check", "substrate-pair exit=0 ms=14 log=/tmp/substrate.log"],
+        ["Check", "affected-tests exit=0 ms=14 log=/tmp/submit-affected.log"],
+      ],
+    })
+    await appendRecord(w.git, {
+      change,
+      kind: "merged",
+      subject: "merged task/evidence into main",
+      target: "origin#main",
+      trailers: [
+        ["Base", base],
+        ["Merge", base],
+        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
+      ],
+    })
+    await appendRecord(w.git, {
+      change,
+      kind: "sent",
+      subject: "sent merge notice",
+      target: "origin#main",
+      trailers: [
+        ["State", "merged"],
+        ["Base", base],
+        ["Merge", base],
+        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
+      ],
+    })
+    await w.git(["push", "--quiet", "origin", `${changeRef(change)}:${changeRef(change)}`])
+
+    const run = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        { command: "show", branch: change.branch },
+        { json: true, workdir: w.workdir },
+      ),
+    ).toBe(0)
+    const shown = records(run)[0] as Readonly<{
+      changes: readonly Readonly<{
+        checks: readonly Readonly<{ name: string; state: string }>[]
+        records: readonly Readonly<{ kind: string }>[]
+      }>[]
+    }>
+
+    expect(shown.changes[0]?.records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
+    expect(shown.changes[0]?.checks.map((check) => [check.name, check.state])).toEqual([
+      ["typecheck", "passed"],
+      ["manifest-co-change", "passed"],
+      ["substrate-pair", "passed"],
+      ["affected-tests", "passed"],
+      ["never-ran", "not-run"],
+    ])
+    expect(shown.changes[0]?.checks.find((check) => check.name === "affected-tests")).toMatchObject({
+      log: "/tmp/affected.log",
+      result: { log: "/tmp/affected.log" },
+    })
   })
 })

@@ -129,7 +129,7 @@ export function show(
   return entries
     .filter((entry) => entry.change.branch === branch)
     .map((entry) => ({
-      checks: trailers(tipOf(entry.change), "Check"),
+      checks: entry.change.records.flatMap((record) => trailers(record, "Check")),
       records: entry.change.records,
       row: row(entry, undefined, options),
     }))
@@ -161,9 +161,7 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
       ? undefined
       : Math.max(0, row.startedAt.getTime() - row.since.getTime())
   const runtimeMs =
-    row.startedAt === undefined
-      ? undefined
-      : Math.max(0, (row.endedAt ?? now).getTime() - row.startedAt.getTime())
+    row.startedAt === undefined ? undefined : Math.max(0, (row.endedAt ?? now).getTime() - row.startedAt.getTime())
   return {
     ...(ageMs === undefined ? {} : { ageMs }),
     ...(waitMs === undefined ? {} : { waitMs }),
