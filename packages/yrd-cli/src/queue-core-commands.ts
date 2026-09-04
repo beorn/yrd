@@ -846,6 +846,10 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
         : `${String(rest.name)} ran for ${where} in ${String(rest.ms)} ms`
     case "result":
       return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`
+    case "settle":
+      return rest.state === "left-off-main"
+        ? `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} left off component main ${String(rest.to).slice(0, 12)}`
+        : `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} -> ${String(rest.to).slice(0, 12)} (component main)`
     case "merge":
       return `${where} merged as ${String(rest.commit).slice(0, 12)}`
     case "message":

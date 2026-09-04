@@ -130,7 +130,7 @@ export function openedAt(change: ChangeRecords): number {
 
 /**
  * A failed record's `Reason` (a check's name, conflict, config-invalid,
- * unrelated-history, gitlink-off-main, replaced, deleted). A stuck record has
+ * unrelated-history, replaced, deleted). A stuck record has
  * the complete incident shape instead, and its code is read above.
  */
 function reasonOf(record: ChangeRecord): string | undefined {

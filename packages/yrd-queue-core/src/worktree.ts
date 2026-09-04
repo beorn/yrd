@@ -61,7 +61,7 @@ export async function freshWorktree(
     // component's remote. git-super's default (0) refuses the network and the
     // queue stuck on a change whose km gitlink was on km's main but not yet in
     // the reference's store (2026-09-03 10:52 PDT, @dev/2's 24089); a gitlink
-    // that is not on its component's main still fails at the gitlink check.
+    // that is not on its component's main is classified by git-super merge.
     maxRemoteFallbacks: Number.POSITIVE_INFINITY,
     referenceWorktree: repo,
     worktree: path,

@@ -1,13 +1,8 @@
 /**
- * The built-in check at submit: every gitlink the change moved reachable from
- * its component's `main` ([plan](../../../../pm/@i/10-yrd/plan.md) § The final
- * design, The queue run; ruling E4, amending D7). A change that moves a
- * component at a commit its main does not carry ends failed, the submitter's,
- * before any declared check runs; a gitlink that main carries, ahead or behind,
- * passes through. Only the gitlinks the change moved against the target are
- * asked about, and a positive answer is kept for the run, so a component is
- * fetched at most once per run per gitlink, and not at all for a change that
- * moves no gitlink.
+ * Settling at submit and merge: git-super raises every held-back gitlink to its
+ * component's newest main. An authored pin main does not carry waits without
+ * ending the change or blocking the next entry; an object no remote can supply
+ * is the submitter's failed change, never a queue-owned stuck.
  *
  * Measured 2026-09-02 on the old core: a root gitlink pointed at a branch
  * commit forked on the gitlink, and every later change was judged against a
@@ -19,9 +14,8 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createProcess, type Process } from "@yrd/process"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, queueRun, readRecords, submit, trailer } from "../src/index.ts"
+import { gitIn, list, queueRun, readQueue, readRecords, submit, trailer } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 
 const roots: string[] = []
@@ -37,38 +31,10 @@ type World = Readonly<{
   onMain: string
   /** A commit on a branch of the component that its main does not carry. */
   offMain: string
-  /** How many times the queue asked the component for its main, so far. */
-  fetches(): number
-  options(): QueueRunOptions
+  /** The newest commit on the component's main when the fixture was made. */
+  main: string
+  options(check?: Readonly<{ run: string; on: readonly ("submit" | "merge")[] }>): QueueRunOptions
 }>
-
-/**
- * The queue's process seam, counting every `git fetch` run inside a component
- * checkout: the one network call the gitlink check makes. Everything else
- * passes through untouched — a fake process would be a fake store.
- */
-function countingFetches(
-  inner: Process,
-  inComponent: (cwd: string) => boolean,
-): Readonly<{ process: Process; count(): number }> {
-  let count = 0
-  const process: Process = {
-    close: () => inner.close(),
-    run: (request) => {
-      if (
-        request.argv[0] === "git" &&
-        request.argv[1] === "fetch" &&
-        request.cwd !== undefined &&
-        inComponent(request.cwd)
-      ) {
-        count += 1
-      }
-      return inner.run(request)
-    },
-    [Symbol.asyncDispose]: () => inner[Symbol.asyncDispose](),
-  }
-  return { count: () => count, process }
-}
 
 /**
  * A component whose main is `one` then `three`, with a branch `feature` at
@@ -108,6 +74,7 @@ async function world(): Promise<World> {
   await cg(["checkout", "--quiet", "main"])
   writeFileSync(join(componentWork, "lib.txt"), "three\n")
   await cg(["commit", "--quiet", "-am", "three"])
+  const main = (await cg(["rev-parse", "HEAD"])).trim()
   await cg(["push", "--quiet", "origin", "main", "feature"])
 
   const remote = join(root, "remote.git")
@@ -124,22 +91,15 @@ async function world(): Promise<World> {
   await git(["push", "--quiet", "origin", "main"])
   const workdir = join(root, "queue")
   mkdirSync(workdir, { recursive: true })
-  // The component's checkout inside a judged worktree is where the check asks
-  // for main; the reference checkout under `work` is the submitter's, not the queue's.
-  const counting = countingFetches(
-    createProcess({ cwd: work }),
-    (cwd) => cwd.startsWith(workdir) && cwd.endsWith("/component"),
-  )
   return {
-    fetches: counting.count,
     git,
+    main,
     offMain,
     onMain,
-    options: () => ({
-      checks: [],
+    options: (check) => ({
+      checks: check === undefined ? [] : [{ name: "component-check", on: check.on, run: check.run }],
       configBlob: "test-config",
       env: process.env,
-      process: counting.process,
       repo: work,
       target: { branch: "main", remote: "origin" },
       workdir,
@@ -164,7 +124,7 @@ async function submitGitlink(w: World, branch: string, sha: string): Promise<str
   return head
 }
 
-/** The component's gitlink moved on main itself, around the queue, and pushed: the case the gitlink check never sees (E5). */
+/** The component's gitlink moved on main itself, around the queue, and pushed: the case candidate settling never sees (E5). */
 async function gitlinkAroundQueue(w: World, sha: string): Promise<string> {
   await w.git(["checkout", "--quiet", "main"])
   const sub = gitIn(join(w.work, "component"))
@@ -188,44 +148,218 @@ async function submitFile(w: World, branch: string): Promise<string> {
   return head
 }
 
-describe("the built-in gitlink check", () => {
-  it("a gitlink the component's main does not carry ends failed, the submitter's, naming the component", async () => {
+/** Submit a root commit whose gitlink object exists nowhere the queue can fetch. */
+async function submitMissingGitlink(w: World, branch: string, missing: string): Promise<string> {
+  const base = (await w.git(["rev-parse", "main"])).trim()
+  await w.git(["read-tree", "main"])
+  await w.git(["update-index", "--add", "--info-only", "--cacheinfo", `160000,${missing},component`])
+  const tree = (await w.git(["write-tree"])).trim()
+  const head = (
+    await w.git(["commit-tree", tree, "-p", base, "-m", `${branch}: record an unavailable component`])
+  ).trim()
+  await w.git(["update-ref", `refs/heads/${branch}`, head])
+  await w.git(["read-tree", "main"])
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
+  return head
+}
+
+async function remoteTarget(w: World): Promise<string> {
+  return (await w.git(["ls-remote", "--refs", "origin", "refs/heads/main"])).trim().split(/\s+/u)[0] ?? ""
+}
+
+async function gitlinkAt(w: World, commit: string): Promise<string> {
+  const row = (await w.git(["ls-tree", commit, "--", "component"])).trim().split(/\s+/u)
+  return row[2] ?? ""
+}
+
+async function advanceComponent(w: World, contents: string): Promise<string> {
+  const componentWork = join(w.work, "..", "component-work")
+  const component = gitIn(componentWork)
+  await component(["checkout", "--quiet", "main"])
+  writeFileSync(join(componentWork, "lib.txt"), `${contents}\n`)
+  await component(["commit", "--quiet", "-am", contents])
+  await component(["push", "--quiet", "origin", "main"])
+  return (await component(["rev-parse", "HEAD"])).trim()
+}
+
+describe("settling gitlinks", () => {
+  it("an off-main gitlink waits in place while the next change proceeds", async () => {
     const w = await world()
     const head = await submitGitlink(w, "task/off", w.offMain)
+    await submitFile(w, "task/next")
 
     const outcome = await queueRun(w.options())
 
-    expect(outcome.exitCode).toBe(1)
-    expect(outcome.failed).toEqual(["task/off"])
-    const failed = (await readRecords(w.git, { branch: "task/off", head })).find((record) => record.kind === "failed")
-    if (failed === undefined) throw new Error("no failed record")
-    expect(trailer(failed, "Reason")).toBe("gitlink-off-main")
-    expect(trailer(failed, "Fault")).toBe("submitter")
-    expect(failed.subject).toContain("component")
-    expect(trailer(failed, "Remedy")).toContain("main")
-    expect(w.fetches()).toBe(1)
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/next"], stuck: [] })
+    const waitingRecords = await readRecords(w.git, { branch: "task/off", head })
+    expect(waitingRecords.map((record) => record.kind)).toEqual(["opened", "opened"])
+    expect(trailer(waitingRecords.at(-1)!, "Code")).toBe("gitlink-off-main")
+    expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("main")
+    expect(trailer(waitingRecords.at(-1)!, "Owner")).toBe("the component writer")
+    const waitingQueue = await readQueue(w.git, "origin", "main")
+    expect(waitingQueue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("queued")
+    const waitingRow = list(waitingQueue.changes).find((row) => row.head === head)
+    expect(waitingRow).toMatchObject({
+      incident: { code: "gitlink-off-main", owner: "the component writer" },
+      next: { owner: "the component writer" },
+      position: 1,
+      state: "queued",
+    })
+    expect(waitingRow?.result).toContain(w.offMain)
+    expect(readFileSync(outcome.log, "utf8")).toContain("gitlink-off-main")
+
+    const componentWork = join(w.work, "..", "component-work")
+    const component = gitIn(componentWork)
+    await component(["checkout", "--quiet", "main"])
+    await component(["merge", "--quiet", "--no-ff", "-s", "ours", "-m", "land feature", "feature"])
+    await component(["push", "--quiet", "origin", "main"])
+    const componentMain = (await component(["rev-parse", "HEAD"])).trim()
+
+    const retried = await queueRun(w.options())
+
+    expect(retried).toMatchObject({ exitCode: 0, failed: [], merged: ["task/off"], stuck: [] })
+    expect((await readRecords(w.git, { branch: "task/off", head })).map((record) => record.kind)).toEqual([
+      "opened",
+      "opened",
+      "checked",
+      "merged",
+      "sent",
+    ])
+    expect(await gitlinkAt(w, await remoteTarget(w))).toBe(componentMain)
   })
 
-  it("a gitlink the component's main carries passes through, and the change merges", async () => {
+  it("a held-back authored pin merges raised and keeps the submitted Change identity", async () => {
     const w = await world()
-    await submitGitlink(w, "task/on", w.onMain)
+    const head = await submitGitlink(w, "task/on", w.onMain)
 
     const outcome = await queueRun(w.options())
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/on"])
-    expect(w.fetches()).toBe(1)
+    const target = await remoteTarget(w)
+    expect(await gitlinkAt(w, target)).toBe(w.main)
+    const message = await w.git(["show", "-s", "--format=%B", target])
+    expect(message).toContain(`Change: task/on@${head}`)
+    expect(message).toContain(`Settled: component@${w.main}`)
+    const merge = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((record) => record.kind === "merge")
+    expect(merge?.gitlinks).toContain(`component ${w.onMain} -> ${w.main}`)
   })
 
-  it("a change that moves no gitlink asks no component: the target's gitlinks are the target's, judged when they landed (E4)", async () => {
+  /** An anomaly already on root main is not the candidate's authorship, but every merge that passes over it must expose it. */
+  it("an untouched off-main target pin stays put and is reported in the run log", async () => {
     const w = await world()
-    await submitFile(w, "task/file")
+    await gitlinkAroundQueue(w, w.offMain)
+    await submitFile(w, "task/pass-over-off-main")
 
     const outcome = await queueRun(w.options())
 
-    expect(outcome.exitCode).toBe(0)
-    expect(outcome.merged).toEqual(["task/file"])
-    expect(w.fetches()).toBe(0)
+    expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/pass-over-off-main"] })
+    const target = await remoteTarget(w)
+    expect(await gitlinkAt(w, target)).toBe(w.offMain)
+    expect(await w.git(["show", "-s", "--format=%(trailers:key=Settled,valueonly)", target])).toContain(
+      `component@${w.offMain} left-off-main component-main@${w.main}`,
+    )
+    const settle = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "settle")
+    expect(settle).toContainEqual(
+      expect.objectContaining({
+        from: w.offMain,
+        path: "component",
+        state: "left-off-main",
+        to: w.main,
+      }),
+    )
+  })
+
+  it("an unfetchable candidate gitlink fails the submitter and the next change proceeds", async () => {
+    const w = await world()
+    const missing = "f".repeat(40)
+    const head = await submitMissingGitlink(w, "task/missing", missing)
+    await submitFile(w, "task/next")
+
+    const outcome = await queueRun(w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/missing"], merged: ["task/next"], stuck: [] })
+    const records = await readRecords(w.git, { branch: "task/missing", head })
+    expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
+    const failed = records.find((record) => record.kind === "failed")
+    expect(trailer(failed!, "Fault")).toBe("submitter")
+    expect(trailer(failed!, "Reason")).toContain(missing)
+    expect(failed?.subject).toContain("component")
+  })
+
+  it("a candidate failure introduced by raising component main is queue-owned stuck", async () => {
+    const w = await world()
+    const breaking = await advanceComponent(w, "breaking component main")
+    const head = await submitFile(w, "task/base-red")
+
+    const outcome = await queueRun(
+      w.options({ on: ["submit"], run: "! grep -q 'breaking component main' component/lib.txt" }),
+    )
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/base-red"] })
+    const records = await readRecords(w.git, { branch: "task/base-red", head })
+    const stuck = records.find((record) => record.kind === "stuck")
+    expect(trailer(stuck!, "Code")).toBe("yrd-submodule-main-regression")
+    expect(trailer(stuck!, "Subject")).toContain("component")
+    expect(trailer(stuck!, "Subject")).toContain(breaking)
+    expect(trailer(stuck!, "Fault")).toBeUndefined()
+    const phases = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "result" && record.name === "component-check")
+      .map((record) => record.phase)
+    expect(phases).toEqual(["submit", "base"])
+  })
+
+  /** Attribution must compare candidate-minus-content even when root main's old pin is divergent, not silently keep that old tree. */
+  it("the settled-base comparator applies a raise over an off-main target pin", async () => {
+    const w = await world()
+    await gitlinkAroundQueue(w, w.offMain)
+    const head = await submitGitlink(w, "task/repair-off-main", w.onMain)
+
+    const outcome = await queueRun(w.options({ on: ["submit"], run: "! grep -q '^three$' component/lib.txt" }))
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/repair-off-main"] })
+    const records = await readRecords(w.git, { branch: "task/repair-off-main", head })
+    const stuck = records.find((record) => record.kind === "stuck")
+    expect(trailer(stuck!, "Code")).toBe("yrd-submodule-main-regression")
+    expect(trailer(stuck!, "Subject")).toContain(`component@${w.main}`)
+    const phases = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "result" && record.name === "component-check")
+      .map((record) => record.phase)
+    expect(phases).toEqual(["submit", "base"])
+  })
+
+  it("a candidate-only failure stays the submitter's when the settled base is green", async () => {
+    const w = await world()
+    await advanceComponent(w, "healthy component main")
+    const head = await submitFile(w, "task/candidate-red")
+
+    const outcome = await queueRun(w.options({ on: ["submit"], run: "test ! -f task-candidate-red.txt" }))
+
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/candidate-red"], merged: [], stuck: [] })
+    const records = await readRecords(w.git, { branch: "task/candidate-red", head })
+    expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
+    expect(trailer(records.find((record) => record.kind === "failed")!, "Fault")).toBe("submitter")
+    const phases = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "result" && record.name === "component-check")
+      .map((record) => record.phase)
+    expect(phases).toEqual(["submit", "base"])
   })
 
   it("a gitlink moved on the target around the queue is reported with its path, and no component is asked about it (E5)", async () => {
@@ -246,13 +380,13 @@ describe("the built-in gitlink check", () => {
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
-    expect(log.filter((record) => record.kind === "merged-direct")).toMatchObject([{ commit: direct, gitlinks: ["component"] }])
+    expect(log.filter((record) => record.kind === "merged-direct")).toMatchObject([
+      { commit: direct, gitlinks: ["component"] },
+    ])
     const told = log.filter((record) => record.kind === "message" && record.says === "merged-direct")
     expect(told).toMatchObject([{ id: direct, says: "merged-direct", to: "none" }])
     expect(told[0]?.text).toContain(`main moved around the queue at ${direct.slice(0, 12)}`)
     expect(told[0]?.text).toContain("it moved the gitlink at component")
-    // The report reads the commit; it never judges the gitlink, so no component is asked.
-    expect(w.fetches()).toBe(0)
   })
 
   it("a gitlink the reference checkout never fetched is materialized from the component's remote, and the change merges", async () => {
@@ -275,11 +409,22 @@ describe("the built-in gitlink check", () => {
     await w.git(["update-index", "--add", "--cacheinfo", `160000,${four},component`])
     const tree = (await w.git(["write-tree"])).trim()
     const head = (
-      await w.git(["commit-tree", tree, "-p", base, "-m", "task/unfetched: move the component gitlink to a commit this checkout never fetched"])
+      await w.git([
+        "commit-tree",
+        tree,
+        "-p",
+        base,
+        "-m",
+        "task/unfetched: move the component gitlink to a commit this checkout never fetched",
+      ])
     ).trim()
     await w.git(["update-ref", "refs/heads/task/unfetched", head])
     await w.git(["read-tree", "main"])
-    await submit(w.git, "origin", { branch: "task/unfetched", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
+    await submit(w.git, "origin", {
+      branch: "task/unfetched",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
 
     const outcome = await queueRun(w.options())
 
@@ -300,7 +445,9 @@ describe("the built-in gitlink check", () => {
     // run's answer — and one merge per run lands the first (ruling D4).
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/first"])
-    expect((await readRecords(w.git, { branch: "task/second", head: second })).map((record) => record.kind)).toEqual(["opened", "checked"])
-    expect(w.fetches()).toBe(1)
+    expect((await readRecords(w.git, { branch: "task/second", head: second })).map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+    ])
   })
 })

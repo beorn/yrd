@@ -101,7 +101,9 @@ describe("the queue run", { timeout: 180_000 }, () => {
         checks: [{ name: "gate", run: `GATE_LOG=${log} sh gate.sh`, scripts: ["gate.sh"] }],
         // The target's gate is red only where the change's marker is, so this
         // case is about WHOSE gate ran and not about whose fault a red one is.
-        files: { "gate.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$GATE_LOG\"\nif [ -e script.txt ]; then exit 1; fi\nexit 0\n" },
+        files: {
+          "gate.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$GATE_LOG\"\nif [ -e script.txt ]; then exit 1; fi\nexit 0\n",
+        },
       })
       const before = await targetTip(repo)
 
@@ -148,13 +150,8 @@ describe("the queue run", { timeout: 180_000 }, () => {
     expect(await checkAttempts(log), one.report).toBeGreaterThan(0)
   })
 
-  /**
-   * "a fresh worktree of the head, the built-in checks and the `on: submit`
-   * checks" … then "the target plus its head in a worktree, … the `on: merge`
-   * checks". The two phases see two different trees, and that difference is
-   * the only thing that makes running the on-merge checks worth anything.
-   */
-  it("the on-submit checks see the head alone; the on-merge checks see it merged onto the target", async () => {
+  /** M7.5: candidate preparation composes onto the target before on-submit, so both phases judge what can actually merge. */
+  it("the on-submit and on-merge checks both see the candidate composed onto the target", async () => {
     const log = await temporaryLog("phases")
     const { repo, origin } = await boundaryRepositoryWith({
       hooks: true,
@@ -169,8 +166,8 @@ describe("the queue run", { timeout: 180_000 }, () => {
         `the plan gives each check a phase, \`on: submit\` or \`on: merge\`; the target will not accept the key: ${String(cause)}`,
       )
     })
-    // The target gains a file AFTER the branch was cut, so "did the check see
-    // it" answers "was this the head alone, or the head merged onto the target".
+    // The target gains a file after the branch was cut. Honest candidate
+    // preparation includes it before either phase judges the branch.
     await advanceTargetAroundQueue(origin, { "moved.txt": "moved\n" })
     await refreshTarget(repo)
 
@@ -183,7 +180,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     expect(submitLine, seen).toBeDefined()
     expect(mergeLine, seen).toBeDefined()
     expect(submitLine, seen).toContain("branch.txt")
-    expect(submitLine, seen).not.toContain("moved.txt")
+    expect(submitLine, seen).toContain("moved.txt")
     expect(mergeLine, seen).toContain("branch.txt")
     expect(mergeLine, seen).toContain("moved.txt")
   })

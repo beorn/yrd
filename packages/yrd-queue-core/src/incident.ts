@@ -1,5 +1,5 @@
 /**
- * The complete, stored explanation of a queue-owned failure.
+ * The complete, stored explanation of a queue-owned failure or queued wait.
  *
  * These six fields are ADR-0007's obvious-error shape. They live on the
  * change record, not in a host-local journal, so every clone reads the same

@@ -76,7 +76,7 @@ export type CheckResult = Readonly<{
  * and the same for every check and setup that runs in it.
  */
 export type CheckedTree = Readonly<{
-  /** `YRD_CANDIDATE_SHA`: the worktree's HEAD — the change's head at submit, the merge commit at merge, the target itself at the target. */
+  /** `YRD_CANDIDATE_SHA`: the worktree's HEAD — a settled composition in queue phases, or the target itself at the target. */
   candidate: string
   /** `YRD_BASE_SHA`: the merge base of that HEAD and the target, so it is always an ancestor of the candidate. */
   base: string

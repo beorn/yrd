@@ -3,10 +3,10 @@
  * The queue run and Attribution).
  *
  * Read the checks from the target. For every queued change, oldest first: a
- * fresh worktree of the head and the on-submit checks; pass writes checked,
- * fail writes failed and tells the submitter, stuck writes stuck and stops the
- * run. Then the first checked change in line: the target plus its head in a
- * worktree (a conflict is a fail, the submitter's), the on-merge checks; pass
+ * settled composition of the target plus the head and the on-submit checks;
+ * pass writes checked, fail writes failed and tells the submitter, stuck writes
+ * stuck and stops the run. Then the first checked change in line is composed
+ * and settled again for the on-merge checks; pass
  * with the target still at the checked base and the branch still at the head
  * fast-forwards the target to the merge commit. Every ended change sends one
  * message, after its ended record is written, with that record's sha as the id.
@@ -20,7 +20,7 @@
  * Every worktree this run makes is prepared before anything is judged in it:
  * the target's `setup:`, once, after materialization and before the first
  * check (worktree.ts). A setup that does not pass is the queue's own ground
- * failing, so the change ends stuck with `Reason: setup` and nobody is billed.
+ * failing, so the change ends stuck with a complete incident and nobody is billed.
  *
  * A branch at the remote with no change is not a change (E2): the queue read
  * never lists it, so nothing here judges, opens or messages it. `submit` is
@@ -39,7 +39,7 @@
 
 import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import type { Process } from "@yrd/process"
+import { createProcess, type Process } from "@yrd/process"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import {
   appendRecord,
@@ -52,7 +52,7 @@ import {
   type WriteRecord,
 } from "./records.ts"
 import { queueName, readConfig, targetName, type Target } from "./config.ts"
-import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
+import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
 import { incidentTrailers } from "./incident.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
@@ -63,6 +63,7 @@ import { inLine, tipOf } from "./state.ts"
 import {
   checkedTree,
   claimWorktrees,
+  freshWorktree,
   prepareWorktree,
   reapWorktrees,
   SETUP,
@@ -130,22 +131,17 @@ export type Run = Readonly<{
   name: string
   /** The queue as this run read it: every change at the remote, and where each stood. */
   queue: QueueRead
-  /**
-   * Gitlinks proven on their component's `main` this run, as `<path>@<sha>`:
-   * a positive answer can only stay true, so the same gitlink is asked about at
-   * most once per run however many changes move it (E4).
-   */
-  onMain: Set<string>
   /** The steps this run is made of, rings and all: every step call goes through these. */
   steps: Steps
   /** Say a ring stopped this round before it could merge; the outcome carries what it said. */
   stop: (stopped: Stopped) => void
 }>
 
-type Ended = "checked" | "failed" | "stuck" | "merged"
+type Ended = "checked" | "waiting" | "failed" | "stuck" | "merged"
 
 /** Which side of a change a step is on: the head it was submitted at, or its merge with the target. */
-type Phase = "submit" | "merge"
+type CandidatePhase = "submit" | "merge"
+type Phase = CandidatePhase | "base"
 
 /** What an ending record will say, before it is written. */
 type EndedWrite = Readonly<{
@@ -231,7 +227,6 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     git,
     log,
     name: queueName(options.target, await remoteUrl(git, options.target.remote)),
-    onMain: new Set(),
     options,
     queue: queue.changes,
     steps: composed(BASE),
@@ -486,21 +481,11 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
       trailers: [["Reason", "unrelated-history"]],
     })
   }
-  const worktree = await run.steps.prepare(run, entry, head, join(run.worktrees, "submit", head.slice(0, 12)), "submit")
+  const composed = await composeCandidate(run, entry, "submit")
+  if (composed.kind === "waiting") return waiting(run, entry, composed.detail)
+  if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail)
+  const { worktree } = composed
   try {
-    // The built-in check: every gitlink the change moved reachable from its
-    // component's main (E4).
-    const offMain = await gitlinkOffMain(run, head, worktree.path)
-    if (offMain !== undefined) {
-      return await run.steps.end(run, entry, "failed", {
-        remedy: `land ${offMain.path}'s commit on its main first, record that gitlink, and submit again`,
-        subject: `${branch} records ${offMain.path} at ${offMain.sha.slice(0, 12)}, which its main does not carry`,
-        trailers: [
-          ["Reason", "gitlink-off-main"],
-          ["Gitlink", `${offMain.path} ${offMain.sha}`],
-        ],
-      })
-    }
     const results = await runPhase(run, entry, "submit", worktree.path, worktree.tree)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
@@ -518,7 +503,9 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
       )
     }
     const failing = results.filter((result) => result.result === "fail")
-    if (failing.length > 0) return await endFailing(run, entry, results, failing, "submit")
+    if (failing.length > 0) {
+      return await attributedFailure(run, entry, results, failing, "submit", composed.settled)
+    }
     await writeRecord(run, {
       change,
       kind: "checked",
@@ -532,46 +519,384 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
   }
 }
 
-/**
- * The first gitlink the change moved that its component's `main` does not
- * carry, or undefined when every moved gitlink is on its main (E4, amending D7).
- * Only a gitlink whose sha differs from the target's is asked about — added
- * or moved by the change; a gitlink the target already carries is the target's,
- * judged when it landed — and each component is asked at its own remote, so
- * the answer is about main as it is now, never a stale tracking ref. A
- * positive answer is kept on the run: a commit on main stays on main, so the
- * same gitlink is fetched at most once per run however many changes move it. A
- * component that cannot be asked throws, and the change ends stuck, because a
- * gitlink the queue cannot judge is not a fail.
- *
- * Measured 2026-09-02: asking every component of the root's tree cost 15
- * fetches and 13.7 s per judged change, for gitlinks the change never touched.
- */
-async function gitlinkOffMain(
-  run: Run,
-  head: string,
-  worktree: string,
-): Promise<Readonly<{ path: string; sha: string }> | undefined> {
-  for (const { path, sha } of await movedGitlinks(run, head)) {
-    const gitlink = `${path}@${sha}`
-    if (run.onMain.has(gitlink)) continue
-    const component = gitIn(join(worktree, path), run.options.process)
-    await component(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
-    if (!(await isAncestor(component, sha, "refs/remotes/origin/main"))) return { path, sha }
-    run.onMain.add(gitlink)
+type SuperMergeDetail = Readonly<{
+  code: string
+  phase: string
+  message: string
+  subject?: string
+  evidence?: string
+  next?: string
+  owner?: string
+}>
+
+type SettledGitlink = Readonly<{
+  path: string
+  from: string
+  to: string
+  state: "raised" | "left-off-main" | "not-run"
+}>
+
+type SuperMergeResult = Readonly<{
+  state: "updated" | "unchanged" | "failed" | "unknown"
+  partial: boolean
+  commit?: string
+  detail?: SuperMergeDetail
+  gitlinks: readonly SettledGitlink[]
+}>
+
+type ComposedCandidate =
+  | Readonly<{ kind: "ready"; mergeCommit: string; settled: readonly SettledGitlink[]; worktree: PreparedWorktree }>
+  | Readonly<{ kind: "waiting"; detail: SuperMergeDetail }>
+  | Readonly<{ kind: "failed"; detail: SuperMergeDetail }>
+
+/** Compose and settle the exact tree a phase will judge, then materialize that final commit before setup or checks run. */
+async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePhase): Promise<ComposedCandidate> {
+  const { head } = entry.change
+  const composing = await freshWorktree(
+    run.git,
+    run.options.repo,
+    run.targetSha,
+    join(run.worktrees, "compose", phase, head.slice(0, 12)),
+    run.options.plumbing,
+  )
+  let result: SuperMergeResult
+  try {
+    result = await superMerge(run, composing.path, head, mergeMessage(run, entry))
+    if (result.state !== "updated" || result.partial) {
+      const detail = result.detail
+      if (detail === undefined) {
+        throw new Error(`git-super merge of ${head} returned ${result.state} without a failure detail`)
+      }
+      return { detail, kind: detail.code === "gitlink-off-main" ? "waiting" : "failed" }
+    }
+    if (result.commit === undefined) throw new Error(`git-super merge of ${head} reported updated without a commit`)
+  } finally {
+    await composing.remove()
   }
-  return undefined
+
+  const mergeCommit = result.commit
+  if (mergeCommit === undefined) throw new Error(`git-super merge of ${head} lost its commit after composition`)
+  for (const settled of result.gitlinks.filter((row) => row.state !== "not-run")) {
+    run.log.write({
+      branch: entry.change.branch,
+      from: settled.from,
+      head,
+      kind: "settle",
+      path: settled.path,
+      phase,
+      state: settled.state,
+      to: settled.to,
+    })
+  }
+  const worktree = await run.steps.prepare(
+    run,
+    entry,
+    mergeCommit,
+    join(run.worktrees, phase, head.slice(0, 12)),
+    phase,
+  )
+  return { kind: "ready", mergeCommit, settled: result.gitlinks, worktree }
 }
 
-/**
- * The gitlinks `head` carries at a sha the target does not, in tree order:
- * one diff of the two trees, keeping every entry whose new mode is a gitlink.
- * A gitlink the change took out, or turned into a file, has no gitlink to judge.
- */
-async function movedGitlinks(run: Run, head: string): Promise<readonly Readonly<{ path: string; sha: string }>[]> {
-  return (await gitlinkRows(run.git, run.targetSha, head))
-    .filter((row) => row.newMode === "160000")
-    .map(({ path, sha }) => ({ path, sha }))
+/** Run git-super as the ruled command boundary; malformed or truncated JSON is never treated as a verdict. */
+async function superMerge(run: Run, cwd: string, commit: string, message: string): Promise<SuperMergeResult> {
+  const execution = await gitSuperExecution(run, cwd, ["merge", commit, "-m", message])
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(execution.stdout)
+  } catch (error) {
+    throw new Error(
+      `git-super merge exited ${String(execution.exitCode)} without readable JSON: ${execution.stderr.trim() || execution.stdout.trim()}`,
+      { cause: error },
+    )
+  }
+  const result = readSuperMergeResult(parsed)
+  if (execution.exitCode === 0 && result.state === "updated" && !result.partial) return result
+  if ((execution.exitCode === 1 || execution.exitCode === 2) && result.detail !== undefined) return result
+  throw new Error(
+    `git-super merge exit/result disagreement: exit=${String(execution.exitCode)} state=${result.state} partial=${String(result.partial)}`,
+  )
+}
+
+async function gitSuperExecution(
+  run: Run,
+  cwd: string,
+  argv: readonly string[],
+): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
+  const owned = run.options.process === undefined
+  const process =
+    run.options.process ?? createProcess({ cwd, env: gitEnvironment(run.options.env ?? globalThis.process.env) })
+  try {
+    const execution = await process.run({
+      argv: ["git-super", "--json", ...argv],
+      cwd,
+      env: gitEnvironment(run.options.env ?? globalThis.process.env),
+    })
+    if (
+      execution.timedOut ||
+      execution.stalled === true ||
+      execution.signal !== null ||
+      execution.sweepFailure !== undefined ||
+      execution.escapedDescendant === true
+    ) {
+      throw new Error(
+        `git-super ${argv[0] ?? "command"} did not settle normally: exit=${String(execution.exitCode)} signal=${execution.signal ?? "none"} timedOut=${String(execution.timedOut)} stalled=${String(execution.stalled === true)}${execution.sweepFailure === undefined ? "" : `; ${execution.sweepFailure}`}`,
+      )
+    }
+    if (execution.outputTruncation !== undefined) {
+      throw new Error(
+        `git-super ${argv[0] ?? "command"} output was truncated: ${JSON.stringify(execution.outputTruncation)}`,
+      )
+    }
+    return execution
+  } finally {
+    if (owned) await process.close()
+  }
+}
+
+function readSuperMergeResult(value: unknown): SuperMergeResult {
+  if (typeof value !== "object" || value === null) throw new Error("git-super merge JSON is not an object")
+  const found = value as Record<string, unknown>
+  if (!new Set(["updated", "unchanged", "failed", "unknown"]).has(String(found.state))) {
+    throw new Error(`git-super merge JSON has invalid state ${String(found.state)}`)
+  }
+  if (typeof found.partial !== "boolean") throw new Error("git-super merge JSON has no boolean partial field")
+  if (!Array.isArray(found.gitlinks)) throw new Error("git-super merge JSON has no gitlinks array")
+  const gitlinks = found.gitlinks.map((row, index): SettledGitlink => {
+    if (typeof row !== "object" || row === null) {
+      throw new Error(`git-super merge gitlink ${String(index)} is not an object`)
+    }
+    const entry = row as Record<string, unknown>
+    if (
+      typeof entry.path !== "string" ||
+      typeof entry.from !== "string" ||
+      typeof entry.to !== "string" ||
+      !new Set(["raised", "left-off-main", "not-run"]).has(String(entry.state))
+    ) {
+      throw new Error(`git-super merge gitlink ${String(index)} is incomplete`)
+    }
+    return entry as SettledGitlink
+  })
+  const detail = found.detail === undefined ? undefined : readSuperMergeDetail(found.detail)
+  return {
+    state: found.state as SuperMergeResult["state"],
+    partial: found.partial,
+    ...(typeof found.commit === "string" ? { commit: found.commit } : {}),
+    ...(detail === undefined ? {} : { detail }),
+    gitlinks,
+  }
+}
+
+function readSuperMergeDetail(value: unknown): SuperMergeDetail {
+  if (typeof value !== "object" || value === null) throw new Error("git-super merge detail is not an object")
+  const detail = value as Record<string, unknown>
+  if (typeof detail.code !== "string" || typeof detail.phase !== "string" || typeof detail.message !== "string") {
+    throw new Error("git-super merge detail has no code, phase, or message")
+  }
+  return {
+    code: detail.code,
+    phase: detail.phase,
+    message: detail.message,
+    ...(typeof detail.subject === "string" ? { subject: detail.subject } : {}),
+    ...(typeof detail.evidence === "string" ? { evidence: detail.evidence } : {}),
+    ...(typeof detail.next === "string" ? { next: detail.next } : {}),
+    ...(typeof detail.owner === "string" ? { owner: detail.owner } : {}),
+  }
+}
+
+function mergeMessage(run: Run, entry: QueueEntry): string {
+  const { branch, head } = entry.change
+  const tip = tipOf(entry.change)
+  const issue = trailer(tip, "Issue")
+  const submitter = trailer(tip, "Submitter")
+  return [
+    `merge ${short(branch, head)} into ${run.options.target.branch}`,
+    "",
+    `Change: ${changeName(entry.change)}`,
+    `Merged-By: ${mergedBy(run.name, run.log.id)}`,
+    ...(issue === undefined ? [] : [`Issue: ${issue}`]),
+    ...(submitter === undefined ? [] : [`Submitter: ${submitter}`]),
+  ].join("\n")
+}
+
+async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): Promise<Ended> {
+  const subject = (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim()
+  const incident = {
+    code: detail.code,
+    subject,
+    via: `git-super merge in yrd queue ${run.name} [${run.log.id}]`,
+    evidence: run.log.path,
+    next: detail.next ?? "push the named component commit to its main, then run yrd queue run",
+    owner: detail.owner ?? "the component writer",
+  }
+  const tip = tipOf(entry.change)
+  const sameWait =
+    trailer(tip, "Code") === incident.code &&
+    trailer(tip, "Subject") === incident.subject &&
+    trailer(tip, "Next") === incident.next &&
+    trailer(tip, "Owner") === incident.owner
+  if (!sameWait) {
+    await writeRecord(run, {
+      change: entry.change,
+      kind: "opened",
+      subject,
+      target: targetName(run.options.target),
+      trailers: incidentTrailers(incident),
+    })
+  }
+  run.log.write({
+    branch: entry.change.branch,
+    decision: entry.reading.state === "checked" ? "checked" : "queued",
+    head: entry.change.head,
+    kind: "change",
+    reason: detail.message,
+  })
+  return "waiting"
+}
+
+async function candidateFailure(run: Run, entry: QueueEntry, detail: SuperMergeDetail): Promise<Ended> {
+  if (detail.code === "merge-conflict") {
+    return run.steps.end(run, entry, "failed", {
+      remedy: detail.next ?? `rebase ${entry.change.branch} onto ${run.options.target.branch} and submit again`,
+      subject: detail.subject ?? `${entry.change.branch} conflicts with ${run.options.target.branch}`,
+      trailers: [
+        ["Reason", "conflict"],
+        ["Detail", detail.message],
+      ],
+    })
+  }
+  if (detail.phase === "prove-gitlink-on-main") {
+    const reason = detail.message.replace(/\s+/gu, " ").trim()
+    return run.steps.end(run, entry, "failed", {
+      remedy: detail.next ?? "publish a materializable component commit, then submit again",
+      subject: (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim(),
+      trailers: [["Reason", reason]],
+    })
+  }
+  return run.steps.end(
+    run,
+    entry,
+    "stuck",
+    stuckWrite(run, {
+      code: detail.code,
+      next: detail.next ?? "repair the queue fault, then run yrd queue run",
+      owner: detail.owner,
+      subject: detail.subject ?? detail.message,
+      via: `git-super merge (${detail.phase})`,
+    }),
+  )
+}
+
+async function attributedFailure(
+  run: Run,
+  entry: QueueEntry,
+  results: readonly CheckResult[],
+  failing: readonly CheckResult[],
+  phase: CandidatePhase,
+  settled: readonly SettledGitlink[],
+): Promise<Ended> {
+  const raises = settled.filter((row) => row.state === "raised")
+  if (raises.length === 0) return endFailing(run, entry, results, failing, phase)
+  const base = await prepareSettledBase(run, entry, raises)
+  try {
+    const baseResults = await runPhase(run, entry, phase, base.path, base.tree, "base")
+    const unresolved = baseResults.find((result) => result.result === "stuck")
+    if (unresolved !== undefined) {
+      return await run.steps.end(
+        run,
+        entry,
+        "stuck",
+        stuckWrite(run, {
+          code: "yrd-check-unresolved",
+          next: `repair ${unresolved.name} or its queue environment, then run yrd queue run`,
+          subject:
+            `the queue could not judge the settled base for ${entry.change.branch}: ${unresolved.name} ${unresolved.why ?? ""}`.trim(),
+          trailers: checkTrailers(baseResults),
+          via: `${unresolved.name} on the settled base alone`,
+        }),
+      )
+    }
+    const baseFailure = baseResults.find((result) => result.result === "fail")
+    if (baseFailure === undefined) return await endFailing(run, entry, results, failing, phase)
+    const pins = raises.map((row) => `${row.path}@${row.to}`).join(", ")
+    return await run.steps.end(
+      run,
+      entry,
+      "stuck",
+      stuckWrite(run, {
+        code: "yrd-submodule-main-regression",
+        next: `fix or revert ${pins} on component main, then run yrd queue run`,
+        owner: "the component writer",
+        subject: `${pins} breaks the root at the settled base`,
+        trailers: checkTrailers(baseResults),
+        via: `the settled base alone failed ${baseFailure.name}; the candidate's own content was absent`,
+      }),
+    )
+  } finally {
+    await base.remove()
+  }
+}
+
+/** Materialize the target with the candidate's exact raises on existing gitlinks, but none of its authored content. */
+async function prepareSettledBase(
+  run: Run,
+  entry: QueueEntry,
+  raises: readonly SettledGitlink[],
+): Promise<PreparedWorktree> {
+  const composing = await freshWorktree(
+    run.git,
+    run.options.repo,
+    run.targetSha,
+    join(run.worktrees, "compose", "base", entry.change.head.slice(0, 12)),
+    run.options.plumbing,
+  )
+  let commit = run.targetSha
+  try {
+    const wt = gitIn(composing.path, run.options.process)
+    for (const raise of raises) {
+      const row = await wt(["ls-tree", "-z", run.targetSha, "--", raise.path])
+      const target = /^160000 commit ([0-9a-f]{40,64})\t/u.exec(row)?.[1]
+      if (target === undefined || target === raise.to) continue
+      const component = gitIn(join(composing.path, raise.path), run.options.process)
+      await component(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+      await superGitlinkWrite(run, composing.path, raise.path, raise.to)
+    }
+    const tree = (await wt(["write-tree"])).trim()
+    const targetTree = (await wt(["rev-parse", `${run.targetSha}^{tree}`])).trim()
+    if (tree !== targetTree) {
+      commit = (
+        await wt(["commit-tree", tree, "-p", run.targetSha, "-m", `settle the base for ${entry.change.branch}`])
+      ).trim()
+      await run.git(["fetch", "--quiet", composing.path, commit])
+    }
+  } finally {
+    await composing.remove()
+  }
+  return run.steps.prepare(run, entry, commit, join(run.worktrees, "base", entry.change.head.slice(0, 12)), "base")
+}
+
+async function superGitlinkWrite(run: Run, cwd: string, path: string, commit: string): Promise<void> {
+  const execution = await gitSuperExecution(run, cwd, ["gitlink", "write", path, commit])
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(execution.stdout)
+  } catch (error) {
+    throw new Error(
+      `git-super gitlink write exited ${String(execution.exitCode)} without readable JSON: ${execution.stderr.trim() || execution.stdout.trim()}`,
+      { cause: error },
+    )
+  }
+  if (typeof parsed !== "object" || parsed === null) throw new Error("git-super gitlink write JSON is not an object")
+  const result = parsed as Record<string, unknown>
+  if (
+    execution.exitCode !== 0 ||
+    (result.state !== "updated" && result.state !== "unchanged") ||
+    result.partial !== false
+  ) {
+    throw new Error(
+      `git-super gitlink write failed for ${path}@${commit}: ${typeof (result.detail as Record<string, unknown> | undefined)?.message === "string" ? String((result.detail as Record<string, unknown>).message) : execution.stderr.trim()}`,
+    )
+  }
 }
 
 /** The on-merge phase for the first checked change. */
@@ -579,50 +904,12 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
   const { change } = entry
   const { branch, head } = change
   const name = changeName(change)
-  const worktree = await run.steps.prepare(
-    run,
-    entry,
-    run.targetSha,
-    join(run.worktrees, "merge", head.slice(0, 12)),
-    "merge",
-  )
+  const composed = await composeCandidate(run, entry, "merge")
+  if (composed.kind === "waiting") return waiting(run, entry, composed.detail)
+  if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail)
+  const { mergeCommit, settled, worktree } = composed
   try {
     const wt = gitIn(worktree.path, run.options.process)
-    let mergeCommit: string
-    try {
-      // The merge commit names its change back, by the change's own name, so
-      // `git log main` says which change every merge came from and
-      // `git log refs/yrd/changes/<that name>` prints its records (E5). The
-      // submitter and the issue come with it, as the opened record carried
-      // them forward, one trailer per line in git's own trailer format.
-      const tip = tipOf(change)
-      const issue = trailer(tip, "Issue")
-      const submitter = trailer(tip, "Submitter")
-      const message = [
-        `merge ${short(branch, head)} into ${run.options.target.branch}`,
-        "",
-        `Change: ${name}`,
-        `Merged-By: ${mergedBy(run.name, run.log.id)}`,
-        ...(issue === undefined ? [] : [`Issue: ${issue}`]),
-        ...(submitter === undefined ? [] : [`Submitter: ${submitter}`]),
-      ].join("\n")
-      await wt(["merge", "--quiet", "--no-ff", "--no-edit", "-m", message, head])
-      mergeCommit = (await wt(["rev-parse", "HEAD"])).trim()
-    } catch (error) {
-      // A conflict is the submitter's: the branch does not fit the target. The
-      // worktree is thrown away whole, so nothing needs aborting. What git
-      // said is the detail, on one line: a trailer is one line, and the merge
-      // command's own message spans several.
-      const said = error instanceof GitExit ? error.detail : error instanceof Error ? error.message : String(error)
-      return await run.steps.end(run, entry, "failed", {
-        remedy: `rebase ${branch} onto ${run.options.target.branch}, resolve the conflict, push, and submit again`,
-        subject: `${branch} conflicts with ${run.options.target.branch}`,
-        trailers: [
-          ["Reason", "conflict"],
-          ["Detail", said.replace(/\s+/gu, " ").trim()],
-        ],
-      })
-    }
     // The built-in check at merge (ruling D2): the merged tree's own declaration
     // reads, so no change can land a `.yrd.yml` that breaks the next queue run.
     let unreadable: string | undefined
@@ -659,7 +946,9 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       )
     }
     const failing = results.filter((result) => result.result === "fail")
-    if (failing.length > 0) return await endFailing(run, entry, results, failing, "merge")
+    if (failing.length > 0) {
+      return await attributedFailure(run, entry, results, failing, "merge", settled)
+    }
     // Pass. The merge is ours to make only while the target is still where this
     // change was checked against and the branch still at the head; otherwise the
     // change keeps its place and is checked again at the new target next run.
@@ -674,7 +963,6 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       })
       return "checked"
     }
-    await run.git(["fetch", "--quiet", worktree.path, mergeCommit])
     // The merged record says how it was merged and what it checked: by the queue,
     // with the on-merge checks' results, in the shape the checked record uses.
     const mergedRecord = await appendRecord(run.git, {
@@ -713,7 +1001,15 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       })
       return "checked"
     }
-    run.log.write({ branch, change: name, commit: mergeCommit, head, kind: "merge", tip: mergeCommit })
+    run.log.write({
+      branch,
+      change: name,
+      commit: mergeCommit,
+      gitlinks: settled.filter((row) => row.state === "raised").map((row) => `${row.path} ${row.from} -> ${row.to}`),
+      head,
+      kind: "merge",
+      tip: mergeCommit,
+    })
     run.log.write({ branch, decision: "merged", head, kind: "change" })
     await run.steps.ended(run, entry, "merged", mergedRecord)
     return "merged"
@@ -754,8 +1050,11 @@ async function push(run: Run, entry: QueueEntry, plan: PushPlan): Promise<Pushed
 }
 
 /**
- * A failing check ends the change failed, the submitter's, at once, with the
- * check, its exit, its duration and its log path.
+ * A failing check with no settlement to attribute ends the change failed, the
+ * submitter's, at once, with the check, its exit, its duration and its log
+ * path. When candidate preparation raised a gitlink, attributedFailure first
+ * runs the same declared plan once on the settled base alone: red there is the
+ * component writer's stuck; green leaves this submitter ending unchanged.
  *
  * It used to run the same check again in the change's worktree and once more
  * at the target before billing anybody, so that a coin flip or a red target
@@ -900,19 +1199,20 @@ async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<v
  * (check.ts opens them create-only). The setup and the checks that follow it
  * share the directory, and both used to spell it out for themselves.
  */
-function checkLogDir(run: Run, entry: QueueEntry, phase: "submit" | "merge"): string {
+function checkLogDir(run: Run, entry: QueueEntry, phase: Phase): string {
   return join(run.options.workdir, "checks", changeName(entry.change), run.log.id, phase)
 }
 
 async function runPhase(
   run: Run,
   entry: QueueEntry,
-  phase: "submit" | "merge",
+  declaredPhase: CandidatePhase,
   cwd: string,
   tree: CheckedTree,
+  phase: Phase = declaredPhase,
 ): Promise<readonly CheckResult[]> {
   const results: CheckResult[] = []
-  for (const spec of run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes(phase))) {
+  for (const spec of run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes(declaredPhase))) {
     results.push(await check(run, entry, spec, cwd, tree, phase))
     if (results.at(-1)?.result !== "pass") break
   }
@@ -925,7 +1225,7 @@ async function check(
   spec: CheckSpec,
   cwd: string,
   tree: CheckedTree,
-  phase: "submit" | "merge",
+  phase: Phase,
 ): Promise<CheckResult> {
   await restoreScripts(run, spec, cwd)
   const logDir = checkLogDir(run, entry, phase)
@@ -1051,6 +1351,7 @@ function stuckWrite(
     subject: string
     via: string
     next: string
+    owner?: string
     trailers?: readonly (readonly [string, string])[]
   }>,
 ): EndedWrite {
@@ -1064,7 +1365,7 @@ function stuckWrite(
         via: `${cause.via} in yrd queue ${run.name} [${run.log.id}]`,
         evidence: run.log.path,
         next: cause.next,
-        owner: "the queue operator",
+        owner: cause.owner ?? "the queue operator",
       }),
       ...(cause.trailers ?? []),
     ],

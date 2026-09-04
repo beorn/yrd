@@ -9,8 +9,10 @@
  * and each message sent. A seventh, `merged-direct`, appears only when
  * something went around the queue: one record per commit on the target the
  * queue did not put there (E5). An
- * eighth, `pause`, appears only when an active pause stops a run before a
- * merge. A ninth, `reap`, appears only when a run before this one died without removing
+ * eighth, `settle`, names each gitlink a candidate or landing merge raised,
+ * plus each pre-existing off-main anomaly it retained without lowering.
+ * A ninth, `pause`, appears only when an active pause stops a run before a
+ * merge. A tenth, `reap`, appears only when a run before this one died without removing
  * its worktrees: one record per worktree taken down. The human line is a
  * rendering of the record, never a second source: whatever a reader prints, the
  * file is what happened.
@@ -50,6 +52,7 @@ export const LOG_KINDS = [
   "change",
   "check",
   "result",
+  "settle",
   "merge",
   "message",
   "merged-direct",
@@ -122,7 +125,6 @@ export function openLog(
  * carries the sentence a caller prints, naming the directory it looked in.
  * Never a blank, never a zero.
  */
-
 
 /** A check as a run's journal records it: the start row, and the end row when it ended. */
 export type JournalCheck = Readonly<{
@@ -232,7 +234,10 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     return startedAt !== undefined && now.getTime() - startedAt.getTime() <= sinceMs
   })
   if (windowed.length === 0) {
-    const held = ours.length === 0 ? "it holds no run journal" : `its ${String(ours.length)} run journal(s) are all older than the window`
+    const held =
+      ours.length === 0
+        ? "it holds no run journal"
+        : `its ${String(ours.length)} run journal(s) are all older than the window`
     return { absent: `no run journal was read: ${dir} — ${held}`, dir, runs: new Map() }
   }
   const runs = new Map<string, JournalRun[]>()
@@ -251,7 +256,10 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
 
 /** What one run's records say about each change it touched. */
 function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): readonly JournalRun[] {
-  const byChange = new Map<string, { branch: string; head: string; checks: JournalCheck[]; decision?: string; at: Date }>()
+  const byChange = new Map<
+    string,
+    { branch: string; head: string; checks: JournalCheck[]; decision?: string; at: Date }
+  >()
   const held = (branch: string, head: string, at: Date) => {
     const key = journalKey(branch, head)
     const found = byChange.get(key) ?? { at, branch, checks: [], head }
@@ -278,7 +286,10 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     // so the end row settles the start row this run already wrote (log.ts's
     // own contract above), and a start row still standing IS the running check.
     const standing = change.checks.findIndex(
-      (candidate) => candidate.name === name && candidate.phase === phase && candidate.startedAt.getTime() === checkStartedAt.getTime(),
+      (candidate) =>
+        candidate.name === name &&
+        candidate.phase === phase &&
+        candidate.startedAt.getTime() === checkStartedAt.getTime(),
     )
     const end = typeof record.end === "string" ? new Date(record.end) : undefined
     const ended = end === undefined || Number.isNaN(end.getTime()) ? undefined : end

@@ -211,7 +211,8 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
   const running = runs.find((run) => run.running !== undefined)
   const startedAt = checkingBegan(runs, tip, ended)
   const state = entry.reading.state
-  const incident = state === "stuck" ? incidentFrom(tip) : undefined
+  const incident =
+    state === "stuck" || (state === "queued" && trailer(tip, "Code") !== undefined) ? incidentFrom(tip) : undefined
   const subject = options.subjects?.get(entry.change.head)
   const run = latest?.id ?? mergedByRun(trailer(tip, "Merged-By"))
   const live = running?.running

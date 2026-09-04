@@ -146,7 +146,7 @@ type GitlinkWorld = World &
 /**
  * A component whose main is `a` then `b`; a root whose main records the component
  * at `a`. Modelled on the queue core's own gitlink case: `b` is on the
- * component's main, so the built-in gitlink check passes a change that records it.
+ * component's main, so candidate settling accepts a change that records it.
  */
 async function gitlinkWorld(): Promise<GitlinkWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-gitlink-"))

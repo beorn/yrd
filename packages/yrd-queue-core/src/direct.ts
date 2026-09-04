@@ -52,7 +52,7 @@ export type DirectMerge = Readonly<{
   subject: string
   /** When it was committed. */
   at: Date
-  /** The gitlink paths it changed against its first parent: a gitlink moved around the queue is the incident class the gitlink check never sees. */
+  /** The gitlink paths it changed against its first parent: a gitlink moved around the queue is the bypass class candidate settling never sees. */
   gitlinks: readonly string[]
   /** Why it is not the queue's, in plain words. */
   why: string
@@ -93,8 +93,15 @@ export async function directMergeCommits(
   const found: DirectMerge[] = []
   for (const record of out.split("\x01")) {
     const [commit, parentList, at, subject, changes] = record.replace(/^\n/u, "").split("\x00")
-    if (commit === undefined || commit === "" || parentList === undefined || at === undefined || subject === undefined)
+    if (
+      commit === undefined ||
+      commit === "" ||
+      parentList === undefined ||
+      at === undefined ||
+      subject === undefined
+    ) {
       continue
+    }
     const parents = parentList.split(" ").filter((parent) => parent !== "")
     const names = (changes ?? "")
       .split("\n")
@@ -148,8 +155,9 @@ function notTheQueues(
   names: readonly string[],
   byName: ReadonlyMap<string, ChangeRecord | undefined>,
 ): string | undefined {
-  if (parents.length !== 2)
+  if (parents.length !== 2) {
     return parents.length === 1 ? "it is one commit, not a merge of a change" : `it has ${parents.length} parents`
+  }
   if (names.length === 0) return "it carries no Change: trailer"
   if (names.length > 1) return `it carries ${names.length} Change: trailers`
   const name = names[0] ?? ""
