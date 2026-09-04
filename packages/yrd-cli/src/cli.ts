@@ -175,6 +175,14 @@ function buildProgram(
       setExit(taken)
     })
   /**
+   * A terminal with a keyboard on the other end. BOTH ends must be one: a
+   * watch whose output is a pipe has nobody to draw for, and one whose input
+   * is a file has nobody to take a key from — either way the rounds it prints
+   * are what the reader wanted.
+   */
+  const interactiveHere = (): boolean => process.stdin.isTTY === true && process.stdout.isTTY === true
+
+  /**
    * `queue list` and `yrd watch` are ONE command (README 1069): the alias is
    * the same action with `--watch` implied, so the two can never grow apart.
    * Both take the same positional filters and the same lens.
@@ -212,7 +220,7 @@ function buildProgram(
       cwd(),
       io,
       listRequest((filters as string[] | undefined) ?? [], { interval, latest, watch }),
-      { json, env, log: log() },
+      { json, env, interactive: interactiveHere(), log: log() },
     )
     setExit(taken)
   })
@@ -248,7 +256,7 @@ function buildProgram(
       cwd(),
       io,
       listRequest((filters as string[] | undefined) ?? [], { interval, latest, watch: true }),
-      { json, env, log: log() },
+      { json, env, interactive: interactiveHere(), log: log() },
     )
     setExit(taken)
   })

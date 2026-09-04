@@ -26,7 +26,7 @@ export { CHANGES, changeName, changeRef, parseChangeName, parseChangeRef, refOfC
 export type { Change } from "./refs.ts"
 export { appendRecord, DIRECT_MERGE, mergedBy, mergedByRun, readRecord, readRecords, trailer, trailers } from "./records.ts"
 export type { ChangeRecord, Git } from "./records.ts"
-export { inLine, nextOwner, readChange } from "./state.ts"
+export { inLine, nextOwner, readChange, tipOf } from "./state.ts"
 export type { NextOwner } from "./state.ts"
 export { configValue, gitIn, refAt } from "./git.ts"
 export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck } from "./check.ts"
