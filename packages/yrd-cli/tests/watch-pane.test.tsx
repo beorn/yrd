@@ -151,7 +151,7 @@ describe("the pane's keys", () => {
   it("says in its own help that a change is never stopped from here, because the watch writes nothing", async () => {
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} />, ["?"])
 
-    expect(text).toContain("writes nothing")
+    expect(text).toContain("The watch writes nothing")
   })
 })
 

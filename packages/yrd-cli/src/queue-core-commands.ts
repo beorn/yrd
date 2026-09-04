@@ -13,7 +13,7 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
-import { mkdirSync, rmSync } from "node:fs"
+import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
@@ -32,6 +32,8 @@ import {
   queueName,
   queueRun,
   readConfig,
+  tipOf,
+  trailers,
   readJournals,
   readQueue,
   runId,
@@ -61,6 +63,8 @@ import {
 import { declarationHere } from "./declaration.ts"
 import { clocksLine, noticeLine, duration } from "./watch-notice.ts"
 import { filterRows, rowLine, rowTable, watchRows, type WatchRow } from "./watch-rows.ts"
+import type { ChangeDetail, CheckPanel } from "./watch-detail.tsx"
+import type { WatchSnapshot } from "./watch-pane.tsx"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -124,7 +128,14 @@ export async function coreQueueCommand(
   repo: string,
   io: YrdCliIO,
   request: CoreQueueCommand,
-  options: Readonly<{ json?: boolean; env?: NodeJS.ProcessEnv; workdir?: string; log?: ConditionalLogger }> = {},
+  options: Readonly<{
+    json?: boolean
+    env?: NodeJS.ProcessEnv
+    workdir?: string
+    log?: ConditionalLogger
+    /** A terminal with a keyboard on the other end: the watch draws its pane instead of printing rounds. */
+    interactive?: boolean
+  }> = {},
 ): Promise<YrdCliExitCode> {
   /** No `.yrd.yml` where the command stands: nothing here says which queue this repository belongs to. */
   const noDeclarationHere = (): YrdCliExitCode => {
@@ -351,7 +362,15 @@ export async function coreQueueCommand(
        * about one and the same tip and no second reading can disagree with it.
        */
       const round = async (): Promise<
-        Readonly<{ rows: readonly WatchRow[]; text: string; data: unknown }>
+        Readonly<{
+          rows: readonly WatchRow[]
+          text: string
+          data: unknown
+          queue: string
+          pause?: string
+          journalAbsent?: string
+          detail: ReadonlyMap<string, ChangeDetail>
+        }>
       > => {
         const queue = await readQueue(git, config.target.remote, config.target.branch)
         // The run journal on THIS machine, and the head subjects in one
@@ -380,12 +399,45 @@ export async function coreQueueCommand(
           request.terms === undefined || request.terms.length === 0
             ? undefined
             : `${String(rows.length)} of ${String(all.length)} change(s) match ${request.terms.join(" or ")}`
+        // Every change's checks, joined to the declaration it was judged by and
+        // to what its logs actually hold. Built only for a pane that will show
+        // them: the text round never opens a log file.
+        const detail = new Map<string, ChangeDetail>()
+        if (options.interactive === true && options.json !== true) {
+          const packed = new Map(
+            queue.changes.map((entry) => [entry.change.head, trailers(tipOf(entry.change), "Check")] as const),
+          )
+          for (const row of rows) {
+            if (detail.has(row.row.head)) continue
+            const declared = await declarationFor(git, config, row.row.base)
+            const views = checksOf(
+              packed.get(row.row.head) ?? [],
+              endingOf(row.row),
+              declared.checks,
+              row.row.live === undefined
+                ? undefined
+                : {
+                    name: row.row.live.check,
+                    ...(row.row.live.log === undefined ? {} : { log: row.row.live.log }),
+                  },
+            )
+            detail.set(row.row.head, {
+              checks: views.map(readOutput),
+              row: row.row,
+              ...(declared.note === undefined ? {} : { note: declared.note }),
+            })
+          }
+        }
         return {
           data: {
             changes: rows.map((row) => ({ ...row.row, ...(row.run === undefined ? {} : { runOf: row.run.id }) })),
             journal: journalFact(journals),
             pause: pause ?? null,
           },
+          detail,
+          queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
+          ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
+          ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
           rows,
           text: [
             // The pause stays the FIRST line it has always been: a queue that
@@ -414,6 +466,41 @@ export async function coreQueueCommand(
         return 0
       }
 
+      // A terminal with a keyboard on the other end gets the pane. It is
+      // reached through a dynamic import so that `yrd --version`, `yrd submit`
+      // and every one-shot queue command never load React or the reconciler at
+      // all — the same separation the retired build script named, restored
+      // with it.
+      if (options.interactive === true && options.json !== true) {
+        const first = await round()
+        if (selectedNothing(request.terms, first.rows)) {
+          io.stderr(missedSelector(request.terms ?? [], first.queue, first.rows.length))
+          return 2
+        }
+        const { WatchPane } = await import("./watch-pane.tsx")
+        const { run } = await import("silvery/runtime")
+        const { createElement } = await import("react")
+        let ending: YrdCliExitCode | undefined
+        const app = await run(
+          createElement(WatchPane, {
+            intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
+            load: async () => {
+              const next = await round()
+              return snapshotOf(next)
+            },
+            onEnding:
+              request.terms === undefined || request.terms.length === 0
+                ? undefined
+                : (code) => {
+                    ending = code
+                  },
+            snapshot: snapshotOf(first),
+          }),
+        )
+        await app.waitUntilExit()
+        return ending ?? 0
+      }
+
       // The watch. A selector runs to an ending and exits with the ending's
       // code, exactly as `yrd check` does (0 pass, 1 fail, 2 stuck); with no
       // selector there is nothing to run TO, so it refreshes until it is
@@ -427,12 +514,8 @@ export async function coreQueueCommand(
         // A selector that matches nothing would otherwise wait forever for a
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.
-        if (first && selected && one.rows.length === 0) {
-          io.stderr(
-            `yrd: nothing in ${queueName(config.target, await remoteUrl(git, config.target.remote))} matches ` +
-              `${(request.terms ?? []).join(" or ")}. The queue read holds ${String(one.rows.length)} matching ` +
-              "change(s); ended changes older than seven days are not read.\n",
-          )
+        if (first && selectedNothing(request.terms, one.rows)) {
+          io.stderr(missedSelector(request.terms ?? [], one.queue, one.rows.length))
           return 2
         }
         first = false
@@ -780,6 +863,67 @@ function describeRun(
   ].filter((part): part is string => part !== undefined)
   const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`
+}
+
+/** A selector was given and nothing answered to it: the one case a watch must refuse rather than wait out. */
+function selectedNothing(terms: readonly string[] | undefined, rows: readonly WatchRow[]): boolean {
+  return terms !== undefined && terms.length > 0 && rows.length === 0
+}
+
+/** What was asked for, where it was looked for, and what the read leaves out. */
+function missedSelector(terms: readonly string[], queue: string, matched: number): string {
+  return (
+    `yrd: nothing in ${queue} matches ${terms.join(" or ")}. The queue read holds ${String(matched)} ` +
+    "matching change(s); ended changes older than seven days are not read.\n"
+  )
+}
+
+/** One reading of the queue as the pane consumes it. */
+function snapshotOf(
+  round: Readonly<{
+    rows: readonly WatchRow[]
+    queue: string
+    pause?: string
+    journalAbsent?: string
+    detail: ReadonlyMap<string, ChangeDetail>
+  }>,
+): WatchSnapshot {
+  return {
+    at: new Date(),
+    detail: round.detail,
+    queue: round.queue,
+    rows: round.rows,
+    ...(round.pause === undefined ? {} : { pause: round.pause }),
+    ...(round.journalAbsent === undefined ? {} : { journalAbsent: round.journalAbsent }),
+  }
+}
+
+/** How much of one check's log the pane holds: the tail, so a huge log never becomes the pane's memory. */
+const LOG_TAIL_BYTES = 64 * 1024
+
+/**
+ * A check with what its log actually holds. Every way there is no output has
+ * its own sentence — no path recorded, the file is not on this machine, it
+ * could not be read — because an empty pane that does not say what it looked
+ * for is the failure this whole port is against.
+ */
+function readOutput(check: CheckView): CheckPanel {
+  if (check.log === undefined) {
+    return { ...check, why: "no log path is recorded for this check" }
+  }
+  try {
+    const size = statSync(check.log).size
+    const text = readFileSync(check.log, "utf8")
+    const output = size > LOG_TAIL_BYTES ? text.slice(-LOG_TAIL_BYTES) : text
+    if (output.trim() === "") return { ...check, why: `the log at ${check.log} is empty` }
+    return { ...check, output }
+  } catch (error) {
+    const why =
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? `no log at ${check.log} on this machine; the queue writes its logs where it runs`
+        : `the log at ${check.log} could not be read: ${error instanceof Error ? error.message : String(error)}`
+    return { ...check, why }
+  }
 }
 
 /**

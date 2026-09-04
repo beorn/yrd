@@ -74,16 +74,18 @@ export function watchTier(columns: number, rows: number): WatchTier {
   return layout === "row" ? "right" : layout === "column" ? "below" : "full"
 }
 
+// Short enough that the modal never wraps a line off its own bottom edge at
+// the narrowest terminal the pane runs in.
 const HELP = [
-  "q          leave the watch",
-  "Enter/Space  open the change under the cursor",
-  "Escape     close the change, or this help",
-  "End        follow the newest rows again",
-  "Tab        move between the check tabs",
-  "?          this help",
+  "q            leave the watch",
+  "Enter/Space  open the change",
+  "Escape       close it, or this help",
+  "End          follow the newest rows",
+  "Tab          move between checks",
+  "?            this help",
   "",
-  "A change is stopped by moving its branch or by pausing the queue,",
-  "never from here: the watch reads and writes nothing.",
+  "The watch writes nothing. Stop a change",
+  "by moving its ref or pausing the queue.",
 ]
 
 export function WatchPane({
