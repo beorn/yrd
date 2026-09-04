@@ -460,11 +460,7 @@ export async function yrdJson(repo: string, ...args: string[]): Promise<YrdJsonR
  * The target moves without the queue: `sha` merged into it around the queue and pushed,
  * as the mechanic does in the garage. Answers the target's new tip.
  */
-export async function mergeAroundQueue(
-  repo: string,
-  sha: string,
-  message = "merged around the queue",
-): Promise<string> {
+export async function mergeAroundQueue(repo: string, sha: string, message = "merged around the queue"): Promise<string> {
   await git(repo, "fetch", "-q", "origin")
   await git(repo, "checkout", "-q", "-B", "main", "origin/main")
   await git(repo, "merge", "-q", "--no-ff", "-m", message, sha)
@@ -797,7 +793,8 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   // endings, so it wants all four, and a case can count what the queue handed
   // over and read which ending each record was for.
   const recorder = JSON.stringify(`cat >>${hookLog}`)
-  const hooks = plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
+  const hooks =
+    plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
   const head = plan.remoteIsOrigin === true ? declaration(origin) : declaration()
   await writeFile(join(repo, ".yrd.yml"), `${head}${hooks}${phasedChecks(plan.checks)}\n`)
 
@@ -889,16 +886,7 @@ export async function advanceTargetAroundQueue(
 export async function landAroundQueue(origin: string, headSha: string, from: string): Promise<string> {
   const clone = await throwawayClone(origin)
   await git(clone, "fetch", "-q", from, "+refs/heads/*:refs/remotes/submitted/*")
-  await git(
-    clone,
-    "merge",
-    "--no-ff",
-    "--no-edit",
-    "-q",
-    headSha,
-    "-m",
-    `landed ${headSha.slice(0, 8)} around the queue`,
-  )
+  await git(clone, "merge", "--no-ff", "--no-edit", "-q", headSha, "-m", `landed ${headSha.slice(0, 8)} around the queue`)
   await git(clone, "push", "-q", "origin", "main")
   return git(clone, "rev-parse", "HEAD")
 }

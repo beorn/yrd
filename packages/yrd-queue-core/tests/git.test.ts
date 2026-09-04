@@ -34,13 +34,13 @@ describe("the git runner", () => {
     const control = plain(main, ["fetch", "origin"])
     expect(control.status, `the control fetch was expected to recurse and fail: ${control.stderr}`).not.toBe(0)
     await expect(gitIn(main)(["fetch", "origin"])).resolves.toBe("")
-    // The same for a push: the superproject commit moves the pin to a commit
+    // The same for a push: the superproject commit moves the gitlink to a commit
     // the submodule's remote does not have. Under `submodule.recurse=true` a
     // plain push recurses on demand into the submodule, whose remote is
     // unreachable, and fails; the runner's push does not recurse.
     plain(join(main, "sub"), ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "sub moved"])
     plain(main, ["add", "sub"])
-    plain(main, ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "main moves the pin"])
+    plain(main, ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "main moves the gitlink"])
     const pushControl = plain(main, ["push", "-q", "origin", "main:refs/heads/control"])
     expect(pushControl.status, `the control push was expected to recurse and fail: ${pushControl.stderr}`).not.toBe(0)
     await expect(gitIn(main)(["push", "-q", "origin", "main:refs/heads/runner"])).resolves.toBe("")

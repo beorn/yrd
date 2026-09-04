@@ -16,7 +16,7 @@ export const FailureEventSchema = z
      * so every consumer that needs to act on the guilty member has to parse
      * prose — and a consumer that cannot parse it punishes the whole batch
      * instead. Absent means "not attributable to a single member", which is a
-     * different event from "attributable to a member we did not name".
+     * different outcome from "attributable to a member we did not name".
      */
     pr: z.string().min(1).optional(),
   })

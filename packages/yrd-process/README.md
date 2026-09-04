@@ -60,7 +60,7 @@ never silent:
   copy a human reading a check verdict sees.
 - `ProcessResult.outputTruncation` carries the same fact structurally, stdout
   before stderr, so machine consumers never match on the notice text.
-- A `WARN` span event names the argv and the byte counts.
+- A `WARN` span entry names the argv and the byte counts.
 
 Every byte still reaches `onOutput`, including the dropped ones, so a caller
 that persists the live stream keeps the complete text — the queue's step

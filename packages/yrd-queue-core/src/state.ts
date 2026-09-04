@@ -56,9 +56,9 @@ export type ChangeRecords = Readonly<{
  * The change's tip: the record whose trailers are the whole derived state.
  *
  * The `??` is what the language costs to say what the type already knows —
- * `at(-1)` is `Record | undefined` for any tuple, while the tuple's first
- * element is a `Record` outright, and on a change with one record they are the
- * same record.
+ * `at(-1)` is `ChangeRecord | undefined` for any tuple, while the tuple's first
+ * element is a `ChangeRecord` outright, and on a change with one record they
+ * are the same record.
  */
 export function tipOf(change: ChangeRecords): ChangeRecord {
   return change.records.at(-1) ?? change.records[0]

@@ -4,7 +4,7 @@
  *
  * One log record per occurrence, each carrying the queue run's id and, where there is
  * one, the branch, head and check it is about. Six kinds appear in every run:
- * the run itself (pin, target, config blob), each change considered and its
+ * the run itself (gitlink, target, config blob), each change considered and its
  * decision, each check's start and end with duration and log path, each merge,
  * and each message sent. A seventh, `merged-direct`, appears only when
  * something went around the queue: one record per commit on the target the
@@ -35,7 +35,7 @@ import { join } from "node:path"
  * A run's own id: the instant it started, then a random tail, so two runs never
  * write one path however close together they start.
  *
- * Minted here because the queue's whole cwd is keyed by it — the
+ * Minted here because the queue's whole workdir is keyed by it — the
  * log, the worktrees, the check logs — and `yrd check` is a run of checks too:
  * it takes an id from the same minter and writes under the same directories,
  * rather than a second scheme that a reader would have to learn.

@@ -52,7 +52,7 @@ export type DirectMerge = Readonly<{
   subject: string
   /** When it was committed. */
   at: Date
-  /** The gitlink paths it changed against its first parent: a pin moved around the queue is the incident class the gitlink check never sees. */
+  /** The gitlink paths it changed against its first parent: a gitlink moved around the queue is the incident class the gitlink check never sees. */
   gitlinks: readonly string[]
   /** Why it is not the queue's, in plain words. */
   why: string
@@ -93,15 +93,8 @@ export async function directMergeCommits(
   const found: DirectMerge[] = []
   for (const record of out.split("\x01")) {
     const [commit, parentList, at, subject, changes] = record.replace(/^\n/u, "").split("\x00")
-    if (
-      commit === undefined ||
-      commit === "" ||
-      parentList === undefined ||
-      at === undefined ||
-      subject === undefined
-    ) {
+    if (commit === undefined || commit === "" || parentList === undefined || at === undefined || subject === undefined)
       continue
-    }
     const parents = parentList.split(" ").filter((parent) => parent !== "")
     const names = (changes ?? "")
       .split("\n")
@@ -155,9 +148,8 @@ function notTheQueues(
   names: readonly string[],
   byName: ReadonlyMap<string, ChangeRecord | undefined>,
 ): string | undefined {
-  if (parents.length !== 2) {
+  if (parents.length !== 2)
     return parents.length === 1 ? "it is one commit, not a merge of a change" : `it has ${parents.length} parents`
-  }
   if (names.length === 0) return "it carries no Change: trailer"
   if (names.length > 1) return `it carries ${names.length} Change: trailers`
   const name = names[0] ?? ""
@@ -174,7 +166,7 @@ function notTheQueues(
 
 /**
  * The one line a reader gets about a direct merge: the target, the commit, its
- * subject, and the pins it moved. It takes only the four values it says, so the
+ * subject, and the gitlinks it moved. It takes only the four values it says, so the
  * `list` row, the queue run's message and the log's human rendering are all one
  * sentence written once — the rendering used to spell it out a second time from
  * the log record's own fields.
@@ -182,6 +174,6 @@ function notTheQueues(
 export function directMergeLine(
   commit: Readonly<{ target: string; commit: string; subject: string; gitlinks: readonly string[] }>,
 ): string {
-  const pins = commit.gitlinks.length === 0 ? "" : `; it moved the pin at ${commit.gitlinks.join(", ")}`
-  return `${commit.target} moved around the queue at ${commit.commit.slice(0, 12)} (${commit.subject})${pins}`
+  const gitlinks = commit.gitlinks.length === 0 ? "" : `; it moved the gitlink at ${commit.gitlinks.join(", ")}`
+  return `${commit.target} moved around the queue at ${commit.commit.slice(0, 12)} (${commit.subject})${gitlinks}`
 }

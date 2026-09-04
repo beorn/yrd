@@ -237,38 +237,30 @@ function readNotify(value: unknown): readonly Notifier[] {
  * both; absent means merge.
  */
 function readChecks(value: unknown): readonly CheckSpec[] {
-  return namedCommands(value, "checks", ["submit", "merge"], ["timeoutMs", "environmentPassthrough", "scripts"]).map(
-    (entry, index) => {
-      const { body, name } = entry
-      const where = `.yrd.yml checks[${index}] ${name}`
-      const scripts = body.scripts
-      if (
-        scripts !== undefined &&
-        (!Array.isArray(scripts) || !scripts.every((path) => typeof path === "string" && path !== ""))
-      ) {
-        throw new Error(`${where}: scripts: must be a list of repository paths`)
-      }
-      const timeoutMs = body.timeoutMs
-      if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || timeoutMs <= 0)) {
-        throw new Error(`${where}: timeoutMs: must be a positive number`)
-      }
-      const passthrough = body.environmentPassthrough
-      if (
-        passthrough !== undefined &&
-        (!Array.isArray(passthrough) || !passthrough.every((named) => typeof named === "string"))
-      ) {
-        throw new Error(`${where}: environmentPassthrough: must be a list of names`)
-      }
-      return {
-        environmentPassthrough: passthrough as readonly string[] | undefined,
-        name,
-        on: entry.on as readonly ("submit" | "merge")[] | undefined,
-        run: entry.run,
-        scripts: scripts as readonly string[] | undefined,
-        timeoutMs,
-      }
-    },
-  )
+  return namedCommands(value, "checks", ["submit", "merge"], ["timeoutMs", "environmentPassthrough", "scripts"]).map((entry, index) => {
+    const { body, name } = entry
+    const where = `.yrd.yml checks[${index}] ${name}`
+    const scripts = body.scripts
+    if (scripts !== undefined && (!Array.isArray(scripts) || !scripts.every((path) => typeof path === "string" && path !== ""))) {
+      throw new Error(`${where}: scripts: must be a list of repository paths`)
+    }
+    const timeoutMs = body.timeoutMs
+    if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || timeoutMs <= 0)) {
+      throw new Error(`${where}: timeoutMs: must be a positive number`)
+    }
+    const passthrough = body.environmentPassthrough
+    if (passthrough !== undefined && (!Array.isArray(passthrough) || !passthrough.every((named) => typeof named === "string"))) {
+      throw new Error(`${where}: environmentPassthrough: must be a list of names`)
+    }
+    return {
+      environmentPassthrough: passthrough as readonly string[] | undefined,
+      name,
+      on: entry.on as readonly ("submit" | "merge")[] | undefined,
+      run: entry.run,
+      scripts: scripts as readonly string[] | undefined,
+      timeoutMs,
+    }
+  })
 }
 
 // Ruling A6's set, plus `setup:` (2026-09-02): every key here is read by the

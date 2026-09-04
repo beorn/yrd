@@ -109,8 +109,8 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
       expect(childPid).not.toBeNull()
       expect(grandchildPid).not.toBeNull()
       // The whole tree must be DEAD (group swept): TERM-ignoring grandchild
-      // included. This fixture pins the fast group layer; the Bay lifecycle
-      // contract separately pins a new-session descendant.
+      // included. This fixture proves the fast group layer; the Bay lifecycle
+      // contract separately proves a new-session descendant.
       expect(await waitDead(childPid as number, 3_000), `child ${childPid} survived settlement`).toBe(true)
       expect(await waitDead(grandchildPid as number, 3_000), `grandchild ${grandchildPid} survived settlement`).toBe(
         true,

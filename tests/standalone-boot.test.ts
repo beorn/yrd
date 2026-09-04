@@ -1,6 +1,6 @@
 /**
  * @failure A dependency's published surface drifts stale relative to what the
- * CLI imports — e.g. an npm-pinned package whose `dist` predates an export
+ * CLI imports — e.g. a fixed npm package version whose `dist` predates an export
  * the CLI now uses — so a fresh `bun install` in a standalone clone produces
  * a `SyntaxError` at import time before any command runs. Measured 2026-09-01:
  * `git-super@0.1.0` on npm predates the `createGit` export its `worktree`

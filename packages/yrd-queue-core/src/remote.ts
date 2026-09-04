@@ -154,19 +154,12 @@ async function tipRecords(git: Git): Promise<ReadonlyMap<string, ChangeRecord>> 
   const tips = new Map<string, ChangeRecord>()
   for (const record of out.split("\x01")) {
     const [sha, ref, at, block, body] = record.replace(/^\n/u, "").split("\x00")
-    if (
-      sha === undefined ||
-      ref === undefined ||
-      at === undefined ||
-      block === undefined ||
-      body === undefined ||
-      sha.trim() === ""
-    ) {
+    if (sha === undefined || ref === undefined || at === undefined || block === undefined || body === undefined || sha.trim() === "") {
       continue
     }
     // Every reader of the queue comes through here, so the one check that a
     // change's records are in the format this code reads belongs here (records.ts).
-    tips.set(ref, tipRecord(recordFrom(sha.trim(), at, body, block), block, ref))
+    tips.set(ref, tipRecord(recordFrom(sha.trim(), at, body, block), sha.trim(), ref))
   }
   return tips
 }

@@ -4,7 +4,7 @@
  *          one commit written once and never amended, that the ref only moves
  *          forward — opened, then checked, then ended, then sent — and that
  *          the tip record's trailers are the entire answer for that change.
- *          Nothing today pins any of it, so a core could record a change in a
+ *          Nothing today gitlinks any of it, so a core could record a change in a
  *          private store, edit a record, or answer `queue list` from a walk, and
  *          every existing test would still pass.
  * @level   l3
@@ -12,9 +12,8 @@
  *           with plain git · the next queue run, which reads its own writes
  *
  * Written from /hh/pm/@i/10-yrd/plan.md § The final design (Store, The change)
- * and the format it cites, @i/10-yrd/record-commit-format-2026-09-02. Never from
- * the current source: where the two disagree, this file follows the plan and
- * goes red.
+ * and CONTEXT.md's Change record entry. Never from the current source: where
+ * the two disagree, this file follows the plan and goes red.
  *
  * Black box. Git is the store the plan names, so `git for-each-ref` and
  * `git log` over `refs/yrd/changes/**` in the shared repository read the
@@ -266,8 +265,7 @@ describe("a change and its records", { timeout: 120_000 }, () => {
 
       for (const [index, record] of read.records.entries()) {
         if (index === 0) continue
-        expect(record.parents, `${report}\nevent ${String(index)} (${record.kind})`).toEqual([
-          read.records[index - 1]?.sha,
+        expect(record.parents, `${report}\nevent ${String(index)} (${record.kind})`).toEqual([read.records[index - 1]?.sha,
         ])
       }
 

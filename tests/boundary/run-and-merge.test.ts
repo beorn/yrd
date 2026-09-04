@@ -1,7 +1,7 @@
 /**
  * @failure The queue run is described in prose — judge from the target, check
  *          the head, merge the first change in line, re-judge when the target
- *          moved, retire a head that is already in the target — and pinned
+ *          moved, retire a head that is already in the target — and recorded
  *          nowhere. A rebuilt core can honour every existing test and still
  *          judge a branch by its own config, carry a pass across bases, or
  *          bill a submitter for a head it merged itself one minute earlier.
@@ -101,9 +101,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
         checks: [{ name: "gate", run: `GATE_LOG=${log} sh gate.sh`, scripts: ["gate.sh"] }],
         // The target's gate is red only where the change's marker is, so this
         // case is about WHOSE gate ran and not about whose fault a red one is.
-        files: {
-          "gate.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$GATE_LOG\"\nif [ -e script.txt ]; then exit 1; fi\nexit 0\n",
-        },
+        files: { "gate.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$GATE_LOG\"\nif [ -e script.txt ]; then exit 1; fi\nexit 0\n" },
       })
       const before = await targetTip(repo)
 

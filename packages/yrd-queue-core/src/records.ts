@@ -173,7 +173,7 @@ export async function readRecords(git: Git, change: Change): Promise<readonly Ch
     // comes BEFORE the walk's own ending below, because a ref whose tip is not
     // a record at all is the very case that check is about.
     if (records.length === 0) {
-      records.push(tipRecord(parsed, block, ref))
+      records.push(tipRecord(parsed, sha, ref))
       continue
     }
     // The first-parent walk ends at the genesis, which carries no `Record:`
@@ -249,23 +249,15 @@ export function changeOf(record: ChangeRecord, where: string): string {
  * The record a change ref's tip IS, held to the format this code reads: an
  * `Record:` naming its kind and a `Change:` naming the change it is about.
  *
- * The immediately preceding spelling called the kind an Event; an older shape
- * called it a `Fact:` and used a `Branch:` and `Head:` pair. There is no
- * compatibility reader for any of them, on purpose: two spellings of one thing
- * in the one store is what a name exists to prevent. So a reader that meets an
- * old shape says which ref it is and what the queue mechanic does about it,
- * rather than "this ref does not end in a record", which reads like corruption.
+ * A reader that meets any other shape says which ref and commit are unreadable
+ * and names the expected trailer.
  */
-export function tipRecord(record: ChangeRecord | undefined, trailerBlock: string, where: string): ChangeRecord {
+export function tipRecord(record: ChangeRecord | undefined, sha: string, where: string): ChangeRecord {
   if (record !== undefined) {
     changeOf(record, where)
     return record
   }
-  if (/^Event(?=:)/mu.test(trailerBlock)) {
-    throw preFormat(where, "its tip carries the former Event trailer; migrate it to Record")
-  }
-  if (/^Fact:/mu.test(trailerBlock)) throw preFormat(where, "its tip carries Fact: where a Record: belongs")
-  throw new Error(`${where} does not end in a record; a change's ref holds only records`)
+  throw new Error(`${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|sent trailer`)
 }
 
 /** The one refusal every pre-format reading earns, and the one cure it names. */

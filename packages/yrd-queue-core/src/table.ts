@@ -83,11 +83,7 @@ export function show(
 ): readonly Readonly<{ row: Row; checks: readonly string[]; records: readonly ChangeRecord[] }>[] {
   return entries
     .filter((entry) => entry.change.branch === branch)
-    .map((entry) => ({
-      checks: trailers(tipOf(entry.change), "Check"),
-      records: entry.change.records,
-      row: row(entry),
-    }))
+    .map((entry) => ({ checks: trailers(tipOf(entry.change), "Check"), records: entry.change.records, row: row(entry) }))
     .sort((left, right) => (right.row.since?.getTime() ?? 0) - (left.row.since?.getTime() ?? 0))
 }
 
@@ -113,7 +109,7 @@ function row(entry: QueueEntry, position?: number): Row {
   }
 }
 
-/** A direct merge: `<target> moved around the queue at <sha12> (<subject>)`, and the pins it moved. */
+/** A direct merge: `<target> moved around the queue at <sha12> (<subject>)`, and the gitlinks it moved. */
 function directMergeRow(commit: DirectMerge): Row {
   return { at: commit.at, branch: commit.target, head: commit.commit, reason: directMergeLine(commit), state: "direct" }
 }

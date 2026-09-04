@@ -4,14 +4,14 @@
  *           the target — a check added, a key mistyped, the switch removed —
  *           takes effect only after a restart, and a correct edit looks
  *           like a wrong one until then. And when the change it merges is the
- *           one that moves its own pin, it keeps running the old code against
- *           a target that pins the new: the relaunch onto the new pin is a
+ *           one that moves its own gitlink, it keeps running the old code against
+ *           a target that records the new one: the relaunch onto the new gitlink is a
  *           person's job again (plan § Commands: the service's three exits;
  *           § Milestones M7).
  * @level    l2 (a real remote and a clone under a temporary root;
  *           `coreQueueCommand` driven directly, no process boundary)
  * @consumer hab, which runs `yrd queue up` as the service and relaunches it on
- *           a pin-move exit · the mechanic, who edits the target's declaration and
+ *           a gitlink-move exit · the mechanic, who edits the target's declaration and
  *           expects the next round to read it
  */
 
@@ -135,21 +135,21 @@ async function redeclare(w: World, text: string): Promise<void> {
   await w.git(["push", "--quiet", "origin", "main"])
 }
 
-type PinnedWorld = World &
+type GitlinkWorld = World &
   Readonly<{
-    /** The component's commit the root pins at start. */
+    /** The component's commit the root records at start. */
     a: string
-    /** The component's next commit, on its main; the root does not pin it yet. */
+    /** The component's next commit, on its main; the root does not record it yet. */
     b: string
   }>
 
 /**
- * A component whose main is `a` then `b`; a root whose main pins the component
+ * A component whose main is `a` then `b`; a root whose main records the component
  * at `a`. Modelled on the queue core's own gitlink case: `b` is on the
- * component's main, so the built-in gitlink check passes a change that pins it.
+ * component's main, so the built-in gitlink check passes a change that records it.
  */
-async function pinnedWorld(): Promise<PinnedWorld> {
-  const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-pin-"))
+async function gitlinkWorld(): Promise<GitlinkWorld> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-gitlink-"))
   roots.push(root)
   const seed = gitIn(root)
 
@@ -174,13 +174,13 @@ async function pinnedWorld(): Promise<PinnedWorld> {
   await identity(git)
   await git(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(work, ".yrd.yml"), DECLARATION)
-  // The root pins the component at its main as it stands now: `a`.
+  // The root records the component at its main as it stands now: `a`.
   await git(["submodule", "add", "--quiet", component, "component"])
   await git(["add", ".yrd.yml", ".gitmodules", "component"])
   await git(["commit", "--quiet", "-m", "main, with the component at a"])
   await git(["push", "--quiet", "origin", "main"])
 
-  // The component's main moves on to `b`; the root still pins `a`.
+  // The component's main moves on to `b`; the root still records `a`.
   writeFileSync(join(componentWork, "lib.txt"), "b\n")
   await cg(["commit", "--quiet", "-am", "b"])
   const b = (await cg(["rev-parse", "HEAD"])).trim()
@@ -191,19 +191,19 @@ async function pinnedWorld(): Promise<PinnedWorld> {
   return { a, b, git, work, workdir }
 }
 
-/** A change that moves the component's pin to `sha`, submitted to the queue. */
-async function submitPin(w: PinnedWorld, branch: string, sha: string): Promise<void> {
+/** A change that moves the component's gitlink to `sha`, submitted to the queue. */
+async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Promise<void> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
   const sub = gitIn(join(w.work, "component"))
   await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
   await sub(["checkout", "--quiet", sha])
   await w.git(["add", "component"])
-  await w.git(["commit", "--quiet", "-m", `pin the component at ${sha.slice(0, 12)}`])
+  await w.git(["commit", "--quiet", "-m", `move the component gitlink to ${sha.slice(0, 12)}`])
   await w.git(["checkout", "--quiet", "main"])
   await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 }
 
-/** This checkout's own commit: what the service finds when nothing names the pin. */
+/** This checkout's own commit: what the service finds when nothing names the gitlink. */
 async function thisCheckout(): Promise<string> {
   return (await gitIn(resolve(import.meta.dirname, "../../.."))(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
 }
@@ -432,31 +432,31 @@ describe("yrd queue up, the service", () => {
     expect(records(run)[1]).toEqual({ ...STUCK, why: "origin/main no longer carries a .yrd.yml" })
   })
 
-  it("ends the loop, exit 0, when the round it ran merged the change that moves its own pin", async () => {
-    const w = await pinnedWorld()
-    await submitPin(w, "task/pin", w.b)
+  it("ends the loop, exit 0, when the round it ran merged the change that moves its own gitlink", async () => {
+    const w = await gitlinkWorld()
+    await submitGitlink(w, "task/gitlink", w.b)
     const run = capture(w.work)
 
     const exit = await coreQueueCommand(
       w.work,
       run.io,
-      { command: "up", intervalSeconds: 0, pin: { path: "component", sha: w.a } },
+      { command: "up", intervalSeconds: 0, gitlink: { path: "component", sha: w.a } },
       { json: true, workdir: w.workdir },
     )
 
     // Zero, not 18: hab reads every non-zero exit as a crash and spends a
-    // restart budget on it, and a pin advance is the one thing the service is
+    // restart budget on it, and a gitlink advance is the one thing the service is
     // MEANT to end for.
     expect(exit, run.stdout()).toBe(0)
     const written = records(run)
     expect(written).toHaveLength(2)
-    expect(written[0]).toMatchObject({ exitCode: 0, merged: ["task/pin"] })
-    expect(written[1]).toEqual({ exitCode: 0, from: w.a, pin: "component", reason: "pin-moved", to: w.b })
-    // The target really moved the pin: the exit reports the world, not the request.
+    expect(written[0]).toMatchObject({ exitCode: 0, merged: ["task/gitlink"] })
+    expect(written[1]).toEqual({ exitCode: 0, from: w.a, gitlink: "component", reason: "gitlink-moved", to: w.b })
+    // The target really moved the gitlink: the exit reports the world, not the request.
     expect((await w.git(["ls-tree", "origin/main", "--", "component"])).trim()).toBe(`160000 commit ${w.b}\tcomponent`)
   })
 
-  it("a signal ends it, exit 0; and with no pin named, it finds its own commit and says the target pins no gitlink at it", async () => {
+  it("a signal ends it, exit 0; and with no gitlink named, it finds its own commit and says the target carries no gitlink at it", async () => {
     const w = await world()
     const run = capture(w.work)
     const stop = new AbortController()
@@ -471,13 +471,13 @@ describe("yrd queue up, the service", () => {
 
     expect(exit, run.stdout()).toBe(0)
     expect(records(run)).toHaveLength(1)
-    // The pin exit is off in this world, said once at info with the commit it
-    // looked for: this suite's own checkout, which the world's target does not pin.
+    // The gitlink exit is off in this world, said once at info with the commit it
+    // looked for: this suite's own checkout, which the world's target does not carry.
     const commit = await thisCheckout()
-    expect(rows.filter((row) => row.message.startsWith("the pin exit is off"))).toEqual([
+    expect(rows.filter((row) => row.message.startsWith("the gitlink exit is off"))).toEqual([
       {
         level: "info",
-        message: `the pin exit is off: the target pins no gitlink at this yrd's commit ${commit.slice(0, 12)}`,
+        message: `the gitlink exit is off: the target carries no gitlink at this yrd's commit ${commit.slice(0, 12)}`,
       },
     ])
   })

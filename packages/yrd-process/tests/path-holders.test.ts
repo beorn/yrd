@@ -155,7 +155,7 @@ describe("inspectPathHolderCensus", () => {
       // Measured 2026-09-01 on five consecutive bay closes after zombies were
       // already auto-cleared: /proc/N/fd answered EACCES while the process was
       // dying, then /proc/N/stat was gone by the identity read, so the row was
-      // `pid N via fd` with no comm and no state. `exited` is the event that
+      // `pid N via fd` with no comm and no state. `exited` is the transition that
       // separates it from the control beside it: same denial, still alive.
       const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-exited-between-reads-"))
       temporary.push(fixture)

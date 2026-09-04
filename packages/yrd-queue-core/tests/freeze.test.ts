@@ -87,23 +87,6 @@ describe("the queue freeze is one leased record ref at the remote", () => {
     expect(await readFreeze(w.git, "origin")).toMatchObject({ by: "operator", reason: "cleared elsewhere" })
   })
 
-  it("teaches the one-time reset when the freeze ref uses the preceding record spelling", async () => {
-    const w = await world()
-    const tree = (await w.git(["mktree"], "")).trim()
-    const previous = (
-      await w.git([
-        "commit-tree",
-        tree,
-        "-m",
-        ["repair landed", "", ["Ev", "ent: unfrozen"].join(""), "Frozen-By: @chief", ""].join("\n"),
-      ])
-    ).trim()
-    await w.git(["push", "--quiet", "origin", `${previous}:${FREEZE_REF}`])
-
-    await expect(readFreeze(w.other, "origin")).rejects.toThrow(/former Event trailer/u)
-    await expect(readFreeze(w.other, "origin")).rejects.toThrow(/Bundle and reset refs\/yrd\/freeze/u)
-  })
-
   it("fails closed when the ref exists but is not a freeze record", async () => {
     const w = await world()
     const tree = (await w.git(["mktree"], "")).trim()
@@ -119,11 +102,7 @@ describe("the queue freeze is one leased record ref at the remote", () => {
     const w = await world()
     const tree = (await w.git(["mktree"], "")).trim()
     const ambiguous = (
-      await w.git([
-        "commit-tree",
-        tree,
-        "-m",
-        "ambiguous state\n\nRecord: frozen\nRecord: unfrozen\nFrozen-By: @chief\n",
+      await w.git(["commit-tree", tree, "-m", "ambiguous state\n\nRecord: frozen\nRecord: unfrozen\nFrozen-By: @chief\n",
       ])
     ).trim()
     await w.git(["push", "--quiet", "origin", `${ambiguous}:${FREEZE_REF}`])

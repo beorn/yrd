@@ -84,7 +84,7 @@ type ProcessResultBase = Readonly<{
   /**
    * Set, stdout before stderr, when a stream wrote past `maxOutputBytes` and
    * its capture kept only a head and a tail. Loud and never swallowed: the same
-   * event is written into {@link ProcessResultBase.stdout}/`stderr` where a
+   * failure is written into {@link ProcessResultBase.stdout}/`stderr` where a
    * human reading a verdict sees it, and machine consumers read it from here
    * rather than by matching the notice text.
    */

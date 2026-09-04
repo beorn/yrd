@@ -11,9 +11,9 @@
 
 /**
  * Every code a Yrd command may exit with (plan § Commands): 0 pass, 1 fail,
- * 2 stuck. A pin that moved under `queue up` is a 0 like any other intended
+ * 2 stuck. A gitlink that moved under `queue up` is a 0 like any other intended
  * ending: hab reads every non-zero exit as a crash and spends a restart budget
- * on it, and the relaunch onto the new pin is the cure, not the fault. The
+ * on it, and the relaunch onto the new gitlink is the cure, not the fault. The
  * incumbent resident's lifecycle codes (3, 10 to 18) went with it at M6.
  */
 export type YrdCliExitCode = 0 | 1 | 2

@@ -26,10 +26,10 @@ import type { Git } from "./records.ts"
  * fetch nor a push recurses into submodules. The superproject sets
  * `submodule.recurse=true`, under which every fetch visits all sixteen
  * submodules (measured 2026-09-03: 16 s against 1 s for the change refs), and
- * a push of a change that moved a pin tries to push the submodule with the
+ * a push of a change that moved a gitlink tries to push the submodule with the
  * superproject's refspec and dies there (`src refspec refs/yrd/changes/… must
  * name a ref`, @dev/2, 2026-09-03). Worktrees get their submodules from
- * materialization (worktree.ts), never from a fetch; a moved pin is judged
+ * materialization (worktree.ts), never from a fetch; a moved gitlink is judged
  * by the built-in check at queue time, never pushed by the submit.
  */
 export function gitIn(cwd: string, process?: Process): Git {
@@ -107,11 +107,7 @@ export class GitExit extends Error {
  * its commit; a `rev:path` names a blob already and git refuses a peel on it,
  * so it is asked for as written.
  */
-export async function refAt(
-  git: Git,
-  ref: string,
-  kind: "commit" | "blob" | "tree" = "commit",
-): Promise<string | undefined> {
+export async function refAt(git: Git, ref: string, kind: "commit" | "blob" | "tree" = "commit"): Promise<string | undefined> {
   try {
     const name = kind === "commit" ? `${ref}^{commit}` : ref
     const out = (await git(["rev-parse", "--verify", "--quiet", name])).trim()
@@ -183,9 +179,8 @@ export async function gitlinkRows(
     const [colonOldMode, newMode, , newSha] = (fields[at] ?? "").split(" ")
     const oldMode = colonOldMode?.replace(/^:/u, "")
     const path = fields[at + 1]
-    if (oldMode === undefined || newMode === undefined || newSha === undefined || path === undefined || path === "") {
+    if (oldMode === undefined || newMode === undefined || newSha === undefined || path === undefined || path === "")
       continue
-    }
     if (oldMode !== "160000" && newMode !== "160000") continue
     rows.push({ newMode, oldMode, path, sha: newSha })
   }

@@ -25,7 +25,7 @@ Yrd is a merge queue that lives inside a Git repository. A queue runs on a branc
 - **result**: pass, fail or stuck, of a check or of a queue run. A fail is the submitter's: the check ran and its command exited non-zero. Stuck means the queue itself cannot go on (a crash, a missing script, a check past its time limit); it stops the queue and is nobody's fault.
 - **change record**: one commit on the change's own ref recording one step and its result: opened, checked, merged, failed, stuck, sent. Records are written once and never rewritten.
 - **queue run**: one round of the queue. `yrd queue run` does one; `yrd queue up` does one every interval, on a loop, which is how the queue runs under whatever supervisor you use.
-- **pin**: a submodule pointer, the commit a superproject records for one of its submodules.
+- **gitlink**: a submodule pointer, the commit a superproject records for one of its submodules.
 - **direct merge**: a commit on the queue branch that the queue did not make, what GitHub calls a direct push. Reported, never prevented.
 
 ## Commands
@@ -98,24 +98,24 @@ The submitter and the queue share only the remote. The submitter pushes a branch
 ## How a change moves
 
 1. **Submit.** One atomic push of the branch and of the change's first record. The branch is pushed with `--force-with-lease`, so a push that would overwrite another submitter's head is refused, loudly.
-2. **Check.** The next queue run takes every queued change, oldest first, into a fresh checkout of its head. Two built-in checks run first: the change shares history with the queue branch, and every pin it moved points at a commit on that submodule's `main`. Then the `on: submit` checks run.
+2. **Check.** The next queue run takes every queued change, oldest first, into a fresh checkout of its head. Two built-in checks run first: the change shares history with the queue branch, and every gitlink it moved points at a commit on that submodule's `main`. Then the `on: submit` checks run.
 3. **Merge.** The first checked change in line is merged with the queue branch in a fresh checkout. A third built-in check runs there: the `.yrd.yml` of the merged tree still parses, so no change can merge a config the next run cannot read. Then the `on: merge` checks run. A pass moves the queue branch to one merge commit (`--no-ff`, so the merge is visible in history) that names the change and the queue run in its trailers (`Change: <branch>@<sha>`, `Merged-By: yrd queue github.com/beorn/hh#main [<run id>]`), committed as `yrd-service`. One change merges per run; the rest are checked again at the new queue branch on the next run. Merging several checked changes as one tested batch, and splitting a failed batch to find the culprit, is planned and not built.
 4. **Decide whose fault a failure is.** A check runs once. If its command exits non-zero, the change failed and it is the submitter's: they read the log, and if the failure was the queue's environment rather than their change, they submit the same head again. The queue never reruns a check to decide. Stuck is different: a crash, a missing script, a check past its time limit, a check that exits 2, a submodule's remote that cannot be asked. Stuck stops the queue.
-5. **Notify.** Every ending runs the `notify` entries whose `on:` lists it, each with the record as one JSON object on stdin: `record` is its discriminant (merged, failed, stuck or merged-direct), followed by `change`, `submitter`, `issue` when one was given, then `reason` and `log` for failed and stuck, or `merge` for merged. The queue composes no prose and knows no addresses; the commands do. A change ends once, so the same object sent again after a crash is the same message, not a second one.
+5. **Notify.** Every ending runs the `notify` entries whose `on:` lists it, each with the record as one JSON object on stdin: `record` is its discriminant (merged, failed, stuck or merged-direct), followed by `change`, `submitter`, `issue` when one was given, then `reason`, `log`, and the branch's `failures` count for failed and stuck, or `merge` for merged. The queue composes no prose and knows no addresses; the commands do. A change ends once, so the same object sent again after a crash is the same message, not a second one.
 
-**Direct merges.** The queue is meant to be the only writer of the queue branch, but nothing stops a person from pushing `main` directly, and the queue does not pretend otherwise. Every queue run walks the queue branch's history since the queue's first record and reports each commit it did not make as a `merged-direct` record, naming the commit and every pin it moved. Then it goes on from the new base. The change at the front is checked again there. A push the queue was about to make onto the old base is refused by its own `--force-with-lease`. A rollback is a `git revert`, submitted through the queue like any other change. A submitted change whose head reaches the queue branch by a direct merge still reads as merged; its merged record says `Merged-By: direct`.
+**Direct merges.** The queue is meant to be the only writer of the queue branch, but nothing stops a person from pushing `main` directly, and the queue does not pretend otherwise. Every queue run walks the queue branch's history since the queue's first record and reports each commit it did not make as a `merged-direct` record, naming the commit and every gitlink it moved. Then it goes on from the new base. The change at the front is checked again there. A push the queue was about to make onto the old base is refused by its own `--force-with-lease`. A rollback is a `git revert`, submitted through the queue like any other change. A submitted change whose head reaches the queue branch by a direct merge still reads as merged; its merged record says `Merged-By: direct`.
 
 ## Superprojects
 
-A superproject is a Git repository whose tree records other repositories as submodules. Each submodule entry is a pin, the exact commit of that repository. In theory that makes a set of repositories one product. In practice ordinary Git commands stop at the pin: `git diff` names `vendor/tool` and never a file inside it. No merge queue we know of reads a pin when it decides whether to merge. They merge the superproject commit as a tree of text and leave the submodule pointers to chance; Gerrit can update pins automatically after a merge, which is not the same as checking a pin before it lands. Yrd reads them before it merges:
+A superproject is a Git repository whose tree records other repositories as submodules. Each submodule entry is a gitlink, the exact commit of that repository. In theory that makes a set of repositories one product. In practice ordinary Git commands stop at the gitlink: `git diff` names `vendor/tool` and never a file inside it. No merge queue we know of reads a gitlink when it decides whether to merge. They merge the superproject commit as a tree of text and leave the submodule pointers to chance; Gerrit can update gitlinks automatically after a merge, which is not the same as checking a gitlink before it lands. Yrd reads them before it merges:
 
-- A change that moves a pin must point it at a commit on that submodule's `main`, or the change fails at the built-in check in step 2, before any declared check runs. A pin at a branch commit nobody merged would make the superproject depend on a commit that can vanish.
-- Every checkout the queue makes has its submodules materialized at the exact pins of the commit under test, so a check sees the whole product as it would ship.
-- A direct merge that moves a pin is reported with the pin's path, because that is the one thing the built-in check above never sees.
+- A change that moves a gitlink must point it at a commit on that submodule's `main`, or the change fails at the built-in check in step 2, before any declared check runs. A gitlink at a branch commit nobody merged would make the superproject depend on a commit that can vanish.
+- Every checkout the queue makes has its submodules materialized at the exact gitlinks of the commit under test, so a check sees the whole product as it would ship.
+- A direct merge that moves a gitlink is reported with the gitlink's path, because that is the one thing the built-in check above never sees.
 - Fetches never recurse into submodules. Under `submodule.recurse=true`, a plain fetch visits every submodule's remote every time; on a superproject with sixteen submodules that was 16 seconds per fetch against 1.
-- A superproject that vendors Yrd itself as a submodule runs the vendored commit. The queue moves to a new Yrd only through its own merge of that pin: the loop ends clean, and a supervisor set to restart it starts the new one.
+- A superproject that vendors Yrd itself as a submodule runs the vendored commit. The queue moves to a new Yrd only through its own merge of that gitlink: the loop ends clean, and a supervisor set to restart it starts the new one.
 
-The submodule plumbing is [git-super](https://github.com/beorn/git-super), Git commands that treat a superproject and its submodule interiors as one product. Yrd uses it to materialize checkouts and to read pins; it is useful on its own wherever a script asks "what changed" across a submodule boundary.
+The submodule plumbing is [git-super](https://github.com/beorn/git-super), Git commands that treat a superproject and its submodule interiors as one product. Yrd uses it to materialize checkouts and to read gitlinks; it is useful on its own wherever a script asks "what changed" across a submodule boundary.
 
 ## Records
 
@@ -131,7 +131,7 @@ Every check writes one line in the queue run's log when it starts and one when i
 
 | Exit | Meaning |
 |---|---|
-| 0 | the run ended with nothing failed or stuck; the `yrd queue up` loop also ends with 0 when the pin of Yrd itself moved, so a supervisor set to restart it starts the new version |
+| 0 | the run ended with nothing failed or stuck; the `yrd queue up` loop also ends with 0 when the gitlink of Yrd itself moved, so a supervisor set to restart it starts the new version |
 | 1 | at least one change ended failed in this run and was sent back |
 | 2 | stuck: the queue cannot go on until someone repairs it; a supervisor should leave it down |
 
@@ -141,16 +141,16 @@ The command exits from one place in the code. It also exits 2 when the command i
 
 | | What is tested | What merges | Where the state lives | Superproject |
 |---|---|---|---|---|
-| **Yrd** | the merge of the queue branch and the change, in a fresh checkout | that same merge commit | commits on refs in the repository; no server | pins checked and materialized |
-| **GitHub merge queue** | several queued pull requests merged together and tested as one | that group's result | GitHub | none: the tree merges, pins unread |
+| **Yrd** | the merge of the queue branch and the change, in a fresh checkout | that same merge commit | commits on refs in the repository; no server | gitlinks checked and materialized |
+| **GitHub merge queue** | several queued pull requests merged together and tested as one | that group's result | GitHub | none: the tree merges, gitlinks unread |
 | **GitLab merge trains** | a pipeline per position in the train | GitLab's merge | GitLab | none |
-| **Gerrit** | the patch set | per submit strategy; rebase or cherry-pick can mint a sha nobody tested | git refs on the Gerrit server | pins can be updated after a merge, not checked before it |
-| **Zuul** | a test merge of the whole train ahead, before the forge merges | whatever the forge then merges | the forge plus ZooKeeper | many repositories per change, named in its project config, not pins |
+| **Gerrit** | the patch set | per submit strategy; rebase or cherry-pick can mint a sha nobody tested | git refs on the Gerrit server | gitlinks can be updated after a merge, not checked before it |
+| **Zuul** | a test merge of the whole train ahead, before the forge merges | whatever the forge then merges | the forge plus ZooKeeper | many repositories per change, named in its project config, not gitlinks |
 | **bors-ng** | a staging merge of the batch | the exact staging sha, fast-forwarded | its own database | none |
 
 In both directions:
 
-- **bors-ng made the rule famous**: test the merge, then ship exactly what you tested. Yrd keeps that rule, needs no forge to hold the queue, and checks pins.
+- **bors-ng made the rule famous**: test the merge, then ship exactly what you tested. Yrd keeps that rule, needs no forge to hold the queue, and checks gitlinks.
 - **Squash and rebase merges buy a clean linear log**, which is a real win for casual reading, and GitHub's and GitLab's queues offer them. The price is that the commit you authored never becomes `main`, so "is my exact commit in" has no ancestry answer. Yrd pays the opposite price, merge commits in the log, and buys the answer back with `git log --first-parent`.
 - **Gerrit's change identity survives any number of revisions.** Yrd's `Change:` trailer on the merge commit and its per-change ref are the same idea at the git layer, without the server, the amend-and-push ceremony, or a submit strategy that merges an untested sha.
 - **Zuul tests a merge of the whole train ahead** before the forge merges anything, checking against that projected future rather than live trunk, which is the fastest way through a busy queue. Yrd merges one change per run and checks the rest again on the new queue branch, which is slower and needs no rollback of a broken train.

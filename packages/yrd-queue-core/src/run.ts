@@ -152,7 +152,7 @@ type Run = Readonly<{
   queue: QueueRead
   /**
    * Gitlinks proven on their component's `main` this run, as `<path>@<sha>`:
-   * a positive answer can only stay true, so the same pin is asked about at
+   * a positive answer can only stay true, so the same gitlink is asked about at
    * most once per run however many changes move it (E4).
    */
   onMain: Set<string>
@@ -196,7 +196,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const stuck: string[] = []
 
   const entries = queue.changes
-  // The run row: the pin (the target's commit) and the config blob the checks
+  // The run row: the gitlink (the target's commit) and the config blob the checks
   // were read from. Each change CONSIDERED writes its own row with its decision
   // when the run has made one; a change that ended in an earlier run is history,
   // and this run claims nothing about it.
@@ -206,7 +206,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     config: options.configBlob,
     ...(options.garage === undefined ? {} : { garage: options.garage }),
     kind: "run",
-    pin: targetSha,
+    gitlink: targetSha,
     queue: run.name,
     target: options.target.branch,
   })
@@ -308,7 +308,7 @@ function ordered(entries: QueueRead, ...states: readonly ("queued" | "checked" |
 /**
  * Every commit on the target's first-parent line since the cutover that the
  * queue did not put there, each reported once: a log record with the commit,
- * its parents, its subject and the pins it moved, and one run of the
+ * its parents, its subject and the gitlinks it moved, and one run of the
  * `merged-direct` hook with the commit sha as the record's id, so a resend
  * after a crash hands over the same record (E5). No record is written, because there is no change to
  * write one on; what the queue has already accounted for is read from git
@@ -430,8 +430,8 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     const offMain = await gitlinkOffMain(run, head, worktree.path)
     if (offMain !== undefined) {
       return await end(run, entry, "failed", {
-        remedy: `land ${offMain.path}'s commit on its main first, pin that, and submit again`,
-        subject: `${branch} pins ${offMain.path} at ${offMain.sha.slice(0, 12)}, which its main does not carry`,
+        remedy: `land ${offMain.path}'s commit on its main first, record that gitlink, and submit again`,
+        subject: `${branch} records ${offMain.path} at ${offMain.sha.slice(0, 12)}, which its main does not carry`,
         trailers: [
           ["Reason", "gitlink-off-main"],
           ["Gitlink", `${offMain.path} ${offMain.sha}`],
@@ -463,18 +463,18 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
 
 /**
  * The first gitlink the change moved that its component's `main` does not
- * carry, or undefined when every moved pin is on its main (E4, amending D7).
+ * carry, or undefined when every moved gitlink is on its main (E4, amending D7).
  * Only a gitlink whose sha differs from the target's is asked about — added
- * or moved by the change; a pin the target already carries is the target's,
+ * or moved by the change; a gitlink the target already carries is the target's,
  * judged when it landed — and each component is asked at its own remote, so
  * the answer is about main as it is now, never a stale tracking ref. A
  * positive answer is kept on the run: a commit on main stays on main, so the
- * same pin is fetched at most once per run however many changes move it. A
+ * same gitlink is fetched at most once per run however many changes move it. A
  * component that cannot be asked throws, and the change ends stuck, because a
- * pin the queue cannot judge is not a fail.
+ * gitlink the queue cannot judge is not a fail.
  *
  * Measured 2026-09-02: asking every component of the root's tree cost 15
- * fetches and 13.7 s per judged change, for pins the change never touched.
+ * fetches and 13.7 s per judged change, for gitlinks the change never touched.
  */
 async function gitlinkOffMain(
   run: Run,
@@ -482,12 +482,12 @@ async function gitlinkOffMain(
   worktree: string,
 ): Promise<Readonly<{ path: string; sha: string }> | undefined> {
   for (const { path, sha } of await movedGitlinks(run, head)) {
-    const pin = `${path}@${sha}`
-    if (run.onMain.has(pin)) continue
+    const gitlink = `${path}@${sha}`
+    if (run.onMain.has(gitlink)) continue
     const component = gitIn(join(worktree, path), run.options.process)
     await component(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
     if (!(await isAncestor(component, sha, "refs/remotes/origin/main"))) return { path, sha }
-    run.onMain.add(pin)
+    run.onMain.add(gitlink)
   }
   return undefined
 }
@@ -495,7 +495,7 @@ async function gitlinkOffMain(
 /**
  * The gitlinks `head` carries at a sha the target does not, in tree order:
  * one diff of the two trees, keeping every entry whose new mode is a gitlink.
- * A gitlink the change took out, or turned into a file, has no pin to judge.
+ * A gitlink the change took out, or turned into a file, has no gitlink to judge.
  */
 async function movedGitlinks(run: Run, head: string): Promise<readonly Readonly<{ path: string; sha: string }>[]> {
   return (await gitlinkRows(run.git, run.targetSha, head))
@@ -1182,8 +1182,7 @@ async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
   }).length
   const own = await readRecords(run.git, entry.change)
   return (
-    elsewhere +
-    own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
+    elsewhere + own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
   )
 }
 

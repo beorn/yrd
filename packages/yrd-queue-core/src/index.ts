@@ -24,16 +24,7 @@
 
 export { CHANGES, changeName, changeRef, parseChangeName, parseChangeRef, refOfChange } from "./refs.ts"
 export type { Change } from "./refs.ts"
-export {
-  appendRecord,
-  DIRECT_MERGE,
-  mergedBy,
-  mergedByRun,
-  readRecord,
-  readRecords,
-  trailer,
-  trailers,
-} from "./records.ts"
+export { appendRecord, DIRECT_MERGE, mergedBy, mergedByRun, readRecord, readRecords, trailer, trailers } from "./records.ts"
 export type { ChangeRecord, Git } from "./records.ts"
 export { inLine, readChange } from "./state.ts"
 export { configValue, gitIn, refAt } from "./git.ts"

@@ -151,7 +151,7 @@ function buildProgram(
     })
   queue
     .command("up")
-    .description("the service: the same round on a loop; exits 2 when stuck, 0 when the pin moves under it")
+    .description("the service: the same round on a loop; exits 2 when stuck, 0 when the gitlink moves under it")
     .option("--interval <seconds>", "seconds between rounds (default 15)", int)
     .option("--json", "emit stable JSON")
     .action(async (options) => {

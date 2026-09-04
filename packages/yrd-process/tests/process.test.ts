@@ -35,8 +35,8 @@ describe("Process", () => {
   })
 
   it("closes each process span with terminal outcome and measured duration", async () => {
-    const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (entry: LogEvent) => events.push(entry) }])
+    const entries: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (entry: LogEvent) => entries.push(entry) }])
     await using process = createProcess({
       env: { PATH: Bun.env.PATH },
       inject: { log },
@@ -44,7 +44,7 @@ describe("Process", () => {
 
     await expect(process.run({ argv: ["printf", "ok"] })).resolves.toMatchObject({ exitCode: 0 })
 
-    expect(events).toContainEqual(
+    expect(entries).toContainEqual(
       expect.objectContaining({
         kind: "span",
         namespace: "yrd:process:run",
@@ -60,15 +60,15 @@ describe("Process", () => {
     // cost lived only in the JSON payload. The message assertion below fails
     // against that rendering; the payload assertion holds under both, because
     // promoting a field into the headline must never move it out of `props`.
-    const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (entry: LogEvent) => events.push(entry) }])
+    const entries: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (entry: LogEvent) => entries.push(entry) }])
     await using process = createProcess({ env: { PATH: Bun.env.PATH }, inject: { log } })
 
     await expect(process.run({ argv: ["printf", "%s", "one two"] })).resolves.toMatchObject({ exitCode: 0 })
 
-    const finished = events.find(
-      (event): event is Extract<LogEvent, { kind: "log" }> =>
-        event.kind === "log" && event.namespace === "yrd:process" && event.message.startsWith("Command finished"),
+    const finished = entries.find(
+      (entry): entry is Extract<LogEvent, { kind: "log" }> =>
+        entry.kind === "log" && entry.namespace === "yrd:process" && entry.message.startsWith("Command finished"),
     )
     // `<duration>ms [<exit>] <command>`, with the word that needs quoting
     // quoted, so the row can be read back as the command that ran.
@@ -99,9 +99,9 @@ describe("Process", () => {
 
   it("reports the spawned child PID before awaiting its exit", async () => {
     const exited = Promise.withResolvers<number>()
-    const events: string[] = []
+    const entries: string[] = []
     const spawn: Spawn = () => {
-      events.push("spawn")
+      entries.push("spawn")
       return {
         pid: 4242,
         stdout: bytes(""),
@@ -116,11 +116,11 @@ describe("Process", () => {
     const running = process.run({
       argv: ["worker"],
       onStart(pid) {
-        events.push(`start:${pid}`)
+        entries.push(`start:${pid}`)
       },
     })
     try {
-      await vi.waitFor(() => expect(events).toEqual(["spawn", "start:4242"]))
+      await vi.waitFor(() => expect(entries).toEqual(["spawn", "start:4242"]))
     } finally {
       exited.resolve(0)
     }
@@ -285,7 +285,7 @@ describe("Process", () => {
     expect(stdout.replace(notice?.[0] as string, "")).toHaveLength(100)
   })
 
-  it("reports the truncation as a structured event as well as in the text", async () => {
+  it("reports the truncation as a structured log entry as well as in the text", async () => {
     const spawn: Spawn = () => ({
       pid: 4242,
       stdout: bytes("y".repeat(500)),

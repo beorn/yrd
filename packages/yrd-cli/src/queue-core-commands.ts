@@ -67,12 +67,12 @@ export type CoreQueueCommand =
       intervalSeconds?: number
       stop?: AbortSignal
       /**
-       * The pin: the gitlink at the target that carries the commit this yrd
+       * The gitlink: the gitlink at the target that carries the commit this yrd
        * runs from. Absent, both are found from this module's own checkout at
-       * start; a test names them to move a pin without running from one.
+       * start; a test names them to move a gitlink without running from one.
        */
-      pin?: Readonly<{ path: string; sha: string }>
-      /** Awaited after each round, before the pin is read; a test mutates the world or stops the service here. */
+      gitlink?: Readonly<{ path: string; sha: string }>
+      /** Awaited after each round, before the gitlink is read; a test mutates the world or stops the service here. */
       afterRound?: (outcome: QueueRunOutcome) => void | Promise<void>
     }>
   | Readonly<{ command: "list" }>
@@ -275,15 +275,15 @@ export async function coreQueueCommand(
       // permanent exit, 2: a round is stuck, or the target's declaration can no
       // longer be read or is no longer there at all, and the queue stays down
       // until a person fixes it. Everything else it does on purpose — a signal,
-      // and a pin that moved under it — exits 0, because hab classifies every
+      // and a gitlink that moved under it — exits 0, because hab classifies every
       // non-zero exit as a crash (ag hab-core, exit-classification.ts), backs
-      // off, and counts it against a three-per-600-s budget: three pin advances
+      // off, and counts it against a three-per-600-s budget: three gitlink advances
       // in ten minutes would have stopped the queue for the one condition whose
       // whole cure is the relaunch.
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
-      const pin = request.pin ?? (await pinOf(git, targetRef, log))
+      const gitlink = request.gitlink ?? (await gitlinkOf(git, targetRef, log))
       let current = config
       for (let round = 1; ; round += 1) {
         // The declaration again, as the target holds it now: a correct edit at
@@ -302,14 +302,14 @@ export async function coreQueueCommand(
         const outcome = await oneRound(current)
         if (outcome === undefined || outcome.exitCode === 2) return 2
         await request.afterRound?.(outcome)
-        // The pin, at the target as this round left it: the round that merged
+        // The gitlink, at the target as this round left it: the round that merged
         // the change moving this yrd's own gitlink is the last one this code runs.
-        if (pin !== undefined) {
-          const now = await gitlinkAt(git, outcome.target, pin.path)
-          if (now !== pin.sha) {
-            const moved = `pin moved from ${pin.sha.slice(0, 12)} to ${now === undefined ? "no gitlink" : now.slice(0, 12)}: exiting for relaunch`
-            log?.info?.(moved, { from: pin.sha, pin: pin.path, to: now })
-            emit(io, options.json, { exitCode: 0, from: pin.sha, pin: pin.path, reason: "pin-moved", to: now }, moved)
+        if (gitlink !== undefined) {
+          const now = await gitlinkAt(git, outcome.target, gitlink.path)
+          if (now !== gitlink.sha) {
+            const moved = `gitlink moved from ${gitlink.sha.slice(0, 12)} to ${now === undefined ? "no gitlink" : now.slice(0, 12)}: exiting for relaunch`
+            log?.info?.(moved, { from: gitlink.sha, gitlink: gitlink.path, to: now })
+            emit(io, options.json, { exitCode: 0, from: gitlink.sha, gitlink: gitlink.path, reason: "gitlink-moved", to: now }, moved)
             return 0
           }
         }
@@ -474,13 +474,13 @@ async function targetAt(git: Git, config: QueueConfig): Promise<string> {
 }
 
 /**
- * The pin the service runs from: the gitlink at the target that carries the
+ * The gitlink the service runs from: the gitlink at the target that carries the
  * very commit this yrd's code runs from, found once at start. Off — said once,
- * at info — when this yrd runs from no git checkout, or when the target pins
- * no gitlink at its commit; then no round can see the pin move, and the
- * relaunch onto a new pin is a person's again.
+ * at info — when this yrd runs from no git checkout, or when the target carries
+ * no gitlink at its commit; then no round can see the gitlink move, and the
+ * relaunch onto a new gitlink is a person's again.
  */
-async function pinOf(
+async function gitlinkOf(
   git: Git,
   targetRef: string,
   log: ConditionalLogger | undefined,
@@ -489,17 +489,17 @@ async function pinOf(
   try {
     running = (await gitIn(dirname(fileURLToPath(import.meta.url)))(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
   } catch (error) {
-    log?.info?.("the pin exit is off: this yrd runs from no git checkout", {
+    log?.info?.("the gitlink exit is off: this yrd runs from no git checkout", {
       error: error instanceof Error ? error.message : String(error),
     })
     return undefined
   }
-  const pinned = gitlinks(await git(["ls-tree", "-r", "-z", targetRef])).find((row) => row.sha === running)
-  if (pinned === undefined) {
-    log?.info?.(`the pin exit is off: the target pins no gitlink at this yrd's commit ${running.slice(0, 12)}`)
+  const recorded = gitlinks(await git(["ls-tree", "-r", "-z", targetRef])).find((row) => row.sha === running)
+  if (recorded === undefined) {
+    log?.info?.(`the gitlink exit is off: the target carries no gitlink at this yrd's commit ${running.slice(0, 12)}`)
     return undefined
   }
-  return pinned
+  return recorded
 }
 
 /** The gitlink at `path` in `commit`, or undefined when there is none there. */
@@ -578,7 +578,7 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
     .join(" at ")
   switch (kind) {
     case "run":
-      return `queue run at ${String(rest.target)} ${String(rest.pin).slice(0, 12)}`
+      return `queue run at ${String(rest.target)} ${String(rest.gitlink).slice(0, 12)}`
     case "change":
       return `${where}: ${String(rest.decision ?? rest.state)}`
     case "check":

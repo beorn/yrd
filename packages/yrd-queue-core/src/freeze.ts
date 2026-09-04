@@ -144,13 +144,6 @@ async function parseFreeze(git: Git, sha: string, where: string): Promise<Freeze
   const [commit, atText, block, body] = (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
   const id = commit?.trim()
   const parsed = commitTrailers(block ?? "")
-  const previousKinds = parsed.filter(([name]) => name === "Event")
-  if (previousKinds.length > 0) {
-    throw new Error(
-      `${where} at ${sha.slice(0, 12)} carries the former Event trailer; this reader accepts Record only. ` +
-        `Bundle and reset ${FREEZE_REF} during the format switch before restarting the queue.`,
-    )
-  }
   const kinds = parsed.filter(([name]) => name === "Record").map(([, value]) => value)
   const kind = kinds[0]
   if (kinds.length !== 1 || (kind !== "frozen" && kind !== "unfrozen")) {

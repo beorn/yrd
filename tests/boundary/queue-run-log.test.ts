@@ -1,7 +1,7 @@
 /**
  * @failure A queue run's log is prose in the plan and nothing in the code, so
  *          what a queue run did is readable only by reading four WARN rows on
- *          stderr and guessing. Nothing pins the record stream, so the rebuild at
+ *          stderr and guessing. Nothing gitlinks the record stream, so the rebuild at
  *          M4 could ship any shape, or none, and every existing test would
  *          still pass.
  * @level   l3
@@ -25,7 +25,7 @@
  *
  *   kind       fields beyond `kind` and `run`
  *   ────────   ──────────────────────────────────────────────────────────────
- *   run        pin      the yrd pin the queue run ran, a sha
+ *   run        gitlink      the yrd gitlink the queue run ran, a sha
  *              config   the target's check config, a blob sha
  *              target   the branch this queue is for
  *              at       when the queue run started, ISO 8601
@@ -162,7 +162,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
 
     // run — once, naming what the queue run judged from.
     const opened = theOne(records, "run")
-    expect(opened.pin, run.report).toEqual(expect.any(String))
+    expect(opened.gitlink, run.report).toEqual(expect.any(String))
     expect(opened.config, run.report).toEqual(expect.any(String))
     expect(opened.target, run.report).toBe("main")
     expect(opened.at, run.report).toEqual(expect.any(String))
@@ -198,10 +198,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       expect(result.branch, run.report).toBe(branch)
       expect(result.head, run.report).toBe(headSha)
     }
-    expect(
-      results.some((result) => result.result === "pass"),
-      run.report,
-    ).toBe(true)
+    expect(results.some((result) => result.result === "pass"), run.report).toBe(true)
 
     // merge — the merge commit and the tip it put on the target.
     const merged = theOne(records, "merge")
@@ -258,9 +255,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // names the log the end row names.
     const key = (record: LogRecord): string => `${String(record.phase)}/${String(record.name)}`
     for (const end of ends) {
-      const before = checks
-        .slice(0, checks.indexOf(end))
-        .filter((record) => key(record) === key(end) && record.end === undefined)
+      const before = checks.slice(0, checks.indexOf(end)).filter((record) => key(record) === key(end) && record.end === undefined)
       expect(before.length, `${run.report}\nno start row before ${key(end)}`).toBe(1)
       expect(before[0]?.log, run.report).toBe(end.log)
     }
@@ -272,10 +267,10 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * them: measured 2026-09-02, an idle queue run prints no WARN row and a
    * merging one prints no WARN row. The single warning a merging queue run used
    * to print was `notify-unconfigured` — the target declaring no notifier, the
-   * fixture's own gap, never a defect in the queue. Pinned so the rewrite
+   * fixture's own gap, never a defect in the queue. Recorded so the rewrite
    * cannot quietly spend what is already earned.
    *
-   * The abnormal paths are NOT pinned here, and deliberately: a queue run that
+   * The abnormal paths are NOT recorded here, and deliberately: a queue run that
    * ends fail or stuck prints three WARN rows each today. Whether M2's zero
    * standing warnings reaches those is @cto's call, not this file's.
    */
@@ -447,7 +442,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
      * A queue run is one invocation, so it has its own log whether or not it
      * built a Run.
      *
-     * Measured 2026-09-02 on pin 0749260a: two consecutive empty-queue queue
+     * Measured 2026-09-02 on gitlink 0749260a: two consecutive empty-queue queue
      * runs in shared main both wrote `R700.jsonl`, because the file and the
      * `run` row were named by the last Run the incumbent had minted and an
      * empty queue mints none. One file then held two `run` rows, both calling
@@ -524,7 +519,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
   /**
    * An empty-queue run's debug log is the queue's own work and nothing else.
    *
-   * Measured 2026-09-02 on pin 0749260a, one empty-queue run in shared main:
+   * Measured 2026-09-02 on gitlink 0749260a, one empty-queue run in shared main:
    * 565 rows at debug, of which 124 debug plus 62 span were
    * `yrd:storage:lock`, 61 each of debug, info and span were
    * `yrd:storage:append`, 64 were `yrd:core:replay` spans and 63 were
@@ -565,7 +560,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * The worktree pool's own housekeeping, and the submodule materialization it
    * delegates, are plumbing by the same rule as the storage rows above.
    *
-   * Measured 2026-09-02 on pin 0749260a, one real merging queue run in shared
+   * Measured 2026-09-02 on gitlink 0749260a, one real merging queue run in shared
    * main: 464 rows at debug, of which 80 were `yrd:submodules:update` spans, 10
    * `yrd:submodules:walk` and 6 `yrd:release`. What a mechanic reads a merging
    * run for is each change and its decision, each check's start and end, the

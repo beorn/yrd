@@ -1,7 +1,7 @@
 /**
  * @failure A change's state is prose in the plan and a stored column in the
  *          code, so the rebuild at M4 could keep any status it likes and every
- *          existing test would still pass. Nothing pins that the five states
+ *          existing test would still pass. Nothing proves that the five states
  *          are DERIVED — that ancestry beats the record table, that a position
  *          renumbers when the change ahead leaves, that two readers of one
  *          record table agree, that a reader holding only git can answer at all.
