@@ -42,6 +42,13 @@ export function parseQueueAddress(operand: string): QueueAddress {
   let host: string
   let path: string
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(repository)) {
+    if (/[\\\t\r\n]/u.test(repository)) {
+      throw refusal(operand, "the repository URL may not contain backslashes, tabs or newlines")
+    }
+    const authority = repository.slice(repository.indexOf("://") + 3).split("/", 1)[0]
+    if (authority === undefined || authority === "") {
+      throw refusal(operand, "the repository URL must name its host immediately after ://")
+    }
     let url: URL
     try {
       url = new URL(repository)
@@ -51,7 +58,9 @@ export function parseQueueAddress(operand: string): QueueAddress {
     if (url.search !== "" || url.hash !== "") {
       throw refusal(operand, "the repository may not carry a query or fragment")
     }
-    host = url.hostname.toLowerCase()
+    // URL removes explicit default ports; the queue address must retain the caller's endpoint.
+    const port = /:(\d+)$/u.exec(authority)?.[1]
+    host = `${url.hostname.toLowerCase()}${port === undefined ? "" : `:${Number(port)}`}`
     path = url.pathname
   } else {
     const parts = repository.split("/")

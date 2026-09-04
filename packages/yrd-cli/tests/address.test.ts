@@ -28,6 +28,35 @@ describe("a queue's canonical address", () => {
     )
   })
 
+  it.each([
+    ["https", 8443],
+    ["https", 443],
+    ["http", 80],
+    ["ssh", 22],
+  ])("preserves an explicit %s port %i in identity, transport and directory", (scheme, port) => {
+    const address = parseQueueAddress(`${scheme}://Forge.EXAMPLE:${port}/team/repo.git#main`)
+    expect(address).toMatchObject({
+      canonical: `forge.example:${port}/team/repo#main`,
+      host: `forge.example:${port}`,
+      transport: `https://forge.example:${port}/team/repo.git`,
+    })
+    expect(queueDirectory("/state/yrd", address)).toBe(
+      join("/state/yrd", `forge.example:${port}`, "team", "repo#main", "repo"),
+    )
+    expect(queueDirectory("/state/yrd", address)).not.toBe(
+      queueDirectory("/state/yrd", parseQueueAddress("forge.example/team/repo#main")),
+    )
+  })
+
+  it.each([
+    "https://forge.example\\team:8443/repo.git#main",
+    "https://forge.example:\t443/team/repo.git#main",
+    "https://forge.example:443\r/team/repo.git#main",
+    "https://forge.example:443\n/team/repo.git#main",
+  ])("refuses URL-normalized authority spelling %j", (operand) => {
+    expect(() => parseQueueAddress(operand)).toThrow("backslashes, tabs or newlines")
+  })
+
   it("keeps repository path directories readable and encodes the queue as one final segment", () => {
     const workdir = "/state/yrd"
     const main = parseQueueAddress("beorn/hh#main")
@@ -53,7 +82,7 @@ describe("a queue's canonical address", () => {
     expect(queueDirectory("/state/yrd", address)).toBe("/state/yrd/local/tmp/remote.git#main/repo")
   })
 
-  it.each(["beorn/hh", "beorn/hh#", "#main", "beorn/hh#main#other"])(
+  it.each(["beorn/hh", "beorn/hh#", "#main", "beorn/hh#main#other", "https:///forge.example:8443/team/repo.git#main"])(
     "refuses malformed queue address %s with the operand and grammar",
     (operand) => {
       expect(() => parseQueueAddress(operand)).toThrow(`queue address '${operand}'`)
