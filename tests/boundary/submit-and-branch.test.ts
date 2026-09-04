@@ -68,7 +68,8 @@ describe("the submit path", { timeout: 120_000 }, () => {
     // Both, or neither: the branch is worth nothing to the queue without the
     // record that opens its change, and the record names a head that must be there.
     expect(await refSha(origin, `refs/heads/${branch}`), submit.report).toBe(head)
-    expect(await refExists(origin, changeRef({ branch: branch, head })), submit.report).toBe(true)
+    expect(await refExists(origin, `refs/yrd/main/${branch}@${head}`), submit.report).toBe(true)
+    expect(await refExists(origin, `refs/yrd/changes/${branch}@${head}`), submit.report).toBe(false)
   })
 
   /**
