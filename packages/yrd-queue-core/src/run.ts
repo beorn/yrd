@@ -51,7 +51,7 @@ import {
   type Git,
   type WriteRecord,
 } from "./records.ts"
-import { queueName, readConfig, targetName, type Target } from "./config.ts"
+import { queueName, readConfig, type Target } from "./config.ts"
 import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
 import { incidentTrailers } from "./incident.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
@@ -510,7 +510,6 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
       change,
       kind: "checked",
       subject: `${branch} passed the on-submit checks at ${run.options.target.branch} ${run.targetSha.slice(0, 12)}`,
-      target: targetName(run.options.target),
       trailers: [["Config", run.options.configBlob], ["Base", run.targetSha], ...checkTrailers(results)],
     })
     return "checked"
@@ -740,7 +739,6 @@ async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): P
       change: entry.change,
       kind: "opened",
       subject,
-      target: targetName(run.options.target),
       trailers: incidentTrailers(incident),
     })
   }
@@ -914,7 +912,9 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     // reads, so no change can land a `.yrd.yml` that breaks the next queue run.
     let unreadable: string | undefined
     try {
-      if ((await readConfig(wt, "HEAD")) === undefined) unreadable = "the merged tree has no .yrd.yml"
+      if ((await readConfig(wt, "HEAD", run.options.target)) === undefined) {
+        unreadable = "the merged tree has no .yrd.yml"
+      }
     } catch (error) {
       unreadable = String(error instanceof Error ? error.message : error)
     }
@@ -965,11 +965,10 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     // The merged record says how it was merged and what it checked: by the queue,
     // with the on-merge checks' results, in the shape the checked record uses.
-    const mergedRecord = await appendRecord(run.git, {
+    const mergedRecord = await appendRecord(run.git, run.options.target.branch, {
       change,
       kind: "merged",
       subject: `${branch} merged into ${run.options.target.branch} as ${mergeCommit.slice(0, 12)}`,
-      target: targetName(run.options.target),
       trailers: [
         ["Merge", mergeCommit],
         ["Base", run.targetSha],
@@ -977,7 +976,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         ...checkTrailers(results),
       ],
     })
-    const ref = changeRef(change)
+    const ref = changeRef(run.options.target.branch, change)
     const pushed = await run.steps.push(run, entry, {
       leases: [[`refs/heads/${run.options.target.branch}`, run.targetSha]],
       updates: [
@@ -1100,7 +1099,6 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
       reason === "deleted"
         ? `${branch} was deleted by its submitter`
         : `${branch} moved off ${head.slice(0, 12)}; its submitter replaced it`,
-    target: targetName(run.options.target),
     trailers: [["Reason", reason]],
   })
   if (retiredRecord === undefined) return
@@ -1149,7 +1147,6 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
     change,
     kind: "merged",
     subject: `merged around the queue at ${merge.slice(0, 12)}`,
-    target: targetName(run.options.target),
     trailers: [
       ["Merge", merge],
       ["Base", base],
@@ -1327,7 +1324,6 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
     change: entry.change,
     kind,
     subject: ended.subject,
-    target: targetName(run.options.target),
     trailers,
   })
   run.log.write({
@@ -1389,7 +1385,7 @@ function checkTrailers(results: readonly CheckResult[]): readonly (readonly [str
  * is a queue that is not judging anything (24096).
  */
 export async function writeRecord(run: Run, write: WriteRecord): Promise<string | undefined> {
-  const ref = changeRef(write.change)
+  const ref = changeRef(run.options.target.branch, write.change)
   let onto = await refAt(run.git, ref)
   if (onto === undefined) {
     throw new Error(`${ref} is not here; the queue read fetched every change ref the remote listed`)

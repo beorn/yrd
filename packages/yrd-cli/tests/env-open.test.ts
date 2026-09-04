@@ -65,7 +65,7 @@ async function world(setup: string): Promise<World> {
   await git(["config", "user.email", "env-open@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), `target: origin#main\nsetup: ${JSON.stringify(setup)}\n`)
+  writeFileSync(join(work, ".yrd.yml"), `setup: ${JSON.stringify(setup)}\n`)
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "declare environment setup"])
   await git(["push", "--quiet", "origin", "main"])
@@ -135,10 +135,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "typecheck-ready"], run.io),
-      run.stderr(),
-    ).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "typecheck-ready"], run.io), run.stderr()).toBe(0)
 
     const bay = join(w.work, ".bays", "typecheck-ready")
     const typecheck = await command(bay, ["bun", "run", "typecheck"])

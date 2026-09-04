@@ -15,7 +15,9 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { PAUSE_REF, gitIn, readPause, writePause, type Git } from "../src/index.ts"
+import { gitIn, pauseRef, readPause, writePause, type Git } from "../src/index.ts"
+
+const PAUSE_REF = pauseRef("main")
 
 const roots: string[] = []
 
@@ -46,23 +48,23 @@ describe("the queue pause is one leased record ref at the remote", () => {
   it("records paused and resumed records with who, when and why", async () => {
     const w = await world()
 
-    expect(await readPause(w.git, "origin")).toBeUndefined()
-    const paused = await writePause(w.git, "origin", {
+    expect(await readPause(w.git, "origin", "main")).toBeUndefined()
+    const paused = await writePause(w.git, "origin", "main", {
       by: "@chief",
       kind: "paused",
       reason: "49 new failures on main",
     })
 
-    expect(await readPause(w.other, "origin")).toEqual(paused)
+    expect(await readPause(w.other, "origin", "main")).toEqual(paused)
     expect(paused).toMatchObject({ by: "@chief", kind: "paused", reason: "49 new failures on main" })
     expect(paused.at).toBeInstanceOf(Date)
 
-    const resumed = await writePause(w.other, "origin", {
+    const resumed = await writePause(w.other, "origin", "main", {
       by: "operator",
       kind: "resumed",
       reason: "the repair landed",
     })
-    expect(await readPause(w.git, "origin")).toEqual(resumed)
+    expect(await readPause(w.git, "origin", "main")).toEqual(resumed)
     expect(resumed).toMatchObject({ by: "operator", kind: "resumed", reason: "the repair landed" })
     expect((await w.other(["log", "-1", "--format=%(trailers:only,unfold)", PAUSE_REF])).trim()).toBe(
       "Record: resumed\nPaused-By: operator",
@@ -71,20 +73,20 @@ describe("the queue pause is one leased record ref at the remote", () => {
 
   it("refuses the second writer when two records race from one observed tip", async () => {
     const w = await world()
-    await writePause(w.git, "origin", { by: "@chief", kind: "paused", reason: "investigating" })
+    await writePause(w.git, "origin", "main", { by: "@chief", kind: "paused", reason: "investigating" })
     let raced = false
     const racingGit: Git = async (args, input) => {
       if (!raced && args[0] === "push" && args.some((argument) => argument.endsWith(`:${PAUSE_REF}`))) {
         raced = true
-        await writePause(w.other, "origin", { by: "operator", kind: "resumed", reason: "cleared elsewhere" })
+        await writePause(w.other, "origin", "main", { by: "operator", kind: "resumed", reason: "cleared elsewhere" })
       }
       return await w.git(args, input)
     }
 
     await expect(
-      writePause(racingGit, "origin", { by: "@chief", kind: "resumed", reason: "my stale clear" }),
+      writePause(racingGit, "origin", "main", { by: "@chief", kind: "resumed", reason: "my stale clear" }),
     ).rejects.toThrow()
-    expect(await readPause(w.git, "origin")).toMatchObject({ by: "operator", reason: "cleared elsewhere" })
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({ by: "operator", reason: "cleared elsewhere" })
   })
 
   it("fails closed when the ref exists but is not a pause record", async () => {
@@ -93,7 +95,7 @@ describe("the queue pause is one leased record ref at the remote", () => {
     const malformed = (await w.git(["commit-tree", tree, "-m", "mystery state"])).trim()
     await w.git(["push", "--quiet", "origin", `${malformed}:${PAUSE_REF}`])
 
-    await expect(readPause(w.other, "origin")).rejects.toThrow(
+    await expect(readPause(w.other, "origin", "main")).rejects.toThrow(
       `${PAUSE_REF} at ${malformed.slice(0, 12)} carries no valid Record: paused|resumed trailer`,
     )
   })
@@ -102,11 +104,15 @@ describe("the queue pause is one leased record ref at the remote", () => {
     const w = await world()
     const tree = (await w.git(["mktree"], "")).trim()
     const ambiguous = (
-      await w.git(["commit-tree", tree, "-m", "ambiguous state\n\nRecord: paused\nRecord: resumed\nPaused-By: @chief\n",
+      await w.git([
+        "commit-tree",
+        tree,
+        "-m",
+        "ambiguous state\n\nRecord: paused\nRecord: resumed\nPaused-By: @chief\n",
       ])
     ).trim()
     await w.git(["push", "--quiet", "origin", `${ambiguous}:${PAUSE_REF}`])
 
-    await expect(readPause(w.other, "origin")).rejects.toThrow("found 2; exactly one is required")
+    await expect(readPause(w.other, "origin", "main")).rejects.toThrow("found 2; exactly one is required")
   })
 })

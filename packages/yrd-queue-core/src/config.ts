@@ -84,7 +84,7 @@ export function parseTarget(text: string): Target | undefined {
 const TARGET_GRAMMAR = "must be <remote>#<branch>, e.g. origin#main"
 
 /** The one line that shows what `notify:` looks like, wherever it has to be shown. */
-const NOTIFY_SHAPE = 'notify: [- <name>: {on: [merged, failed], run: <command>}]'
+const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]"
 
 /** The endings the queue can notify about; it has no others to run a command on. */
 export const ENDINGS = ["merged", "failed", "stuck", "merged-direct"] as const
@@ -127,16 +127,18 @@ export type QueueConfig = Readonly<{
  * `.yrd.yml` (an honest absence, read as git's exit 1). Any other failure
  * throws with the path that is wrong.
  */
-export async function readConfig(git: Git, commit: string): Promise<QueueConfig | undefined> {
+export async function readConfig(git: Git, commit: string, target: Target): Promise<QueueConfig | undefined> {
   const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
   if (blob === undefined) return undefined
   const text = await git(["show", `${commit}:.yrd.yml`])
-  const raw: unknown = Bun.YAML.parse(text)
+  let raw: unknown
+  try {
+    raw = Bun.YAML.parse(text)
+  } catch (error) {
+    throw new Error(`.yrd.yml at ${commit} does not parse: ${error instanceof Error ? error.message : String(error)}`)
+  }
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${commit.slice(0, 12)} is not a mapping`)
   onlyKeys(raw, TOP_KEYS, ".yrd.yml")
-  const declared = raw.target ?? "origin#main"
-  const target = typeof declared === "string" ? parseTarget(declared) : undefined
-  if (target === undefined) throw new Error(`.yrd.yml target: ${TARGET_GRAMMAR}`)
   const notify = readNotify(raw.notify)
   const setup = optionalString(raw, "setup")
   return { blob, checks: readChecks(raw.checks), notify, setup, target }
@@ -237,37 +239,45 @@ function readNotify(value: unknown): readonly Notifier[] {
  * both; absent means merge.
  */
 function readChecks(value: unknown): readonly CheckSpec[] {
-  return namedCommands(value, "checks", ["submit", "merge"], ["timeoutMs", "environmentPassthrough", "scripts"]).map((entry, index) => {
-    const { body, name } = entry
-    const where = `.yrd.yml checks[${index}] ${name}`
-    const scripts = body.scripts
-    if (scripts !== undefined && (!Array.isArray(scripts) || !scripts.every((path) => typeof path === "string" && path !== ""))) {
-      throw new Error(`${where}: scripts: must be a list of repository paths`)
-    }
-    const timeoutMs = body.timeoutMs
-    if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || timeoutMs <= 0)) {
-      throw new Error(`${where}: timeoutMs: must be a positive number`)
-    }
-    const passthrough = body.environmentPassthrough
-    if (passthrough !== undefined && (!Array.isArray(passthrough) || !passthrough.every((named) => typeof named === "string"))) {
-      throw new Error(`${where}: environmentPassthrough: must be a list of names`)
-    }
-    return {
-      environmentPassthrough: passthrough as readonly string[] | undefined,
-      name,
-      on: entry.on as readonly ("submit" | "merge")[] | undefined,
-      run: entry.run,
-      scripts: scripts as readonly string[] | undefined,
-      timeoutMs,
-    }
-  })
+  return namedCommands(value, "checks", ["submit", "merge"], ["timeoutMs", "environmentPassthrough", "scripts"]).map(
+    (entry, index) => {
+      const { body, name } = entry
+      const where = `.yrd.yml checks[${index}] ${name}`
+      const scripts = body.scripts
+      if (
+        scripts !== undefined &&
+        (!Array.isArray(scripts) || !scripts.every((path) => typeof path === "string" && path !== ""))
+      ) {
+        throw new Error(`${where}: scripts: must be a list of repository paths`)
+      }
+      const timeoutMs = body.timeoutMs
+      if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || timeoutMs <= 0)) {
+        throw new Error(`${where}: timeoutMs: must be a positive number`)
+      }
+      const passthrough = body.environmentPassthrough
+      if (
+        passthrough !== undefined &&
+        (!Array.isArray(passthrough) || !passthrough.every((named) => typeof named === "string"))
+      ) {
+        throw new Error(`${where}: environmentPassthrough: must be a list of names`)
+      }
+      return {
+        environmentPassthrough: passthrough as readonly string[] | undefined,
+        name,
+        on: entry.on as readonly ("submit" | "merge")[] | undefined,
+        run: entry.run,
+        scripts: scripts as readonly string[] | undefined,
+        timeoutMs,
+      }
+    },
+  )
 }
 
 // Ruling A6's set, plus `setup:` (2026-09-02): every key here is read by the
 // queue, and one it does not read is still refused. A fresh worktree has
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["target", "checks", "setup", "notify"] as const
+const TOP_KEYS = ["checks", "setup", "notify"] as const
 
 /**
  * A key the declaration used to read, and where its meaning went. A typo is
@@ -277,9 +287,10 @@ const TOP_KEYS = ["target", "checks", "setup", "notify"] as const
  */
 const RETIRED: Readonly<Record<string, string>> = {
   owner: `the queue addresses nobody: a notify: entry decides who hears about an ending, in its own arguments (${NOTIFY_SHAPE})`,
-  remote: `the remote is the left side of the target, which ${TARGET_GRAMMAR}`,
+  remote: "the repository is origin; select a queue branch with --queue or a <repo>#<queue> operand",
   scratch: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   workdir: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
+  target: "the branch carrying .yrd.yml is the queue; select it with --queue or a <repo>#<queue> operand",
 }
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */

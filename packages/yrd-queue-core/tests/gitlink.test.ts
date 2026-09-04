@@ -84,7 +84,7 @@ async function world(): Promise<World> {
   const git = gitIn(work)
   await identity(git)
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), "target: origin#main\n")
+  writeFileSync(join(work, ".yrd.yml"), "{}\n")
   await git(["submodule", "add", "--quiet", component, "component"])
   await git(["add", ".yrd.yml", ".gitmodules", "component"])
   await git(["commit", "--quiet", "-m", "base, with the component at its main"])
@@ -191,7 +191,7 @@ describe("settling gitlinks", () => {
     const outcome = await queueRun(w.options())
 
     expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/next"], stuck: [] })
-    const waitingRecords = await readRecords(w.git, { branch: "task/off", head })
+    const waitingRecords = await readRecords(w.git, "main", { branch: "task/off", head })
     expect(waitingRecords.map((record) => record.kind)).toEqual(["opened", "opened"])
     expect(trailer(waitingRecords.at(-1)!, "Code")).toBe("gitlink-off-main")
     expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("main")
@@ -218,7 +218,7 @@ describe("settling gitlinks", () => {
     const retried = await queueRun(w.options())
 
     expect(retried).toMatchObject({ exitCode: 0, failed: [], merged: ["task/off"], stuck: [] })
-    expect((await readRecords(w.git, { branch: "task/off", head })).map((record) => record.kind)).toEqual([
+    expect((await readRecords(w.git, "main", { branch: "task/off", head })).map((record) => record.kind)).toEqual([
       "opened",
       "opened",
       "checked",
@@ -287,7 +287,7 @@ describe("settling gitlinks", () => {
     const outcome = await queueRun(w.options())
 
     expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/missing"], merged: ["task/next"], stuck: [] })
-    const records = await readRecords(w.git, { branch: "task/missing", head })
+    const records = await readRecords(w.git, "main", { branch: "task/missing", head })
     expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
     const failed = records.find((record) => record.kind === "failed")
     expect(trailer(failed!, "Fault")).toBe("submitter")
@@ -305,7 +305,7 @@ describe("settling gitlinks", () => {
     )
 
     expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/base-red"] })
-    const records = await readRecords(w.git, { branch: "task/base-red", head })
+    const records = await readRecords(w.git, "main", { branch: "task/base-red", head })
     const stuck = records.find((record) => record.kind === "stuck")
     expect(trailer(stuck!, "Code")).toBe("yrd-submodule-main-regression")
     expect(trailer(stuck!, "Subject")).toContain("component")
@@ -329,7 +329,7 @@ describe("settling gitlinks", () => {
     const outcome = await queueRun(w.options({ on: ["submit"], run: "! grep -q '^three$' component/lib.txt" }))
 
     expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/repair-off-main"] })
-    const records = await readRecords(w.git, { branch: "task/repair-off-main", head })
+    const records = await readRecords(w.git, "main", { branch: "task/repair-off-main", head })
     const stuck = records.find((record) => record.kind === "stuck")
     expect(trailer(stuck!, "Code")).toBe("yrd-submodule-main-regression")
     expect(trailer(stuck!, "Subject")).toContain(`component@${w.main}`)
@@ -350,7 +350,7 @@ describe("settling gitlinks", () => {
     const outcome = await queueRun(w.options({ on: ["submit"], run: "test ! -f task-candidate-red.txt" }))
 
     expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/candidate-red"], merged: [], stuck: [] })
-    const records = await readRecords(w.git, { branch: "task/candidate-red", head })
+    const records = await readRecords(w.git, "main", { branch: "task/candidate-red", head })
     expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
     expect(trailer(records.find((record) => record.kind === "failed")!, "Fault")).toBe("submitter")
     const phases = readFileSync(outcome.log, "utf8")
@@ -429,7 +429,7 @@ describe("settling gitlinks", () => {
     const outcome = await queueRun(w.options())
 
     expect(outcome.exitCode).toBe(0)
-    const kinds = (await readRecords(w.git, { branch: "task/unfetched", head })).map((record) => record.kind)
+    const kinds = (await readRecords(w.git, "main", { branch: "task/unfetched", head })).map((record) => record.kind)
     expect(kinds).not.toContain("stuck")
     expect(kinds).toContain("merged")
   })
@@ -445,9 +445,8 @@ describe("settling gitlinks", () => {
     // run's answer — and one merge per run lands the first (ruling D4).
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/first"])
-    expect((await readRecords(w.git, { branch: "task/second", head: second })).map((record) => record.kind)).toEqual([
-      "opened",
-      "checked",
-    ])
+    expect(
+      (await readRecords(w.git, "main", { branch: "task/second", head: second })).map((record) => record.kind),
+    ).toEqual(["opened", "checked"])
   })
 })

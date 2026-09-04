@@ -22,7 +22,16 @@
  * their path, not this one.
  */
 
-export { CHANGES, changeName, changeRef, parseChangeName, parseChangeRef, refOfChange } from "./refs.ts"
+export {
+  changeName,
+  changeRef,
+  encodeQueueComponent,
+  parseChangeName,
+  parseChangeRef,
+  pauseRef,
+  queueRefPrefix,
+  refOfChange,
+} from "./refs.ts"
 export type { Change } from "./refs.ts"
 export {
   appendRecord,
@@ -54,14 +63,5 @@ export type { Clocks, ListOptions, Row } from "./table.ts"
 export { readHistories, readQueue, resolveRemote } from "./remote.ts"
 export { directMergeCommits, directMergeLine } from "./direct.ts"
 export { refuseTarget, submit, issueOf } from "./submit.ts"
-export {
-  PAUSE_REF,
-  QueuePaused,
-  QueueNotPaused,
-  activePause,
-  pauseLine,
-  readPause,
-  requireResumed,
-  writePause,
-} from "./pause.ts"
+export { QueuePaused, QueueNotPaused, activePause, pauseLine, readPause, requireResumed, writePause } from "./pause.ts"
 export type { PauseRecord, PauseKind, WritePause } from "./pause.ts"

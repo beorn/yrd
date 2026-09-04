@@ -24,7 +24,6 @@
 import { mergedBy } from "./records.ts"
 import {
   activePause,
-  PAUSE_REF,
   pauseLine,
   QueuePaused,
   readPause,
@@ -32,14 +31,14 @@ import {
   type PauseRecord,
   type ResumedFence,
 } from "./pause.ts"
-import { changeName } from "./refs.ts"
+import { changeName, pauseRef } from "./refs.ts"
 import { QueueAuthorityUnreadable, type Pushed, type Ring, type Run, type Stopped } from "./run.ts"
 
 export const withPause: Ring = (steps) => ({
   ...steps,
 
   open: async (run) => {
-    const paused = await activePause(run.git, run.options.target.remote)
+    const paused = await activePause(run.git, run.options.target.remote, run.options.target.branch)
     if (paused === undefined) return steps.open(run)
     recordPause(run, paused)
     return stopped(paused)
@@ -50,18 +49,19 @@ export const withPause: Ring = (steps) => ({
     // stops the round here, with nothing pushed. Unreadable authority is loud:
     // a queue that cannot tell whether it is paused merges nothing.
     let fence: ResumedFence
+    const ref = pauseRef(run.options.target.branch)
     try {
-      fence = await resumedFence(run.git, run.options.target.remote, {
+      fence = await resumedFence(run.git, run.options.target.remote, run.options.target.branch, {
         by: mergedBy(run.name, run.log.id),
         reason: `merge ${changeName(entry.change)}`,
       })
     } catch (error) {
       if (error instanceof QueuePaused) return stop(run, error.pause, error)
-      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${PAUSE_REF}`, error)
+      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${ref}`, error)
     }
     const pushed = await steps.push(run, entry, {
-      leases: [...plan.leases, [PAUSE_REF, fence.expected]],
-      updates: [...plan.updates, [fence.sha, PAUSE_REF]],
+      leases: [...plan.leases, [ref, fence.expected]],
+      updates: [...plan.updates, [fence.sha, ref]],
     })
     if (pushed.landed) return pushed
     // A pause writer can win after our reads too, and then the atomic leases
@@ -71,9 +71,9 @@ export const withPause: Ring = (steps) => ({
     // checked rather than raising.
     let now: PauseRecord | undefined
     try {
-      now = await readPause(run.git, run.options.target.remote)
+      now = await readPause(run.git, run.options.target.remote, run.options.target.branch)
     } catch (error) {
-      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${PAUSE_REF}`, error)
+      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${ref}`, error)
     }
     if (now?.kind === "paused") return stop(run, now, pushed.error)
     const saw = now?.sha ?? "absent"

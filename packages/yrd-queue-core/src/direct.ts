@@ -41,7 +41,7 @@
 
 import { endedKind, mergedByRun, trailer, type ChangeRecord, type Git } from "./records.ts"
 import { gitlinkRows } from "./git.ts"
-import { CHANGES, changeName } from "./refs.ts"
+import { changeName, queueRefPrefix } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
 
 export type DirectMerge = Readonly<{
@@ -70,7 +70,7 @@ export async function directMergeCommits(
   targetSha: string,
   entries: QueueRead,
 ): Promise<readonly DirectMerge[]> {
-  const started = await queueStarted(git)
+  const started = await queueStarted(git, target)
   // No records anywhere: this queue has judged nothing, so it has no history of
   // its own and nothing on the target is yet its business to report.
   if (started === undefined) return []
@@ -139,10 +139,11 @@ export async function directMergeCommits(
  * a direct merge made in the same second as the first record is reported, never
  * hidden. The boundary errs towards reporting more, as the old one did.
  */
-async function queueStarted(git: Git): Promise<string | undefined> {
-  const some = (await git(["for-each-ref", "--count=1", "--format=%(refname)", `${CHANGES}/`])).trim()
+async function queueStarted(git: Git, queue: string): Promise<string | undefined> {
+  const prefix = queueRefPrefix(queue)
+  const some = (await git(["for-each-ref", "--count=1", "--format=%(refname)", `${prefix}/`])).trim()
   if (some === "") return undefined
-  return (await git(["log", "--first-parent", "--min-parents=1", "--reverse", "--format=%cI", `--glob=${CHANGES}/*`]))
+  return (await git(["log", "--first-parent", "--min-parents=1", "--reverse", "--format=%cI", `--glob=${prefix}/*`]))
     .split("\n")
     .map((line) => line.trim())
     .find((line) => line !== "")

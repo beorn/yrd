@@ -68,7 +68,6 @@ const GENESIS_OBJECT = `tree ${EMPTY_TREE}\nauthor yrd <yrd@yrd> 0 +0000\ncommit
 export type WriteRecord = Readonly<{
   /** The change the record is about: a branch at a head, written as the one `Change:` trailer. */
   change: Change
-  target: string
   kind: RecordKind
   subject: string
   trailers?: readonly (readonly [string, string])[]
@@ -126,8 +125,8 @@ export async function recordCommit(git: Git, write: WriteRecord, parent: string 
  * authority and its own local ref is bookkeeping the next queue read
  * overwrites, so it writes the object with `recordCommit` and leases the push.
  */
-export async function appendRecord(git: Git, write: WriteRecord): Promise<string> {
-  const ref = changeRef(write.change)
+export async function appendRecord(git: Git, queue: string, write: WriteRecord): Promise<string> {
+  const ref = changeRef(queue, write.change)
   const tip = await refAt(git, ref)
   const sha = await recordCommit(git, write, tip)
   await git(["update-ref", ref, sha, tip ?? ABSENT])
@@ -156,8 +155,8 @@ async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [s
 }
 
 /** Every record of a change, oldest first. An unknown change reads as no records. */
-export async function readRecords(git: Git, change: Change): Promise<readonly ChangeRecord[]> {
-  const ref = changeRef(change)
+export async function readRecords(git: Git, queue: string, change: Change): Promise<readonly ChangeRecord[]> {
+  const ref = changeRef(queue, change)
   if ((await refAt(git, ref)) === undefined) return []
   // %x00 separates the fields and %x01 the records, because a commit message
   // holds newlines and a naive split would cut a record in half.
@@ -187,13 +186,7 @@ export async function readRecords(git: Git, change: Change): Promise<readonly Ch
 
 /** The message one record commit carries. */
 export function recordMessage(write: WriteRecord): string {
-  const lines = [
-    write.subject,
-    "",
-    `Record: ${write.kind}`,
-    `Change: ${changeName(write.change)}`,
-    `Target: ${write.target}`,
-  ]
+  const lines = [write.subject, "", `Record: ${write.kind}`, `Change: ${changeName(write.change)}`]
   for (const [name, value] of write.trailers ?? []) {
     if (value.includes("\n")) throw new Error(`trailer ${name} carries a newline; one trailer is one line`)
     lines.push(`${name}: ${value}`)

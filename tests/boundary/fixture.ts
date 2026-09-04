@@ -82,13 +82,9 @@ export type FakeCheckPlan = Readonly<{
   yrdRemote?: boolean
 }>
 
-/**
- * The head of a `.yrd.yml`: `target: <remote>#<branch>` (ruling A5). The remote
- * is the shared repository's URL when the case asks for it to be added from the
- * declaration, and `origin` otherwise.
- */
-export function declaration(remote?: string): string {
-  return `target: ${JSON.stringify(`${remote ?? "origin"}#main`)}\n`
+/** The config carries rules only; the branch holding it is the queue's identity. */
+export function declaration(_remote?: string): string {
+  return ""
 }
 
 export type BoundaryRepository = Readonly<{
@@ -282,7 +278,7 @@ export async function checkAttempts(checkLog: string): Promise<number> {
 
 /** Every change ref a repository carries, as `<sha> <name>` lines. */
 export async function changeRefs(repo: string): Promise<readonly string[]> {
-  const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/yrd/changes/**")
+  const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/yrd/main/**")
   return listed === "" ? [] : listed.split("\n")
 }
 
@@ -309,7 +305,7 @@ type ChangeRecord = Readonly<{
 
 /** A change's ref as a reader sees it. */
 export type ChangeReading = Readonly<{
-  /** `refs/yrd/changes/<branch>@<head>`. */
+  /** `refs/yrd/main/<branch>@<head>`. */
   ref: string
   exists: boolean
   /** The ref's tip sha, or "" when there is no such ref. */
@@ -382,7 +378,7 @@ export async function readChange(
   repo: string,
   change: Readonly<{ branch: string; headSha: string }>,
 ): Promise<ChangeReading> {
-  const ref = changeRef({ branch: change.branch, head: change.headSha })
+  const ref = changeRef("main", { branch: change.branch, head: change.headSha })
   const present = await changeRefs(repo)
   const tipLine = present.find((line) => line.endsWith(` ${ref}`))
   if (tipLine === undefined) {
@@ -460,7 +456,11 @@ export async function yrdJson(repo: string, ...args: string[]): Promise<YrdJsonR
  * The target moves without the queue: `sha` merged into it around the queue and pushed,
  * as the mechanic does in the garage. Answers the target's new tip.
  */
-export async function mergeAroundQueue(repo: string, sha: string, message = "merged around the queue"): Promise<string> {
+export async function mergeAroundQueue(
+  repo: string,
+  sha: string,
+  message = "merged around the queue",
+): Promise<string> {
   await git(repo, "fetch", "-q", "origin")
   await git(repo, "checkout", "-q", "-B", "main", "origin/main")
   await git(repo, "merge", "-q", "--no-ff", "-m", message, sha)
@@ -774,7 +774,7 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   const hookLog = join(root, "hooks.log")
   const plan = planOf(checkLog)
 
-  await git(root, "init", "-q", "--bare", origin)
+  await git(root, "init", "-q", "--bare", "--initial-branch=main", origin)
   await git(root, "init", "-q", "-b", "main", repoPath)
   const repo = await realpath(repoPath)
   await git(repo, "config", "user.name", "Yrd Boundary")
@@ -793,8 +793,7 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   // endings, so it wants all four, and a case can count what the queue handed
   // over and read which ending each record was for.
   const recorder = JSON.stringify(`cat >>${hookLog}`)
-  const hooks =
-    plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
+  const hooks = plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
   const head = plan.remoteIsOrigin === true ? declaration(origin) : declaration()
   await writeFile(join(repo, ".yrd.yml"), `${head}${hooks}${phasedChecks(plan.checks)}\n`)
 
@@ -886,7 +885,16 @@ export async function advanceTargetAroundQueue(
 export async function landAroundQueue(origin: string, headSha: string, from: string): Promise<string> {
   const clone = await throwawayClone(origin)
   await git(clone, "fetch", "-q", from, "+refs/heads/*:refs/remotes/submitted/*")
-  await git(clone, "merge", "--no-ff", "--no-edit", "-q", headSha, "-m", `landed ${headSha.slice(0, 8)} around the queue`)
+  await git(
+    clone,
+    "merge",
+    "--no-ff",
+    "--no-edit",
+    "-q",
+    headSha,
+    "-m",
+    `landed ${headSha.slice(0, 8)} around the queue`,
+  )
   await git(clone, "push", "-q", "origin", "main")
   return git(clone, "rev-parse", "HEAD")
 }

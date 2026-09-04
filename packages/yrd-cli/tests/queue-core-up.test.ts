@@ -85,7 +85,7 @@ function logRows(): Readonly<{
   return { log, rows }
 }
 
-const DECLARATION = "target: origin#main\n"
+const DECLARATION = "{}\n"
 
 async function identity(git: Git): Promise<void> {
   await git(["config", "user.email", "queue@yrd.test"])
@@ -217,6 +217,7 @@ describe("yrd queue up, the service", () => {
     writeFileSync(join(w.work, "one.txt"), "one\n")
     await w.git(["add", "one.txt"])
     await w.git(["commit", "--quiet", "-m", "one"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
     await submit(w.git, "origin", {
       branch: "task/one",
@@ -275,6 +276,7 @@ describe("yrd queue up, the service", () => {
     writeFileSync(join(w.work, "one.txt"), "one\n")
     await w.git(["add", "one.txt"])
     await w.git(["commit", "--quiet", "-m", "one"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
 
     const opened = capture(w.work)
@@ -352,7 +354,8 @@ describe("yrd queue up, the service", () => {
     ).toBe(0)
     const resumedList = records(listedResumed)[0]
     expect(resumedList).toMatchObject({ changes: [{ branch: "task/one" }], pause: null })
-    const beforeRetry = await w.git(["ls-remote", "--refs", "origin", "refs/yrd/changes/*"])
+    const ref = changeRef("main", { branch: "task/one", head })
+    const beforeRetry = await w.git(["ls-remote", "--refs", "origin", ref])
     const pausedAgain = capture(w.work)
     expect(
       await coreQueueCommand(
@@ -381,7 +384,7 @@ describe("yrd queue up, the service", () => {
       ),
     ).toBe(1)
     expect(retried.stderr()).toContain("retry must wait too")
-    expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/changes/*"])).toBe(beforeRetry)
+    expect(await w.git(["ls-remote", "--refs", "origin", ref])).toBe(beforeRetry)
   })
 
   it("reads the target's declaration again every round: a key the target's edit mistyped ends it stuck, naming the key", async () => {
@@ -395,7 +398,7 @@ describe("yrd queue up, the service", () => {
       {
         afterRound: async () => {
           rounds += 1
-          if (rounds === 1) await redeclare(w, `${DECLARATION}batch: 1\n`)
+          if (rounds === 1) await redeclare(w, "batch: 1\n")
         },
         command: "up",
         intervalSeconds: 0,
@@ -522,21 +525,19 @@ describe("yrd queue list, the table", () => {
       ["Next", incident.next],
       ["Owner", incident.owner],
     ] as const
-    const ended = await appendRecord(w.git, {
+    const ended = await appendRecord(w.git, "main", {
       change,
       kind: "stuck",
       subject,
-      target: "origin#main",
       trailers: incidentTrailers,
     })
-    await appendRecord(w.git, {
+    await appendRecord(w.git, "main", {
       change,
       kind: "sent",
       subject: "logged the incident",
-      target: "origin#main",
       trailers: [["State", "stuck"], ["For", ended], ["To", "none"], ["Delivery", "none"], ...incidentTrailers],
     })
-    await w.git(["push", "--quiet", "origin", `${changeRef(change)}:${changeRef(change)}`])
+    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
 
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
@@ -623,7 +624,6 @@ describe("yrd queue show, one change's evidence", () => {
     await redeclare(
       w,
       [
-        "target: origin#main",
         "checks:",
         "  - typecheck:",
         "      run: bun run typecheck",
@@ -651,11 +651,10 @@ describe("yrd queue show, one change's evidence", () => {
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
     })
-    await appendRecord(w.git, {
+    await appendRecord(w.git, "main", {
       change,
       kind: "checked",
       subject: "on-submit checks passed",
-      target: "origin#main",
       trailers: [
         ["Base", base],
         ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
@@ -664,22 +663,20 @@ describe("yrd queue show, one change's evidence", () => {
         ["Check", "affected-tests exit=0 ms=14 log=/tmp/submit-affected.log"],
       ],
     })
-    await appendRecord(w.git, {
+    await appendRecord(w.git, "main", {
       change,
       kind: "merged",
       subject: "merged task/evidence into main",
-      target: "origin#main",
       trailers: [
         ["Base", base],
         ["Merge", base],
         ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
       ],
     })
-    await appendRecord(w.git, {
+    await appendRecord(w.git, "main", {
       change,
       kind: "sent",
       subject: "sent merge notice",
-      target: "origin#main",
       trailers: [
         ["State", "merged"],
         ["Base", base],
@@ -687,7 +684,7 @@ describe("yrd queue show, one change's evidence", () => {
         ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
       ],
     })
-    await w.git(["push", "--quiet", "origin", `${changeRef(change)}:${changeRef(change)}`])
+    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
 
     const run = capture(w.work)
     expect(

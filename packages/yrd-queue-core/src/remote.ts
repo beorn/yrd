@@ -23,7 +23,7 @@
 
 import { readRecords, recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
 import { isAncestor } from "./git.ts"
-import { CHANGES, changeName, changeRef, parseChangeRef, type Change } from "./refs.ts"
+import { changeName, changeRef, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readChange, type ChangeRecords, type ChangeReading } from "./state.ts"
 
 /** One change as the queue read sees it. */
@@ -55,6 +55,7 @@ export async function readQueue(
   remote: string,
   target: string,
 ): Promise<Readonly<{ target: string; changes: QueueRead }>> {
+  const prefix = queueRefPrefix(target)
   // Where every branch and every change stands at the remote, in one reading.
   // Branch heads are read from here and never from a tracking ref, so a stale
   // local ref can never speak for the remote.
@@ -70,7 +71,7 @@ export async function readQueue(
     } else if (ref.startsWith("refs/heads/")) {
       heads.set(ref.slice("refs/heads/".length), sha)
     } else {
-      const change = parseChangeRef(ref)
+      const change = parseChangeRef(target, ref)
       // A ref named after the target is not a change, so the read yields none
       // for it: it is never judged, never given a record and never messaged
       // about, and above all it never accounts for a commit on the target's
@@ -86,7 +87,7 @@ export async function readQueue(
   // this one fetch brings every submitted head with it, whether or not the
   // branch still stands; `--prune` forgets a local change ref the remote no
   // longer holds. Nothing else is asked for: no branch, no tag.
-  await git(["fetch", "--quiet", "--no-tags", "--prune", remote, `+${CHANGES}/*:${CHANGES}/*`])
+  await git(["fetch", "--quiet", "--no-tags", "--prune", remote, `+${prefix}/*:${prefix}/*`])
   // Then exactly the branches those changes name, and the target, in one
   // fetch, so the ancestry reading below asks fresh tracking refs. A named
   // branch the remote no longer has cannot be fetched (git refuses an absent
@@ -110,7 +111,7 @@ export async function readQueue(
     await git(["update-ref", "--stdin"], gone.map((branch) => `delete refs/remotes/${remote}/${branch}\n`).join(""))
   }
 
-  const tips = await tipRecords(git)
+  const tips = await tipRecords(git, target)
   // Every branch tip the target already carries, in one reading.
   const merged = new Set(
     (await git(["for-each-ref", "--format=%(objectname)", `--merged=${targetSha}`, `refs/remotes/${remote}/`]))
@@ -122,11 +123,12 @@ export async function readQueue(
   const entries: QueueEntry[] = []
   for (const submitted of changeRefs) {
     const branchHead = heads.get(submitted.branch)
-    const tip = tips.get(changeRef(submitted))
+    const ref = changeRef(target, submitted)
+    const tip = tips.get(ref)
     // The ls-remote listed this change and the fetch was to bring it: a change
     // gone between the two readings is two moments, not one reading, and is loud.
     if (tip === undefined) {
-      throw new Error(`${changeRef(submitted)} was at ${remote} but not here after the fetch; read the queue again`)
+      throw new Error(`${ref} was at ${remote} but not here after the fetch; read the queue again`)
     }
     // A head that is a branch tip was answered by the one reading above; an
     // older head of a branch that moved on, or whose branch is gone, is asked
@@ -151,10 +153,10 @@ export async function readQueue(
  * full record histories. Call this only for the entries a detail view opens;
  * the queue-wide read deliberately stays tip-only.
  */
-export async function readHistories(git: Git, entries: QueueRead, remote: string): Promise<QueueRead> {
+export async function readHistories(git: Git, entries: QueueRead, remote: string, queue: string): Promise<QueueRead> {
   const hydrated: QueueEntry[] = []
   for (const entry of entries) {
-    const records = await readRecords(git, entry.change)
+    const records = await readRecords(git, queue, entry.change)
     const first = records[0]
     if (first === undefined) {
       throw new Error(
@@ -167,15 +169,18 @@ export async function readHistories(git: Git, entries: QueueRead, remote: string
 }
 
 /** Every change ref's tip record, by ref, in one reading. A change ref that does not end in a record is loud. */
-async function tipRecords(git: Git): Promise<ReadonlyMap<string, ChangeRecord>> {
+async function tipRecords(git: Git, queue: string): Promise<ReadonlyMap<string, ChangeRecord>> {
+  const prefix = queueRefPrefix(queue)
+  const pause = pauseRef(queue)
   const out = await git([
     "for-each-ref",
     "--format=%(objectname)%00%(refname)%00%(committerdate:iso-strict)%00%(trailers:only,unfold)%00%(contents)%01",
-    `${CHANGES}/`,
+    `${prefix}/`,
   ])
   const tips = new Map<string, ChangeRecord>()
   for (const record of out.split("\x01")) {
     const [sha, ref, at, block, body] = record.replace(/^\n/u, "").split("\x00")
+    if (ref === pause) continue
     if (
       sha === undefined ||
       ref === undefined ||

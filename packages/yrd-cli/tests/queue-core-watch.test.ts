@@ -78,7 +78,7 @@ async function world(check = "test -f pass.txt"): Promise<World> {
   await git(["config", "user.email", "queue@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), `target: origin#main\nchecks:\n  - verify:\n      run: ${check}\n`)
+  writeFileSync(join(work, ".yrd.yml"), `checks:\n  - verify:\n      run: ${check}\n`)
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])
@@ -243,7 +243,6 @@ describe("what a watch says it looked at", () => {
     writeFileSync(
       join(w.work, ".yrd.yml"),
       [
-        "target: origin#main",
         "checks:",
         "  - repeated:",
         "      run: test -f pass.txt",

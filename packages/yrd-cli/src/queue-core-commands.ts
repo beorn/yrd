@@ -27,7 +27,6 @@ import {
   pauseLine,
   prepareWorktree,
   gitIn,
-  hintsIn,
   incidentLines,
   list,
   queueName,
@@ -40,7 +39,6 @@ import {
   subjects,
   targetName,
   refAt,
-  resolveRemote,
   runCheck,
   show,
   refuseTarget,
@@ -60,7 +58,6 @@ import {
   type QueueRunOutcome,
   type Row,
 } from "@yrd/queue-core"
-import { declarationHere } from "./declaration.ts"
 import { clocksLine, noticeLine, duration } from "./watch-notice.ts"
 import { filterRows, rowLine, rowTable, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel } from "./watch-detail.tsx"
@@ -68,6 +65,7 @@ import type { WatchSnapshot } from "./watch-pane.tsx"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
+import { originHead } from "./queue-location.ts"
 
 export type CoreQueueCommand =
   | Readonly<{ command: "submit"; branch?: string; submitter: string; issue?: string; dryRun?: boolean }>
@@ -132,50 +130,26 @@ export async function coreQueueCommand(
     json?: boolean
     env?: NodeJS.ProcessEnv
     workdir?: string
+    /** The queue branch selected by the CLI; absent means origin/HEAD. */
+    queue?: string
     log?: ConditionalLogger
     /** A terminal with a keyboard on the other end: the watch draws its pane instead of printing rounds. */
     interactive?: boolean
   }> = {},
 ): Promise<YrdCliExitCode> {
-  /** No `.yrd.yml` where the command stands: nothing here says which queue this repository belongs to. */
-  const noDeclarationHere = (): YrdCliExitCode => {
-    io.stderr(
-      `yrd: ${NAMED[request.command]} needs a queue, and there is no .yrd.yml at ${repo} or in any directory ` +
-        "above it within this repository. A queue is a branch whose commit carries one.\n",
-    )
-    return 2
-  }
-  /** The target carries no declaration: whatever stands here, that branch runs no queue. */
+  /** The selected queue branch carries no declaration, so it runs no queue. */
   const noQueueOnTarget = (ref: string): YrdCliExitCode => {
     io.stderr(
       `yrd: ${NAMED[request.command]} needs a queue, and ${ref} carries no .yrd.yml. ` +
-        "The declaration that judges lives on the branch the queue lands on; one that stands only here judges nothing.\n",
+        "The queue's config lives on the queue branch itself.\n",
     )
     return 2
   }
-  // Where to look, from the declaration checked out where the command stands:
-  // `target: <remote>#<branch>`, optional, a hint. A file that does not
-  // parse hints NOTHING and says so on stderr, once: the defaults stand,
-  // because this file is a hint and the target's is the authority — a branch
-  // that breaks its own `.yrd.yml` still submits, and D2 bills it at merge
-  // (config.ts). What it may not do is go quiet.
-  const here = declarationHere(repo)
-  if (here === undefined) return noDeclarationHere()
-  const hints = hintsIn(here.text, join(here.root, ".yrd.yml"))
-  if (hints.problem !== undefined) {
-    io.stderr(
-      `yrd: ${hints.problem}; it hints nothing, so this asks origin/main, which must carry the declaration itself\n`,
-    )
-  }
-  const git = gitIn(here.root)
+  const git = gitIn(repo)
   const log = options.log?.child("queue")
-  // The declaration here only hints where the queue is (`target:`); the
-  // declaration AT that target is the authority for every judgement. A branch
-  // that rewrote or broke its own `.yrd.yml` is judged by the target's rules
-  // all the same (ruling D2 bills it at merge).
-  const hinted = await resolveRemote(git, hints.target?.remote ?? "origin")
-  const hintedTarget = hints.target?.branch ?? "main"
-  const targetRef = `${hinted}/${hintedTarget}`
+  const remote = "origin"
+  const queue = options.queue ?? (await originHead(git))
+  const targetRef = `${remote}/${queue}`
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
   // target carries no `.yrd.yml` at all — there is no queue there; a
@@ -183,12 +157,10 @@ export async function coreQueueCommand(
   // one-shot command; the service reads again before every round, so an edit at
   // the target takes effect on the next round.
   const declaration = async (): Promise<QueueConfig | undefined> => {
-    await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
-    const declared = await readConfig(git, targetRef)
+    await git(["fetch", "--quiet", remote, `+refs/heads/${queue}:refs/remotes/${targetRef}`])
+    const declared = await readConfig(git, targetRef, { branch: queue, remote })
     if (declared === undefined) return undefined
-    // The declared remote may be a URL; `resolveRemote` turns it into the name
-    // this repository knows it by, adding `yrd` when it has none.
-    return { ...declared, target: { ...declared.target, remote: await resolveRemote(git, declared.target.remote) } }
+    return { ...declared, target: { branch: queue, remote } }
   }
   const config = await declaration()
   if (config === undefined) return noQueueOnTarget(targetRef)
@@ -221,7 +193,7 @@ export async function coreQueueCommand(
     case "pause":
     case "resume": {
       try {
-        const pause = await writePause(git, config.target.remote, {
+        const pause = await writePause(git, config.target.remote, config.target.branch, {
           by: request.by,
           kind: request.command === "pause" ? "paused" : "resumed",
           reason: request.command === "pause" ? request.reason : (request.reason ?? "pause lifted"),
@@ -242,7 +214,7 @@ export async function coreQueueCommand(
       refuseTarget(branch, config.target.branch)
       if (request.dryRun === true) {
         try {
-          await requireResumed(git, config.target.remote)
+          await requireResumed(git, config.target.remote, config.target.branch)
         } catch (error) {
           if (error instanceof QueuePaused) {
             io.stderr(`yrd: ${error.message}\n`)
@@ -397,7 +369,7 @@ export async function coreQueueCommand(
           watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
           request.terms ?? [],
         )
-        const pause = await activePause(git, config.target.remote)
+        const pause = await activePause(git, config.target.remote, config.target.branch)
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table.
         const scope =
@@ -414,6 +386,7 @@ export async function coreQueueCommand(
             git,
             queue.changes.filter((entry) => heads.has(entry.change.head)),
             config.target.remote,
+            config.target.branch,
           )
           const packed = new Map(
             histories.flatMap((entry) =>
@@ -643,7 +616,7 @@ export async function coreQueueCommand(
       const queue = await readQueue(git, config.target.remote, config.target.branch)
       const journals = readJournals(join(workdir, "logs"))
       const matching = queue.changes.filter((entry) => entry.change.branch === request.branch)
-      const hydrated = await readHistories(git, matching, config.target.remote)
+      const hydrated = await readHistories(git, matching, config.target.remote, config.target.branch)
       const changes = show(hydrated, request.branch, {
         journals,
         subjects: await subjects(
@@ -1006,7 +979,7 @@ async function declarationFor(
     return { checks: config.checks, note: "the record names no base, so these are the checks the target declares now" }
   }
   try {
-    const at = await readConfig(git, base)
+    const at = await readConfig(git, base, config.target)
     if (at !== undefined) return { checks: at.checks }
     return {
       checks: config.checks,

@@ -31,7 +31,7 @@ afterAll(() => {
 })
 
 /** The check passes only when `marker.txt` is absent from the tree it runs in. */
-const DECLARATION = 'target: origin#main\nchecks:\n  - {no-marker: {run: "test ! -f marker.txt"}}\n'
+const DECLARATION = 'checks:\n  - {no-marker: {run: "test ! -f marker.txt"}}\n'
 
 function capture(cwd: string): Readonly<{ io: YrdCliIO; stdout(): string }> {
   let stdout = ""

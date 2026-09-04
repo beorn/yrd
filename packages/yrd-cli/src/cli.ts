@@ -37,6 +37,7 @@ import {
   readGarageDeclaration,
 } from "./garage.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
+import { resolveQueueLocation } from "./queue-location.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
@@ -46,7 +47,7 @@ const DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER"
 
 type GlobalOptions = YrdObservabilityFlags
 
-type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean }>
+type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean; queue?: string }>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string }>
 
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
@@ -90,7 +91,7 @@ function buildProgram(
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.dryRun === true ? { dryRun: true } : {}),
       },
-      { json: options.json, env, log: log() },
+      { json: options.json, env, log: log(), queue: options.queue },
     )
     setExit(taken)
   }
@@ -103,6 +104,7 @@ function buildProgram(
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
+    .option("--queue <branch>", "the queue branch at origin; defaults to origin/HEAD")
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
     .command("pause <reason>")
@@ -141,12 +143,18 @@ function buildProgram(
       )
     })
   queue
-    .command("run")
+    .command("run [queue]")
     .description("one round of queue work, run now rather than by the service")
     .option("--json", "emit stable JSON")
-    .action(async (options) => {
+    .action(async (operand, options) => {
       const json = (options as { json?: boolean }).json
-      const taken = await coreQueueCommand(cwd(), io, { command: "run" }, { json, env, log: log() })
+      const location = await resolveQueueLocation(cwd(), operand as string | undefined, env)
+      const taken = await coreQueueCommand(
+        location.repo,
+        io,
+        { command: "run" },
+        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
+      )
       setExit(taken)
     })
   queue
@@ -307,6 +315,7 @@ function buildProgram(
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
+    .option("--queue <branch>", "the queue branch at origin; defaults to origin/HEAD")
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
 
   program

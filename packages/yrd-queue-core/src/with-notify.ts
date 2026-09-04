@@ -21,7 +21,7 @@
 
 import { createProcess, shellCommand } from "@yrd/process"
 import { readCheckTrailer } from "./check.ts"
-import { targetName, type Ending, type Notifier } from "./config.ts"
+import type { Ending, Notifier } from "./config.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
 import {
   endedKind,
@@ -182,7 +182,6 @@ async function told(
       change: entry.change,
       kind: "sent",
       subject: `${said(delivery)} ${name}: ${text}`,
-      target: targetName(run.options.target),
       trailers: [
         ["Message-Id", endedRecord],
         ["To", name],
@@ -279,7 +278,7 @@ async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
     const tip = tipOf(candidate.change)
     return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
   }).length
-  const own = await readRecords(run.git, entry.change)
+  const own = await readRecords(run.git, run.options.target.branch, entry.change)
   return (
     elsewhere +
     own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length

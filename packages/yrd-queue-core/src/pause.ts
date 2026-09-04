@@ -8,8 +8,7 @@
 
 import { ABSENT, RECORD_FORMAT, commitTrailers, type Git } from "./records.ts"
 import { refAt } from "./git.ts"
-
-export const PAUSE_REF = "refs/yrd/pause"
+import { pauseRef } from "./refs.ts"
 
 export type PauseKind = "paused" | "resumed"
 
@@ -54,14 +53,14 @@ export class QueueNotPaused extends Error {
 }
 
 /** The active pause, or undefined when the ref is absent or ends resumed. */
-export async function activePause(git: Git, remote: string): Promise<PauseRecord | undefined> {
-  const record = await readPause(git, remote)
+export async function activePause(git: Git, remote: string, queue: string): Promise<PauseRecord | undefined> {
+  const record = await readPause(git, remote, queue)
   return record?.kind === "paused" ? record : undefined
 }
 
 /** Refuse while the remote's latest pause record is paused. */
-export async function requireResumed(git: Git, remote: string): Promise<void> {
-  const pause = await activePause(git, remote)
+export async function requireResumed(git: Git, remote: string, queue: string): Promise<void> {
+  const pause = await activePause(git, remote, queue)
   if (pause !== undefined) throw new QueuePaused(pause)
 }
 
@@ -70,34 +69,30 @@ export async function requireResumed(git: Git, remote: string): Promise<void> {
  * malformed, unreachable and unreadable state throws instead of opening the
  * queue on a guess.
  */
-export async function readPause(git: Git, remote: string): Promise<PauseRecord | undefined> {
-  const advertised = await pauseTip(git, remote)
+export async function readPause(git: Git, remote: string, queue: string): Promise<PauseRecord | undefined> {
+  const ref = pauseRef(queue)
+  const advertised = await pauseTip(git, remote, ref)
   if (advertised === undefined) return undefined
-  await git(["fetch", "--quiet", "--no-tags", remote, `+${PAUSE_REF}:${PAUSE_REF}`])
-  const fetched = await refAt(git, PAUSE_REF)
+  await git(["fetch", "--quiet", "--no-tags", remote, `+${ref}:${ref}`])
+  const fetched = await refAt(git, ref)
   if (fetched === undefined) {
-    throw new Error(`${remote} advertised ${PAUSE_REF} at ${advertised}, but the fetch left no readable ref`)
+    throw new Error(`${remote} advertised ${ref} at ${advertised}, but the fetch left no readable ref`)
   }
-  return parsePause(git, fetched, `${remote} ${PAUSE_REF}`)
+  return parsePause(git, fetched, `${remote} ${ref}`)
 }
 
 /** Append one paused or resumed record under a lease on the remote tip. */
-export async function writePause(git: Git, remote: string, write: WritePause): Promise<PauseRecord> {
+export async function writePause(git: Git, remote: string, queue: string, write: WritePause): Promise<PauseRecord> {
+  const ref = pauseRef(queue)
   const reason = oneLine(write.reason, "a pause record needs a reason")
   const by = oneLine(write.by, "a pause record needs an actor")
-  const previous = await readPause(git, remote)
+  const previous = await readPause(git, remote, queue)
   if (write.kind === "paused" && previous?.kind === "paused") throw new QueuePaused(previous)
   if (write.kind === "resumed" && previous?.kind !== "paused") throw new QueueNotPaused()
   const commit = await pauseCommit(git, previous, { ...write, by, reason })
-  await git([
-    "push",
-    "--quiet",
-    `--force-with-lease=${PAUSE_REF}:${previous?.sha ?? ABSENT}`,
-    remote,
-    `${commit}:${PAUSE_REF}`,
-  ])
-  await git(["update-ref", PAUSE_REF, commit])
-  return parsePause(git, commit, `${remote} ${PAUSE_REF}`)
+  await git(["push", "--quiet", `--force-with-lease=${ref}:${previous?.sha ?? ABSENT}`, remote, `${commit}:${ref}`])
+  await git(["update-ref", ref, commit])
+  return parsePause(git, commit, `${remote} ${ref}`)
 }
 
 /**
@@ -110,11 +105,12 @@ export async function writePause(git: Git, remote: string, write: WritePause): P
 export async function resumedFence(
   git: Git,
   remote: string,
+  queue: string,
   write: Readonly<{ reason: string; by: string }>,
 ): Promise<ResumedFence> {
   const reason = oneLine(write.reason, "a pause fence needs a reason")
   const by = oneLine(write.by, "a pause fence needs an actor")
-  const previous = await readPause(git, remote)
+  const previous = await readPause(git, remote, queue)
   if (previous?.kind === "paused") throw new QueuePaused(previous)
   const sha = await pauseCommit(git, previous, { by, kind: "resumed", reason })
   return { expected: previous?.sha ?? ABSENT, previous, sha }
@@ -126,16 +122,16 @@ export function pauseLine(record: PauseRecord): string {
   return `${record.kind} by ${record.by} since ${since}: ${record.reason}`
 }
 
-async function pauseTip(git: Git, remote: string): Promise<string | undefined> {
-  const rows = (await git(["ls-remote", "--refs", remote, PAUSE_REF]))
+async function pauseTip(git: Git, remote: string, ref: string): Promise<string | undefined> {
+  const rows = (await git(["ls-remote", "--refs", remote, ref]))
     .split("\n")
     .map((row) => row.trim())
     .filter(Boolean)
   if (rows.length === 0) return undefined
-  if (rows.length !== 1) throw new Error(`${remote} answered with ${String(rows.length)} values for ${PAUSE_REF}`)
-  const [sha, ref] = (rows[0] ?? "").split(/\s+/u)
-  if (ref !== PAUSE_REF || sha === undefined || !/^[0-9a-f]+$/u.test(sha)) {
-    throw new Error(`${remote} returned an unreadable ${PAUSE_REF} advertisement: ${rows[0]}`)
+  if (rows.length !== 1) throw new Error(`${remote} answered with ${String(rows.length)} values for ${ref}`)
+  const [sha, advertisedRef] = (rows[0] ?? "").split(/\s+/u)
+  if (advertisedRef !== ref || sha === undefined || !/^[0-9a-f]+$/u.test(sha)) {
+    throw new Error(`${remote} returned an unreadable ${ref} advertisement: ${rows[0]}`)
   }
   return sha
 }
