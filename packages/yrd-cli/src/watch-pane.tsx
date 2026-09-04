@@ -5,9 +5,9 @@
  *
  * Ported from the monitor deleted at yrd `1f638504` — its split/focus/scroll
  * shell, its keys and its layout tiers — re-typed against the new core's `Row`
- * and rewritten wherever it read the retired timeline. Nothing here imports
- * `@yrd/queue`, `QueueStatusResult` or a run timeline; nothing here writes;
- * and nothing here derives a change's state, which `readChange` alone does.
+ * and rewritten wherever it read the retired timeline. Nothing here imports the
+ * retired core, its status result or its run timeline; nothing here writes; and
+ * nothing here derives a change's state, which `readChange` alone does.
  *
  * Keys, kept from the monitor: `q` leaves, `Enter`/`Space` opens the change
  * under the cursor, `Escape` closes it, `End` follows the tail again, `?`
