@@ -86,7 +86,7 @@ A key the queue does not read is refused, never ignored. The queue workdir is no
     refs/yrd/changes/<branch>@<sha>         the records: one ref per change, one commit per record; on origin too
     refs/yrd/pause                          paused/resumed records; the latest commit is the state, on origin too
     yrd/                                    the queue workdir (git config yrd.workdir moves it)
-      worktrees/<run id>/<phase>/<sha>      a fresh checkout per checked change, removed when the check ends
+      worktrees/<run id>/<phase>/<sha>      fresh checkouts; removed when the run settles, retained together on stuck for repair
       checks/<change>/<run id>/<phase>/<name>.log   check logs, kept
       environments/<name>/<run id>/logs, tmp        setup log and TMPDIR for one opened environment, kept
       logs/<run id>.jsonl                   the run's journal, one line per record
