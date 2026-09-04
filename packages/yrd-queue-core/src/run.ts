@@ -67,16 +67,6 @@ import { queueName, readConfig, targetName, type Ending, type Notifier, type Tar
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { directMergeCommits, directMergeLine, type DirectMerge } from "./direct.ts"
-import {
-  activePause,
-  PAUSE_REF,
-  pauseLine,
-  QueuePaused,
-  readPause,
-  resumedFence,
-  type PauseRecord,
-  type ResumedFence,
-} from "./pause.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed } from "./rings.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
@@ -139,7 +129,7 @@ export type QueueRunOutcome = Readonly<{
 }>
 
 /** Everything one run's steps share. */
-type Run = Readonly<{
+export type Run = Readonly<{
   options: QueueRunOptions
   git: Git
   log: QueueRunLog
@@ -190,7 +180,7 @@ export type Stopped = Readonly<{ ring: string; says: string; what: unknown }>
  * it moves, `[object, ref]`, and the leases proving nobody else moved them,
  * `[ref, expected]`.
  */
-type PushPlan = Readonly<{
+export type PushPlan = Readonly<{
   updates: readonly (readonly [string, string])[]
   leases: readonly (readonly [string, string])[]
 }>
@@ -200,7 +190,7 @@ type PushPlan = Readonly<{
  * when the pusher could read one; no `reason` is a push that found nothing
  * moved, and its caller raises `error` rather than inventing a race.
  */
-type Pushed =
+export type Pushed =
   | Readonly<{ landed: true }>
   | Readonly<{ landed: false; reason?: string; saw?: string; error: unknown }>
 
@@ -233,7 +223,7 @@ export type Steps = Readonly<{
 export type Ring = (steps: Steps) => Steps
 
 /** An authority read failed outside any one change's responsibility. */
-class QueueAuthorityUnreadable extends Error {
+export class QueueAuthorityUnreadable extends Error {
   constructor(authority: string, error: unknown) {
     super(`${authority} could not be read: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
     this.name = "QueueAuthorityUnreadable"
@@ -400,11 +390,8 @@ async function reportDirectMerges(run: Run, entries: QueueRead): Promise<readonl
 }
 
 /** Nothing stops the round: a queue with no ring on it runs every round it is given. */
-async function open(run: Run): Promise<Stopped | undefined> {
-  const paused = await activePause(run.git, run.options.target.remote)
-  if (paused === undefined) return undefined
-  recordPause(run, paused)
-  return { ring: "pause", says: pauseLine(paused), what: paused }
+async function open(): Promise<Stopped | undefined> {
+  return undefined
 }
 
 /**
@@ -707,61 +694,27 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         ...checkTrailers(results),
       ],
     })
-    // The merge transaction advances the pause ref as a resumed record under
-    // lease. That makes this read and the atomic push one ordering point with a
-    // concurrent `queue pause`: whichever lease wins happened first.
-    let fence: ResumedFence
-    try {
-      fence = await resumedFence(run.git, run.options.target.remote, {
-        by: mergedBy(run.name, run.log.id),
-        reason: `merge ${name}`,
-      })
-    } catch (error) {
-      if (error instanceof QueuePaused) {
-        recordPause(run, error.pause)
-        run.stop({ ring: "pause", says: pauseLine(error.pause), what: error.pause })
-        run.log.write({ branch, decision: "checked", head, kind: "change", reason: "paused" })
-        return "checked"
-      }
-      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${PAUSE_REF}`, error)
-    }
     const ref = changeRef(change)
     const pushed = await run.steps.push(run, entry, {
-      leases: [
-        [`refs/heads/${run.options.target.branch}`, run.targetSha],
-        [PAUSE_REF, fence.expected],
-      ],
+      leases: [[`refs/heads/${run.options.target.branch}`, run.targetSha]],
       updates: [
         [mergeCommit, `refs/heads/${run.options.target.branch}`],
         [mergedRecord, ref],
-        [fence.sha, PAUSE_REF],
       ],
     })
     if (!pushed.landed) {
-      // A target, branch, or pause writer can win after our reads. The atomic
-      // leases then reject every update, and the remote — never Git's prose —
-      // identifies the authority that moved. The change remains checked.
-      let pauseNow: PauseRecord | undefined
-      try {
-        pauseNow = await readPause(run.git, run.options.target.remote)
-      } catch (authorityError) {
-        throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${PAUSE_REF}`, authorityError)
-      }
-      if (pauseNow?.kind === "paused") {
-        recordPause(run, pauseNow)
-        run.stop({ ring: "pause", says: pauseLine(pauseNow), what: pauseNow })
-        run.log.write({ branch, decision: "checked", head, kind: "change", reason: "paused" })
-        return "checked"
-      }
-      const authorityMoved = pauseNow?.sha !== fence.previous?.sha
-      if (pushed.reason === undefined && !authorityMoved) throw pushed.error
+      // Something can win after our reads, and then the atomic leases reject
+      // every update. A push that read what moved says so and the change simply
+      // keeps its place; one that could read nothing raises, because a queue
+      // that cannot explain a refused merge has not judged anything.
+      if (pushed.reason === undefined) throw pushed.error
       run.log.write({
         branch,
         decision: "checked",
         head,
         kind: "change",
-        reason: pushed.reason ?? "pause-moved",
-        saw: pushed.saw ?? pauseNow?.sha ?? "absent",
+        reason: pushed.reason,
+        ...(pushed.saw === undefined ? {} : { saw: pushed.saw }),
       })
       return "checked"
     }
@@ -1486,15 +1439,4 @@ async function finish(
     target: targetNow,
     ...lists,
   }
-}
-
-/** Record one active pause in the run's structured log. */
-function recordPause(run: Run, pause: PauseRecord): void {
-  run.log.write({
-    by: pause.by,
-    kind: "pause",
-    reason: pause.reason,
-    since: pause.at.toISOString(),
-    state: pause.kind,
-  })
 }
