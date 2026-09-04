@@ -179,13 +179,11 @@ export function journalKey(branch: string, head: string): string {
  * Undefined for a name that is not one of ours.
  */
 export function runStartedAt(id: string): Date | undefined {
-  const stamp = /^q-(\d{8})T(\d{6})(\d{3})Z-/u.exec(id)
+  const stamp = /^q-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{3})Z-/u.exec(id)
   if (stamp === null) return undefined
-  const [, day, time, milliseconds] = stamp
-  if (day === undefined || time === undefined || milliseconds === undefined) return undefined
-  const at = new Date(
-    `${day.slice(0, 4)}-${day.slice(4, 6)}-${day.slice(6, 8)}T${time.slice(0, 2)}:${time.slice(2, 4)}:${time.slice(4, 6)}.${milliseconds}Z`,
-  )
+  const [, year, month, day, hour, minute, second, milliseconds] = stamp
+  if ([year, month, day, hour, minute, second, milliseconds].some((part) => part === undefined)) return undefined
+  const at = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}.${milliseconds}Z`)
   return Number.isNaN(at.getTime()) ? undefined : at
 }
 
