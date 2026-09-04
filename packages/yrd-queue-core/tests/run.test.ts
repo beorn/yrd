@@ -7,7 +7,16 @@
  */
 
 import { spawnSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -387,6 +396,18 @@ describe("a check log is written once", () => {
 })
 
 describe("a queue run", () => {
+  it("refuses a queue-owned hooks path that is not empty", async () => {
+    const w = await world()
+    const hooksPath = join(w.workdir, "hooks-disabled")
+    const unexpected = join(hooksPath, "unexpected-hook")
+    mkdirSync(hooksPath, { recursive: true })
+    writeFileSync(unexpected, "must not run\n")
+
+    await expect(queueRun(w.options({ exit: 0 }))).rejects.toThrow(
+      `queue-owned hooks path ${hooksPath} is not empty (unexpected-hook); remove the named entries, then run yrd queue run`,
+    )
+  })
+
   it("pass: the change is checked, merged, the target moves by one merge commit, and the submitter is told to close their bead", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
@@ -552,7 +573,7 @@ describe("a queue run", () => {
     const w = await world()
     const head = await submitCommit(w, "task/git-super-stuck", "git-super-stuck.txt")
     const bin = join(w.workdir, "bin")
-    const argvLog = join(w.workdir, "git-super.argv")
+    const invocationLog = join(w.workdir, "git-super-invocation.json")
     mkdirSync(bin, { recursive: true })
     const stderrTail = `hook stderr start\n${"checkout drift ".repeat(400)}\nhook stderr end`
     const detail = {
@@ -574,7 +595,7 @@ describe("a queue run", () => {
     const fakeGitSuper = join(bin, "git-super")
     writeFileSync(
       fakeGitSuper,
-      `#!/usr/bin/env bun\nimport { writeFileSync } from "node:fs"\nwriteFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join("\\n"))\nprocess.stdout.write(${JSON.stringify(`${JSON.stringify(result)}\n`)})\nprocess.exit(2)\n`,
+      `#!/usr/bin/env bun\nimport { spawnSync } from "node:child_process"\nimport { writeFileSync } from "node:fs"\nconst hooksPath = spawnSync("git", ["config", "--get", "core.hooksPath"], { encoding: "utf8" }).stdout.trim()\nwriteFileSync(${JSON.stringify(invocationLog)}, JSON.stringify({ argv: process.argv.slice(2), hooksPath }))\nprocess.stdout.write(${JSON.stringify(`${JSON.stringify(result)}\n`)})\nprocess.exit(2)\n`,
     )
     chmodSync(fakeGitSuper, 0o755)
     const base = w.options({ exit: 0 })
@@ -585,8 +606,16 @@ describe("a queue run", () => {
     })
 
     expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/git-super-stuck"] })
-    expect(readFileSync(argvLog, "utf8").split("\n")).toContain("--no-verify")
     const composing = join(w.workdir, "worktrees", outcome.run, "compose", "submit", head.slice(0, 12))
+    const hooksPath = join(w.workdir, "hooks-disabled")
+    const invocation = JSON.parse(readFileSync(invocationLog, "utf8")) as {
+      argv: string[]
+      hooksPath: string
+    }
+    expect(invocation.argv).not.toContain("--no-verify")
+    expect(invocation.hooksPath).toBe(hooksPath)
+    expect(existsSync(hooksPath)).toBe(true)
+    expect(readdirSync(hooksPath)).toEqual([])
     expect(existsSync(composing)).toBe(true)
     await fetchChanges(w)
     const records = await readRecords(w.git, { branch: "task/git-super-stuck", head })

@@ -37,7 +37,7 @@
  * could not do its own job, and the next thing to happen is a person.
  */
 
-import { mkdirSync, rmSync } from "node:fs"
+import { mkdirSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
@@ -125,6 +125,8 @@ export type Run = Readonly<{
   log: QueueRunLog
   /** The temp root every program this run starts gets as `TMPDIR`: `<workdir>/tmp`. */
   tmpdir: string
+  /** An asserted-empty directory that isolates queue-owned Git commits from repository hooks. */
+  hooksPath: string
   worktrees: string
   /** The target the run read at its start; every judgement is against it. */
   targetSha: string
@@ -221,6 +223,14 @@ export class QueueAuthorityUnreadable extends Error {
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   const git = options.git ?? gitIn(options.repo, options.process)
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
+  const hooksPath = join(options.workdir, "hooks-disabled")
+  mkdirSync(hooksPath, { recursive: true })
+  const hooks = readdirSync(hooksPath).sort()
+  if (hooks.length > 0) {
+    throw new Error(
+      `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries, then run yrd queue run`,
+    )
+  }
   // One reading of the remote yields both the queue and the commit the target
   // stood at when it was read, so the run never asks a second time and can
   // never judge against a target its own queue read did not see.
@@ -229,6 +239,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   let stopped: Stopped | undefined
   const run: Run = {
     git,
+    hooksPath,
     log,
     name: queueName(options.target, await remoteUrl(git, options.target.remote)),
     options,
@@ -602,7 +613,7 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
 
 /** Run git-super as the ruled command boundary; malformed or truncated JSON is never treated as a verdict. */
 async function superMerge(run: Run, cwd: string, commit: string, message: string): Promise<SuperMergeResult> {
-  const execution = await gitSuperExecution(run, cwd, ["merge", commit, "--no-verify", "-m", message])
+  const execution = await gitSuperExecution(run, cwd, ["merge", commit, "-m", message])
   let parsed: unknown
   try {
     parsed = JSON.parse(execution.stdout)
@@ -630,7 +641,7 @@ async function gitSuperExecution(
     run.options.process ?? createProcess({ cwd, env: gitEnvironment(run.options.env ?? globalThis.process.env) })
   try {
     const execution = await process.run({
-      argv: ["git-super", "--json", ...argv],
+      argv: ["git", "-c", `core.hooksPath=${run.hooksPath}`, "super", "--json", ...argv],
       cwd,
       env: gitEnvironment(run.options.env ?? globalThis.process.env),
     })

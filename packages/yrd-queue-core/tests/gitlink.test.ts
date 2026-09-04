@@ -11,7 +11,7 @@
  * and 13.7 s per judged change.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -247,6 +247,35 @@ describe("settling gitlinks", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>)
       .find((record) => record.kind === "merge")
     expect(merge?.gitlinks).toContain(`component ${w.onMain} -> ${w.main}`)
+  })
+
+  it("the queue-owned merge is isolated from vetoing and observing repository hooks", async () => {
+    const w = await world()
+    const head = await submitGitlink(w, "task/hook-isolation", w.onMain)
+    const observed = join(w.work, "..", "queue-hook-observed.log")
+    for (const [hook, exit] of [
+      ["prepare-commit-msg", 1],
+      ["post-commit", 0],
+    ] as const) {
+      const path = join(w.work, ".git", "hooks", hook)
+      writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' '${hook}' >> '${observed}'\nexit ${String(exit)}\n`)
+      chmodSync(path, 0o755)
+    }
+
+    const outcome = await queueRun(w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/hook-isolation"], stuck: [] })
+    expect(existsSync(observed)).toBe(false)
+    const target = await remoteTarget(w)
+    expect((await w.git(["rev-list", "--parents", "-n", "1", target])).trim().split(" ")).toHaveLength(3)
+    expect(await w.git(["show", "-s", "--format=%B", target])).toContain(`Settled: component@${w.main}`)
+    expect(await gitlinkAt(w, target)).toBe(w.main)
+    expect((await readRecords(w.git, { branch: "task/hook-isolation", head })).map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+      "merged",
+      "sent",
+    ])
   })
 
   /** An anomaly already on root main is not the candidate's authorship, but every merge that passes over it must expose it. */
