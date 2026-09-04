@@ -9,8 +9,11 @@ const result = await Bun.build({
   outdir: dist,
   naming: "yrd.js",
   target: "bun",
+  // The live watch pane is reached through a dynamic import so it stays a separate
+  // chunk: non-watch commands (yrd --version, submit, one-shot queue) never load it, and
+  // the core bundle does not top-level-import silvery's TUI-only SplitPane.
   splitting: true,
-  external: ["@silvery/*", "loggily", "zod"],
+  external: ["react", "react/*", "silvery", "silvery/*", "@silvery/*", "loggily", "zod"],
 })
 if (!result.success) throw new AggregateError(result.logs, "Could not build Yrd")
 

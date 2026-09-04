@@ -38,9 +38,12 @@
     "check:hh": "bun run typecheck:hh && bun run test"
   },
   "dependencies": {
+    "@silvery/ansi": "^0.24.0",
     "@silvery/commander": "^0.24.0",
     "@silvery/scope": "^0.24.0",
     "loggily": "^0.10.2",
+    "react": "^19.2.0",
+    "silvery": "^0.24.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
