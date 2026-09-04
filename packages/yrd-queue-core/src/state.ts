@@ -121,9 +121,7 @@ export function openedAt(change: ChangeRecords): number {
   const last = tipOf(change)
   const opened = last.trailers.find(([name]) => name === "Opened")?.[1]
   const time = opened === undefined ? Number.NaN : Date.parse(opened)
-  if (Number.isNaN(time)) {
-    throw new Error(`record ${last.sha.slice(0, 12)} carries no readable Opened: (${opened ?? "absent"})`)
-  }
+  if (Number.isNaN(time)) throw new Error(`record ${last.sha.slice(0, 12)} carries no readable Opened: (${opened ?? "absent"})`)
   return time
 }
 

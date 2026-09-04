@@ -198,10 +198,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       expect(result.branch, run.report).toBe(branch)
       expect(result.head, run.report).toBe(headSha)
     }
-    expect(
-      results.some((result) => result.result === "pass"),
-      run.report,
-    ).toBe(true)
+    expect(results.some((result) => result.result === "pass"), run.report).toBe(true)
 
     // merge — the merge commit and the tip it put on the target.
     const merged = theOne(records, "merge")
@@ -258,9 +255,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // names the log the end row names.
     const key = (record: LogRecord): string => `${String(record.phase)}/${String(record.name)}`
     for (const end of ends) {
-      const before = checks
-        .slice(0, checks.indexOf(end))
-        .filter((record) => key(record) === key(end) && record.end === undefined)
+      const before = checks.slice(0, checks.indexOf(end)).filter((record) => key(record) === key(end) && record.end === undefined)
       expect(before.length, `${run.report}\nno start row before ${key(end)}`).toBe(1)
       expect(before[0]?.log, run.report).toBe(end.log)
     }

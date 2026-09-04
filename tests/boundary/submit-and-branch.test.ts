@@ -121,7 +121,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   // The plan: "It adds the `yrd` remote from `.yrd.yml` when missing." It does
   // not name the key, so the fixture writes `remote:`. If the core names it
   // something else this test is red for the key and not for the rule; the
-  // rule it fixes in place is that a repository with no `yrd` remote can still submit.
+  // rule it holds is that a repository with no `yrd` remote can still submit.
   it("adds the yrd remote from .yrd.yml when the repository has none", async () => {
     const { repo, origin } = await boundaryRepository({ exit: 0, yrdRemote: true })
     expect(await remoteNames(repo)).not.toContain("yrd")
@@ -258,12 +258,8 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(await refExists(origin, changeRef({ branch: branch, head: head1 })), second.report).toBe(true)
     expect(await refExists(origin, changeRef({ branch: branch, head: head2 })), second.report).toBe(true)
     // Loud is this: each change says who put that head there.
-    expect((await recordMessages(origin, changeRef({ branch: branch, head: head1 }))).at(-1) ?? "").toContain(
-      "ada@example.invalid",
-    )
-    expect((await recordMessages(origin, changeRef({ branch: branch, head: head2 }))).at(-1) ?? "").toContain(
-      "bo@example.invalid",
-    )
+    expect((await recordMessages(origin, changeRef({ branch: branch, head: head1 }))).at(-1) ?? "").toContain("ada@example.invalid")
+    expect((await recordMessages(origin, changeRef({ branch: branch, head: head2 }))).at(-1) ?? "").toContain("bo@example.invalid")
   })
 
   /**

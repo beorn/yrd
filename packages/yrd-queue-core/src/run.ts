@@ -1122,8 +1122,7 @@ async function send(
  * The JSON object a notify entry reads on its stdin: the record itself, the same
  * one the change's ref stores, in the fields a reader needs and nothing else.
  *
- * `record` is the record's discriminant and says which ending it is; `change`
- * says which change — its name, or for
+ * `record` says which ending it is and `change` which change — its name, or for
  * a direct merge the commit that went around the queue. `submitter` and `issue` are
  * there when the submit gave them. `merged` carries the merge it made; `failed`
  * and `stuck` carry why and where to read it, and `failed` how many times this
@@ -1182,8 +1181,7 @@ async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
   }).length
   const own = await readRecords(run.git, entry.change)
   return (
-    elsewhere +
-    own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
+    elsewhere + own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
   )
 }
 

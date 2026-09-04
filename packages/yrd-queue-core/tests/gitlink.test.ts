@@ -246,9 +246,7 @@ describe("the built-in gitlink check", () => {
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
-    expect(log.filter((record) => record.kind === "merged-direct")).toMatchObject([
-      { commit: direct, gitlinks: ["component"] },
-    ])
+    expect(log.filter((record) => record.kind === "merged-direct")).toMatchObject([{ commit: direct, gitlinks: ["component"] }])
     const told = log.filter((record) => record.kind === "message" && record.says === "merged-direct")
     expect(told).toMatchObject([{ id: direct, says: "merged-direct", to: "none" }])
     expect(told[0]?.text).toContain(`main moved around the queue at ${direct.slice(0, 12)}`)
@@ -277,22 +275,11 @@ describe("the built-in gitlink check", () => {
     await w.git(["update-index", "--add", "--cacheinfo", `160000,${four},component`])
     const tree = (await w.git(["write-tree"])).trim()
     const head = (
-      await w.git([
-        "commit-tree",
-        tree,
-        "-p",
-        base,
-        "-m",
-        "task/unfetched: move the component gitlink to a commit this checkout never fetched",
-      ])
+      await w.git(["commit-tree", tree, "-p", base, "-m", "task/unfetched: move the component gitlink to a commit this checkout never fetched"])
     ).trim()
     await w.git(["update-ref", "refs/heads/task/unfetched", head])
     await w.git(["read-tree", "main"])
-    await submit(w.git, "origin", {
-      branch: "task/unfetched",
-      submitter: "@dev/2",
-      target: { branch: "main", remote: "origin" },
-    })
+    await submit(w.git, "origin", { branch: "task/unfetched", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 
     const outcome = await queueRun(w.options())
 
@@ -313,10 +300,7 @@ describe("the built-in gitlink check", () => {
     // run's answer — and one merge per run lands the first (ruling D4).
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/first"])
-    expect((await readRecords(w.git, { branch: "task/second", head: second })).map((record) => record.kind)).toEqual([
-      "opened",
-      "checked",
-    ])
+    expect((await readRecords(w.git, { branch: "task/second", head: second })).map((record) => record.kind)).toEqual(["opened", "checked"])
     expect(w.fetches()).toBe(1)
   })
 })

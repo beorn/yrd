@@ -114,7 +114,8 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     const w = await world()
 
     await expect(submit(w.git, "origin", { branch: "main", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })).rejects.toThrow(
-      "main is the target, not a change")
+      "main is the target, not a change",
+    )
     expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
   })
 
@@ -157,7 +158,8 @@ describe("a change is named <branch>@<sha>, and that name is the last part of it
     expect(await remoteRefs(w)).toContain(`refs/yrd/changes/task/one@v2@${head}`)
     expect((await readRecords(w.git, { branch: "task/one@v2", head })).map((record) => record.kind)).toEqual(["opened"])
     expect((await readQueue(w.git, "origin", "main")).changes.map((entry) => [entry.change.branch, entry.change.head])).toEqual([
-      ["task/one@v2", head]])
+      ["task/one@v2", head],
+    ])
   })
 })
 

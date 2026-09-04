@@ -244,7 +244,7 @@ export function changeOf(record: ChangeRecord, where: string): string {
 }
 
 /**
- * The record a change ref's tip IS, held to the format this code reads: an
+ * The record a change ref's tip IS, held to the format this code reads: a
  * `Record:` naming its kind and a `Change:` naming the change it is about.
  *
  * A reader that meets any other shape says which ref and commit are unreadable
@@ -255,9 +255,7 @@ export function tipRecord(record: ChangeRecord | undefined, sha: string, where: 
     changeOf(record, where)
     return record
   }
-  throw new Error(
-    `${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|sent trailer`,
-  )
+  throw new Error(`${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|sent trailer`)
 }
 
 /** Every value of a trailer, in order. */

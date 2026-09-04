@@ -755,14 +755,7 @@ describe("a queue run", () => {
 
     const held = await queueRun(w.options({ exit: 0 }))
 
-    expect(held).toMatchObject({
-      directMerges: [direct],
-      exitCode: 0,
-      failed: [],
-      freeze: frozen,
-      merged: [],
-      stuck: [],
-    })
+    expect(held).toMatchObject({ directMerges: [direct], exitCode: 0, failed: [], freeze: frozen, merged: [], stuck: [] })
     expect(existsSync(dead)).toBe(false)
     expect(logRecords(held).filter((record) => record.kind === "reap")).toHaveLength(1)
     expect(logRecords(held).filter((record) => record.kind === "merged-direct")).toHaveLength(1)
@@ -776,9 +769,9 @@ describe("a queue run", () => {
     expect((await readRecords(w.git, { branch: "task/deleted", head: deleted })).map((record) => record.kind)).toEqual([
       "opened",
     ])
-    expect(
-      (await readRecords(w.git, { branch: "task/caught-up", head: caughtUp })).map((record) => record.kind),
-    ).toEqual(["opened"])
+    expect((await readRecords(w.git, { branch: "task/caught-up", head: caughtUp })).map((record) => record.kind)).toEqual([
+      "opened",
+    ])
     expect((await readRecords(w.git, { branch: "task/unsent", head: unsent })).map((record) => record.kind)).toEqual([
       "opened",
       "failed",
@@ -1063,9 +1056,7 @@ describe("a queue run", () => {
     await fetchChanges(w)
     // The planted ref still holds the one record that was written on it, and no
     // run considered it: no record, no row, no message.
-    expect((await readRecords(w.git, { branch: "main", head: w.target })).map((record) => record.kind)).toEqual([
-      "opened",
-    ])
+    expect((await readRecords(w.git, { branch: "main", head: w.target })).map((record) => record.kind)).toEqual(["opened"])
     for (const outcome of [merging, after]) {
       expect(logRecords(outcome).filter((record) => record.kind === "change" && record.branch === "main")).toEqual([])
       expect(logRecords(outcome).filter((record) => record.kind === "merged-direct")).toEqual([])

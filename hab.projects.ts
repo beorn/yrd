@@ -58,12 +58,12 @@ export default {
         // the CLI every tick was noise with a second opinion.
         // The loop has two endings it chooses: 2 (stuck — it stays down until
         // the garage fixes the queue) and 0, which now covers both a signal and
-        // a moved pin, read at the target after every round and taken at a
+        // a moved gitlink, read at the target after every round and taken at a
         // round boundary with nothing in flight. `source-stale` (11) and the
         // stale installed plan (13) were the incumbent resident's
         // self-supervision and went with it at M6 with `habitant-exit.ts`.
         //
-        // A pin move exits 0, and under `on-failure` a clean ending is not
+        // A gitlink move exits 0, and under `on-failure` a clean ending is not
         // relaunched, so the policy is `always`. The one permanent exit is 2,
         // stuck. Ruled by @cto 2026-09-03.
         //
@@ -72,7 +72,7 @@ export default {
         // exit taxonomy was INERT: 13 fired twice on 2026-09-02 alone, once at
         // 08:06 and once before 08:42, each time as a merge changed the step
         // definitions under a serving runner, and each time the queue stayed
-        // down until a person ran `hab up`. The pin advances cost the same
+        // down until a person ran `hab up`. The gitlink advances cost the same
         // ritual — stop the resident, advance the gitlink, start it again —
         // between 2m43s and ~40 minutes each, on the fleet's critical path.
         // Operator ruling 2026-09-02: "why isn't yrd fully automatic now? that

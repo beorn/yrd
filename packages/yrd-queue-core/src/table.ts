@@ -83,11 +83,7 @@ export function show(
 ): readonly Readonly<{ row: Row; checks: readonly string[]; records: readonly ChangeRecord[] }>[] {
   return entries
     .filter((entry) => entry.change.branch === branch)
-    .map((entry) => ({
-      checks: trailers(tipOf(entry.change), "Check"),
-      records: entry.change.records,
-      row: row(entry),
-    }))
+    .map((entry) => ({ checks: trailers(tipOf(entry.change), "Check"), records: entry.change.records, row: row(entry) }))
     .sort((left, right) => (right.row.since?.getTime() ?? 0) - (left.row.since?.getTime() ?? 0))
 }
 

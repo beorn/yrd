@@ -125,9 +125,8 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
   // `-z` because a worktree path may contain a newline, and the newline form
   // would then split one entry into two unreadable ones.
   const listed = await process.run({ argv: ["git", "worktree", "list", "--porcelain", "-z"], cwd: root })
-  if (listed.exitCode !== 0) {
+  if (listed.exitCode !== 0)
     throw new Error(`yrd: git worktree list exited ${String(listed.exitCode)}: ${listed.stderr.trim()}`)
-  }
   const under = `${resolve(baysRoot)}/`
   const rows: EnvRow[] = []
   let current: { path?: string; head?: string; branch?: string } = {}

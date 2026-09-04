@@ -265,8 +265,7 @@ describe("a change and its records", { timeout: 120_000 }, () => {
 
       for (const [index, record] of read.records.entries()) {
         if (index === 0) continue
-        expect(record.parents, `${report}\nrecord ${String(index)} (${record.kind})`).toEqual([
-          read.records[index - 1]?.sha,
+        expect(record.parents, `${report}\nrecord ${String(index)} (${record.kind})`).toEqual([read.records[index - 1]?.sha,
         ])
       }
 

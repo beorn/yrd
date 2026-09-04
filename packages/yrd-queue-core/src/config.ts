@@ -84,7 +84,7 @@ export function parseTarget(text: string): Target | undefined {
 const TARGET_GRAMMAR = "must be <remote>#<branch>, e.g. origin#main"
 
 /** The one line that shows what `notify:` looks like, wherever it has to be shown. */
-const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]"
+const NOTIFY_SHAPE = 'notify: [- <name>: {on: [merged, failed], run: <command>}]'
 
 /** The endings the queue can notify about; it has no others to run a command on. */
 export const ENDINGS = ["merged", "failed", "stuck", "merged-direct"] as const

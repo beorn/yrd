@@ -55,12 +55,7 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
   await w.git(["commit", "--quiet", "-m", file])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
-  await submit(w.git, "origin", {
-    branch,
-    submitter: "@dev/2",
-    target: { branch: "main", remote: "origin" },
-    issue: `@i/1/${file}`,
-  })
+  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" }, issue: `@i/1/${file}` })
   return head
 }
 
@@ -93,13 +88,7 @@ describe("the declaration is read from the target commit", () => {
       { name: "supervisor", on: ["stuck"], run: "bun tools/yrd-notify.ts --to @cto" },
     ])
     expect(config?.checks).toEqual([
-      {
-        environmentPassthrough: undefined,
-        name: "typecheck",
-        on: ["submit", "merge"],
-        run: "bun run typecheck",
-        timeoutMs: undefined,
-      },
+      { environmentPassthrough: undefined, name: "typecheck", on: ["submit", "merge"], run: "bun run typecheck", timeoutMs: undefined },
       { environmentPassthrough: undefined, name: "tests", on: undefined, run: "bun run test", timeoutMs: 1_800_000 },
     ])
     expect(config?.blob).toMatch(/^[0-9a-f]{40}$/u)
@@ -108,9 +97,7 @@ describe("the declaration is read from the target commit", () => {
   it("names the setup that finishes every fresh worktree, and holds it to one command", async () => {
     // A fresh worktree has submodules and no dependencies, so the target says
     // once how to finish one instead of every check prefixing its own `run:`.
-    const declared = await world(
-      "target: origin#main\nsetup: bun install --frozen-lockfile\nchecks:\n  - tests:\n      run: bun run test\n",
-    )
+    const declared = await world("target: origin#main\nsetup: bun install --frozen-lockfile\nchecks:\n  - tests:\n      run: bun run test\n")
     expect(await readConfig(declared.git, "main")).toMatchObject({ setup: "bun install --frozen-lockfile" })
 
     // Optional: a target that declares none prepares nothing beyond materialization.
@@ -163,9 +150,7 @@ describe("the declaration is read from the target commit", () => {
   it("refuses a target that is not <remote>#<branch>, and the retired remote: key by name", async () => {
     for (const written of ["main", "origin#", "#main"]) {
       const wrong = await world(`target: ${JSON.stringify(written)}\n`)
-      await expect(readConfig(wrong.git, "main")).rejects.toThrow(
-        /target: must be <remote>#<branch>, e\.g\. origin#main/u,
-      )
+      await expect(readConfig(wrong.git, "main")).rejects.toThrow(/target: must be <remote>#<branch>, e\.g\. origin#main/u)
     }
 
     // The old two-key shape: `remote:` is refused like any unknown key, and the
@@ -200,9 +185,7 @@ describe("the declaration is read from the target commit", () => {
 
     // An ending the queue does not have, and a key `notify:` does not read.
     const unknownEnding = await world("notify:\n  - everyone:\n      on: landed\n      run: bun x\n")
-    await expect(readConfig(unknownEnding.git, "main")).rejects.toThrow(
-      /on: must be merged or failed or stuck or merged-direct/u,
-    )
+    await expect(readConfig(unknownEnding.git, "main")).rejects.toThrow(/on: must be merged or failed or stuck or merged-direct/u)
     const timed = await world("notify:\n  - everyone:\n      run: bun x\n      timeoutMs: 1000\n")
     await expect(readConfig(timed.git, "main")).rejects.toThrow(/unknown key timeoutMs/u)
 
@@ -230,9 +213,7 @@ describe("the declaration is read from the target commit", () => {
     const old = await world("batch: 1\nchecks:\n  - verify:\n      run: bun run test\n")
     await expect(readConfig(old.git, "main")).rejects.toThrow(/unknown key batch/u)
 
-    const wrong = await world(
-      "target: origin#main\nchecks:\n  - verify:\n      on: sometimes\n      run: bun run test\n",
-    )
+    const wrong = await world("target: origin#main\nchecks:\n  - verify:\n      on: sometimes\n      run: bun run test\n")
     await expect(readConfig(wrong.git, "main")).rejects.toThrow(/on: must be submit or merge/u)
   })
 })
@@ -269,18 +250,12 @@ describe("the table is the queue read rendered", () => {
     const rows = list(entries, { directMerges })
     expect(rows.map((row) => [row.state, row.branch, row.head, row.position, row.reason])).toEqual([
       ["queued", "task/one", rows[0]?.head, 1, undefined],
-      [
-        "direct",
-        "main",
-        direct,
-        undefined,
-        `main moved around the queue at ${direct.slice(0, 12)} (direct.txt around the queue)`,
-      ],
+      ["direct", "main", direct, undefined, `main moved around the queue at ${direct.slice(0, 12)} (direct.txt around the queue)`],
     ])
     // Windowed like every ended row: an old direct is not this week's news.
-    expect(
-      list(entries, { directMerges, sinceMs: 0, now: new Date(Date.now() + 60_000) }).map((row) => row.state),
-    ).toEqual(["queued"])
+    expect(list(entries, { directMerges, sinceMs: 0, now: new Date(Date.now() + 60_000) }).map((row) => row.state)).toEqual([
+      "queued",
+    ])
   })
 
   it("shows one branch's changes newest first", async () => {
@@ -292,11 +267,7 @@ describe("the table is the queue read rendered", () => {
     await w.git(["commit", "--quiet", "-am", "again"])
     const second = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", {
-      branch: "task/one",
-      submitter: "@dev/2",
-      target: { branch: "main", remote: "origin" },
-    })
+    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 
     const shown = show((await readQueue(w.git, "origin", "main")).changes, "task/one")
     expect(shown.map((entry) => [entry.row.head, entry.row.state, entry.row.reason])).toEqual([

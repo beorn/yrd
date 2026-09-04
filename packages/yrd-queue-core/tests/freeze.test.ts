@@ -102,11 +102,7 @@ describe("the queue freeze is one leased record ref at the remote", () => {
     const w = await world()
     const tree = (await w.git(["mktree"], "")).trim()
     const ambiguous = (
-      await w.git([
-        "commit-tree",
-        tree,
-        "-m",
-        "ambiguous state\n\nRecord: frozen\nRecord: unfrozen\nFrozen-By: @chief\n",
+      await w.git(["commit-tree", tree, "-m", "ambiguous state\n\nRecord: frozen\nRecord: unfrozen\nFrozen-By: @chief\n",
       ])
     ).trim()
     await w.git(["push", "--quiet", "origin", `${ambiguous}:${FREEZE_REF}`])
