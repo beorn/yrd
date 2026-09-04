@@ -116,6 +116,8 @@ export type QueueConfig = Readonly<{
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
+  /** One shell command run before closing a retained environment. */
+  teardown?: string
   /** What the queue notifies, per ending; empty when the declaration names none. */
   notify: readonly Notifier[]
   /** The blob the declaration was read from, recorded on every checked record. */
@@ -141,7 +143,8 @@ export async function readConfig(git: Git, commit: string, target: Target): Prom
   onlyKeys(raw, TOP_KEYS, ".yrd.yml")
   const notify = readNotify(raw.notify)
   const setup = optionalString(raw, "setup")
-  return { blob, checks: readChecks(raw.checks), notify, setup, target }
+  const teardown = optionalString(raw, "teardown")
+  return { blob, checks: readChecks(raw.checks), notify, setup, teardown, target }
 }
 
 export type Hints = Readonly<{
@@ -273,11 +276,11 @@ function readChecks(value: unknown): readonly CheckSpec[] {
   )
 }
 
-// Ruling A6's set, plus `setup:` (2026-09-02): every key here is read by the
-// queue, and one it does not read is still refused. A fresh worktree has
+// Ruling A6's set, plus environment setup/teardown: every key here has a
+// consumer, and one nobody reads is still refused. A fresh worktree has
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["checks", "setup", "notify"] as const
+const TOP_KEYS = ["checks", "setup", "teardown", "notify"] as const
 
 /**
  * A key the declaration used to read, and where its meaning went. A typo is

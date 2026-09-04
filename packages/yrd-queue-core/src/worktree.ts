@@ -156,7 +156,7 @@ export async function reapWorktrees(git: Git, root: string, thisRun: string): Pr
   }
   const reaped: Reaped[] = []
   if (dead.size > 0) {
-    for (const path of await registeredWorktrees(git)) {
+    for (const { path } of await registeredWorktrees(git)) {
       const of = runOwning(root, path)
       const why = of === undefined ? undefined : dead.get(of)
       if (of === undefined || why === undefined) continue
@@ -203,13 +203,29 @@ function runOwning(root: string, path: string): string | undefined {
   return within.split(sep)[0]
 }
 
-/** Every worktree the repository has registered, by path. The main worktree is among them and never under the root, so it is never a candidate. */
-async function registeredWorktrees(git: Git): Promise<readonly string[]> {
-  return (await git(["worktree", "list", "--porcelain"]))
-    .split("\n")
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length).trim())
-    .filter((path) => path !== "")
+export type RegisteredWorktree = Readonly<{ path: string; head?: string; branch?: string; locked?: string }>
+
+/** Git's own registry, shared by environment list/close and queue cleanup.
+ * NUL-delimited fields preserve paths containing whitespace or newlines. */
+export async function registeredWorktrees(git: Git): Promise<readonly RegisteredWorktree[]> {
+  const rows: RegisteredWorktree[] = []
+  let current: { path?: string; head?: string; branch?: string; locked?: string } = {}
+  const take = (): void => {
+    if (current.path !== undefined) rows.push({ ...current, path: current.path })
+    current = {}
+  }
+  for (const field of (await git(["worktree", "list", "--porcelain", "-z"])).split("\0")) {
+    if (field === "") take()
+    else if (field.startsWith("worktree ")) {
+      take()
+      current.path = field.slice("worktree ".length)
+    } else if (field.startsWith("HEAD ")) current.head = field.slice("HEAD ".length)
+    else if (field.startsWith("branch ")) current.branch = field.slice("branch ".length).replace(/^refs\/heads\//u, "")
+    else if (field === "locked" || field.startsWith("locked "))
+      current.locked = field.slice("locked".length).trimStart()
+  }
+  take()
+  return rows
 }
 
 /** The directories directly under `root`, or none when there is no root yet. */

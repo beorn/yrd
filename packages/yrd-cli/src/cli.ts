@@ -26,7 +26,7 @@
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
-import { listEnvironments, openEnvironment } from "./env-commands.ts"
+import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
 import {
   closeGarage,
   garageRefCommit,
@@ -331,6 +331,13 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (commit, options) =>
       setExit(await openEnvironment(commit, options as Parameters<typeof openEnvironment>[1], io)),
+    )
+  env_
+    .command("close <path>")
+    .description("run declared teardown and remove a registered clean environment without force")
+    .option("--json", "emit stable JSON")
+    .action(async (path, options) =>
+      setExit(await closeEnvironment(path, options as Parameters<typeof closeEnvironment>[1], io)),
     )
   env_
     .command("list", { isDefault: true })

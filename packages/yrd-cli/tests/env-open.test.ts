@@ -12,12 +12,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, type Git } from "@yrd/queue-core"
@@ -64,7 +65,7 @@ async function command(
   return { exit, stderr, stdout }
 }
 
-async function world(setup: string): Promise<World> {
+async function world(setup: string, teardown?: string): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-open-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -76,7 +77,10 @@ async function world(setup: string): Promise<World> {
   await git(["config", "user.email", "env-open@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), `setup: ${JSON.stringify(setup)}\n`)
+  writeFileSync(
+    join(work, ".yrd.yml"),
+    `setup: ${JSON.stringify(setup)}\n${teardown === undefined ? "" : `teardown: ${JSON.stringify(teardown)}\n`}`,
+  )
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "declare environment setup"])
   await git(["push", "--quiet", "origin", "main"])
@@ -311,5 +315,144 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain("exit 23 is not a verdict")
     expect(run.stderr()).toContain("setup exploded")
     expect(run.stderr()).toContain(bay)
+  })
+})
+
+describe("yrd env close preserves anything it cannot safely remove", () => {
+  it("opens, lists and closes a workdir configured through a symlink", async () => {
+    const w = await world(":")
+    const actual = join(w.work, "state-actual")
+    const alias = join(w.work, "state-alias")
+    mkdirSync(actual)
+    symlinkSync(actual, alias)
+    await w.git(["config", "yrd.workdir", alias])
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
+    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const physical = realpathSync(path)
+    const listed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
+    expect(JSON.parse(listed.stdout())).toMatchObject({ environments: [{ path: physical, head: selected }] })
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+    expect(JSON.parse(closed.stdout())).toEqual({ closed: physical })
+    expect(existsSync(path)).toBe(false)
+  })
+
+  it("lists and closes newline-containing paths from a nested caller using the same Git registry", async () => {
+    const w = await world(":")
+    await w.git(["config", "yrd.workdir", join(w.work, "state\nwith spaces")])
+    const nested = join(w.work, "nested")
+    mkdirSync(nested)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(nested)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
+    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const listed = capture(nested)
+    expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
+    expect(JSON.parse(listed.stdout())).toMatchObject({ environments: [{ path, head: selected }] })
+    const closed = capture(nested)
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "close", relative(nested, path), "--json"], closed.io),
+      closed.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
+    expect(existsSync(path)).toBe(false)
+  })
+
+  it("refuses dirty submodules even when repository configuration normally hides them", async () => {
+    const w = await world(":", "printf touched > ../teardown-ran.txt")
+    await addMaterializedDependency(w)
+    await w.git(["config", "submodule.vendor/dependency.ignore", "all"])
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
+    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const userWork = join(path, "vendor/dependency/READY")
+    writeFileSync(userWork, "user edits\n")
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io)).toBe(2)
+    expect(closed.stderr()).toContain("dirty")
+    expect(readFileSync(userWork, "utf8")).toBe("user edits\n")
+    expect(existsSync(join(dirname(path), "teardown-ran.txt"))).toBe(false)
+  })
+
+  it.each([false, true])("closes a registered clean environment with declared teardown=%s", async (teardown) => {
+    const w = await world(":", teardown ? 'printf "%s\\n" "$YRD_CANDIDATE_SHA" > ../closed.txt' : undefined)
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
+    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    // Close reads the retained commit, never the caller's edited declaration.
+    writeFileSync(join(w.work, ".yrd.yml"), "teardown: exit 23\n")
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path, "--json"], closed.io), closed.stderr()).toBe(0)
+    expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
+    expect(existsSync(path)).toBe(false)
+    expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(path)
+    if (teardown) expect(readFileSync(join(dirname(path), "closed.txt"), "utf8")).toBe(`${selected}\n`)
+  })
+
+  it.each(["unknown", "outside", "symlink-outside", "dirty-tracked", "dirty-untracked", "locked"])(
+    "refuses %s before running teardown or removing data",
+    async (kind) => {
+      const w = await world(":", "printf touched > ../teardown-ran.txt")
+      const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+      const opened = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
+      const { path } = JSON.parse(opened.stdout()) as { path: string }
+      let target = path
+      if (kind === "unknown") {
+        target = join(dirname(path), "unregistered")
+        mkdirSync(target)
+      } else if (kind === "outside" || kind === "symlink-outside") {
+        const outside = join(w.work, "outside")
+        await w.git(["worktree", "add", "--quiet", "--detach", outside, selected])
+        target = outside
+        if (kind === "symlink-outside") {
+          target = join(dirname(path), "escape")
+          symlinkSync(outside, target)
+        }
+      } else if (kind === "dirty-tracked") writeFileSync(join(path, ".yrd.yml"), "local edits\n")
+      else if (kind === "dirty-untracked") writeFileSync(join(path, "user-work.txt"), "uncommitted work\n")
+      else await w.git(["worktree", "lock", "--reason", "active owner", path])
+
+      const before = await w.git(["worktree", "list", "--porcelain", "-z"])
+      const closed = capture(w.work)
+      expect(await runYrdProcess(["bun", "yrd", "env", "close", target, "--json"], closed.io)).toBe(2)
+      expect(closed.stdout()).toBe("")
+      expect(closed.stderr()).toContain(
+        kind.startsWith("dirty")
+          ? "dirty"
+          : kind === "locked"
+            ? "locked"
+            : kind === "unknown"
+              ? "not registered"
+              : "outside",
+      )
+      expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toBe(before)
+      expect(existsSync(target)).toBe(true)
+      expect(existsSync(join(dirname(path), "teardown-ran.txt"))).toBe(false)
+      expect(existsSync(join(w.work, "teardown-ran.txt"))).toBe(false)
+    },
+  )
+
+  it.each(["fail", "dirty"])("preserves the worktree when teardown ends %s", async (kind) => {
+    const w = await world(
+      ":",
+      kind === "fail" ? "printf 'teardown exploded\\n' >&2; exit 23" : "printf changed > teardown-left.txt",
+    )
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    const opened = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
+    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const closed = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "close", path], closed.io)).toBe(2)
+    expect(closed.stdout()).toBe("")
+    expect(closed.stderr()).toContain(kind === "fail" ? "teardown exploded" : "dirty")
+    expect(existsSync(path)).toBe(true)
+    expect(await w.git(["worktree", "list", "--porcelain", "-z"])).toContain(path)
+    if (kind === "dirty") expect(readFileSync(join(path, "teardown-left.txt"), "utf8")).toBe("changed")
   })
 })
