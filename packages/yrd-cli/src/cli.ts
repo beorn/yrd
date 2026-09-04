@@ -31,7 +31,6 @@ import {
   closeGarage,
   garageRefCommit,
   garageSeat,
-  garageServiceRefusal,
   garageStatusLine,
   openGarage,
   readGarageDeclaration,
@@ -158,27 +157,18 @@ function buildProgram(
       setExit(taken)
     })
   queue
-    .command("up")
+    .command("up [queue]")
     .description("the service: the same round on a loop; exits 2 when stuck, 0 when the gitlink moves under it")
     .option("--interval <seconds>", "seconds between rounds (default 15)", int)
     .option("--json", "emit stable JSON")
-    .action(async (options) => {
+    .action(async (operand, options) => {
       const { interval, json } = options as { interval?: number; json?: boolean }
-      // The garage stops the SERVICE, and this is the last moment before it
-      // becomes one. `queue run` — one round, run now — goes through untouched,
-      // because that is what a garage is FOR; it stamps the reason on its own
-      // record instead.
-      const garage = readGarageDeclaration(cwd())
-      if (garage !== undefined) {
-        io.stderr(`${garageServiceRefusal(garage)}\n`)
-        setExit(2)
-        return
-      }
+      const location = await resolveQueueLocation(cwd(), operand as string | undefined, env)
       const taken = await coreQueueCommand(
-        cwd(),
+        location.repo,
         io,
         { command: "up", ...(interval === undefined ? {} : { intervalSeconds: interval }) },
-        { json, env, log: log() },
+        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
       )
       setExit(taken)
     })
@@ -249,7 +239,7 @@ function buildProgram(
   // The garage is a ref, so a mechanic can open it with plain git and every
   // surface reads it. These two spellings stay because the queue is IN the
   // garage: they are the only non-plumbing way to open and close it, and
-  // `readGarageDeclaration` is already on the run path above.
+  // `readGarageDeclaration` is also on the core queue command path.
   listOptions(
     program
       .command("watch [filter...]")

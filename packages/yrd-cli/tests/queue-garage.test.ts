@@ -14,13 +14,14 @@
  * what a queue run stamps on its own record is `tests/boundary/
  * queue-garage.test.ts`, on a repository with a real queue.
  */
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/cli.ts"
 import { GARAGE_REF } from "../src/garage.ts"
+import { parseQueueAddress, queueDirectory } from "../src/address.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
 
@@ -143,23 +144,34 @@ describe("the garage is a declaration in git", () => {
     expect(await git(repo, "log", "-1", "--format=%(trailers:key=Opened-By,valueonly)", GARAGE_REF)).toBe("@cto")
   })
 
-  it("stops the service on one line, before it reads a remote or writes anything", async () => {
+  it.each(["local", "address"])("stops the %s service before its remote read or queue-state write", async (mode) => {
     const repo = await repository()
+    const address = `${repo}#main`
+    const workdir = join(repo, "state")
+    const selected = mode === "local" ? repo : queueDirectory(workdir, parseQueueAddress(address))
+    if (mode === "address") {
+      await git(repo, "config", "yrd.workdir", workdir)
+      await mkdir(dirname(selected), { recursive: true })
+      await git(repo, "clone", "--quiet", "--no-checkout", repo, selected)
+    }
     // Written with plain git, in a repository yrd has never run in: the garage
     // is a record of the repository, not of yrd's state.
-    const tree = await git(repo, "mktree")
+    const tree = await git(selected, "mktree")
     const commit = await git(repo, "commit-tree", tree, "-m", "garage: rebuilding the core\n\nOpened-By: @cto\n")
-    await git(repo, "update-ref", GARAGE_REF, commit)
-    expect(existsSync(join(repo, ".git", "yrd-core")), "yrd has written nothing here yet").toBe(false)
+    if (mode === "address") await git(selected, "fetch", "--quiet", "origin", commit)
+    await git(selected, "update-ref", GARAGE_REF, commit)
+    expect(existsSync(join(selected, ".git", "yrd")), "yrd has written nothing here yet").toBe(false)
+    if (mode === "address") expect(await readdir(dirname(selected))).toEqual(["repo"])
 
     // `queue up` is the service — one round on a loop — and the only spelling
     // the garage refuses.
-    const service = await yrd(repo, "queue", "up")
+    const service = await yrd(repo, "queue", "up", ...(mode === "address" ? [address] : []))
 
     expect(service.exitCode, service.report).toBe(2)
     expect(service.stderr.trimEnd()).toBe("garage: rebuilding the core; the service stays down until the garage closes")
     expect(service.stdout).toBe("")
     // The refusal happens before the queue's own directory is made.
-    expect(existsSync(join(repo, ".git", "yrd-core")), service.report).toBe(false)
+    expect(existsSync(join(selected, ".git", "yrd")), service.report).toBe(false)
+    if (mode === "address") expect(await readdir(dirname(selected)), service.report).toEqual(["repo"])
   })
 })

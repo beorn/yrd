@@ -62,7 +62,7 @@ import { clocksLine, noticeLine, duration } from "./watch-notice.ts"
 import { filterRows, rowLine, rowTable, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel } from "./watch-detail.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
-import { readGarageDeclaration } from "./garage.ts"
+import { garageServiceRefusal, readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
@@ -137,6 +137,14 @@ export async function coreQueueCommand(
     interactive?: boolean
   }> = {},
 ): Promise<YrdCliExitCode> {
+  // A garage stops only the service, before any remote read or queue-state write.
+  if (request.command === "up") {
+    const garage = readGarageDeclaration(repo)
+    if (garage !== undefined) {
+      io.stderr(`${garageServiceRefusal(garage)}\n`)
+      return 2
+    }
+  }
   /** The selected queue branch carries no declaration, so it runs no queue. */
   const noQueueOnTarget = (ref: string): YrdCliExitCode => {
     io.stderr(

@@ -6,7 +6,12 @@ import { parseQueueAddress, queueDirectory, queueRoot, type QueueAddress } from 
 import { repositoryHere } from "./declaration.ts"
 import { workdirOf } from "./workdir.ts"
 
-export type QueueLocation = Readonly<{ repo: string; queue: string; workdir: string; address?: QueueAddress }>
+export type QueueLocation = Readonly<{
+  repo: string
+  queue: string | undefined
+  workdir: string
+  address?: QueueAddress
+}>
 
 export async function originHead(git: ReturnType<typeof gitIn>): Promise<string> {
   const out = await git(["ls-remote", "--symref", "origin", "HEAD"])
@@ -51,7 +56,7 @@ export async function resolveQueueLocation(
     (operand.includes("#") || operand.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(operand))
   if (inside !== undefined && !addressed) {
     const git = gitIn(inside)
-    return { repo: inside, queue: operand ?? (await originHead(git)), workdir: await workdirOf(git) }
+    return { repo: inside, queue: operand, workdir: await workdirOf(git) }
   }
   if (operand === undefined) {
     throw new Error(
