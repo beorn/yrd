@@ -94,6 +94,25 @@ async function addMaterializedDependency(w: World): Promise<void> {
 }
 
 describe("yrd env open prepares the retained environment", () => {
+  it("opens the exact commit detached and runs that commit's setup", async () => {
+    const w = await world("printf 'selected commit\\n' > selected-setup.txt")
+    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(w.work, ".yrd.yml"), "setup: printf 'newer commit\\n' > selected-setup.txt\n")
+    await w.git(["add", ".yrd.yml"])
+    await w.git(["commit", "--quiet", "-m", "change setup after selected commit"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const current = (await w.git(["rev-parse", "HEAD"])).trim()
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], run.io), run.stderr()).toBe(0)
+
+    const { path } = JSON.parse(run.stdout()) as { path: string }
+    expect((await gitIn(path)(["rev-parse", "HEAD"])).trim()).toBe(selected)
+    expect((await gitIn(path)(["branch", "--show-current"])).trim()).toBe("")
+    expect(readFileSync(join(path, "selected-setup.txt"), "utf8")).toBe("selected commit\n")
+    expect((await w.git(["rev-parse", "HEAD"])).trim()).toBe(current)
+  })
+
   it("runs the target's declared setup after materialization", async () => {
     const w = await world("test -f vendor/dependency/READY && printf '%s\\n' \"$YRD_REPO\" > setup-ready.txt")
     await addMaterializedDependency(w)
