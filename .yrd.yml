@@ -1,3 +1,4 @@
+setup: bun install --frozen-lockfile
 checks:
-  - test:
-      run: bun run test
+  - check:
+      run: bun run check
