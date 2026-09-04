@@ -211,7 +211,7 @@ describe("yrd env open prepares the retained environment", () => {
     const head = (await gitIn(occupied)(["rev-parse", "HEAD"])).trim()
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "occupied"], run.io)).toBe(2)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "occupied"], run.io), run.stderr()).toBe(2)
 
     expect(run.stderr()).toContain(occupied)
     expect(run.stderr()).toContain("git worktree list --porcelain")

@@ -79,7 +79,6 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     name,
     branch,
     base,
-    ...(options.issue === undefined ? {} : { issue: options.issue }),
   })
   if (provisioned.conclusion !== "success") {
     throw new Error(`yrd: could not open environment '${name}': ${provisioned.error.message}`)
