@@ -5,7 +5,7 @@
  * read from this single coarse tick, fed explicitly to whatever renders it,
  * rather than each component asking `Date.now()` on its own render path. Two
  * clocks on one screen drift, and the operator sees one row age while its
- * neighbour freezes.
+ * neighbour stalls.
  *
  * **The tick is also where the process's memory is kept bounded.** React's
  * dev build fires `performance.mark()`/`measure()` several hundred times a
