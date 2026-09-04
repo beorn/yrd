@@ -7,10 +7,13 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@silvery/ansi": "^0.24.0",
     "@silvery/commander": "^0.24.0",
     "@yrd/bay": "workspace:*",
     "@yrd/process": "workspace:*",
     "@yrd/queue-core": "workspace:*",
-    "loggily": "^0.10.2"
+    "loggily": "^0.10.2",
+    "react": "^19.2.0",
+    "silvery": "^0.24.0"
   }
 }
