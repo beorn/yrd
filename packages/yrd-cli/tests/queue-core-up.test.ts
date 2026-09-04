@@ -261,7 +261,11 @@ describe("yrd queue up, the service", () => {
       ),
     ).toBe(0)
     expect(rounds).toBe(2)
-    expect(records(service)[0]).toMatchObject({ exitCode: 0, pause: { kind: "paused" }, merged: [] })
+    expect(records(service)[0]).toMatchObject({
+      exitCode: 0,
+      merged: [],
+      stopped: { ring: "pause", what: { kind: "paused" } },
+    })
     expect(records(service)[1]).toMatchObject({ exitCode: 0, merged: ["task/one"] })
   })
 
