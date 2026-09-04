@@ -21,6 +21,7 @@ import {
   directMergeCommits,
   activePause,
   changeName,
+  checksOf,
   claimWorktrees,
   directMergeLine,
   pauseLine,
@@ -30,8 +31,10 @@ import {
   list,
   queueRun,
   readConfig,
+  readJournals,
   readQueue,
   runId,
+  subjects,
   targetName,
   refAt,
   resolveRemote,
@@ -45,6 +48,9 @@ import {
   requireResumed,
   writePause,
   type CheckResult,
+  type CheckSpec,
+  type CheckView,
+  type Journals,
   type Git,
   type LogRecord,
   type QueueConfig,
@@ -324,14 +330,25 @@ export async function coreQueueCommand(
       // target the queue read itself saw, so the rows and the reading are about
       // one and the same tip and no second reading can disagree with it.
       const queue = await readQueue(git, config.target.remote, config.target.branch)
+      // The run journal on THIS machine, and the head subjects in one batched
+      // read: the two joins the table needs and neither of them a second
+      // derivation of anything the records already say. A machine that runs no
+      // queue has no journal, and `journals.absent` is the sentence that says
+      // so rather than a row that reads as if nothing were running.
+      const journals = readJournals(join(workdir, "logs"))
       const rows = list(queue.changes, {
         directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
+        journals,
+        subjects: await subjects(
+          git,
+          queue.changes.map((entry) => entry.change.head),
+        ),
       })
       const pause = await activePause(git, config.target.remote)
       emit(
         io,
         options.json,
-        { changes: rows, pause: pause ?? null },
+        { changes: rows, journal: journalFact(journals), pause: pause ?? null },
         [pause === undefined ? undefined : pauseLine(pause), table(rows)]
           .filter((line): line is string => line !== undefined)
           .join("\n"),
@@ -431,14 +448,41 @@ export async function coreQueueCommand(
           : 0
     }
     case "show": {
-      const changes = show((await readQueue(git, config.target.remote, config.target.branch)).changes, request.branch)
+      const queue = await readQueue(git, config.target.remote, config.target.branch)
+      const journals = readJournals(join(workdir, "logs"))
+      const changes = show(queue.changes, request.branch, {
+        journals,
+        subjects: await subjects(
+          git,
+          queue.changes.map((entry) => entry.change.head),
+        ),
+      })
+      // The checks a change was JUDGED BY: the declaration at the commit its
+      // record names in `Base:`, joined to what actually ran. `show` used to
+      // print the packed `Check:` trailer as it stood, so a check that never
+      // ran — every check after a failing one — was simply not on the screen,
+      // and the command that produced a log was nowhere.
+      const views = new Map<string, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
+      for (const change of changes) {
+        const declared = await declarationFor(git, config, change.row.base)
+        views.set(change.row.head, {
+          checks: checksOf(
+            change.checks,
+            endingOf(change.row),
+            declared.checks,
+            change.row.live === undefined ? undefined : { name: change.row.live.check, ...(change.row.live.log === undefined ? {} : { log: change.row.live.log }) },
+          ),
+          ...(declared.note === undefined ? {} : { note: declared.note }),
+        })
+      }
       emit(
         io,
         options.json,
         {
           changes: changes.map((change) => ({
             ...change.row,
-            checks: change.checks,
+            checks: views.get(change.row.head)?.checks ?? [],
+            ...(views.get(change.row.head)?.note === undefined ? {} : { checksNote: views.get(change.row.head)?.note }),
             records: change.records.map((record) => ({
               at: record.at,
               kind: record.kind,
@@ -446,11 +490,19 @@ export async function coreQueueCommand(
               subject: record.subject,
             })),
           })),
+          journal: journalFact(journals),
         },
         changes.length === 0
           ? `no change for ${request.branch}`
           : changes
-              .map((change) => [line(change.row), ...change.checks.map((check) => `  ${check}`)].join("\n"))
+              .map((change) => {
+                const view = views.get(change.row.head)
+                return [
+                  line(change.row),
+                  ...(view?.note === undefined ? [] : [`  (${view.note})`]),
+                  ...(view?.checks ?? []).flatMap(checkLines),
+                ].join("\n")
+              })
               .join("\n"),
       )
       return 0
@@ -632,6 +684,95 @@ function describeRun(
   ].filter((part): part is string => part !== undefined)
   const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`
+}
+
+/**
+ * Where the run journal was looked for, and what was found there — carried in
+ * every JSON answer that has journal-derived fields in it, so a reader that
+ * sees no `live` and no `run` can tell a queue with nothing running from a
+ * machine that holds no journal at all.
+ */
+function journalFact(journals: Journals): Readonly<{ dir: string; absent?: string }> {
+  return { dir: journals.dir, ...(journals.absent === undefined ? {} : { absent: journals.absent }) }
+}
+
+/**
+ * The declaration a change was JUDGED BY: the one at the commit its record
+ * names in `Base:`, not whatever the target carries now. A change judged under
+ * checks that have since been renamed must still show the checks it was
+ * measured against.
+ *
+ * When that reading cannot be had — no `Base:` on the record, or the commit is
+ * not in this repository — the target's own declaration stands in AND the note
+ * says so, in the same breath, because a "not run" measured against the wrong
+ * list is a claim nobody made.
+ */
+async function declarationFor(
+  git: Git,
+  config: QueueConfig,
+  base: string | undefined,
+): Promise<Readonly<{ checks: readonly CheckSpec[]; note?: string }>> {
+  if (base === undefined) {
+    return { checks: config.checks, note: "the record names no base, so these are the checks the target declares now" }
+  }
+  try {
+    const at = await readConfig(git, base)
+    if (at !== undefined) return { checks: at.checks }
+    return {
+      checks: config.checks,
+      note: `${base.slice(0, 12)} carries no .yrd.yml, so these are the checks the target declares now`,
+    }
+  } catch (error) {
+    return {
+      checks: config.checks,
+      note: `the declaration at ${base.slice(0, 12)} could not be read (${error instanceof Error ? error.message : String(error)}), so these are the checks the target declares now`,
+    }
+  }
+}
+
+/** How the change ended, in the word `checksOf` needs to judge its last check. */
+function endingOf(row: Row): "checked" | "merged" | "failed" | "stuck" | "open" {
+  return row.state === "merged" || row.state === "failed" || row.state === "stuck" || row.state === "checked"
+    ? row.state
+    : "open"
+}
+
+/**
+ * The glyphs the retired watch used for exactly these five conditions, kept
+ * because the operator already reads them: passed, failed, stuck, running, and
+ * a check the change never reached.
+ */
+const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
+  failed: "\u00d7",
+  passed: "\u2713",
+  running: "\u25c9",
+  "not-run": "\u2212",
+  stuck: "\u25cc",
+}
+
+/** One check, and under it the command that produced it and the log it wrote. */
+function checkLines(check: CheckView): readonly string[] {
+  const exit = check.result?.exit === undefined ? "" : ` exit=${check.result.exit}`
+  const ms = check.result?.ms === undefined ? "" : ` ${duration(check.result.ms)}`
+  const state = check.state === "not-run" ? " NOT RUN" : check.state === "running" ? " running" : ""
+  return [
+    `  ${CHECK_GLYPH[check.state]} ${check.name}${state}${exit}${ms}`,
+    // The command above its output, which here is the path the output went to
+    // (S2.21). A check the declaration no longer names has no command to show,
+    // and says that rather than showing an empty one.
+    check.spec === undefined ? "      (the declaration does not name this check)" : `      $ ${check.spec.run}`,
+    ...(check.log === undefined ? [] : [`      log ${check.log}`]),
+  ]
+}
+
+/** Coarse human duration, largest unit — the watch timeline's own format. */
+function duration(milliseconds: number): string {
+  const ms = Math.max(0, milliseconds)
+  if (ms < 1_000) return `${String(Math.round(ms))}ms`
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`
+  if (ms < 3_600_000) return `${String(Math.floor(ms / 60_000))}m`
+  if (ms < 86_400_000) return `${String(Math.floor(ms / 3_600_000))}h`
+  return `${String(Math.floor(ms / 86_400_000))}d`
 }
 
 function table(rows: readonly Row[]): string {

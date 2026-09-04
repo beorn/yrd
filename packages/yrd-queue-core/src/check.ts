@@ -116,13 +116,122 @@ export function checkTrailer(result: CheckResult): string {
   return `${result.name} exit=${String(result.exit)} ms=${String(result.durationMs)} log=${result.log}`
 }
 
-/** What a packed `Check:` trailer says: the check's name, and where its log went. */
-export function readCheckTrailer(packed: string): Readonly<{ name: string; log?: string }> {
+/**
+ * What a packed `Check:` trailer says: the check's name, how it exited, how
+ * long it took, and where its log went — every field {@link checkTrailer}
+ * writes, read back. It used to answer with two of the four, so a reader that
+ * wanted the exit went to the trailer text itself with a regex of its own; the
+ * format has one reader and this is it.
+ */
+export function readCheckTrailer(packed: string): Readonly<{ name: string; exit?: string; ms?: number; log?: string }> {
   const name = packed.split(" ")[0] ?? ""
+  const exit = /(?:^| )exit=([^ ]*)/u.exec(packed)?.[1]
+  const written = /(?:^| )ms=(\d+)/u.exec(packed)?.[1]
+  const ms = written === undefined ? undefined : Number(written)
   // `log=` is written last, so its value runs to the end and a path with an
   // `=` in it survives the reading.
   const log = /(?:^| )log=(.+)$/u.exec(packed)?.[1]
-  return { name, ...(log === undefined ? {} : { log }) }
+  return {
+    name,
+    ...(exit === undefined ? {} : { exit }),
+    ...(ms === undefined || Number.isNaN(ms) ? {} : { ms }),
+    ...(log === undefined ? {} : { log }),
+  }
+}
+
+/**
+ * The checks a change was judged by: the declaration joined to what actually
+ * ran ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, The queue run).
+ *
+ * A `Check:` trailer records only checks that RAN. "Not run" therefore has no
+ * meaning without the declared list, and the declared list that matters is the
+ * one the change was judged by — the declaration at the commit the record
+ * names in `Base:`, not whatever the target carries now. The queue runs the
+ * declaration's checks in its own order and stops at the first that is not a
+ * pass (run.ts), so the checks after a failed one did not run and this says so
+ * rather than leaving them off the screen.
+ *
+ * The per-check verdict follows from that same stopping rule: every trailer
+ * but the last is a check the queue ran and went on from, which is a pass, and
+ * the last one's verdict is the one the change's ending record already states.
+ * Nothing here re-derives a change's state — `readChange` is the only place
+ * that happens.
+ */
+export type CheckRun = Readonly<{
+  result: "pass" | "fail" | "stuck"
+  /** The exit as the trailer spells it: a number, or `timeout`, `signal`, `missing`, `unsettled`. */
+  exit?: string
+  /** How long it took. */
+  ms?: number
+  /** The real path its output went to. */
+  log?: string
+}>
+
+export type CheckView = Readonly<{
+  /** The check's name — whether the declaration names it, it ran, or both. */
+  name: string
+  /**
+   * The declaration's own entry, the command included. Absent when the
+   * declaration read for this change does not name a check that ran: the
+   * declaration moved, and the command that produced this log is not knowable
+   * from it. Absent, never an empty string.
+   */
+  spec?: CheckSpec
+  /** What the record says this check did; absent means it did not run. */
+  result?: CheckRun
+  state: "passed" | "failed" | "stuck" | "running" | "not-run"
+  /** The real log path: the result's when it ran, the journal's while it runs. */
+  log?: string
+}>
+
+/** The check a run journal says is running right now on this change. */
+export type CheckedNow = Readonly<{ name: string; log?: string }>
+
+export function checksOf(
+  packed: readonly string[],
+  ending: "checked" | "merged" | "failed" | "stuck" | "open",
+  declared: readonly CheckSpec[],
+  live?: CheckedNow,
+): readonly CheckView[] {
+  const ran = packed.map(readCheckTrailer)
+  const verdict = (index: number): CheckRun["result"] => {
+    if (index < ran.length - 1) return "pass"
+    return ending === "failed" ? "fail" : ending === "stuck" ? "stuck" : "pass"
+  }
+  const byName = new Map(ran.map((result, index) => [result.name, { index, result }]))
+  const seen = new Set<string>()
+  const view = (name: string, spec: CheckSpec | undefined): CheckView => {
+    seen.add(name)
+    const found = byName.get(name)
+    if (found === undefined) {
+      const state = live?.name === name ? "running" : "not-run"
+      return {
+        name,
+        state,
+        ...(spec === undefined ? {} : { spec }),
+        ...(state === "running" && live?.log !== undefined ? { log: live.log } : {}),
+      }
+    }
+    const result = verdict(found.index)
+    return {
+      name,
+      result: {
+        result,
+        ...(found.result.exit === undefined ? {} : { exit: found.result.exit }),
+        ...(found.result.ms === undefined ? {} : { ms: found.result.ms }),
+        ...(found.result.log === undefined ? {} : { log: found.result.log }),
+      },
+      state: result === "pass" ? "passed" : result === "fail" ? "failed" : "stuck",
+      ...(spec === undefined ? {} : { spec }),
+      ...(found.result.log === undefined ? {} : { log: found.result.log }),
+    }
+  }
+  const declaredViews = declared.map((spec) => view(spec.name, spec))
+  // A check that ran but the declaration does not name: the declaration moved
+  // under the change. Its result is measured and stays on screen; what is not
+  // knowable — the command it ran — is absent rather than guessed.
+  const undeclared = ran.filter((result) => !seen.has(result.name)).map((result) => view(result.name, undefined))
+  return [...declaredViews, ...undeclared]
 }
 
 export async function runCheck(run: RunCheck): Promise<CheckResult> {
