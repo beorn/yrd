@@ -47,11 +47,12 @@ const DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER"
 type GlobalOptions = YrdObservabilityFlags
 
 type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean; queue?: string }>
-type PauseOptions = Readonly<{ json?: boolean; notify?: string }>
+type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string }>
 
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
 const DRY_RUN_HELP = "print the change this would open and push nothing"
+const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
 export function resolveSubmitter(declared: string | undefined, env: NodeJS.ProcessEnv): string {
   const named = declared?.trim()
@@ -80,8 +81,9 @@ function buildProgram(
     .option("-q, --quiet", "lower the log level; repeat for less", (_value, previous: number) => previous + 1, 0)
 
   const queueSubmit = async (branch: string | undefined, options: SubmitOptions): Promise<void> => {
+    const location = await resolveQueueLocation(cwd(), options.queue, env, "submit")
     const taken = await coreQueueCommand(
-      cwd(),
+      location.repo,
       io,
       {
         command: "submit",
@@ -90,7 +92,14 @@ function buildProgram(
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.dryRun === true ? { dryRun: true } : {}),
       },
-      { json: options.json, env, log: log(), queue: options.queue },
+      {
+        json: options.json,
+        env,
+        log: log(),
+        queue: location.queue,
+        workdir: location.workdir,
+        remote: location.remote,
+      },
     )
     setExit(taken)
   }
@@ -103,51 +112,58 @@ function buildProgram(
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
-    .option("--queue <branch>", "the queue branch at origin; defaults to origin/HEAD")
+    .option("--queue <value>", QUEUE_HELP)
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
-    .command("pause <reason>")
+    .command("pause")
     .description("stop checking and merging while the service keeps the queue visible")
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who paused the queue")
-    .action(async (reason, options) => {
-      const declared = options as PauseOptions
+    .option("--queue <value>", QUEUE_HELP)
+    .requiredOption("--reason <text>", "why checking and merging are paused")
+    .action(async (options) => {
+      const declared = options as PauseOptions & { reason: string }
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
       setExit(
         await coreQueueCommand(
-          cwd(),
+          location.repo,
           io,
-          { by: resolveSubmitter(declared.notify, env), command: "pause", reason: reason as string },
-          { json: declared.json, env, log: log() },
+          { by: resolveSubmitter(declared.notify, env), command: "pause", reason: declared.reason },
+          { json: declared.json, env, log: log(), queue: location.queue, workdir: location.workdir },
         ),
       )
     })
   queue
-    .command("resume [reason]")
+    .command("resume")
     .description("resume checking and merging on the next service interval")
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who resumed the queue")
-    .action(async (reason, options) => {
+    .option("--queue <value>", QUEUE_HELP)
+    .option("--reason <text>", "why checking and merging may resume")
+    .action(async (options) => {
       const declared = options as PauseOptions
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
       setExit(
         await coreQueueCommand(
-          cwd(),
+          location.repo,
           io,
           {
             by: resolveSubmitter(declared.notify, env),
             command: "resume",
-            ...(reason === undefined ? {} : { reason: reason as string }),
+            ...(declared.reason === undefined ? {} : { reason: declared.reason }),
           },
-          { json: declared.json, env, log: log() },
+          { json: declared.json, env, log: log(), queue: location.queue, workdir: location.workdir },
         ),
       )
     })
   queue
-    .command("run [queue]")
+    .command("run")
     .description("one round of queue work, run now rather than by the service")
     .option("--json", "emit stable JSON")
-    .action(async (operand, options) => {
-      const json = (options as { json?: boolean }).json
-      const location = await resolveQueueLocation(cwd(), operand as string | undefined, env)
+    .option("--queue <value>", QUEUE_HELP)
+    .action(async (options) => {
+      const { json, queue } = options as { json?: boolean; queue?: string }
+      const location = await resolveQueueLocation(cwd(), queue, env)
       const taken = await coreQueueCommand(
         location.repo,
         io,
@@ -157,13 +173,14 @@ function buildProgram(
       setExit(taken)
     })
   queue
-    .command("up [queue]")
+    .command("up")
     .description("the service: the same round on a loop; exits 2 when stuck, 0 when the gitlink moves under it")
     .option("--interval <seconds>", "seconds between rounds (default 15)", int)
     .option("--json", "emit stable JSON")
-    .action(async (operand, options) => {
-      const { interval, json } = options as { interval?: number; json?: boolean }
-      const location = await resolveQueueLocation(cwd(), operand as string | undefined, env)
+    .option("--queue <value>", QUEUE_HELP)
+    .action(async (options) => {
+      const { interval, json, queue } = options as { interval?: number; json?: boolean; queue?: string }
+      const location = await resolveQueueLocation(cwd(), queue, env)
       const taken = await coreQueueCommand(
         location.repo,
         io,
@@ -201,6 +218,7 @@ function buildProgram(
     command
       .option("--latest", "one row per change; the default keeps every run that touched it")
       .option("--json", "emit stable JSON")
+      .option("--queue <value>", QUEUE_HELP)
       .option("--interval <seconds>", "seconds between refreshes while watching (default 5)", int)
   listOptions(
     queue
@@ -208,17 +226,19 @@ function buildProgram(
       .description("every change in line, then the failed and the merged; filters are case-insensitive OR terms")
       .option("--watch", "refresh until the selected change ends, exiting with its code as yrd check does"),
   ).action(async (filters, options) => {
-    const { interval, json, latest, watch } = options as {
+    const { interval, json, latest, watch, queue } = options as {
       interval?: number
       json?: boolean
       latest?: boolean
       watch?: boolean
+      queue?: string
     }
+    const location = await resolveQueueLocation(cwd(), queue, env, "reader")
     const taken = await coreQueueCommand(
-      cwd(),
+      location.repo,
       io,
       listRequest((filters as string[] | undefined) ?? [], { interval, latest, watch }),
-      { json, env, interactive: interactiveHere(), log: log() },
+      { json, env, interactive: interactiveHere(), log: log(), queue: location.queue, workdir: location.workdir },
     )
     setExit(taken)
   })
@@ -226,13 +246,15 @@ function buildProgram(
     .command("show <branch>")
     .description("the branch's changes, each check's result and log")
     .option("--json", "emit stable JSON")
+    .option("--queue <value>", QUEUE_HELP)
     .action(async (branch, options) => {
-      const json = (options as { json?: boolean }).json
+      const { json, queue } = options as { json?: boolean; queue?: string }
+      const location = await resolveQueueLocation(cwd(), queue, env, "reader")
       const taken = await coreQueueCommand(
-        cwd(),
+        location.repo,
         io,
         { branch: branch as string, command: "show" },
-        { json, env, log: log() },
+        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
       )
       setExit(taken)
     })
@@ -249,12 +271,18 @@ function buildProgram(
           "the run id and the check clocks are absent and the watch says where it looked.",
       ),
   ).action(async (filters, options) => {
-    const { interval, json, latest } = options as { interval?: number; json?: boolean; latest?: boolean }
+    const { interval, json, latest, queue } = options as {
+      interval?: number
+      json?: boolean
+      latest?: boolean
+      queue?: string
+    }
+    const location = await resolveQueueLocation(cwd(), queue, env, "reader")
     const taken = await coreQueueCommand(
-      cwd(),
+      location.repo,
       io,
       listRequest((filters as string[] | undefined) ?? [], { interval, latest, watch: true }),
-      { json, env, interactive: interactiveHere(), log: log() },
+      { json, env, interactive: interactiveHere(), log: log(), queue: location.queue, workdir: location.workdir },
     )
     setExit(taken)
   })
@@ -305,7 +333,7 @@ function buildProgram(
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
-    .option("--queue <branch>", "the queue branch at origin; defaults to origin/HEAD")
+    .option("--queue <value>", QUEUE_HELP)
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
 
   program

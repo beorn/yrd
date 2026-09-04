@@ -64,7 +64,39 @@ describe("a queue started by address on a host with no checkout", () => {
       )
 
       const address = `${remote}#main`
-      const proc = Bun.spawn(["bun", join(REPO_ROOT, "bin/yrd.ts"), "queue", command, address, "--json"], {
+      for (const verb of ["pause", "resume"]) {
+        const transition = Bun.spawn(
+          [
+            "bun",
+            join(REPO_ROOT, "bin/yrd.ts"),
+            "queue",
+            verb,
+            "--queue",
+            address,
+            ...(verb === "pause" ? ["--reason", "inspect admitted change"] : []),
+            "--json",
+          ],
+          {
+            cwd: outside,
+            env: {
+              ...process.env,
+              GIT_CONFIG_COUNT: "1",
+              GIT_CONFIG_KEY_0: "yrd.workdir",
+              GIT_CONFIG_VALUE_0: workdir,
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        )
+        const [stdout, stderr, code] = await Promise.all([
+          new Response(transition.stdout).text(),
+          new Response(transition.stderr).text(),
+          transition.exited,
+        ])
+        expect(code, stderr).toBe(0)
+        expect(JSON.parse(stdout)).toMatchObject({ kind: verb === "pause" ? "paused" : "resumed" })
+      }
+      const proc = Bun.spawn(["bun", join(REPO_ROOT, "bin/yrd.ts"), "queue", command, "--queue", address, "--json"], {
         cwd: outside,
         timeout: 15_000,
         env: {

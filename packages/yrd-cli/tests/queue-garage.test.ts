@@ -165,7 +165,7 @@ describe("the garage is a declaration in git", () => {
 
     // `queue up` is the service — one round on a loop — and the only spelling
     // the garage refuses.
-    const service = await yrd(repo, "queue", "up", ...(mode === "address" ? [address] : []))
+    const service = await yrd(repo, "queue", "up", ...(mode === "address" ? ["--queue", address] : []))
 
     expect(service.exitCode, service.report).toBe(2)
     expect(service.stderr.trimEnd()).toBe("garage: rebuilding the core; the service stays down until the garage closes")

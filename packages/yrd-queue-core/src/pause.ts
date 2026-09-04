@@ -37,8 +37,11 @@ export type ResumedFence = Readonly<{
 export class QueuePaused extends Error {
   readonly pause: PauseRecord
 
-  constructor(pause: PauseRecord) {
-    super(`${pauseLine(pause)}; run 'yrd queue resume [reason]' to admit and merge work again`)
+  constructor(pause: PauseRecord, remote: string, queue: string) {
+    const selector = (remote === "origin" ? queue : `${remote}#${queue}`).replaceAll("'", "'\\''")
+    super(
+      `${pauseLine(pause)}; run yrd queue resume --queue '${selector}' --reason '<text>' to admit and merge work again`,
+    )
     this.name = "QueuePaused"
     this.pause = pause
   }
@@ -61,7 +64,7 @@ export async function activePause(git: Git, remote: string, queue: string): Prom
 /** Refuse while the remote's latest pause record is paused. */
 export async function requireResumed(git: Git, remote: string, queue: string): Promise<void> {
   const pause = await activePause(git, remote, queue)
-  if (pause !== undefined) throw new QueuePaused(pause)
+  if (pause !== undefined) throw new QueuePaused(pause, remote, queue)
 }
 
 /**
@@ -87,7 +90,7 @@ export async function writePause(git: Git, remote: string, queue: string, write:
   const reason = oneLine(write.reason, "a pause record needs a reason")
   const by = oneLine(write.by, "a pause record needs an actor")
   const previous = await readPause(git, remote, queue)
-  if (write.kind === "paused" && previous?.kind === "paused") throw new QueuePaused(previous)
+  if (write.kind === "paused" && previous?.kind === "paused") throw new QueuePaused(previous, remote, queue)
   if (write.kind === "resumed" && previous?.kind !== "paused") throw new QueueNotPaused()
   const commit = await pauseCommit(git, previous, { ...write, by, reason })
   await git(["push", "--quiet", `--force-with-lease=${ref}:${previous?.sha ?? ABSENT}`, remote, `${commit}:${ref}`])
@@ -111,7 +114,7 @@ export async function resumedFence(
   const reason = oneLine(write.reason, "a pause fence needs a reason")
   const by = oneLine(write.by, "a pause fence needs an actor")
   const previous = await readPause(git, remote, queue)
-  if (previous?.kind === "paused") throw new QueuePaused(previous)
+  if (previous?.kind === "paused") throw new QueuePaused(previous, remote, queue)
   const sha = await pauseCommit(git, previous, { by, kind: "resumed", reason })
   return { expected: previous?.sha ?? ABSENT, previous, sha }
 }

@@ -290,10 +290,10 @@ const TOP_KEYS = ["checks", "setup", "teardown", "notify"] as const
  */
 const RETIRED: Readonly<Record<string, string>> = {
   owner: `the queue addresses nobody: a notify: entry decides who hears about an ending, in its own arguments (${NOTIFY_SHAPE})`,
-  remote: "the repository is origin; select a queue branch with --queue or a <repo>#<queue> operand",
+  remote: "select the queue with --queue <branch> at origin or --queue <repo>#<queue>",
   scratch: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   workdir: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
-  target: "the branch carrying .yrd.yml is the queue; select it with --queue or a <repo>#<queue> operand",
+  target: "the branch carrying .yrd.yml is the queue; select it with --queue <branch> or --queue <repo>#<queue>",
 }
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */

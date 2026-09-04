@@ -10,6 +10,8 @@ export type QueueLocation = Readonly<{
   repo: string
   queue: string | undefined
   workdir: string
+  /** Submission retains its author checkout and sends to this transport. */
+  remote?: string
   address?: QueueAddress
 }>
 
@@ -17,7 +19,7 @@ export async function originHead(git: ReturnType<typeof gitIn>): Promise<string>
   const out = await git(["ls-remote", "--symref", "origin", "HEAD"])
   const branch = /^ref:\s+refs\/heads\/(.+)\s+HEAD$/mu.exec(out)?.[1]
   if (branch === undefined || branch === "") {
-    throw new Error("origin/HEAD did not name a queue branch; set the remote's HEAD or pass the queue branch")
+    throw new Error("origin/HEAD did not name a queue branch; set the remote's HEAD or pass --queue <branch>")
   }
   return branch
 }
@@ -44,26 +46,41 @@ async function ensureOwnedClone(root: string, address: QueueAddress): Promise<st
   return repo
 }
 
-/** Resolve a queue-owner command without borrowing an unrelated checkout. */
+/** Resolve the one queue selector; only submission retains the author's checkout. */
 export async function resolveQueueLocation(
   cwd: string,
-  operand: string | undefined,
+  value: string | undefined,
   env: NodeJS.ProcessEnv,
+  context: "queue" | "reader" | "submit" = "queue",
 ): Promise<QueueLocation> {
   const inside = repositoryHere(cwd)
-  const addressed =
-    operand !== undefined &&
-    (operand.includes("#") || operand.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(operand))
-  if (inside !== undefined && !addressed) {
-    const git = gitIn(inside)
-    return { repo: inside, queue: operand, workdir: await workdirOf(git) }
-  }
-  if (operand === undefined) {
+  if (inside === undefined && context !== "queue") {
     throw new Error(
-      `queue owner command at ${cwd} needs a queue address <repo>#<queue>, for example beorn/hh#main; no Git clone contains the current directory`,
+      `${context === "submit" ? "submit" : "queue list/show/watch"} at ${cwd} needs a repository; run inside a clone${context === "submit" ? " containing the branch to submit" : " or the queue-owned clone"}`,
     )
   }
-  const address = parseQueueAddress(operand)
+  const addressed =
+    value !== undefined &&
+    (value.includes("#") || value.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value))
+  if (inside !== undefined && !addressed) {
+    const git = gitIn(inside)
+    return { repo: inside, queue: value, workdir: await workdirOf(git) }
+  }
+  if (value === undefined || !addressed) {
+    throw new Error(
+      `queue command at ${cwd} needs a repository; run inside a clone or pass --queue <repo>#<queue>, for example --queue beorn/hh#main`,
+    )
+  }
+  const address = parseQueueAddress(value)
+  if (context === "submit" && inside !== undefined) {
+    return {
+      address,
+      queue: address.queue,
+      repo: inside,
+      remote: address.transport,
+      workdir: await workdirOf(gitIn(inside)),
+    }
+  }
   const host = await hostWorkdir(cwd, env)
   return {
     address,

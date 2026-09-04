@@ -132,6 +132,8 @@ export async function coreQueueCommand(
     workdir?: string
     /** The queue branch selected by the CLI; absent means origin/HEAD. */
     queue?: string
+    /** Explicit submission destination; the author checkout remains the source. */
+    remote?: string
     log?: ConditionalLogger
     /** A terminal with a keyboard on the other end: the watch draws its pane instead of printing rounds. */
     interactive?: boolean
@@ -155,9 +157,11 @@ export async function coreQueueCommand(
   }
   const git = gitIn(repo)
   const log = options.log?.child("queue")
-  const remote = "origin"
+  const remote = options.remote ?? "origin"
   const queue = options.queue ?? (await originHead(git))
-  const targetRef = `${remote}/${queue}`
+  // Addressed submission reads the fetched commit without inventing a named
+  // remote or overwriting the author's origin tracking refs.
+  const targetRef = options.remote === undefined ? `${remote}/${queue}` : "FETCH_HEAD"
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
   // target carries no `.yrd.yml` at all — there is no queue there; a
@@ -165,7 +169,12 @@ export async function coreQueueCommand(
   // one-shot command; the service reads again before every round, so an edit at
   // the target takes effect on the next round.
   const declaration = async (): Promise<QueueConfig | undefined> => {
-    await git(["fetch", "--quiet", remote, `+refs/heads/${queue}:refs/remotes/${targetRef}`])
+    await git([
+      "fetch",
+      "--quiet",
+      remote,
+      options.remote === undefined ? `+refs/heads/${queue}:refs/remotes/${targetRef}` : `refs/heads/${queue}`,
+    ])
     const declared = await readConfig(git, targetRef, { branch: queue, remote })
     if (declared === undefined) return undefined
     return { ...declared, target: { branch: queue, remote } }
