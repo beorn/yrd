@@ -134,3 +134,50 @@ export function openedAt(change: ChangeRecords): number {
 function reasonOf(record: ChangeRecord): string | undefined {
   return record.trailers.find(([name]) => name === "Reason")?.[1]
 }
+
+/**
+ * Who acts next, and why: one derivation, here, beside the state it reads.
+ *
+ * A notice that says what a change IS without saying whose move it is leaves
+ * every reader to guess, and two surfaces guessing differently is the
+ * ready-vs-queued bug in another costume. So this lives next to
+ * {@link readChange} and takes its reading, never a word rendered from it.
+ *
+ * The rule, in full: a change the queue still owes work to — queued or checked
+ * — is the queue's; a failed one is the submitter's, because only the branch's
+ * author can move it; a merged one is nobody's; a stuck one is the queue
+ * OPERATOR's, because stuck is the queue's own statement that it could not
+ * judge. The stuck record does not yet name a person (M7.5 owns that field),
+ * so until it does this points at the evidence — the run journal — rather than
+ * inventing an owner.
+ */
+export type NextOwner = Readonly<{
+  /** Who moves it next, in words a reader can act on. */
+  owner: string
+  /** Why it is theirs. */
+  because: string
+}>
+
+export function nextOwner(
+  reading: ChangeReading,
+  about: Readonly<{ submitter?: string; journal?: string }> = {},
+): NextOwner | undefined {
+  switch (reading.state) {
+    case "merged":
+      return undefined
+    case "queued":
+      return { because: "it starts when the queue reaches it", owner: "the queue" }
+    case "checked":
+      return { because: "its checks passed; it merges when the queue reaches it", owner: "the queue" }
+    case "failed":
+      return {
+        because: `it failed${reading.reason === undefined ? "" : ` (${reading.reason})`}, and only the branch's author can move it`,
+        owner: about.submitter ?? "the submitter",
+      }
+    case "stuck":
+      return {
+        because: `the queue could not judge it${reading.reason === undefined ? "" : ` (${reading.reason})`}; no record names a person yet, so the evidence is ${about.journal ?? "the run journal, which was not read"}`,
+        owner: "the queue's operator",
+      }
+  }
+}

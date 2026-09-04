@@ -278,9 +278,11 @@ describe("the table is the queue read rendered", () => {
 })
 
 describe("a packed Check: trailer", () => {
-  it("reads back the name and the log the writer put in it, log path and all", () => {
+  it("reads back every field the writer put in it, log path and all", () => {
     // The table renders a row off this trailer, so the pair is the contract:
-    // whatever the run writes, the reader has to give back.
+    // whatever the run writes, the reader has to give back. It gave back two
+    // of the four, so a reader that wanted the exit or the duration went to
+    // the trailer text with a regex of its own.
     const packed = checkTrailer({
       durationMs: 1234,
       exit: 1,
@@ -291,8 +293,27 @@ describe("a packed Check: trailer", () => {
 
     expect(packed).toBe("verify exit=1 ms=1234 log=/queue/checks/task~one@abc/q-1/merge/type=check.log")
     expect(readCheckTrailer(packed)).toEqual({
+      exit: "1",
       log: "/queue/checks/task~one@abc/q-1/merge/type=check.log",
+      ms: 1234,
       name: "verify",
+    })
+  })
+
+  it("reads back a word exit, which is what a check the queue could not measure carries", () => {
+    const packed = checkTrailer({
+      durationMs: 1_800_000,
+      exit: "timeout",
+      log: "/queue/checks/task~one@abc/q-1/merge/test.log",
+      name: "test",
+      result: "stuck",
+    })
+
+    expect(readCheckTrailer(packed)).toEqual({
+      exit: "timeout",
+      log: "/queue/checks/task~one@abc/q-1/merge/test.log",
+      ms: 1_800_000,
+      name: "test",
     })
   })
 })
