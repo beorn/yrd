@@ -1182,7 +1182,8 @@ async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
   }).length
   const own = await readRecords(run.git, entry.change)
   return (
-    elsewhere + own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
+    elsewhere +
+    own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
   )
 }
 

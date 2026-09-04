@@ -233,15 +233,13 @@ export function trailer(record: ChangeRecord, name: string): string | undefined 
  * back into a branch and a head. `where` names the ref, so the refusal below
  * says which change is unreadable.
  *
- * Loud when the record carries none. Records written before 2026-09-03 spelled the
- * change as a `Branch:` and `Head:` pair, and no reader here understands that
- * shape: reading it would mean two spellings of a change's name in the one
- * store, which is what the name exists to prevent. There is no compatibility
- * reader on purpose.
+ * Loud when the record carries none. There is no compatibility reader on
+ * purpose: two spellings of a change's name in one store would defeat the
+ * name.
  */
 export function changeOf(record: ChangeRecord, where: string): string {
   const change = trailer(record, "Change")
-  if (change === undefined) throw preFormat(where, `its record ${record.sha.slice(0, 12)} carries no Change: trailer`)
+  if (change === undefined) throw new Error(`${where} at ${record.sha.slice(0, 12)} carries no Change: trailer`)
   return change
 }
 
@@ -257,14 +255,8 @@ export function tipRecord(record: ChangeRecord | undefined, sha: string, where: 
     changeOf(record, where)
     return record
   }
-  throw new Error(`${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|sent trailer`)
-}
-
-/** The one refusal every pre-format reading earns, and the one cure it names. */
-function preFormat(where: string, what: string): Error {
-  return new Error(
-    `${where}: ${what}. These records predate the 2026-09-03 format and no reader understands them; the queue ` +
-      "mechanic bundles and deletes them — `git bundle create <file> refs/yrd/changes/*`, then delete the refs.",
+  throw new Error(
+    `${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|sent trailer`,
   )
 }
 

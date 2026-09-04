@@ -1,7 +1,7 @@
 /**
  * @failure A queue run's log is prose in the plan and nothing in the code, so
  *          what a queue run did is readable only by reading four WARN rows on
- *          stderr and guessing. Nothing gitlinks the record stream, so the rebuild at
+ *          stderr and guessing. Nothing holds the record stream in place, so the rebuild at
  *          M4 could ship any shape, or none, and every existing test would
  *          still pass.
  * @level   l3
@@ -198,7 +198,10 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       expect(result.branch, run.report).toBe(branch)
       expect(result.head, run.report).toBe(headSha)
     }
-    expect(results.some((result) => result.result === "pass"), run.report).toBe(true)
+    expect(
+      results.some((result) => result.result === "pass"),
+      run.report,
+    ).toBe(true)
 
     // merge — the merge commit and the tip it put on the target.
     const merged = theOne(records, "merge")
@@ -255,7 +258,9 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // names the log the end row names.
     const key = (record: LogRecord): string => `${String(record.phase)}/${String(record.name)}`
     for (const end of ends) {
-      const before = checks.slice(0, checks.indexOf(end)).filter((record) => key(record) === key(end) && record.end === undefined)
+      const before = checks
+        .slice(0, checks.indexOf(end))
+        .filter((record) => key(record) === key(end) && record.end === undefined)
       expect(before.length, `${run.report}\nno start row before ${key(end)}`).toBe(1)
       expect(before[0]?.log, run.report).toBe(end.log)
     }

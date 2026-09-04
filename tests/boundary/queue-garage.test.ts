@@ -4,7 +4,7 @@
  *          tell which rounds were the mechanic's.
  * @level   l3
  * @consumer the mechanic's garage ledger · anyone reading a queue run's JSONL
- *           log after the record
+ *           log after writing the record
  *
  * Black box, on the M1 harness: a real repository, a fake check, one
  * `yrd queue run` — one round, around the queue, which is the round a garage is for. The

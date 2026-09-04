@@ -12,7 +12,7 @@
  * the only way to keep `hab up <seat>` from starting it — so the record
  * vanished and the status line fell back to "NO RUNNER - habitant runner [pid]
  * died ...; restart it", which is false in the garage and names the one act the
- * garage forbids. An record whose store disappears when the service is turned off
+ * garage forbids. A record whose store disappears when the service is turned off
  * is the wrong store. Git is the truth (plan of record, principle 1), so the
  * garage is `refs/yrd/garage` in the queue's repository: a commit with no
  * parent whose message is `garage: <reason>` and whose `Opened-By:` trailer

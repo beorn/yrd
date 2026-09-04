@@ -146,7 +146,7 @@ describe("the garage is a declaration in git", () => {
   it("stops the service on one line, before it reads a remote or writes anything", async () => {
     const repo = await repository()
     // Written with plain git, in a repository yrd has never run in: the garage
-    // is an record of the repository, not of yrd's state.
+    // is a record of the repository, not of yrd's state.
     const tree = await git(repo, "mktree")
     const commit = await git(repo, "commit-tree", tree, "-m", "garage: rebuilding the core\n\nOpened-By: @cto\n")
     await git(repo, "update-ref", GARAGE_REF, commit)

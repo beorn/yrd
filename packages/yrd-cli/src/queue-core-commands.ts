@@ -307,9 +307,16 @@ export async function coreQueueCommand(
         if (gitlink !== undefined) {
           const now = await gitlinkAt(git, outcome.target, gitlink.path)
           if (now !== gitlink.sha) {
-            const moved = `gitlink moved from ${gitlink.sha.slice(0, 12)} to ${now === undefined ? "no gitlink" : now.slice(0, 12)}: exiting for relaunch`
+            const from = gitlink.sha.slice(0, 12)
+            const to = now === undefined ? "no gitlink" : now.slice(0, 12)
+            const moved = `gitlink moved from ${from} to ${to}: exiting for relaunch`
             log?.info?.(moved, { from: gitlink.sha, gitlink: gitlink.path, to: now })
-            emit(io, options.json, { exitCode: 0, from: gitlink.sha, gitlink: gitlink.path, reason: "gitlink-moved", to: now }, moved)
+            emit(
+              io,
+              options.json,
+              { exitCode: 0, from: gitlink.sha, gitlink: gitlink.path, reason: "gitlink-moved", to: now },
+              moved,
+            )
             return 0
           }
         }

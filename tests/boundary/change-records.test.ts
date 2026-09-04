@@ -4,7 +4,7 @@
  *          one commit written once and never amended, that the ref only moves
  *          forward — opened, then checked, then ended, then sent — and that
  *          the tip record's trailers are the entire answer for that change.
- *          Nothing today gitlinks any of it, so a core could record a change in a
+ *          Nothing today holds any of it in place, so a core could record a change in a
  *          private store, edit a record, or answer `queue list` from a walk, and
  *          every existing test would still pass.
  * @level   l3
@@ -265,7 +265,8 @@ describe("a change and its records", { timeout: 120_000 }, () => {
 
       for (const [index, record] of read.records.entries()) {
         if (index === 0) continue
-        expect(record.parents, `${report}\nevent ${String(index)} (${record.kind})`).toEqual([read.records[index - 1]?.sha,
+        expect(record.parents, `${report}\nrecord ${String(index)} (${record.kind})`).toEqual([
+          read.records[index - 1]?.sha,
         ])
       }
 
@@ -316,8 +317,8 @@ describe("a change and its records", { timeout: 120_000 }, () => {
       expect(read.records.length, report).toBeGreaterThan(0)
 
       for (const record of read.records) {
-        expect(record.trailers.get("Record"), `${report}\nevent ${record.sha}`).toHaveLength(1)
-        expect(RECORD_KINDS.has(record.kind), `${report}\nevent ${record.sha} says Record: ${record.kind}`).toBe(true)
+        expect(record.trailers.get("Record"), `${report}\nrecord ${record.sha}`).toHaveLength(1)
+        expect(RECORD_KINDS.has(record.kind), `${report}\nrecord ${record.sha} says Record: ${record.kind}`).toBe(true)
       }
       // The genesis is not a record and carries none.
       expect(read.genesis?.trailers.get("Record"), report).toBeUndefined()
