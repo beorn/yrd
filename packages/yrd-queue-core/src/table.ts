@@ -86,6 +86,36 @@ export type Row = Readonly<{
   next?: NextOwner
 }>
 
+/** One line of the watch's list: a change, or a change as ONE run saw it. */
+export type WatchRow = Readonly<{
+  row: Row
+  /** The run this line is about; absent when no journal split the change by run. */
+  run?: JournalRun
+}>
+
+export type WatchRowOptions = Readonly<{
+  /** One row per change instead of one per run: the opt-in lens (S2.13). */
+  latest?: boolean
+  /** What the run journals on this machine say; absent leaves one row per change. */
+  journals?: Journals
+}>
+
+/**
+ * The rows a watch shows, in the order `list()` already put them: in line
+ * first by position, then the ended, newest first. A change with runs keeps
+ * that place and its runs follow it newest first, so the reading order is
+ * still "what is in line, then what happened".
+ */
+export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): readonly WatchRow[] {
+  if (options.latest === true || options.journals === undefined) return rows.map((row) => ({ row }))
+  const journals = options.journals
+  return rows.flatMap((row) => {
+    const runs = journals.runs.get(journalKey(row.branch, row.head)) ?? []
+    if (runs.length === 0) return [{ row }]
+    return runs.map((run) => ({ row, run }))
+  })
+}
+
 export type ListOptions = Readonly<{
   now?: Date
   /** How far back the ended rows reach; the plan's default is seven days. */
