@@ -9,7 +9,7 @@
  * and each message sent. A seventh, `merged-direct`, appears only when
  * something went around the queue: one record per commit on the target the
  * queue did not put there (E5). An
- * eighth, `freeze`, appears only when an active freeze stops a run before a
+ * eighth, `pause`, appears only when an active pause stops a run before a
  * merge. A ninth, `reap`, appears only when a run before this one died without removing
  * its worktrees: one record per worktree taken down. The human line is a
  * rendering of the record, never a second source: whatever a reader prints, the
@@ -46,7 +46,7 @@ export function runId(started: Date = new Date()): string {
 
 export const LOG_KINDS = [
   "run",
-  "freeze",
+  "pause",
   "change",
   "check",
   "result",

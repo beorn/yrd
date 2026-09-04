@@ -68,14 +68,14 @@ import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { directMergeCommits, directMergeLine } from "./direct.ts"
 import {
-  activeFreeze,
-  FREEZE_REF,
-  QueueFrozen,
-  readFreeze,
-  unfrozenFence,
-  type FreezeRecord,
-  type UnfrozenFence,
-} from "./freeze.ts"
+  activePause,
+  PAUSE_REF,
+  QueuePaused,
+  readPause,
+  resumedFence,
+  type PauseRecord,
+  type ResumedFence,
+} from "./pause.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine, tipOf } from "./state.ts"
@@ -127,8 +127,8 @@ export type QueueRunOutcome = Readonly<{
   target: string
   /** The garage's reason, when the round was made in the garage. */
   garage?: string
-  /** The active merge freeze that made this run stop before a merge. */
-  freeze?: FreezeRecord
+  /** The active merge pause that made this run stop before a merge. */
+  pause?: PauseRecord
   merged: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
@@ -227,14 +227,14 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // the base it read.
   const directMerges = await reportDirectMerges(run, entries)
 
-  // A freeze stops here. Reaping only cleans local scratch, and direct
+  // A pause stops here. Reaping only cleans local scratch, and direct
   // reporting only observes work already done outside the queue. Everything
-  // below writes a change record or notifies about one, so a frozen round leaves
+  // below writes a change record or notifies about one, so a paused round leaves
   // every change exactly as it found it while still surfacing direct merges.
-  const frozenAtStart = await activeFreeze(git, options.target.remote)
-  if (frozenAtStart !== undefined) {
-    recordFreeze(run, frozenAtStart)
-    return finish(run, 0, { directMerges, failed, merged, stuck }, frozenAtStart)
+  const pausedAtStart = await activePause(git, options.target.remote)
+  if (pausedAtStart !== undefined) {
+    recordPause(run, pausedAtStart)
+    return finish(run, 0, { directMerges, failed, merged, stuck }, pausedAtStart)
   }
 
   // Bookkeeping at the edges of the records first, so every reader below reads
@@ -268,11 +268,11 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const checked = ordered((await readQueue(git, options.target.remote, options.target.branch)).changes, "checked").find(
     (entry) => !staleChecked(run, entry),
   )
-  let observedFreeze: FreezeRecord | undefined
+  let observedPause: PauseRecord | undefined
   if (checked !== undefined) {
     const outcome = await guarded(run, checked, () =>
-      land(run, checked, (freeze) => {
-        observedFreeze = freeze
+      land(run, checked, (pause) => {
+        observedPause = pause
       }),
     )
     if (outcome === "stuck") stuck.push(checked.change.branch)
@@ -284,7 +284,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     run,
     stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0,
     { directMerges, failed, merged, stuck },
-    observedFreeze,
+    observedPause,
   )
 }
 
@@ -504,7 +504,7 @@ async function movedGitlinks(run: Run, head: string): Promise<readonly Readonly<
 }
 
 /** The on-merge phase for the first checked change. */
-async function land(run: Run, entry: QueueEntry, observedFreeze: (freeze: FreezeRecord) => void): Promise<Ended> {
+async function land(run: Run, entry: QueueEntry, observedPause: (pause: PauseRecord) => void): Promise<Ended> {
   const { change } = entry
   const { branch, head } = change
   const name = changeName(change)
@@ -604,23 +604,23 @@ async function land(run: Run, entry: QueueEntry, observedFreeze: (freeze: Freeze
         ...checkTrailers(results),
       ],
     })
-    // The merge transaction advances the freeze ref as an unfrozen record under
+    // The merge transaction advances the pause ref as a resumed record under
     // lease. That makes this read and the atomic push one ordering point with a
-    // concurrent `queue freeze`: whichever lease wins happened first.
-    let fence: UnfrozenFence
+    // concurrent `queue pause`: whichever lease wins happened first.
+    let fence: ResumedFence
     try {
-      fence = await unfrozenFence(run.git, run.options.target.remote, {
+      fence = await resumedFence(run.git, run.options.target.remote, {
         by: mergedBy(run.name, run.log.id),
         reason: `merge ${name}`,
       })
     } catch (error) {
-      if (error instanceof QueueFrozen) {
-        recordFreeze(run, error.freeze)
-        observedFreeze(error.freeze)
-        run.log.write({ branch, decision: "checked", head, kind: "change", reason: "frozen" })
+      if (error instanceof QueuePaused) {
+        recordPause(run, error.pause)
+        observedPause(error.pause)
+        run.log.write({ branch, decision: "checked", head, kind: "change", reason: "paused" })
         return "checked"
       }
-      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${FREEZE_REF}`, error)
+      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${PAUSE_REF}`, error)
     }
     const ref = changeRef(change)
     try {
@@ -629,30 +629,30 @@ async function land(run: Run, entry: QueueEntry, observedFreeze: (freeze: Freeze
         "--quiet",
         "--atomic",
         `--force-with-lease=refs/heads/${run.options.target.branch}:${run.targetSha}`,
-        `--force-with-lease=${FREEZE_REF}:${fence.expected}`,
+        `--force-with-lease=${PAUSE_REF}:${fence.expected}`,
         run.options.target.remote,
         `${mergeCommit}:refs/heads/${run.options.target.branch}`,
         `${mergedRecord}:${ref}`,
-        `${fence.sha}:${FREEZE_REF}`,
+        `${fence.sha}:${PAUSE_REF}`,
       ])
     } catch (error) {
-      // A target, branch, or freeze writer can win after our reads. The atomic
+      // A target, branch, or pause writer can win after our reads. The atomic
       // leases then reject every update, and the remote — never Git's prose —
       // identifies the authority that moved. The change remains checked.
-      let freezeNow: FreezeRecord | undefined
+      let pauseNow: PauseRecord | undefined
       try {
-        freezeNow = await readFreeze(run.git, run.options.target.remote)
+        pauseNow = await readPause(run.git, run.options.target.remote)
       } catch (authorityError) {
-        throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${FREEZE_REF}`, authorityError)
+        throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${PAUSE_REF}`, authorityError)
       }
       const moved = await remoteHeads(run, branch)
-      if (freezeNow?.kind === "frozen") {
-        recordFreeze(run, freezeNow)
-        observedFreeze(freezeNow)
-        run.log.write({ branch, decision: "checked", head, kind: "change", reason: "frozen" })
+      if (pauseNow?.kind === "paused") {
+        recordPause(run, pauseNow)
+        observedPause(pauseNow)
+        run.log.write({ branch, decision: "checked", head, kind: "change", reason: "paused" })
         return "checked"
       }
-      const authorityMoved = freezeNow?.sha !== fence.previous?.sha
+      const authorityMoved = pauseNow?.sha !== fence.previous?.sha
       if (moved.target === run.targetSha && moved.branch === head && !authorityMoved) throw error
       run.log.write({
         branch,
@@ -660,8 +660,8 @@ async function land(run: Run, entry: QueueEntry, observedFreeze: (freeze: Freeze
         head,
         kind: "change",
         reason:
-          moved.target !== run.targetSha ? "target-moved" : moved.branch !== head ? "branch-moved" : "freeze-moved",
-        saw: moved.target !== run.targetSha ? (moved.target ?? "gone") : (freezeNow?.sha ?? "absent"),
+          moved.target !== run.targetSha ? "target-moved" : moved.branch !== head ? "branch-moved" : "pause-moved",
+        saw: moved.target !== run.targetSha ? (moved.target ?? "gone") : (pauseNow?.sha ?? "absent"),
       })
       return "checked"
     }
@@ -1353,7 +1353,7 @@ async function finish(
   run: Run,
   exitCode: 0 | 1 | 2,
   lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[]; directMerges: readonly string[] }>,
-  freeze?: FreezeRecord,
+  pause?: PauseRecord,
 ): Promise<QueueRunOutcome> {
   // A push updates the remote-tracking ref it pushed to, so after a merge the
   // target as this run left it is right there; a run that merged nothing left
@@ -1375,7 +1375,7 @@ async function finish(
     config: run.options.configBlob,
     exitCode,
     ...(run.options.garage === undefined ? {} : { garage: run.options.garage }),
-    ...(freeze === undefined ? {} : { freeze }),
+    ...(pause === undefined ? {} : { pause }),
     log: run.log.path,
     run: run.log.id,
     target: targetNow,
@@ -1383,13 +1383,13 @@ async function finish(
   }
 }
 
-/** Record one active freeze in the run's structured log. */
-function recordFreeze(run: Run, freeze: FreezeRecord): void {
+/** Record one active pause in the run's structured log. */
+function recordPause(run: Run, pause: PauseRecord): void {
   run.log.write({
-    by: freeze.by,
-    kind: "freeze",
-    reason: freeze.reason,
-    since: freeze.at.toISOString(),
-    state: freeze.kind,
+    by: pause.by,
+    kind: "pause",
+    reason: pause.reason,
+    since: pause.at.toISOString(),
+    state: pause.kind,
   })
 }

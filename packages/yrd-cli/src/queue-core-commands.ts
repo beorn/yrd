@@ -19,11 +19,11 @@ import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
   directMergeCommits,
-  activeFreeze,
+  activePause,
   changeName,
   claimWorktrees,
   directMergeLine,
-  freezeLine,
+  pauseLine,
   prepareWorktree,
   gitIn,
   hintsIn,
@@ -40,12 +40,12 @@ import {
   refuseTarget,
   submit,
   issueOf,
-  QueueFrozen,
-  QueueNotFrozen,
-  requireUnfrozen,
-  writeFreeze,
+  QueuePaused,
+  QueueNotPaused,
+  requireResumed,
+  writePause,
   type CheckResult,
-  type FreezeRecord,
+  type PauseRecord,
   type Git,
   type LogRecord,
   type QueueConfig,
@@ -59,8 +59,8 @@ import { workdirOf } from "./workdir.ts"
 
 export type CoreQueueCommand =
   | Readonly<{ command: "submit"; branch?: string; submitter: string; issue?: string; dryRun?: boolean }>
-  | Readonly<{ command: "freeze"; by: string; reason: string }>
-  | Readonly<{ command: "unfreeze"; by: string; reason?: string }>
+  | Readonly<{ command: "pause"; by: string; reason: string }>
+  | Readonly<{ command: "resume"; by: string; reason?: string }>
   | Readonly<{ command: "run" }>
   | Readonly<{
       command: "up"
@@ -82,12 +82,12 @@ export type CoreQueueCommand =
 /** What each command is called when it has to say it needs a queue. */
 const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
-  freeze: "queue freeze",
+  pause: "queue pause",
   list: "queue list",
   run: "queue run",
   show: "queue show",
   submit: "submit",
-  unfreeze: "queue unfreeze",
+  resume: "queue resume",
   up: "queue up",
 }
 
@@ -187,18 +187,18 @@ export async function coreQueueCommand(
   }
 
   switch (request.command) {
-    case "freeze":
-    case "unfreeze": {
+    case "pause":
+    case "resume": {
       try {
-        const freeze = await writeFreeze(git, config.target.remote, {
+        const pause = await writePause(git, config.target.remote, {
           by: request.by,
-          kind: request.command === "freeze" ? "frozen" : "unfrozen",
-          reason: request.command === "freeze" ? request.reason : (request.reason ?? "freeze lifted"),
+          kind: request.command === "pause" ? "paused" : "resumed",
+          reason: request.command === "pause" ? request.reason : (request.reason ?? "pause lifted"),
         })
-        emit(io, options.json, freeze, freezeLine(freeze))
+        emit(io, options.json, pause, pauseLine(pause))
         return 0
       } catch (error) {
-        if (error instanceof QueueFrozen || error instanceof QueueNotFrozen) {
+        if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
           io.stderr(`yrd: ${error.message}\n`)
           return 1
         }
@@ -211,9 +211,9 @@ export async function coreQueueCommand(
       refuseTarget(branch, config.target.branch)
       if (request.dryRun === true) {
         try {
-          await requireUnfrozen(git, config.target.remote)
+          await requireResumed(git, config.target.remote)
         } catch (error) {
-          if (error instanceof QueueFrozen) {
+          if (error instanceof QueuePaused) {
             io.stderr(`yrd: ${error.message}\n`)
             return 1
           }
@@ -252,7 +252,7 @@ export async function coreQueueCommand(
           ...(request.issue === undefined ? {} : { issue: request.issue }),
         })
       } catch (error) {
-        if (error instanceof QueueFrozen) {
+        if (error instanceof QueuePaused) {
           io.stderr(`yrd: ${error.message}\n`)
           return 1
         }
@@ -328,12 +328,12 @@ export async function coreQueueCommand(
       const rows = list(queue.changes, {
         directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
       })
-      const freeze = await activeFreeze(git, config.target.remote)
+      const pause = await activePause(git, config.target.remote)
       emit(
         io,
         options.json,
-        { changes: rows, freeze: freeze ?? null },
-        [freeze === undefined ? undefined : freezeLine(freeze), table(rows)]
+        { changes: rows, pause: pause ?? null },
+        [pause === undefined ? undefined : pauseLine(pause), table(rows)]
           .filter((line): line is string => line !== undefined)
           .join("\n"),
       )
@@ -595,7 +595,7 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `told ${String(rest.to)} about ${where}`
     case "reap":
       return `reaped the worktree ${String(rest.path)} of the run ${String(rest.of)}: ${String(rest.why)}`
-    case "freeze":
+    case "pause":
       return `${String(rest.state)} by ${String(rest.by)} since ${String(rest.since)}: ${String(rest.reason)}`
     case "merged-direct":
       return directMergeLine({
@@ -618,7 +618,7 @@ function describeRun(
     directMerges: readonly string[]
     log: string
     garage?: string
-    freeze?: FreezeRecord
+    pause?: PauseRecord
   }>,
 ): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
@@ -629,7 +629,7 @@ function describeRun(
     outcome.directMerges.length > 0
       ? `${String(outcome.directMerges.length)} ${outcome.directMerges.length === 1 ? "commit" : "commits"} around the queue at ${outcome.directMerges.map((sha) => sha.slice(0, 12)).join(", ")}`
       : undefined,
-    outcome.freeze === undefined ? undefined : `${freezeLine(outcome.freeze)}; no merge was made`,
+    outcome.pause === undefined ? undefined : `${pauseLine(outcome.pause)}; no merge was made`,
   ].filter((part): part is string => part !== undefined)
   const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`

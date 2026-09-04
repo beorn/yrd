@@ -34,15 +34,15 @@ Yrd is a merge queue that lives inside a Git repository. A queue runs on a branc
 yrd submit [branch] [--notify <who>] [--issue <id>] [--dry-run]   push the branch (the current one when none is named) and open its change; same head again is a retry
 yrd queue run                                                     one queue run
 yrd queue up [--interval <seconds>]                               queue runs on a loop, every 15 seconds by default; run this under your supervisor
-yrd queue freeze <reason> [--notify <seat>]                       stop checking and merging; the service keeps the queue visible
-yrd queue unfreeze [reason] [--notify <seat>]                     resume on the next service interval
+yrd queue pause <reason> [--notify <seat>]                        stop checking and merging; the service keeps the queue visible
+yrd queue resume [reason] [--notify <seat>]                       resume on the next service interval
 yrd queue list                                                    every change in line, its state, position, last result and log
 yrd queue show <branch>                                           that branch's changes, newest first, each check's result and log
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD
 yrd env open|list                                                 a checkout of one branch to work in
 ```
 
-Every command takes `--json`. `yrd submit` refuses the queue branch itself: it is not a change. While frozen, submit and dry-run refuse with who froze the queue, when, why, and the unfreeze command; already-submitted changes keep their place. `yrd queue up` continues ticking and does no checking or merging until unfreeze. `yrd check` checks out HEAD afresh, so uncommitted changes are not seen.
+Every command takes `--json`. `yrd submit` refuses the queue branch itself: it is not a change. While paused, submit and dry-run refuse with who paused the queue, when, why, and the resume command; already-submitted changes keep their place. `yrd queue up` continues ticking and does no checking or merging until resume. `yrd check` checks out HEAD afresh, so uncommitted changes are not seen.
 
 ## The config, `.yrd.yml`
 
@@ -84,7 +84,7 @@ A key the queue does not read is refused, never ignored. The queue workdir is no
   .yrd.yml                                  the config, read from the queue branch
   .git/
     refs/yrd/changes/<branch>@<sha>         the records: one ref per change, one commit per record; on origin too
-    refs/yrd/freeze                         frozen/unfrozen records; the latest commit is the state, on origin too
+    refs/yrd/pause                          paused/resumed records; the latest commit is the state, on origin too
     yrd/                                    the queue workdir (git config yrd.workdir moves it)
       worktrees/<run id>/<phase>/<sha>      a fresh checkout per checked change, removed when the check ends
       checks/<change>/<run id>/<phase>/<name>.log   check logs, kept

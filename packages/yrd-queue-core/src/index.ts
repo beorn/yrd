@@ -43,13 +43,13 @@ export { readQueue, resolveRemote } from "./remote.ts"
 export { directMergeCommits, directMergeLine } from "./direct.ts"
 export { refuseTarget, submit, issueOf } from "./submit.ts"
 export {
-  FREEZE_REF,
-  QueueFrozen,
-  QueueNotFrozen,
-  activeFreeze,
-  freezeLine,
-  readFreeze,
-  requireUnfrozen,
-  writeFreeze,
-} from "./freeze.ts"
-export type { FreezeRecord, FreezeKind, WriteFreeze } from "./freeze.ts"
+  PAUSE_REF,
+  QueuePaused,
+  QueueNotPaused,
+  activePause,
+  pauseLine,
+  readPause,
+  requireResumed,
+  writePause,
+} from "./pause.ts"
+export type { PauseRecord, PauseKind, WritePause } from "./pause.ts"

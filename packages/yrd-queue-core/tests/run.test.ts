@@ -13,7 +13,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   CHANGES,
-  FREEZE_REF,
+  PAUSE_REF,
   appendRecord,
   changeName,
   changeRef,
@@ -28,7 +28,7 @@ import {
   submit,
   trailer,
   trailers,
-  writeFreeze,
+  writePause,
 } from "../src/index.ts"
 import type { CheckedTree, Git, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
 
@@ -693,40 +693,40 @@ describe("a queue run", () => {
     )
   })
 
-  it("a freeze leaves admitted work queued without checks, and unfreeze lets the next run merge it", async () => {
+  it("a pause leaves admitted work queued without checks, and resume lets the next run merge it", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
-    const frozen = await writeFreeze(w.git, "origin", {
+    const paused = await writePause(w.git, "origin", {
       by: "@chief",
-      kind: "frozen",
+      kind: "paused",
       reason: "main needs repair",
     })
 
     const held = await queueRun(w.options({ exit: 0 }))
 
     expect(held.exitCode).toBe(0)
-    expect(held.freeze).toEqual(frozen)
+    expect(held.pause).toEqual(paused)
     expect(held.merged).toEqual([])
     expect(await remoteTarget(w)).toBe(w.target)
     await fetchChanges(w)
     expect((await readRecords(w.git, { branch: "task/one", head })).map((record) => record.kind)).toEqual(["opened"])
     expect(logRecords(held)).toContainEqual(
-      expect.objectContaining({ by: "@chief", kind: "freeze", reason: "main needs repair", state: "frozen" }),
+      expect.objectContaining({ by: "@chief", kind: "pause", reason: "main needs repair", state: "paused" }),
     )
 
-    await writeFreeze(w.git, "origin", { by: "@chief", kind: "unfrozen", reason: "repair landed" })
+    await writePause(w.git, "origin", { by: "@chief", kind: "resumed", reason: "repair landed" })
     const resumed = await queueRun(w.options({ exit: 0 }))
     expect(resumed.merged).toEqual(["task/one"])
   })
 
-  it("a frozen run reaps and reports direct merges without retiring, catching up, resending, or judging changes", async () => {
+  it("a paused run reaps and reports direct merges without retiring, catching up, resending, or judging changes", async () => {
     const w = await world()
     const queued = await submitCommit(w, "task/queued", "queued.txt")
     const deleted = await submitCommit(w, "task/deleted", "deleted.txt")
     const caughtUp = await submitCommit(w, "task/caught-up", "caught-up.txt")
 
     // One change is already on the target but has no merged record, so catch-up
-    // would mutate it; the merge itself is also a direct merge the frozen run owes.
+    // would mutate it; the merge itself is also a direct merge the paused run owes.
     await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "landed around the queue", caughtUp])
     const direct = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["push", "--quiet", "origin", "main"])
@@ -746,16 +746,16 @@ describe("a queue run", () => {
     // One admitted branch is gone, so retirement would append a failed record;
     // another remains queued, so the submit phase would judge it.
     await w.git(["push", "--quiet", "origin", ":refs/heads/task/deleted"])
-    const dead = await worktreeOfRun(w, "q-dead-frozen", exitedPid())
-    const frozen = await writeFreeze(w.git, "origin", {
+    const dead = await worktreeOfRun(w, "q-dead-paused", exitedPid())
+    const paused = await writePause(w.git, "origin", {
       by: "@chief",
-      kind: "frozen",
+      kind: "paused",
       reason: "inspect the target",
     })
 
     const held = await queueRun(w.options({ exit: 0 }))
 
-    expect(held).toMatchObject({ directMerges: [direct], exitCode: 0, failed: [], freeze: frozen, merged: [], stuck: [] })
+    expect(held).toMatchObject({ directMerges: [direct], exitCode: 0, failed: [], pause: paused, merged: [], stuck: [] })
     expect(existsSync(dead)).toBe(false)
     expect(logRecords(held).filter((record) => record.kind === "reap")).toHaveLength(1)
     expect(logRecords(held).filter((record) => record.kind === "merged-direct")).toHaveLength(1)
@@ -779,26 +779,26 @@ describe("a queue run", () => {
     expect(messages(w)).toEqual([{ change: direct, record: "merged-direct" }])
   })
 
-  it("a freeze placed after the last read but before the atomic merge push blocks every ref advance", async () => {
+  it("a pause placed after the last read but before the atomic merge push blocks every ref advance", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const ref = changeRef({ branch: "task/one", head })
-    const rivalPath = join(w.workdir, "..", "freeze-rival")
+    const rivalPath = join(w.workdir, "..", "pause-rival")
     await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
     const rival = gitIn(rivalPath)
     await rival(["config", "user.email", "rival@yrd.test"])
     await rival(["config", "user.name", "rival"])
 
-    let frozen: QueueRunOutcome["freeze"]
+    let paused: QueueRunOutcome["pause"]
     let targetBeforePush = ""
     let changeBeforePush = ""
     const git: Git = async (args, input) => {
-      if (frozen === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+      if (paused === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
         targetBeforePush = await remoteTarget(w)
         changeBeforePush = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
-        frozen = await writeFreeze(rival, "origin", {
+        paused = await writePause(rival, "origin", {
           by: "operator",
-          kind: "frozen",
+          kind: "paused",
           reason: "stop before merge",
         })
       }
@@ -807,8 +807,8 @@ describe("a queue run", () => {
 
     const outcome = await queueRun({ ...w.options({ exit: 0 }), git })
 
-    expect(frozen).toBeDefined()
-    expect(outcome.freeze).toEqual(frozen)
+    expect(paused).toBeDefined()
+    expect(outcome.pause).toEqual(paused)
     expect(outcome.merged).toEqual([])
     expect(await remoteTarget(w)).toBe(targetBeforePush)
     expect((await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]).toBe(changeBeforePush)
@@ -817,13 +817,13 @@ describe("a queue run", () => {
       "opened",
       "checked",
     ])
-    expect(logRecords(outcome)).toContainEqual(expect.objectContaining({ decision: "checked", reason: "frozen" }))
+    expect(logRecords(outcome)).toContainEqual(expect.objectContaining({ decision: "checked", reason: "paused" }))
   })
 
-  it("an unreadable freeze at the pre-merge authority read faults the run without ending the change", async () => {
+  it("an unreadable pause at the pre-merge authority read faults the run without ending the change", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
-    const rivalPath = join(w.workdir, "..", "malformed-freeze-rival")
+    const rivalPath = join(w.workdir, "..", "malformed-pause-rival")
     await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
     const rival = gitIn(rivalPath)
     await rival(["config", "user.email", "rival@yrd.test"])
@@ -832,7 +832,7 @@ describe("a queue run", () => {
     let reads = 0
     let malformed = ""
     const git: Git = async (args, input) => {
-      if (args[0] === "ls-remote" && args.includes(FREEZE_REF)) {
+      if (args[0] === "ls-remote" && args.includes(PAUSE_REF)) {
         reads += 1
         if (reads === 2) {
           const tree = (await rival(["mktree"], "")).trim()
@@ -841,17 +841,17 @@ describe("a queue run", () => {
               "commit-tree",
               tree,
               "-m",
-              "authority cannot be parsed\n\nRecord: wedged\nFrozen-By: operator\n",
+              "authority cannot be parsed\n\nRecord: wedged\nPaused-By: operator\n",
             ])
           ).trim()
-          await rival(["push", "--quiet", "origin", `${malformed}:${FREEZE_REF}`])
+          await rival(["push", "--quiet", "origin", `${malformed}:${PAUSE_REF}`])
         }
       }
       return await w.git(args, input)
     }
 
     await expect(queueRun({ ...w.options({ exit: 0 }), git })).rejects.toThrow(
-      `origin ${FREEZE_REF} could not be read: origin ${FREEZE_REF} at`,
+      `origin ${PAUSE_REF} could not be read: origin ${PAUSE_REF} at`,
     )
 
     expect(malformed).not.toBe("")

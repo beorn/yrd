@@ -211,7 +211,7 @@ async function thisCheckout(): Promise<string> {
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
-  it("stays alive through a frozen round and resumes the queued change after unfreeze", async () => {
+  it("stays alive through a paused round and resumes the queued change after resume", async () => {
     const w = await world()
     await w.git(["checkout", "--quiet", "-b", "task/one", "main"])
     writeFileSync(join(w.work, "one.txt"), "one\n")
@@ -227,7 +227,7 @@ describe("yrd queue up, the service", () => {
       await coreQueueCommand(
         w.work,
         capture(w.work).io,
-        { by: "@chief", command: "freeze", reason: "repair main" },
+        { by: "@chief", command: "pause", reason: "repair main" },
         { workdir: w.workdir },
       ),
     ).toBe(0)
@@ -249,7 +249,7 @@ describe("yrd queue up, the service", () => {
               await coreQueueCommand(
                 w.work,
                 capture(w.work).io,
-                { by: "@chief", command: "unfreeze", reason: "repair landed" },
+                { by: "@chief", command: "resume", reason: "repair landed" },
                 { workdir: w.workdir },
               )
             } else {
@@ -261,11 +261,11 @@ describe("yrd queue up, the service", () => {
       ),
     ).toBe(0)
     expect(rounds).toBe(2)
-    expect(records(service)[0]).toMatchObject({ exitCode: 0, freeze: { kind: "frozen" }, merged: [] })
+    expect(records(service)[0]).toMatchObject({ exitCode: 0, pause: { kind: "paused" }, merged: [] })
     expect(records(service)[1]).toMatchObject({ exitCode: 0, merged: ["task/one"] })
   })
 
-  it("freeze is visible, refuses live and dry-run submit, and unfreeze admits the same branch", async () => {
+  it("pause is visible, refuses live and dry-run submit, and resume admits the same branch", async () => {
     const w = await world()
     await w.git(["checkout", "--quiet", "-b", "task/one", "main"])
     writeFileSync(join(w.work, "one.txt"), "one\n")
@@ -278,23 +278,23 @@ describe("yrd queue up, the service", () => {
       await coreQueueCommand(
         w.work,
         opened.io,
-        { by: "@chief", command: "freeze", reason: "49 new failures on main" },
+        { by: "@chief", command: "pause", reason: "49 new failures on main" },
         { json: true, workdir: w.workdir },
       ),
     ).toBe(0)
-    expect(records(opened)[0]).toMatchObject({ by: "@chief", kind: "frozen", reason: "49 new failures on main" })
+    expect(records(opened)[0]).toMatchObject({ by: "@chief", kind: "paused", reason: "49 new failures on main" })
 
-    const duplicateFreeze = capture(w.work)
+    const duplicatePause = capture(w.work)
     expect(
       await coreQueueCommand(
         w.work,
-        duplicateFreeze.io,
-        { by: "operator", command: "freeze", reason: "replace the active freeze" },
+        duplicatePause.io,
+        { by: "operator", command: "pause", reason: "replace the active pause" },
         { workdir: w.workdir },
       ),
     ).toBe(1)
-    expect(duplicateFreeze.stderr()).toContain("frozen by @chief")
-    expect(duplicateFreeze.stderr()).toContain("49 new failures on main")
+    expect(duplicatePause.stderr()).toContain("paused by @chief")
+    expect(duplicatePause.stderr()).toContain("49 new failures on main")
 
     for (const dryRun of [true, false]) {
       const refused = capture(w.work)
@@ -306,22 +306,22 @@ describe("yrd queue up, the service", () => {
           { workdir: w.workdir },
         ),
       ).toBe(1)
-      expect(refused.stderr()).toContain("frozen by @chief")
+      expect(refused.stderr()).toContain("paused by @chief")
       expect(refused.stderr()).toContain("49 new failures on main")
-      expect(refused.stderr()).toContain("yrd queue unfreeze")
+      expect(refused.stderr()).toContain("yrd queue resume")
     }
     expect(await w.git(["ls-remote", "--heads", "origin", "task/one"])).toBe("")
 
     const listed = capture(w.work)
     expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    expect(listed.stdout().split("\n")[0]).toContain("frozen by @chief")
+    expect(listed.stdout().split("\n")[0]).toContain("paused by @chief")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,
     )
     expect(records(listedJson)[0]).toMatchObject({
       changes: [],
-      freeze: { by: "@chief", kind: "frozen", reason: "49 new failures on main" },
+      pause: { by: "@chief", kind: "paused", reason: "49 new failures on main" },
     })
 
     const closed = capture(w.work)
@@ -329,7 +329,7 @@ describe("yrd queue up, the service", () => {
       await coreQueueCommand(
         w.work,
         closed.io,
-        { by: "@chief", command: "unfreeze", reason: "repair landed" },
+        { by: "@chief", command: "resume", reason: "repair landed" },
         { workdir: w.workdir },
       ),
     ).toBe(0)
@@ -342,31 +342,31 @@ describe("yrd queue up, the service", () => {
         { workdir: w.workdir },
       ),
     ).toBe(0)
-    const listedUnfrozen = capture(w.work)
+    const listedResumed = capture(w.work)
     expect(
-      await coreQueueCommand(w.work, listedUnfrozen.io, { command: "list" }, { json: true, workdir: w.workdir }),
+      await coreQueueCommand(w.work, listedResumed.io, { command: "list" }, { json: true, workdir: w.workdir }),
     ).toBe(0)
-    const unfrozenList = records(listedUnfrozen)[0]
-    expect(unfrozenList).toMatchObject({ changes: [{ branch: "task/one" }], freeze: null })
+    const resumedList = records(listedResumed)[0]
+    expect(resumedList).toMatchObject({ changes: [{ branch: "task/one" }], pause: null })
     const beforeRetry = await w.git(["ls-remote", "--refs", "origin", "refs/yrd/changes/*"])
-    const refrozen = capture(w.work)
+    const pausedAgain = capture(w.work)
     expect(
       await coreQueueCommand(
         w.work,
-        refrozen.io,
-        { by: "@chief", command: "freeze", reason: "retry must wait too" },
+        pausedAgain.io,
+        { by: "@chief", command: "pause", reason: "retry must wait too" },
         { workdir: w.workdir },
       ),
     ).toBe(0)
-    const listedRefrozen = capture(w.work)
+    const listedPausedAgain = capture(w.work)
     expect(
-      await coreQueueCommand(w.work, listedRefrozen.io, { command: "list" }, { json: true, workdir: w.workdir }),
+      await coreQueueCommand(w.work, listedPausedAgain.io, { command: "list" }, { json: true, workdir: w.workdir }),
     ).toBe(0)
-    const refrozenList = records(listedRefrozen)[0]
-    expect(refrozenList).toMatchObject({
-      freeze: { by: "@chief", kind: "frozen", reason: "retry must wait too" },
+    const pausedAgainList = records(listedPausedAgain)[0]
+    expect(pausedAgainList).toMatchObject({
+      pause: { by: "@chief", kind: "paused", reason: "retry must wait too" },
     })
-    expect(refrozenList?.changes).toEqual(unfrozenList?.changes)
+    expect(pausedAgainList?.changes).toEqual(resumedList?.changes)
     const retried = capture(w.work)
     expect(
       await coreQueueCommand(

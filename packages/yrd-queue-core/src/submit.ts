@@ -16,7 +16,7 @@ import { targetName, type Target } from "./config.ts"
 import { ABSENT, appendRecord, type Git } from "./records.ts"
 import { refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
-import { requireUnfrozen } from "./freeze.ts"
+import { requireResumed } from "./pause.ts"
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -59,9 +59,9 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // (2026-09-03: `main@0a9db9daf7eb`, named for the queue's own merge 005a622156c7).
   refuseTarget(request.branch, request.target.branch)
   // This is the early courtesy refusal. The run is the enforcement point: a
-  // freeze that races this read may let the change open, but it cannot let it
-  // be checked or merged while the freeze stands.
-  await requireUnfrozen(git, remote)
+  // pause that races this read may let the change open, but it cannot let it
+  // be checked or merged while the pause stands.
+  await requireResumed(git, remote)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const change = { branch: request.branch, head }
   const ref = changeRef(change)

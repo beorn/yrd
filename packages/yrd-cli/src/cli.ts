@@ -2,7 +2,7 @@
  * The whole command surface ([plan](../../../../pm/@i/10-yrd/plan.md)
  * § The final design, Commands).
  *
- * The command surface is `yrd queue submit|run|up|freeze|unfreeze|list|show`,
+ * The command surface is `yrd queue submit|run|up|pause|resume|list|show`,
  * `yrd check`, `yrd env open|list`, with `yrd submit` as the alias of the one
  * used most and `yrd bay` as `env`'s until flag day's word is retired. Every
  * queue command is `@yrd/queue-core` through `coreQueueCommand`; nothing here
@@ -47,7 +47,7 @@ const DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER"
 type GlobalOptions = YrdObservabilityFlags
 
 type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean }>
-type FreezeOptions = Readonly<{ json?: boolean; notify?: string }>
+type PauseOptions = Readonly<{ json?: boolean; notify?: string }>
 
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
@@ -105,35 +105,35 @@ function buildProgram(
     .option("--dry-run", DRY_RUN_HELP)
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
-    .command("freeze <reason>")
+    .command("pause <reason>")
     .description("stop checking and merging while the service keeps the queue visible")
     .option("--json", "emit stable JSON")
-    .option("--notify <seat>", "name who froze the queue")
+    .option("--notify <seat>", "name who paused the queue")
     .action(async (reason, options) => {
-      const declared = options as FreezeOptions
+      const declared = options as PauseOptions
       setExit(
         await coreQueueCommand(
           cwd(),
           io,
-          { by: resolveSubmitter(declared.notify, env), command: "freeze", reason: reason as string },
+          { by: resolveSubmitter(declared.notify, env), command: "pause", reason: reason as string },
           { json: declared.json, env, log: log() },
         ),
       )
     })
   queue
-    .command("unfreeze [reason]")
+    .command("resume [reason]")
     .description("resume checking and merging on the next service interval")
     .option("--json", "emit stable JSON")
-    .option("--notify <seat>", "name who unfroze the queue")
+    .option("--notify <seat>", "name who resumed the queue")
     .action(async (reason, options) => {
-      const declared = options as FreezeOptions
+      const declared = options as PauseOptions
       setExit(
         await coreQueueCommand(
           cwd(),
           io,
           {
             by: resolveSubmitter(declared.notify, env),
-            command: "unfreeze",
+            command: "resume",
             ...(reason === undefined ? {} : { reason: reason as string }),
           },
           { json: declared.json, env, log: log() },
