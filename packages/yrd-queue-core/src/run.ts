@@ -66,10 +66,11 @@ import {
 import { queueName, readConfig, targetName, type Ending, type Notifier, type Target } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
-import { directMergeCommits, directMergeLine } from "./direct.ts"
+import { directMergeCommits, directMergeLine, type DirectMerge } from "./direct.ts"
 import {
   activePause,
   PAUSE_REF,
+  pauseLine,
   QueuePaused,
   readPause,
   resumedFence,
@@ -77,6 +78,7 @@ import {
   type ResumedFence,
 } from "./pause.ts"
 import { changeName, changeRef } from "./refs.ts"
+import { composed } from "./rings.ts"
 import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine, tipOf } from "./state.ts"
 import {
@@ -127,8 +129,8 @@ export type QueueRunOutcome = Readonly<{
   target: string
   /** The garage's reason, when the round was made in the garage. */
   garage?: string
-  /** The active merge pause that made this run stop before a merge. */
-  pause?: PauseRecord
+  /** What a ring stopped this round for, before any merge could be made, when one did. */
+  stopped?: Stopped
   merged: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
@@ -156,9 +158,79 @@ type Run = Readonly<{
    * most once per run however many changes move it (E4).
    */
   onMain: Set<string>
+  /** The steps this run is made of, rings and all: every step call goes through these. */
+  steps: Steps
+  /** Say a ring stopped this round before it could merge; the outcome carries what it said. */
+  stop: (stopped: Stopped) => void
 }>
 
 type Ended = "checked" | "failed" | "stuck" | "merged"
+
+/** Which side of a change a step is on: the head it was submitted at, or its merge with the target. */
+type Phase = "submit" | "merge"
+
+/** What an ending record will say, before it is written. */
+type EndedWrite = Readonly<{
+  subject: string
+  trailers: readonly (readonly [string, string])[]
+  remedy?: string
+}>
+
+/**
+ * A ring stopped this round before it could merge, and says so.
+ *
+ * `ring` names the ring, `says` is its one line for a person, and `what` is the
+ * ring's own record of the stop, whose shape only that ring and its readers
+ * know. The loop carries it out on the outcome and reads none of it.
+ */
+export type Stopped = Readonly<{ ring: string; says: string; what: unknown }>
+
+/**
+ * One atomic push as a plan, so a ring can add to it before it is made: the refs
+ * it moves, `[object, ref]`, and the leases proving nobody else moved them,
+ * `[ref, expected]`.
+ */
+type PushPlan = Readonly<{
+  updates: readonly (readonly [string, string])[]
+  leases: readonly (readonly [string, string])[]
+}>
+
+/**
+ * What one atomic push did. A push that did not land names what moved under it
+ * when the pusher could read one; no `reason` is a push that found nothing
+ * moved, and its caller raises `error` rather than inventing a race.
+ */
+type Pushed =
+  | Readonly<{ landed: true }>
+  | Readonly<{ landed: false; reason?: string; saw?: string; error: unknown }>
+
+/**
+ * The steps one run is made of, every member a function, so a ring is a function
+ * from this bundle to this bundle: a feature is one file and one line of
+ * rings.ts, and deleting those two takes the whole of it.
+ *
+ * Every step call inside a run goes through `Run.steps`, the composed bundle,
+ * so a ring sees every call rather than only the ones the loop happens to make.
+ */
+export type Steps = Readonly<{
+  /** Once, at the top of the round. A value stops the round and becomes its outcome. */
+  open: (run: Run) => Promise<Stopped | undefined>
+  /** One pass per entry before anything is judged. */
+  bookkeep: (run: Run, entry: QueueEntry) => Promise<void>
+  prepare: (run: Run, entry: QueueEntry, commit: string, path: string, phase: Phase) => Promise<PreparedWorktree>
+  judge: (run: Run, entry: QueueEntry) => Promise<Ended>
+  land: (run: Run, entry: QueueEntry) => Promise<Ended>
+  /** The one atomic push a merge makes; a ring adds to the plan before it is made. */
+  push: (run: Run, entry: QueueEntry, plan: PushPlan) => Promise<Pushed>
+  end: (run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended: EndedWrite) => Promise<Ended>
+  /** A change ended and its record is written; whoever wants to hear it hears it here. */
+  ended: (run: Run, entry: QueueEntry, kind: "merged" | "failed" | "stuck", endedRecord: string) => Promise<void>
+  /** The same, for a commit that went around the queue: there is no change to end. */
+  direct: (run: Run, commit: DirectMerge) => Promise<void>
+}>
+
+/** One ring of the onion: the same bundle, with the members it owns wrapped. */
+export type Ring = (steps: Steps) => Steps
 
 /** An authority read failed outside any one change's responsibility. */
 class QueueAuthorityUnreadable extends Error {
@@ -176,6 +248,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // never judge against a target its own queue read did not see.
   const queue = await readQueue(git, options.target.remote, options.target.branch)
   const targetSha = queue.target
+  let stopped: Stopped | undefined
   const run: Run = {
     git,
     log,
@@ -183,6 +256,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     onMain: new Set(),
     options,
     queue: queue.changes,
+    steps: composed(BASE),
+    stop: (said) => {
+      stopped = said
+    },
     tmpdir: join(options.workdir, "tmp"),
     targetSha,
     worktrees: join(options.workdir, "worktrees", log.id),
@@ -227,25 +304,16 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // the base it read.
   const directMerges = await reportDirectMerges(run, entries)
 
-  // A pause stops here. Reaping only cleans local scratch, and direct
+  // A ring stops the round here. Reaping only cleans local scratch, and direct
   // reporting only observes work already done outside the queue. Everything
-  // below writes a change record or notifies about one, so a paused round leaves
-  // every change exactly as it found it while still surfacing direct merges.
-  const pausedAtStart = await activePause(git, options.target.remote)
-  if (pausedAtStart !== undefined) {
-    recordPause(run, pausedAtStart)
-    return finish(run, 0, { directMerges, failed, merged, stuck }, pausedAtStart)
-  }
+  // below writes a change record or tells somebody about one, so a stopped round
+  // leaves every change exactly as it found it while still surfacing direct merges.
+  stopped = await run.steps.open(run)
+  if (stopped !== undefined) return finish(run, 0, { directMerges, failed, merged, stuck }, stopped)
 
   // Bookkeeping at the edges of the records first, so every reader below reads
-  // records and never reconciles: a branch that is gone or moved off a head ends
-  // that head's change failed with the reason and no message (ruling B3); a
-  // head the target already carries gets its merged record, so the tip catches
-  // up with ancestry; an ended change whose message reached nobody is sent
-  // again (at-least-once, § The queue run).
-  for (const entry of entries) await retire(run, entry)
-  for (const entry of entries) await catchUp(run, entry)
-  for (const entry of entries) await resend(run, entry)
+  // records and never reconciles.
+  for (const entry of entries) await run.steps.bookkeep(run, entry)
 
   // On-submit: every queued change, oldest first, in a fresh worktree of its
   // head. A stuck change kept its place, and this run takes it again from
@@ -255,7 +323,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   for (const entry of ordered(entries, "queued", "stuck", "checked").filter(
     (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
   )) {
-    const outcome = await guarded(run, entry, () => judge(run, entry))
+    const outcome = await guarded(run, entry, () => run.steps.judge(run, entry))
     if (outcome === "stuck") {
       stuck.push(entry.change.branch)
       return finish(run, 2, { directMerges, failed, merged, stuck })
@@ -268,25 +336,22 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const checked = ordered((await readQueue(git, options.target.remote, options.target.branch)).changes, "checked").find(
     (entry) => !staleChecked(run, entry),
   )
-  let observedPause: PauseRecord | undefined
   if (checked !== undefined) {
-    const outcome = await guarded(run, checked, () =>
-      land(run, checked, (pause) => {
-        observedPause = pause
-      }),
-    )
+    const outcome = await guarded(run, checked, () => run.steps.land(run, checked))
     if (outcome === "stuck") stuck.push(checked.change.branch)
     else if (outcome === "failed") failed.push(checked.change.branch)
     else if (outcome === "merged") merged.push(checked.change.branch)
   }
 
-  return finish(
-    run,
-    stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0,
-    { directMerges, failed, merged, stuck },
-    observedPause,
-  )
+  return finish(run, stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0, { directMerges, failed, merged, stuck }, stopped)
 }
+
+/**
+ * The queue with no rings on it: the bare loop's own steps, which rings.ts
+ * wraps in order. Every one of them is reached through `Run.steps` and never by
+ * name, so a ring that wraps one sees every call to it.
+ */
+const BASE: Steps = { bookkeep, direct, end, ended, judge, land, open, prepare, push }
 
 /** A checked change whose checked record names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
@@ -329,28 +394,54 @@ async function reportDirectMerges(run: Run, entries: QueueRead): Promise<readonl
       subject: commit.subject,
       why: commit.why,
     })
-    const text = `${directMergeLine(commit)}: ${commit.why}. The queue goes on from the new base; a rollback is a git revert, pushed through the queue.`
-    // A direct merge has no change, so the commit that went around the queue stands
-    // where a change's name would (`NotifyRecord`).
-    for (const { name, delivery, failure } of await notifyAll(run, DIRECT, {
-      change: commit.commit,
-      record: DIRECT,
-    })) {
-      run.log.write({
-        about: target,
-        branch: target,
-        delivered: delivery === "sent",
-        ...(failure === undefined ? {} : { error: failure }),
-        head: commit.commit,
-        id: commit.commit,
-        kind: "message",
-        says: DIRECT,
-        text,
-        to: name,
-      })
-    }
+    await run.steps.direct(run, commit)
   }
   return found.map((commit) => commit.commit)
+}
+
+/** Nothing stops the round: a queue with no ring on it runs every round it is given. */
+async function open(run: Run): Promise<Stopped | undefined> {
+  const paused = await activePause(run.git, run.options.target.remote)
+  if (paused === undefined) return undefined
+  recordPause(run, paused)
+  return { ring: "pause", says: pauseLine(paused), what: paused }
+}
+
+/**
+ * One pass over one entry before anything is judged: a branch that is gone or
+ * moved off a head ends that head's change failed with the reason and no
+ * message (ruling B3); a head the target already carries gets its merged
+ * record, so the tip catches up with ancestry.
+ */
+async function bookkeep(run: Run, entry: QueueEntry): Promise<void> {
+  await retire(run, entry)
+  await catchUp(run, entry)
+  await resend(run, entry)
+}
+
+/** A commit that went around the queue is told about; the base tells nobody. */
+async function direct(run: Run, commit: DirectMerge): Promise<void> {
+  const target = run.options.target.branch
+  const text = `${directMergeLine(commit)}: ${commit.why}. The queue goes on from the new base; a rollback is a git revert, pushed through the queue.`
+  // A direct merge has no change, so the commit that went around the queue stands
+  // where a change's name would (`NotifyRecord`).
+  for (const { name, delivery, failure } of await notifyAll(run, DIRECT, {
+    change: commit.commit,
+    record: DIRECT,
+  })) {
+    run.log.write({
+      about: target,
+      branch: target,
+      delivered: delivery === "sent",
+      ...(failure === undefined ? {} : { error: failure }),
+      head: commit.commit,
+      id: commit.commit,
+      kind: "message",
+      says: DIRECT,
+      text,
+      to: name,
+    })
+  }
 }
 
 /**
@@ -369,12 +460,12 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     // not build the ground a judgement stands on, which is never the
     // submitter's fault, so the reason says setup and not crash.
     if (error instanceof SetupFailed) {
-      return end(run, entry, "stuck", {
+      return run.steps.end(run, entry, "stuck", {
         subject: `the queue could not prepare a worktree for ${entry.change.branch}: ${message.slice(0, 200)}`,
         trailers: [["Reason", SETUP]],
       })
     }
-    return end(run, entry, "stuck", {
+    return run.steps.end(run, entry, "stuck", {
       subject: `the queue crashed judging ${entry.change.branch}: ${message.slice(0, 200)}`,
       trailers: [["Reason", "crash"]],
     })
@@ -393,7 +484,7 @@ async function prepare(
   entry: QueueEntry,
   commit: string,
   path: string,
-  phase: "submit" | "merge",
+  phase: Phase,
 ): Promise<PreparedWorktree> {
   const logDir = checkLogDir(run, entry, phase)
   const about = { branch: entry.change.branch, head: entry.change.head, name: SETUP, phase }
@@ -417,19 +508,25 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
   // fail every change behind a merge; an unrelated history is what a merge
   // must never splice in.
   if ((await mergeBase(run.git, head, run.targetSha)) === undefined) {
-    return end(run, entry, "failed", {
+    return run.steps.end(run, entry, "failed", {
       remedy: `rebase ${branch} onto ${run.options.target.branch} and submit again`,
       subject: `${branch} shares no history with ${run.options.target.branch}`,
       trailers: [["Reason", "unrelated-history"]],
     })
   }
-  const worktree = await prepare(run, entry, head, join(run.worktrees, "submit", head.slice(0, 12)), "submit")
+  const worktree = await run.steps.prepare(
+    run,
+    entry,
+    head,
+    join(run.worktrees, "submit", head.slice(0, 12)),
+    "submit",
+  )
   try {
     // The built-in check: every gitlink the change moved reachable from its
     // component's main (E4).
     const offMain = await gitlinkOffMain(run, head, worktree.path)
     if (offMain !== undefined) {
-      return await end(run, entry, "failed", {
+      return await run.steps.end(run, entry, "failed", {
         remedy: `land ${offMain.path}'s commit on its main first, record that gitlink, and submit again`,
         subject: `${branch} records ${offMain.path} at ${offMain.sha.slice(0, 12)}, which its main does not carry`,
         trailers: [
@@ -441,7 +538,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     const results = await runPhase(run, entry, "submit", worktree.path, worktree.tree)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
-      return await end(run, entry, "stuck", {
+      return await run.steps.end(run, entry, "stuck", {
         subject: `the queue could not judge ${branch}: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
         trailers: [["Reason", stuckOne.name], ...checkTrailers(results)],
       })
@@ -504,11 +601,17 @@ async function movedGitlinks(run: Run, head: string): Promise<readonly Readonly<
 }
 
 /** The on-merge phase for the first checked change. */
-async function land(run: Run, entry: QueueEntry, observedPause: (pause: PauseRecord) => void): Promise<Ended> {
+async function land(run: Run, entry: QueueEntry): Promise<Ended> {
   const { change } = entry
   const { branch, head } = change
   const name = changeName(change)
-  const worktree = await prepare(run, entry, run.targetSha, join(run.worktrees, "merge", head.slice(0, 12)), "merge")
+  const worktree = await run.steps.prepare(
+    run,
+    entry,
+    run.targetSha,
+    join(run.worktrees, "merge", head.slice(0, 12)),
+    "merge",
+  )
   try {
     const wt = gitIn(worktree.path, run.options.process)
     let mergeCommit: string
@@ -537,7 +640,7 @@ async function land(run: Run, entry: QueueEntry, observedPause: (pause: PauseRec
       // said is the detail, on one line: a trailer is one line, and the merge
       // command's own message spans several.
       const said = error instanceof GitExit ? error.detail : error instanceof Error ? error.message : String(error)
-      return await end(run, entry, "failed", {
+      return await run.steps.end(run, entry, "failed", {
         remedy: `rebase ${branch} onto ${run.options.target.branch}, resolve the conflict, push, and submit again`,
         subject: `${branch} conflicts with ${run.options.target.branch}`,
         trailers: [
@@ -555,7 +658,7 @@ async function land(run: Run, entry: QueueEntry, observedPause: (pause: PauseRec
       unreadable = String(error instanceof Error ? error.message : error).slice(0, 160)
     }
     if (unreadable !== undefined) {
-      return await end(run, entry, "failed", {
+      return await run.steps.end(run, entry, "failed", {
         remedy: `fix .yrd.yml on ${branch} (${unreadable}), push, and submit again`,
         subject: `${branch} would land a declaration the queue cannot read`,
         trailers: [["Reason", "config-invalid"]],
@@ -568,7 +671,7 @@ async function land(run: Run, entry: QueueEntry, observedPause: (pause: PauseRec
     const results = await runPhase(run, entry, "merge", worktree.path, merged)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
-      return await end(run, entry, "stuck", {
+      return await run.steps.end(run, entry, "stuck", {
         subject: `the queue could not judge ${branch} at merge: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
         trailers: [["Reason", stuckOne.name], ...checkTrailers(results)],
       })
@@ -616,26 +719,25 @@ async function land(run: Run, entry: QueueEntry, observedPause: (pause: PauseRec
     } catch (error) {
       if (error instanceof QueuePaused) {
         recordPause(run, error.pause)
-        observedPause(error.pause)
+        run.stop({ ring: "pause", says: pauseLine(error.pause), what: error.pause })
         run.log.write({ branch, decision: "checked", head, kind: "change", reason: "paused" })
         return "checked"
       }
       throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${PAUSE_REF}`, error)
     }
     const ref = changeRef(change)
-    try {
-      await run.git([
-        "push",
-        "--quiet",
-        "--atomic",
-        `--force-with-lease=refs/heads/${run.options.target.branch}:${run.targetSha}`,
-        `--force-with-lease=${PAUSE_REF}:${fence.expected}`,
-        run.options.target.remote,
-        `${mergeCommit}:refs/heads/${run.options.target.branch}`,
-        `${mergedRecord}:${ref}`,
-        `${fence.sha}:${PAUSE_REF}`,
-      ])
-    } catch (error) {
+    const pushed = await run.steps.push(run, entry, {
+      leases: [
+        [`refs/heads/${run.options.target.branch}`, run.targetSha],
+        [PAUSE_REF, fence.expected],
+      ],
+      updates: [
+        [mergeCommit, `refs/heads/${run.options.target.branch}`],
+        [mergedRecord, ref],
+        [fence.sha, PAUSE_REF],
+      ],
+    })
+    if (!pushed.landed) {
       // A target, branch, or pause writer can win after our reads. The atomic
       // leases then reject every update, and the remote — never Git's prose —
       // identifies the authority that moved. The change remains checked.
@@ -645,38 +747,61 @@ async function land(run: Run, entry: QueueEntry, observedPause: (pause: PauseRec
       } catch (authorityError) {
         throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${PAUSE_REF}`, authorityError)
       }
-      const moved = await remoteHeads(run, branch)
       if (pauseNow?.kind === "paused") {
         recordPause(run, pauseNow)
-        observedPause(pauseNow)
+        run.stop({ ring: "pause", says: pauseLine(pauseNow), what: pauseNow })
         run.log.write({ branch, decision: "checked", head, kind: "change", reason: "paused" })
         return "checked"
       }
       const authorityMoved = pauseNow?.sha !== fence.previous?.sha
-      if (moved.target === run.targetSha && moved.branch === head && !authorityMoved) throw error
+      if (pushed.reason === undefined && !authorityMoved) throw pushed.error
       run.log.write({
         branch,
         decision: "checked",
         head,
         kind: "change",
-        reason:
-          moved.target !== run.targetSha ? "target-moved" : moved.branch !== head ? "branch-moved" : "pause-moved",
-        saw: moved.target !== run.targetSha ? (moved.target ?? "gone") : (pauseNow?.sha ?? "absent"),
+        reason: pushed.reason ?? "pause-moved",
+        saw: pushed.saw ?? pauseNow?.sha ?? "absent",
       })
       return "checked"
     }
     run.log.write({ branch, change: name, commit: mergeCommit, head, kind: "merge", tip: mergeCommit })
     run.log.write({ branch, decision: "merged", head, kind: "change" })
-    await send(
-      run,
-      entry,
-      mergedRecord,
-      "merged",
-      messageFor("merged", { branch, head, merge: mergeCommit, subject: "" }),
-    )
+    await run.steps.ended(run, entry, "merged", mergedRecord)
     return "merged"
   } finally {
     await worktree.remove()
+  }
+}
+
+/**
+ * The one atomic push a merge makes: every ref in the plan moves or none does,
+ * and every lease proves nobody moved that ref between this run's reads and
+ * this moment.
+ *
+ * A rejection is not an error until somebody has looked. The target or the
+ * branch may have moved under us, and then the change simply keeps its place and
+ * is judged again next run. What the pusher cannot read as a race it hands back
+ * with the rejection, for a caller that knows more to explain or raise.
+ */
+async function push(run: Run, entry: QueueEntry, plan: PushPlan): Promise<Pushed> {
+  try {
+    await run.git([
+      "push",
+      "--quiet",
+      "--atomic",
+      ...plan.leases.map(([ref, expected]) => `--force-with-lease=${ref}:${expected}`),
+      run.options.target.remote,
+      ...plan.updates.map(([object, ref]) => `${object}:${ref}`),
+    ])
+    return { landed: true }
+  } catch (error) {
+    const moved = await remoteHeads(run, entry.change.branch)
+    if (moved.target !== run.targetSha) {
+      return { error, landed: false, reason: "target-moved", saw: moved.target ?? "gone" }
+    }
+    if (moved.branch !== entry.change.head) return { error, landed: false, reason: "branch-moved" }
+    return { error, landed: false }
   }
 }
 
@@ -698,10 +823,10 @@ async function endFailing(
   entry: QueueEntry,
   results: readonly CheckResult[],
   failing: readonly CheckResult[],
-  phase: "submit" | "merge",
+  phase: Phase,
 ): Promise<Ended> {
   const first = failing[0]
-  return end(run, entry, "failed", {
+  return run.steps.end(run, entry, "failed", {
     remedy: `fix ${first?.name ?? "the check"} (log: ${first?.log ?? ""}), push, and submit again`,
     subject: `${entry.change.branch} failed ${failing.map((result) => result.name).join(", ")}${phase === "merge" ? " at merge" : ""}`,
     trailers: [["Reason", first?.name ?? "check"], ...checkTrailers(results)],
@@ -786,7 +911,7 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   })
   if (mergedRecord === undefined) return
   run.log.write({ branch, decision: "merged", head, kind: "change", reason: "already on the target" })
-  await send(run, entry, mergedRecord, "merged", messageFor("merged", { branch, head, merge, subject: "" }))
+  await run.steps.ended(run, entry, "merged", mergedRecord)
 }
 
 /**
@@ -813,23 +938,11 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   if (endedSha === undefined) {
     throw new Error(`${entry.change.branch}: sent record ${tip.sha.slice(0, 12)} names no ended record to send again`)
   }
-  const ended = tip.kind === "sent" ? await readRecord(run.git, endedSha) : tip
-  if (ended.kind !== "failed" && ended.kind !== "stuck" && ended.kind !== "merged") {
-    throw new Error(`${entry.change.branch}: ${endedSha.slice(0, 12)} is a ${ended.kind} record, not an ended one`)
+  const written = tip.kind === "sent" ? await readRecord(run.git, endedSha) : tip
+  if (written.kind !== "failed" && written.kind !== "stuck" && written.kind !== "merged") {
+    throw new Error(`${entry.change.branch}: ${endedSha.slice(0, 12)} is a ${written.kind} record, not an ended one`)
   }
-  await send(
-    run,
-    entry,
-    ended.sha,
-    ended.kind,
-    messageFor(ended.kind, {
-      branch: entry.change.branch,
-      head: entry.change.head,
-      merge: trailer(ended, "Merge") ?? "",
-      remedy: trailer(ended, "Remedy"),
-      subject: ended.subject,
-    }),
-  )
+  await run.steps.ended(run, entry, written.kind, written.sha)
 }
 
 /** A change as a person reads it: the branch and twelve characters of the head, the trailer's spelling shortened. */
@@ -998,12 +1111,7 @@ function record(
   run.log.write({ ...common, exit: String(result.exit), kind: "result", result: result.result, whose })
 }
 
-async function end(
-  run: Run,
-  entry: QueueEntry,
-  kind: "failed" | "stuck",
-  ended: Readonly<{ subject: string; trailers: readonly (readonly [string, string])[]; remedy?: string }>,
-): Promise<Ended> {
+async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended: EndedWrite): Promise<Ended> {
   // Who is billed follows from the kind, once: a fail is the submitter's, and
   // says so; a stuck is always the queue's, so its record says nothing about
   // fault (a constant trailer says nothing). A `replaced` or `deleted` change
@@ -1029,48 +1137,45 @@ async function end(
   })
   // No record, no message: the message's id IS that record's sha, and the next
   // run's reading of the remote is what repairs the ending (24096).
-  if (record !== undefined) {
-    await send(
-      run,
-      entry,
-      record,
-      kind,
-      messageFor(kind, {
-        branch: entry.change.branch,
-        head: entry.change.head,
-        remedy: ended.remedy,
-        subject: ended.subject,
-      }),
-    )
-  }
+  if (record !== undefined) await run.steps.ended(run, entry, kind, record)
   return kind
 }
 
-/** One message per ended change, after its ended record; the record's sha is the id. */
-async function send(
+/**
+ * One message per ended change, after its ended record; the record's sha is the
+ * id. What the message says is read from that record and nowhere else, so a
+ * resend after a crash says exactly what the first send said.
+ */
+async function ended(
   run: Run,
   entry: QueueEntry,
-  endedRecord: string,
   kind: "merged" | "failed" | "stuck",
-  text: string,
+  endedRecord: string,
 ): Promise<void> {
-  const ended = await readRecord(run.git, endedRecord)
+  const written = await readRecord(run.git, endedRecord)
+  const text = messageFor(kind, {
+    branch: entry.change.branch,
+    head: entry.change.head,
+    merge: trailer(written, "Merge") ?? "",
+    remedy: trailer(written, "Remedy"),
+    subject: written.subject,
+  })
   // The queue addresses nobody. It says what happened and runs the entries that
   // want this ending; who hears about it is their own business. The submitter
   // travels with the record as the opaque string the submit gave — `unknown` is
   // what a submit with neither `--notify` nor `YRD_DEFAULT_SUBMITTER` records
   // (rulings B6 and D9), and it is not a seat.
-  const submitter = trailer(ended, "Submitter")
+  const submitter = trailer(written, "Submitter")
   const known = submitter !== undefined && submitter !== "unknown"
-  const issue = trailer(ended, "Issue")
-  const lastCheck = trailers(ended, "Check").at(-1)
+  const issue = trailer(written, "Issue")
+  const lastCheck = trailers(written, "Check").at(-1)
   const log = lastCheck === undefined ? run.log.path : (readCheckTrailer(lastCheck).log ?? run.log.path)
   const handed = await notifyAll(run, kind, {
     change: changeName(entry.change),
     record: kind,
     ...(issue === undefined ? {} : { issue }),
     ...(known ? { submitter } : {}),
-    ...(kind === "merged" ? { merge: trailer(ended, "Merge") ?? "" } : { log, reason: reasonFor(kind, ended) }),
+    ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
     ...(kind === "failed" ? { failures: await failuresOf(run, entry) } : {}),
   })
   for (const { name, delivery, failure } of handed) {
@@ -1090,7 +1195,7 @@ async function send(
         ["For", endedRecord],
         ["Delivery", delivery],
         ...(failure === undefined ? [] : [["Delivery-Error", failure] as const]),
-        ...ended.trailers.filter(([key]) => RESULT_TRAILERS.has(key)),
+        ...written.trailers.filter(([key]) => RESULT_TRAILERS.has(key)),
       ],
     }
     const sentRecord = await writeRecord(run, sentWrite)
@@ -1353,7 +1458,7 @@ async function finish(
   run: Run,
   exitCode: 0 | 1 | 2,
   lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[]; directMerges: readonly string[] }>,
-  pause?: PauseRecord,
+  stopped?: Stopped,
 ): Promise<QueueRunOutcome> {
   // A push updates the remote-tracking ref it pushed to, so after a merge the
   // target as this run left it is right there; a run that merged nothing left
@@ -1375,7 +1480,7 @@ async function finish(
     config: run.options.configBlob,
     exitCode,
     ...(run.options.garage === undefined ? {} : { garage: run.options.garage }),
-    ...(pause === undefined ? {} : { pause }),
+    ...(stopped === undefined ? {} : { stopped }),
     log: run.log.path,
     run: run.log.id,
     target: targetNow,

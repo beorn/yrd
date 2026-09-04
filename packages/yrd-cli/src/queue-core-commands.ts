@@ -45,7 +45,6 @@ import {
   requireResumed,
   writePause,
   type CheckResult,
-  type PauseRecord,
   type Git,
   type LogRecord,
   type QueueConfig,
@@ -618,7 +617,7 @@ function describeRun(
     directMerges: readonly string[]
     log: string
     garage?: string
-    pause?: PauseRecord
+    stopped?: Readonly<{ says: string }>
   }>,
 ): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
@@ -629,7 +628,7 @@ function describeRun(
     outcome.directMerges.length > 0
       ? `${String(outcome.directMerges.length)} ${outcome.directMerges.length === 1 ? "commit" : "commits"} around the queue at ${outcome.directMerges.map((sha) => sha.slice(0, 12)).join(", ")}`
       : undefined,
-    outcome.pause === undefined ? undefined : `${pauseLine(outcome.pause)}; no merge was made`,
+    outcome.stopped === undefined ? undefined : `${outcome.stopped.says}; no merge was made`,
   ].filter((part): part is string => part !== undefined)
   const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`

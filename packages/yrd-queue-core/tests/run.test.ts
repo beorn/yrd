@@ -30,7 +30,7 @@ import {
   trailers,
   writePause,
 } from "../src/index.ts"
-import type { CheckedTree, Git, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
+import type { CheckedTree, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
 
 const roots: string[] = []
 
@@ -705,7 +705,7 @@ describe("a queue run", () => {
     const held = await queueRun(w.options({ exit: 0 }))
 
     expect(held.exitCode).toBe(0)
-    expect(held.pause).toEqual(paused)
+    expect(held.stopped?.what).toEqual(paused)
     expect(held.merged).toEqual([])
     expect(await remoteTarget(w)).toBe(w.target)
     await fetchChanges(w)
@@ -755,7 +755,8 @@ describe("a queue run", () => {
 
     const held = await queueRun(w.options({ exit: 0 }))
 
-    expect(held).toMatchObject({ directMerges: [direct], exitCode: 0, failed: [], pause: paused, merged: [], stuck: [] })
+    expect(held).toMatchObject({ directMerges: [direct], exitCode: 0, failed: [], merged: [], stuck: [] })
+    expect(held.stopped?.what).toEqual(paused)
     expect(existsSync(dead)).toBe(false)
     expect(logRecords(held).filter((record) => record.kind === "reap")).toHaveLength(1)
     expect(logRecords(held).filter((record) => record.kind === "merged-direct")).toHaveLength(1)
@@ -789,7 +790,7 @@ describe("a queue run", () => {
     await rival(["config", "user.email", "rival@yrd.test"])
     await rival(["config", "user.name", "rival"])
 
-    let paused: QueueRunOutcome["pause"]
+    let paused: PauseRecord | undefined
     let targetBeforePush = ""
     let changeBeforePush = ""
     const git: Git = async (args, input) => {
@@ -808,7 +809,7 @@ describe("a queue run", () => {
     const outcome = await queueRun({ ...w.options({ exit: 0 }), git })
 
     expect(paused).toBeDefined()
-    expect(outcome.pause).toEqual(paused)
+    expect(outcome.stopped?.what).toEqual(paused)
     expect(outcome.merged).toEqual([])
     expect(await remoteTarget(w)).toBe(targetBeforePush)
     expect((await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]).toBe(changeBeforePush)
