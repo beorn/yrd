@@ -172,6 +172,8 @@ The common thread: every system above answers "what exactly did we test, and is 
 
 Yrd needs Bun and Git. The queue runs as one process on one machine, as the user who starts it, and a check is whatever command the config names, run as that user.
 
+**Queue-owned Git operations never run repository hooks.** Base settlement, gitlink raises, and final merge settlement run under an asserted-empty `core.hooksPath`; this is a load-bearing isolation boundary, not an optional bypass. `--no-verify` is not a substitute: on Git 2.55 it does not suppress `prepare-commit-msg` or `post-commit`, and it does not configure child Git processes. Starting the `git super` command with `git -c core.hooksPath=<empty-dir>` propagates the override to its child Git commands through `GIT_CONFIG_PARAMETERS`. Repository hooks validate authored work; queue artifacts are derived, and checks on their output belong in `.yrd.yml`.
+
 ```
 bun install --frozen-lockfile
 bun run typecheck
