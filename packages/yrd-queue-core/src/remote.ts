@@ -12,8 +12,10 @@
  * number of git invocations however many changes there are — one `ls-remote`,
  * one fetch of the change refs, one fetch of exactly the branches they name
  * (the target among them), one `for-each-ref` for every change's tip record,
- * one for ancestry — because the tip record's trailers are the whole derived
- * state and no history is walked. The change refs are read FIRST and the
+ * one for ancestry — because the tip record's trailers are the whole state
+ * answer and no history is walked. A detail view expands only its selected
+ * entries through `readHistories` to recover phase-specific check evidence.
+ * The change refs are read FIRST and the
  * branches follow from them, so a remote with thousands of branches the queue
  * has nothing to do with is never fetched (E3; measured 2026-09-02: the root's
  * origin holds 7,387 branches, and fetching them all cost 17 s a round).
@@ -181,8 +183,9 @@ async function tipRecords(git: Git): Promise<ReadonlyMap<string, ChangeRecord>> 
       block === undefined ||
       body === undefined ||
       sha.trim() === ""
-    )
-      {continue}
+    ) {
+      continue
+    }
     // Every reader of the queue comes through here, so the one check that a
     // change's records are in the format this code reads belongs here (records.ts).
     tips.set(ref, tipRecord(recordFrom(sha.trim(), at, body, block), sha.trim(), ref))

@@ -23,9 +23,10 @@
  *   `Opened:`, `Submitter:` and `Issue:` carried forward from the first
  *   record, a sent record naming who it went to (`To:`) and how it went
  *   (`Delivery: sent`, `logged` or `failed`), and an ended record's result
- *   carried onto its sent record, so the tip
- *   record's trailers are the whole answer about the change and one
- *   `for-each-ref` answers `yrd queue list` with no history walk.
+ *   carried onto its sent record, so the tip has the whole state/result answer
+ *   needed by `yrd queue list` and one `for-each-ref` answers it with no history
+ *   walk. Phase-specific `Check:` evidence stays on the record where it ran;
+ *   one-change detail readers walk that history through `readHistories`.
  *
  * The genesis is one object: an empty-tree commit with a fixed author and
  * time, so it has the same sha in every repository and is written at most
@@ -255,7 +256,9 @@ export function tipRecord(record: ChangeRecord | undefined, sha: string, where: 
     changeOf(record, where)
     return record
   }
-  throw new Error(`${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|sent trailer`)
+  throw new Error(
+    `${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|sent trailer`,
+  )
 }
 
 /** Every value of a trailer, in order. */

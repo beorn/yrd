@@ -3,9 +3,10 @@
  * Commands): `yrd queue list` and `yrd queue show <branch>`, derived at read
  * time from the queue read. Nothing here is stored and nothing here is a
  * second reader: both views are the queue read rendered, so they can never
- * disagree with a queue run or with each other. Every row is read off one
- * record, the change's tip, whose trailers are the whole derived state — except
- * the row for a commit the queue did not put on the target, a direct merge, which is
+ * disagree with a queue run or with each other. Every row is read off the
+ * change's tip, whose trailers carry its derived state. One-change detail
+ * folds `Check:` evidence from the full history supplied by `readHistories`.
+ * The row for a commit the queue did not put on the target, a direct merge, is
  * read off the target itself (E5).
  *
  * Two readings JOIN the records here, and neither is a second derivation of

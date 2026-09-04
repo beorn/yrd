@@ -175,9 +175,9 @@ async function told(
   })
   for (const { name, delivery, failure } of handed) {
     // One sent record per entry that fired, so a reader can see which of them the
-    // queue reached. The sent record repeats the ended state and carries the
-    // ended record's result, so the tip record's trailers stay the whole answer
-    // about the change and no reader has to walk to the record before (ruling A2).
+    // queue reached. The sent record repeats the ended state/result, so
+    // fixed-cost list reads stay complete after delivery. Earlier-phase check
+    // evidence remains on its own records (ruling A2).
     const sentWrite: WriteRecord = {
       change: entry.change,
       kind: "sent",
@@ -281,7 +281,8 @@ async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
   }).length
   const own = await readRecords(run.git, entry.change)
   return (
-    elsewhere + own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
+    elsewhere +
+    own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
   )
 }
 
