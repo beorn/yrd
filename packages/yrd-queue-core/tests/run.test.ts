@@ -9,7 +9,7 @@
 import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   CHANGES,
@@ -30,9 +30,18 @@ import {
   trailers,
   writePause,
 } from "../src/index.ts"
-import type { CheckedTree, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
+import type { ChangeRecord, CheckedTree, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
 
 const roots: string[] = []
+
+const INCIDENT_FIELDS = ["Code", "Subject", "Via", "Evidence", "Next", "Owner"] as const
+
+function incidentOf(record: ChangeRecord | undefined): Readonly<Record<(typeof INCIDENT_FIELDS)[number], string>> {
+  if (record === undefined) throw new Error("no incident record")
+  const incident = Object.fromEntries(INCIDENT_FIELDS.map((field) => [field, trailer(record, field)]))
+  for (const field of INCIDENT_FIELDS) expect(incident[field], `${field}: must be present and non-empty`).toBeTruthy()
+  return incident as Record<(typeof INCIDENT_FIELDS)[number], string>
+}
 
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
@@ -510,17 +519,26 @@ describe("a queue run", () => {
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/changes/*:refs/yrd/changes/*"])
     const records = await readRecords(w.git, { branch: "task/one", head })
     expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "stuck", "sent"])
-    // A stuck record names the check as its reason and says nothing about fault:
-    // stuck is always the queue's, and a constant trailer says nothing.
-    expect(records[2]?.trailers).toEqual(expect.arrayContaining([["Reason", "verify"]]))
-    expect(records[2]?.trailers.filter(([name]) => name === "Fault" || name === "Cause")).toEqual([])
+    const incident = incidentOf(records[2])
+    expect(incident).toMatchObject({
+      Code: "yrd-check-unresolved",
+      Subject: expect.stringContaining("verify"),
+      Via: expect.stringContaining(outcome.run),
+      Owner: "the queue operator",
+    })
+    expect(isAbsolute(incident.Evidence)).toBe(true)
+    expect(existsSync(incident.Evidence)).toBe(true)
+    expect(incident.Next).toContain("yrd queue run")
+    expect(records[2]?.trailers.filter(([name]) => name === "Reason" || name === "Fault" || name === "Cause")).toEqual(
+      [],
+    )
     expect(records[3]?.trailers).toEqual(
       expect.arrayContaining([
         ["To", "recorder"],
         ["State", "stuck"],
-        ["Reason", "verify"],
       ]),
     )
+    expect(incidentOf(records[3])).toEqual(incident)
     expect(messages(w)[0]).toMatchObject({
       change: changeName({ branch: "task/one", head }),
       record: "stuck",
@@ -770,9 +788,9 @@ describe("a queue run", () => {
     expect((await readRecords(w.git, { branch: "task/deleted", head: deleted })).map((record) => record.kind)).toEqual([
       "opened",
     ])
-    expect((await readRecords(w.git, { branch: "task/caught-up", head: caughtUp })).map((record) => record.kind)).toEqual([
-      "opened",
-    ])
+    expect(
+      (await readRecords(w.git, { branch: "task/caught-up", head: caughtUp })).map((record) => record.kind),
+    ).toEqual(["opened"])
     expect((await readRecords(w.git, { branch: "task/unsent", head: unsent })).map((record) => record.kind)).toEqual([
       "opened",
       "failed",
@@ -1057,7 +1075,9 @@ describe("a queue run", () => {
     await fetchChanges(w)
     // The planted ref still holds the one record that was written on it, and no
     // run considered it: no record, no row, no message.
-    expect((await readRecords(w.git, { branch: "main", head: w.target })).map((record) => record.kind)).toEqual(["opened"])
+    expect((await readRecords(w.git, { branch: "main", head: w.target })).map((record) => record.kind)).toEqual([
+      "opened",
+    ])
     for (const outcome of [merging, after]) {
       expect(logRecords(outcome).filter((record) => record.kind === "change" && record.branch === "main")).toEqual([])
       expect(logRecords(outcome).filter((record) => record.kind === "merged-direct")).toEqual([])
@@ -1331,7 +1351,7 @@ describe("the target's setup", () => {
     await fetchChanges(w)
     const records = await readRecords(w.git, { branch: "task/one", head })
     expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
-    expect(records[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
+    expect(incidentOf(records[1])).toMatchObject({ Code: "yrd-setup-unusable", Owner: "the queue operator" })
     expect(records[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
     // The check never ran: there was no prepared tree to run it in.
     expect(whereRan(w).filter(([what]) => what === "check")).toEqual([])
@@ -1342,6 +1362,23 @@ describe("the target's setup", () => {
     expect(logRecords(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "1", result: "fail", whose: "queue" },
     ])
+  })
+
+  it("keeps a setup failure longer than 400 characters lossless in the authoritative incident", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const tail = "THE-END-OF-THE-SETUP-FAILURE"
+    const missing = `no-such-setup-command ${"x".repeat(450)}${tail}`
+
+    await queueRun(w.options({ exit: 0, setup: missing }))
+
+    await fetchChanges(w)
+    const records = await readRecords(w.git, { branch: "task/one", head })
+    const incident = incidentOf(records.find((record) => record.kind === "stuck"))
+    expect(incident.Code).toBe("yrd-setup-unusable")
+    expect(incident.Subject).toContain(tail)
+    expect(incident.Subject.length).toBeGreaterThan(400)
+    expect(incidentOf(records.at(-1))).toEqual(incident)
   })
 
   it("a setup past its bound is stuck too, and the change is never billed", async () => {
@@ -1358,7 +1395,7 @@ describe("the target's setup", () => {
     await fetchChanges(w)
     const records = await readRecords(w.git, { branch: "task/one", head })
     expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
-    expect(records[1]?.trailers).toEqual(expect.arrayContaining([["Reason", "setup"]]))
+    expect(incidentOf(records[1])).toMatchObject({ Code: "yrd-setup-unusable", Owner: "the queue operator" })
     expect(logRecords(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "missing", result: "stuck", whose: "queue" },
     ])

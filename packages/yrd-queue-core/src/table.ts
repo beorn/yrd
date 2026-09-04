@@ -27,6 +27,7 @@ import { endedKind, mergedByRun, trailer, trailers, type ChangeRecord } from "./
 import { readCheckTrailer } from "./check.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
 import { journalKey, type Journals, type JournalRun } from "./log.ts"
+import { incidentFrom, incidentLine, type Incident } from "./incident.ts"
 import type { Git } from "./records.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
 import { inLine, nextOwner, tipOf, type ChangeState, type NextOwner } from "./state.ts"
@@ -44,6 +45,8 @@ export type Row = Readonly<{
   result?: string
   /** The log path of the deciding check, when there is one. */
   log?: string
+  /** The complete queue-owned incident stored on a stuck record. */
+  incident?: Incident
   issue?: string
   submitter?: string
   /** Why: `replaced`, `deleted`, a check's code, or for a `direct` row the one line about that commit. */
@@ -208,27 +211,37 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
   const running = runs.find((run) => run.running !== undefined)
   const startedAt = checkingBegan(runs, tip, ended)
   const state = entry.reading.state
+  const incident = state === "stuck" ? incidentFrom(tip) : undefined
   const subject = options.subjects?.get(entry.change.head)
   const run = latest?.id ?? mergedByRun(trailer(tip, "Merged-By"))
   const live = running?.running
-  const next = nextOwner(entry.reading, {
-    ...(submitter === undefined ? {} : { submitter }),
-    ...(options.journals?.dir === undefined ? {} : { journal: options.journals.dir }),
-  })
+  const next =
+    incident === undefined
+      ? nextOwner(entry.reading, {
+          ...(submitter === undefined ? {} : { submitter }),
+          ...(options.journals?.dir === undefined ? {} : { journal: options.journals.dir }),
+        })
+      : { because: incident.next, owner: incident.owner }
   return {
     at: tip.at,
     branch: entry.change.branch,
     head: entry.change.head,
     log: lastCheck?.log,
     position,
-    reason: entry.reading.reason,
-    result: tip.kind === "opened" ? undefined : resultOf(ended, lastCheck?.name),
+    reason: incident?.code ?? entry.reading.reason,
+    result:
+      incident === undefined
+        ? tip.kind === "opened"
+          ? undefined
+          : resultOf(ended, lastCheck?.name)
+        : incidentLine(incident),
     since: opened === undefined ? undefined : new Date(opened),
     state,
     submitter: trailer(tip, "Submitter"),
     issue: trailer(tip, "Issue"),
     merge: trailer(tip, "Merge"),
     base: trailer(tip, "Base"),
+    ...(incident === undefined ? {} : { incident }),
     ...(subject === undefined ? {} : { subject }),
     ...(run === undefined ? {} : { run }),
     ...(startedAt === undefined ? {} : { startedAt }),

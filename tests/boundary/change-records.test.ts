@@ -233,9 +233,7 @@ describe("a change and its records", { timeout: 120_000 }, () => {
       expect(failed.trailers.get("Remedy")?.[0] ?? "", report).not.toBe("")
     })
 
-    // today: red — no change ref. The queue run exits 2 (M2 landed that) but
-    // writes no ref a reader can see, so nothing records WHY it stopped.
-    it("a stuck change ends with one stuck record and its reason, with no fault line: stuck is always the queue's", async () => {
+    it("a stuck change ends with one complete incident on the ref, with no fault line", async () => {
       const { boundary, change } = await submitted({ exit: 2, hooks: true }, "stuck")
 
       const run = await queueRunOnce(boundary.repo)
@@ -249,7 +247,10 @@ describe("a change and its records", { timeout: 120_000 }, () => {
       const stuck = read.records.find((record) => record.kind === "stuck")
       if (stuck === undefined) throw new Error(report)
       expect(stuck.trailers.get("Fault"), report).toBeUndefined()
-      expect(stuck.trailers.get("Reason")?.[0] ?? "", report).not.toBe("")
+      expect(stuck.trailers.get("Reason"), report).toBeUndefined()
+      for (const field of ["Code", "Subject", "Via", "Evidence", "Next", "Owner"]) {
+        expect(stuck.trailers.get(field)?.[0] ?? "", `${field}: missing\n${report}`).not.toBe("")
+      }
     })
 
     // today: red — no change ref, so no parent chain and no merge commit to
@@ -265,7 +266,8 @@ describe("a change and its records", { timeout: 120_000 }, () => {
 
       for (const [index, record] of read.records.entries()) {
         if (index === 0) continue
-        expect(record.parents, `${report}\nrecord ${String(index)} (${record.kind})`).toEqual([read.records[index - 1]?.sha,
+        expect(record.parents, `${report}\nrecord ${String(index)} (${record.kind})`).toEqual([
+          read.records[index - 1]?.sha,
         ])
       }
 

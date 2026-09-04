@@ -40,14 +40,7 @@
 import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import type { Process } from "@yrd/process"
-import {
-  checkLogPath,
-  checkTrailer,
-  runCheck,
-  type CheckedTree,
-  type CheckResult,
-  type CheckSpec,
-} from "./check.ts"
+import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import {
   appendRecord,
   DIRECT_MERGE,
@@ -60,6 +53,7 @@ import {
 } from "./records.ts"
 import { queueName, readConfig, targetName, type Target } from "./config.ts"
 import { GitExit, gitIn, gitlinkRows, isAncestor, mergeBase, refAt } from "./git.ts"
+import { incidentTrailers } from "./incident.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef } from "./refs.ts"
@@ -383,8 +377,8 @@ async function reportDirectMerges(run: Run, entries: QueueRead): Promise<readonl
 }
 
 /** Nothing stops the round: a queue with no ring on it runs every round it is given. */
-async function open(): Promise<Stopped | undefined> {
-  return undefined
+function open(): Promise<Stopped | undefined> {
+  return Promise.resolve(undefined)
 }
 
 /**
@@ -424,15 +418,29 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     // not build the ground a judgement stands on, which is never the
     // submitter's fault, so the reason says setup and not crash.
     if (error instanceof SetupFailed) {
-      return run.steps.end(run, entry, "stuck", {
-        subject: `the queue could not prepare a worktree for ${entry.change.branch}: ${message.slice(0, 200)}`,
-        trailers: [["Reason", SETUP]],
-      })
+      return run.steps.end(
+        run,
+        entry,
+        "stuck",
+        stuckWrite(run, {
+          code: "yrd-setup-unusable",
+          next: "repair the queue setup, then run yrd queue run",
+          subject: `the queue could not prepare a worktree for ${entry.change.branch}: ${message}`,
+          via: SETUP,
+        }),
+      )
     }
-    return run.steps.end(run, entry, "stuck", {
-      subject: `the queue crashed judging ${entry.change.branch}: ${message.slice(0, 200)}`,
-      trailers: [["Reason", "crash"]],
-    })
+    return run.steps.end(
+      run,
+      entry,
+      "stuck",
+      stuckWrite(run, {
+        code: "yrd-queue-crash",
+        next: "repair the queue fault, then run yrd queue run",
+        subject: `the queue crashed judging ${entry.change.branch}: ${message}`,
+        via: "queue run",
+      }),
+    )
   }
 }
 
@@ -478,13 +486,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
       trailers: [["Reason", "unrelated-history"]],
     })
   }
-  const worktree = await run.steps.prepare(
-    run,
-    entry,
-    head,
-    join(run.worktrees, "submit", head.slice(0, 12)),
-    "submit",
-  )
+  const worktree = await run.steps.prepare(run, entry, head, join(run.worktrees, "submit", head.slice(0, 12)), "submit")
   try {
     // The built-in check: every gitlink the change moved reachable from its
     // component's main (E4).
@@ -502,10 +504,18 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     const results = await runPhase(run, entry, "submit", worktree.path, worktree.tree)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
-      return await run.steps.end(run, entry, "stuck", {
-        subject: `the queue could not judge ${branch}: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
-        trailers: [["Reason", stuckOne.name], ...checkTrailers(results)],
-      })
+      return await run.steps.end(
+        run,
+        entry,
+        "stuck",
+        stuckWrite(run, {
+          code: "yrd-check-unresolved",
+          next: `repair ${stuckOne.name} or its queue environment, then run yrd queue run`,
+          subject: `the queue could not judge ${branch}: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
+          trailers: checkTrailers(results),
+          via: `${stuckOne.name} during submit`,
+        }),
+      )
     }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) return await endFailing(run, entry, results, failing, "submit")
@@ -609,7 +619,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         subject: `${branch} conflicts with ${run.options.target.branch}`,
         trailers: [
           ["Reason", "conflict"],
-          ["Detail", said.replace(/\s+/gu, " ").trim().slice(0, 200)],
+          ["Detail", said.replace(/\s+/gu, " ").trim()],
         ],
       })
     }
@@ -619,7 +629,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     try {
       if ((await readConfig(wt, "HEAD")) === undefined) unreadable = "the merged tree has no .yrd.yml"
     } catch (error) {
-      unreadable = String(error instanceof Error ? error.message : error).slice(0, 160)
+      unreadable = String(error instanceof Error ? error.message : error)
     }
     if (unreadable !== undefined) {
       return await run.steps.end(run, entry, "failed", {
@@ -635,10 +645,18 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     const results = await runPhase(run, entry, "merge", worktree.path, merged)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
-      return await run.steps.end(run, entry, "stuck", {
-        subject: `the queue could not judge ${branch} at merge: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
-        trailers: [["Reason", stuckOne.name], ...checkTrailers(results)],
-      })
+      return await run.steps.end(
+        run,
+        entry,
+        "stuck",
+        stuckWrite(run, {
+          code: "yrd-check-unresolved",
+          next: `repair ${stuckOne.name} or its queue environment, then run yrd queue run`,
+          subject: `the queue could not judge ${branch} at merge: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
+          trailers: checkTrailers(results),
+          via: `${stuckOne.name} during merge`,
+        }),
+      )
     }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) return await endFailing(run, entry, results, failing, "merge")
@@ -1023,6 +1041,34 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
   // run's reading of the remote is what repairs the ending (24096).
   if (record !== undefined) await run.steps.ended(run, entry, kind, record)
   return kind
+}
+
+/** One constructor for every complete queue-owned incident written to a change ref. */
+function stuckWrite(
+  run: Run,
+  cause: Readonly<{
+    code: string
+    subject: string
+    via: string
+    next: string
+    trailers?: readonly (readonly [string, string])[]
+  }>,
+): EndedWrite {
+  const subject = cause.subject.replace(/\s+/gu, " ").trim()
+  return {
+    subject,
+    trailers: [
+      ...incidentTrailers({
+        code: cause.code,
+        subject,
+        via: `${cause.via} in yrd queue ${run.name} [${run.log.id}]`,
+        evidence: run.log.path,
+        next: cause.next,
+        owner: "the queue operator",
+      }),
+      ...(cause.trailers ?? []),
+    ],
+  }
 }
 
 function checkTrailers(results: readonly CheckResult[]): readonly (readonly [string, string])[] {

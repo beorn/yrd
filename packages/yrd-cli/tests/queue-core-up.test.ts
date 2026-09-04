@@ -488,6 +488,98 @@ describe("yrd queue up, the service", () => {
 })
 
 describe("yrd queue list, the table", () => {
+  it("renders one stored lossless incident compactly in list and fully in show", async () => {
+    const w = await world()
+    await w.git(["checkout", "--quiet", "-b", "task/incident", "main"])
+    writeFileSync(join(w.work, "incident.txt"), "incident\n")
+    await w.git(["add", "incident.txt"])
+    await w.git(["commit", "--quiet", "-m", "incident specimen"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    const change = { branch: "task/incident", head }
+    await submit(w.git, "origin", {
+      branch: change.branch,
+      submitter: "@dev/3",
+      target: { branch: "main", remote: "origin" },
+    })
+    const evidence = join(w.workdir, "incident", "q-lossless.jsonl")
+    mkdirSync(join(w.workdir, "incident"), { recursive: true })
+    writeFileSync(evidence, '{"kind":"change","decision":"stuck"}\n')
+    const subject = `verify could not decide ${"x".repeat(450)}THE-END-OF-THE-INCIDENT`
+    const incident = {
+      code: "yrd-check-unresolved",
+      subject,
+      via: "verify during merge in yrd queue test [q-lossless]",
+      evidence,
+      next: "repair verify or its queue environment, then run yrd queue run",
+      owner: "the queue operator",
+    }
+    const incidentTrailers = [
+      ["Code", incident.code],
+      ["Subject", incident.subject],
+      ["Via", incident.via],
+      ["Evidence", incident.evidence],
+      ["Next", incident.next],
+      ["Owner", incident.owner],
+    ] as const
+    const ended = await appendRecord(w.git, {
+      change,
+      kind: "stuck",
+      subject,
+      target: "origin#main",
+      trailers: incidentTrailers,
+    })
+    await appendRecord(w.git, {
+      change,
+      kind: "sent",
+      subject: "logged the incident",
+      target: "origin#main",
+      trailers: [["State", "stuck"], ["For", ended], ["To", "none"], ["Delivery", "none"], ...incidentTrailers],
+    })
+    await w.git(["push", "--quiet", "origin", `${changeRef(change)}:${changeRef(change)}`])
+
+    const listedJson = capture(w.work)
+    expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
+      0,
+    )
+    const listed = records(listedJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
+    expect(listed.changes[0]).toMatchObject({ incident, reason: incident.code, state: "stuck" })
+    expect(String(listed.changes[0]?.result)).toContain("THE-END-OF-THE-INCIDENT")
+
+    const listedText = capture(w.work)
+    expect(await coreQueueCommand(w.work, listedText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(listedText.stdout()).toContain("THE-END-OF-THE-INCIDENT")
+    const listedLine = listedText
+      .stdout()
+      .split("\n")
+      .find((line) => line.includes("task/incident"))
+    expect(listedLine, listedText.stdout()).toBeDefined()
+    expect(listedLine?.match(/\bstuck\b/gu), listedText.stdout()).toHaveLength(1)
+
+    const shownJson = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        shownJson.io,
+        { command: "show", branch: change.branch },
+        { json: true, workdir: w.workdir },
+      ),
+    ).toBe(0)
+    const shown = records(shownJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
+    expect(shown.changes[0]).toMatchObject({ incident, reason: incident.code, state: "stuck" })
+
+    const shownText = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, shownText.io, { command: "show", branch: change.branch }, { workdir: w.workdir }),
+    ).toBe(0)
+    expect(shownText.stdout()).toContain(`  subject: ${subject}`)
+    expect(shownText.stdout()).toContain(`  via: ${incident.via}`)
+    expect(shownText.stdout()).toContain(`  evidence: ${evidence}`)
+    expect(shownText.stdout()).toContain(`  next: ${incident.next}`)
+    expect(shownText.stdout()).toContain(`  owner: ${incident.owner}`)
+    expect(shownText.stdout().match(/\bstuck\b/gu), shownText.stdout()).toHaveLength(1)
+  })
+
   it("a commit the target gained around the queue is a row of its own, in the JSON and on the line (E5)", async () => {
     const w = await world()
     // The queue's history starts at its first record, so there is one change

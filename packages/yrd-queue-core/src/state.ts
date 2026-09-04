@@ -22,6 +22,7 @@
  */
 
 import type { ChangeRecord } from "./records.ts"
+import { incidentFrom } from "./incident.ts"
 
 export const CHANGE_STATES = ["queued", "checked", "stuck", "merged", "failed"] as const
 
@@ -80,7 +81,7 @@ export function readChange(change: ChangeRecords): ChangeReading {
     case "failed":
       return { state: "failed", reason: reasonOf(last) }
     case "stuck":
-      return { state: "stuck", reason: reasonOf(last) }
+      return { state: "stuck", reason: incidentFrom(last).code }
     case "checked":
       return { state: "checked" }
     case "opened":
@@ -91,7 +92,7 @@ export function readChange(change: ChangeRecords): ChangeReading {
       const state = last.trailers.find(([name]) => name === "State")?.[1]
       if (state === "merged") return { state: "merged" }
       if (state === "failed") return { state: "failed", reason: reasonOf(last) }
-      if (state === "stuck") return { state: "stuck", reason: reasonOf(last) }
+      if (state === "stuck") return { state: "stuck", reason: incidentFrom(last).code }
       throw new Error(`sent record ${last.sha.slice(0, 12)} names no ended state (State: ${state ?? "absent"})`)
     }
   }
@@ -121,15 +122,16 @@ export function openedAt(change: ChangeRecords): number {
   const last = tipOf(change)
   const opened = last.trailers.find(([name]) => name === "Opened")?.[1]
   const time = opened === undefined ? Number.NaN : Date.parse(opened)
-  if (Number.isNaN(time)) throw new Error(`record ${last.sha.slice(0, 12)} carries no readable Opened: (${opened ?? "absent"})`)
+  if (Number.isNaN(time)) {
+    throw new Error(`record ${last.sha.slice(0, 12)} carries no readable Opened: (${opened ?? "absent"})`)
+  }
   return time
 }
 
 /**
  * A failed record's `Reason` (a check's name, conflict, config-invalid,
- * unrelated-history, gitlink-off-main, replaced, deleted) or a stuck record's
- * (a check's name, setup, crash): one key on both, because stuck is always the
- * queue's and needs no second word for it.
+ * unrelated-history, gitlink-off-main, replaced, deleted). A stuck record has
+ * the complete incident shape instead, and its code is read above.
  */
 function reasonOf(record: ChangeRecord): string | undefined {
   return record.trailers.find(([name]) => name === "Reason")?.[1]

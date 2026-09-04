@@ -28,6 +28,7 @@ import {
   prepareWorktree,
   gitIn,
   hintsIn,
+  incidentLines,
   list,
   queueName,
   queueRun,
@@ -695,8 +696,15 @@ export async function coreQueueCommand(
           : changes
               .map((change) => {
                 const view = views.get(change.row.head)
+                const headline =
+                  change.row.incident === undefined
+                    ? rowLine({ row: change.row })
+                    : rowLine({ row: { ...change.row, reason: undefined, result: undefined } })
                 return [
-                  rowLine({ row: change.row }),
+                  headline,
+                  ...(change.row.incident === undefined
+                    ? []
+                    : incidentLines(change.row.incident).map((line) => `  ${line}`)),
                   ...(view?.note === undefined ? [] : [`  (${view.note})`]),
                   ...(view?.checks ?? []).flatMap(checkLines),
                 ].join("\n")

@@ -47,7 +47,13 @@ export type Worktree = Readonly<{
  * materialized throws, because a check run against a half-materialized tree
  * would judge something no commit describes.
  */
-export async function freshWorktree(git: Git, repo: string, commit: string, path: string, plumbing?: PlumbingLog): Promise<Worktree> {
+export async function freshWorktree(
+  git: Git,
+  repo: string,
+  commit: string,
+  path: string,
+  plumbing?: PlumbingLog,
+): Promise<Worktree> {
   await git(["worktree", "add", "--quiet", "--detach", path, commit])
   const materialized = await materializeSubmodulesFromLocalWorktreeParallel({
     ...(plumbing === undefined ? {} : { log: plumbing }),
@@ -381,5 +387,5 @@ async function removeWorktree(git: Git, path: string): Promise<void> {
 }
 
 function describe(result: Readonly<{ stderr?: string; stdout?: string; message?: string }>): string {
-  return (result.message ?? result.stderr ?? result.stdout ?? "no detail").trim().slice(0, 400)
+  return (result.message ?? result.stderr ?? result.stdout ?? "no detail").trim()
 }

@@ -35,6 +35,8 @@ export {
   trailers,
 } from "./records.ts"
 export type { ChangeRecord, Git } from "./records.ts"
+export { incidentFrom, incidentLine, incidentLines, incidentTrailers } from "./incident.ts"
+export type { Incident } from "./incident.ts"
 export { inLine, nextOwner, readChange, tipOf } from "./state.ts"
 export type { NextOwner } from "./state.ts"
 export { configValue, gitIn, refAt } from "./git.ts"

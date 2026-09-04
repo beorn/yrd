@@ -181,7 +181,7 @@ async function told(
     const sentWrite: WriteRecord = {
       change: entry.change,
       kind: "sent",
-      subject: `${said(delivery)} ${name}: ${text}`.slice(0, 200),
+      subject: `${said(delivery)} ${name}: ${text}`,
       target: targetName(run.options.target),
       trailers: [
         ["Message-Id", endedRecord],
@@ -334,11 +334,28 @@ async function deliver(
   if (result.exitCode === 0) return { delivery: "sent" }
   return {
     delivery: "failed",
-    failure: `the notify entry ${entry.name} exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`
-      .replace(/\s+/gu, " ")
-      .slice(0, 300),
+    failure:
+      `the notify entry ${entry.name} exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`.replace(
+        /\s+/gu,
+        " ",
+      ),
   }
 }
 
 /** An ended record's result, as its sent record carries it forward. */
-const RESULT_TRAILERS = new Set(["Reason", "Fault", "Remedy", "Check", "Merge", "Base", "Gitlink", "Merged-By"])
+const RESULT_TRAILERS = new Set([
+  "Reason",
+  "Fault",
+  "Remedy",
+  "Check",
+  "Merge",
+  "Base",
+  "Gitlink",
+  "Merged-By",
+  "Code",
+  "Subject",
+  "Via",
+  "Evidence",
+  "Next",
+  "Owner",
+])
