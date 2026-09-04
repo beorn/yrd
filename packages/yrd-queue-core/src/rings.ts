@@ -9,10 +9,18 @@
  */
 
 import type { Ring, Steps } from "./run.ts"
+import { withNotify, type NotifyOptions } from "./with-notify.ts"
 import { withPause } from "./with-pause.ts"
 
 /** The rings, outermost first: the first named here sees a step call before the rest. */
-export const RINGS: readonly Ring[] = [withPause]
+export const RINGS: readonly Ring[] = [withPause, withNotify]
+
+/**
+ * Every ring's own options, intersected, so the run's options carry each ring's
+ * without the loop naming any of them. A ring with no options of its own adds
+ * nothing here.
+ */
+export type RingOptions = NotifyOptions
 
 /** The bare loop's steps with every ring around them, outermost last to wrap. */
 export const composed = (base: Steps): Steps => RINGS.reduceRight((steps, ring) => ring(steps), base)
