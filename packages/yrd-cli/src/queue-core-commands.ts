@@ -58,6 +58,8 @@ import {
   type Row,
 } from "@yrd/queue-core"
 import { declarationHere } from "./declaration.ts"
+import { duration } from "./watch-notice.ts"
+import { rowLine, rowTable } from "./watch-rows.ts"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -349,7 +351,7 @@ export async function coreQueueCommand(
         io,
         options.json,
         { changes: rows, journal: journalFact(journals), pause: pause ?? null },
-        [pause === undefined ? undefined : pauseLine(pause), table(rows)]
+        [pause === undefined ? undefined : pauseLine(pause), rowTable(rows.map((row) => ({ row })))]
           .filter((line): line is string => line !== undefined)
           .join("\n"),
       )
@@ -498,7 +500,7 @@ export async function coreQueueCommand(
               .map((change) => {
                 const view = views.get(change.row.head)
                 return [
-                  line(change.row),
+                  rowLine({ row: change.row }),
                   ...(view?.note === undefined ? [] : [`  (${view.note})`]),
                   ...(view?.checks ?? []).flatMap(checkLines),
                 ].join("\n")
@@ -763,27 +765,6 @@ function checkLines(check: CheckView): readonly string[] {
     check.spec === undefined ? "      (the declaration does not name this check)" : `      $ ${check.spec.run}`,
     ...(check.log === undefined ? [] : [`      log ${check.log}`]),
   ]
-}
-
-/** Coarse human duration, largest unit — the watch timeline's own format. */
-function duration(milliseconds: number): string {
-  const ms = Math.max(0, milliseconds)
-  if (ms < 1_000) return `${String(Math.round(ms))}ms`
-  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`
-  if (ms < 3_600_000) return `${String(Math.floor(ms / 60_000))}m`
-  if (ms < 86_400_000) return `${String(Math.floor(ms / 3_600_000))}h`
-  return `${String(Math.floor(ms / 86_400_000))}d`
-}
-
-function table(rows: readonly Row[]): string {
-  if (rows.length === 0) return "nothing in line"
-  return rows.map(line).join("\n")
-}
-
-function line(row: Row): string {
-  const position = row.position === undefined ? "  " : String(row.position).padStart(2)
-  const result = row.result ?? row.reason ?? ""
-  return `${position} ${row.state.padEnd(7)} ${row.branch} ${row.head.slice(0, 12)} ${result}${row.issue === undefined ? "" : ` ${row.issue}`}`.trimEnd()
 }
 
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {
