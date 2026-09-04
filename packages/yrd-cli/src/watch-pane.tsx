@@ -32,7 +32,7 @@ import {
 import type { Row } from "@yrd/queue-core"
 import { useCoarseNow } from "./watch-clock.ts"
 import { WatchDetail, type ChangeDetail } from "./watch-detail.tsx"
-import { rowGlyph, rowLine, type WatchRow } from "./watch-rows.ts"
+import { rowGlyph, rowLine, watchRowKey, type WatchRow } from "./watch-rows.ts"
 
 /** Everything one reading of the queue put on screen. The pane renders it and reads nothing itself. */
 export type WatchSnapshot = Readonly<{
@@ -43,7 +43,7 @@ export type WatchSnapshot = Readonly<{
   /** Where the run journal was looked for and why there was none — never a blank where a fact belongs. */
   journalAbsent?: string
   rows: readonly WatchRow[]
-  /** One change opened, by head: its checks with their output. */
+  /** Detail by watchRowKey: change head plus selected journal run, with its own output. */
   detail: ReadonlyMap<string, ChangeDetail>
   /** The instant this reading was made; every age on screen counts from it. */
   at: Date
@@ -180,13 +180,13 @@ export function WatchPane({
   if (failure !== undefined) throw failure
 
   const selected = shown.rows[cursor]
-  const detail = selected === undefined ? undefined : shown.detail.get(selected.row.head)
+  const detail = selected === undefined ? undefined : shown.detail.get(watchRowKey(selected))
   const list = (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <ListView
         ref={listRef}
         items={[...shown.rows]}
-        getKey={(item: WatchRow, index: number) => `${item.row.head}@${item.run?.id ?? String(index)}`}
+        getKey={watchRowKey}
         cursorKey={cursor}
         nav
         active={!open || tier !== "full"}
@@ -205,7 +205,12 @@ export function WatchPane({
   const body =
     tier === "full" || !open ? (
       open ? (
-        <WatchDetail detail={detail} now={now} {...(checkTab === undefined ? {} : { selected: checkTab })} onSelect={setCheckTab} />
+        <WatchDetail
+          detail={detail}
+          now={now}
+          {...(checkTab === undefined ? {} : { selected: checkTab })}
+          onSelect={setCheckTab}
+        />
       ) : (
         list
       )

@@ -15,7 +15,14 @@
  */
 
 import type { Row, WatchRow } from "@yrd/queue-core"
+import { journalKey } from "@yrd/queue-core"
 export { watchRows, type WatchRow, type WatchRowOptions } from "@yrd/queue-core"
+
+/** The same identity for selection and detail: branch, head, and journal run. */
+export function watchRowKey(row: WatchRow): string {
+  const change = journalKey(row.row.branch, row.row.head)
+  return row.run === undefined ? change : `${change}@${row.run.id}`
+}
 
 /**
  * Whether a row answers to a filter term: case-insensitive, and an OR across
@@ -82,7 +89,7 @@ export function rowLine(row: WatchRow): string {
   // now — which is the run, whatever else is known.
   const run = row.run?.id ?? row.row.run ?? row.row.live?.run
   return [
-    `${position} ${row.row.state.padEnd(7)} ${row.row.branch} ${row.row.head.slice(0, 12)} ${result}`,
+    `${position} ${row.row.runResult === undefined ? "" : "change "}${row.row.state.padEnd(7)} ${row.row.branch} ${row.row.head.slice(0, 12)} ${row.row.runResult === undefined ? "" : "run result: "}${result}`,
     row.row.issue === undefined ? "" : ` ${row.row.issue}`,
     // A direct merge's whole line IS its reason, subject and all, so adding
     // the subject beside it printed it twice. Anything the result already

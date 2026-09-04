@@ -57,14 +57,15 @@ const WORD: Readonly<Record<Row["state"], string>> = {
 export function watchNotice(row: Row): Notice {
   const live = row.live
   const position = row.position === undefined ? "" : ` #${String(row.position)}`
-  const cause = row.reason ?? row.result
+  const cause = row.runResult === undefined ? (row.reason ?? row.result) : `run result: ${row.runResult}`
+  const state = row.runResult === undefined ? WORD[row.state] : `change ${WORD[row.state]}`
   return {
     glyph: live === undefined ? GLYPH[row.state] : RUNNING,
     // The overlay says what is happening RIGHT NOW; the state still says what
     // the records say, and both are on the line, because a change under a
     // check reads `queued` until its checked record lands and that is an
     // answer, not a bug to paper over.
-    word: live === undefined ? `${WORD[row.state]}${position}` : `${WORD[row.state]}${position}, checking ${live.check}`,
+    word: live === undefined ? `${state}${position}` : `${state}${position}, checking ${live.check}`,
     ...(cause === undefined ? {} : { cause }),
     ...(row.next === undefined ? {} : { next: `${row.next.owner} — ${row.next.because}` }),
   }

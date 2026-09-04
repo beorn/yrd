@@ -11,7 +11,7 @@
  *           reading the live table
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
@@ -276,11 +276,112 @@ describe("what a watch says it looked at", () => {
     if (snapshot === undefined) throw new Error("interactive watch rendered no snapshot")
     const detail = snapshot.detail.values().next().value
     if (detail === undefined) throw new Error("interactive watch rendered no change detail")
-    expect(detail.checks.map((check) => [check.name, check.state])).toEqual([
-      ["repeated", "passed"],
-      ["submit-only", "passed"],
-      ["merge-only", "passed"],
+    // Each measured occurrence survives, including the same name in two
+    // phases; CTO b55a973f forbids collapsing the candidate/comparator pair.
+    expect(detail.checks.map((check) => [check.name, check.phase, check.state])).toEqual([
+      ["repeated", "submit", "passed"],
+      ["submit-only", "submit", "passed"],
+      ["repeated", "merge", "passed"],
+      ["merge-only", "merge", "passed"],
     ])
-    expect(detail.checks.find((check) => check.name === "repeated")?.log).toContain("/merge/")
+    expect(detail.checks.find((check) => check.name === "repeated" && check.phase === "submit")?.log).toContain(
+      "/submit/",
+    )
+    expect(detail.checks.find((check) => check.name === "repeated" && check.phase === "merge")?.log).toContain(
+      "/merge/",
+    )
+  })
+
+  it("keeps each historical run's result and output in JSON, text, and interactive detail", async () => {
+    // One real change, first stuck then failed. The old artifact survives;
+    // historical-run-rows-use-latest-result was the reader relabelling it.
+    const w = await world()
+    const control = join(w.workdir, "check.sh")
+    writeFileSync(control, "echo FIRST_RUN_MISSING\nexit 127\n")
+    writeFileSync(
+      join(w.work, ".yrd.yml"),
+      `target: origin#main\nchecks:\n  - verify:\n      run: ${JSON.stringify(`sh ${control}`)}\n`,
+    )
+    await w.git(["commit", "--quiet", "-am", "declare a repairable external check"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await change(w, "task/history", false)
+
+    const first = capture(w.work)
+    expect(await coreQueueCommand(w.work, first.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
+    const firstId = (JSON.parse(first.stdout()) as { run: string }).run
+    const before = capture(w.work)
+    await coreQueueCommand(w.work, before.io, { command: "list" }, { json: true, workdir: w.workdir })
+    const original = (JSON.parse(before.stdout()) as { changes: Record<string, unknown>[] }).changes.find(
+      (row) => row.branch === "task/history",
+    )!
+    expect(original.state).toBe("stuck")
+    expect(readFileSync(String(original.log), "utf8")).toBe("FIRST_RUN_MISSING\n")
+
+    writeFileSync(control, "echo SECOND_RUN_FAIL\nexit 1\n")
+    const second = capture(w.work)
+    expect(await coreQueueCommand(w.work, second.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(1)
+    const secondId = (JSON.parse(second.stdout()) as { run: string }).run
+    const listed = capture(w.work)
+    await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })
+    const rows = (JSON.parse(listed.stdout()) as { changes: Record<string, unknown>[] }).changes.filter(
+      (row) => row.branch === "task/history",
+    )
+    expect(rows).toHaveLength(2)
+    const old = rows.find((row) => row.runOf === firstId)!
+    const latest = rows.find((row) => row.runOf === secondId)!
+    expect(old, listed.stdout()).toMatchObject({
+      state: "failed",
+      run: firstId,
+      runResult: original.result,
+      result: original.result,
+      log: original.log,
+    })
+    expect(latest).toMatchObject({ state: "failed", run: secondId, runResult: "fail verify", result: "fail verify" })
+    expect(old.endedAt).toBe(original.endedAt)
+    expect(latest.incident).toBeUndefined()
+    expect(readFileSync(String(old.log), "utf8")).toBe("FIRST_RUN_MISSING\n")
+    expect(readFileSync(String(latest.log), "utf8")).toBe("SECOND_RUN_FAIL\n")
+
+    const plain = capture(w.work)
+    await coreQueueCommand(w.work, plain.io, { command: "list" }, { workdir: w.workdir })
+    expect(
+      plain
+        .stdout()
+        .split("\n")
+        .find((line) => line.includes(`[${firstId}]`)),
+    ).toContain(String(original.result))
+    expect(
+      plain
+        .stdout()
+        .split("\n")
+        .find((line) => line.includes(`[${secondId}]`)),
+    ).toContain("fail verify")
+
+    rendered.snapshot = undefined
+    const interactive = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        interactive.io,
+        { command: "list", watch: true, terms: ["task/history"] },
+        { interactive: true, workdir: w.workdir },
+      ),
+      interactive.stderr(),
+    ).toBe(0)
+    const snapshot = renderedSnapshot()
+    if (snapshot === undefined) throw new Error("interactive list rendered no snapshot")
+    expect(snapshot.rows.map((entry) => entry.row.run)).toEqual([secondId, firstId])
+    const details = [...snapshot.detail.values()]
+    expect(details).toHaveLength(2)
+    expect(details.find((detail) => detail.row.run === firstId)?.checks[0]).toMatchObject({
+      state: "stuck",
+      log: original.log,
+      output: "FIRST_RUN_MISSING\n",
+    })
+    expect(details.find((detail) => detail.row.run === secondId)?.checks[0]).toMatchObject({
+      state: "failed",
+      log: latest.log,
+      output: "SECOND_RUN_FAIL\n",
+    })
   })
 })

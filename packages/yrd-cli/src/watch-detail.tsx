@@ -58,6 +58,7 @@ const TAB_WORD: Readonly<Record<CheckView["state"], string>> = {
   passed: "✓",
   running: "◉",
   stuck: "◌",
+  unmeasured: "?",
 }
 
 const TAB_COLOR: Readonly<Record<CheckView["state"], string>> = {
@@ -66,6 +67,7 @@ const TAB_COLOR: Readonly<Record<CheckView["state"], string>> = {
   passed: "$fg-success",
   running: "$fg-info",
   stuck: "$fg-warning",
+  unmeasured: "$fg-warning",
 }
 
 export function WatchDetail({
@@ -120,23 +122,26 @@ export function WatchDetail({
         <Text color="$fg-muted">the declaration this change was judged by names no check</Text>
       ) : (
         <Tabs
-          value={detail.checks[index]?.name ?? detail.checks[0]?.name ?? ""}
+          value={String(index)}
           onChange={(value: string) => {
-            const at = detail.checks.findIndex((check) => check.name === value)
-            if (at !== -1) onSelect?.(at)
+            const at = Number(value)
+            if (Number.isInteger(at) && at >= 0 && at < detail.checks.length) onSelect?.(at)
           }}
         >
           <TabList>
-            {detail.checks.map((check) => (
-              <Tab key={check.name} value={check.name}>
+            {detail.checks.map((check, at) => (
+              <Tab key={String(at)} value={String(at)}>
                 <Text color={TAB_COLOR[check.state]}>
                   {TAB_WORD[check.state]} {check.name}
+                  {check.phase !== undefined && detail.checks.filter((other) => other.name === check.name).length > 1
+                    ? ` (${check.phase})`
+                    : ""}
                 </Text>
               </Tab>
             ))}
           </TabList>
-          {detail.checks.map((check) => (
-            <TabPanel key={check.name} value={check.name}>
+          {detail.checks.map((check, at) => (
+            <TabPanel key={String(at)} value={String(at)}>
               <CheckBody check={check} />
             </TabPanel>
           ))}
@@ -160,7 +165,11 @@ function CheckBody({ check }: { check: CheckPanel }) {
         <Text wrap="truncate">$ {check.spec.run}</Text>
       )}
       <Text color="$fg-muted" wrap="truncate">
-        {check.state === "not-run" ? "NOT RUN" : check.state}
+        {check.state === "not-run"
+          ? "NOT RUN"
+          : check.state === "unmeasured"
+            ? "unmeasured — no result recorded"
+            : check.state}
         {exit}
         {check.result?.ms === undefined ? "" : ` ${String(check.result.ms)}ms`}
       </Text>

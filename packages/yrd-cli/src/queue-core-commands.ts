@@ -46,6 +46,7 @@ import {
   refuseTarget,
   submit,
   issueOf,
+  journalKey,
   QueuePaused,
   QueueNotPaused,
   requireResumed,
@@ -62,7 +63,7 @@ import {
 } from "@yrd/queue-core"
 import { declarationHere } from "./declaration.ts"
 import { clocksLine, noticeLine, duration } from "./watch-notice.ts"
-import { filterRows, rowLine, rowTable, watchRows, type WatchRow } from "./watch-rows.ts"
+import { filterRows, rowLine, rowTable, watchRows, watchRowKey, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel } from "./watch-detail.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { readGarageDeclaration } from "./garage.ts"
@@ -417,14 +418,17 @@ export async function coreQueueCommand(
           )
           const packed = new Map(
             histories.flatMap((entry) =>
-              show([entry], entry.change.branch).map((change) => [entry.change.head, change.checks] as const),
+              show([entry], entry.change.branch).map(
+                (change) => [journalKey(entry.change.branch, entry.change.head), change.checks] as const,
+              ),
             ),
           )
           for (const row of rows) {
-            if (detail.has(row.row.head)) continue
+            const key = watchRowKey(row)
+            if (detail.has(key)) continue
             const declared = await declarationFor(git, config, row.row.base)
             const views = checksOf(
-              packed.get(row.row.head) ?? [],
+              packed.get(journalKey(row.row.branch, row.row.head)) ?? [],
               endingOf(row.row),
               declared.checks,
               row.row.live === undefined
@@ -433,8 +437,9 @@ export async function coreQueueCommand(
                     name: row.row.live.check,
                     ...(row.row.live.log === undefined ? {} : { log: row.row.live.log }),
                   },
+              row.run?.checks,
             )
-            detail.set(row.row.head, {
+            detail.set(key, {
               checks: views.map(readOutput),
               row: row.row,
               ...(declared.note === undefined ? {} : { note: declared.note }),
@@ -1038,13 +1043,21 @@ const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
   running: "\u25c9",
   "not-run": "\u2212",
   stuck: "\u25cc",
+  unmeasured: "?",
 }
 
 /** One check, and under it the command that produced it and the log it wrote. */
 function checkLines(check: CheckView): readonly string[] {
   const exit = check.result?.exit === undefined ? "" : ` exit=${check.result.exit}`
   const ms = check.result?.ms === undefined ? "" : ` ${duration(check.result.ms)}`
-  const state = check.state === "not-run" ? " NOT RUN" : check.state === "running" ? " running" : ""
+  const state =
+    check.state === "not-run"
+      ? " NOT RUN"
+      : check.state === "running"
+        ? " running"
+        : check.state === "unmeasured"
+          ? " unmeasured — no result recorded"
+          : ""
   return [
     `  ${CHECK_GLYPH[check.state]} ${check.name}${state}${exit}${ms}`,
     // The command above its output, which here is the path the output went to

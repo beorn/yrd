@@ -32,6 +32,7 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
+import type { JournalCheck } from "./log.ts"
 
 /**
  * A check as the target declares it — the whole declaration, in one type.
@@ -170,6 +171,8 @@ export type CheckRun = Readonly<{
 export type CheckView = Readonly<{
   /** The check's name — whether the declaration names it, it ran, or both. */
   name: string
+  /** The recorded phase of this measured occurrence; absent for trailer-only views. */
+  phase?: string
   /**
    * The declaration's own entry, the command included. Absent when the
    * declaration read for this change does not name a check that ran: the
@@ -177,9 +180,9 @@ export type CheckView = Readonly<{
    * from it. Absent, never an empty string.
    */
   spec?: CheckSpec
-  /** What the record says this check did; absent means it did not run. */
+  /** What the record says this check did; absent also covers a journal with no measured result. */
   result?: CheckRun
-  state: "passed" | "failed" | "stuck" | "running" | "not-run"
+  state: "passed" | "failed" | "stuck" | "running" | "not-run" | "unmeasured"
   /** The real log path: the result's when it ran, the journal's while it runs. */
   log?: string
 }>
@@ -192,19 +195,19 @@ export function checksOf(
   ending: "checked" | "merged" | "failed" | "stuck" | "open",
   declared: readonly CheckSpec[],
   live?: CheckedNow,
+  measured?: readonly JournalCheck[],
 ): readonly CheckView[] {
-  const ran = packed.map(readCheckTrailer)
+  const ran = measured ?? packed.map(readCheckTrailer)
   const verdict = (index: number): CheckRun["result"] => {
     if (index < ran.length - 1) return "pass"
     return ending === "failed" ? "fail" : ending === "stuck" ? "stuck" : "pass"
   }
   const byName = new Map(ran.map((result, index) => [result.name, { index, result }]))
   const seen = new Set<string>()
-  const view = (name: string, spec: CheckSpec | undefined): CheckView => {
+  const view = (name: string, spec: CheckSpec | undefined, found = byName.get(name)): CheckView => {
     seen.add(name)
-    const found = byName.get(name)
     if (found === undefined) {
-      const state = live?.name === name ? "running" : "not-run"
+      const state = measured === undefined && live?.name === name ? "running" : "not-run"
       return {
         name,
         state,
@@ -212,19 +215,46 @@ export function checksOf(
         ...(state === "running" && live?.log !== undefined ? { log: live.log } : {}),
       }
     }
-    const result = verdict(found.index)
+    const measuredCheck = measured?.[found.index]
+    const result = measured === undefined ? verdict(found.index) : measuredCheck?.result
     return {
       name,
-      result: {
-        result,
-        ...(found.result.exit === undefined ? {} : { exit: found.result.exit }),
-        ...(found.result.ms === undefined ? {} : { ms: found.result.ms }),
-        ...(found.result.log === undefined ? {} : { log: found.result.log }),
-      },
-      state: result === "pass" ? "passed" : result === "fail" ? "failed" : "stuck",
+      ...(measuredCheck === undefined ? {} : { phase: measuredCheck.phase }),
+      ...(result === undefined
+        ? {}
+        : {
+            result: {
+              result,
+              ...(found.result.exit === undefined ? {} : { exit: found.result.exit }),
+              ...(found.result.ms === undefined ? {} : { ms: found.result.ms }),
+              ...(found.result.log === undefined ? {} : { log: found.result.log }),
+            },
+          }),
+      state:
+        result === undefined
+          ? measuredCheck?.endedAt === undefined && live?.name === name && live.log === measuredCheck?.log
+            ? "running"
+            : "unmeasured"
+          : result === "pass"
+            ? "passed"
+            : result === "fail"
+              ? "failed"
+              : "stuck",
       ...(spec === undefined ? {} : { spec }),
       ...(found.result.log === undefined ? {} : { log: found.result.log }),
     }
+  }
+  if (measured !== undefined) {
+    // Every occurrence survives, including the baseline comparator for a
+    // failed candidate. A by-name collapse would relabel its green result.
+    const occurrences = measured.map((check, index) =>
+      view(
+        check.name,
+        declared.find((spec) => spec.name === check.name),
+        { index, result: check },
+      ),
+    )
+    return [...occurrences, ...declared.filter((spec) => !seen.has(spec.name)).map((spec) => view(spec.name, spec))]
   }
   const declaredViews = declared.map((spec) => view(spec.name, spec))
   // A check that ran but the declaration does not name: the declaration moved

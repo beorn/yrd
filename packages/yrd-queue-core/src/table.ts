@@ -43,6 +43,8 @@ export type Row = Readonly<{
   position?: number
   /** The last result: pass, fail or stuck, with the check that decided it. */
   result?: string
+  /** Selected journal run's measured result; `state` remains the change's CURRENT state. */
+  runResult?: string
   /** The log path of the deciding check, when there is one. */
   log?: string
   /** The complete queue-owned incident stored on a stuck record. */
@@ -112,8 +114,47 @@ export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): 
   return rows.flatMap((row) => {
     const runs = journals.runs.get(journalKey(row.branch, row.head)) ?? []
     if (runs.length === 0) return [{ row }]
-    return runs.map((run) => ({ row, run }))
+    return runs.map((run) => ({ row: runRow(row, run), run }))
   })
+}
+
+/** Join already-recorded run facts; never rederive the change's state. */
+function runRow(current: Row, run: JournalRun): Row {
+  const check = run.decision === "failed" ? run.checks.findLast((check) => check.result === "fail") : run.checks.at(-1)
+  const result =
+    run.incident === undefined
+      ? run.decision === "checked" || run.decision === "merged" || run.decision === "failed" || run.decision === "stuck"
+        ? resultOf(run.decision, check?.name)
+        : check?.result === undefined
+          ? undefined
+          : `${check.result} ${check.name}`
+      : incidentLine(run.incident)
+  const live = run.running
+  return {
+    ...current,
+    // Assign absent values too: no later run's facts may survive this join.
+    at: run.at,
+    base: run.base,
+    merge: run.merge,
+    reason: run.incident?.code ?? run.reason,
+    incident: run.incident,
+    result,
+    runResult: result,
+    log: check?.log,
+    run: run.id,
+    startedAt: run.checks[0]?.startedAt,
+    endedAt: run.decision === undefined ? undefined : run.at,
+    live:
+      live === undefined
+        ? undefined
+        : {
+            run: run.id,
+            check: live.name,
+            phase: live.phase,
+            since: live.startedAt,
+            ...(live.log === undefined ? {} : { log: live.log }),
+          },
+  }
 }
 
 export type ListOptions = Readonly<{

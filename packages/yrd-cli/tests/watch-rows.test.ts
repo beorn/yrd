@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest"
 import type { Journals, Row } from "@yrd/queue-core"
 import { journalKey } from "@yrd/queue-core"
 import { clocksLine, noticeLine, watchNotice } from "../src/watch-notice.ts"
-import { filterRows, rowLine, rowTable, watchRows } from "../src/watch-rows.ts"
+import { filterRows, rowLine, rowTable, watchRows, watchRowKey } from "../src/watch-rows.ts"
 
 const since = new Date("2026-09-03T19:00:00.000Z")
 const now = new Date("2026-09-03T20:00:00.000Z")
@@ -44,6 +44,8 @@ describe("the rows a watch shows", () => {
     })
 
     expect(rows.map((entry) => entry.run?.id)).toEqual(["q-2", "q-1"])
+    const first = rows[0]!
+    expect(watchRowKey(first)).not.toBe(watchRowKey({ ...first, row: { ...first.row, branch: "task/other" } }))
   })
 
   it("collapses to one row per change under --latest, the opt-in lens", () => {
@@ -61,6 +63,49 @@ describe("the rows a watch shows", () => {
 
     expect(rows).toHaveLength(1)
     expect(rows[0]?.row.branch).toBe("task/one")
+  })
+
+  it("clears newer evidence absent from an old run, but keeps the current state and next owner", () => {
+    const current = row({
+      state: "failed",
+      result: "fail later",
+      reason: "later",
+      log: "/later/log",
+      base: "later",
+      merge: "later",
+      run: "later",
+      startedAt: now,
+      endedAt: now,
+      incident: {
+        code: "later",
+        subject: "later",
+        via: "later",
+        evidence: "/later",
+        next: "repair",
+        owner: "operator",
+      },
+      live: { run: "later", check: "later", phase: "merge", since: now },
+      next: { owner: "submitter", because: "fix the change" },
+    })
+    const options = { journals: journals({ [journalKey(current.branch, current.head)]: ["old"] }) }
+    const historical = watchRows([current], options)[0]!
+    expect(historical.row).toMatchObject({ state: "failed", next: current.next, run: "old" })
+    for (const key of [
+      "result",
+      "runResult",
+      "reason",
+      "log",
+      "base",
+      "merge",
+      "incident",
+      "startedAt",
+      "endedAt",
+      "live",
+    ] as const)
+      expect(historical.row[key], key).toBeUndefined()
+    expect(filterRows([historical], ["later"])).toHaveLength(0)
+    expect(watchRows([current], { ...options, latest: true })[0]?.row).toBe(current)
+    expect(watchRows([current])[0]?.row).toBe(current)
   })
 })
 
@@ -88,10 +133,7 @@ describe("the filter terms", () => {
   })
 
   it("is an OR across terms, not an AND", () => {
-    expect(filterRows(rows, ["parser", "conflict"]).map((entry) => entry.row.branch)).toEqual([
-      "task/one",
-      "task/two",
-    ])
+    expect(filterRows(rows, ["parser", "conflict"]).map((entry) => entry.row.branch)).toEqual(["task/one", "task/two"])
   })
 
   it("with no terms is no filter, never no rows", () => {
