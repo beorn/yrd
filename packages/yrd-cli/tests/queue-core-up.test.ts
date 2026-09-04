@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { appendRecord, changeRef, gitIn, submit, type Git } from "@yrd/queue-core"
+import { appendRecord, changeRef, gitIn, readRecords, submit, trailer, type Git } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -211,18 +211,45 @@ async function thisCheckout(): Promise<string> {
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
-  it("stays alive through a paused round and resumes the queued change after resume", async () => {
+  it("stays alive through pause and two consecutive merges after resume (24096)", async () => {
     const w = await world()
-    await w.git(["checkout", "--quiet", "-b", "task/one", "main"])
-    writeFileSync(join(w.work, "one.txt"), "one\n")
-    await w.git(["add", "one.txt"])
-    await w.git(["commit", "--quiet", "-m", "one"])
-    await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", {
-      branch: "task/one",
-      submitter: "@dev/2",
-      target: { branch: "main", remote: "origin" },
-    })
+    const heads = new Map<string, string>()
+    // The notifier runs after the atomic merge and before its sent record.
+    // A second writer at the real remote wins that interval for each merge.
+    const remote = (await w.git(["remote", "get-url", "origin"])).trim()
+    await identity(gitIn(remote))
+    const rival = join(w.work, "..", "notify-rival.ts")
+    writeFileSync(
+      rival,
+      `
+import { appendRecord, gitIn, parseChangeName, readRecords } from ${JSON.stringify(resolve(import.meta.dirname, "../../yrd-queue-core/src/index.ts"))}
+const change = parseChangeName(JSON.parse(await Bun.stdin.text()).change)
+if (!change) throw new Error("notifier received no change")
+const git = gitIn(${JSON.stringify(remote)})
+const tip = (await readRecords(git, change)).at(-1)
+if (!tip || tip.kind !== "merged") throw new Error("notifier ran before the merge record landed")
+await appendRecord(git, { change, kind: "merged", subject: "another observer recorded the merge", target: "origin#main", trailers: tip.trailers })
+`,
+    )
+    await redeclare(
+      w,
+      `${DECLARATION}notify:\n  - rival:\n      on: [merged]\n      run: ${JSON.stringify(`bun '${rival}'`)}\n`,
+    )
+    // One service invocation must survive its first merge's bookkeeping and
+    // reach the next admitted change, not merely return success for one round.
+    for (const name of ["one", "two"]) {
+      await w.git(["checkout", "--quiet", "-b", `task/${name}`, "main"])
+      writeFileSync(join(w.work, `${name}.txt`), `${name}\n`)
+      await w.git(["add", `${name}.txt`])
+      await w.git(["commit", "--quiet", "-m", name])
+      heads.set(name, (await w.git(["rev-parse", "HEAD"])).trim())
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", {
+        branch: `task/${name}`,
+        submitter: "@dev/2",
+        target: { branch: "main", remote: "origin" },
+      })
+    }
     expect(
       await coreQueueCommand(
         w.work,
@@ -235,6 +262,7 @@ describe("yrd queue up, the service", () => {
     const stop = new AbortController()
     let rounds = 0
     const service = capture(w.work)
+    const { log, rows } = logRows()
     expect(
       await coreQueueCommand(
         w.work,
@@ -252,21 +280,38 @@ describe("yrd queue up, the service", () => {
                 { by: "@chief", command: "resume", reason: "repair landed" },
                 { workdir: w.workdir },
               )
-            } else {
+            } else if (rounds === 3) {
               stop.abort()
             }
           },
         },
-        { json: true, workdir: w.workdir },
+        { json: true, log, workdir: w.workdir },
       ),
     ).toBe(0)
-    expect(rounds).toBe(2)
+    expect(rounds).toBe(3)
     expect(records(service)[0]).toMatchObject({
       exitCode: 0,
       merged: [],
       stopped: { ring: "pause", what: { kind: "paused" } },
     })
     expect(records(service)[1]).toMatchObject({ exitCode: 0, merged: ["task/one"] })
+    expect(records(service)[2]).toMatchObject({ exitCode: 0, merged: ["task/two"] })
+    for (const name of ["one", "two"]) {
+      expect((await w.git(["show", `origin/main:${name}.txt`])).trim()).toBe(name)
+      const head = heads.get(name)
+      if (head === undefined) throw new Error(`no submitted head for ${name}`)
+      const change = { branch: `task/${name}`, head }
+      const ref = changeRef(change)
+      await w.git(["fetch", "--quiet", "origin", `+${ref}:${ref}`])
+      const history = await readRecords(w.git, change)
+      expect(history.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "merged", "sent"])
+      expect(trailer(history[4]!, "State")).toBe("merged")
+      const merge = trailer(history[2]!, "Merge")
+      expect(merge).toMatch(/^[0-9a-f]{40}$/u)
+      await w.git(["merge-base", "--is-ancestor", merge!, "origin/main"])
+      const warning = rows.find((row) => row.level === "warn" && row.message.startsWith(`${ref}:`))
+      expect(warning?.message).toMatch(/remote [0-9a-f]{40}, intended [0-9a-f]{40} \(diverged\); inspect: git -C /u)
+    }
   })
 
   it("pause is visible, refuses live and dry-run submit, and resume admits the same branch", async () => {

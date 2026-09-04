@@ -1445,24 +1445,38 @@ export async function writeRecord(run: Run, write: WriteRecord): Promise<string 
       const now = await fetchRemoteChange(run, ref)
       if (now === onto) throw error
       onto = now
-      run.log.write({
+      // Compare the exact fetched object, not a second reading of a moving
+      // remote ref. Relation describes the intended record relative to remote.
+      let relation = "unknown"
+      let relationError: string | undefined
+      try {
+        const base = await mergeBase(run.git, record, now)
+        relation = record === now ? "equal" : base === record ? "behind" : base === now ? "ahead" : "diverged"
+      } catch (error) {
+        // Explaining a refused bookkeeping write must not kill a landed run.
+        relationError = error instanceof Error ? error.message : String(error)
+      }
+      // Both objects exist here now. After Git's prune window the intended
+      // object can disappear; the stored OIDs remain the durable evidence.
+      const next = `git -C '${run.options.repo.replaceAll("'", "'\\''")}' log --oneline --left-right ${record}...${now}`
+      const diagnostic = {
         branch: write.change.branch,
         decision: write.kind,
+        ...(relationError === undefined ? {} : { error: relationError }),
         head: write.change.head,
-        kind: "change",
+        intended: record,
+        kind: "change" as const,
+        next,
         reason: "change-ref-taken",
+        ref,
+        relation,
         remote: now,
-      })
+        text: `${ref}: remote ${now}, intended ${record} (${relation})${relationError === undefined ? "" : `; ancestry read failed: ${relationError}`}; inspect: ${next}`,
+      }
+      run.log.write(diagnostic)
+      if (attempt === 1) run.log.write({ ...diagnostic, reason: "change-ref-contended" })
     }
   }
-  run.log.write({
-    branch: write.change.branch,
-    decision: write.kind,
-    head: write.change.head,
-    kind: "change",
-    reason: "change-ref-contended",
-    remote: onto,
-  })
   return undefined
 }
 

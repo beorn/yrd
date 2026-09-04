@@ -32,6 +32,7 @@ import {
   mergedByRun,
   queueRun,
   readRecords,
+  readRecord,
   readQueue,
   runCheck,
   submit,
@@ -454,50 +455,140 @@ describe("a queue run", () => {
     ).toEqual(expect.arrayContaining(["run", "change", "check", "result", "merge", "message"]))
   })
 
-  it("a second writer that takes the change ref between the read and the push loses neither record", async () => {
-    const w = await world()
-    const head = await submitCommit(w, "task/one", "one.txt")
-    const ref = changeRef({ branch: "task/one", head })
-    const rivalPath = join(w.workdir, "..", "record-rival")
-    await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
-    const rival = gitIn(rivalPath)
-    await rival(["config", "user.email", "rival@yrd.test"])
-    await rival(["config", "user.name", "rival"])
+  it.each([
+    ["checked", "diverged", 1],
+    ["sent", "diverged", 1],
+    ["sent", "behind", 1],
+    ["sent", "equal", 1],
+    ["sent", "ahead", 1],
+    ["sent", "unknown", 1],
+    ["sent", "diverged", 2],
+  ] as const)(
+    "a second writer racing the %s record (%s, %i refusals) preserves records and explains the tips (24096)",
+    async (kind, relation, refusals) => {
+      const w = await world()
+      const head = await submitCommit(w, "task/one", "one.txt")
+      const ref = changeRef({ branch: "task/one", head })
+      const rivalPath = join(w.workdir, "..", "record-rival")
+      await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
+      const rival = gitIn(rivalPath)
+      await rival(["config", "user.email", "rival@yrd.test"])
+      await rival(["config", "user.name", "rival"])
 
-    let concurrent: string | undefined
-    const git: Git = async (args, input) => {
-      // Between the tip this run read the change at and its leased push, a
-      // second queue appends a record of its own and pushes it first. A real
-      // writer at the real remote, not a reading of this one's argv.
-      if (concurrent === undefined && args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))) {
-        await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
-        concurrent = await appendRecord(rival, {
-          change: { branch: "task/one", head },
-          kind: "stuck",
-          subject: "another queue got there first",
-          target: "origin#main",
-          trailers: [["Reason", "crash"]],
-        })
-        await rival(["push", "--quiet", "origin", `${concurrent}:${ref}`])
+      let concurrent: string | undefined
+      let intended: string | undefined
+      let raced = 0
+      const git: Git = async (args, input) => {
+        if (relation === "unknown" && args[0] === "merge-base" && args[1] === intended && args[2] === concurrent) {
+          throw new Error("diagnostic ancestry read unavailable")
+        }
+        // Between the tip this run read the change at and its leased push, a
+        // second queue appends a record of its own and pushes it first. A real
+        // writer at the real remote, not a reading of this one's argv.
+        const refspec = args.find((arg) => arg.endsWith(`:${ref}`))
+        if (
+          raced < refusals &&
+          args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`)) &&
+          refspec !== undefined &&
+          (await readRecord(w.git, refspec.slice(0, -ref.length - 1))).kind === kind
+        ) {
+          raced += 1
+          intended = refspec.slice(0, -ref.length - 1)
+          await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
+          const previous = (await rival(["rev-parse", ref])).trim()
+          if (relation === "behind" || relation === "equal" || relation === "ahead") {
+            // A real second writer already has our intended record (or has
+            // appended after it), but our captured lease still names its parent.
+            await rival(["fetch", "--quiet", w.work, intended])
+            await rival(["update-ref", ref, intended])
+          }
+          concurrent =
+            relation === "ahead"
+              ? (await rival(["rev-parse", `${intended}^^`])).trim()
+              : relation === "equal"
+                ? intended
+                : await appendRecord(rival, {
+                    change: { branch: "task/one", head },
+                    kind: "stuck",
+                    subject: "another queue got there first",
+                    target: "origin#main",
+                    trailers: [["Reason", "crash"]],
+                  })
+          // Only the disposable fixture's remote rewinds, under its exact
+          // previous value, to exercise an external writer moving backwards.
+          await rival([
+            "push",
+            "--quiet",
+            ...(relation === "ahead" ? [`--force-with-lease=${ref}:${previous}`] : []),
+            "origin",
+            `${concurrent}:${ref}`,
+          ])
+        }
+        return w.git(args, input)
       }
-      return w.git(args, input)
-    }
 
-    const outcome = await queueRun({ ...w.options({ exit: 0, on: ["submit"] }), git })
+      const outcome = await queueRun({ ...w.options({ exit: 0, on: ["submit"] }), git })
 
-    // The lease refused the first push, so the rival's record stands; the same
-    // record was written again onto it and pushed, so neither is lost and the
-    // run went on to merge.
-    expect(outcome.exitCode).toBe(0)
-    expect(outcome.merged).toEqual(["task/one"])
-    await fetchChanges(w)
-    const records = await readRecords(w.git, { branch: "task/one", head })
-    expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "checked", "merged", "sent"])
-    expect(records.map((record) => record.sha)).toContain(concurrent)
-    expect(logRecords(outcome)).toContainEqual(
-      expect.objectContaining({ decision: "checked", reason: "change-ref-taken", remote: concurrent }),
-    )
-  })
+      // The lease refused the first push, so the rival's record stands; the same
+      // record was written again onto it and pushed, so neither is lost and the
+      // run went on to merge.
+      expect(outcome.exitCode).toBe(0)
+      expect(outcome.merged).toEqual(["task/one"])
+      await fetchChanges(w)
+      const records = await readRecords(w.git, { branch: "task/one", head })
+      expect(records.map((record) => record.kind)).toEqual(
+        kind === "checked"
+          ? ["opened", "stuck", "checked", "merged", "sent"]
+          : relation === "equal"
+            ? ["opened", "checked", "merged", "sent"]
+            : relation === "ahead"
+              ? ["opened", "checked", "sent"]
+              : relation === "behind"
+                ? ["opened", "checked", "merged", "sent", "stuck", "sent"]
+                : refusals === 2
+                  ? ["opened", "checked", "merged", "stuck", "stuck"]
+                  : ["opened", "checked", "merged", "stuck", "sent"],
+      )
+      expect(records.map((record) => record.sha)).toContain(concurrent)
+      expect(intended).toMatch(/^[0-9a-f]{40}$/u)
+      if (relation === "equal") {
+        // Git accepts an already-equal ref as up-to-date, even with the old
+        // lease. There was no rejected write to diagnose or retry.
+        expect(logRecords(outcome).filter((record) => record.reason === "change-ref-taken")).toEqual([])
+        return
+      }
+      expect(logRecords(outcome)).toContainEqual(
+        expect.objectContaining({
+          decision: kind,
+          reason: "change-ref-taken",
+          ref,
+          remote: concurrent,
+          intended,
+          relation,
+        }),
+      )
+      const diagnostic = logRecords(outcome).findLast((record) => record.reason === "change-ref-taken")
+      expect(diagnostic?.text).toBe(
+        `${ref}: remote ${concurrent}, intended ${intended} (${relation})${relation === "unknown" ? "; ancestry read failed: diagnostic ancestry read unavailable" : ""}; inspect: ${String(diagnostic?.next)}`,
+      )
+      // The diagnostic's read is executable in the emitting state, using the
+      // exact fetched objects even though the remote ref has moved again.
+      const read = spawnSync("sh", ["-c", String(diagnostic?.next)], { encoding: "utf8" })
+      expect(read.status, read.stderr).toBe(0)
+      if (relation === "ahead") expect(read.stdout).toMatch(/^</mu)
+      else expect(read.stdout).toMatch(/^>/mu)
+      if (relation === "diverged" || relation === "unknown") expect(read.stdout).toMatch(/^</mu)
+      if (relation === "unknown") expect(diagnostic?.error).toBe("diagnostic ancestry read unavailable")
+      if (refusals === 2) {
+        expect(logRecords(outcome)).toContainEqual(
+          expect.objectContaining({ reason: "change-ref-contended", ref, remote: concurrent, intended, relation }),
+        )
+        expect(logRecords(outcome)).toContainEqual(
+          expect.objectContaining({ kind: "message", delivered: false, says: "merged" }),
+        )
+      }
+    },
+  )
 
   it("fail: the target stands still, the change ends failed with the check and a remedy, and the submitter gets it back", async () => {
     const w = await world()
