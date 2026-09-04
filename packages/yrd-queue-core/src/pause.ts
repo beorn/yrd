@@ -26,8 +26,8 @@ export type WritePause = Readonly<{
   by: string
 }>
 
-/** The resumed record and expected tip one atomic merge push must carry. */
-export type ResumedFence = Readonly<{
+/** The state-preserving record and expected tip one atomic merge push must carry. */
+export type PauseFence = Readonly<{
   sha: string
   expected: string
   previous?: PauseRecord
@@ -103,19 +103,24 @@ export async function writePause(git: Git, remote: string, queue: string, write:
  *
  * Preparation moves no ref. The caller must include both the lease and
  * `${sha}:${PAUSE_REF}` in the SAME atomic push as the target and change
- * updates. An active pause is a normal refusal; unreadable authority is loud.
+ * updates. Only the unchanged pause admitting an explicit foreground round
+ * may be carried forward paused; any newer pause refuses. Unreadable authority is loud.
  */
-export async function resumedFence(
+export async function pauseFence(
   git: Git,
   remote: string,
   queue: string,
   write: Readonly<{ reason: string; by: string }>,
-): Promise<ResumedFence> {
+  admittedPause?: PauseRecord,
+): Promise<PauseFence> {
   const reason = oneLine(write.reason, "a pause fence needs a reason")
   const by = oneLine(write.by, "a pause fence needs an actor")
   const previous = await readPause(git, remote, queue)
-  if (previous?.kind === "paused") throw new QueuePaused(previous, remote, queue)
-  const sha = await pauseCommit(git, previous, { by, kind: "resumed", reason })
+  if (previous?.kind === "paused" && previous.sha !== admittedPause?.sha) throw new QueuePaused(previous, remote, queue)
+  const sha =
+    previous?.kind === "paused"
+      ? await pauseCommit(git, previous, { by: previous.by, kind: "paused", reason: previous.reason }, previous.at)
+      : await pauseCommit(git, previous, { by, kind: "resumed", reason })
   return { expected: previous?.sha ?? ABSENT, previous, sha }
 }
 
@@ -164,16 +169,25 @@ async function parsePause(git: Git, sha: string, where: string): Promise<PauseRe
   if (id === undefined || id === "" || atText === undefined || reason === undefined || reason === "") {
     throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable pause record`)
   }
-  const at = new Date(atText)
+  // A foreground fence is a new commit, not a new decision to pause. Keep the
+  // original pause time while its own commit time records the merge's fence.
+  const pauseTimes = parsed.filter(([name]) => name === "Paused-At").map(([, value]) => value)
+  if (pauseTimes.length > 1) throw new Error(`${where} at ${sha.slice(0, 12)} carries multiple Paused-At: trailers`)
+  const at = new Date(pauseTimes[0] ?? atText)
   if (Number.isNaN(at.getTime())) {
-    throw new Error(`${where} at ${sha.slice(0, 12)} has an unreadable commit time '${atText}'`)
+    throw new Error(`${where} at ${sha.slice(0, 12)} has an unreadable pause time '${pauseTimes[0] ?? atText}'`)
   }
   return Object.freeze({ at, by, kind, reason, sha: id })
 }
 
-async function pauseCommit(git: Git, previous: PauseRecord | undefined, write: WritePause): Promise<string> {
+async function pauseCommit(
+  git: Git,
+  previous: PauseRecord | undefined,
+  write: WritePause,
+  pausedAt?: Date,
+): Promise<string> {
   const tree = (await git(["mktree"], "")).trim()
-  const message = `${write.reason}\n\nRecord: ${write.kind}\nPaused-By: ${write.by}\n`
+  const message = `${write.reason}\n\nRecord: ${write.kind}\nPaused-By: ${write.by}\n${pausedAt === undefined ? "" : `Paused-At: ${pausedAt.toISOString()}\n`}`
   const args = ["commit-tree", tree]
   if (previous !== undefined) args.push("-p", previous.sha)
   return (await git([...args, "-m", message])).trim()

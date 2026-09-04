@@ -62,7 +62,6 @@ import { clocksLine, noticeLine, duration } from "./watch-notice.ts"
 import { filterRows, rowLine, rowTable, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel } from "./watch-detail.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
-import { garageServiceRefusal, readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
@@ -139,14 +138,6 @@ export async function coreQueueCommand(
     interactive?: boolean
   }> = {},
 ): Promise<YrdCliExitCode> {
-  // A garage stops only the service, before any remote read or queue-state write.
-  if (request.command === "up") {
-    const garage = readGarageDeclaration(repo)
-    if (garage !== undefined) {
-      io.stderr(`${garageServiceRefusal(garage)}\n`)
-      return 2
-    }
-  }
   /** The selected queue branch carries no declaration, so it runs no queue. */
   const noQueueOnTarget = (ref: string): YrdCliExitCode => {
     io.stderr(
@@ -197,7 +188,10 @@ export async function coreQueueCommand(
   const oneRound = async (declared: QueueConfig): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
-      outcome = await queueRun(runOptions(repo, declared, workdir, options.env, options.log))
+      outcome = await queueRun({
+        ...runOptions(repo, declared, workdir, options.env, options.log),
+        foreground: request.command === "run",
+      })
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
       return undefined
@@ -772,14 +766,10 @@ function runOptions(
   env?: NodeJS.ProcessEnv,
   log?: ConditionalLogger,
 ) {
-  // A round made while the garage is open says so on its own record, so a
-  // reader of the log can tell the mechanic's rounds from the service's.
-  const garage = readGarageDeclaration(repo)
   return {
     checks: config.checks,
     configBlob: config.blob,
     env,
-    ...(garage === undefined ? {} : { garage: garage.reason }),
     notify: config.notify,
     // git-super narrates which submodule it borrowed and how long each phase
     // took; that is trace-level plumbing, so it gets a logger only at trace.
@@ -868,7 +858,6 @@ function describeRun(
     stuck: readonly string[]
     directMerges: readonly string[]
     log: string
-    garage?: string
     stopped?: Readonly<{ says: string }>
   }>,
 ): string {
@@ -882,8 +871,7 @@ function describeRun(
       : undefined,
     outcome.stopped === undefined ? undefined : `${outcome.stopped.says}; no merge was made`,
   ].filter((part): part is string => part !== undefined)
-  const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
-  return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`
+  return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")} (log ${outcome.log})`
 }
 
 /** A selector was given and nothing answered to it: the one case a watch must refuse rather than wait out. */

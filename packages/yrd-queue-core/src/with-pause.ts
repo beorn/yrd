@@ -9,14 +9,13 @@
  *
  * The ring holds two of the run's steps.
  *
- * `open` is the cheap answer: an active pause at the top of a round stops it
- * there, before any change record is written, so a paused round leaves every
- * change exactly as it found it.
+ * `open` stops automatic rounds before any change record is written. An
+ * explicit foreground round may process admitted work under the pause it saw.
  *
  * `push` is the expensive one, and the reason a pause is more than a flag. The
- * merge's atomic push carries the pause ref forward as a resumed record under
+ * merge's atomic push carries the pause ref forward without clearing a pause under
  * its own lease, in the SAME transaction as the target and the change
- * (`pause.ts` § resumedFence). That is what makes the read and the push one
+ * (`pause.ts` § pauseFence). That is what makes the read and the push one
  * ordering point with a concurrent `queue pause`: whichever lease wins
  * happened first, and no merge can slip past a pause written a moment ago.
  */
@@ -27,61 +26,79 @@ import {
   pauseLine,
   QueuePaused,
   readPause,
-  resumedFence,
+  pauseFence,
   type PauseRecord,
-  type ResumedFence,
+  type PauseFence,
 } from "./pause.ts"
 import { changeName, pauseRef } from "./refs.ts"
 import { QueueAuthorityUnreadable, type Pushed, type Ring, type Run, type Stopped } from "./run.ts"
 
-export const withPause: Ring = (steps) => ({
-  ...steps,
+export type PauseOptions = Readonly<{
+  /** Explicit queue run may work the admitted set under the pause it observed. */
+  foreground?: boolean
+}>
 
-  open: async (run) => {
-    const paused = await activePause(run.git, run.options.target.remote, run.options.target.branch)
-    if (paused === undefined) return steps.open(run)
-    recordPause(run, paused)
-    return stopped(paused)
-  },
+export const withPause: Ring = (steps) => {
+  let admittedPause: PauseRecord | undefined
+  return {
+    ...steps,
 
-  push: async (run, entry, plan) => {
-    // Preparing the fence reads the pause; an active one is a normal refusal and
-    // stops the round here, with nothing pushed. Unreadable authority is loud:
-    // a queue that cannot tell whether it is paused merges nothing.
-    let fence: ResumedFence
-    const ref = pauseRef(run.options.target.branch)
-    try {
-      fence = await resumedFence(run.git, run.options.target.remote, run.options.target.branch, {
-        by: mergedBy(run.name, run.log.id),
-        reason: `merge ${changeName(entry.change)}`,
+    open: async (run) => {
+      const paused = await activePause(run.git, run.options.target.remote, run.options.target.branch)
+      if (paused === undefined) return steps.open(run)
+      recordPause(run, paused)
+      if (run.options.foreground === true) {
+        admittedPause = paused
+        return steps.open(run)
+      }
+      return stopped(paused)
+    },
+
+    push: async (run, entry, plan) => {
+      // A newly active pause is a normal refusal, including in a foreground
+      // round admitted under an older pause. Unreadable authority is loud:
+      // a queue that cannot tell whether it is paused merges nothing.
+      let fence: PauseFence
+      const ref = pauseRef(run.options.target.branch)
+      try {
+        fence = await pauseFence(
+          run.git,
+          run.options.target.remote,
+          run.options.target.branch,
+          {
+            by: mergedBy(run.name, run.log.id),
+            reason: `merge ${changeName(entry.change)}`,
+          },
+          admittedPause,
+        )
+      } catch (error) {
+        if (error instanceof QueuePaused) return stop(run, error.pause, error)
+        throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${ref}`, error)
+      }
+      const pushed = await steps.push(run, entry, {
+        leases: [...plan.leases, [ref, fence.expected]],
+        updates: [...plan.updates, [fence.sha, ref]],
       })
-    } catch (error) {
-      if (error instanceof QueuePaused) return stop(run, error.pause, error)
-      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${ref}`, error)
-    }
-    const pushed = await steps.push(run, entry, {
-      leases: [...plan.leases, [ref, fence.expected]],
-      updates: [...plan.updates, [fence.sha, ref]],
-    })
-    if (pushed.landed) return pushed
-    // A pause writer can win after our reads too, and then the atomic leases
-    // reject every update. The remote — never Git's prose — says whether that
-    // is what happened: a pause now active stops the round however else the
-    // push was rejected, and an authority that merely moved leaves the change
-    // checked rather than raising.
-    let now: PauseRecord | undefined
-    try {
-      now = await readPause(run.git, run.options.target.remote, run.options.target.branch)
-    } catch (error) {
-      throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${ref}`, error)
-    }
-    if (now?.kind === "paused") return stop(run, now, pushed.error)
-    const saw = now?.sha ?? "absent"
-    if (pushed.reason !== undefined) return pushed.saw === undefined ? { ...pushed, saw } : pushed
-    if (now?.sha !== fence.previous?.sha) return { error: pushed.error, landed: false, reason: "pause-moved", saw }
-    return pushed
-  },
-})
+      if (pushed.landed) return pushed
+      // A pause writer can win after our reads too, and then the atomic leases
+      // reject every update. The remote — never Git's prose — says whether that
+      // is what happened: a pause now active stops the round however else the
+      // push was rejected, and an authority that merely moved leaves the change
+      // checked rather than raising.
+      let now: PauseRecord | undefined
+      try {
+        now = await readPause(run.git, run.options.target.remote, run.options.target.branch)
+      } catch (error) {
+        throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${ref}`, error)
+      }
+      if (now?.kind === "paused" && now.sha !== admittedPause?.sha) return stop(run, now, pushed.error)
+      const saw = now?.sha ?? "absent"
+      if (pushed.reason !== undefined) return pushed.saw === undefined ? { ...pushed, saw } : pushed
+      if (now?.sha !== fence.previous?.sha) return { error: pushed.error, landed: false, reason: "pause-moved", saw }
+      return pushed
+    },
+  }
+}
 
 /** Say the round stopped for this pause, and answer the push with it. */
 function stop(run: Run, pause: PauseRecord, error: unknown): Pushed {

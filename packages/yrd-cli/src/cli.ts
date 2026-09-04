@@ -27,14 +27,6 @@
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
 import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
-import {
-  closeGarage,
-  garageRefCommit,
-  garageSeat,
-  garageStatusLine,
-  openGarage,
-  readGarageDeclaration,
-} from "./garage.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { resolveQueueLocation } from "./queue-location.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
@@ -258,10 +250,6 @@ function buildProgram(
       )
       setExit(taken)
     })
-  // The garage is a ref, so a mechanic can open it with plain git and every
-  // surface reads it. These two spellings stay because the queue is IN the
-  // garage: they are the only non-plumbing way to open and close it, and
-  // `readGarageDeclaration` is also on the core queue command path.
   listOptions(
     program
       .command("watch [filter...]")
@@ -286,42 +274,6 @@ function buildProgram(
     )
     setExit(taken)
   })
-  const garage = queue
-    .command("garage", { hidden: true })
-    .description("stop the service and work on the queue yourself")
-  garage.helpCommand(false)
-  garage
-    .command("open")
-    .description("open the garage; the service stays down until it closes")
-    .requiredOption("--reason <text>", "why the service is off")
-    .action((options) => {
-      const repo = cwd()
-      const standing = readGarageDeclaration(repo)
-      if (standing !== undefined) {
-        io.stderr(`yrd: the garage is already open — ${garageStatusLine(standing)}\n`)
-        setExit(2)
-        return
-      }
-      const { reason } = options as { reason: string }
-      const { garage: opened } = openGarage(repo, { by: garageSeat(env), reason })
-      io.stdout(`${garageStatusLine(opened)}\n`)
-    })
-  garage
-    .command("close")
-    .description("close the garage; the service may start again")
-    .action(() => {
-      const repo = cwd()
-      const standing = readGarageDeclaration(repo)
-      const at = garageRefCommit(repo)
-      if (standing === undefined || at === undefined) {
-        io.stderr("yrd: no garage is open here\n")
-        setExit(2)
-        return
-      }
-      closeGarage(repo, at)
-      io.stdout(`the garage is closed (it was ${standing.reason})\n`)
-    })
-
   addQueueExamples(queue, name)
 
   // `yrd submit` is `yrd queue submit` (plan § Commands), registered rather

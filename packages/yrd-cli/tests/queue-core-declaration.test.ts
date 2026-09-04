@@ -50,6 +50,27 @@ async function world(config?: string): Promise<string> {
 }
 
 describe("a queue is the selected origin branch carrying config", () => {
+  it.each(["open", "close"])("refuses the retired garage %s command without changing local refs", async (verb) => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    if (verb === "close") {
+      const tree = (await git(["mktree"], "")).trim()
+      const commit = (
+        await git(["commit-tree", tree, "-m", "garage: historical declaration\n\nOpened-By: @chief\n"])
+      ).trim()
+      await git(["update-ref", "refs/yrd/garage", commit])
+    }
+    const before = await git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/"])
+    const run = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "queue", "garage", verb, ...(verb === "open" ? ["--reason", "repair"] : [])],
+        run.io,
+      ),
+    ).toBe(2)
+    expect(await git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/"])).toBe(before)
+  })
+
   it.each(["default", "bare"])("pause/resume select the %s queue without treating it as a reason", async (mode) => {
     const repo = await world("{}\n")
     const git = gitIn(repo)

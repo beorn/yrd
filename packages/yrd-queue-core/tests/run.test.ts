@@ -11,6 +11,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
+import { createProcess } from "@yrd/process"
+import { gitEnvironment } from "../src/git.ts"
 import {
   appendRecord,
   changeName,
@@ -24,6 +26,7 @@ import {
   queueRun,
   readRecords,
   readQueue,
+  readPause,
   runCheck,
   submit,
   trailer,
@@ -738,6 +741,86 @@ describe("a queue run", () => {
     const resumed = await queueRun(w.options({ exit: 0 }))
     expect(resumed.merged).toEqual(["task/one"])
   })
+
+  it("a foreground run merges admitted work with fresh fences and preserves the original pause facts", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    await submitCommit(w, "task/two", "two.txt")
+    const dated = gitIn(
+      w.work,
+      createProcess({
+        cwd: w.work,
+        env: gitEnvironment({
+          ...process.env,
+          GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
+          GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
+        }),
+      }),
+    )
+    const paused = await writePause(dated, "origin", "main", {
+      by: "@chief",
+      kind: "paused",
+      reason: "inspect admitted set",
+    })
+
+    const outcome = await queueRun({ ...w.options({ exit: 0 }), foreground: true })
+
+    expect(outcome.merged).toEqual(["task/one"])
+    expect(outcome.stopped).toBeUndefined()
+    const next = await queueRun({ ...w.options({ exit: 0 }), foreground: true })
+    expect(next.merged).toEqual(["task/two"])
+    const after = await readPause(w.git, "origin", "main")
+    expect(after).toMatchObject({ at: paused.at, by: paused.by, reason: paused.reason, kind: "paused" })
+    expect(after?.sha).not.toBe(paused.sha)
+    expect((await w.git(["rev-list", "--count", `${paused.sha}..${after?.sha}`])).trim()).toBe("2")
+    expect(logRecords(outcome)).toContainEqual(
+      expect.objectContaining({
+        kind: "pause",
+        reason: paused.reason,
+        by: paused.by,
+        since: paused.at.toISOString(),
+        state: "paused",
+      }),
+    )
+    const automatic = await queueRun(w.options({ exit: 0 }))
+    expect(automatic.stopped?.what).toEqual(after)
+  })
+
+  it.each(["before-fence", "before-push"])(
+    "a changed pause %s stops a foreground merge and preserves all remote refs",
+    async (when) => {
+      const w = await world()
+      const head = await submitCommit(w, "task/one", "one.txt")
+      await writePause(w.git, "origin", "main", { by: "@chief", kind: "paused", reason: "initial pause" })
+      const ref = changeRef("main", { branch: "task/one", head })
+      let reads = 0
+      let raced: PauseRecord | undefined
+      let changeBefore = ""
+      const git: Git = async (args, input) => {
+        if (args[0] === "ls-remote" && args.includes(PAUSE_REF)) reads += 1
+        const fence = when === "before-fence" && args[0] === "ls-remote" && args.includes(PAUSE_REF) && reads === 2
+        const push =
+          when === "before-push" && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))
+        if (raced === undefined && (fence || push)) {
+          changeBefore = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
+          await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "new decision" })
+          raced = await writePause(w.git, "origin", "main", {
+            by: "operator",
+            kind: "paused",
+            reason: "stop this round",
+          })
+        }
+        return w.git(args, input)
+      }
+      const outcome = await queueRun({ ...w.options({ exit: 0 }), foreground: true, git })
+      expect(raced?.reason).toBe("stop this round")
+      expect(outcome.merged).toEqual([])
+      expect(outcome.stopped?.what).toEqual(raced)
+      expect(await remoteTarget(w)).toBe(w.target)
+      expect((await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]).toBe(changeBefore)
+      expect(await readPause(w.git, "origin", "main")).toEqual(raced)
+    },
+  )
 
   it("a paused run reaps and reports direct merges without retiring, catching up, resending, or judging changes", async () => {
     const w = await world()

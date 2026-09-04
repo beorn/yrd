@@ -85,8 +85,6 @@ export type QueueRunOptions = Readonly<{
   configBlob: string
   /** The queue workdir: its logs, its worktrees and its temp root; on the root filesystem. */
   workdir: string
-  /** Why the queue is in the garage, when it is: a round the mechanic ran says so on its own record. */
-  garage?: string
   /** Receives every log record as it is written, for the human rendering. */
   render?: (record: LogRecord) => void
   /** The logger the worktree plumbing narrates to; pass one only at trace. */
@@ -106,8 +104,6 @@ export type QueueRunOutcome = Readonly<{
   config: string
   /** The target after the run. */
   target: string
-  /** The garage's reason, when the round was made in the garage. */
-  garage?: string
   /** What a ring stopped this round for, before any merge could be made, when one did. */
   stopped?: Stopped
   merged: readonly string[]
@@ -254,7 +250,6 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     base: targetSha,
     checks: options.checks.map((check) => check.name),
     config: options.configBlob,
-    ...(options.garage === undefined ? {} : { garage: options.garage }),
     kind: "run",
     gitlink: targetSha,
     queue: run.name,
@@ -1500,7 +1495,6 @@ async function finish(
     base: run.targetSha,
     config: run.options.configBlob,
     exitCode,
-    ...(run.options.garage === undefined ? {} : { garage: run.options.garage }),
     ...(stopped === undefined ? {} : { stopped }),
     log: run.log.path,
     run: run.log.id,
