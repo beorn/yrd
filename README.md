@@ -86,7 +86,7 @@ A key the queue does not read is refused, never ignored. The queue workdir is no
     refs/yrd/changes/<branch>@<sha>         the records: one ref per change, one commit per record; on origin too
     refs/yrd/pause                          paused/resumed records; the latest commit is the state, on origin too
     yrd/                                    the queue workdir (git config yrd.workdir moves it)
-      worktrees/<run id>/<phase>/<sha>      a fresh checkout per checked change, removed when the check ends
+      worktrees/<run id>/<phase>/<sha>      fresh checkouts; removed when the run settles, retained together on stuck for repair
       checks/<change>/<run id>/<phase>/<name>.log   check logs, kept
       environments/<name>/<run id>/logs, tmp        setup log and TMPDIR for one opened environment, kept
       logs/<run id>.jsonl                   the run's journal, one line per record
@@ -171,6 +171,8 @@ The common thread: every system above answers "what exactly did we test, and is 
 ## Development
 
 Yrd needs Bun and Git. The queue runs as one process on one machine, as the user who starts it, and a check is whatever command the config names, run as that user.
+
+**Queue-owned Git operations never run repository hooks.** Base settlement, gitlink raises, and final merge settlement run under an asserted-empty `core.hooksPath`; this is a load-bearing isolation boundary, not an optional bypass. `--no-verify` is not a substitute: on Git 2.55 it does not suppress `prepare-commit-msg` or `post-commit`, and it does not configure child Git processes. Starting the `git super` command with `git -c core.hooksPath=<empty-dir>` propagates the override to its child Git commands through `GIT_CONFIG_PARAMETERS`. Repository hooks validate authored work; queue artifacts are derived, and checks on their output belong in `.yrd.yml`.
 
 ```
 bun install --frozen-lockfile
