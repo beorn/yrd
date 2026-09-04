@@ -24,7 +24,7 @@ function rethrowWorktreeOwnershipConflict(cause: unknown): never {
   if (!/already used by worktree|is already checked out/iu.test(message)) throw cause
   throw new Error(
     `${message}\nThe branch remains owned by its existing worktree; ` +
-      "materialize the recorded commit in detached HEAD instead.",
+      "inspect it with git worktree list --porcelain and resume in the named worktree.",
   )
 }
 
@@ -42,24 +42,6 @@ async function remoteBranchHead(git: Git, repo: string, branch: string): Promise
     throw new Error(`origin returned no commit for branch '${branch}'`)
   }
   return headSha
-}
-
-type BranchProvisionDecision = Readonly<{ kind: "open"; source: "local" | "tracking" | "base" }> | Readonly<{ kind: "refuse" }>
-
-/**
- * One state table owns branch provenance: an ordinary open takes the first
- * carrier it finds (local > tracking > base), while an environment opened FOR an
- * issue refuses every pre-existing carrier — a claim branch that already
- * exists somewhere was not cut here, and opening on top of it would silently
- * adopt work whose provenance nobody proved.
- */
-function decideBranchProvision(
-  input: Readonly<{ claim: boolean; local: boolean; tracking: boolean; remote: boolean }>,
-): BranchProvisionDecision {
-  if (input.claim) {
-    return input.local || input.tracking || input.remote ? { kind: "refuse" } : { kind: "open", source: "base" }
-  }
-  return { kind: "open", source: input.local ? "local" : input.tracking ? "tracking" : "base" }
 }
 
 function safeBayPath(root: string, bay: string): string {
@@ -88,34 +70,32 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           git.run(repo, ["rev-parse", "--verify", `${localRef}^{commit}`], true),
           git.run(repo, ["rev-parse", "--verify", `${remoteRef}^{commit}`], true),
         ])
-        const decision = decideBranchProvision({
-          claim: input.issue !== undefined,
-          local: local.code === 0,
-          tracking: tracking.code === 0,
-          remote: input.issue !== undefined && (await remoteBranchHead(git, repo, input.branch)) !== undefined,
-        })
-        if (decision.kind === "refuse") {
-          throw new Error(
-            `branch '${input.branch}' already exists without matching claim provenance; ` +
-              "link that branch to the claim's draft change, then reopen with bay open",
-          )
-        }
-        if (decision.source === "local") {
+        // Git's worktree registration owns the branch, not an issue marker.
+        // Preserve existing work in local > tracking > remote order; ordinary
+        // non-force worktree add refuses if another worktree already owns it.
+        if (local.code === 0) {
           try {
             await worktrees.add({ kind: "branch", path, branch: input.branch })
           } catch (cause) {
             rethrowWorktreeOwnershipConflict(cause)
           }
         } else {
+          const remoteHead = tracking.code === 0 ? undefined : await remoteBranchHead(git, repo, input.branch)
+          if (remoteHead !== undefined) {
+            // Fetch the captured object, not a branch that may move after the
+            // observation. Adoption does not widen a single-branch clone's
+            // fetch configuration or manufacture an upstream mapping.
+            await git.run(repo, ["fetch", "--no-recurse-submodules", "origin", remoteHead])
+          }
           await worktrees.add({
             kind: "new-branch",
             path,
             branch: input.branch,
-            ref: decision.source === "tracking" ? remoteRef : baseSha,
+            ref: tracking.code === 0 ? remoteRef : (remoteHead ?? baseSha),
           })
-        }
-        if (decision.source === "tracking") {
-          await git.run(path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
+          if (tracking.code === 0) {
+            await git.run(path, ["branch", "--set-upstream-to", `origin/${input.branch}`, input.branch])
+          }
         }
         await worktrees.materializeSubmodules(path)
         const headSha = await git.commit(path, "HEAD")
