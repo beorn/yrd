@@ -29,6 +29,7 @@ import {
   gitIn,
   hintsIn,
   list,
+  queueName,
   queueRun,
   readConfig,
   readJournals,
@@ -58,8 +59,8 @@ import {
   type Row,
 } from "@yrd/queue-core"
 import { declarationHere } from "./declaration.ts"
-import { duration } from "./watch-notice.ts"
-import { rowLine, rowTable } from "./watch-rows.ts"
+import { clocksLine, noticeLine, duration } from "./watch-notice.ts"
+import { filterRows, rowLine, rowTable, watchRows, type WatchRow } from "./watch-rows.ts"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -82,7 +83,19 @@ export type CoreQueueCommand =
       /** Awaited after each round, before the gitlink is read; a test mutates the world or stops the service here. */
       afterRound?: (outcome: QueueRunOutcome) => void | Promise<void>
     }>
-  | Readonly<{ command: "list" }>
+  | Readonly<{
+      command: "list"
+      /** Case-insensitive OR terms over the branch, the subject, the run and the failure (S2.12). */
+      terms?: readonly string[]
+      /** One row per change instead of one per run (S2.13). */
+      latest?: boolean
+      /** Refresh until an ending, or until stopped: `yrd queue list --watch`, and `yrd watch` (README 1069). */
+      watch?: boolean
+      /** Seconds between refreshes while watching; the default is 5. */
+      intervalSeconds?: number
+      /** Stops the watch; a test ends the loop with it, a terminal ends it with a signal. */
+      stop?: AbortSignal
+    }>
   | Readonly<{ command: "show"; branch: string }>
   | Readonly<{ command: "check"; names: readonly string[] }>
 
@@ -328,34 +341,115 @@ export async function coreQueueCommand(
       }
     }
     case "list": {
-      // The commits that went around the queue are rows too (E5), judged at the
-      // target the queue read itself saw, so the rows and the reading are about
-      // one and the same tip and no second reading can disagree with it.
-      const queue = await readQueue(git, config.target.remote, config.target.branch)
-      // The run journal on THIS machine, and the head subjects in one batched
-      // read: the two joins the table needs and neither of them a second
-      // derivation of anything the records already say. A machine that runs no
-      // queue has no journal, and `journals.absent` is the sentence that says
-      // so rather than a row that reads as if nothing were running.
-      const journals = readJournals(join(workdir, "logs"))
-      const rows = list(queue.changes, {
-        directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
-        journals,
-        subjects: await subjects(
-          git,
-          queue.changes.map((entry) => entry.change.head),
-        ),
-      })
-      const pause = await activePause(git, config.target.remote)
-      emit(
-        io,
-        options.json,
-        { changes: rows, journal: journalFact(journals), pause: pause ?? null },
-        [pause === undefined ? undefined : pauseLine(pause), rowTable(rows.map((row) => ({ row })))]
-          .filter((line): line is string => line !== undefined)
-          .join("\n"),
-      )
-      return 0
+      /**
+       * One reading of the queue, rendered. Everything the list and the watch
+       * show comes from here, so a refresh cannot show a different table from
+       * the one a plain `queue list` would print at the same instant.
+       *
+       * The commits that went around the queue are rows too (E5), judged at
+       * the target the queue read itself saw, so the rows and the reading are
+       * about one and the same tip and no second reading can disagree with it.
+       */
+      const round = async (): Promise<
+        Readonly<{ rows: readonly WatchRow[]; text: string; data: unknown }>
+      > => {
+        const queue = await readQueue(git, config.target.remote, config.target.branch)
+        // The run journal on THIS machine, and the head subjects in one
+        // batched read: the two joins the table needs and neither of them a
+        // second derivation of anything the records already say. A machine
+        // that runs no queue has no journal, and `journals.absent` is the
+        // sentence that says so rather than a row that reads as if nothing
+        // were running.
+        const journals = readJournals(join(workdir, "logs"))
+        const all = list(queue.changes, {
+          directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
+          journals,
+          subjects: await subjects(
+            git,
+            queue.changes.map((entry) => entry.change.head),
+          ),
+        })
+        const rows = filterRows(
+          watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
+          request.terms ?? [],
+        )
+        const pause = await activePause(git, config.target.remote)
+        // What was queried, where it looked, and what it left out — said on the
+        // screen, not left for the reader to infer from an empty table.
+        const scope =
+          request.terms === undefined || request.terms.length === 0
+            ? undefined
+            : `${String(rows.length)} of ${String(all.length)} change(s) match ${request.terms.join(" or ")}`
+        return {
+          data: {
+            changes: rows.map((row) => ({ ...row.row, ...(row.run === undefined ? {} : { runOf: row.run.id }) })),
+            journal: journalFact(journals),
+            pause: pause ?? null,
+          },
+          rows,
+          text: [
+            // The pause stays the FIRST line it has always been: a queue that
+            // is not running is the loudest thing about it, and a reader who
+            // scrolled past the name would still see it. The name follows.
+            pause === undefined ? undefined : pauseLine(pause),
+            queueName(config.target, await remoteUrl(git, config.target.remote)),
+            // G5: journal-derived fields are absent off the queue's own
+            // machine, and the watch says where it looked rather than showing
+            // a blank where a fact belongs.
+            journals.absent,
+            scope,
+            rowTable(rows),
+            ...(rows.length === 1 && rows[0] !== undefined
+              ? [noticeLine(rows[0].row), clocksLine(rows[0].row)].filter((part) => part !== "")
+              : []),
+          ]
+            .filter((part): part is string => part !== undefined)
+            .join("\n"),
+        }
+      }
+
+      if (request.watch !== true) {
+        const one = await round()
+        emit(io, options.json, one.data, one.text)
+        return 0
+      }
+
+      // The watch. A selector runs to an ending and exits with the ending's
+      // code, exactly as `yrd check` does (0 pass, 1 fail, 2 stuck); with no
+      // selector there is nothing to run TO, so it refreshes until it is
+      // stopped and exits 0.
+      const selected = request.terms !== undefined && request.terms.length > 0
+      const interval = Math.max(1, request.intervalSeconds ?? 5) * 1000
+      const stopped = (): boolean => request.stop?.aborted === true
+      let first = true
+      for (;;) {
+        const one = await round()
+        // A selector that matches nothing would otherwise wait forever for a
+        // change that is not there. It is refused loudly, with what was asked
+        // for and where it was looked for.
+        if (first && selected && one.rows.length === 0) {
+          io.stderr(
+            `yrd: nothing in ${queueName(config.target, await remoteUrl(git, config.target.remote))} matches ` +
+              `${(request.terms ?? []).join(" or ")}. The queue read holds ${String(one.rows.length)} matching ` +
+              "change(s); ended changes older than seven days are not read.\n",
+          )
+          return 2
+        }
+        first = false
+        // A real terminal is redrawn in place; a pipe or a test keeps every
+        // round, because a watch whose output is being read later is a log.
+        if (io.color === true) io.stdout("\u001b[H\u001b[2J")
+        emit(io, options.json, one.data, one.text)
+        if (selected) {
+          const ending = endingCode(one.rows)
+          if (ending !== undefined) return ending
+        }
+        if (stopped()) return 0
+        await new Promise((resolve) => {
+          setTimeout(resolve, interval)
+        })
+        if (stopped()) return 0
+      }
     }
     case "check": {
       // `yrd check <name>`: the named checks as the target declares them, run
@@ -686,6 +780,25 @@ function describeRun(
   ].filter((part): part is string => part !== undefined)
   const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`
+}
+
+/**
+ * The code a watched set of changes ended with, or undefined while any of them
+ * is still in line. It is `yrd check`'s own ladder — stuck beats failed beats
+ * merged — because a watch is the same question asked over time, and the two
+ * answering differently for one change is the whole failure this mirrors.
+ */
+function endingCode(rows: readonly WatchRow[]): YrdCliExitCode | undefined {
+  const states = rows.map((row) => row.row.state)
+  if (states.some((state) => state === "queued" || state === "checked")) return undefined
+  if (states.some((state) => state === "stuck")) return 2
+  if (states.some((state) => state === "failed")) return 1
+  return 0
+}
+
+/** The URL a remote NAME stands for, which is what the queue calls itself to a stranger (config.ts). */
+async function remoteUrl(git: Git, remote: string): Promise<string> {
+  return (await git(["remote", "get-url", remote])).trim()
 }
 
 /**
