@@ -548,6 +548,75 @@ describe("a queue run", () => {
     expect(messages(w)[0]?.failures).toBeUndefined()
   })
 
+  it("git-super stuck preserves its worktree and carries complete failure evidence to the journal and supervisor", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/git-super-stuck", "git-super-stuck.txt")
+    const bin = join(w.workdir, "bin")
+    const argvLog = join(w.workdir, "git-super.argv")
+    mkdirSync(bin, { recursive: true })
+    const stderrTail = `hook stderr start\n${"checkout drift ".repeat(400)}\nhook stderr end`
+    const detail = {
+      code: "settled-merge-commit-failed",
+      phase: "write-settled-merge",
+      message: `settled-merge-commit-failed: the candidate merge could not be committed\n${stderrTail}`,
+      subject: "the candidate merge could not be committed",
+      evidence: `git -C ${w.work} status --short`,
+      next: "repair the queue checkout, then run yrd queue run",
+      owner: "the queue operator",
+    }
+    const result = {
+      state: "failed",
+      partial: true,
+      detail,
+      gitlinks: [],
+      repositories: [{ repository: w.work, state: "failed", refs: [] }],
+    }
+    const fakeGitSuper = join(bin, "git-super")
+    writeFileSync(
+      fakeGitSuper,
+      `#!/usr/bin/env bun\nimport { writeFileSync } from "node:fs"\nwriteFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join("\\n"))\nprocess.stdout.write(${JSON.stringify(`${JSON.stringify(result)}\n`)})\nprocess.exit(2)\n`,
+    )
+    chmodSync(fakeGitSuper, 0o755)
+    const base = w.options({ exit: 0 })
+
+    const outcome = await queueRun({
+      ...base,
+      env: { ...base.env, PATH: `${bin}:${base.env?.PATH ?? process.env.PATH ?? ""}` },
+    })
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/git-super-stuck"] })
+    expect(readFileSync(argvLog, "utf8").split("\n")).toContain("--no-verify")
+    const composing = join(w.workdir, "worktrees", outcome.run, "compose", "submit", head.slice(0, 12))
+    expect(existsSync(composing)).toBe(true)
+    await fetchChanges(w)
+    const records = await readRecords(w.git, { branch: "task/git-super-stuck", head })
+    const stuck = records.find((record) => record.kind === "stuck")
+    const incident = incidentOf(stuck)
+    expect(incident.Subject).toContain("hook stderr start")
+    expect(incident.Subject).toContain("hook stderr end")
+    expect(incident.Subject).toContain("checkout drift ".repeat(400).trim())
+    expect(incident.Via).toContain(composing)
+    const journal = logRecords(outcome).find(
+      (record) => record.kind === "change" && record.decision === "stuck" && record.branch === "task/git-super-stuck",
+    )
+    expect(journal).toMatchObject({
+      code: incident.Code,
+      subject: incident.Subject,
+      via: incident.Via,
+      evidence: incident.Evidence,
+      next: incident.Next,
+      owner: incident.Owner,
+      detail: detail.message,
+      worktree: composing,
+    })
+    expect(messages(w)[0]).toMatchObject({
+      change: changeName({ branch: "task/git-super-stuck", head }),
+      record: "stuck",
+      reason: incident.Subject,
+    })
+    expect(messages(w)[0]?.reason).toContain("hook stderr end")
+  })
+
   it("runs every notify entry that wants this ending, once each, and writes one sent record per entry", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
