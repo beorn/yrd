@@ -17,7 +17,7 @@
  * (position, age, wait) are NOT here; they moved to the status box.
  */
 
-import { trailer, type ChangeRecord, type Row } from "@yrd/queue-core"
+import { DIRECT_MERGE, trailer, type ChangeRecord, type Row } from "@yrd/queue-core"
 import { clock, mediaDuration } from "./watch-format.ts"
 
 export type HistoryEntry = Readonly<{
@@ -55,11 +55,14 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
     }
     case "merged": {
       const merge = trailer(record, "Merge")
-      const by = trailer(record, "Merged-By")
+      // The queue's own merges read `yrd queue <name> [<run>]` and say nothing
+      // more here; the one word worth a row is the core's DIRECT_MERGE sentinel,
+      // a merge the queue did not make (E5).
+      const direct = trailer(record, "Merged-By") === DIRECT_MERGE
       return {
         at: record.at,
         text: merge === undefined ? "merged" : `merged as ${short(merge)}`,
-        ...(by === undefined || by === "queue" ? {} : { detail: `by ${by}` }),
+        ...(direct ? { detail: "a direct merge, around the queue" } : {}),
       }
     }
     case "failed": {

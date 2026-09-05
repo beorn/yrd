@@ -3,7 +3,7 @@
  * pills (watch-redesign items 3, 28, 30–33, 38):
  *
  *   YRD QUEUES   1 /hh ⎇ main                              ← the top line: title + queue pills, nothing else (30, 32b, 33)
- *   TIME      STATUS      RUN           CHANGES                        BY        AGE   RUN
+ *   TIME      STATUS      RUN           CHANGES                        BY        AGE   RUNTIME
  *   17:04:06  ○ queued    —             task/foo  fix the parser        @ci      0:37
  *   17:02:11  ◉ queued    main#170206   task/bar  add a check (typecheck) @chief  3:12  1:02
  *   16:55:40  ✓ merged    main#165540   task/baz  drop a flag           @dev/2  14:20  4:01
@@ -108,7 +108,7 @@ export function listLayout(rows: readonly WatchRow[], label: string, columns: nu
       ...measured.map((clock) => (clock.ageMs === undefined ? 0 : mediaDuration(clock.ageMs).length)),
     ),
     durationWidth: Math.max(
-      3,
+      "RUNTIME".length,
       ...measured.map((clock) => (clock.runtimeMs === undefined ? 0 : mediaDuration(clock.runtimeMs).length)),
     ),
   }
@@ -184,7 +184,7 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
         age: label("AGE"),
         by: label("BY"),
         changes: label("CHANGES"),
-        duration: label("RUN"),
+        duration: label("RUNTIME"),
         run: label("RUN"),
         status: label("STATUS"),
         time: label("TIME"),

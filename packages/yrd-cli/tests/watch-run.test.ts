@@ -131,11 +131,15 @@ describe("HISTORY and METADATA (watch-change)", () => {
     ])
   })
 
-  it("names a merge the queue did not make, and carries a failure's detail after the dash", () => {
+  it("says a direct merge went around the queue, says nothing about the queue's own merges, and carries a failure's detail", () => {
     const entries = historyEntries([
       record("merged", 0, [
         ["Merge", "b234234abcde".padEnd(40, "0")],
         ["Merged-By", "direct"],
+      ]),
+      record("merged", 500, [
+        ["Merge", "c345345bcdef".padEnd(40, "0")],
+        ["Merged-By", "yrd queue main [q-20260903T113000000Z-0badf00d]"],
       ]),
       record("failed", 1_000, [
         ["Reason", "conflict"],
@@ -144,7 +148,8 @@ describe("HISTORY and METADATA (watch-change)", () => {
     ])
     expect(entries).toEqual([
       expect.objectContaining({ detail: "CONFLICT (content): x.ts", text: "failed conflict" }),
-      expect.objectContaining({ detail: "by direct", text: "merged as b234234abcde" }),
+      { at: expect.any(Date), text: "merged as c345345bcdef" },
+      expect.objectContaining({ detail: "a direct merge, around the queue", text: "merged as b234234abcde" }),
     ])
   })
 

@@ -168,7 +168,10 @@ describe("the table (items 3, 28, 38)", () => {
 
     const header = text.split("\n").find((line) => line.includes("CHANGES"))
     expect(header).toBeDefined()
-    for (const column of ["TIME", "STATUS", "RUN", "CHANGES", "BY", "AGE"]) expect(header).toContain(column)
+    for (const column of ["TIME", "STATUS", "RUN", "CHANGES", "BY", "AGE", "RUNTIME"]) expect(header).toContain(column)
+    // The run and its duration are two columns with two names, in this order.
+    expect(header!.indexOf("RUN ")).toBeLessThan(header!.indexOf("CHANGES"))
+    expect(header!.trimEnd().endsWith("RUNTIME")).toBe(true)
     // The CHANGES cell is the change's branch and its subject, never the branch alone (28), with the failure's code as status.
     const line = text.split("\n").find((candidate) => candidate.includes("task/one"))
     expect(line).toContain("× failed")
@@ -496,6 +499,47 @@ describe("the layout tier", () => {
 
   it("drills in to one pane when there is room for neither split", () => {
     expect(watchTier(60, 10)).toBe("full")
+  })
+})
+
+describe("the running step and the check-less declaration", () => {
+  it("shows how long the running step has run, from the row's own live instant, beside the pulse (item 39)", async () => {
+    const live = row({
+      live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: new Date(NOW.getTime() - 151_000) },
+      position: 1,
+      state: "checked",
+    })
+    const run = runOf(live, "main", [
+      { name: "typecheck", result: { ms: 8_000, result: "pass" }, state: "passed" },
+      { name: "affected-tests", state: "running" },
+    ])
+    const text = await paint(at(<RunStatusBox run={run} live={false} />))
+
+    expect(text).toMatch(/◉ affected-tests 2:31/u)
+    expect(text).toMatch(/✓ typecheck 0:08/u)
+  })
+
+  it("says so when the declaration a change was judged by names no check, instead of a bare tab strip", async () => {
+    const detail = detailOf({ row: row() }, [])
+    const text = await paint(at(<WatchDetail detail={detail} live={false} />))
+
+    expect(text).toContain("names no check")
+    expect(text).toContain("Changes")
+  })
+
+  it("gives a direct row's box its one line about the commit where a subject would stand", async () => {
+    const direct = row({
+      branch: "main",
+      head: "3".repeat(40),
+      reason: "main moved around the queue at 333333333333 (fix: land it)",
+      state: "direct",
+      subject: undefined,
+    })
+    const text = await paint(
+      at(<WatchDetail detail={detailOf({ row: direct }, [])} live={false} selected={CHANGES_TAB} />),
+    )
+
+    expect(text).toContain("main moved around the queue at 333333333333")
   })
 })
 

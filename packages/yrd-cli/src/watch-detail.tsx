@@ -141,6 +141,9 @@ export function WatchDetail({
           {detail.note}
         </Text>
       )}
+      {detail.checks.length === 0 ? (
+        <Text color="$fg-muted">the declaration this change was judged by names no check</Text>
+      ) : null}
       <Tabs
         value={tab}
         onChange={(value: string) => {
@@ -224,7 +227,12 @@ export function RunStatusBox({
       )}
       <TimingRows row={row} />
       {run.steps.map((step, index) => (
-        <StepLine key={`${String(index)}:${step.name}`} step={step} live={live} />
+        <StepLine
+          key={`${String(index)}:${step.name}`}
+          step={step}
+          live={live}
+          {...(step.state === "running" && row.live?.check === step.name ? { since: row.live.since } : {})}
+        />
       ))}
     </TitledBox>
   )
@@ -245,8 +253,14 @@ function TimingRows({ row }: { row: Row }) {
   )
 }
 
+/** The running step's own clock: its own leaf on the second, so the box does not re-render for it. */
+function RunningFor({ since }: { since: Date }) {
+  const now = useNow()
+  return <Text color="$fg-muted"> {mediaDuration(now.getTime() - since.getTime())}</Text>
+}
+
 /** One step: hanging glyph, name, duration, and the remedy on a failed one (item 39). Kind-agnostic. */
-function StepLine({ step, live }: { step: WatchStep; live: boolean }) {
+function StepLine({ step, live, since }: { step: WatchStep; live: boolean; since?: Date }) {
   const color = CHECK_COLOR[step.state]
   const active = step.state === "running"
   const failed = step.state === "failed" || step.state === "stuck"
@@ -267,6 +281,7 @@ function StepLine({ step, live }: { step: WatchStep; live: boolean }) {
     >
       <Text wrap="wrap" minWidth={0}>
         <Text color={failed ? color : active ? "$fg-info" : undefined}>{step.name}</Text>
+        {since === undefined ? null : <RunningFor since={since} />}
         {duration === "" ? null : <Text color="$fg-muted"> {duration}</Text>}
         {step.remedy === undefined ? null : <Text color={color}> — {step.remedy}</Text>}
       </Text>
@@ -301,9 +316,9 @@ export function changeId(row: Pick<Row, "branch" | "head">): string {
   return `${row.branch}@${row.head.slice(0, 12)}`
 }
 
-/** What stands where a subject would, when the head is not in this repository: said, never blank. */
-function subjectAbsent(row: Pick<Row, "state">): string {
-  return row.state === "direct" ? "" : "(subject not fetched: the head is not in this repository)"
+/** What stands where a subject would: a direct row's one line about its commit, else the reason the head is not here. Said, never blank. */
+function subjectAbsent(row: Pick<Row, "state" | "reason">): string {
+  return row.state === "direct" ? (row.reason ?? "") : "(subject not fetched: the head is not in this repository)"
 }
 
 /**
