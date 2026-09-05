@@ -92,16 +92,3 @@ export function clocksLine(row: Row, now: Date = new Date()): string {
     .filter((part): part is string => part !== undefined)
     .join(" · ")
 }
-
-/**
- * Coarse human duration, largest unit — the retired watch timeline's own cell
- * format, kept so a reader's eye does not have to relearn it.
- */
-export function duration(milliseconds: number): string {
-  const ms = Math.max(0, milliseconds)
-  if (ms < 1_000) return `${String(Math.round(ms))}ms`
-  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`
-  if (ms < 3_600_000) return `${String(Math.floor(ms / 60_000))}m`
-  if (ms < 86_400_000) return `${String(Math.floor(ms / 3_600_000))}h`
-  return `${String(Math.floor(ms / 86_400_000))}d`
-}

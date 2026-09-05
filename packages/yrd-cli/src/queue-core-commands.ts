@@ -62,13 +62,13 @@ import {
   type Row,
 } from "@yrd/queue-core"
 import { declarationHere } from "./declaration.ts"
-import { clocksLine, noticeLine, duration } from "./watch-notice.ts"
+import { clocksLine, noticeLine } from "./watch-notice.ts"
 import { filterRows, rowLine, rowTable, watchRows, watchRowKey, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
-import { clock } from "./watch-format.ts"
+import { CHECK_GLYPH, clock, mediaDuration } from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOf, type RunDecision } from "./watch-stats.ts"
 import { readGarageDeclaration } from "./garage.ts"
@@ -1153,19 +1153,11 @@ function endingOf(row: Row): "checked" | "merged" | "failed" | "stuck" | "open" 
  * because the operator already reads them: passed, failed, stuck, running, and
  * a check the change never reached.
  */
-const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
-  failed: "\u00d7",
-  passed: "\u2713",
-  running: "\u25c9",
-  "not-run": "\u2212",
-  stuck: "\u25cc",
-  unmeasured: "?",
-}
 
 /** One check, and under it the command that produced it and the log it wrote. */
 function checkLines(check: CheckView): readonly string[] {
   const exit = check.result?.exit === undefined ? "" : ` exit=${check.result.exit}`
-  const ms = check.result?.ms === undefined ? "" : ` ${duration(check.result.ms)}`
+  const ms = check.result?.ms === undefined ? "" : ` ${mediaDuration(check.result.ms)}`
   const state =
     check.state === "not-run"
       ? " NOT RUN"

@@ -9,7 +9,7 @@
  */
 
 import { homedir } from "node:os"
-import { runStartedAt, type Row } from "@yrd/queue-core"
+import { runStartedAt, type CheckView, type Row } from "@yrd/queue-core"
 
 /** The one glyph per state — the retired watch's, kept because the operator already reads them. */
 export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
@@ -41,6 +41,26 @@ export const STATE_COLOR: Readonly<Record<Row["state"], string>> = {
 
 /** The working color a live check overlays on any state. */
 export const RUNNING_COLOR = "$fg-info"
+
+/** The one glyph per check state, so the tab strip, the step lines and the one-shot print cannot disagree about a check. */
+export const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
+  failed: "×",
+  "not-run": "−",
+  passed: "✓",
+  running: "◉",
+  stuck: "◌",
+  unmeasured: "?",
+}
+
+/** The one color per check state. */
+export const CHECK_COLOR: Readonly<Record<CheckView["state"], string>> = {
+  failed: "$fg-error",
+  "not-run": "$fg-muted",
+  passed: "$fg-success",
+  running: "$fg-info",
+  stuck: "$fg-warning",
+  unmeasured: "$fg-warning",
+}
 
 /** The color for a row: the working one while a check runs on it, else its state's. */
 export function stateColor(row: Pick<Row, "state" | "live">): string {

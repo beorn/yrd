@@ -42,7 +42,7 @@ import type { ChangeRecord, CheckView, Row } from "@yrd/queue-core"
 import { clocks } from "@yrd/queue-core"
 import { diffSummary, historyEntries, metadataGroups, metadataKeyWidth, type ChangeCommits } from "./watch-change.ts"
 import { useNow } from "./watch-clock.ts"
-import { clock, mediaDuration, stateColor, stateGlyph } from "./watch-format.ts"
+import { CHECK_COLOR, CHECK_GLYPH, clock, mediaDuration, stateColor, stateGlyph } from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { explanationLine, headlineOf, runTitle, timingRows, type WatchRun, type WatchStep } from "./watch-run.ts"
 
@@ -97,25 +97,6 @@ export function defaultTab(checks: readonly CheckPanel[]): string {
 
 /** The Changes tab's value: never a check's index. */
 export const CHANGES_TAB = "changes"
-
-/** The word a tab wears, so the strip alone says which checks were never reached. */
-const STEP_GLYPH: Readonly<Record<CheckView["state"], string>> = {
-  failed: "×",
-  "not-run": "−",
-  passed: "✓",
-  running: "◉",
-  stuck: "◌",
-  unmeasured: "?",
-}
-
-const STEP_COLOR: Readonly<Record<CheckView["state"], string>> = {
-  failed: "$fg-error",
-  "not-run": "$fg-muted",
-  passed: "$fg-success",
-  running: "$fg-info",
-  stuck: "$fg-warning",
-  unmeasured: "$fg-warning",
-}
 
 export function WatchDetail({
   detail,
@@ -172,8 +153,8 @@ export function WatchDetail({
           </Tab>
           {detail.checks.map((check, at) => (
             <Tab key={String(at)} value={String(at)}>
-              <Text color={STEP_COLOR[check.state]}>
-                {STEP_GLYPH[check.state]} {check.name}
+              <Text color={CHECK_COLOR[check.state]}>
+                {CHECK_GLYPH[check.state]} {check.name}
                 {check.phase !== undefined && detail.checks.filter((other) => other.name === check.name).length > 1
                   ? ` (${check.phase})`
                   : ""}
@@ -257,7 +238,7 @@ export function RunStatusBox({
 
 /** One step: hanging glyph, name, duration, and the remedy on a failed one (item 39). Kind-agnostic. */
 function StepLine({ step, live }: { step: WatchStep; live: boolean }) {
-  const color = STEP_COLOR[step.state]
+  const color = CHECK_COLOR[step.state]
   const active = step.state === "running"
   const failed = step.state === "failed" || step.state === "stuck"
   const duration = step.state === "not-run" ? "not run" : step.ms === undefined ? "" : mediaDuration(step.ms)
@@ -266,11 +247,11 @@ function StepLine({ step, live }: { step: WatchStep; live: boolean }) {
       marker={
         active && live ? (
           <Pulse synchronized colors={[color, "$fg-muted"]} flexShrink={0}>
-            {STEP_GLYPH[step.state]}
+            {CHECK_GLYPH[step.state]}
           </Pulse>
         ) : (
           <Text color={color} flexShrink={0}>
-            {STEP_GLYPH[step.state]}
+            {CHECK_GLYPH[step.state]}
           </Text>
         )
       }
