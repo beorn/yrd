@@ -41,6 +41,16 @@ export function isDuplicateMerge(run: Pick<JournalRun, "decision" | "reason" | "
 export type RowDecision = Readonly<{ decision: RunDecision["decision"]; duplicate: boolean }>
 
 /**
+ * A row that recorded a verdict the reader cannot name: a `result` sentence
+ * that is neither a check verdict nor the row's own incident, or a journal
+ * run whose `decision` is a word this reader does not know. Counted apart and
+ * never folded into stuck (@cto 0686be28): a new result vocabulary must show
+ * up as a number nobody expected, not as a stuck run nobody had.
+ */
+export const UNCLASSIFIED = "unclassified"
+export type RowVerdict = RowDecision | typeof UNCLASSIFIED
+
+/**
  * What the run behind a row decided, read from the row's own fields — the
  * one rule for a row split by a journal run and for a row that stands for
  * its whole change:
@@ -49,13 +59,15 @@ export type RowDecision = Readonly<{ decision: RunDecision["decision"]; duplicat
  * 2. a `result` says the verdict — `fail …` failed, `stuck …` stuck, `pass …`
  *    merged when the row carries the run's merge commit, a duplicate merge
  *    when it carries the already-on-the-target reason and no commit, checked
- *    otherwise; any other sentence with an `endedAt` is a stuck run's incident;
+ *    otherwise; the row's own incident — the sentence `runRow` writes as
+ *    `<code>: …` with that code in `reason` — is a stuck run; any other
+ *    sentence is {@link UNCLASSIFIED}, counted apart, never stuck;
  * 3. no `result`: the change's `state` when it is a decision (a replaced or
  *    deleted change reads failed with no run of its own), else nothing.
  * `runRow` (queue core, table.ts) writes exactly these fields from a journal
  * run, so a split row answers as that run and an unsplit row as its change.
  */
-export function rowDecision(row: Row): RowDecision | undefined {
+export function rowDecision(row: Row): RowVerdict | undefined {
   const result = row.result
   if (result !== undefined) {
     if (row.endedAt === undefined) return undefined
@@ -66,7 +78,8 @@ export function rowDecision(row: Row): RowDecision | undefined {
       const duplicate = isDuplicateMerge({ decision: "merged", merge: row.merge, reason: row.reason })
       return duplicate ? { decision: "merged", duplicate: true } : { decision: "checked", duplicate: false }
     }
-    return { decision: "stuck", duplicate: false }
+    if (row.reason !== undefined && result.startsWith(`${row.reason}:`)) return { decision: "stuck", duplicate: false }
+    return UNCLASSIFIED
   }
   switch (row.state) {
     case "merged":
@@ -92,18 +105,36 @@ export function rowDecision(row: Row): RowDecision | undefined {
  */
 export function decisionsOfRows(rows: readonly WatchRow[]): readonly RunDecision[] {
   const decisions: RunDecision[] = []
-  for (const { row, run } of rows) {
-    if (run !== undefined) {
-      const decision = run.decision
-      if (decision !== "merged" && decision !== "failed" && decision !== "stuck" && decision !== "checked") continue
-      decisions.push({ at: run.at, decision, duplicate: isDuplicateMerge(run), run: run.id })
-      continue
-    }
-    const decided = rowDecision(row)
-    if (decided === undefined || row.at === undefined) continue
-    decisions.push({ at: row.at, ...decided, run: row.run ?? `${row.branch}@${row.head}` })
+  for (const item of rows) {
+    const verdict = verdictOfRow(item)
+    if (verdict === undefined || verdict === UNCLASSIFIED) continue
+    const at = item.run?.at ?? item.row.at
+    if (at === undefined) continue
+    decisions.push({ at, ...verdict, run: item.run?.id ?? item.row.run ?? `${item.row.branch}@${item.row.head}` })
   }
   return decisions
+}
+
+/** One row's verdict: the journal run's decision when the row was split by one, else the row's own fields. */
+export function verdictOfRow(item: WatchRow): RowVerdict | undefined {
+  const { row, run } = item
+  if (run !== undefined) {
+    const decision = run.decision
+    // The records a run writes about a change: `opened` and `sent` are not
+    // verdicts (the opening, and the notice delivered after an ending); the
+    // four verdicts count; any other word is one this reader does not know.
+    if (decision === undefined || decision === "opened" || decision === "sent") return undefined
+    if (decision !== "merged" && decision !== "failed" && decision !== "stuck" && decision !== "checked") {
+      return UNCLASSIFIED
+    }
+    return { decision, duplicate: isDuplicateMerge(run) }
+  }
+  return rowDecision(row)
+}
+
+/** The rows whose verdict the reader could not name — see {@link UNCLASSIFIED}. */
+export function unclassifiedRows(rows: readonly WatchRow[]): readonly WatchRow[] {
+  return rows.filter((item) => verdictOfRow(item) === UNCLASSIFIED)
 }
 
 export type StatsBucket = Readonly<{

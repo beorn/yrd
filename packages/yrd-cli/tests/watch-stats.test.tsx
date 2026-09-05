@@ -13,7 +13,16 @@ import { render } from "silvery/test"
 import type { JournalRun, WatchRow } from "@yrd/queue-core"
 import { StatsBox, statsHoursFor } from "../src/watch-boxes.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
-import { countCell, decisionsOfRows, isDuplicateMerge, statsBuckets, type RunDecision } from "../src/watch-stats.ts"
+import {
+  UNCLASSIFIED,
+  countCell,
+  decisionsOfRows,
+  isDuplicateMerge,
+  rowDecision,
+  statsBuckets,
+  unclassifiedRows,
+  type RunDecision,
+} from "../src/watch-stats.ts"
 
 // A local instant: 14:30 on a Thursday, so yesterday and a midnight both fall inside 24 hours.
 const NOW = new Date(2026, 8, 3, 14, 30, 0)
@@ -105,6 +114,11 @@ describe("the duplicate predicate and the flattening", () => {
           state: "failed",
         },
       },
+      // A run whose record about the change is the notice it sent after an ending: not a verdict, not unknown.
+      {
+        row: { ...two, at: NOW, state: "merged" },
+        run: journalRun("r5", { decision: "sent", reason: "change-ref-taken" }),
+      },
       // A run that ran a check and recorded no decision: a result with no endedAt.
       {
         row: {
@@ -126,6 +140,24 @@ describe("the duplicate predicate and the flattening", () => {
       ["r4", "failed", false],
       ["q-5", "failed", false],
     ])
+    expect(unclassifiedRows(rows)).toEqual([])
+  })
+
+  it("names a stuck run by its own incident sentence and leaves an unknown sentence unclassified, never stuck", () => {
+    const incident = {
+      at: NOW,
+      branch: "task/i",
+      endedAt: NOW,
+      head: "1".repeat(40),
+      reason: "yrd-check-unresolved",
+      result: "yrd-check-unresolved: the queue could not judge task/i at merge: affected-tests exit 3 is not a verdict",
+      state: "failed" as const,
+    }
+    expect(rowDecision(incident)).toEqual({ decision: "stuck", duplicate: false })
+    expect(rowDecision({ ...incident, reason: undefined })).toBe(UNCLASSIFIED)
+    expect(rowDecision({ ...incident, result: "held by hand" })).toBe(UNCLASSIFIED)
+    expect(decisionsOfRows([{ row: { ...incident, result: "held by hand" } }])).toEqual([])
+    expect(unclassifiedRows([{ row: incident }, { row: { ...incident, result: "held by hand" } }])).toHaveLength(1)
   })
 })
 

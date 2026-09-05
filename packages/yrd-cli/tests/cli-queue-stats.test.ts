@@ -132,6 +132,7 @@ describe("yrd queue stats through the process entry", () => {
       failed: 0,
       merged: 0,
       stuck: 0,
+      unclassified: 0,
     })
     expect(document.groups).toEqual([expect.objectContaining({ key: "task/one", rows: 1 })])
     expect(document.pushedNeverSubmitted.count).toBe(1)

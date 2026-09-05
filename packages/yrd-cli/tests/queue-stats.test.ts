@@ -157,7 +157,14 @@ describe("the compact witness: one queue day in seven rows", () => {
     expect(stats.total).toMatchObject({ byAncestry: 1, failed: 1, inLine: 1, merged: 3, stuck: 0 })
     // Per run: task/a failed once, passed once without merging (checked), merged once; task/b failed once and
     // merged once; task/c's merge merged nothing; task/d decided nothing yet.
-    expect(stats.total.decisions).toEqual({ checked: 1, duplicates: 1, failed: 2, merged: 2, stuck: 0 })
+    expect(stats.total.decisions).toEqual({
+      checked: 1,
+      duplicates: 1,
+      failed: 2,
+      merged: 2,
+      stuck: 0,
+      unclassified: 0,
+    })
     expect(decisionsOfRows(COMPACT)).toHaveLength(6)
     // Retries: task/a's two extra runs. Re-pushed: task/b, once.
     expect(stats.total).toMatchObject({ branches: 4, rePushedBranches: 1, rePushes: 1, sameHeadRetries: 2 })
@@ -202,7 +209,14 @@ describe("the real witness: eighteen rows of the live queue", () => {
     })
     // Verdicts per run: 3 merges, 1 duplicate, 5 failed (three of them `replaced`), 2 stuck runs whose
     // result is an incident sentence; 7 rows are runs that recorded no decision.
-    expect(stats.total.decisions).toEqual({ checked: 0, duplicates: 1, failed: 5, merged: 3, stuck: 2 })
+    expect(stats.total.decisions).toEqual({
+      checked: 0,
+      duplicates: 1,
+      failed: 5,
+      merged: 3,
+      stuck: 2,
+      unclassified: 0,
+    })
     expect(decisionsOfRows(rows)).toHaveLength(11)
     expect(stats.total).toMatchObject({ branches: 5, rePushedBranches: 2, rePushes: 3, sameHeadRetries: 10 })
     expect(stats.total.latency.count).toBe(3)
@@ -244,6 +258,63 @@ describe("the real witness: eighteen rows of the live queue", () => {
   })
 })
 
+describe("a verdict the reader cannot name (@cto 0686be28)", () => {
+  it("counts an unknown result sentence apart as unclassified, never as stuck, and says so on the definitions line", () => {
+    const rows: readonly WatchRow[] = [
+      // A stuck run's incident: the sentence runRow writes as `<code>: …` with the code in `reason`.
+      row({
+        at: at("2026-09-05T02:00:00Z"),
+        branch: "task/x",
+        head: "1".repeat(40),
+        state: "merged",
+        result: "yrd-setup-unusable: the queue could not prepare a worktree for task/x; next: repair the queue setup",
+        reason: "yrd-setup-unusable",
+        endedAt: at("2026-09-05T02:00:00Z"),
+      }),
+      // A sentence this reader does not know: a future vocabulary, or a record it never learned.
+      row({
+        at: at("2026-09-05T03:00:00Z"),
+        branch: "task/y",
+        head: "2".repeat(40),
+        state: "failed",
+        result: "quarantined by the operator",
+        endedAt: at("2026-09-05T03:00:00Z"),
+      }),
+      // A journal run whose decision is a word this reader does not know.
+      {
+        row: { at: at("2026-09-05T04:00:00Z"), branch: "task/z", head: "3".repeat(40), state: "failed" },
+        run: {
+          at: at("2026-09-05T04:00:00Z"),
+          branch: "task/z",
+          checks: [],
+          decision: "deferred",
+          head: "3".repeat(40),
+          id: "q-9",
+          startedAt: at("2026-09-05T03:50:00Z"),
+        },
+      },
+    ]
+    const stats = queueStats(rows, [], { now: NOW })
+    expect(stats.total.decisions).toEqual({
+      checked: 0,
+      duplicates: 0,
+      failed: 0,
+      merged: 0,
+      stuck: 1,
+      unclassified: 2,
+    })
+    expect(decisionsOfRows(rows).map((decision) => decision.decision)).toEqual(["stuck"])
+    // The changes still count by the queue's own state; only the run verdicts are unnamed.
+    expect(stats.total).toMatchObject({ changes: 3, failed: 2, merged: 1 })
+    const text = formatQueueStats(stats, "q")
+    expect(text).toContain(
+      "0 checked (the STATS pane's numbers), 2 UNCLASSIFIED (a result vocabulary this reader does not know; never counted as stuck)",
+    )
+    // And a queue with nothing unnamed does not mention it.
+    expect(formatQueueStats(queueStats(COMPACT, [], { now: NOW }), "q")).not.toContain("UNCLASSIFIED")
+  })
+})
+
 describe("the window and the pushed refs", () => {
   it("keeps only the decisions at or after --since, keeps rows still in line, and names the window's origin", () => {
     const all = queueStats(COMPACT, [], { now: NOW })
@@ -268,7 +339,14 @@ describe("the window and the pushed refs", () => {
     // task/a's merging run and task/c's ancestry merge are inside; task/d is in line, so always in view.
     expect(recent.total.rows).toBe(3)
     expect(recent.total).toMatchObject({ byAncestry: 1, changes: 3, inLine: 1, merged: 2 })
-    expect(recent.total.decisions).toEqual({ checked: 0, duplicates: 1, failed: 0, merged: 1, stuck: 0 })
+    expect(recent.total.decisions).toEqual({
+      checked: 0,
+      duplicates: 1,
+      failed: 0,
+      merged: 1,
+      stuck: 0,
+      unclassified: 0,
+    })
     expect(recent.total.latency).toEqual({ count: 1, medianMs: 14_400_000, p90Ms: 14_400_000 })
   })
 

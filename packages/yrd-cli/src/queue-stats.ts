@@ -39,7 +39,7 @@
  */
 
 import type { Row, WatchRow } from "@yrd/queue-core"
-import { decisionsOfRows, rowDecision, type RunDecision } from "./watch-stats.ts"
+import { decisionsOfRows, unclassifiedRows } from "./watch-stats.ts"
 
 export { decisionsOfRows } from "./watch-stats.ts"
 
@@ -82,13 +82,15 @@ export type LatencyStats = Readonly<{
   p90Ms?: number
 }>
 
-/** Verdicts counted per run — what the STATS pane counts, over the same rows. */
+/** Verdicts counted per run — what the STATS pane counts, over the same rows; `unclassified` is what neither could name. */
 export type DecisionCounts = Readonly<{
   merged: number
   duplicates: number
   failed: number
   stuck: number
   checked: number
+  /** Rows that recorded a verdict this reader cannot name: a result vocabulary it does not know. Never folded into stuck. */
+  unclassified: number
 }>
 
 export type StatsGroup = Readonly<{
@@ -153,43 +155,16 @@ function percentile(sorted: readonly number[], p: number): number | undefined {
   return sorted[rank - 1]
 }
 
-/** The verdict a row carries, journal run first, as {@link decisionsOfRows} reads it. */
-function verdictOf(item: WatchRow): Readonly<{ decision: RunDecision["decision"]; duplicate: boolean }> | undefined {
-  const [decision] = decisionsOfRows([item])
-  if (decision !== undefined) return { decision: decision.decision, duplicate: decision.duplicate }
-  return item.run === undefined ? rowDecision(item.row) : undefined
-}
-
-/**
- * Each change's LAST verdict: the newest decided row per `branch@head`. A
- * change with no decided row is in line.
- */
-function lastVerdicts(
-  rows: readonly WatchRow[],
-): Map<string, Readonly<{ row: Row; verdict: ReturnType<typeof verdictOf> }>> {
-  const last = new Map<string, Readonly<{ row: Row; verdict: ReturnType<typeof verdictOf> }>>()
-  for (const item of rows) {
-    const key = `${item.row.branch}@${item.row.head}`
-    const verdict = verdictOf(item)
-    const seen = last.get(key)
-    if (seen === undefined) {
-      last.set(key, { row: item.row, verdict })
-      continue
-    }
-    // A decided row outranks an undecided one; among decided rows the newest wins.
-    if (verdict === undefined) continue
-    if (seen.verdict === undefined || (seen.row.at?.getTime() ?? 0) <= (item.row.at?.getTime() ?? 0)) {
-      last.set(key, { row: item.row, verdict })
-    }
-  }
-  return last
-}
-
 function latencyOf(rows: readonly WatchRow[]): LatencyStats {
-  // One latency per merged CHANGE: from its opening to the row that merged it.
-  const ms = [...lastVerdicts(rows).values()]
-    .filter(({ verdict }) => verdict?.decision === "merged" && !verdict.duplicate)
-    .map(({ row }) => (row.since === undefined || row.at === undefined ? -1 : row.at.getTime() - row.since.getTime()))
+  // One latency per merged CHANGE: from its opening to the row whose run merged it (a head merges once).
+  const merging = new Map<string, Row>()
+  for (const item of rows) {
+    const [decision] = decisionsOfRows([item])
+    if (decision === undefined || decision.decision !== "merged" || decision.duplicate) continue
+    merging.set(`${item.row.branch}@${item.row.head}`, item.row)
+  }
+  const ms = [...merging.values()]
+    .map((row) => (row.since === undefined || row.at === undefined ? -1 : row.at.getTime() - row.since.getTime()))
     .filter((value) => value >= 0)
     .sort((a, b) => a - b)
   const median = percentile(ms, 50)
@@ -244,6 +219,7 @@ function groupOf(key: string, rows: readonly WatchRow[]): StatsGroup {
       failed: decisions.filter((decision) => decision.decision === "failed").length,
       merged: decisions.filter((decision) => decision.decision === "merged" && !decision.duplicate).length,
       stuck: decisions.filter((decision) => decision.decision === "stuck").length,
+      unclassified: unclassifiedRows(rows).length,
     },
     failed: inState("failed"),
     inLine: inState("queued", "checked"),
@@ -398,7 +374,8 @@ export function formatQueueStats(stats: QueueStats, queue: string): string {
   const d = stats.total.decisions
   const definitions =
     "ROWS = one per run per change · CHANGES = distinct branch@head · MERGED/FAILED/STUCK/IN LINE = changes by the queue's current state; ANCESTRY = of the merged, those no run merged (replaced, or already on the target) · " +
-    `verdicts per run: ${String(d.merged)} merged, ${String(d.duplicates)} dup, ${String(d.failed)} failed, ${String(d.stuck)} stuck, ${String(d.checked)} checked (the STATS pane's numbers) · ` +
+    `verdicts per run: ${String(d.merged)} merged, ${String(d.duplicates)} dup, ${String(d.failed)} failed, ${String(d.stuck)} stuck, ${String(d.checked)} checked (the STATS pane's numbers)` +
+    `${d.unclassified === 0 ? "" : `, ${String(d.unclassified)} UNCLASSIFIED (a result vocabulary this reader does not know; never counted as stuck)`} · ` +
     "RETRIES = rows beyond the first for one branch@head · RE-PUSHED = branches with more than one head · " +
     "MEDIAN/P90 = opened → merged, per merged change · " +
     sinceLine(stats)
