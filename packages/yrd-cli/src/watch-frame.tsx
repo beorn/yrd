@@ -3,7 +3,7 @@
  *
  * The retired surface stacked, top to bottom: the loud pause line only when
  * there is no RUNNER rail to carry it, the title line, the RUNNER box with the
- * pause on its last rail, the table header and rows, the STATS box, the pills
+ * pause on its last rail, the table header and rows, the pills, the STATS box
  * (24169-old-watch.md §1, 24169-old-list.md §1). The pane and `yrd list` each
  * spelled that order by hand and drifted apart (2026-09-05: the pane got RUNNER
  * back above the table while the page still printed it last), so the order
