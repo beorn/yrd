@@ -31,9 +31,11 @@
  *   a push without a `yrd submit` (plan E2) — restricted to the window by the
  *   tip's committer date when the commit is here, and counted apart as
  *   `ageUnknown` when it is not (a tip nobody fetched has no date to read).
- *   Every age is a COMMIT age (`ageBasis`): git records no push time, so a
- *   commit age is a lower bound on how long the push has waited, never the
- *   waiting time itself.
+ *   Every age is a COMMIT age (`ageBasis`): git records no push time. A tip
+ *   is ordinarily committed before it is pushed, so its commit age is at most
+ *   an upper bound on how long the push has waited — and committer dates are
+ *   whatever the committer's clock said, so nothing guarantees even that. It
+ *   says how old the tip is, never how long it has waited.
  * - latency: per merged change (its last merged row), from the change's
  *   `since` (opened) to that row's `at` (merged); median and p90 over them.
  * - the window: a row is inside when its decision (`at`) is at or after
@@ -100,6 +102,15 @@ export type StatsGroup = Readonly<{
   /** `queue` for the whole queue; otherwise the submitter or the branch. */
   key: string
   rows: number
+  /**
+   * The rows in view counted by the state they carry, states present only. A
+   * per-run row carries its CHANGE's current state, so this is runs by where
+   * their change ended up — not verdicts (`decisions`) and not changes
+   * (`merged`, `failed`, …). It is the number the first STATS box printed and
+   * the one older snapshots show; kept under its own name for that continuity,
+   * never printed in the table.
+   */
+  rowsByState: Readonly<Partial<Record<Row["state"], number>>>
   /** Distinct `branch@head` among the rows. */
   changes: number
   /** Changes in state merged: on the target, by a merge of their own or by ancestry. */
@@ -216,6 +227,10 @@ function groupOf(key: string, rows: readonly WatchRow[]): StatsGroup {
   const inState = (...wanted: readonly Row["state"][]): number =>
     [...states.values()].filter((state) => wanted.includes(state)).length
   const merged = inState("merged")
+  const rowsByState: Partial<Record<Row["state"], number>> = {}
+  for (const { row } of [...rows].sort((a, b) => a.row.state.localeCompare(b.row.state))) {
+    rowsByState[row.state] = (rowsByState[row.state] ?? 0) + 1
+  }
   return {
     branches: branches.size,
     byAncestry: [...states.entries()].filter(([change, state]) => state === "merged" && !mergedByRun.has(change))
@@ -237,6 +252,7 @@ function groupOf(key: string, rows: readonly WatchRow[]): StatsGroup {
     rePushedBranches,
     rePushes,
     rows: rows.length,
+    rowsByState,
     sameHeadRetries,
     stuck: inState("stuck"),
   }

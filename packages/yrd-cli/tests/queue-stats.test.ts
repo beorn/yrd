@@ -173,6 +173,9 @@ describe("the compact witness: one queue day in seven rows", () => {
     // The mutation: the first cut counted `state` per row and called this queue four merges for three.
     expect(stateOnlyMerged(COMPACT)).toBe(4)
     expect(stats.total.merged).toBe(3)
+    // That per-row number survives under its own name, for the snapshots that were read off it:
+    // task/a's three rows and task/b@3 and task/c carry `merged`, five rows for three merged changes.
+    expect(stats.total.rowsByState).toEqual({ failed: 1, merged: 5, queued: 1 })
   })
 
   it("groups by submitter and by branch, and the groups sum to the queue", () => {
@@ -218,6 +221,8 @@ describe("the real witness: eighteen rows of the live queue", () => {
       unclassified: 0,
     })
     expect(decisionsOfRows(rows)).toHaveLength(11)
+    // Rows by the state they carry (`python3 -c 'Counter(c["state"] for c in changes)'` on the fixture).
+    expect(stats.total.rowsByState).toEqual({ failed: 2, merged: 16 })
     expect(stats.total).toMatchObject({ branches: 5, rePushedBranches: 2, rePushes: 3, sameHeadRetries: 10 })
     expect(stats.total.latency.count).toBe(3)
     expect(Math.round(stats.total.latency.medianMs ?? 0)).toBe(1_463_826)
