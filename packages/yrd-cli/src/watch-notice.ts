@@ -3,8 +3,8 @@
  * (S2.17, README 784).
  *
  * **It derives nothing.** The state is `Row.state`, which `readChange` alone
- * produces; the cause is the row's own `reason`/`result`; the next owner is
- * `Row.next`, derived once in state.ts beside the state it reads. There is no
+ * produces; the cause is the row's own incident/`reason`/`result`; routing is
+ * `Row.next`, derived once in state.ts. Incidents carry advice, not actors. There is no
  * comparison against a state word anywhere below, and there must never be
  * one: two parallel
  * derivations of a display band is the ready-vs-queued bug that shipped twice
@@ -16,7 +16,7 @@
  * new state added to the core is a compile error here, which is the point.
  */
 
-import { clocks, type Row } from "@yrd/queue-core"
+import { clocks, incidentLine, type Row } from "@yrd/queue-core"
 
 export type Notice = Readonly<{
   glyph: string
@@ -24,7 +24,7 @@ export type Notice = Readonly<{
   word: string
   /** Why it is that, when the row carries a why. */
   cause?: string
-  /** Whose move it is, and why it is theirs. */
+  /** Incident advice, or whose move an ordinary change is and why. */
   next?: string
 }>
 
@@ -57,20 +57,27 @@ const WORD: Readonly<Record<Row["state"], string>> = {
 export function watchNotice(row: Row): Notice {
   const live = row.live
   const position = row.position === undefined ? "" : ` #${String(row.position)}`
-  const cause = row.reason ?? row.result
+  const cause = row.incident === undefined ? (row.reason ?? row.result) : incidentLine(row.incident)
+  const next =
+    row.incident !== undefined
+      ? row.incident.next
+      : row.next === undefined
+        ? undefined
+        : `${row.next.owner} — ${row.next.because}`
   return {
     glyph: live === undefined ? GLYPH[row.state] : RUNNING,
     // The overlay says what is happening RIGHT NOW; the state still says what
     // the records say, and both are on the line, because a change under a
     // check reads `queued` until its checked record lands and that is an
     // answer, not a bug to paper over.
-    word: live === undefined ? `${WORD[row.state]}${position}` : `${WORD[row.state]}${position}, checking ${live.check}`,
+    word:
+      live === undefined ? `${WORD[row.state]}${position}` : `${WORD[row.state]}${position}, checking ${live.check}`,
     ...(cause === undefined ? {} : { cause }),
-    ...(row.next === undefined ? {} : { next: `${row.next.owner} — ${row.next.because}` }),
+    ...(next === undefined ? {} : { next }),
   }
 }
 
-/** The notice as one line: state, then cause, then whose move it is. */
+/** The notice as one line: state, cause, and any next step. */
 export function noticeLine(row: Row): string {
   const notice = watchNotice(row)
   return [

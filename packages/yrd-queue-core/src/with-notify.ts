@@ -23,6 +23,7 @@ import { createProcess, shellCommand } from "@yrd/process"
 import { readCheckTrailer } from "./check.ts"
 import type { Ending, Notifier } from "./config.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
+import { INCIDENT_TRAILERS } from "./incident.ts"
 import {
   endedKind,
   readRecord,
@@ -358,10 +359,5 @@ const RESULT_TRAILERS = new Set([
   "Base",
   "Gitlink",
   "Merged-By",
-  "Code",
-  "Subject",
-  "Via",
-  "Evidence",
-  "Next",
-  "Owner",
+  ...INCIDENT_TRAILERS,
 ])

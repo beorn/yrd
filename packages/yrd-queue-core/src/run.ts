@@ -44,7 +44,7 @@ import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResul
 import { DIRECT_MERGE, endedKind, recordCommit, mergedBy, trailer, type Git, type WriteRecord } from "./records.ts"
 import { queueName, readConfig, type Target } from "./config.ts"
 import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
-import { incidentTrailers } from "./incident.ts"
+import { incidentTrailers, type IncidentCode } from "./incident.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import type { PauseRecord } from "./pause.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
@@ -142,6 +142,8 @@ type EndedWrite = Readonly<{
   subject: string
   trailers: readonly (readonly [string, string])[]
   remedy?: string
+  /** The foreign diagnosis, preserved verbatim in this ending's existing journal row. */
+  diagnosis?: SuperMergeDetail
 }>
 
 /**
@@ -549,9 +551,7 @@ type SuperMergeDetail = Readonly<{
   phase: string
   message: string
   subject?: string
-  evidence?: string
   next?: string
-  owner?: string
 }>
 
 type SettledGitlink = Readonly<{
@@ -723,9 +723,7 @@ function readSuperMergeDetail(value: unknown): SuperMergeDetail {
     phase: detail.phase,
     message: detail.message,
     ...(typeof detail.subject === "string" ? { subject: detail.subject } : {}),
-    ...(typeof detail.evidence === "string" ? { evidence: detail.evidence } : {}),
     ...(typeof detail.next === "string" ? { next: detail.next } : {}),
-    ...(typeof detail.owner === "string" ? { owner: detail.owner } : {}),
   }
 }
 
@@ -747,19 +745,17 @@ function mergeMessage(run: Run, entry: QueueEntry): string {
 async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): Promise<Ended> {
   const subject = (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim()
   const incident = {
-    code: detail.code,
+    code: "gitlink-off-main" as const,
     subject,
-    via: `git-super merge in yrd queue ${run.name} [${run.log.id}]`,
+    via: `git-super merge (${detail.code}, ${detail.phase}) in yrd queue ${run.name} [${run.log.id}]`,
     evidence: run.log.path,
     next: detail.next ?? "push the named component commit to its main, then run yrd queue run",
-    owner: detail.owner ?? "the component writer",
   }
   const tip = tipOf(entry.change)
   const sameWait =
     trailer(tip, "Code") === incident.code &&
     trailer(tip, "Subject") === incident.subject &&
-    trailer(tip, "Next") === incident.next &&
-    trailer(tip, "Owner") === incident.owner
+    trailer(tip, "Next") === incident.next
   if (!sameWait) {
     await writeRecord(
       run,
@@ -774,9 +770,11 @@ async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): P
   }
   run.log.write({
     branch: entry.change.branch,
+    code: detail.code,
     decision: entry.reading.state === "checked" ? "checked" : "queued",
     head: entry.change.head,
     kind: "change",
+    phase: detail.phase,
     reason: detail.message,
   })
   return "waiting"
@@ -801,18 +799,15 @@ async function candidateFailure(run: Run, entry: QueueEntry, detail: SuperMergeD
       trailers: [["Reason", reason]],
     })
   }
-  return run.steps.end(
-    run,
-    entry,
-    "stuck",
-    stuckWrite(run, {
-      code: detail.code,
+  return run.steps.end(run, entry, "stuck", {
+    ...stuckWrite(run, {
+      code: "yrd-merge-unresolved",
       next: detail.next ?? "repair the queue fault, then run yrd queue run",
-      owner: detail.owner,
       subject: detail.subject ?? detail.message,
-      via: `git-super merge (${detail.phase})`,
+      via: `git-super merge (${detail.code}, ${detail.phase})`,
     }),
-  )
+    diagnosis: detail,
+  })
 }
 
 async function attributedFailure(
@@ -854,7 +849,6 @@ async function attributedFailure(
       stuckWrite(run, {
         code: "yrd-submodule-main-regression",
         next: `fix or revert ${pins} on component main, then run yrd queue run`,
-        owner: "the component writer",
         subject: `${pins} breaks the root at the settled base`,
         trailers: checkTrailers(baseResults),
         via: `the settled base alone failed ${baseFailure.name}; the candidate's own content was absent`,
@@ -1388,7 +1382,8 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
     decision: kind,
     head: entry.change.head,
     kind: "change",
-    reason: ended.subject,
+    reason: ended.diagnosis?.message ?? ended.subject,
+    ...(ended.diagnosis === undefined ? {} : { code: ended.diagnosis.code, phase: ended.diagnosis.phase }),
   })
   // No record, no message: the message's id IS that record's sha, and the next
   // run's reading of the remote is what repairs the ending (24096).
@@ -1396,15 +1391,14 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
   return kind
 }
 
-/** One constructor for every complete queue-owned incident written to a change ref. */
+/** One constructor for queue-owned failures, with this run's real evidence and remedy. */
 function stuckWrite(
   run: Run,
   cause: Readonly<{
-    code: string
+    code: IncidentCode
     subject: string
     via: string
     next: string
-    owner?: string
     trailers?: readonly (readonly [string, string])[]
   }>,
 ): EndedWrite {
@@ -1418,7 +1412,6 @@ function stuckWrite(
         via: `${cause.via} in yrd queue ${run.name} [${run.log.id}]`,
         evidence: run.log.path,
         next: cause.next,
-        owner: cause.owner ?? "the queue operator",
       }),
       ...(cause.trailers ?? []),
     ],

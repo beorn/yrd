@@ -568,20 +568,23 @@ describe("yrd queue list, the table", () => {
     writeFileSync(evidence, '{"kind":"change","decision":"stuck"}\n')
     const subject = `verify could not decide ${"x".repeat(450)}THE-END-OF-THE-INCIDENT`
     const incident = {
-      code: "yrd-check-unresolved",
+      // This code deliberately predates the registry this reader knows. Stored
+      // records remain readable even when their writer was newer or older.
+      code: "yrd-historical-unknown",
       subject,
       via: "verify during merge in yrd queue test [q-lossless]",
       evidence,
       next: "repair verify or its queue environment, then run yrd queue run",
       owner: "the queue operator",
     }
+    const { owner: legacyOwner, ...projectedIncident } = incident
     const incidentTrailers = [
       ["Code", incident.code],
       ["Subject", incident.subject],
       ["Via", incident.via],
       ["Evidence", incident.evidence],
       ["Next", incident.next],
-      ["Owner", incident.owner],
+      ["Owner", legacyOwner],
     ] as const
     const ended = await appendRecord(w.git, "main", {
       change,
@@ -602,8 +605,13 @@ describe("yrd queue list, the table", () => {
       0,
     )
     const listed = records(listedJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
-    expect(listed.changes[0]).toMatchObject({ incident, reason: incident.code, state: "stuck" })
-    expect(String(listed.changes[0]?.result)).toContain("THE-END-OF-THE-INCIDENT")
+    expect(listed.changes[0]).toMatchObject({ incident: projectedIncident, reason: incident.code, state: "stuck" })
+    expect(listed.changes[0]).not.toHaveProperty("incident.owner")
+    expect(listed.changes[0]).not.toHaveProperty("next")
+    const listedResult = String(listed.changes[0]?.result)
+    expect(listedResult).toContain("THE-END-OF-THE-INCIDENT")
+    expect(listedResult.indexOf(subject)).toBeLessThan(listedResult.indexOf(incident.code))
+    expect(listedResult).not.toContain(legacyOwner)
 
     const listedText = capture(w.work)
     expect(await coreQueueCommand(w.work, listedText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
@@ -614,6 +622,8 @@ describe("yrd queue list, the table", () => {
       .find((line) => line.includes("task/incident"))
     expect(listedLine, listedText.stdout()).toBeDefined()
     expect(listedLine?.match(/\bstuck\b/gu), listedText.stdout()).toHaveLength(1)
+    expect(listedText.stdout()).not.toContain(legacyOwner)
+    expect(listedText.stdout()).not.toContain("owner:")
 
     const shownJson = capture(w.work)
     expect(
@@ -625,7 +635,14 @@ describe("yrd queue list, the table", () => {
       ),
     ).toBe(0)
     const shown = records(shownJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
-    expect(shown.changes[0]).toMatchObject({ incident, queue: "main", reason: incident.code, state: "stuck" })
+    expect(shown.changes[0]).toMatchObject({
+      incident: projectedIncident,
+      queue: "main",
+      reason: incident.code,
+      state: "stuck",
+    })
+    expect(shown.changes[0]).not.toHaveProperty("incident.owner")
+    expect(shown.changes[0]).not.toHaveProperty("next")
 
     const shownText = capture(w.work)
     expect(
@@ -636,7 +653,8 @@ describe("yrd queue list, the table", () => {
     expect(shownText.stdout()).toContain(`  via: ${incident.via}`)
     expect(shownText.stdout()).toContain(`  evidence: ${evidence}`)
     expect(shownText.stdout()).toContain(`  next: ${incident.next}`)
-    expect(shownText.stdout()).toContain(`  owner: ${incident.owner}`)
+    expect(shownText.stdout()).not.toContain(legacyOwner)
+    expect(shownText.stdout()).not.toContain("owner:")
     expect(shownText.stdout().match(/\bstuck\b/gu), shownText.stdout()).toHaveLength(1)
   })
 

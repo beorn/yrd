@@ -41,12 +41,13 @@ const roots: string[] = []
 const CHANGES = queueRefPrefix("main")
 const PAUSE_REF = pauseRef("main")
 
-const INCIDENT_FIELDS = ["Code", "Subject", "Via", "Evidence", "Next", "Owner"] as const
+const INCIDENT_FIELDS = ["Code", "Subject", "Via", "Evidence", "Next"] as const
 
 function incidentOf(record: ChangeRecord | undefined): Readonly<Record<(typeof INCIDENT_FIELDS)[number], string>> {
   if (record === undefined) throw new Error("no incident record")
   const incident = Object.fromEntries(INCIDENT_FIELDS.map((field) => [field, trailer(record, field)]))
   for (const field of INCIDENT_FIELDS) expect(incident[field], `${field}: must be present and non-empty`).toBeTruthy()
+  expect(trailer(record, "Owner")).toBeUndefined()
   return incident as Record<(typeof INCIDENT_FIELDS)[number], string>
 }
 
@@ -616,7 +617,6 @@ describe("a queue run", () => {
       Code: "yrd-check-unresolved",
       Subject: expect.stringContaining("verify"),
       Via: expect.stringContaining(outcome.run),
-      Owner: "the queue operator",
     })
     expect(isAbsolute(incident.Evidence)).toBe(true)
     expect(existsSync(incident.Evidence)).toBe(true)
@@ -1669,7 +1669,7 @@ describe("the target's setup", () => {
     await fetchChanges(w)
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
-    expect(incidentOf(records[1])).toMatchObject({ Code: "yrd-setup-unusable", Owner: "the queue operator" })
+    expect(incidentOf(records[1])).toMatchObject({ Code: "yrd-setup-unusable" })
     expect(records[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
     // The check never ran: there was no prepared tree to run it in.
     expect(whereRan(w).filter(([what]) => what === "check")).toEqual([])
@@ -1713,7 +1713,7 @@ describe("the target's setup", () => {
     await fetchChanges(w)
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
-    expect(incidentOf(records[1])).toMatchObject({ Code: "yrd-setup-unusable", Owner: "the queue operator" })
+    expect(incidentOf(records[1])).toMatchObject({ Code: "yrd-setup-unusable" })
     expect(logRecords(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "missing", result: "stuck", whose: "queue" },
     ])

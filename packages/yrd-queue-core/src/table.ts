@@ -225,7 +225,7 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
           ...(submitter === undefined ? {} : { submitter }),
           ...(options.journals?.dir === undefined ? {} : { journal: options.journals.dir }),
         })
-      : { because: incident.next, owner: incident.owner }
+      : undefined
   return {
     at: tip.at,
     branch: entry.change.branch,
