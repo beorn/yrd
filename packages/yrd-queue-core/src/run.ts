@@ -41,20 +41,12 @@ import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
-import {
-  appendRecord,
-  DIRECT_MERGE,
-  endedKind,
-  recordCommit,
-  mergedBy,
-  trailer,
-  type Git,
-  type WriteRecord,
-} from "./records.ts"
+import { DIRECT_MERGE, endedKind, recordCommit, mergedBy, trailer, type Git, type WriteRecord } from "./records.ts"
 import { queueName, readConfig, type Target } from "./config.ts"
 import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
 import { incidentTrailers } from "./incident.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
+import type { PauseRecord } from "./pause.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
@@ -123,6 +115,10 @@ export type Run = Readonly<{
   worktrees: string
   /** The target the run read at its start; every judgement is against it. */
   targetSha: string
+  /** The pause record captured in the same remote advertisement as the queue. */
+  pause: PauseRecord | undefined
+  /** The target OID this run successfully pushed, or its captured starting OID. */
+  targetAfter: { sha: string }
   /** What this queue calls itself wherever a stranger reads it: `<host>/<path>#<branch>`. */
   name: string
   /** The queue as this run read it: every change at the remote, and where each stood. */
@@ -194,7 +190,13 @@ export type Steps = Readonly<{
   push: (run: Run, entry: QueueEntry, plan: PushPlan) => Promise<Pushed>
   end: (run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended: EndedWrite) => Promise<Ended>
   /** A change ended and its record is written; whoever wants to hear it hears it here. */
-  ended: (run: Run, entry: QueueEntry, kind: "merged" | "failed" | "stuck", endedRecord: string) => Promise<void>
+  ended: (
+    run: Run,
+    entry: QueueEntry,
+    kind: "merged" | "failed" | "stuck",
+    endedRecord: string,
+    appendTip: string,
+  ) => Promise<void>
   /** The same, for a commit that went around the queue: there is no change to end. */
   direct: (run: Run, commit: DirectMerge) => Promise<void>
 }>
@@ -224,6 +226,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     log,
     name: queueName(options.target, await remoteUrl(git, options.target.remote)),
     options,
+    pause: queue.pause,
     queue: queue.changes,
     steps: composed(BASE),
     stop: (said) => {
@@ -231,6 +234,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     },
     tmpdir: join(options.workdir, "tmp"),
     targetSha,
+    targetAfter: { sha: targetSha },
     worktrees: join(options.workdir, "worktrees", log.id),
   }
   mkdirSync(run.worktrees, { recursive: true })
@@ -501,12 +505,16 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     if (failing.length > 0) {
       return await attributedFailure(run, entry, results, failing, "submit", composed.settled)
     }
-    await writeRecord(run, {
-      change,
-      kind: "checked",
-      subject: `${branch} passed the on-submit checks at ${run.options.target.branch} ${run.targetSha.slice(0, 12)}`,
-      trailers: [["Config", run.options.configBlob], ["Base", run.targetSha], ...checkTrailers(results)],
-    })
+    await writeRecord(
+      run,
+      {
+        change,
+        kind: "checked",
+        subject: `${branch} passed the on-submit checks at ${run.options.target.branch} ${run.targetSha.slice(0, 12)}`,
+        trailers: [["Config", run.options.configBlob], ["Base", run.targetSha], ...checkTrailers(results)],
+      },
+      tipOf(entry.change).sha,
+    )
     return "checked"
   } finally {
     await worktree.remove()
@@ -730,12 +738,16 @@ async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): P
     trailer(tip, "Next") === incident.next &&
     trailer(tip, "Owner") === incident.owner
   if (!sameWait) {
-    await writeRecord(run, {
-      change: entry.change,
-      kind: "opened",
-      subject,
-      trailers: incidentTrailers(incident),
-    })
+    await writeRecord(
+      run,
+      {
+        change: entry.change,
+        kind: "opened",
+        subject,
+        trailers: incidentTrailers(incident),
+      },
+      tip.sha,
+    )
   }
   run.log.write({
     branch: entry.change.branch,
@@ -960,20 +972,28 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     // The merged record says how it was merged and what it checked: by the queue,
     // with the on-merge checks' results, in the shape the checked record uses.
-    const mergedRecord = await appendRecord(run.git, run.options.target.branch, {
-      change,
-      kind: "merged",
-      subject: `${branch} merged into ${run.options.target.branch} as ${mergeCommit.slice(0, 12)}`,
-      trailers: [
-        ["Merge", mergeCommit],
-        ["Base", run.targetSha],
-        ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
-        ...checkTrailers(results),
-      ],
-    })
     const ref = changeRef(run.options.target.branch, change)
+    const expectedTip = tipOf(entry.change).sha
+    const mergedRecord = await recordCommit(
+      run.git,
+      {
+        change,
+        kind: "merged",
+        subject: `${branch} merged into ${run.options.target.branch} as ${mergeCommit.slice(0, 12)}`,
+        trailers: [
+          ["Merge", mergeCommit],
+          ["Base", run.targetSha],
+          ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
+          ...checkTrailers(results),
+        ],
+      },
+      expectedTip,
+    )
     const pushed = await run.steps.push(run, entry, {
-      leases: [[`refs/heads/${run.options.target.branch}`, run.targetSha]],
+      leases: [
+        [`refs/heads/${run.options.target.branch}`, run.targetSha],
+        [ref, expectedTip],
+      ],
       updates: [
         [mergeCommit, `refs/heads/${run.options.target.branch}`],
         [mergedRecord, ref],
@@ -991,10 +1011,12 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         head,
         kind: "change",
         reason: pushed.reason,
+        ...(pushed.reason === "change-ref-moved" ? { expected: expectedTip } : {}),
         ...(pushed.saw === undefined ? {} : { saw: pushed.saw }),
       })
       return "checked"
     }
+    run.targetAfter.sha = mergeCommit
     run.log.write({
       branch,
       change: name,
@@ -1005,7 +1027,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       tip: mergeCommit,
     })
     run.log.write({ branch, decision: "merged", head, kind: "change" })
-    await run.steps.ended(run, entry, "merged", mergedRecord)
+    await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
     return "merged"
   } finally {
     await worktree.remove()
@@ -1034,11 +1056,16 @@ async function push(run: Run, entry: QueueEntry, plan: PushPlan): Promise<Pushed
     ])
     return { landed: true }
   } catch (error) {
-    const moved = await remoteHeads(run, entry.change.branch)
+    const ref = changeRef(run.options.target.branch, entry.change)
+    const moved = await remoteHeads(run, entry.change.branch, ref)
     if (moved.target !== run.targetSha) {
       return { error, landed: false, reason: "target-moved", saw: moved.target ?? "gone" }
     }
     if (moved.branch !== entry.change.head) return { error, landed: false, reason: "branch-moved" }
+    const expectedTip = plan.leases.find(([leased]) => leased === ref)?.[1]
+    if (expectedTip !== undefined && moved.change !== expectedTip) {
+      return { error, landed: false, reason: "change-ref-moved", saw: moved.change ?? "gone" }
+    }
     return { error, landed: false }
   }
 }
@@ -1087,15 +1114,19 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
   if (endedAs === "failed" || endedAs === "merged") return
   const { change } = entry
   const { branch, head } = change
-  const retiredRecord = await writeRecord(run, {
-    change,
-    kind: "failed",
-    subject:
-      reason === "deleted"
-        ? `${branch} was deleted by its submitter`
-        : `${branch} moved off ${head.slice(0, 12)}; its submitter replaced it`,
-    trailers: [["Reason", reason]],
-  })
+  const retiredRecord = await writeRecord(
+    run,
+    {
+      change,
+      kind: "failed",
+      subject:
+        reason === "deleted"
+          ? `${branch} was deleted by its submitter`
+          : `${branch} moved off ${head.slice(0, 12)}; its submitter replaced it`,
+      trailers: [["Reason", reason]],
+    },
+    tipOf(entry.change).sha,
+  )
   if (retiredRecord === undefined) return
   run.log.write({ branch, decision: "failed", head, kind: "change", reason })
 }
@@ -1138,19 +1169,23 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
     .filter((sha) => sha !== "")
   const merge = landing?.[0] ?? head
   const base = landing?.[1] ?? head
-  const mergedRecord = await writeRecord(run, {
-    change,
-    kind: "merged",
-    subject: `merged around the queue at ${merge.slice(0, 12)}`,
-    trailers: [
-      ["Merge", merge],
-      ["Base", base],
-      ["Merged-By", DIRECT_MERGE],
-    ],
-  })
+  const mergedRecord = await writeRecord(
+    run,
+    {
+      change,
+      kind: "merged",
+      subject: `merged around the queue at ${merge.slice(0, 12)}`,
+      trailers: [
+        ["Merge", merge],
+        ["Base", base],
+        ["Merged-By", DIRECT_MERGE],
+      ],
+    },
+    tip.sha,
+  )
   if (mergedRecord === undefined) return
   run.log.write({ branch, decision: "merged", head, kind: "change", reason: "already on the target" })
-  await run.steps.ended(run, entry, "merged", mergedRecord)
+  await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
 }
 
 /** A change as a person reads it: the branch and twelve characters of the head, the trailer's spelling shortened. */
@@ -1315,12 +1350,16 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
     ...(kind === "failed" ? [["Fault", "submitter"] as const] : []),
     ...(ended.remedy === undefined ? [] : [["Remedy", ended.remedy] as const]),
   ]
-  const record = await writeRecord(run, {
-    change: entry.change,
-    kind,
-    subject: ended.subject,
-    trailers,
-  })
+  const record = await writeRecord(
+    run,
+    {
+      change: entry.change,
+      kind,
+      subject: ended.subject,
+      trailers,
+    },
+    tipOf(entry.change).sha,
+  )
   run.log.write({
     branch: entry.change.branch,
     decision: kind,
@@ -1330,7 +1369,7 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
   })
   // No record, no message: the message's id IS that record's sha, and the next
   // run's reading of the remote is what repairs the ending (24096).
-  if (record !== undefined) await run.steps.ended(run, entry, kind, record)
+  if (record !== undefined) await run.steps.ended(run, entry, kind, record, record)
   return kind
 }
 
@@ -1375,16 +1414,13 @@ function checkTrailers(results: readonly CheckResult[]): readonly (readonly [str
  * `--force-with-lease` is what proves nobody else moved the ref between the
  * reading and the push, and the object being immutable is what makes a retry
  * cheap: on a refusal the run takes the winner's tip, writes the same record onto
- * it, and pushes once more. A second refusal is written down and left for the
- * next run's catch-up to repair, because a queue that spins on a contended ref
- * is a queue that is not judging anything (24096).
+ * it, and pushes once more. A second refusal is logged and leaves this record
+ * unwritten: a queue that spins on a contended ref is a queue that is not
+ * judging anything (24096).
  */
-export async function writeRecord(run: Run, write: WriteRecord): Promise<string | undefined> {
+export async function writeRecord(run: Run, write: WriteRecord, expectedTip: string): Promise<string | undefined> {
   const ref = changeRef(run.options.target.branch, write.change)
-  let onto = await refAt(run.git, ref)
-  if (onto === undefined) {
-    throw new Error(`${ref} is not here; the queue read fetched every change ref the remote listed`)
-  }
+  let onto = expectedTip
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const record = await recordCommit(run.git, write, onto)
     try {
@@ -1395,10 +1431,6 @@ export async function writeRecord(run: Run, write: WriteRecord): Promise<string 
         run.options.target.remote,
         `${record}:${ref}`,
       ])
-      // The local ref follows what the remote has just accepted, so a second
-      // record written for this change in the same run — an ending and then its
-      // sent record — starts from the tip that is really there.
-      await run.git(["update-ref", ref, record])
       return record
     } catch (error) {
       // Git's rejection text varies (`stale info`, `fetch first`,
@@ -1407,7 +1439,6 @@ export async function writeRecord(run: Run, write: WriteRecord): Promise<string 
       // stays loud.
       const now = await fetchRemoteChange(run, ref)
       if (now === onto) throw error
-      onto = now
       run.log.write({
         branch: write.change.branch,
         decision: write.kind,
@@ -1416,6 +1447,7 @@ export async function writeRecord(run: Run, write: WriteRecord): Promise<string 
         reason: "change-ref-taken",
         remote: now,
       })
+      onto = now
     }
   }
   run.log.write({
@@ -1431,14 +1463,19 @@ export async function writeRecord(run: Run, write: WriteRecord): Promise<string 
 
 /** Read one authoritative remote change tip and make that exact object local. */
 async function fetchRemoteChange(run: Run, ref: string): Promise<string> {
-  // A run-private destination says which object this fetch actually received.
-  // `ls-remote` followed by a moving-ref fetch can advertise A, fetch B, then
-  // leave A unavailable for the ancestry check.
-  const fetchedRef = `refs/yrd/fetched/${run.log.id}`
-  await run.git(["fetch", "--quiet", "--no-recurse-submodules", run.options.target.remote, `+${ref}:${fetchedRef}`])
-  const remote = await refAt(run.git, fetchedRef)
-  if (remote === undefined) throw new Error(`${ref}: fetch completed without a change tip`)
-  await run.git(["update-ref", "-d", fetchedRef, remote])
+  const rows = (await run.git(["ls-remote", "--refs", run.options.target.remote, ref])).split("\n")
+  const remote = rows.map((row) => row.trim().split(/\s+/u)).find(([, name]) => name === ref)?.[0]
+  if (remote === undefined || remote === "") throw new Error(`${ref}: the remote change tip is absent`)
+  await run.git([
+    "fetch",
+    "--quiet",
+    "--no-tags",
+    "--no-recurse-submodules",
+    "--no-write-fetch-head",
+    "--refmap=",
+    run.options.target.remote,
+    remote,
+  ])
   return remote
 }
 
@@ -1456,7 +1493,11 @@ async function remoteUrl(git: Git, remote: string): Promise<string> {
 }
 
 /** Where the target and one branch stand at the remote right now. */
-async function remoteHeads(run: Run, branch: string): Promise<Readonly<{ target?: string; branch?: string }>> {
+async function remoteHeads(
+  run: Run,
+  branch: string,
+  change?: string,
+): Promise<Readonly<{ target?: string; branch?: string; change?: string }>> {
   const rows = (
     await run.git([
       "ls-remote",
@@ -1464,26 +1505,26 @@ async function remoteHeads(run: Run, branch: string): Promise<Readonly<{ target?
       run.options.target.remote,
       `refs/heads/${run.options.target.branch}`,
       `refs/heads/${branch}`,
+      ...(change === undefined ? [] : [change]),
     ])
   ).split("\n")
   const at = new Map(rows.map((row) => row.trim().split(/\s+/u)).map(([sha, ref]) => [ref ?? "", sha ?? ""]))
-  return { branch: at.get(`refs/heads/${branch}`), target: at.get(`refs/heads/${run.options.target.branch}`) }
+  return {
+    branch: at.get(`refs/heads/${branch}`),
+    ...(change === undefined ? {} : { change: at.get(change) }),
+    target: at.get(`refs/heads/${run.options.target.branch}`),
+  }
 }
 
-async function finish(
+function finish(
   run: Run,
   exitCode: 0 | 1 | 2,
   lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[]; directMerges: readonly string[] }>,
   stopped?: Stopped,
-): Promise<QueueRunOutcome> {
-  // A push updates the remote-tracking ref it pushed to, so after a merge the
-  // target as this run left it is right there; a run that merged nothing left
-  // it where it found it.
-  const targetNow =
-    lists.merged.length === 0
-      ? run.targetSha
-      : ((await refAt(run.git, `refs/remotes/${run.options.target.remote}/${run.options.target.branch}`)) ??
-        run.targetSha)
+): QueueRunOutcome {
+  // The accepted merge object is the target this run left; readers and pushes
+  // never need a tracking ref to recover an OID the run already owns.
+  const targetNow = run.targetAfter.sha
   // A run that reaches here removed every worktree it made, so its own
   // directory and the pid file in it have nothing left to say. Taking them
   // leaves exactly the runs that did NOT end under the worktrees root, which

@@ -54,9 +54,9 @@ export const withNotify: Ring = (steps) => ({
     await resend(run, entry)
   },
 
-  ended: async (run, entry, kind, endedRecord) => {
-    await steps.ended(run, entry, kind, endedRecord)
-    await told(run, entry, kind, endedRecord)
+  ended: async (run, entry, kind, endedRecord, appendTip) => {
+    await steps.ended(run, entry, kind, endedRecord, appendTip)
+    await told(run, entry, kind, endedRecord, appendTip)
   },
 
   direct: async (run, commit) => {
@@ -91,10 +91,10 @@ async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
 }
 
 /**
- * Every ended change whose message reached nobody is sent again: an ended tip
- * with no sent record (a crash between the two), or a sent record whose delivery
- * failed. The id is the ended record's sha, so whoever hears it sees one message
- * however many times it is sent (§ The queue run, at-least-once).
+ * Resend an undelivered ending exposed by the captured tip: an ended tip with
+ * no sent record (a crash between the two), or a sent record whose delivery
+ * failed. The id is the ended record's sha, so whoever hears it can identify
+ * repeated attempts (§ The queue run, at-least-once).
  */
 async function resend(run: Run, entry: QueueEntry): Promise<void> {
   const tip = tipOf(entry.change)
@@ -118,7 +118,7 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   if (written.kind !== "failed" && written.kind !== "stuck" && written.kind !== "merged") {
     throw new Error(`${entry.change.branch}: ${endedSha.slice(0, 12)} is a ${written.kind} record, not an ended one`)
   }
-  await run.steps.ended(run, entry, written.kind, written.sha)
+  await run.steps.ended(run, entry, written.kind, written.sha, tip.sha)
 }
 
 /** The one message an ended change sends, in the plan's three shapes (§ Commands). */
@@ -146,6 +146,7 @@ async function told(
   entry: QueueEntry,
   kind: "merged" | "failed" | "stuck",
   endedRecord: string,
+  initialAppendTip: string,
 ): Promise<void> {
   const written = await readRecord(run.git, endedRecord)
   const text = messageFor(kind, {
@@ -173,6 +174,7 @@ async function told(
     ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
     ...(kind === "failed" ? { failures: await failuresOf(run, entry, endedRecord) } : {}),
   })
+  let appendTip: string | undefined = initialAppendTip
   for (const { name, delivery, failure } of handed) {
     // One sent record per entry that fired, so a reader can see which of them the
     // queue reached. The sent record repeats the ended state/result, so
@@ -192,15 +194,19 @@ async function told(
         ...written.trailers.filter(([key]) => RESULT_TRAILERS.has(key)),
       ],
     }
-    const sentRecord = await writeRecord(run, sentWrite)
-    // `delivered` is the whole truth about this message or it is worth nothing:
-    // a record a notifier took whose sent record never landed WILL be handed over
-    // again by the next run, so it is not delivered, and the log says which half
-    // failed rather than claiming the id is settled.
+    const sentRecord: string | undefined =
+      appendTip === undefined ? undefined : await writeRecord(run, sentWrite, appendTip)
+    if (sentRecord !== undefined) appendTip = sentRecord
+    // A notifier result is not durable unless its sent record landed. Keep the
+    // immutable ending id in the log and distinguish this append contention from
+    // later results that could not be appended after it.
     const unrecorded =
       sentRecord === undefined
-        ? `the sent record for ${endedRecord.slice(0, 12)} was not written; the next run sends it again`
+        ? appendTip === undefined
+          ? `the sent result for ${endedRecord.slice(0, 12)} was unrecorded after a prior sent append contended`
+          : `the sent result for ${endedRecord.slice(0, 12)} was unrecorded after its append contended`
         : undefined
+    if (sentRecord === undefined) appendTip = undefined
     const trouble = [failure, unrecorded].filter((why): why is string => why !== undefined).join("; ")
     run.log.write({
       about: entry.change.branch,
@@ -313,9 +319,9 @@ async function notifyAll(run: Run, ending: Ending, record: NotifyRecord): Promis
  * Run one notify entry's command, the record a JSON object on its stdin, and
  * say how it went: `sent` when it accepted the record, `failed` with why when it
  * exited non-zero. A command that fails changes nothing about what a change IS:
- * the ended record stands and the next run hands it the same record again
- * (ruling D9). Nothing here throws, so a failed notifier can never end a merged
- * change stuck.
+ * the ended record stands and the failed delivery is recorded under that
+ * immutable identity (ruling D9). Nothing here throws, so a failed notifier can
+ * never end a merged change stuck.
  */
 async function deliver(
   run: Run,

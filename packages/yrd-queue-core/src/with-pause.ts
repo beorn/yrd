@@ -21,15 +21,7 @@
  */
 
 import { mergedBy } from "./records.ts"
-import {
-  activePause,
-  pauseLine,
-  QueuePaused,
-  readPause,
-  pauseFence,
-  type PauseRecord,
-  type PauseFence,
-} from "./pause.ts"
+import { pauseLine, QueuePaused, readPause, pauseFence, type PauseRecord, type PauseFence } from "./pause.ts"
 import { changeName, pauseRef } from "./refs.ts"
 import { QueueAuthorityUnreadable, type Pushed, type Ring, type Run, type Stopped } from "./run.ts"
 
@@ -44,7 +36,7 @@ export const withPause: Ring = (steps) => {
     ...steps,
 
     open: async (run) => {
-      const paused = await activePause(run.git, run.options.target.remote, run.options.target.branch)
+      const paused = run.pause?.kind === "paused" ? run.pause : undefined
       if (paused === undefined) return steps.open(run)
       recordPause(run, paused)
       if (run.options.foreground === true) {

@@ -449,6 +449,7 @@ describe("a queue run", () => {
     await rival(["config", "user.name", "rival"])
 
     let concurrent: string | undefined
+    let poisoned = false
     const git: Git = async (args, input) => {
       // Between the tip this run read the change at and its leased push, a
       // second queue appends a record of its own and pushes it first. A real
@@ -463,7 +464,14 @@ describe("a queue run", () => {
         })
         await rival(["push", "--quiet", "origin", `${concurrent}:${ref}`])
       }
-      return w.git(args, input)
+      const output = await w.git(args, input)
+      // A local reader/cache is not authority for this append. Poison it after
+      // the queue captured the remote record, before the writer begins.
+      if (!poisoned && args[0] === "merge-base") {
+        await w.git(["update-ref", ref, head])
+        poisoned = true
+      }
+      return output
     }
 
     const outcome = await queueRun({ ...w.options({ exit: 0, on: ["submit"] }), git })
@@ -472,7 +480,9 @@ describe("a queue run", () => {
     // record was written again onto it and pushed, so neither is lost and the
     // run went on to merge.
     expect(outcome.exitCode).toBe(0)
+    expect(poisoned).toBe(true)
     expect(outcome.merged).toEqual(["task/one"])
+    expect(await refAt(w.git, ref)).toBe(head)
     await fetchChanges(w)
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "checked", "merged", "sent"])
@@ -480,6 +490,22 @@ describe("a queue run", () => {
     expect(logRecords(outcome)).toContainEqual(
       expect.objectContaining({ decision: "checked", reason: "change-ref-taken", remote: concurrent }),
     )
+  })
+
+  it("a refused record push with an unchanged remote tip rethrows its original error", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    const before = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]
+    const refused = new Error("record transport refused")
+    const git: Git = async (args, input) => {
+      if (args[0] === "push" && args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))) throw refused
+      return w.git(args, input)
+    }
+
+    await expect(queueRun({ ...w.options({ exit: 0, on: ["submit"] }), git })).rejects.toBe(refused)
+    expect((await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]).toBe(before)
+    expect(await remoteTarget(w)).toBe(w.target)
   })
 
   it("fail: the target stands still, the change ends failed with the check and a remedy, and the submitter gets it back", async () => {
@@ -574,6 +600,81 @@ describe("a queue run", () => {
     // One sent record per entry, each naming the entry it is about.
     expect(records.slice(-2).map((record) => trailer(record, "To"))).toEqual(["submitter", "board"])
     expect(records.slice(-2).map((record) => trailer(record, "Delivery"))).toEqual(["sent", "sent"])
+    const merged = records[2]
+    const firstSent = records[3]
+    const secondSent = records[4]
+    if (merged === undefined || firstSent === undefined || secondSent === undefined) throw new Error("missing record")
+    expect(records.slice(-2).map((record) => trailer(record, "For"))).toEqual([merged.sha, merged.sha])
+    expect(records.slice(-2).map((record) => trailer(record, "Message-Id"))).toEqual([merged.sha, merged.sha])
+    expect((await w.git(["rev-parse", `${firstSent.sha}^`])).trim()).toBe(merged.sha)
+    expect((await w.git(["rev-parse", `${secondSent.sha}^`])).trim()).toBe(firstSent.sha)
+  })
+
+  it("two refused sent appends leave both notifier results visibly unrecorded without guessing a parent", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    const rivalPath = join(w.workdir, "..", "sent-record-rival")
+    await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
+    const rival = gitIn(rivalPath)
+    await rival(["config", "user.email", "rival@yrd.test"])
+    await rival(["config", "user.name", "rival"])
+
+    let landed = false
+    const attempted: string[] = []
+    const competing: string[] = []
+    const git: Git = async (args, input) => {
+      if (args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) landed = true
+      const recordPush =
+        landed &&
+        args[0] === "push" &&
+        !args.includes("--atomic") &&
+        args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))
+      if (recordPush) {
+        const refspec = args.find((arg) => arg.endsWith(`:${ref}`))
+        const record = refspec?.slice(0, -`:${ref}`.length)
+        if (record === undefined || record === "") throw new Error("sent push names no record")
+        attempted.push(record)
+        await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
+        const competingRecord = await appendRecord(rival, "main", {
+          change: { branch: "task/one", head },
+          kind: "stuck",
+          subject: `rival sent append ${String(competing.length + 1)}`,
+          trailers: [["Reason", "crash"]],
+        })
+        await rival(["push", "--quiet", "origin", `${competingRecord}:${ref}`])
+        competing.push(competingRecord)
+      }
+      return w.git(args, input)
+    }
+
+    const outcome = await queueRun({
+      ...w.options({ exit: 0 }),
+      git,
+      notify: [
+        { name: "first", on: ["merged"], run: w.notifier },
+        { name: "second", on: ["merged"], run: w.notifier },
+      ],
+    })
+
+    expect(messages(w)).toHaveLength(2)
+    expect(attempted).toHaveLength(2)
+    expect(competing).toHaveLength(2)
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    const merged = records.find((record) => record.kind === "merged")
+    if (merged === undefined) throw new Error("missing merged record")
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "stuck", "stuck"])
+    expect(records.slice(-2).map((record) => record.sha)).toEqual(competing)
+    const rows = logRecords(outcome).filter((record) => record.kind === "message")
+    expect(rows.map(({ delivered, id, to }) => ({ delivered, id, to }))).toEqual([
+      { delivered: false, id: merged.sha, to: "first" },
+      { delivered: false, id: merged.sha, to: "second" },
+    ])
+    expect(rows.map((row) => row.error)).toEqual([
+      expect.stringContaining("after its append contended"),
+      expect.stringContaining("after a prior sent append contended"),
+    ])
   })
 
   it("an ending no entry wants is still recorded: one sent record, To: none and Delivery: none", async () => {
@@ -716,6 +817,47 @@ describe("a queue run", () => {
     )
   })
 
+  it("a change tip moving before the atomic landing loses neither history nor the target", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    const rivalPath = join(w.workdir, "..", "change-tip-mover")
+    await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
+    const rival = gitIn(rivalPath)
+    await rival(["config", "user.email", "rival@yrd.test"])
+    await rival(["config", "user.name", "rival"])
+
+    let expected = ""
+    let moved: string | undefined
+    const git: Git = async (args, input) => {
+      if (moved === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+        expected = (await rival(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
+        await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
+        moved = await appendRecord(rival, "main", {
+          change: { branch: "task/one", head },
+          kind: "stuck",
+          subject: "another queue got there first",
+          trailers: [["Reason", "crash"]],
+        })
+        await rival(["push", "--quiet", "origin", `${moved}:${ref}`])
+      }
+      return w.git(args, input)
+    }
+
+    const outcome = await queueRun({ ...w.options({ exit: 0 }), git })
+
+    expect(moved).toBeDefined()
+    expect(outcome.merged).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "stuck"])
+    expect(records.at(-1)?.sha).toBe(moved)
+    expect(logRecords(outcome)).toContainEqual(
+      expect.objectContaining({ decision: "checked", expected, reason: "change-ref-moved", saw: moved }),
+    )
+  })
+
   it("a pause leaves admitted work queued without checks, and resume lets the next run merge it", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
@@ -802,7 +944,9 @@ describe("a queue run", () => {
       let changeBefore = ""
       const git: Git = async (args, input) => {
         if (args[0] === "ls-remote" && args.includes(PAUSE_REF)) reads += 1
-        const fence = when === "before-fence" && args[0] === "ls-remote" && args.includes(PAUSE_REF) && reads === 2
+        // Admission now comes from readQueue's broad captured advertisement;
+        // this is the first separate pause read, immediately before the fence.
+        const fence = when === "before-fence" && args[0] === "ls-remote" && args.includes(PAUSE_REF) && reads === 1
         const push =
           when === "before-push" && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))
         if (raced === undefined && (fence || push)) {
@@ -949,7 +1093,7 @@ describe("a queue run", () => {
     const git: Git = async (args, input) => {
       if (args[0] === "ls-remote" && args.includes(PAUSE_REF)) {
         reads += 1
-        if (reads === 2) {
+        if (reads === 1) {
           const tree = (await rival(["mktree"], "")).trim()
           malformed = (
             await rival([
@@ -1009,11 +1153,16 @@ describe("a queue run", () => {
     )
     expect(messages(w)).toEqual([])
 
-    // The notifier is back: the same message, with the merged record's sha as its id.
+    // The notifier is back: the same message, with the merged record's sha as
+    // its id. A poisoned local ref cannot replace the captured sent tip used
+    // as this resend's append parent.
+    const ref = changeRef("main", { branch: "task/one", head })
+    await w.git(["update-ref", ref, head])
     const again = await queueRun(w.options({ exit: 0 }))
     expect(again.exitCode).toBe(0)
+    expect(await refAt(w.git, ref)).toBe(head)
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
-    records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
+    records = await readRecords(w.git, (await refAt(w.git, ref))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
     expect(records.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
@@ -1575,33 +1724,31 @@ describe("a failing check bills the submitter at once", () => {
     // Two: the change that failed under the old head, and this one.
     expect(messages(w).at(-1)).toMatchObject({ record: "failed", failures: 2 })
 
-    // A concurrent local rewind must not change the ending's failure count.
+    // A concurrent local poison must not choose either the ending's parent or
+    // the immutable ending record used to count this message's failures.
     await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
       issue: "@i/10-yrd/1",
     })
-    const ref = changeRef("main", { branch: "task/one", head: (await refAt(w.git, "refs/heads/task/one"))! })
-    let rewound = false
+    const currentHead = (await refAt(w.git, "refs/heads/task/one"))!
+    const ref = changeRef("main", { branch: "task/one", head: currentHead })
+    let poisoned = false
     const git: Git = async (args, input) => {
       const output = await w.git(args, input)
-      if (!rewound && args[0] === "update-ref" && args[1] === ref && args[2] !== undefined) {
-        const records = await readRecords(w.git, args[2])
-        const preceding = records.at(-2)
-        if (records.at(-1)?.kind === "failed" && preceding?.kind === "opened") {
-          await w.git(["update-ref", ref, preceding.sha, args[2]])
-          rewound = true
-        }
+      if (!poisoned && args[0] === "merge-base") {
+        await w.git(["update-ref", ref, currentHead])
+        poisoned = true
       }
       return output
     }
     const retried = await queueRun({ ...w.options({ exit: 1, on: ["submit"] }), git })
-    expect(rewound).toBe(true)
+    expect(poisoned).toBe(true)
     expect(messages(w).at(-1)).toMatchObject({ record: "failed", failures: 3 })
-    expect(logRecords(retried)).toContainEqual(
-      expect.objectContaining({ kind: "change", decision: "sent", reason: "change-ref-taken" }),
-    )
+    expect(logRecords(retried)).not.toContainEqual(expect.objectContaining({ reason: "change-ref-taken" }))
+    expect(await refAt(w.git, ref)).toBe(currentHead)
+    await fetchChanges(w)
     expect((await readRecords(w.git, (await refAt(w.git, ref))!)).at(-1)?.kind).toBe("sent")
   })
 
