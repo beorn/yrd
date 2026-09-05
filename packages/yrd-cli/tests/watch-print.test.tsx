@@ -1,9 +1,13 @@
 /**
- * The page `yrd list` prints is the pane's frame, once: the retired page put
- * RUNNER in the header block above the table (24169-old-list.md §1), with the
- * pause on RUNNER's own rail and nowhere else. The pane got that order back
- * (yrd b2d8ebb3, 0f2c45e6); the page must not drift from it again, so the
- * order is tested here where the page is rendered, not inferred from the pane.
+ * @failure  The printed page drifted from the pane: the pane got RUNNER back
+ *           above the table with the pause on its own rail (yrd b2d8ebb3,
+ *           0f2c45e6) while `yrd list` still printed the pause as a bare
+ *           first line and RUNNER last, under the table (the operator's
+ *           2026-09-05 eyeball; the retired page put RUNNER in the header
+ *           block above the table, 24169-old-list.md §1). The order is
+ *           tested where the page is rendered, not inferred from the pane.
+ * @level    l2 (a real silvery render of the page into a headless buffer)
+ * @consumer the operator reading `yrd list` (@i/10-yrd/24169)
  */
 
 import { describe, expect, it } from "vitest"
