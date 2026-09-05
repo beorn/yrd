@@ -72,19 +72,7 @@ export type FakeCheckPlan = Readonly<{
    * writes the same `.yrd.yml` it always did. On, the target declares one
    * command for all four endings that appends each record to `hookLog`. */
   hooks?: boolean
-  /** Declare the `yrd` remote in `.yrd.yml`, so the submit path has somewhere
-   * to read it from when the repository has no such remote. Default off, so
-   * every case that predates this knob writes the same `.yrd.yml` it always
-   * did. The plan says the submit path "adds the `yrd` remote from `.yrd.yml`
-   * when missing" and does not name the key; `remote:` is this fixture's
-   * reading of it. */
-  yrdRemote?: boolean
 }>
-
-/** The config carries rules only; the branch holding it is the queue's identity. */
-export function declaration(_remote?: string): string {
-  return ""
-}
 
 export type BoundaryRepository = Readonly<{
   /** The working repository the queue runs against. */
@@ -118,9 +106,6 @@ export function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryReposit
       },
     ],
     ...(plan.hooks === true ? { hooks: true } : {}),
-    // `remote:` is the one line that selects the queue (plan § Cutover). A case
-    // that asks for the yrd remote by name gets the shared repository's path.
-    ...(plan.yrdRemote === true ? { remoteIsOrigin: true } : {}),
   }))
 }
 
@@ -745,8 +730,6 @@ type BoundaryPlan = Readonly<{
   checks: readonly PhasedCheck[]
   /** Declare a hook for every ending, as `FakeCheckPlan.hooks` does. */
   hooks?: boolean
-  /** Name the shared repository by URL in `remote:`, instead of `origin`. */
-  remoteIsOrigin?: boolean
   /** Files committed on the target alongside `README.md` and `.yrd.yml`.
    * A path ending in `.sh` is committed executable. */
   files?: Readonly<Record<string, string>>
@@ -830,8 +813,7 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   // over and read which ending each record was for.
   const recorder = JSON.stringify(`cat >>${hookLog}`)
   const hooks = plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
-  const head = plan.remoteIsOrigin === true ? declaration(origin) : declaration()
-  await writeFile(join(repo, ".yrd.yml"), `${head}${hooks}${phasedChecks(plan.checks)}\n`)
+  await writeFile(join(repo, ".yrd.yml"), `${hooks}${phasedChecks(plan.checks)}\n`)
 
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")

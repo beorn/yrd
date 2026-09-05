@@ -36,7 +36,6 @@ import {
   submitOneCommit,
   submitSameHead,
   targetTip,
-  declaration,
 } from "./fixture.ts"
 
 afterEach(removeTemporaryRoots)
@@ -80,7 +79,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
       // The fake check judges content: it exits as told only where the change
       // wrote a file, so the change carries one beside its rewritten config.
       await submitCommitWriting(repo, "rewrite", {
-        ".yrd.yml": `${declaration()}checks: [{gate: {run: ${JSON.stringify(fake(branchLog, 0))}}}]\n`,
+        ".yrd.yml": `checks: [{gate: {run: ${JSON.stringify(fake(branchLog, 0))}}}]\n`,
         "rewrite.txt": "the change\n",
       })
 
@@ -305,9 +304,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
   it("a branch whose config cannot be parsed ends failed, and the queue keeps running", async () => {
     const log = await temporaryLog("unparseable")
     const { repo } = await boundaryRepositoryWith(passing(log))
-    // The declaration head stays (it is what selects the core under
-    // measurement, ruling A5); the body below it is what cannot be parsed.
-    const change = await submitCommitWriting(repo, "broken", { ".yrd.yml": `${declaration()}checks: [{gate: {run:\n` })
+    const change = await submitCommitWriting(repo, "broken", { ".yrd.yml": "checks: [{gate: {run:\n" })
     const before = await targetTip(repo)
 
     const run = await queueRunOnce(repo)

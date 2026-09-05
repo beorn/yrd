@@ -127,12 +127,19 @@ describe("a queue is the selected origin branch carrying config", () => {
   it.each(["run", "up", "pause", "resume"])("%s outside a clone requires an address-valued flag", async (verb) => {
     const outside = mkdtempSync(join(tmpdir(), "yrd-cli-no-clone-"))
     roots.push(outside)
+    const reason = verb === "pause" ? ["--reason", "checking"] : []
     for (const selector of [[], ["--queue", "main"]]) {
       const run = capture(outside)
-      const reason = verb === "pause" ? ["--reason", "checking"] : []
       expect(await runYrdProcess(["bun", "yrd", "queue", verb, ...selector, ...reason, "--json"], run.io)).toBe(2)
       expect(run.stderr()).toContain("inside a clone or pass --queue <repo>#<queue>")
     }
+    const operand = "https://github.com/beorn/hh.git"
+    const malformed = capture(outside)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", verb, "--queue", operand, ...reason, "--json"], malformed.io),
+    ).toBe(2)
+    expect(malformed.stderr()).toContain(`queue address '${operand}' must be <repo>#<queue>`)
+    expect(malformed.stdout()).toBe("")
   })
 
   it.each(["run", "up", "pause", "resume"])("%s refuses a positional queue before remote mutation", async (verb) => {
@@ -259,22 +266,5 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(exit).toBe(2)
     expect(run.stderr()).toContain("queue list needs a queue")
     expect(run.stderr()).toContain("origin/main carries no .yrd.yml")
-  })
-
-  it("accepts config with no identity key because the selected branch is the identity", async () => {
-    const repo = await world("{}\n")
-    const run = capture(repo)
-
-    expect(await coreQueueCommand(repo, run.io, { command: "list" }, { queue: "main" })).toBe(0)
-    expect(run.stderr()).toBe("")
-  })
-
-  it("refuses the retired target: key with the selector that replaces it", async () => {
-    const repo = await world("target: origin#main\n")
-    const run = capture(repo)
-
-    await expect(coreQueueCommand(repo, run.io, { command: "list" }, { queue: "main" })).rejects.toThrow(
-      /unknown key target.*select it with --queue/u,
-    )
   })
 })

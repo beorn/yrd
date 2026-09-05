@@ -143,13 +143,16 @@ describe("the declaration is read from the queue branch commit", () => {
   })
 
   it("takes queue identity from the caller and refuses target: and remote: by name", async () => {
-    const plain = await world("checks:\n  - verify:\n      run: bun run test\n")
-    expect(await readConfig(plain.git, "main", MAIN)).toMatchObject({ target: { branch: "main", remote: "origin" } })
+    const plain = await world("{}\n")
+    expect(await readConfig(plain.git, "main", MAIN)).toMatchObject({
+      checks: [],
+      target: { branch: "main", remote: "origin" },
+    })
 
     for (const key of ["target", "remote"] as const) {
       const retired = await world(`${key}: origin#develop\n`)
       await expect(readConfig(retired.git, "main", MAIN)).rejects.toThrow(new RegExp(`unknown key ${key}`, "u"))
-      await expect(readConfig(retired.git, "main", MAIN)).rejects.toThrow(/select (?:it|a queue branch)/u)
+      await expect(readConfig(retired.git, "main", MAIN)).rejects.toThrow("--queue <branch>")
     }
   })
 

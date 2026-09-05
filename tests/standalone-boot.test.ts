@@ -47,15 +47,4 @@ describe("standalone CLI boot", () => {
     expect(exitCode).toBe(0)
     expect(stdout).toMatch(/^yrd \d+\.\d+\.\d+/)
   })
-
-  it("names the queue-address grammar when an owner command receives a malformed address", async () => {
-    const operand = "https://github.com/beorn/hh.git"
-
-    const { stderr, exitCode } = await runCli("queue", "run", operand)
-
-    expect(exitCode).toBe(2)
-    expect(stderr).toContain("queue address")
-    expect(stderr).toContain("<repo>#<queue>")
-    expect(stderr).toContain(operand)
-  })
 })

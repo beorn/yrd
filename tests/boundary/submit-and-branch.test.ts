@@ -116,7 +116,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   })
 
   it("uses origin as the repository and does not add a declaration-selected remote", async () => {
-    const { repo, origin } = await boundaryRepository({ exit: 0, yrdRemote: true })
+    const { repo, origin } = await boundaryRepository({ exit: 0 })
     expect(await remoteNames(repo)).not.toContain("yrd")
     const branch = "24099-remote"
     const head = await commitOnBranch(repo, branch)
