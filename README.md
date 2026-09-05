@@ -36,7 +36,8 @@ yrd queue run                                                     one queue run
 yrd queue up [--interval <seconds>]                               queue runs on a loop, every 15 seconds by default; run this under your supervisor
 yrd queue pause --reason <text> [--notify <seat>]                  pause admission and automatic runs; keep the queue visible
 yrd queue resume [--reason <text>] [--notify <seat>]               resume on the next service interval
-yrd queue list                                                    every change in line, its state, position, last result and log
+yrd queue list [filter...] [--latest] [--watch]                     per-run rows; --latest gives one per change; filters are case-insensitive OR terms
+yrd watch [filter...] [--latest]                                   queue list with --watch implied
 yrd queue show <branch>                                           that branch's changes, newest first, each check's result and log
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD
 yrd env open <commit>                                             retain an exact commit detached; print its path
@@ -52,7 +53,7 @@ Every command takes `--json`. `yrd submit` refuses the queue branch itself: it i
 
 ## The config, `.yrd.yml`
 
-The queue's config is a file on the queue branch. It is read from that branch on every queue run, never from the change, so a branch cannot change the checks that judge it. The smallest config that does something:
+The queue's config is a file on the queue branch. Each round captures one commit from that branch for both its config and its base; later branch updates take effect next round. The config never comes from the change, so a branch cannot change the checks that judge it. The smallest config that does something:
 
 ```yml
 checks:
@@ -63,7 +64,8 @@ checks:
 Everything the file can say:
 
 ```yml
-setup: bun install --frozen-lockfile # runs once in every fresh checkout the queue makes, before any check
+setup: bun install --frozen-lockfile # once per materialized check worktree or newly opened retained environment
+# Queue ancestry runs before setup; transient composition skips it.
 teardown: bun run teardown # optional project command, run before closing a retained environment
 checks:
   - typecheck: # each check is one mapping of its name to its settings
@@ -92,7 +94,7 @@ For addressed queue-owner and reader commands, the host root is `git config yrd.
 ```
 <host root>/github.com/beorn/hh#main/
   repo/                                             the queue-owned clone; .yrd.yml is read from the queue branch
-  worktrees/<run id>/<phase>/<sha>/                 temporary checkouts
+  worktrees/<run id>/[compose/]<phase>/<sha>/        temporary composition and check worktrees
   checks/<change>/<run id>/<phase>/<name>.log        retained check logs
   logs/<run id>.jsonl                               the run journal
   tmp/                                              TMPDIR for checks
