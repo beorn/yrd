@@ -279,6 +279,25 @@ describe("the table is the queue read rendered", () => {
     const head = await submitCommit(w, "task/one", "one.txt")
     const change = { branch: "task/one", head }
     const base = (await w.git(["rev-parse", "main"])).trim()
+    const incident = [
+      ["Code", "yrd-submodule-main-regression"],
+      ["Subject", "task/one"],
+      ["Via", "pre-merge"],
+      ["Evidence", "/tmp/submodule-main.log"],
+      ["Next", "repair the component pin"],
+      ["Owner", "@cto"],
+    ] as const
+    for (const kind of ["stuck", "sent"] as const) {
+      await appendRecord(w.git, "main", {
+        change,
+        kind,
+        subject: kind === "stuck" ? "component pin needs repair" : "sent stuck notice",
+        trailers: [...incident, ...(kind === "sent" ? [["State", "stuck"] as const] : [])],
+      })
+    }
+    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
+    const beforeRecheck = (await readQueue(w.git, "origin", "main")).changes
+    expect(beforeRecheck[0]?.reading.state).toBe("stuck")
     await appendRecord(w.git, "main", {
       change,
       kind: "checked",
@@ -290,6 +309,11 @@ describe("the table is the queue read rendered", () => {
         ["Check", "substrate-pair exit=0 ms=14 log=/tmp/substrate.log"],
       ],
     })
+    // A concurrent fetch can advance the local ref between the queue read
+    // and opening detail. History must expand that reading, not mix moments.
+    const prior = show(await readHistories(w.git, beforeRecheck, "origin", "main"), change.branch)
+    expect(prior[0]?.row).toMatchObject({ state: "stuck", incident: { code: "yrd-submodule-main-regression" } })
+    expect(prior[0]?.checks).toEqual([])
     await appendRecord(w.git, "main", {
       change,
       kind: "merged",
