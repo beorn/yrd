@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawnSync } from "node:child_process"
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -36,6 +36,40 @@ async function run(
 }
 
 describe("version CLI", () => {
+  it.each([
+    ["--help", 0],
+    ["--unknown-output-drain-option", 2],
+  ] as const)("drains both output pipes before the executable exits for %s", (flag, expectedExit) => {
+    // A real process boundary is required: string-collecting injected IO cannot
+    // expose process.exit discarding pending pipe writes (queue list >64KiB).
+    const size = 1024 * 1024
+    const payloadHash = new Bun.CryptoHasher("sha256").update("x".repeat(size)).digest("hex")
+    const entry = join(root, "packages/yrd-cli/src/cli.ts")
+    const script = `
+      import { runYrdExecutable } from ${JSON.stringify(entry)}
+      process.stdout.write("x".repeat(${size}))
+      process.stderr.write("x".repeat(${size}))
+      process.argv = [process.execPath, "yrd", ${JSON.stringify(flag)}]
+      await runYrdExecutable()
+    `
+    const result = spawnSync(process.execPath, ["-e", script], {
+      cwd: tmpdir(),
+      env: { ...process.env, NO_COLOR: "1" },
+      encoding: "utf8",
+      timeout: 8_000,
+      maxBuffer: 4 * size,
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(expectedExit)
+    for (const [stream, text] of [
+      ["stdout", result.stdout],
+      ["stderr", result.stderr],
+    ] as const) {
+      expect(text.length, `${stream} must drain before exit`).toBeGreaterThanOrEqual(size)
+      expect(new Bun.CryptoHasher("sha256").update(text.slice(0, size)).digest("hex"), stream).toBe(payloadHash)
+    }
+  })
+
   it("reports unknown when HEAD succeeds but git status fails", () => {
     const calls: string[][] = []
     const git: GitProbe = (args) => {

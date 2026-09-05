@@ -27,7 +27,6 @@
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
-import { fdWriters } from "./stdout-fd.ts"
 import { listEnvironments, openEnvironment } from "./env-commands.ts"
 import {
   closeGarage,
@@ -476,15 +475,24 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
 /** The process entry, shared by `yrd` and `git-yrd`. */
 export async function runYrdExecutable(): Promise<never> {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
-  // Direct fd writes: a `--json` document larger than a pipe's buffer reaches
-  // `| jq` and `> file` whole, where an asynchronous write could be cut at exit.
   const io: YrdCliIO = {
-    stdout: fdWriters.stdout,
-    stderr: fdWriters.stderr,
+    stdout: (text) => void process.stdout.write(text),
+    stderr: (text) => void process.stderr.write(text),
     color,
     ...(process.stdout.isTTY && process.stdout.columns > 0 ? { columns: process.stdout.columns } : {}),
     cwd: process.cwd(),
   }
   const exitCode = await runYrdProcess(process.argv, io)
+  // A forced exit discards queued pipe writes (large queue JSON stopped at
+  // 64KiB). Finish both streams before terminating; an empty-write callback
+  // is not a flush barrier in Bun. A failed drain must reject, not report success.
+  await Promise.all(
+    [process.stdout, process.stderr].map(
+      (stream) =>
+        new Promise<void>((resolve, reject) => {
+          stream.end((error?: Error | null) => (error ? reject(error) : resolve()))
+        }),
+    ),
+  )
   process.exit(exitCode)
 }
