@@ -1,29 +1,26 @@
 /**
  * The queue read: one reading of the remote that yields the queue, the
- * changes and where each stands ([plan](../../../../pm/@i/10-yrd/plan.md)
- * § The final design, Store and The change; ruling E3, which amends D8).
+ * changes and where each stands (ruling E3).
  *
  * A branch is its ref at the `yrd` remote. A change is the ref
- * `refs/yrd/changes/<branch>@<sha>` beside it, and a branch with no change is
+ * `refs/yrd/<queue>/<branch>@<sha>` beside it, and a branch with no change is
  * not a change (E2): the queue read lists what was submitted and nothing
  * else. The remote is the one store; a working repository is a reader that
- * fetches those refs before it reads. Nothing here stores a status: the queue
- * is read again from the remote's refs every time it is asked for, in a fixed
- * number of git invocations however many changes there are — one `ls-remote`,
- * one fetch of the change refs, one fetch of exactly the branches they name
- * (the target among them), one `for-each-ref` for every change's tip record,
- * one for ancestry — because the tip record's trailers are the whole state
- * answer and no history is walked. A detail view expands only its selected
- * entries through `readHistories` to recover phase-specific check evidence.
- * The change refs are read FIRST and the
- * branches follow from them, so a remote with thousands of branches the queue
- * has nothing to do with is never fetched (E3; measured 2026-09-02: the root's
- * origin holds 7,387 branches, and fetching them all cost 17 s a round).
+ * fetches their captured objects before it reads. Nothing here stores a status: the queue
+ * is read again from one remote advertisement every time it is asked for.
+ * One object-only fetch brings the captured target, pause, change tips and
+ * relevant branch heads without moving a local ref or writing `FETCH_HEAD`.
+ * One no-walk log reads the tip records, then ancestry is asked once per
+ * distinct submitted head. A detail view expands only its selected entries
+ * through `readHistories` to recover phase-specific check evidence. A remote
+ * with thousands of unrelated branches therefore supplies no unrelated object
+ * (E3; measured 2026-09-02: fetching 7,387 branches cost 17 s a round).
  */
 
-import { readRecords, recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
+import { changeOf, readRecords, recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
 import { isAncestor } from "./git.ts"
-import { changeName, changeRef, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
+import { parsePause, type PauseRecord } from "./pause.ts"
+import { changeName, parseChangeRef, pauseRef, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
 
 /** One change as the queue read sees it. */
@@ -54,15 +51,16 @@ export async function readQueue(
   git: Git,
   remote: string,
   target: string,
-): Promise<Readonly<{ target: string; changes: QueueRead }>> {
-  const prefix = queueRefPrefix(target)
+): Promise<Readonly<{ target: string; changes: QueueRead; pause: PauseRecord | undefined }>> {
+  const pause = pauseRef(target)
   // Where every branch and every change stands at the remote, in one reading.
-  // Branch heads are read from here and never from a tracking ref, so a stale
-  // local ref can never speak for the remote.
+  // Every later operation uses these captured object ids, never a tracking or
+  // queue ref that another reader or writer can move underneath it.
   const rows = (await git(["ls-remote", "--refs", remote])).split("\n")
   const heads = new Map<string, string>()
-  const changeRefs: Change[] = []
+  const changeRefs: Array<Readonly<{ change: Change; oid: string; ref: string }>> = []
   let targetSha: string | undefined
+  let pauseSha: string | undefined
   for (const row of rows) {
     const [sha, ref] = row.trim().split(/\s+/u)
     if (sha === undefined || ref === undefined) continue
@@ -70,6 +68,8 @@ export async function readQueue(
       targetSha = sha
     } else if (ref.startsWith("refs/heads/")) {
       heads.set(ref.slice("refs/heads/".length), sha)
+    } else if (ref === pause) {
+      pauseSha = sha
     } else {
       const change = parseChangeRef(target, ref)
       // A ref named after the target is not a change, so the read yields none
@@ -78,78 +78,65 @@ export async function readQueue(
       // own first-parent line, where an accounted commit hides every direct
       // at or below it (direct.ts; E5). `submit` refuses to open one, so this
       // is only about the ones a remote already holds.
-      if (change !== undefined && change.branch !== target) changeRefs.push(change)
+      if (change !== undefined && change.branch !== target) changeRefs.push({ change, oid: sha, ref })
     }
   }
   if (targetSha === undefined) throw new Error(`the target ${target} is not at ${remote}`)
 
-  // The change refs first (E3). An opened record has its head as a parent, so
-  // this one fetch brings every submitted head with it, whether or not the
-  // branch still stands; `--prune` forgets a local change ref the remote no
-  // longer holds. Nothing else is asked for: no branch, no tag.
-  await git(["fetch", "--quiet", "--no-tags", "--prune", remote, `+${prefix}/*:${prefix}/*`])
-  // Then exactly the branches those changes name, and the target, in one
-  // fetch, so the ancestry reading below asks fresh tracking refs. A named
-  // branch the remote no longer has cannot be fetched (git refuses an absent
-  // ref) and reads deleted from the ls-remote above; a tracking ref of it that
-  // lingers is forgotten in one `update-ref`, because `--prune` prunes only
-  // what the refspecs it is given name (measured 2026-09-02 on git 2.55: two
-  // explicit branch refspecs with `--prune` left a deleted branch's tracking
-  // ref standing). Nothing else under `refs/remotes/<remote>/` is touched:
-  // a working repository that is also somebody's clone keeps its own refs.
-  const named = new Set(changeRefs.map((change) => change.branch))
-  const standing = [...named].filter((branch) => branch !== target && heads.has(branch))
+  const named = new Set(changeRefs.map(({ change }) => change.branch))
+  const relevantHeads = [...named]
+    .filter((branch) => branch !== target)
+    .map((branch) => heads.get(branch))
+    .filter((sha): sha is string => sha !== undefined)
+  const objectIds = new Set([targetSha, ...changeRefs.map(({ oid }) => oid), ...relevantHeads])
+  if (pauseSha !== undefined) objectIds.add(pauseSha)
+  // These objects have no local ref. Keep Git's normal unreachable-object grace
+  // while a reader uses them; never run `gc --prune=now` in an active workdir.
+  // Empty refmaps and no FETCH_HEAD are what make concurrent readers observers
+  // rather than writers. The target makes this list non-empty.
   await git([
     "fetch",
     "--quiet",
     "--no-tags",
+    "--no-recurse-submodules",
+    "--no-write-fetch-head",
+    "--refmap=",
     remote,
-    ...[target, ...standing].map((branch) => `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`),
+    ...objectIds,
   ])
-  const gone = [...named].filter((branch) => branch !== target && !heads.has(branch))
-  if (gone.length > 0) {
-    await git(["update-ref", "--stdin"], gone.map((branch) => `delete refs/remotes/${remote}/${branch}\n`).join(""))
-  }
 
-  const tips = await tipRecords(git, target)
-  // Every branch tip the target already carries, in one reading.
-  const merged = new Set(
-    (await git(["for-each-ref", "--format=%(objectname)", `--merged=${targetSha}`, `refs/remotes/${remote}/`]))
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line !== ""),
-  )
+  const tips = await tipRecords(git, changeRefs)
+  const headOnTarget = new Map<string, boolean>()
+  const capturedPause = pauseSha === undefined ? undefined : await parsePause(git, pauseSha, `${remote} ${pause}`)
 
   const entries: QueueEntry[] = []
-  for (const submitted of changeRefs) {
+  for (const { change: submitted, ref } of changeRefs) {
     const branchHead = heads.get(submitted.branch)
-    const ref = changeRef(target, submitted)
     const tip = tips.get(ref)
     // The ls-remote listed this change and the fetch was to bring it: a change
     // gone between the two readings is two moments, not one reading, and is loud.
     if (tip === undefined) {
       throw new Error(`${ref} was at ${remote} but not here after the fetch; read the queue again`)
     }
-    // A head that is a branch tip was answered by the one reading above; an
-    // older head of a branch that moved on, or whose branch is gone, is asked
-    // for itself — its object came with the change ref.
-    const headOnTarget =
-      merged.has(submitted.head) ||
-      (submitted.head !== branchHead && (await isAncestor(git, submitted.head, targetSha)))
+    let isHeadOnTarget = headOnTarget.get(submitted.head)
+    if (isHeadOnTarget === undefined) {
+      isHeadOnTarget = await isAncestor(git, submitted.head, targetSha)
+      headOnTarget.set(submitted.head, isHeadOnTarget)
+    }
     const change: ChangeRecords = {
       ...(branchHead === undefined ? {} : { branchHead }),
       branch: submitted.branch,
       records: [tip],
       head: submitted.head,
-      headOnTarget,
+      headOnTarget: isHeadOnTarget,
     }
     entries.push({ change, reading: readChange(change) })
   }
-  return { changes: entries, target: targetSha }
+  return { changes: entries, pause: capturedPause, target: targetSha }
 }
 
 /**
- * Expand selected queue entries from their fixed-cost tip reading to their
+ * Expand selected queue entries from their captured tip reading to their
  * full histories through their captured tips, never through a newer local ref.
  * Call this only for the entries a detail view opens; the queue-wide read stays tip-only.
  */
@@ -174,32 +161,30 @@ export async function readHistories(git: Git, entries: QueueRead, remote: string
   return hydrated
 }
 
-/** Every change ref's tip record, by ref, in one reading. A change ref that does not end in a record is loud. */
-async function tipRecords(git: Git, queue: string): Promise<ReadonlyMap<string, ChangeRecord>> {
-  const prefix = queueRefPrefix(queue)
-  const pause = pauseRef(queue)
-  const out = await git([
-    "for-each-ref",
-    "--format=%(objectname)%00%(refname)%00%(committerdate:iso-strict)%00%(trailers:only,unfold)%00%(contents)%01",
-    `${prefix}/`,
-  ])
-  const tips = new Map<string, ChangeRecord>()
+/** Captured change-tip records, by advertised ref, without resolving a moving name. */
+async function tipRecords(
+  git: Git,
+  captured: readonly Readonly<{ change: Change; oid: string; ref: string }>[],
+): Promise<ReadonlyMap<string, ChangeRecord>> {
+  if (captured.length === 0) return new Map()
+  const oids = [...new Set(captured.map(({ oid }) => oid))]
+  const out = await git(["log", "--no-walk", "--format=%H%x00%cI%x00%(trailers:only,unfold)%x00%B%x01", ...oids])
+  const byOid = new Map<string, ChangeRecord | undefined>()
   for (const record of out.split("\x01")) {
-    const [sha, ref, at, block, body] = record.replace(/^\n/u, "").split("\x00")
-    if (ref === pause) continue
-    if (
-      sha === undefined ||
-      ref === undefined ||
-      at === undefined ||
-      block === undefined ||
-      body === undefined ||
-      sha.trim() === ""
-    ) {
-      continue
+    const [sha, at, block, body] = record.replace(/^\n/u, "").split("\x00")
+    const oid = sha?.trim()
+    if (oid === undefined || oid === "" || at === undefined || block === undefined || body === undefined) continue
+    byOid.set(oid, recordFrom(oid, at, body, block))
+  }
+  const tips = new Map<string, ChangeRecord>()
+  for (const { change, oid, ref } of captured) {
+    const tip = tipRecord(byOid.get(oid), oid, ref)
+    const expected = changeName(change)
+    const actual = changeOf(tip, ref)
+    if (actual !== expected) {
+      throw new Error(`${ref} at ${oid.slice(0, 12)} carries Change: ${actual}, not ${expected}`)
     }
-    // Every reader of the queue comes through here, so the one check that a
-    // change's records are in the format this code reads belongs here (records.ts).
-    tips.set(ref, tipRecord(recordFrom(sha.trim(), at, body, block), sha.trim(), ref))
+    tips.set(ref, tip)
   }
   return tips
 }

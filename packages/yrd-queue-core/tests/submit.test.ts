@@ -6,7 +6,7 @@
  * the remote is the one store and what it holds is the only truth.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -21,8 +21,10 @@ import {
   queueRefPrefix,
   readRecords,
   readQueue,
+  readPause,
   refAt,
   submit,
+  writePause,
 } from "../src/index.ts"
 import type { Git } from "../src/index.ts"
 
@@ -241,7 +243,7 @@ describe("the queue read is every submitted change at the remote", () => {
     expect(opened?.reading.state).toBe("queued")
   })
 
-  it("reads the change refs first and fetches only the branches they name: 200 unrelated branches are never fetched (E3)", async () => {
+  it("two readers fetch only submitted changes without changing shared refs or FETCH_HEAD (E3)", async () => {
     const w = await world()
     // Another clone puts a commit this clone has never seen on 200 branches.
     const other = join(dirname(w.work), "other")
@@ -270,30 +272,26 @@ describe("the queue read is every submitted change at the remote", () => {
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
     })
-    // The submits' own pushes left tracking refs for the two; forget them, so
-    // that what stands after the reading is what the reading fetched.
+    // A reading must not recreate the submitter's tracking refs.
     await w.git(["update-ref", "-d", "refs/remotes/origin/task/one"])
     await w.git(["update-ref", "-d", "refs/remotes/origin/task/two"])
     expect((await remoteRefs(w)).filter((ref) => ref.startsWith("refs/heads/bulk/"))).toHaveLength(200)
+    const refs = ["for-each-ref", "--format=%(refname)%00%(objectname)"]
+    const before = await w.git(refs)
+    const fetchHead = (await w.git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
+    writeFileSync(fetchHead, "caller-owned fetch evidence\n")
 
-    const entries = (await readQueue(w.git, "origin", "main")).changes
+    const [first, second] = await Promise.all([readQueue(w.git, "origin", "main"), readQueue(w.git, "origin", "main")])
 
-    expect(entries.map((entry) => entry.change.branch).sort()).toEqual(["task/one", "task/two"])
-    const tracked = (await w.git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"]))
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line !== "" && line !== "refs/remotes/origin/HEAD")
-      .sort()
-    expect(tracked).toEqual([
-      "refs/remotes/origin/main",
-      "refs/remotes/origin/task/one",
-      "refs/remotes/origin/task/two",
-    ])
+    expect(first.changes.map((entry) => entry.change.branch).sort()).toEqual(["task/one", "task/two"])
+    expect(second).toEqual(first)
+    expect(await w.git(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
     // Never fetched means not here at all: the bulk commit's object never arrived.
     await expect(w.git(["cat-file", "-e", bulk])).rejects.toThrow(/exited 1/u)
   })
 
-  it("a change whose branch is gone reads failed, deleted, and the tracking ref left behind is forgotten (E3)", async () => {
+  it("a deleted branch ignores stale local refs, and pause comes from the same captured reading (E3)", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/gone", "gone.txt")
     await submit(w.git, "origin", {
@@ -304,13 +302,32 @@ describe("the queue read is every submitted change at the remote", () => {
     expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBe(head)
     // Taken out at the remote by somebody else, so this clone's tracking ref lingers.
     await gitIn(w.remote)(["update-ref", "-d", "refs/heads/task/gone"])
+    const paused = await writePause(w.git, "origin", "main", { by: "operator", kind: "paused", reason: "maintenance" })
+    const refs = ["for-each-ref", "--format=%(refname)%00%(objectname)"]
+    const before = await w.git(refs)
+    const fetchHead = (await w.git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
+    writeFileSync(fetchHead, "caller-owned fetch evidence\n")
+    let resumed = false
+    const git: Git = async (args, input) => {
+      const result = await w.git(args, input)
+      if (args[0] === "ls-remote" && !resumed) {
+        resumed = true
+        await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "maintenance complete" })
+      }
+      return result
+    }
 
-    const entries = (await readQueue(w.git, "origin", "main")).changes
+    const reading = await readQueue(git, "origin", "main")
 
-    const gone = entries.find((entry) => entry.change.branch === "task/gone")
+    const gone = reading.changes.find((entry) => entry.change.branch === "task/gone")
     expect(gone?.change.head).toBe(head)
     expect(gone?.reading).toEqual({ reason: "deleted", state: "failed" })
-    expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBeUndefined()
+    expect(resumed).toBe(true)
+    expect(reading.pause).toEqual(paused)
+    expect((await readPause(w.git, "origin", "main"))?.kind).toBe("resumed")
+    expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBe(head)
+    expect(await w.git(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
   })
 
   it("orders by the first opened record, and a superseded head reads failed, replaced", async () => {

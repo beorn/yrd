@@ -140,7 +140,8 @@ async function pauseTip(git: Git, remote: string, ref: string): Promise<string |
   return sha
 }
 
-async function parsePause(git: Git, sha: string, where: string): Promise<PauseRecord> {
+/** Decode an already-fetched pause object captured by a reader or writer. */
+export async function parsePause(git: Git, sha: string, where: string): Promise<PauseRecord> {
   const [commit, atText, block, body] = (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
   const id = commit?.trim()
   const parsed = commitTrailers(block ?? "")
