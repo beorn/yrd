@@ -33,7 +33,10 @@ function scratch(name: string): string {
 }
 
 /** A journal directory with one run's records written the way `openLog` writes them. */
-function journalDir(records: readonly Readonly<Record<string, unknown>>[], at = new Date()): Readonly<{ dir: string; run: string }> {
+function journalDir(
+  records: readonly Readonly<Record<string, unknown>>[],
+  at = new Date(),
+): Readonly<{ dir: string; run: string }> {
   const dir = join(scratch("journal"), "logs")
   const log = openLog(dir, () => at)
   for (const record of records) log.write(record as never)
@@ -163,10 +166,17 @@ describe("the clocks", () => {
     expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000, runtimeMs: 15 * 60 * 1000, waitMs: 30 * 60 * 1000 })
   })
 
-  it("keeps counting the runtime of a change that has not ended", () => {
+  it("counts an unrecorded runtime only while the change is queued or checked", () => {
     const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state: "checked" }
 
-    expect(clocks(row, now).runtimeMs).toBe(30 * 60 * 1000)
+    for (const state of ["queued", "checked"] as const) {
+      expect(clocks({ ...row, state }, now).runtimeMs, state).toBe(30 * 60 * 1000)
+    }
+    // Git can prove a change merged or its branch disappeared without an
+    // ending record. Missing evidence must not turn a stopped clock live.
+    for (const state of ["merged", "failed", "stuck", "direct"] as const) {
+      expect(clocks({ ...row, state }, now), state).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+    }
   })
 
   it("leaves wait and runtime ABSENT when nothing recorded that checking began, rather than answering zero", () => {
@@ -212,7 +222,9 @@ describe("the declared checks, joined to what ran", () => {
   })
 
   it("keeps a measured result the declaration no longer names, and says its command is not knowable", () => {
-    const views = checksOf(["gone exit=1 ms=5 log=/w/gone.log"], "failed", [{ name: "typecheck", run: "bun run typecheck" }])
+    const views = checksOf(["gone exit=1 ms=5 log=/w/gone.log"], "failed", [
+      { name: "typecheck", run: "bun run typecheck" },
+    ])
 
     expect(views.map((view) => [view.name, view.state])).toEqual([
       ["typecheck", "not-run"],
