@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { isAbsolute, join } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
   CHANGES,
@@ -43,6 +43,8 @@ import {
 import type { ChangeRecord, CheckedTree, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
 
 const roots: string[] = []
+// The real queue child needs GitSuper even when the worker's PATH is sealed.
+const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
 
 const INCIDENT_FIELDS = ["Code", "Subject", "Via", "Evidence", "Next", "Owner"] as const
 
@@ -172,6 +174,7 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
         FAKE_EVERYWHERE: check.everywhere === true ? "1" : "0",
         FAKE_EXIT: String(check.exit ?? 0),
         FAKE_SLEEP: String(check.sleep ?? 0),
+        PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
       },
       notify: [{ name: "recorder", on: ["merged", "failed", "stuck", "merged-direct"], run: notifier }],
       repo: work,

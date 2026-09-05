@@ -17,7 +17,7 @@
 
 import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { appendRecord, changeRef, gitIn, readRecords, submit, trailer, type Git } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
@@ -33,6 +33,9 @@ process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
 process.env.GIT_CONFIG_VALUE_0 = "always"
 
 const roots: string[] = []
+// Resolve the queue's declared dependency; the CLI need not install a second copy.
+const queueCoreEntry = Bun.resolveSync("@yrd/queue-core", import.meta.dirname)
+const gitSuperBin = resolve(Bun.resolveSync("git-super", dirname(queueCoreEntry)), "../../bin")
 
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
@@ -291,7 +294,12 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
             }
           },
         },
-        { json: true, log, workdir: w.workdir },
+        {
+          env: { ...process.env, PATH: `${gitSuperBin}:${process.env.PATH ?? ""}` },
+          json: true,
+          log,
+          workdir: w.workdir,
+        },
       ),
     ).toBe(0)
     expect(rounds).toBe(3)
