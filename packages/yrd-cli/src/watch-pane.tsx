@@ -60,6 +60,8 @@ import {
   type WatchQueue,
 } from "./watch-list.tsx"
 import { watchRowKey, type WatchRow } from "./watch-rows.ts"
+import { RunnerBox } from "./watch-boxes.tsx"
+import type { RunnerFacts } from "./watch-runner.ts"
 
 /** Everything one reading of the queue put on screen. The pane renders it and reads nothing itself. */
 export type WatchSnapshot = Readonly<{
@@ -72,6 +74,8 @@ export type WatchSnapshot = Readonly<{
   /** Where the run journal was looked for and why there was none — never a blank where a fact belongs. */
   journalAbsent?: string
   rows: readonly WatchRow[]
+  /** What the RUNNER box shows: the newest run journal and its process, read on the queue's own machine. */
+  runner?: RunnerFacts
   /** The instant this reading was made; every age on screen counts from it. */
   at: Date
 }>
@@ -351,6 +355,9 @@ export function WatchPane({
       }}
     />
   )
+  // The width the list pane gets: the whole terminal, or its share of a split.
+  const listColumns = opened && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) - DIVIDER_SIZE : columns
+  const inLine = shown.rows.filter((item) => item.row.position !== undefined).length
   const list = (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
       <Table
@@ -364,6 +371,16 @@ export function WatchPane({
           setAtEnd(false)
         }}
       />
+      {shown.runner === undefined ? null : (
+        <RunnerBox
+          facts={shown.runner}
+          label={label}
+          inLine={inLine}
+          columns={listColumns - 2}
+          live={live}
+          {...(shown.pause === undefined ? {} : { pause: shown.pause })}
+        />
+      )}
       <StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />
     </Box>
   )

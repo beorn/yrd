@@ -68,6 +68,7 @@ import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
+import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -378,6 +379,8 @@ export async function coreQueueCommand(
           queues: readonly WatchQueue[]
           pause?: string
           journalAbsent?: string
+          /** The newest run journal and its process, for the RUNNER box. */
+          runner: RunnerFacts
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
           entries: QueueEntries
         }>
@@ -420,6 +423,7 @@ export async function coreQueueCommand(
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: here.root }],
+          runner: readRunnerFacts(workdir),
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
           ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
           rows,
@@ -1013,6 +1017,7 @@ function snapshotOf(
     queues: readonly WatchQueue[]
     pause?: string
     journalAbsent?: string
+    runner: RunnerFacts
   }>,
 ): WatchSnapshot {
   return {
@@ -1020,6 +1025,7 @@ function snapshotOf(
     queue: round.queue,
     queues: round.queues,
     rows: round.rows,
+    runner: round.runner,
     ...(round.pause === undefined ? {} : { pause: round.pause }),
     ...(round.journalAbsent === undefined ? {} : { journalAbsent: round.journalAbsent }),
   }
