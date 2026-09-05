@@ -46,10 +46,20 @@ export type PushedRef = Readonly<{
 
 export type StatsBy = "submitter" | "branch"
 
+/** How the window's start was arrived at, so a reader can rederive it: what was asked, and what kind of thing it was. */
+export type SinceOrigin = Readonly<{
+  /** The `--since` text as given; absent for the default window. */
+  asked?: string
+  /** `duration` back from `now`, an `instant` as written, a `commit`'s committer date, or the `default` seven days. */
+  kind: "duration" | "instant" | "commit" | "default"
+}>
+
 export type QueueStatsOptions = Readonly<{
   now: Date
   /** Rows whose decision is before this instant, and refs whose tip is older, are outside the window; absent, {@link DEFAULT_WINDOW_MS} back from `now`. */
   since?: Date
+  /** Where `since` came from; the default when `since` is absent. */
+  sinceFrom?: SinceOrigin
   by?: StatsBy
 }>
 
@@ -92,7 +102,10 @@ export type PushedNeverSubmitted = Readonly<{
 
 export type QueueStats = Readonly<{
   at: Date
+  /** The window's start, resolved to one instant. */
   since: Date
+  /** How `since` was arrived at: the text asked and its kind, so the window can be rederived. */
+  sinceFrom: SinceOrigin
   /** True when nobody asked for a window and the seven-day default stands. */
   defaultWindow: boolean
   by: StatsBy
@@ -252,20 +265,40 @@ export function queueStats(
     groups,
     pushedNeverSubmitted: pushedNeverSubmitted(refs, windowed),
     since,
+    sinceFrom: options.since === undefined ? { kind: "default" } : (options.sinceFrom ?? { kind: "instant" }),
     total: groupOf("queue", inside),
   }
 }
 
-/** `3h`, `45m`, `2d`, an ISO instant, or nothing; a sha is the caller's to resolve to an instant first. */
-export function parseSince(text: string, now: Date): Date | undefined {
+/**
+ * `3h`, `45m`, `2d`, `1w` (a duration back from `now`), or an ISO instant, with
+ * its kind; undefined for anything else — a commit is the caller's to resolve,
+ * to its committer date, because that needs git.
+ */
+export function parseSince(text: string, now: Date): Readonly<{ at: Date; kind: "duration" | "instant" }> | undefined {
   const relative = /^(\d+(?:\.\d+)?)\s*(m|h|d|w)$/u.exec(text.trim())
   if (relative !== null) {
     const amount = Number(relative[1])
     const unit = { d: 86_400_000, h: 3_600_000, m: 60_000, w: 604_800_000 }[relative[2] ?? "h"] ?? 3_600_000
-    return new Date(now.getTime() - amount * unit)
+    return { at: new Date(now.getTime() - amount * unit), kind: "duration" }
   }
   const instant = new Date(text)
-  return Number.isNaN(instant.getTime()) ? undefined : instant
+  return Number.isNaN(instant.getTime()) ? undefined : { at: instant, kind: "instant" }
+}
+
+/** The window's start as the definitions line says it: the instant, and how it was arrived at. */
+export function sinceLine(stats: QueueStats): string {
+  const at = stats.since.toISOString()
+  switch (stats.sinceFrom.kind) {
+    case "default":
+      return `SINCE = ${at}, the default seven days back from ${stats.at.toISOString()} (the read's own horizon)`
+    case "duration":
+      return `SINCE = ${at}, from --since ${stats.sinceFrom.asked ?? ""} (a duration back from ${stats.at.toISOString()})`
+    case "commit":
+      return `SINCE = ${at}, from --since ${stats.sinceFrom.asked ?? ""} (that commit's committer date)`
+    default:
+      return `SINCE = ${at}, from --since ${stats.sinceFrom.asked ?? ""} (an instant, as written)`
+  }
 }
 
 function duration(ms: number | undefined): string {
@@ -320,6 +353,10 @@ export function formatQueueStats(stats: QueueStats, queue: string): string {
       .trimEnd(),
   )
   const window = `since ${stats.since.toISOString()}${stats.defaultWindow ? " (the default seven days, the read's own horizon)" : ""}`
+  const definitions =
+    "RETRIES = rows beyond the first for one branch@head · RE-PUSHED = branches with more than one head · " +
+    "MEDIAN/P90 = opened → merged, per merged change · " +
+    sinceLine(stats)
   const pushed = stats.pushedNeverSubmitted
   const pushedLine =
     `pushed, never submitted: ${String(pushed.count)}` +
@@ -329,6 +366,6 @@ export function formatQueueStats(stats: QueueStats, queue: string): string {
     `${queue} · stats at ${stats.at.toISOString()} · ${window} · by ${stats.by}`,
     ...rendered,
     pushedLine,
-    "RETRIES = rows beyond the first for one branch@head · RE-PUSHED = branches with more than one head · MEDIAN/P90 = opened → merged, per merged change",
+    definitions,
   ].join("\n")
 }

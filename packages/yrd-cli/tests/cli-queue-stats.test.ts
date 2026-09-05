@@ -129,7 +129,20 @@ describe("yrd queue stats through the process entry", () => {
     const work = await queueWithOneChangeAndOnePush()
     const byCommit = await yrd(work, "queue", "stats", "--json", "--since", "main")
     expect(byCommit.exitCode, byCommit.report).toBe(0)
-    expect((JSON.parse(byCommit.stdout) as { defaultWindow: boolean }).defaultWindow).toBe(false)
+    const parsed = JSON.parse(byCommit.stdout) as {
+      defaultWindow: boolean
+      since: string
+      sinceFrom: { asked?: string; kind: string }
+    }
+    expect(parsed.defaultWindow).toBe(false)
+    expect(parsed.sinceFrom).toEqual({ asked: "main", kind: "commit" })
+    // The window is main's committer date, exactly: rederivable from git.
+    const gitOut = Bun.spawnSync(["git", "-C", work, "log", "-1", "--format=%ct", "main"]).stdout.toString().trim()
+    expect(new Date(parsed.since).getTime()).toBe(Number(gitOut) * 1000)
+    const text = await yrd(work, "queue", "stats", "--since", "main")
+    expect(text.stdout.trimEnd().split("\n").at(-1)).toContain(
+      `SINCE = ${parsed.since}, from --since main (that commit's committer date)`,
+    )
 
     const refused = await yrd(work, "queue", "stats", "--since", "nope")
     expect(refused.exitCode).toBe(2)

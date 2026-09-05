@@ -11,7 +11,14 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import type { Row, WatchRow } from "@yrd/queue-core"
-import { decisionsOfRows, formatQueueStats, parseSince, queueStats, type PushedRef } from "../src/queue-stats.ts"
+import {
+  decisionsOfRows,
+  formatQueueStats,
+  parseSince,
+  queueStats,
+  sinceLine,
+  type PushedRef,
+} from "../src/queue-stats.ts"
 import { statsBuckets } from "../src/watch-stats.ts"
 
 /** The live /hh queue as `yrd queue list --json` printed it at 2026-09-05 06:36Z: 146 rows. */
@@ -155,9 +162,21 @@ describe("the window and the pushed refs", () => {
     expect(all.defaultWindow).toBe(true)
     expect(all.since.toISOString()).toBe("2026-08-29T06:36:00.000Z")
 
-    const recent = queueStats(rows, [], { now: NOW, since: parseSince("3h", NOW) })
+    const asked = parseSince("3h", NOW)
+    const recent = queueStats(rows, [], {
+      now: NOW,
+      since: asked?.at,
+      sinceFrom: { asked: "3h", kind: asked?.kind ?? "instant" },
+    })
     expect(recent.defaultWindow).toBe(false)
     expect(recent.since.toISOString()).toBe("2026-09-05T03:36:00.000Z")
+    expect(recent.sinceFrom).toEqual({ asked: "3h", kind: "duration" })
+    expect(sinceLine(recent)).toBe(
+      "SINCE = 2026-09-05T03:36:00.000Z, from --since 3h (a duration back from 2026-09-05T06:36:00.000Z)",
+    )
+    expect(sinceLine(all)).toBe(
+      "SINCE = 2026-08-29T06:36:00.000Z, the default seven days back from 2026-09-05T06:36:00.000Z (the read's own horizon)",
+    )
     // The merged row inside the window, plus the queued row: still in line, so always in view.
     expect(recent.total.rows).toBe(2)
     expect(recent.total.merged).toBe(1)
@@ -167,11 +186,26 @@ describe("the window and the pushed refs", () => {
   })
 
   it("parses 3h, 45m, 2d, 1w and an instant; refuses the rest", () => {
-    expect(parseSince("45m", NOW)?.toISOString()).toBe("2026-09-05T05:51:00.000Z")
-    expect(parseSince("2d", NOW)?.toISOString()).toBe("2026-09-03T06:36:00.000Z")
-    expect(parseSince("1w", NOW)?.toISOString()).toBe("2026-08-29T06:36:00.000Z")
-    expect(parseSince("2026-09-01T00:00:00Z", NOW)?.toISOString()).toBe("2026-09-01T00:00:00.000Z")
+    expect(parseSince("45m", NOW)).toEqual({ at: new Date("2026-09-05T05:51:00.000Z"), kind: "duration" })
+    expect(parseSince("2d", NOW)).toEqual({ at: new Date("2026-09-03T06:36:00.000Z"), kind: "duration" })
+    expect(parseSince("1w", NOW)).toEqual({ at: new Date("2026-08-29T06:36:00.000Z"), kind: "duration" })
+    expect(parseSince("2026-09-01T00:00:00Z", NOW)).toEqual({
+      at: new Date("2026-09-01T00:00:00.000Z"),
+      kind: "instant",
+    })
     expect(parseSince("yesterday-ish", NOW)).toBeUndefined()
+    // A commit's window is said as the commit's committer date, so a reader can rederive it with `git log -1 --format=%ct`.
+    const byCommit = queueStats([], [], {
+      now: NOW,
+      since: new Date("2026-09-04T12:00:00Z"),
+      sinceFrom: { asked: "main", kind: "commit" },
+    })
+    expect(sinceLine(byCommit)).toBe(
+      "SINCE = 2026-09-04T12:00:00.000Z, from --since main (that commit's committer date)",
+    )
+    expect(formatQueueStats(byCommit, "q").split("\n").at(-1)).toContain(
+      "from --since main (that commit's committer date)",
+    )
   })
 
   it("counts refs pushed and never submitted inside the window, oldest first, and says how many it could not date", () => {
@@ -197,7 +231,7 @@ describe("the window and the pushed refs", () => {
       },
       { branch: "task/never-fetched", head: "7".repeat(40), submitted: false },
     ]
-    const stats = queueStats(rows, refs, { now: NOW, since: parseSince("1d", NOW) })
+    const stats = queueStats(rows, refs, { now: NOW, since: parseSince("1d", NOW)?.at })
     expect(stats.pushedNeverSubmitted.count).toBe(2)
     expect(stats.pushedNeverSubmitted.oldestAgeMs).toBe(5 * 3_600_000)
     expect(stats.pushedNeverSubmitted.ageUnknown).toBe(1)

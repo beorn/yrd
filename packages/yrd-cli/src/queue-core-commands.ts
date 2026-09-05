@@ -72,7 +72,14 @@ import { stripAnsi } from "@silvery/ansi"
 import { CHECK_GLYPH, clock, firstLine, mediaDuration } from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOf, type RunDecision } from "./watch-stats.ts"
-import { formatQueueStats, parseSince, queueStats, type PushedRef, type StatsBy } from "./queue-stats.ts"
+import {
+  formatQueueStats,
+  parseSince,
+  queueStats,
+  type PushedRef,
+  type SinceOrigin,
+  type StatsBy,
+} from "./queue-stats.ts"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -632,14 +639,22 @@ export async function coreQueueCommand(
       // one row per run per change, exactly the rows the watch and the list
       // show, so a stat can never disagree with the table it summarizes.
       const now = request.now ?? new Date()
-      let since: Date | undefined
+      // `--since` is exactly one instant: a duration back from now, an instant
+      // as written, or a commit's COMMITTER date; the stats carry which.
+      let window: Readonly<{ since: Date; sinceFrom: SinceOrigin }> | undefined
       if (request.since !== undefined) {
-        since = parseSince(request.since, now) ?? (await instantOfCommit(git, request.since))
-        if (since === undefined) {
-          io.stderr(
-            `yrd: --since ${request.since} is not a duration (3h, 45m, 2d, 1w), an instant, or a commit this repository has\n`,
-          )
-          return 2
+        const parsed = parseSince(request.since, now)
+        if (parsed !== undefined) {
+          window = { since: parsed.at, sinceFrom: { asked: request.since, kind: parsed.kind } }
+        } else {
+          const committed = await instantOfCommit(git, request.since)
+          if (committed === undefined) {
+            io.stderr(
+              `yrd: --since ${request.since} is not a duration (3h, 45m, 2d, 1w), an instant, or a commit this repository has\n`,
+            )
+            return 2
+          }
+          window = { since: committed, sinceFrom: { asked: request.since, kind: "commit" } }
         }
       }
       const { journals, all } = await readListing(git, config, workdir)
@@ -647,7 +662,7 @@ export async function coreQueueCommand(
       const refs = await pushedRefs(git, config.target.remote, config.target.branch)
       const stats = queueStats(rows, refs, {
         now,
-        ...(since === undefined ? {} : { since }),
+        ...window,
         ...(request.by === undefined ? {} : { by: request.by }),
       })
       const name = queueName(config.target, await remoteUrl(git, config.target.remote))

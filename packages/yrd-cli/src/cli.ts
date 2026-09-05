@@ -250,7 +250,7 @@ function buildProgram(
     )
     .option(
       "--since <when>",
-      "a duration (3h, 45m, 2d, 1w), an instant, or a commit; rows decided before it are outside",
+      "a duration back from now (3h, 45m, 2d, 1w), an instant, or a commit (its committer date); rows decided before it are outside",
     )
     .option("--by <key>", "group under the queue line by submitter (default) or branch")
     .option("--json", "emit stable JSON: one document, complete on a pipe or a file")
