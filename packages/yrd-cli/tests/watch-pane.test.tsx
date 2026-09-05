@@ -855,6 +855,42 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
   })
 })
 
+describe("the RUNNER box's wrapped rails and the height budget", () => {
+  // Seen on the admitted head at exactly 120x30 (eyeball-0f2c45e6-full-120x30.png):
+  // the STATS bottom border painted on the footer row and the pills row fell
+  // off screen. Root cause, isolated 2026-09-05: a `wrap="wrap"` text inside
+  // the RUNNER box's marker row under-reports its height to the column's flex
+  // pass by exactly the lines it wraps to, so every box below it is laid out
+  // that many rows too high. The rails are pre-wrapped into rows now, as the
+  // command rail always was.
+  const pause =
+    "paused by @ci since Sep 5, 2026, 8:51:32 AM PDT: CI garage: M8 git-process prerequisite merged as 4431d6d8ad163ef1d560963f3f70782f4ffca156; full round audit and remaining M8 reconciliation before another admission; no service activation"
+  const runner = {
+    journalDir: "/w/logs",
+    latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
+  }
+  const decisions = [{ at: NOW, decision: "merged" as const, duplicate: false, run: RUN_ID }]
+
+  it("keeps the footer on the last row and the pills on screen at 120x30 with a three-row pause", async () => {
+    const app = render(<WatchPane snapshot={snapshot({ pause, runner, decisions })} live={false} />, {
+      cols: 120,
+      rows: 30,
+    })
+    await app.waitForLayoutStable()
+    await settle(app)
+    const lines = app.text.split("\n")
+    const last = lines.filter((line) => line.trim() !== "").at(-1) ?? ""
+    expect(last).toContain("change(s)")
+    // The footer shares its row with nothing: no box border, no STATS cell.
+    expect(last).not.toMatch(/[╭╰│─╮╯]/u)
+    // The pills row is on screen, between the table and STATS.
+    expect(lines.findIndex((line) => /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u.test(line))).toBeGreaterThan(0)
+    // The pause is on the RUNNER rail, wrapped onto rows under its marker, once.
+    expect(app.text.match(/paused by @ci/gu)).toHaveLength(1)
+    app.unmount()
+  })
+})
+
 describe("the frame's order under the table", () => {
   // The retired pane stacked the status pills right under the rows and the
   // STATS box after them (24169-old-watch.md §1 items 4–6); the port had the

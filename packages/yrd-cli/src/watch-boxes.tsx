@@ -32,6 +32,11 @@ import {
 
 /** Gutter 2 + borders 2 + the box's paddingX 2: what the command text cannot have (the retired box's own accounting). */
 const RUNNER_CHROME = 6
+// Row caps for the rails that can run long (the retired pane capped its pause
+// banner the same way: wraps, never truncates below the cap, elides past it).
+const PAUSE_MAX_ROWS = 4
+const ABSENT_MAX_ROWS = 3
+const SILENT_MAX_ROWS = 3
 
 const HEALTH_COLOR: Readonly<Record<RunnerHealth, string>> = {
   absent: "$fg-muted",
@@ -101,7 +106,28 @@ export function RunnerBox({
       : health === "running"
         ? `yrd queue run · ${runShortName(label, latest.id)}${latest.pid === undefined ? "" : ` [pid ${String(latest.pid)}]`}`
         : `yrd queue up · last run ${runShortName(label, latest.id)} wrote ${mediaDuration(sinceWrite ?? 0)} ago`
-  const commandRows = boundedHangingLines(command, Math.max(8, columns - RUNNER_CHROME), 3)
+  // Every rail that can run long is pre-wrapped into rows, like the command
+  // rail: a `wrap="wrap"` text inside a marker row under-reports its height to
+  // the column's flex pass by exactly the lines it wraps to, and every box below
+  // RUNNER is then laid out that many rows too high (the STATS border on the
+  // footer row, the pills row off screen; 2026-09-05, reproduced in isolation).
+  const railWidth = Math.max(8, columns - RUNNER_CHROME)
+  const commandRows = boundedHangingLines(command, railWidth, 3)
+  const absentRows =
+    latest === undefined
+      ? boundedHangingLines(facts.absent ?? `no run journal was read: ${facts.journalDir}`, railWidth, ABSENT_MAX_ROWS)
+      : []
+  const silentRows =
+    latest !== undefined && health === "silent"
+      ? boundedHangingLines(
+          `RUNNER SILENT — no journal write for ${mediaDuration(sinceWrite ?? 0)} while ${String(inLine)} ${
+            inLine === 1 ? "change waits" : "changes wait"
+          } in line; is yrd-service up? (hab ps yrd-service)`,
+          railWidth,
+          SILENT_MAX_ROWS,
+        )
+      : []
+  const pauseRows = pause === undefined ? [] : boundedHangingLines(pause, railWidth, PAUSE_MAX_ROWS)
   // Item 14: while a run executes the informational rails go muted so the
   // activity line carries the eye; item 27: an error rail keeps its color.
   const rail = "$fg-muted"
@@ -120,9 +146,11 @@ export function RunnerBox({
       </MarkerRow>
       {latest === undefined ? (
         <MarkerRow>
-          <Text color={rail} wrap="wrap" minWidth={0}>
-            {facts.absent ?? `no run journal was read: ${facts.journalDir}`}
-          </Text>
+          {absentRows.map((row) => (
+            <Text key={row} color={rail} wrap="truncate" minWidth={0}>
+              {row}
+            </Text>
+          ))}
         </MarkerRow>
       ) : (
         <>
@@ -144,23 +172,26 @@ export function RunnerBox({
               progress {clock(latest.lastWriteAt, { seconds: true })} · {mediaDuration(sinceWrite ?? 0)} ago
             </Text>
           </MarkerRow>
-          {health === "silent" ? (
+          {silentRows.length === 0 ? null : (
             <MarkerRow>
-              <Text color="$fg-error" bold wrap="wrap" minWidth={0}>
-                RUNNER SILENT — no journal write for {mediaDuration(sinceWrite ?? 0)} while {String(inLine)}{" "}
-                {inLine === 1 ? "change waits" : "changes wait"} in line; is yrd-service up? (hab ps yrd-service)
-              </Text>
+              {silentRows.map((row) => (
+                <Text key={row} color="$fg-error" bold wrap="truncate" minWidth={0}>
+                  {row}
+                </Text>
+              ))}
             </MarkerRow>
-          ) : null}
+          )}
         </>
       )}
-      {pause === undefined ? null : (
+      {pauseRows.length === 0 ? null : (
         <>
           <Box height={1} flexShrink={0} />
           <MarkerRow marker={<Text color="$fg-warning">⚠︎</Text>}>
-            <Text color="$fg-warning" bold wrap="wrap" minWidth={0}>
-              {pause}
-            </Text>
+            {pauseRows.map((row) => (
+              <Text key={row} color="$fg-warning" bold wrap="truncate" minWidth={0}>
+                {row}
+              </Text>
+            ))}
           </MarkerRow>
         </>
       )}

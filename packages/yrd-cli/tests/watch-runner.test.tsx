@@ -154,7 +154,9 @@ describe("the RUNNER box", () => {
     const text = await paint(latest({ lastWriteAt: new Date(NOW.getTime() - 12 * 60_000) }), 3)
 
     expect(text).toContain("silent 12:00")
-    expect(text).toContain("RUNNER SILENT — no journal write for 12:00 while 3 changes wait in")
+    // The banner is pre-wrapped into rows under its marker (never a live wrap): read it row by row.
+    expect(text).toContain("RUNNER SILENT — no journal write for 12:00 while 3 changes wait")
+    expect(text).toContain("in line; is yrd-service up? (hab ps yrd-service)")
     expect(text).toContain("hab ps yrd-service")
   })
 
