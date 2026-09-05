@@ -806,7 +806,8 @@ function runOptions(
 
 /**
  * The human line is a rendering of the log record, and the CLI's own logger is the
- * one place it is rendered: one debug row per log record, named by the log record's kind,
+ * one place it is rendered: one debug row per log record (warn for refused
+ * change-record writes), named by the log record's kind,
  * at the level the invocation resolved (`--log-level`, `LOG_LEVEL`, `-v`),
  * never a second format and never a second reading of the environment. No
  * host logger, no rendering: the JSONL file is what happened either way, and
@@ -824,6 +825,10 @@ function renderer(root: ConditionalLogger | undefined): (record: LogRecord) => v
       byKind.set(record.kind, log)
     }
     const { kind, run: _run, at: _at, ...rest } = record
+    if (kind === "change" && (rest.reason === "change-ref-taken" || rest.reason === "change-ref-contended")) {
+      log.warn?.(summarize(kind, rest), rest)
+      return
+    }
     // A conditional logger has no debug method below its level: nothing to render.
     log.debug?.(summarize(kind, rest), rest)
   }
@@ -837,6 +842,7 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
     case "run":
       return `queue run at ${String(rest.target)} ${String(rest.gitlink).slice(0, 12)}`
     case "change":
+      if (typeof rest.text === "string") return rest.text
       return `${where}: ${String(rest.decision ?? rest.state)}`
     case "check":
       // Two rows per check: `ms` is the end row's, and its absence is the
