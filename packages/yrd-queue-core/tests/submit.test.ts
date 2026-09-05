@@ -26,6 +26,8 @@ import {
   submit,
   writePause,
 } from "../src/index.ts"
+import { GitExit } from "../src/git.ts"
+import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -328,6 +330,74 @@ describe("the queue read is every submitted change at the remote", () => {
     expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBe(head)
     expect(await w.git(refs)).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
+  })
+
+  it("a captured queue object the server no longer serves refuses the reading with a retry remedy", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/one", "one.txt")
+    const submitted = await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    const ref = changeRef("main", submitted)
+    const reader = join(dirname(w.work), "reader")
+    await gitIn(dirname(w.work))(["clone", "--quiet", "--no-local", w.remote, reader])
+    const readerGit = gitIn(reader)
+    await readerGit(["config", "protocol.version", "0"])
+    const remoteGit = gitIn(w.remote)
+    await remoteGit(["config", "uploadpack.allowAnySHA1InWant", "false"])
+    await remoteGit(["config", "uploadpack.allowReachableSHA1InWant", "false"])
+    await remoteGit(["config", "uploadpack.allowTipSHA1InWant", "false"])
+    const refs = ["for-each-ref", "--format=%(refname)%00%(objectname)"]
+    const before = await readerGit(refs)
+    const fetchHead = (await readerGit(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
+    writeFileSync(fetchHead, "caller-owned fetch evidence\n")
+    let fetches = 0
+    let removed = false
+    const git: Git = async (args, input) => {
+      if (args[0] === "ls-remote" && !removed) {
+        const output = await readerGit(args, input)
+        await remoteGit(["update-ref", "-d", ref])
+        removed = true
+        return output
+      }
+      if (args[0] === "fetch") {
+        fetches += 1
+      }
+      return readerGit(args, input)
+    }
+
+    const error = await readQueue(git, "origin", "main").then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+
+    expect(error).toBeInstanceOf(CapturedQueueObjectsUnavailable)
+    if (!(error instanceof CapturedQueueObjectsUnavailable)) throw new Error("queue read unexpectedly succeeded")
+    expect(error).toMatchObject({
+      kind: "captured-queue-objects-unavailable",
+      capturedTarget: w.target,
+      queue: "main",
+      remote: "origin",
+    })
+    expect(error.message).toMatch(
+      new RegExp(`^origin#main at ${w.target}: could not fetch captured queue objects`, "u"),
+    )
+    expect(error.message).toContain("read the queue again")
+    expect(error.detail).toContain(submitted.opened)
+    expect(error.cause).toBeInstanceOf(GitExit)
+    expect((error.cause as GitExit).detail).toBe(error.detail)
+    expect(fetches).toBe(1)
+    expect(removed).toBe(true)
+    expect(await readerGit(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
+    await expect(readerGit(["cat-file", "-e", submitted.opened])).rejects.toThrow(/exited 1/u)
+
+    await w.git(["push", "--quiet", "origin", `${submitted.opened}:${ref}`])
+    expect((await readQueue(readerGit, "origin", "main")).changes.map((entry) => entry.change.branch)).toEqual([
+      "task/one",
+    ])
   })
 
   it("orders by the first opened record, and a superseded head reads failed, replaced", async () => {

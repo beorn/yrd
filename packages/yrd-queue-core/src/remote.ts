@@ -18,7 +18,7 @@
  */
 
 import { changeOf, readRecords, recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
-import { isAncestor } from "./git.ts"
+import { GitExit, isAncestor } from "./git.ts"
 import { parsePause, type PauseRecord } from "./pause.ts"
 import { changeName, parseChangeRef, pauseRef, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
@@ -32,6 +32,25 @@ export type QueueEntry = Readonly<{
 
 /** What one reading of the remote yields: every change, and where each stands. */
 export type QueueRead = readonly QueueEntry[]
+
+/** One captured queue reading whose exact-object fetch failed. */
+export class CapturedQueueObjectsUnavailable extends Error {
+  readonly kind = "captured-queue-objects-unavailable"
+
+  constructor(
+    readonly remote: string,
+    readonly queue: string,
+    readonly capturedTarget: string,
+    readonly detail: string,
+    cause: unknown,
+  ) {
+    super(
+      `${remote}#${queue} at ${capturedTarget}: could not fetch captured queue objects; read the queue again: ${detail}`,
+      { cause },
+    )
+    this.name = "CapturedQueueObjectsUnavailable"
+  }
+}
 
 /**
  * Every change at the remote, read: one entry per change ref, and nothing for
@@ -94,16 +113,21 @@ export async function readQueue(
   // while a reader uses them; never run `gc --prune=now` in an active workdir.
   // Empty refmaps and no FETCH_HEAD are what make concurrent readers observers
   // rather than writers. The target makes this list non-empty.
-  await git([
-    "fetch",
-    "--quiet",
-    "--no-tags",
-    "--no-recurse-submodules",
-    "--no-write-fetch-head",
-    "--refmap=",
-    remote,
-    ...objectIds,
-  ])
+  try {
+    await git([
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "--no-write-fetch-head",
+      "--refmap=",
+      remote,
+      ...objectIds,
+    ])
+  } catch (error) {
+    const detail = error instanceof GitExit ? error.detail : error instanceof Error ? error.message : String(error)
+    throw new CapturedQueueObjectsUnavailable(remote, target, targetSha, detail, error)
+  }
 
   const tips = await tipRecords(git, changeRefs)
   const headOnTarget = new Map<string, boolean>()
