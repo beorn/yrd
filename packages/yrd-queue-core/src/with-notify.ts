@@ -23,6 +23,7 @@ import { createProcess, shellCommand } from "@yrd/process"
 import { readCheckTrailer } from "./check.ts"
 import type { Ending, Notifier } from "./config.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
+import { refAt } from "./git.ts"
 import {
   endedKind,
   readRecord,
@@ -32,7 +33,7 @@ import {
   type ChangeRecord,
   type WriteRecord,
 } from "./records.ts"
-import { changeName } from "./refs.ts"
+import { changeName, changeRef } from "./refs.ts"
 import { short, writeRecord, type Ring, type Run } from "./run.ts"
 import { tipOf } from "./state.ts"
 import type { QueueEntry } from "./remote.ts"
@@ -278,7 +279,9 @@ async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
     const tip = tipOf(candidate.change)
     return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
   }).length
-  const own = await readRecords(run.git, run.options.target.branch, entry.change)
+  // This count includes the post-write tip, not the earlier queue reading.
+  const tip = await refAt(run.git, changeRef(run.options.target.branch, entry.change))
+  const own = tip === undefined ? [] : await readRecords(run.git, tip)
   return (
     elsewhere +
     own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length

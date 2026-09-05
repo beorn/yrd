@@ -24,7 +24,7 @@
 import { readRecords, recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
 import { isAncestor } from "./git.ts"
 import { changeName, changeRef, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
-import { readChange, type ChangeRecords, type ChangeReading } from "./state.ts"
+import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
 
 /** One change as the queue read sees it. */
 export type QueueEntry = Readonly<{
@@ -150,20 +150,26 @@ export async function readQueue(
 
 /**
  * Expand selected queue entries from their fixed-cost tip reading to their
- * full record histories. Call this only for the entries a detail view opens;
- * the queue-wide read deliberately stays tip-only.
+ * full histories through their captured tips, never through a newer local ref.
+ * Call this only for the entries a detail view opens; the queue-wide read stays tip-only.
  */
 export async function readHistories(git: Git, entries: QueueRead, remote: string, queue: string): Promise<QueueRead> {
   const hydrated: QueueEntry[] = []
   for (const entry of entries) {
-    const records = await readRecords(git, queue, entry.change)
+    const tip = tipOf(entry.change).sha
+    const records = await readRecords(git, tip)
     const first = records[0]
     if (first === undefined) {
       throw new Error(
-        `${changeName(entry.change)} was listed at ${remote} but its record history was absent after the queue read; run yrd queue show ${entry.change.branch} again`,
+        `${changeName(entry.change)} was listed at ${remote}#${queue} at ${tip} but its record history was absent after the queue read; run yrd queue show ${entry.change.branch} again`,
       )
     }
-    hydrated.push({ ...entry, change: { ...entry.change, records: [first, ...records.slice(1)] } })
+    const change: ChangeRecords = { ...entry.change, records: [first, ...records.slice(1)] }
+    const expandedTip = tipOf(change).sha
+    if (expandedTip !== tip) {
+      throw new Error(`${changeName(change)} history ended at ${expandedTip}, not its captured tip ${tip}`)
+    }
+    hydrated.push({ ...entry, change })
   }
   return hydrated
 }

@@ -154,13 +154,11 @@ async function carriedFrom(git: Git, sha: string): Promise<readonly (readonly [s
   return (await readRecord(git, sha)).trailers.filter(([name]) => (CARRIED as readonly string[]).includes(name))
 }
 
-/** Every record of a change, oldest first. An unknown change reads as no records. */
-export async function readRecords(git: Git, queue: string, change: Change): Promise<readonly ChangeRecord[]> {
-  const ref = changeRef(queue, change)
-  if ((await refAt(git, ref)) === undefined) return []
+/** Every record through the captured commit, oldest first. Never re-read a moving ref. */
+export async function readRecords(git: Git, from: string): Promise<readonly ChangeRecord[]> {
   // %x00 separates the fields and %x01 the records, because a commit message
   // holds newlines and a naive split would cut a record in half.
-  const out = await git(["log", "--first-parent", `--format=${RECORD_FORMAT}%x01`, ref])
+  const out = await git(["log", "--first-parent", `--format=${RECORD_FORMAT}%x01`, from])
   const records: ChangeRecord[] = []
   for (const record of out.split("\x01")) {
     const row = record.trim()
@@ -170,10 +168,11 @@ export async function readRecords(git: Git, queue: string, change: Change): Prom
     const parsed = recordFrom(sha, at, body, block)
     // The tip is the first record this reads, and the one check that these
     // records are in the format this code understands happens on it, once. It
-    // comes BEFORE the walk's own ending below, because a ref whose tip is not
+    // comes BEFORE the walk's own ending below, because a captured tip that is not
     // a record at all is the very case that check is about.
     if (records.length === 0) {
-      records.push(tipRecord(parsed, sha, ref))
+      const where = parsed === undefined ? `history from ${from}` : `${changeOf(parsed, from)} history from ${from}`
+      records.push(tipRecord(parsed, sha, where))
       continue
     }
     // The first-parent walk ends at the genesis, which carries no `Record:`

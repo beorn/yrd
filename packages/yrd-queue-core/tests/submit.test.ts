@@ -88,7 +88,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     const refs = await remoteRefs(w)
     expect(refs).toContain("refs/heads/task/one")
     expect(refs).toContain(changeRef("main", { branch: "task/one", head }))
-    const records = await readRecords(w.git, "main", { branch: "task/one", head })
+    const records = await readRecords(w.git, submitted.opened)
     expect(records.map((record) => record.kind)).toEqual(["opened"])
     expect(records[0]?.trailers).toEqual(
       expect.arrayContaining([
@@ -102,7 +102,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
 
   it("at an unchanged head is a retry: a second opened record, one change", async () => {
     const w = await world()
-    const head = await branchWithCommit(w, "task/one", "one.txt")
+    await branchWithCommit(w, "task/one", "one.txt")
     await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
@@ -115,7 +115,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     })
 
     expect(again.retry).toBe(true)
-    const records = await readRecords(w.git, "main", { branch: "task/one", head })
+    const records = await readRecords(w.git, again.opened)
     expect(records.map((record) => record.kind)).toEqual(["opened", "opened"])
     expect((await remoteRefs(w)).filter((ref) => ref.startsWith("refs/yrd/main/task/one@"))).toHaveLength(1)
   })
@@ -174,16 +174,14 @@ describe("a change is named <branch>@<sha>, and that name is the last part of it
   it("is a ref git accepts and reads back, @ included", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/one@v2", "one.txt")
-    await submit(w.git, "origin", {
+    const submitted = await submit(w.git, "origin", {
       branch: "task/one@v2",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
     })
 
     expect(await remoteRefs(w)).toContain(`refs/yrd/main/task/one@v2@${head}`)
-    expect((await readRecords(w.git, "main", { branch: "task/one@v2", head })).map((record) => record.kind)).toEqual([
-      "opened",
-    ])
+    expect((await readRecords(w.git, submitted.opened)).map((record) => record.kind)).toEqual(["opened"])
     expect(
       (await readQueue(w.git, "origin", "main")).changes.map((entry) => [entry.change.branch, entry.change.head]),
     ).toEqual([["task/one@v2", head]])
