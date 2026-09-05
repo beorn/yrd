@@ -7,7 +7,6 @@
  */
 
 import { ABSENT, RECORD_FORMAT, commitTrailers, type Git } from "./records.ts"
-import { refAt } from "./git.ts"
 import { pauseRef } from "./refs.ts"
 
 export type PauseKind = "paused" | "resumed"
@@ -76,12 +75,10 @@ export async function readPause(git: Git, remote: string, queue: string): Promis
   const ref = pauseRef(queue)
   const advertised = await pauseTip(git, remote, ref)
   if (advertised === undefined) return undefined
-  await git(["fetch", "--quiet", "--no-tags", remote, `+${ref}:${ref}`])
-  const fetched = await refAt(git, ref)
-  if (fetched === undefined) {
-    throw new Error(`${remote} advertised ${ref} at ${advertised}, but the fetch left no readable ref`)
-  }
-  return parsePause(git, fetched, `${remote} ${ref}`)
+  // These objects have no local ref: retain Git's prune grace while readers
+  // use them, never gc --prune=now in a workdir with an active reading.
+  await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, advertised])
+  return parsePause(git, advertised, `${remote} ${ref}`)
 }
 
 /** Append one paused or resumed record under a lease on the remote tip. */
@@ -94,7 +91,6 @@ export async function writePause(git: Git, remote: string, queue: string, write:
   if (write.kind === "resumed" && previous?.kind !== "paused") throw new QueueNotPaused()
   const commit = await pauseCommit(git, previous, { ...write, by, reason })
   await git(["push", "--quiet", `--force-with-lease=${ref}:${previous?.sha ?? ABSENT}`, remote, `${commit}:${ref}`])
-  await git(["update-ref", ref, commit])
   return parsePause(git, commit, `${remote} ${ref}`)
 }
 

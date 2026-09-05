@@ -11,11 +11,11 @@
  * boundary.
  */
 
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, pauseRef, readPause, writePause, type Git } from "../src/index.ts"
+import { gitIn, pauseRef, readPause, writePause, type Git, type PauseRecord } from "../src/index.ts"
 
 const PAUSE_REF = pauseRef("main")
 
@@ -45,8 +45,12 @@ async function world(): Promise<World> {
 }
 
 describe("the queue pause is one leased record ref at the remote", () => {
-  it("records paused and resumed records with who, when and why", async () => {
+  it("reads captured pause records without changing local refs or FETCH_HEAD", async () => {
     const w = await world()
+    const refs = ["for-each-ref", "--format=%(refname) %(objectname)"]
+    const before = await w.other(refs)
+    const fetchHead = (await w.other(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
+    writeFileSync(fetchHead, "another command's fetch result\n")
 
     expect(await readPause(w.git, "origin", "main")).toBeUndefined()
     const paused = await writePause(w.git, "origin", "main", {
@@ -55,20 +59,31 @@ describe("the queue pause is one leased record ref at the remote", () => {
       reason: "49 new failures on main",
     })
 
-    expect(await readPause(w.other, "origin", "main")).toEqual(paused)
+    // A resume after advertisement must not change this reading's pause.
+    let resumed: PauseRecord | undefined
+    const racing: Git = async (args, input) => {
+      const result = await w.other(args, input)
+      if (args[0] === "ls-remote" && resumed === undefined) {
+        resumed = await writePause(w.git, "origin", "main", {
+          by: "operator",
+          kind: "resumed",
+          reason: "the repair landed",
+        })
+      }
+      return result
+    }
+    expect(await readPause(racing, "origin", "main")).toEqual(paused)
     expect(paused).toMatchObject({ by: "@chief", kind: "paused", reason: "49 new failures on main" })
     expect(paused.at).toBeInstanceOf(Date)
 
-    const resumed = await writePause(w.other, "origin", "main", {
-      by: "operator",
-      kind: "resumed",
-      reason: "the repair landed",
-    })
-    expect(await readPause(w.git, "origin", "main")).toEqual(resumed)
+    expect(await readPause(w.other, "origin", "main")).toEqual(resumed)
     expect(resumed).toMatchObject({ by: "operator", kind: "resumed", reason: "the repair landed" })
-    expect((await w.other(["log", "-1", "--format=%(trailers:only,unfold)", PAUSE_REF])).trim()).toBe(
+    expect((await w.other(["log", "-1", "--format=%(trailers:only,unfold)", resumed!.sha])).trim()).toBe(
       "Record: resumed\nPaused-By: operator",
     )
+    expect(await w.other(refs)).toBe(before)
+    expect(await w.git(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
   })
 
   it("refuses the second writer when two records race from one observed tip", async () => {
