@@ -14,8 +14,8 @@
  * onto the old base and the queue run judges every change on the new one; a
  * rollback is a person's `git revert`, never the queue's.
  *
- * The queue's history starts at its own first record: the oldest commit under
- * `refs/yrd/changes/`, which is the first `opened` record anyone wrote here.
+ * The queue's history starts at its own first record: the oldest commit in
+ * its captured change histories, the first `opened` record anyone wrote here.
  * Everything on the target older than that instant belongs to whatever moved
  * the branch before this queue existed, and is never judged.
  *
@@ -41,8 +41,9 @@
 
 import { endedKind, mergedByRun, trailer, type ChangeRecord, type Git } from "./records.ts"
 import { gitlinkRows } from "./git.ts"
-import { changeName, queueRefPrefix } from "./refs.ts"
+import { changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
+import { tipOf } from "./state.ts"
 
 export type DirectMerge = Readonly<{
   /** The branch it moved: the queue's target. */
@@ -70,7 +71,7 @@ export async function directMergeCommits(
   targetSha: string,
   entries: QueueRead,
 ): Promise<readonly DirectMerge[]> {
-  const started = await queueStarted(git, target)
+  const started = await queueStarted(git, entries)
   // No records anywhere: this queue has judged nothing, so it has no history of
   // its own and nothing on the target is yet its business to report.
   if (started === undefined) return []
@@ -124,26 +125,24 @@ export async function directMergeCommits(
 
 /**
  * When the queue's own history starts: the committer date of the oldest record
- * commit under `refs/yrd/changes/`, which is the first `opened` record anyone
- * wrote here. Undefined when there is no change at all — then the queue has
+ * in its captured change histories. Undefined when there is no change at all — then the queue has
  * judged nothing and has no history to start.
  *
  * The walk is first-parent from every change tip, so it reads records and ends
  * at the genesis (records.ts). `--min-parents=1` drops the genesis itself, whose
  * committer date is the epoch by construction and would put the boundary in
- * 1970. A change ref is asked for FIRST because `git log --glob` with no
- * matching ref falls back to HEAD, which would answer with the project's own
- * history — the silent wrong answer this reading exists to avoid.
+ * 1970. No entries means no walk: `git log` without commits would fall back to
+ * HEAD and invent a boundary from the project's own history. Pause records
+ * are not changes and never supply that boundary.
  *
  * The date is handed to `git log --since`, which keeps commits at or after it:
  * a direct merge made in the same second as the first record is reported, never
  * hidden. The boundary errs towards reporting more, as the old one did.
  */
-async function queueStarted(git: Git, queue: string): Promise<string | undefined> {
-  const prefix = queueRefPrefix(queue)
-  const some = (await git(["for-each-ref", "--count=1", "--format=%(refname)", `${prefix}/`])).trim()
-  if (some === "") return undefined
-  return (await git(["log", "--first-parent", "--min-parents=1", "--reverse", "--format=%cI", `--glob=${prefix}/*`]))
+async function queueStarted(git: Git, entries: QueueRead): Promise<string | undefined> {
+  if (entries.length === 0) return undefined
+  const tips = [...new Set(entries.map((entry) => tipOf(entry.change).sha))]
+  return (await git(["log", "--first-parent", "--min-parents=1", "--reverse", "--format=%cI", ...tips]))
     .split("\n")
     .map((line) => line.trim())
     .find((line) => line !== "")

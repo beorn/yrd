@@ -1273,6 +1273,9 @@ describe("a queue run", () => {
     // instant to start from — and every commit on the target belongs to
     // whatever moved the branch before this queue existed.
     const w = await world({ declaredLater: true })
+    // Operational pause history is not a submitted change's history.
+    await writePause(w.git, "origin", "main", { by: "operator", kind: "paused", reason: "maintenance" })
+    await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "maintenance complete" })
     await pushAroundQueue(w, "direct.txt")
 
     const outcome = await queueRun(w.options({ exit: 0 }))

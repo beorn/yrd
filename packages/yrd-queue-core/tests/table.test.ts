@@ -231,6 +231,8 @@ describe("the table is the queue read rendered", () => {
     const direct = (await w.git(["rev-parse", "HEAD"])).trim()
 
     const entries = (await readQueue(w.git, "origin", "main")).changes
+    // The captured reading owns its history even when no local change ref remains.
+    await w.git(["update-ref", "-d", changeRef("main", entries[0]!.change)])
     const directMerges = await directMergeCommits(w.git, "main", direct, entries)
     expect(directMerges.map((commit) => [commit.commit, commit.subject, commit.gitlinks, commit.why])).toEqual([
       [direct, "direct.txt around the queue", [], "it is one commit, not a merge of a change"],
