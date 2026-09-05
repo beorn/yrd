@@ -161,13 +161,34 @@ describe("the top line (items 30, 32d, 33)", () => {
     app.unmount()
   })
 
-  it("puts the pause above everything, because a queue that is not running is the loudest thing about it", async () => {
+  it("puts RUNNER before the table and keeps the pause only on its RUNNER rail", async () => {
+    // The component tests covered the top pause and RUNNER independently, so
+    // they missed the live screen duplicating one pause around a long table.
+    const pause = "paused by @chief: the host is down"
     const text = await paint(
-      <WatchPane snapshot={snapshot({ pause: "paused by @chief: the host is down" })} live={false} />,
+      <WatchPane
+        snapshot={snapshot({
+          pause,
+          runner: {
+            journalDir: "/w/logs",
+            latest: {
+              alive: false,
+              id: RUN_ID,
+              lastWriteAt: NOW,
+              startedAt: NOW,
+            },
+          },
+        })}
+        live={false}
+      />,
     )
 
     const lines = text.split("\n").filter((line) => line.trim() !== "")
-    expect(lines[0]).toContain("paused by @chief")
+    expect(lines[0]).toContain("YRD QUEUES")
+    expect(lines.findIndex((line) => line.includes("RUNNER"))).toBeLessThan(
+      lines.findIndex((line) => line.includes("CHANGES")),
+    )
+    expect(text.match(new RegExp(pause, "gu"))).toHaveLength(1)
   })
 
   it("says WHERE the run journal was looked for when there was none, so no journal never reads as nothing running", async () => {
@@ -527,6 +548,18 @@ describe("the pane's keys and the detail's identity", () => {
 describe("the layout tier", () => {
   it("puts the detail beside the list on a wide terminal", () => {
     expect(watchTier(220, 50)).toBe("right")
+  })
+
+  it("opens the selected change's detail by default when a split tier has room for it", async () => {
+    // `watchTier` alone proved geometry but not the visible initial state; the
+    // restored pane initialized every tier closed and hid this whole surface.
+    const open = opener()
+    const app = render(<WatchPane snapshot={snapshot()} live={false} open={open} />, { cols: 220, rows: 50 })
+    await settle(app)
+
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(app.text).toContain("1 test failed: the parser")
+    app.unmount()
   })
 
   it("drills in to one pane when there is room for neither split", () => {

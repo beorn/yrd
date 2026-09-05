@@ -174,12 +174,14 @@ export function WatchPane({
   /** Called with the ending's code when every watched change has ended, so the command can exit with it. */
   onEnding?: (code: 0 | 1 | 2) => void
 }) {
+  const { columns, rows: terminalRows } = useWindowSize()
+  const tier = watchTier(columns, terminalRows)
   const [shown, setShown] = useState(snapshot)
   const [failure, setFailure] = useState<Error | undefined>(undefined)
   const [readFailure, setReadFailure] = useState<ReadFailure | undefined>(undefined)
   const [detailFailure, setDetailFailure] = useState<(ReadFailure & { key: string }) | undefined>(undefined)
   const [cursor, setCursor] = useState(0)
-  const [opened, setOpened] = useState(false)
+  const [opened, setOpened] = useState(() => tier !== "full")
   const [helpOpen, setHelpOpen] = useState(false)
   const [tab, setTab] = useState<string | undefined>(undefined)
   /** The row the cursor is on, by identity; undefined at the top, following the newest. */
@@ -190,8 +192,6 @@ export function WatchPane({
   const [diffOpen, setDiffOpen] = useState(false)
   const [diffs, setDiffs] = useState<ReadonlyMap<string, DiffText>>(new Map())
   const listRef = useRef<ListViewHandle | null>(null)
-  const { columns, rows: terminalRows } = useWindowSize()
-  const tier = watchTier(columns, terminalRows)
 
   const refresh = useCallback(async () => {
     if (load === undefined) return
@@ -418,6 +418,16 @@ export function WatchPane({
   const inLine = shown.rows.filter((item) => item.row.position !== undefined).length
   const list = (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
+      {shown.runner === undefined ? null : (
+        <RunnerBox
+          facts={shown.runner}
+          label={label}
+          inLine={inLine}
+          columns={listColumns - 2}
+          live={live}
+          {...(shown.pause === undefined ? {} : { pause: shown.pause })}
+        />
+      )}
       <Table
         rows={visible}
         empty={shown.rows.length === 0 ? "nothing in line" : "no change matches the filters"}
@@ -431,16 +441,6 @@ export function WatchPane({
           setCursorRow(index === 0 ? undefined : visible[index])
         }}
       />
-      {shown.runner === undefined ? null : (
-        <RunnerBox
-          facts={shown.runner}
-          label={label}
-          inLine={inLine}
-          columns={listColumns - 2}
-          live={live}
-          {...(shown.pause === undefined ? {} : { pause: shown.pause })}
-        />
-      )}
       {shown.decisions === undefined || terminalRows < STATS_MIN_ROWS ? null : (
         <StatsBox
           decisions={shown.decisions}
@@ -474,12 +474,6 @@ export function WatchPane({
   return (
     <NowProvider readAt={shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {/* Loudest first: a queue that is not running is the loudest thing about it. */}
-        {shown.pause === undefined ? null : (
-          <Text bold color="$fg-warning" wrap="truncate">
-            {shown.pause}
-          </Text>
-        )}
         {/* The top line is ONLY the title and the queue pills (items 30, 32b, 33). */}
         <TopLine
           queues={shown.queues}
