@@ -436,5 +436,16 @@ export async function runYrdExecutable(): Promise<never> {
     cwd: process.cwd(),
   }
   const exitCode = await runYrdProcess(process.argv, io)
+  // A forced exit discards queued pipe writes (large queue JSON stopped at
+  // 64KiB). Finish both streams before terminating; an empty-write callback
+  // is not a flush barrier in Bun. A failed drain must reject, not report success.
+  await Promise.all(
+    [process.stdout, process.stderr].map(
+      (stream) =>
+        new Promise<void>((resolve, reject) => {
+          stream.end((error?: Error | null) => (error ? reject(error) : resolve()))
+        }),
+    ),
+  )
   process.exit(exitCode)
 }
