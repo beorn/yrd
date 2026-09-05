@@ -1,6 +1,6 @@
 /**
  * The boxes under the table: RUNNER (watch-redesign items 13, 14, 16, 17,
- * 27, 29, 29a, 37) and, in the next slice, STATS.
+ * 27, 29, 29a, 37) and STATS (items 18–22).
  *
  *   ╭─ RUNNER ──────────────────────────────────────────── run 0:42 ─╮
  *   │ $ yrd queue run · main#170406 [pid 1712479]                     │  ← blue, `$` pulses while a run executes;
@@ -20,6 +20,7 @@ import { useNow } from "./watch-clock.ts"
 import { boundedHangingLines, clock, mediaDuration, runShortName } from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { runnerHealth, type RunnerFacts, type RunnerHealth } from "./watch-runner.ts"
+import { STATS_ROWS, countCell, statsBuckets, type RunDecision, type StatsBucket } from "./watch-stats.ts"
 
 /** Gutter 2 + borders 2 + the box's paddingX 2: what the command text cannot have (the retired box's own accounting). */
 const RUNNER_CHROME = 6
@@ -155,6 +156,88 @@ export function RunnerBox({
           </MarkerRow>
         </>
       )}
+    </TitledBox>
+  )
+}
+
+/** The label column of the STATS box, wide enough for `MERGES` and a space. */
+const STATS_LABEL_WIDTH = 8
+/** One hour cell: two digits or up to three digits of count, right-aligned. */
+const STATS_HOUR_WIDTH = 3
+/** The two calendar columns. */
+const STATS_PERIOD_WIDTHS = [6, 8] as const
+
+/** How many hour buckets fit beside the label and the two calendar columns, between 6 and 24. */
+export function statsHoursFor(columns: number): number {
+  const fixed = RUNNER_CHROME + STATS_LABEL_WIDTH + STATS_PERIOD_WIDTHS[0] + STATS_PERIOD_WIDTHS[1] + 2
+  return Math.max(6, Math.min(24, Math.floor((columns - fixed) / STATS_HOUR_WIDTH)))
+}
+
+/**
+ * The STATS box (items 18–22): `TODAY`, `YSTRDAY`, then the hours of the last
+ * day newest first; every number right-aligned (item 19); the local midnight
+ * as its own one-character column running through header and rows alike
+ * (item 20); DUP muted and just above FAILS (items 21, 22).
+ */
+export function StatsBox({
+  decisions,
+  columns,
+  absent,
+}: {
+  decisions: readonly RunDecision[]
+  columns: number
+  /** Why there are no decisions to count, when there are none: the journal sentence. */
+  absent?: string
+}) {
+  const now = useNow()
+  const buckets = statsBuckets(decisions, now, statsHoursFor(columns))
+  const periods = buckets.filter((bucket) => bucket.kind === "period")
+  const hours = buckets.filter((bucket) => bucket.kind === "hour")
+  const cell = (bucket: StatsBucket, text: string, color: string | undefined, bold = false) => (
+    <Box
+      key={bucket.key}
+      width={bucket.kind === "hour" ? STATS_HOUR_WIDTH : STATS_PERIOD_WIDTHS[bucket.key === "today" ? 0 : 1]}
+      flexShrink={0}
+      justifyContent="flex-end"
+    >
+      <Text color={color} bold={bold}>
+        {text}
+      </Text>
+    </Box>
+  )
+  // The midnight rule: one blank-or-bar cell BEFORE every hour bucket that
+  // starts a new local day, on every row, so the column reads as one line.
+  const boundary = (bucket: StatsBucket) =>
+    bucket.dayBoundary ? (
+      <Box key={`${bucket.key}-day`} width={1} flexShrink={0}>
+        <Text color="$fg-muted">│</Text>
+      </Box>
+    ) : null
+  const line = (label: string, text: (bucket: StatsBucket) => string, color: string | undefined, bold = false) => (
+    <Box flexDirection="row" minWidth={0} overflow="hidden">
+      <Box width={STATS_LABEL_WIDTH} flexShrink={0}>
+        <Text color={color ?? undefined} bold={bold}>
+          {label}
+        </Text>
+      </Box>
+      {periods.map((bucket) => cell(bucket, text(bucket), color, bold))}
+      <Box width={2} flexShrink={0}>
+        <Text color="$fg-muted"> │</Text>
+      </Box>
+      {hours.flatMap((bucket) => [boundary(bucket), cell(bucket, text(bucket), color, bold)])}
+    </Box>
+  )
+  return (
+    <TitledBox title="STATS">
+      {line("", (bucket) => bucket.label, "$fg-muted", true)}
+      {STATS_ROWS.map((row) =>
+        line(row.label, (bucket) => countCell(bucket, row.key), row.key === "duplicates" ? "$fg-muted" : undefined),
+      )}
+      {decisions.length === 0 && absent !== undefined ? (
+        <Text color="$fg-muted" wrap="wrap">
+          {absent}
+        </Text>
+      ) : null}
     </TitledBox>
   )
 }

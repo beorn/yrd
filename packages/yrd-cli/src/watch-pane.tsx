@@ -60,8 +60,9 @@ import {
   type WatchQueue,
 } from "./watch-list.tsx"
 import { watchRowKey, type WatchRow } from "./watch-rows.ts"
-import { RunnerBox } from "./watch-boxes.tsx"
+import { RunnerBox, StatsBox } from "./watch-boxes.tsx"
 import type { RunnerFacts } from "./watch-runner.ts"
+import type { RunDecision } from "./watch-stats.ts"
 
 /** Everything one reading of the queue put on screen. The pane renders it and reads nothing itself. */
 export type WatchSnapshot = Readonly<{
@@ -76,6 +77,8 @@ export type WatchSnapshot = Readonly<{
   rows: readonly WatchRow[]
   /** What the RUNNER box shows: the newest run journal and its process, read on the queue's own machine. */
   runner?: RunnerFacts
+  /** What the STATS box counts: every decision the run journals on this machine recorded. */
+  decisions?: readonly RunDecision[]
   /** The instant this reading was made; every age on screen counts from it. */
   at: Date
 }>
@@ -89,6 +92,8 @@ const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 1
 const DEFAULT_SPLIT_RATIO = 0.65
+/** Below this many terminal rows the STATS box would push the table off the screen, so it yields (the retired pane's own rule). */
+const STATS_MIN_ROWS = 30
 
 export type WatchTier = "right" | "below" | "full"
 
@@ -379,6 +384,13 @@ export function WatchPane({
           columns={listColumns - 2}
           live={live}
           {...(shown.pause === undefined ? {} : { pause: shown.pause })}
+        />
+      )}
+      {shown.decisions === undefined || terminalRows < STATS_MIN_ROWS ? null : (
+        <StatsBox
+          decisions={shown.decisions}
+          columns={listColumns - 2}
+          {...(shown.journalAbsent === undefined ? {} : { absent: shown.journalAbsent })}
         />
       )}
       <StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />

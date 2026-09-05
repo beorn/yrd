@@ -69,6 +69,7 @@ import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
+import { decisionsOf, type RunDecision } from "./watch-stats.ts"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -381,6 +382,8 @@ export async function coreQueueCommand(
           journalAbsent?: string
           /** The newest run journal and its process, for the RUNNER box. */
           runner: RunnerFacts
+          /** Every decision the journals recorded, for the STATS box. */
+          decisions: readonly RunDecision[]
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
           entries: QueueEntries
         }>
@@ -424,6 +427,7 @@ export async function coreQueueCommand(
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: here.root }],
           runner: readRunnerFacts(workdir),
+          decisions: decisionsOf(journals),
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
           ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
           rows,
@@ -1018,10 +1022,12 @@ function snapshotOf(
     pause?: string
     journalAbsent?: string
     runner: RunnerFacts
+    decisions: readonly RunDecision[]
   }>,
 ): WatchSnapshot {
   return {
     at: new Date(),
+    decisions: round.decisions,
     queue: round.queue,
     queues: round.queues,
     rows: round.rows,
