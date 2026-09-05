@@ -1195,48 +1195,61 @@ describe("a queue run", () => {
     expect(messages(w)).toEqual([])
   })
 
-  it("a failing notifier changes nothing about the change, and the next run sends the same message again", async () => {
+  it("a later successful recipient does not hide a failing notifier from the next run", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
 
-    // The notifier is down: the merge still happens, the sent record says the
-    // delivery failed, and the run is not stuck (ruling D9).
+    // The first recipient is down and the second accepts the same ending. The
+    // later success must not hide the earlier delivery still owed (ruling D9).
     const down = await queueRun({
       ...(await w.options({ exit: 0 })),
-      notify: [{ name: "recorder", on: ["merged"], run: "sh -c 'echo the notifier is down >&2; exit 3'" }],
+      notify: [
+        { name: "recovering", on: ["merged"], run: "sh -c 'echo the notifier is down >&2; exit 3'" },
+        { name: "recorder", on: ["merged"], run: w.notifier },
+      ],
     })
-    expect(down.exitCode).toBe(0)
-    expect(down.merged).toEqual(["task/one"])
+    expect(down).toMatchObject({ exitCode: 0, merged: ["task/one"], stuck: [] })
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     let records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
-    expect(records.at(-1)?.trailers).toEqual(
-      expect.arrayContaining([
-        ["State", "merged"],
-        ["Delivery", "failed"],
-      ]),
-    )
-    expect(messages(w)).toEqual([])
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
+    const merged = records[2]
+    const appendTip = records.at(-1)
+    if (merged === undefined || appendTip === undefined) throw new Error("missing merged or sent record")
+    expect(records.slice(-2).map((record) => trailer(record, "To"))).toEqual(["recovering", "recorder"])
+    expect(records.slice(-2).map((record) => trailer(record, "Delivery"))).toEqual(["failed", "sent"])
+    expect(records.slice(-2).map((record) => trailer(record, "For"))).toEqual([merged.sha, merged.sha])
+    expect(records.slice(-2).map((record) => trailer(record, "Message-Id"))).toEqual([merged.sha, merged.sha])
+    expect(messages(w)).toHaveLength(1)
 
-    // The notifier is back: the same message, with the merged record's sha as
-    // its id. A poisoned local ref cannot replace the captured sent tip used
-    // as this resend's append parent.
+    // The failed recipient is back. A poisoned local ref cannot replace either
+    // the immutable ending id or the captured sent tip used as append parent.
     const ref = changeRef("main", { branch: "task/one", head })
     await w.git(["update-ref", ref, head])
-    const again = await queueRun(await w.options({ exit: 0 }))
+    const again = await queueRun({
+      ...(await w.options({ exit: 0 })),
+      notify: [{ name: "recovering", on: ["merged"], run: w.notifier }],
+    })
     expect(again.exitCode).toBe(0)
     expect(await refAt(w.git, ref)).toBe(head)
+    expect(
+      logRecords(again)
+        .filter((record) => record.kind === "message")
+        .map(({ delivered, id, to }) => ({ delivered, id, to })),
+    ).toEqual([{ delivered: true, id: merged.sha, to: "recovering" }])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     records = await readRecords(w.git, (await refAt(w.git, ref))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent", "sent"])
     expect(records.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
-        ["To", "recorder"],
+        ["To", "recovering"],
         ["Delivery", "sent"],
+        ["For", merged.sha],
+        ["Message-Id", merged.sha],
       ]),
     )
-    expect(messages(w)).toHaveLength(1)
-    expect(messages(w)[0]).toMatchObject({ record: "merged" })
+    expect((await w.git(["rev-parse", `${records.at(-1)!.sha}^`])).trim()).toBe(appendTip.sha)
+    expect(messages(w)).toHaveLength(2)
+    expect(messages(w).map((message) => message.record)).toEqual(["merged", "merged"])
   })
 
   it("a change merged around the queue reads merged, its catch-up record says a direct merge did it, and the direct merge is reported once (E5)", async () => {
