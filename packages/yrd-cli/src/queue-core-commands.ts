@@ -19,7 +19,6 @@ import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import {
   directMergeCommits,
-  activePause,
   changeName,
   checksOf,
   claimWorktrees,
@@ -38,7 +37,6 @@ import {
   runId,
   subjects,
   targetName,
-  refAt,
   runCheck,
   show,
   refuseTarget,
@@ -150,28 +148,53 @@ export async function coreQueueCommand(
   const log = options.log?.child("queue")
   const remote = options.remote ?? "origin"
   const queue = options.queue ?? (await originHead(git))
-  // Addressed submission reads the fetched commit without inventing a named
-  // remote or overwriting the author's origin tracking refs.
-  const targetRef = options.remote === undefined ? `${remote}/${queue}` : "FETCH_HEAD"
+  const target = { branch: queue, remote }
+  const targetLabel = `${remote}/${queue}`
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
   // target carries no `.yrd.yml` at all — there is no queue there; a
   // declaration that exists and cannot be read throws. One reading serves a
   // one-shot command; the service reads again before every round, so an edit at
   // the target takes effect on the next round.
-  const declaration = async (): Promise<QueueConfig | undefined> => {
+  const declaration = async (): Promise<Readonly<{ config: QueueConfig; oid: string }> | undefined> => {
+    const ref = `refs/heads/${queue}`
+    const rows = (await git(["ls-remote", "--refs", remote, ref]))
+      .split("\n")
+      .map((row) => row.trim())
+      .filter(Boolean)
+    if (rows.length === 0) throw new Error(`the target ${targetLabel} is not at ${remote}`)
+    if (rows.length !== 1) throw new Error(`${remote} answered with ${String(rows.length)} values for ${ref}`)
+    const [oid, advertisedRef] = (rows[0] ?? "").split(/\s+/u)
+    if (advertisedRef !== ref || oid === undefined || !/^[0-9a-f]+$/u.test(oid)) {
+      throw new Error(`${remote} returned an unreadable ${ref} advertisement: ${rows[0]}`)
+    }
+    // Fetch exactly the advertised object without lending this observation to
+    // FETCH_HEAD or a tracking ref another command owns.
     await git([
       "fetch",
       "--quiet",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "--no-write-fetch-head",
+      "--refmap=",
       remote,
-      options.remote === undefined ? `+refs/heads/${queue}:refs/remotes/${targetRef}` : `refs/heads/${queue}`,
+      oid,
     ])
-    const declared = await readConfig(git, targetRef, { branch: queue, remote })
+    let declared: QueueConfig | undefined
+    try {
+      declared = await readConfig(git, oid, target)
+    } catch (error) {
+      throw new Error(
+        `the declaration at ${targetLabel} cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      )
+    }
     if (declared === undefined) return undefined
-    return { ...declared, target: { branch: queue, remote } }
+    return { config: declared, oid }
   }
-  const config = await declaration()
-  if (config === undefined) return noQueueOnTarget(targetRef)
+  const captured = await declaration()
+  if (captured === undefined) return noQueueOnTarget(targetLabel)
+  const config = captured.config
   const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
 
@@ -297,8 +320,8 @@ export async function coreQueueCommand(
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
-      const gitlink = request.gitlink ?? (await gitlinkOf(git, targetRef, log))
-      let current = config
+      const gitlink = request.gitlink ?? (await gitlinkOf(git, captured.oid, log))
+      let current = captured
       for (let round = 1; ; round += 1) {
         // The declaration again, as the target holds it now: a correct edit at
         // the target is the next round's, never a restart's.
@@ -306,14 +329,14 @@ export async function coreQueueCommand(
           let why: string | undefined
           try {
             const next = await declaration()
-            if (next === undefined) why = `${targetRef} no longer carries a .yrd.yml`
+            if (next === undefined) why = `${targetLabel} no longer carries a .yrd.yml`
             else current = next
           } catch (error) {
             why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
           }
           if (why !== undefined) return stuck(why)
         }
-        const outcome = await oneRound(current)
+        const outcome = await oneRound(current.config)
         if (outcome === undefined || outcome.exitCode === 2) return 2
         await request.afterRound?.(outcome)
         // The gitlink, at the target as this round left it: the round that merged
@@ -380,7 +403,7 @@ export async function coreQueueCommand(
           watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
           request.terms ?? [],
         )
-        const pause = await activePause(git, config.target.remote, config.target.branch)
+        const pause = queue.pause?.kind === "paused" ? queue.pause : undefined
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table.
         const scope =
@@ -591,7 +614,7 @@ export async function coreQueueCommand(
         env: options.env,
         plumbing: options.log?.child("worktree"),
         ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
-        targetSha: await targetAt(git, config),
+        targetSha: captured.oid,
       })
       const results: CheckResult[] = []
       try {
@@ -703,20 +726,6 @@ export async function coreQueueCommand(
 }
 
 /**
- * The target as this checkout has it: the remote-tracking ref the declaration
- * names, fetched by `declaration()` before any command runs here. Absent is
- * loud, because what base a check is judging against is a claim about that
- * commit. `yrd check` is the one caller: every command that reads the queue
- * takes the target from that reading instead.
- */
-async function targetAt(git: Git, config: QueueConfig): Promise<string> {
-  const ref = `refs/remotes/${config.target.remote}/${config.target.branch}`
-  const sha = await refAt(git, ref)
-  if (sha === undefined) throw new Error(`${targetName(config.target)} is not here: ${ref} is absent`)
-  return sha
-}
-
-/**
  * The gitlink the service runs from: the gitlink at the target that carries the
  * very commit this yrd's code runs from, found once at start. Off — said once,
  * at info — when this yrd runs from no git checkout, or when the target carries
@@ -725,7 +734,7 @@ async function targetAt(git: Git, config: QueueConfig): Promise<string> {
  */
 async function gitlinkOf(
   git: Git,
-  targetRef: string,
+  targetOid: string,
   log: ConditionalLogger | undefined,
 ): Promise<Readonly<{ path: string; sha: string }> | undefined> {
   let running: string
@@ -737,7 +746,7 @@ async function gitlinkOf(
     })
     return undefined
   }
-  const recorded = gitlinks(await git(["ls-tree", "-r", "-z", targetRef])).find((row) => row.sha === running)
+  const recorded = gitlinks(await git(["ls-tree", "-r", "-z", targetOid])).find((row) => row.sha === running)
   if (recorded === undefined) {
     log?.info?.(`the gitlink exit is off: the target carries no gitlink at this yrd's commit ${running.slice(0, 12)}`)
     return undefined

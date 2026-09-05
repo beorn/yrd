@@ -5,11 +5,11 @@
  * @level l2 (`coreQueueCommand` against a real remote and clone)
  * @consumer Every queue command.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, writePause } from "@yrd/queue-core"
+import { changeRef, gitIn, readQueue, writePause } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -78,6 +78,23 @@ describe("a queue is the selected origin branch carrying config", () => {
     await git(["branch", "release/1.x"])
     await git(["push", "--quiet", "origin", "release/1.x"])
     await remote(["symbolic-ref", "HEAD", "refs/heads/release/1.x"])
+    // Administration captures the selected target object without borrowing a
+    // queue read: even an unreadable change must not prevent the operator from
+    // pausing it, and the capture must not rewrite this clone's refs/FETCH_HEAD.
+    const release = (await git(["rev-parse", "release/1.x"])).trim()
+    const tree = (await git(["rev-parse", `${release}^{tree}`])).trim()
+    const advanced = (await git(["commit-tree", tree, "-p", release, "-m", "advance the queue target"])).trim()
+    await remote(["fetch", "--quiet", "--no-tags", repo, advanced])
+    await remote(["update-ref", "refs/heads/release/1.x", advanced])
+    const malformedRef = changeRef("release/1.x", { branch: "task/unreadable", head: advanced })
+    await remote(["update-ref", malformedRef, advanced])
+    const refs = ["for-each-ref", "--format=%(refname) %(objectname)"]
+    const yrdRefs = async (): Promise<readonly string[]> =>
+      (await remote(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).trim().split("\n").sort()
+    const expectedYrdRefs = ["refs/yrd/release%2F1.x/pause", malformedRef].sort()
+    const before = await git(refs)
+    const fetchHead = (await git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
+    writeFileSync(fetchHead, "another command's fetch result\n")
     const operand = mode === "default" ? [] : ["--queue", "release/1.x"]
     const paused = capture(repo)
     expect(
@@ -88,7 +105,9 @@ describe("a queue is the selected origin branch carrying config", () => {
       paused.stderr(),
     ).toBe(0)
     expect(JSON.parse(paused.stdout())).toMatchObject({ kind: "paused", reason: "checking release" })
-    expect(await remote(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).toBe("refs/yrd/release%2F1.x/pause\n")
+    expect(await git(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
+    expect(await yrdRefs()).toEqual(expectedYrdRefs)
     const resumed = capture(repo)
     const reason = mode === "default" ? [] : ["--reason", "release checked"]
     expect(
@@ -99,7 +118,10 @@ describe("a queue is the selected origin branch carrying config", () => {
       kind: "resumed",
       reason: mode === "default" ? "pause lifted" : "release checked",
     })
-    expect(await remote(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).toBe("refs/yrd/release%2F1.x/pause\n")
+    expect(await yrdRefs()).toEqual(expectedYrdRefs)
+    expect(await git(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
+    await expect(readQueue(git, "origin", "release/1.x")).rejects.toThrow(malformedRef)
   })
 
   it("requires pause --reason before any pause ref changes", async () => {
@@ -244,7 +266,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     const run = capture(repo)
 
     await expect(coreQueueCommand(repo, run.io, { command: "list" }, { queue: "main" })).rejects.toThrow(
-      /\.yrd\.yml at origin\/main does not parse/u,
+      /the declaration at origin\/main cannot be read: .*\.yrd\.yml.*does not parse/u,
     )
 
     // The up action must forward both the addressed clone and selected branch.
@@ -258,7 +280,9 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(
       await runYrdProcess(["bun", "yrd", "queue", "up", "--queue", `${remote}#release/uri`, "--json"], service.io),
     ).toBe(2)
-    expect(service.stderr()).toContain(".yrd.yml at origin/release/uri does not parse")
+    expect(service.stderr()).toContain("the declaration at origin/release/uri cannot be read")
+    expect(service.stderr()).toContain(".yrd.yml")
+    expect(service.stderr()).toContain("does not parse")
   })
 
   it("refuses a selected branch with no config and names that branch", async () => {
