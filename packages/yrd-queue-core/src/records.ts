@@ -15,8 +15,9 @@
  *   prune, and `git log --first-parent` from the tip reads exactly the records
  *   and stops at the genesis (measured 2026-09-02: with the head as the only
  *   parent, a plain log walks the whole project history);
- * - every later record has one parent, the record before it; the merge commit is
- *   never a parent;
+ * - every later record has one parent, the record before it, except a checked
+ *   intent's one valid `Merge:` trailer adds its candidate merge second; that
+ *   retains the candidate without putting it in the first-parent record history;
  * - the message is a prose first line, then trailers, one meaning each, with
  *   `Record:` naming the kind, `Change:` naming the change the record is about and
  *   `Target:` naming the branch it merges into, both on every record,
@@ -100,7 +101,22 @@ export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
  * a second one.
  */
 export async function recordCommit(git: Git, write: WriteRecord, parent: string | undefined): Promise<string> {
-  const parents = parent === undefined ? [await genesis(git), write.change.head] : [parent]
+  const merges =
+    write.kind === "checked"
+      ? (write.trailers ?? []).filter(([name]) => name === "Merge").map(([, value]) => value)
+      : []
+  if (merges.length > 1) {
+    throw new Error(`checked record carries ${merges.length} Merge: trailers; one candidate merge is required`)
+  }
+  const merge = merges[0]
+  if (merge !== undefined && !/^[0-9a-f]{40}$/iu.test(merge)) {
+    throw new Error("checked record Merge: must name a full object id")
+  }
+  if (merge !== undefined && parent === undefined) {
+    throw new Error("checked record Merge: requires a prior record")
+  }
+  const parents =
+    parent === undefined ? [await genesis(git), write.change.head] : merge === undefined ? [parent] : [parent, merge]
   const carried =
     parent === undefined ? [["Opened", new Date().toISOString()] as const] : await carriedFrom(git, parent)
   const named = new Set((write.trailers ?? []).map(([name]) => name))

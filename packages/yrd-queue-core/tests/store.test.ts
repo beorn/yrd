@@ -91,7 +91,7 @@ describe("a change's records are its commits", () => {
 
   it("keeps the records in the order they happened", async () => {
     const { git, head } = await repository()
-    await appendRecord(git, "main", {
+    const opened = await appendRecord(git, "main", {
       change: { branch: "task/one", head },
       kind: "opened",
       subject: "submitted",
@@ -109,7 +109,64 @@ describe("a change's records are its commits", () => {
 
     const records = await readRecords(git, checked)
     expect(records.map((record) => record.kind)).toEqual(["opened", "checked"])
+    expect((await git(["rev-list", "--parents", "-n", "1", checked])).trim().split(/\s+/u)).toEqual([checked, opened])
     expect(records[1]?.trailers.filter(([name]) => name === "Check")).toHaveLength(2)
+  })
+
+  // Requirement: a root-only checked intent retains its candidate merge with
+  // the records, without making that merge a first-parent record. Before this
+  // case, checked records had only their prior record as a parent, so a fresh
+  // clone could lose the candidate merge after its branch disappeared.
+  it("retains a checked root-only intent's merge outside first-parent record history", async () => {
+    const { git, head, root, target } = await repository()
+    const change = { branch: "task/one", head }
+    const opened = await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    const tree = (await git(["rev-parse", `${head}^{tree}`])).trim()
+    const merge = (await git(["commit-tree", tree, "-p", target, "-p", head, "-m", "candidate merge"])).trim()
+    const checked = await appendRecord(git, "main", {
+      change,
+      kind: "checked",
+      subject: "root-only intent checked",
+      trailers: [
+        ["Config", "88f70021"],
+        ["Merge", merge],
+      ],
+    })
+
+    expect((await git(["rev-list", "--parents", "-n", "1", checked])).trim().split(/\s+/u)).toEqual([
+      checked,
+      opened,
+      merge,
+    ])
+    expect((await git(["log", "--first-parent", "--format=%H", checked])).split("\n")).not.toContain(merge)
+    const records = await readRecords(git, checked)
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked"])
+    expect(trailer(records[1]!, "Landing")).toBeUndefined()
+
+    const recovery = mkdtempSync(join(tmpdir(), "yrd-core-recovery-"))
+    roots.push(recovery)
+    rmSync(recovery, { force: true, recursive: true })
+    await git(["clone", "--mirror", "--no-local", root, recovery])
+    await expect(gitIn(recovery)(["cat-file", "-e", `${merge}^{commit}`])).resolves.toBe("")
+  })
+
+  it.each([
+    ["a malformed candidate id", [["Merge", "not-an-object-id"]], /Merge: must name a full object id/u],
+    [
+      "ambiguous candidate ids",
+      [
+        ["Merge", "a".repeat(40)],
+        ["Merge", "b".repeat(40)],
+      ],
+      /2 Merge: trailers/u,
+    ],
+  ] as const)("refuses checked intent with %s", async (_name, trailers, error) => {
+    const { git, head } = await repository()
+    const change = { branch: "task/one", head }
+    await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    await expect(appendRecord(git, "main", { change, kind: "checked", subject: "checked", trailers })).rejects.toThrow(
+      error,
+    )
   })
 
   it("refuses a second writer that read the same tip, instead of interleaving", async () => {
