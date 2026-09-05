@@ -37,6 +37,12 @@
  * nothing of the queue's on top is reported again next run, with the commit
  * sha as its id, so the notifier sees one message however many runs say it:
  * at-least-once, the plan's shape for every message.
+ *
+ * A product component is a current-tip reading, not another history walk. Its
+ * protected main tip is explained only by the current root gitlink or the
+ * exact source of a still-current checked landing intent for that component,
+ * resolved remote, and `refs/heads/main`. A CAS pre-image and terminal intent
+ * are never authority; external components remain exempt.
  */
 
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"

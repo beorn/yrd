@@ -14,11 +14,14 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createLogger, type Event } from "loggily"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { gitIn, submit, type Git } from "@yrd/queue-core"
+import { DirectReadChanged, directMergeCommits, gitIn, queueRun, submit, type Git } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
+
+vi.mock("@yrd/queue-core", { spy: true })
 
 const rendered: { snapshot: WatchSnapshot | undefined } = vi.hoisted(() => ({ snapshot: undefined }))
 vi.mock("silvery/runtime", () => ({
@@ -38,11 +41,12 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
 
-type Capture = Readonly<{ io: YrdCliIO; stdout(): string; stderr(): string }>
+type Capture = Readonly<{ io: YrdCliIO; stdout(): string; stdoutWrites(): readonly string[]; stderr(): string }>
 
 function capture(cwd: string): Capture {
   let stdout = ""
   let stderr = ""
+  const stdoutWrites: string[] = []
   return {
     io: {
       color: false,
@@ -52,10 +56,12 @@ function capture(cwd: string): Capture {
       },
       stdout(text) {
         stdout += text
+        stdoutWrites.push(text)
       },
     },
     stderr: () => stderr,
     stdout: () => stdout,
+    stdoutWrites: () => stdoutWrites,
   }
 }
 
@@ -180,6 +186,165 @@ describe("yrd watch, the ending's exit code", () => {
     // out — on stderr, not inferred by the reader from an empty table.
     expect(run.stderr()).toContain("no-such-branch")
     expect(run.stderr()).toContain("seven days")
+  })
+
+  it("reads again after a mixed direct-detector pass instead of refusing its selector, then completes normally", async () => {
+    const w = await world()
+    await change(w, "task/good", true)
+    await drain(w)
+    vi.mocked(directMergeCommits).mockRejectedValueOnce(
+      new DirectReadChanged("origin/main changed while component mains were read"),
+    )
+    const run = capture(w.work)
+
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", intervalSeconds: 1, terms: ["task/good"], watch: true },
+      { workdir: w.workdir },
+    )
+
+    expect(exit, run.stdout()).toBe(0)
+    expect(run.stderr()).toBe("")
+    expect(run.stdoutWrites()[0]).toContain("origin/main changed while component mains were read; read the queue again")
+    expect(run.stdoutWrites()[0]).not.toContain("task/good")
+    expect(run.stdoutWrites()[1]).toContain("task/good")
+    expect(run.stdoutWrites()[1]).toContain("merged")
+  })
+
+  it("makes a one-shot mixed direct read an explicit stopped JSON result, never an empty change list", async () => {
+    const w = await world()
+    expect(
+      await coreQueueCommand(
+        w.work,
+        capture(w.work).io,
+        { by: "@chief", command: "pause", reason: "preserve the captured pause" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(0)
+    vi.mocked(directMergeCommits).mockRejectedValueOnce(
+      new DirectReadChanged("origin/main changed while component mains were read"),
+    )
+    const run = capture(w.work)
+
+    const exit = await coreQueueCommand(w.work, run.io, { command: "list" }, { json: true, workdir: w.workdir })
+
+    expect(exit, run.stdout()).toBe(0)
+    const refused = JSON.parse(run.stdout()) as Record<string, unknown>
+    expect(refused).toMatchObject({
+      pause: { by: "@chief", kind: "paused", reason: "preserve the captured pause" },
+      stopped: {
+        ring: "direct",
+        says: "origin/main changed while component mains were read; read the queue again",
+        what: { reason: "direct-read-changed" },
+      },
+    })
+    expect(refused).not.toHaveProperty("changes")
+
+    vi.mocked(directMergeCommits).mockRejectedValueOnce(
+      new DirectReadChanged("origin/main changed while component mains were read"),
+    )
+    const human = capture(w.work)
+    await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })
+    expect(human.stdout()).toContain("paused by @chief")
+    expect(human.stdout()).toContain("preserve the captured pause")
+
+    rendered.snapshot = undefined
+    vi.mocked(directMergeCommits).mockRejectedValueOnce(
+      new DirectReadChanged("origin/main changed while component mains were read"),
+    )
+    await coreQueueCommand(
+      w.work,
+      capture(w.work).io,
+      { command: "list", watch: true },
+      { interactive: true, workdir: w.workdir },
+    )
+    expect(renderedSnapshot()).toMatchObject({
+      pause: expect.stringContaining("paused by @chief"),
+      readNotice: "origin/main changed while component mains were read; read the queue again",
+      rows: [],
+    })
+  })
+
+  it("narrates a transient direct-reader stop as stopped and preserves its result-log text", async () => {
+    const w = await world()
+    const messages: string[] = []
+    const log = createLogger("test", [
+      { level: "debug" },
+      {
+        write: (entry: Event) => {
+          if (entry.kind === "log") messages.push(entry.message)
+        },
+      },
+    ])
+    vi.mocked(queueRun).mockImplementationOnce(async (options) => {
+      options.render?.({
+        at: "2026-09-05T00:00:00.000Z",
+        kind: "result",
+        run: "q-direct-read",
+        text: "origin/main changed while component mains were read; read the queue again",
+      })
+      return {
+        base: "0".repeat(40),
+        config: "0".repeat(40),
+        directMerges: [],
+        exitCode: 0,
+        failed: [],
+        log: "/tmp/q-direct-read.jsonl",
+        merged: [],
+        run: "q-direct-read",
+        stopped: {
+          ring: "direct",
+          says: "origin/main changed while component mains were read; read the queue again",
+          what: { reason: "direct-read-changed" },
+        },
+        stuck: [],
+        target: "0".repeat(40),
+      }
+    })
+    const run = capture(w.work)
+
+    const exit = await coreQueueCommand(w.work, run.io, { command: "run" }, { log, workdir: w.workdir })
+
+    expect(exit).toBe(0)
+    expect(run.stdout()).toContain("stopped: origin/main changed while component mains were read; read the queue again")
+    expect(run.stdout()).not.toContain("pass:")
+    expect(messages).toContain("origin/main changed while component mains were read; read the queue again")
+
+    vi.mocked(queueRun).mockRejectedValueOnce(new Error("the remote could not be read"))
+    const rejected = capture(w.work)
+    expect(await coreQueueCommand(w.work, rejected.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    expect(rejected.stdout()).toContain("stuck: the queue run could not judge: the remote could not be read")
+  })
+
+  it("clears a direct-read stopped JSON result on the next clean watch read", async () => {
+    const w = await world()
+    await change(w, "task/good", true)
+    await drain(w)
+    vi.mocked(directMergeCommits).mockRejectedValueOnce(
+      new DirectReadChanged("origin/main changed while component mains were read"),
+    )
+    const run = capture(w.work)
+
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "list", intervalSeconds: 1, terms: ["task/good"], watch: true },
+      { json: true, workdir: w.workdir },
+    )
+
+    expect(exit, run.stdout()).toBe(0)
+    const rounds = run.stdoutWrites().map((output) => JSON.parse(output) as Record<string, unknown>)
+    expect(rounds[0]).toMatchObject({
+      stopped: {
+        ring: "direct",
+        says: "origin/main changed while component mains were read; read the queue again",
+        what: { reason: "direct-read-changed" },
+      },
+    })
+    expect(rounds[0]).not.toHaveProperty("changes")
+    expect(rounds[1]).not.toHaveProperty("stopped")
+    expect(rounds[1]?.changes).toEqual([expect.objectContaining({ branch: "task/good", state: "merged" })])
   })
 
   it("keeps refreshing with no selector, because there is no ending to run to, and stops on the signal", async () => {

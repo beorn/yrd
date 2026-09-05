@@ -119,7 +119,7 @@ export type QueueRunOutcome = Readonly<{
   merged: readonly string[]
   failed: readonly string[]
   stuck: readonly string[]
-  /** The commits on the target's first-parent line that the queue did not put there, reported this run (E5). */
+  /** Root first-parent bypass commits and unexplained product component protected tips, reported this run (E5). */
   directMerges: readonly string[]
 }>
 
@@ -336,16 +336,19 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   try {
     directMerges = await reportDirectMerges(run, entries)
   } catch (error) {
-    if (!(error instanceof DirectReadChanged)) throw error
-    run.log.write({ kind: "result", reason: "direct-read-changed", text: error.message, exit: 0 })
+    const changed = error instanceof DirectReadChanged
+    const reason = changed ? "direct-read-changed" : "direct-read-failed"
+    const text = error instanceof Error ? error.message : String(error)
+    const exit = changed ? 0 : 2
+    run.log.write({ kind: "result", reason, text, exit })
     return finish(
       run,
-      0,
+      exit,
       { directMerges: [], failed, merged, stuck },
       {
         ring: "direct",
-        says: error.message,
-        what: { reason: "direct-read-changed" },
+        says: text,
+        what: { reason },
       },
     )
   }

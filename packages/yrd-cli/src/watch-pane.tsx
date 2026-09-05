@@ -42,6 +42,8 @@ export type WatchSnapshot = Readonly<{
   pause?: string
   /** Where the run journal was looked for and why there was none — never a blank where a fact belongs. */
   journalAbsent?: string
+  /** A mixed direct-detector reading has no verdict; the timer reads again. */
+  readNotice?: string
   rows: readonly WatchRow[]
   /** Detail by watchRowKey: change head plus selected journal run, with its own output. */
   detail: ReadonlyMap<string, ChangeDetail>
@@ -120,7 +122,7 @@ export function WatchPane({
     if (load === undefined) return
     const next = await load()
     setShown(next)
-    const code = endingOf(next.rows)
+    const code = next.readNotice === undefined ? endingOf(next.rows) : undefined
     if (code !== undefined) onEnding?.(code)
   }, [load, onEnding])
 
@@ -248,6 +250,7 @@ export function WatchPane({
       <Text bold wrap="truncate">
         {shown.queue}
       </Text>
+      {shown.readNotice === undefined ? null : <Text color="$fg-warning">⚠ {shown.readNotice}</Text>}
       {/* Where the journal was looked for, when there was none. A watch that
           showed no running check because it had no journal to read must say
           so, or it reads as a queue with nothing to do. */}
@@ -256,13 +259,15 @@ export function WatchPane({
           {shown.journalAbsent}
         </Text>
       )}
-      {body}
-      <Box height={1} flexShrink={0}>
-        <Text color="$fg-muted" wrap="truncate">
-          {atEnd ? "" : "End follows again · "}
-          {String(shown.rows.length)} change(s) · ? for help · q leaves
-        </Text>
-      </Box>
+      {shown.readNotice === undefined ? body : null}
+      {shown.readNotice === undefined ? (
+        <Box height={1} flexShrink={0}>
+          <Text color="$fg-muted" wrap="truncate">
+            {atEnd ? "" : "End follows again · "}
+            {String(shown.rows.length)} change(s) · ? for help · q leaves
+          </Text>
+        </Box>
+      ) : null}
       {helpOpen ? (
         <ModalDialog title="yrd watch">
           {HELP.map((line) => (

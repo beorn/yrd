@@ -21,6 +21,7 @@ import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure } from "@yrd/process"
 import {
   directMergeCommits,
+  DirectReadChanged,
   changeName,
   checksOf,
   claimWorktrees,
@@ -242,6 +243,8 @@ export async function coreQueueCommand(
         foreground: request.command === "run",
       })
     } catch (error) {
+      // silent-fallback-allow: `stuck` already emitted the human/JSON exit-2
+      // refusal; `undefined` is only the caller's internal loop control.
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
       return undefined
     }
@@ -459,11 +462,13 @@ export async function coreQueueCommand(
           queue: string
           pause?: string
           journalAbsent?: string
+          readNotice?: string
           detail: ReadonlyMap<string, ChangeDetail>
         }>
       > => {
         const config = declared.config
         const queue = await readQueue(git, config.target.remote, config.target.branch, declared.oid)
+        const pause = queue.pause?.kind === "paused" ? queue.pause : undefined
         // The run journal on THIS machine, and the head subjects in one
         // batched read: the two joins the table needs and neither of them a
         // second derivation of anything the records already say. A machine
@@ -471,12 +476,38 @@ export async function coreQueueCommand(
         // sentence that says so rather than a row that reads as if nothing
         // were running.
         const journals = readJournals(join(workdir, "logs"))
-        const all = list(queue.changes, {
-          directMerges: await directMergeCommits(git, config.target.branch, declared.oid, queue.changes, {
+        let directMerges: Awaited<ReturnType<typeof directMergeCommits>>
+        try {
+          directMerges = await directMergeCommits(git, config.target.branch, declared.oid, queue.changes, {
             repo,
             remote: config.target.remote,
             workdir,
-          }),
+          })
+        } catch (error) {
+          if (!(error instanceof DirectReadChanged)) throw error
+          const name = queueName(config.target, await remoteUrl(git, config.target.remote))
+          return {
+            data: {
+              journal: journalFact(journals),
+              pause: pause ?? null,
+              stopped: {
+                ring: "direct",
+                says: error.message,
+                what: { reason: "direct-read-changed" },
+              },
+            },
+            detail: new Map(),
+            queue: name,
+            ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
+            readNotice: error.message,
+            rows: [],
+            text: [pause === undefined ? undefined : pauseLine(pause), name, error.message]
+              .filter((part): part is string => part !== undefined)
+              .join("\n"),
+          }
+        }
+        const all = list(queue.changes, {
+          directMerges,
           journals,
           subjects: await subjects(
             git,
@@ -487,7 +518,6 @@ export async function coreQueueCommand(
           watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
           request.terms ?? [],
         )
-        const pause = queue.pause?.kind === "paused" ? queue.pause : undefined
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table.
         const scope =
@@ -583,7 +613,7 @@ export async function coreQueueCommand(
       // with it.
       if (options.interactive === true && options.json !== true) {
         const first = await round(captured)
-        if (selectedNothing(request.terms, first.rows)) {
+        if (first.readNotice === undefined && selectedNothing(request.terms, first.rows)) {
           io.stderr(missedSelector(request.terms ?? [], first.queue, first.rows.length))
           return 2
         }
@@ -627,7 +657,7 @@ export async function coreQueueCommand(
         // A selector that matches nothing would otherwise wait forever for a
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.
-        if (first && selectedNothing(request.terms, one.rows)) {
+        if (first && one.readNotice === undefined && selectedNothing(request.terms, one.rows)) {
           io.stderr(missedSelector(request.terms ?? [], one.queue, one.rows.length))
           return 2
         }
@@ -636,7 +666,7 @@ export async function coreQueueCommand(
         // round, because a watch whose output is being read later is a log.
         if (io.color === true) io.stdout("\u001b[H\u001b[2J")
         emit(io, options.json, one.data, one.text)
-        if (selected) {
+        if (selected && one.readNotice === undefined) {
           const ending = endingCode(one.rows)
           if (ending !== undefined) return ending
         }
@@ -957,6 +987,7 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
         ? `${String(rest.name)} started for ${where}`
         : `${String(rest.name)} ran for ${where} in ${String(rest.ms)} ms`
     case "result":
+      if (typeof rest.text === "string") return rest.text
       return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`
     case "settle":
       return rest.state === "left-off-main"
@@ -993,7 +1024,10 @@ function describeRun(
     stopped?: Readonly<{ says: string }>
   }>,
 ): string {
-  const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
+  const words =
+    outcome.stopped === undefined
+      ? (["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode))
+      : "stopped"
   const parts = [
     outcome.merged.length > 0 ? `merged ${outcome.merged.join(", ")}` : undefined,
     outcome.failed.length > 0 ? `failed ${outcome.failed.join(", ")}` : undefined,
@@ -1026,6 +1060,7 @@ function snapshotOf(
     queue: string
     pause?: string
     journalAbsent?: string
+    readNotice?: string
     detail: ReadonlyMap<string, ChangeDetail>
   }>,
 ): WatchSnapshot {
@@ -1036,6 +1071,7 @@ function snapshotOf(
     rows: round.rows,
     ...(round.pause === undefined ? {} : { pause: round.pause }),
     ...(round.journalAbsent === undefined ? {} : { journalAbsent: round.journalAbsent }),
+    ...(round.readNotice === undefined ? {} : { readNotice: round.readNotice }),
   }
 }
 

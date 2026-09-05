@@ -9,7 +9,8 @@
  * @consumer the operator reading `yrd watch`
  */
 
-import { describe, expect, it } from "vitest"
+import { act } from "react"
+import { describe, expect, it, vi } from "vitest"
 import { render } from "silvery/test"
 import type { Row } from "@yrd/queue-core"
 import { WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
@@ -96,6 +97,63 @@ describe("the top line", () => {
     )
 
     expect(text).toContain("/w/logs")
+  })
+
+  it("shows a mixed direct read as a warning with no current change rows", async () => {
+    // A mixed root/change-ref observation has no queue verdict. The old pane
+    // had no typed refusal state, so it could only render an empty list.
+    const text = await paint(
+      <WatchPane
+        snapshot={snapshot({
+          detail: new Map(),
+          readNotice: "origin/main changed while component mains were read; read the queue again",
+          rows: [],
+        })}
+        live={false}
+      />,
+    )
+
+    expect(text).toContain("origin/main changed while component mains were read; read the queue again")
+    expect(text).not.toContain("task/one")
+  })
+
+  it("does not complete for a refusal, then completes on the next successful timer read", async () => {
+    let loads = 0
+    const completedAt: number[] = []
+    const refused = snapshot({
+      readNotice: "origin/main changed while component mains were read; read the queue again",
+    })
+    const load = async () => {
+      loads += 1
+      return loads === 1 ? refused : snapshot()
+    }
+    const onEnding = () => {
+      completedAt.push(loads)
+    }
+    const pane = () => <WatchPane snapshot={refused} intervalMs={50} load={load} onEnding={onEnding} />
+    const app = await act(async () => render(pane(), { cols: 120, rows: 40 }))
+    try {
+      await act(async () => {
+        await app.waitForLayoutStable()
+      })
+
+      expect(app.text).toContain("origin/main changed while component mains were read; read the queue again")
+      expect(app.text).not.toContain("task/one")
+      expect(app.text).not.toContain("change(s)")
+
+      await act(async () => {
+        await vi.waitFor(() => expect(completedAt).toEqual([2]))
+        app.rerender(pane())
+        await app.waitForLayoutStable()
+      })
+      expect(app.text).not.toContain("origin/main changed while component mains were read; read the queue again")
+      expect(app.text).toContain("task/one")
+      expect(app.text).toContain("1 change(s)")
+    } finally {
+      await act(async () => {
+        app.unmount()
+      })
+    }
   })
 })
 

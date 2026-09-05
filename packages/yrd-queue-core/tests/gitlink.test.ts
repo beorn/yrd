@@ -18,8 +18,10 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
 import {
+  appendRecord,
   changeRef,
   checksOf,
+  directMergeCommits,
   gitIn,
   list,
   queueRun,
@@ -463,9 +465,9 @@ describe("settling gitlinks", () => {
     expect(JSON.parse(policy ?? "null")).toMatchObject({ landing: mode, target: w.main })
   })
 
-  // A required protected declaration must fail before submit checks or a
-  // landing intent, not silently inherit a mode from the authored pin.
-  it("refuses missing protected landing mode before submit checks or landing intent", async () => {
+  // A required protected declaration is a direct-reader authority failure,
+  // before any candidate record, check, or push can happen.
+  it("stops the whole run on missing protected landing mode before candidate work", async () => {
     const w = await world()
     const componentWork = join(w.work, "..", "component-work")
     const component = gitIn(componentWork)
@@ -475,20 +477,38 @@ describe("settling gitlinks", () => {
     const protectedMain = await remoteTip(component, "refs/heads/main")
     const target = await remoteTip(w.git, "refs/heads/main")
     const head = await submitFile(w, "task/missing-policy")
+    const ref = changeRef("main", { branch: "task/missing-policy", head })
+    const opened = await remoteTip(w.git, ref)
     const marker = join(w.work, "..", "missing-policy-check")
+    const failure = `component .yrd.yml at protected main ${protectedMain} must declare landing: product or external before the queue can judge it`
 
     const outcome = await queueRun(await w.options({ on: ["submit"], run: `touch '${marker}'` }))
 
-    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/missing-policy"] })
+    expect(outcome).toMatchObject({
+      directMerges: [],
+      exitCode: 2,
+      failed: [],
+      merged: [],
+      stopped: { ring: "direct", says: failure, what: { reason: "direct-read-failed" } },
+      stuck: [],
+    })
     expect(existsSync(marker)).toBe(false)
     expect(await remoteTip(w.git, "refs/heads/main")).toBe(target)
     expect(await remoteTip(component, "refs/heads/main")).toBe(protectedMain)
-    const records = await readRecords(
-      w.git,
-      await remoteTip(w.git, changeRef("main", { branch: "task/missing-policy", head })),
+    expect(await remoteTip(w.git, ref)).toBe(opened)
+    const records = await readRecords(w.git, opened)
+    expect(records.map((record) => record.kind)).toEqual(["opened"])
+    expect(
+      records.some((record) => trailer(record, "Check") !== undefined || trailer(record, "Merge") !== undefined),
+    ).toBe(false)
+    const journal = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(journal.filter((record) => record.kind === "change" && record.head === head)).toEqual([])
+    expect(journal).toContainEqual(
+      expect.objectContaining({ exit: 2, kind: "result", reason: "direct-read-failed", text: failure }),
     )
-    expect(records.some((record) => trailer(record, "Merge") !== undefined)).toBe(false)
-    expect(readFileSync(outcome.log, "utf8")).toContain(`protected main ${protectedMain} must declare landing`)
   })
 
   it("a divergent authored pin fails its author while the next change proceeds, then a rebased submission lands", async () => {
@@ -867,18 +887,23 @@ describe("settling gitlinks", () => {
     const outcome = await queueRun(await w.options())
 
     expect(outcome.exitCode).toBe(0)
-    expect(outcome.directMerges).toEqual([direct])
+    // The root now pins `offMain`, while product component main still names
+    // `main`. Both current positions are unexplained: the root moved around
+    // the queue, and no landing (or current root pin) explains component main.
+    expect(outcome.directMerges).toEqual([direct, w.main])
     const log = readFileSync(outcome.log, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
     expect(log.filter((record) => record.kind === "merged-direct")).toMatchObject([
-      { commit: direct, gitlinks: ["component"] },
+      { branch: "main", commit: direct, gitlinks: ["component"] },
+      { branch: "component/main", commit: w.main },
     ])
     const told = log.filter((record) => record.kind === "message" && record.says === "merged-direct")
-    expect(told).toMatchObject([{ id: direct, says: "merged-direct", to: "none" }])
-    expect(told[0]?.text).toContain(`main moved around the queue at ${direct.slice(0, 12)}`)
-    expect(told[0]?.text).toContain("it moved the gitlink at component")
+    const rootNotice = told.find((record) => record.id === direct)
+    expect(rootNotice).toMatchObject({ id: direct, says: "merged-direct", to: "none" })
+    expect(rootNotice?.text).toContain(`main moved around the queue at ${direct.slice(0, 12)}`)
+    expect(rootNotice?.text).toContain("it moved the gitlink at component")
   })
 
   // M8.5 E5: a product component main is queue-owned only through a root
@@ -914,6 +939,111 @@ describe("settling gitlinks", () => {
       expect(records).toMatchObject(reports ? [{ branch: "component/main", commit: direct }] : [])
     },
   )
+
+  it.each([
+    ["does not treat expectedDestination as authority", "checked", "expected-destination"],
+    ["does not let a failed record leave its landing intent current", "failed", "source"],
+  ] as const)("%s", async (_name, terminal, position) => {
+    const w = await world()
+    const source = await advanceComponent(w, "landing source")
+    const expectedDestination = position === "expected-destination" ? w.onMain : w.main
+    const componentRemote = gitIn(join(w.work, "..", "component.git"))
+    if (position === "expected-destination") {
+      // `T` is the landing CAS pre-image but neither the root pin nor source.
+      await componentRemote(["update-ref", "refs/heads/main", expectedDestination])
+    }
+    const head = await submitFile(w, `task/${position}`)
+    const change = { branch: `task/${position}`, head }
+    const landing = {
+      destination: "refs/heads/main",
+      expectedDestination: { oid: expectedDestination, state: "oid" },
+      remote: join(w.work, "..", "component.git"),
+      repository: "component",
+      source,
+    }
+    const checked = await appendRecord(w.git, "main", {
+      change,
+      kind: "checked",
+      subject: "frozen product landing",
+      trailers: [
+        ["Base", await remoteTip(w.git, "refs/heads/main")],
+        ["Config", "test-config"],
+        ["Config", JSON.stringify({ remote: join(w.work, "..", "remote.git"), repository: "." })],
+        ["Landing", JSON.stringify(landing)],
+        ["Merge", await remoteTip(w.git, "refs/heads/main")],
+        ["Merged-By", "main@direct-test"],
+      ],
+    })
+    const tip =
+      terminal === "failed"
+        ? await appendRecord(w.git, "main", {
+            change,
+            kind: "failed",
+            subject: "landing retired before root push",
+            trailers: [["Reason", "landing no longer current"]],
+          })
+        : checked
+    const ref = changeRef("main", change)
+    await w.git(["push", "--quiet", "origin", `${tip}:${ref}`])
+
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const entries = (await readQueue(w.git, "origin", "main", target)).changes
+    expect((await readRecords(w.git, await remoteTip(w.git, ref))).map((record) => record.kind)).toEqual(
+      terminal === "failed" ? ["opened", "checked", "failed"] : ["opened", "checked"],
+    )
+
+    const found = await directMergeCommits(w.git, "main", target, entries, {
+      remote: "origin",
+      repo: w.work,
+      workdir: join(w.work, "..", "direct-read"),
+    })
+
+    expect(found).toMatchObject([
+      {
+        commit: position === "expected-destination" ? expectedDestination : source,
+        target: "component/main",
+      },
+    ])
+  })
+
+  it.each([
+    ["a new change ref", async (w: World, direct: string) => submitFile(w, `task/direct-read-${direct.slice(0, 8)}`)],
+    ["a moved root", async (w: World, direct: string) => gitlinkAroundQueue(w, direct)],
+  ] as const)("abandons a mixed direct read when %s arrives during component observation", async (_name, move) => {
+    const w = await world()
+    const direct = await advanceComponent(w, "component moves during direct read")
+    let moved = false
+    await using real = createProcess({ cwd: w.work })
+    const observing: Process = {
+      ...real,
+      async run(request) {
+        const result = await real.run(request)
+        if (!moved && request.argv.includes("show") && request.argv.includes("--no-patch")) {
+          moved = true
+          await move(w, direct)
+        }
+        return result
+      },
+    }
+
+    const outcome = await queueRun({ ...(await w.options()), process: observing })
+
+    expect(moved).toBe(true)
+    expect(outcome).toMatchObject({ directMerges: [], exitCode: 0, failed: [], merged: [], stuck: [] })
+    const records = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(records.filter((record) => record.kind === "merged-direct")).toEqual([])
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        exit: 0,
+        kind: "result",
+        reason: "direct-read-changed",
+        text: expect.stringContaining("read the queue again"),
+      }),
+    )
+  })
 
   it("a gitlink the reference checkout never fetched is materialized from the component's remote, and the change merges", async () => {
     const w = await world()
