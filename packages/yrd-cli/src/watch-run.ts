@@ -93,6 +93,9 @@ export function headlineOf(row: Row, joinedRun = false): string {
   // not: the box IS the run, so the `change merged` qualifier is kept only
   // where the run's own result disagrees with the change's state.
   if (row.state === "merged" && row.result?.startsWith("pass") === true) return "passed, merged"
+  // A check running now is the present, not a historical run's reading: the
+  // `change` qualifier that tells the two apart has nothing to tell apart.
+  if (row.live !== undefined) return notice.word.replace(/^change /u, "")
   if (joinedRun && notice.cause !== undefined) return `${notice.word}, ${notice.cause}`
   if (
     (row.state === "failed" || row.state === "stuck") &&

@@ -1072,7 +1072,9 @@ function readOutput(check: CheckView): CheckPanel {
   } catch (error) {
     const why =
       (error as NodeJS.ErrnoException).code === "ENOENT"
-        ? `no log at ${check.log} on this machine; the queue writes its logs where it runs`
+        ? check.state === "running"
+          ? `running; nothing written yet at ${check.log}`
+          : `no log at ${check.log} on this machine; the queue writes its logs where it runs`
         : `the log at ${check.log} could not be read: ${error instanceof Error ? error.message : String(error)}`
     return { ...check, why }
   }

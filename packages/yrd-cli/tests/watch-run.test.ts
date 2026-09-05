@@ -175,3 +175,15 @@ describe("HISTORY and METADATA (watch-change)", () => {
     expect(groups).toEqual([[{ key: "HEAD", value: "abcdef012345" }]])
   })
 })
+
+describe("a check running now", () => {
+  it("drops the joined-run qualifier from the headline: the present is not a historical reading", () => {
+    const live = row({
+      live: { check: "affected-tests", phase: "merge", run: "q-x", since: new Date(NOW_MS) },
+      position: 1,
+      state: "checked",
+    })
+    expect(headlineOf(live, true)).toBe("checked #1, checking affected-tests")
+    expect(headlineOf(live)).toBe("checked #1, checking affected-tests")
+  })
+})
