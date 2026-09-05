@@ -68,6 +68,7 @@ import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
+import { stripAnsi } from "@silvery/ansi"
 import { CHECK_GLYPH, clock, mediaDuration } from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOf, type RunDecision } from "./watch-stats.ts"
@@ -1066,7 +1067,10 @@ function readOutput(check: CheckView): CheckPanel {
   try {
     const size = statSync(check.log).size
     const text = readFileSync(check.log, "utf8")
-    const output = size > LOG_TAIL_BYTES ? text.slice(-LOG_TAIL_BYTES) : text
+    // A log is evidence, and its colors are not: vitest and friends write
+    // chalk backgrounds, and a background inside a Text is a strict-render
+    // refusal that took the whole pane down on 2026-09-05 (soak, minute one).
+    const output = stripAnsi(size > LOG_TAIL_BYTES ? text.slice(-LOG_TAIL_BYTES) : text)
     if (output.trim() === "") return { ...check, why: `the log at ${check.log} is empty` }
     return { ...check, output }
   } catch (error) {

@@ -214,8 +214,14 @@ export function StatsBox({
         <Text color="$fg-muted">│</Text>
       </Box>
     ) : null
-  const line = (label: string, text: (bucket: StatsBucket) => string, color: string | undefined, bold = false) => (
-    <Box flexDirection="row" minWidth={0} overflow="hidden">
+  const line = (
+    key: string,
+    label: string,
+    text: (bucket: StatsBucket) => string,
+    color: string | undefined,
+    bold = false,
+  ) => (
+    <Box key={key} flexDirection="row" minWidth={0} overflow="hidden">
       <Box width={STATS_LABEL_WIDTH} flexShrink={0}>
         <Text color={color ?? undefined} bold={bold}>
           {label}
@@ -230,9 +236,14 @@ export function StatsBox({
   )
   return (
     <TitledBox title="STATS">
-      {line("", (bucket) => bucket.label, "$fg-muted", true)}
+      {line("header", "", (bucket) => bucket.label, "$fg-muted", true)}
       {STATS_ROWS.map((row) =>
-        line(row.label, (bucket) => countCell(bucket, row.key), row.key === "duplicates" ? "$fg-muted" : undefined),
+        line(
+          row.key,
+          row.label,
+          (bucket) => countCell(bucket, row.key),
+          row.key === "duplicates" ? "$fg-muted" : undefined,
+        ),
       )}
       {decisions.length === 0 && absent !== undefined ? (
         <Text color="$fg-muted" wrap="wrap">

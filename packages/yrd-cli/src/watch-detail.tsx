@@ -223,8 +223,8 @@ export function RunStatusBox({
         </MarkerRow>
       )}
       <TimingRows row={row} />
-      {run.steps.map((step) => (
-        <StepLine key={`${step.name}@${step.state}`} step={step} live={live} />
+      {run.steps.map((step, index) => (
+        <StepLine key={`${String(index)}:${step.name}`} step={step} live={live} />
       ))}
     </TitledBox>
   )

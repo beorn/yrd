@@ -108,9 +108,11 @@ async function settle(app: ReturnType<typeof render>): Promise<void> {
 
 /** A box rendered on its own still reads the test's clock, not the wall's. */
 function at(element: React.ReactElement): React.ReactElement {
-  return <NowContext.Provider value={NOW}>
-        <MinuteContext.Provider value={NOW}>{element}</MinuteContext.Provider>
-      </NowContext.Provider>
+  return (
+    <NowContext.Provider value={NOW}>
+      <MinuteContext.Provider value={NOW}>{element}</MinuteContext.Provider>
+    </NowContext.Provider>
+  )
 }
 
 /** One frame of the pane, painted into a headless terminal and read back as text. */
@@ -494,5 +496,26 @@ describe("the layout tier", () => {
 
   it("drills in to one pane when there is room for neither split", () => {
     expect(watchTier(60, 10)).toBe("full")
+  })
+})
+
+describe("the status box's step keys", () => {
+  it("draws two steps of the same name and state, the submit-phase and merge-phase setup, as two lines", async () => {
+    const run: WatchRun = {
+      kind: "queue",
+      id: RUN_ID,
+      label: "main",
+      row: row({ state: "checked", position: 1 }),
+      steps: [
+        { name: "setup", state: "passed", ms: 1_000 },
+        { name: "typecheck", state: "passed", ms: 8_000 },
+        { name: "setup", state: "passed", ms: 1_000 },
+        { name: "affected-tests", state: "running" },
+      ],
+    }
+    const text = await paint(at(<RunStatusBox run={run} live={false} />))
+
+    expect(text.match(/✓ setup 0:01/gu)).toHaveLength(2)
+    expect(text).toContain("◉ affected-tests")
   })
 })

@@ -337,7 +337,7 @@ describe("what a watch says it looked at", () => {
     expect(original.state).toBe("stuck")
     expect(readFileSync(String(original.log), "utf8")).toBe("FIRST_RUN_MISSING\n")
 
-    writeFileSync(control, "echo SECOND_RUN_FAIL\nexit 1\n")
+    writeFileSync(control, "printf 'SECOND_RUN_FAIL \\033[30m\\033[45m slow \\033[49m\\033[39m\\n'\nexit 1\n")
     const second = capture(w.work)
     expect(await coreQueueCommand(w.work, second.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(1)
     const secondId = (JSON.parse(second.stdout()) as { run: string }).run
@@ -360,7 +360,10 @@ describe("what a watch says it looked at", () => {
     expect(old.endedAt).toBe(original.endedAt)
     expect(latest.incident).toBeUndefined()
     expect(readFileSync(String(old.log), "utf8")).toBe("FIRST_RUN_MISSING\n")
-    expect(readFileSync(String(latest.log), "utf8")).toBe("SECOND_RUN_FAIL\n")
+    // The raw log keeps its colors; the pane never sees them (a chalk background inside a Text is a strict-render refusal).
+    expect(readFileSync(String(latest.log), "utf8")).toBe(
+      "SECOND_RUN_FAIL \u001b[30m\u001b[45m slow \u001b[49m\u001b[39m\n",
+    )
 
     const plain = capture(w.work)
     await coreQueueCommand(w.work, plain.io, { command: "list" }, { workdir: w.workdir })
@@ -401,7 +404,7 @@ describe("what a watch says it looked at", () => {
     expect(details.find((detail) => detail.row.run === secondId)?.checks[0]).toMatchObject({
       state: "failed",
       log: latest.log,
-      output: "SECOND_RUN_FAIL\n",
+      output: "SECOND_RUN_FAIL  slow \n",
     })
   })
 })
