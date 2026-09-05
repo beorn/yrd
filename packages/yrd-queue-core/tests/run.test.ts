@@ -1571,6 +1571,35 @@ describe("a failing check bills the submitter at once", () => {
 
     // Two: the change that failed under the old head, and this one.
     expect(messages(w).at(-1)).toMatchObject({ record: "failed", failures: 2 })
+
+    // A concurrent local rewind must not change the ending's failure count.
+    await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    const ref = changeRef("main", { branch: "task/one", head: (await refAt(w.git, "refs/heads/task/one"))! })
+    let rewound = false
+    const git: Git = async (args, input) => {
+      const output = await w.git(args, input)
+      if (!rewound && args[0] === "update-ref" && args[1] === ref && args[2] !== undefined) {
+        const records = await readRecords(w.git, args[2])
+        const preceding = records.at(-2)
+        if (records.at(-1)?.kind === "failed" && preceding?.kind === "opened") {
+          await w.git(["update-ref", ref, preceding.sha, args[2]])
+          rewound = true
+        }
+      }
+      return output
+    }
+    const retried = await queueRun({ ...w.options({ exit: 1, on: ["submit"] }), git })
+    expect(rewound).toBe(true)
+    expect(messages(w).at(-1)).toMatchObject({ record: "failed", failures: 3 })
+    expect(logRecords(retried)).toContainEqual(
+      expect.objectContaining({ kind: "change", decision: "sent", reason: "change-ref-taken" }),
+    )
+    expect((await readRecords(w.git, (await refAt(w.git, ref))!)).at(-1)?.kind).toBe("sent")
   })
 
   it("a check that is red at the target too still bills the submitter, and the queue keeps running", async () => {

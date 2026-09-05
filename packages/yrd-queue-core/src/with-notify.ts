@@ -23,7 +23,6 @@ import { createProcess, shellCommand } from "@yrd/process"
 import { readCheckTrailer } from "./check.ts"
 import type { Ending, Notifier } from "./config.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
-import { refAt } from "./git.ts"
 import {
   endedKind,
   readRecord,
@@ -33,7 +32,7 @@ import {
   type ChangeRecord,
   type WriteRecord,
 } from "./records.ts"
-import { changeName, changeRef } from "./refs.ts"
+import { changeName } from "./refs.ts"
 import { short, writeRecord, type Ring, type Run } from "./run.ts"
 import { tipOf } from "./state.ts"
 import type { QueueEntry } from "./remote.ts"
@@ -172,7 +171,7 @@ async function told(
     ...(issue === undefined ? {} : { issue }),
     ...(known ? { submitter } : {}),
     ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
-    ...(kind === "failed" ? { failures: await failuresOf(run, entry) } : {}),
+    ...(kind === "failed" ? { failures: await failuresOf(run, entry, endedRecord) } : {}),
   })
   for (const { name, delivery, failure } of handed) {
     // One sent record per entry that fired, so a reader can see which of them the
@@ -273,15 +272,14 @@ const MOVED_ON = new Set(["replaced", "deleted"])
  * records, where a retry at an unchanged head appends a second opened record and a
  * second failure under one ref, so the tip alone would forget the first.
  */
-async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
+async function failuresOf(run: Run, entry: QueueEntry, endedRecord: string): Promise<number> {
   const elsewhere = run.queue.filter((candidate) => {
     if (candidate.change.branch !== entry.change.branch || candidate.change.head === entry.change.head) return false
     const tip = tipOf(candidate.change)
     return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
   }).length
-  // This count includes the post-write tip, not the earlier queue reading.
-  const tip = await refAt(run.git, changeRef(run.options.target.branch, entry.change))
-  const own = tip === undefined ? [] : await readRecords(run.git, tip)
+  // Count through the written ending, regardless of concurrent local ref changes.
+  const own = await readRecords(run.git, endedRecord)
   return (
     elsewhere +
     own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
