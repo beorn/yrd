@@ -369,7 +369,13 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
 
     const listed = capture(w.work)
     expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    expect(listed.stdout().split("\n")[0]).toContain("paused by @chief")
+    // The pause rides the RUNNER box's last rail, once — under the title, not above it (watch-frame.tsx).
+    const page = listed.stdout().split("\n")
+    expect(page.filter((line) => line.includes("paused by @chief"))).toHaveLength(1)
+    expect(page.findIndex((line) => line.includes("paused by @chief"))).toBeGreaterThan(
+      page.findIndex((line) => line.includes("RUNNER")),
+    )
+    expect(page.findIndex((line) => line.includes("RUNNER"))).toBeGreaterThan(-1)
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,

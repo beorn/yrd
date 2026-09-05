@@ -854,3 +854,33 @@ describe("the cursor is a row, not an index (the retired pane's fixed-row mode)"
     app.unmount()
   })
 })
+
+describe("the frame's order under the table", () => {
+  // The retired pane stacked the status pills right under the rows and the
+  // STATS box after them (24169-old-watch.md §1 items 4–6); the port had the
+  // pills last, below STATS, where a full-height box pushed them off screen.
+  const runner = {
+    journalDir: "/w/logs",
+    latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
+  }
+  const decisions = [{ at: NOW, decision: "merged" as const, duplicate: false, run: RUN_ID }]
+
+  it("puts the status pills between the rows and STATS", async () => {
+    const app = render(<WatchPane snapshot={snapshot({ runner, decisions })} live={false} />, {
+      cols: 120,
+      rows: 50,
+    })
+    await app.waitForLayoutStable()
+    await settle(app)
+    const lines = app.text.split("\n")
+    const lastRow = lines.findIndex((line) => line.includes("task/one"))
+    const pills = lines.findIndex(
+      (line, index) => index > lastRow && /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u.test(line),
+    )
+    const stats = lines.findIndex((line) => line.includes("STATS"))
+    expect(lastRow).toBeGreaterThan(0)
+    expect(pills).toBeGreaterThan(lastRow)
+    expect(stats).toBeGreaterThan(pills)
+    app.unmount()
+  })
+})
