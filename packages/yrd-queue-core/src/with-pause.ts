@@ -20,7 +20,7 @@
  * happened first, and no merge can slip past a pause written a moment ago.
  */
 
-import { mergedBy } from "./records.ts"
+import { ABSENT, mergedBy } from "./records.ts"
 import { pauseLine, QueuePaused, readPause, pauseFence, type PauseRecord, type PauseFence } from "./pause.ts"
 import { changeName, pauseRef } from "./refs.ts"
 import { QueueAuthorityUnreadable, type Pushed, type Ring, type Run, type Stopped } from "./run.ts"
@@ -52,10 +52,12 @@ export const withPause: Ring = (steps) => {
       // a queue that cannot tell whether it is paused merges nothing.
       let fence: PauseFence
       const ref = pauseRef(run.options.target.branch)
+      const remote = plan.updates.find((row) => row.repository === ".")?.remote
+      if (remote === undefined) throw new Error("landing plan has no root remote for its pause fence")
       try {
         fence = await pauseFence(
           run.git,
-          run.options.target.remote,
+          remote,
           run.options.target.branch,
           {
             by: mergedBy(run.name, run.log.id),
@@ -65,11 +67,21 @@ export const withPause: Ring = (steps) => {
         )
       } catch (error) {
         if (error instanceof QueuePaused) return stop(run, error.pause, error)
-        throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${ref}`, error)
+        throw new QueueAuthorityUnreadable(`${remote} ${ref}`, error)
       }
       const pushed = await steps.push(run, entry, {
-        leases: [...plan.leases, [ref, fence.expected]],
-        updates: [...plan.updates, [fence.sha, ref]],
+        ...plan,
+        updates: [
+          ...plan.updates,
+          {
+            repository: ".",
+            remote,
+            source: fence.sha,
+            destination: ref,
+            expectedDestination:
+              fence.expected === ABSENT ? { state: "missing" } : { state: "oid", oid: fence.expected },
+          },
+        ],
       })
       if (pushed.landed) return pushed
       // A pause writer can win after our reads too, and then the atomic leases
@@ -79,9 +91,9 @@ export const withPause: Ring = (steps) => {
       // checked rather than raising.
       let now: PauseRecord | undefined
       try {
-        now = await readPause(run.git, run.options.target.remote, run.options.target.branch)
+        now = await readPause(run.git, remote, run.options.target.branch)
       } catch (error) {
-        throw new QueueAuthorityUnreadable(`${run.options.target.remote} ${ref}`, error)
+        throw new QueueAuthorityUnreadable(`${remote} ${ref}`, error)
       }
       if (now?.kind === "paused" && now.sha !== admittedPause?.sha) return stop(run, now, pushed.error)
       const saw = now?.sha ?? "absent"

@@ -38,10 +38,22 @@
  */
 
 import { mkdirSync, readdirSync, rmSync } from "node:fs"
-import { join } from "node:path"
-import { createProcess, type Process } from "@yrd/process"
+import { join, resolve } from "node:path"
+import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
+import { readCommitSubmodules } from "git-super/commit-graph"
+import { parsePushPlan, remoteContainsCommit, type GitSuperResult, type RefUpdate } from "git-super"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
-import { DIRECT_MERGE, endedKind, recordCommit, mergedBy, trailer, type Git, type WriteRecord } from "./records.ts"
+import {
+  DIRECT_MERGE,
+  endedKind,
+  recordCommit,
+  readRecord,
+  mergedBy,
+  trailer,
+  type Git,
+  type WriteRecord,
+  type ChangeRecord,
+} from "./records.ts"
 import { queueName, readConfig, type Target } from "./config.ts"
 import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
 import { incidentTrailers, type Incident, type IncidentCode } from "./incident.ts"
@@ -167,8 +179,9 @@ export type Stopped = Readonly<{ ring: string; says: string; what: unknown }>
  * `[ref, expected]`.
  */
 export type PushPlan = Readonly<{
-  updates: readonly (readonly [string, string])[]
-  leases: readonly (readonly [string, string])[]
+  /** Materialized frozen candidate, including direct component repositories. */
+  repository: string
+  updates: readonly RefUpdate[]
 }>
 
 /**
@@ -325,6 +338,17 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   stopped = await run.steps.open(run)
   if (stopped !== undefined) return finish(run, 0, { directMerges, failed, merged, stuck }, stopped)
 
+  // A durable landing intent wins over derived deleted/replaced/stale state.
+  // Its candidate was already tested; bookkeeping must not hide it and a
+  // restart must not compose or check another tree in its place.
+  const recovery = entries.find((entry) => isLandingIntent(tipOf(entry.change)))
+  if (recovery !== undefined) {
+    const outcome = await resumeLanding(run, recovery, tipOf(recovery.change))
+    if (outcome === "merged") merged.push(recovery.change.branch)
+    else if (outcome === "stuck") stuck.push(recovery.change.branch)
+    return finish(run, stuck.length > 0 ? 2 : 0, { directMerges, failed, merged, stuck }, stopped)
+  }
+
   // Bookkeeping at the edges of the records first, so every reader below reads
   // records and never reconciles.
   for (const entry of entries) await run.steps.bookkeep(run, entry)
@@ -368,7 +392,11 @@ const BASE: Steps = { bookkeep, direct, end, ended, judge, land, open, prepare, 
 /** A checked change whose checked record names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
   const tip = tipOf(entry.change)
-  return tip.kind === "checked" && trailer(tip, "Config") !== run.options.configBlob
+  return tip.kind === "checked" && !isLandingIntent(tip) && trailer(tip, "Config") !== run.options.configBlob
+}
+
+function isLandingIntent(record: ChangeRecord): boolean {
+  return record.kind === "checked" && trailer(record, "Merge") !== undefined
 }
 
 /** The entries in the named states, in line order. */
@@ -569,12 +597,12 @@ type SuperMergeDetail = Readonly<{
   next?: string
 }>
 
-type SettledGitlink = Readonly<{
-  path: string
-  from: string
-  to: string
-  state: "raised" | "left-off-main" | "not-run"
-}>
+type SettledGitlink = Readonly<
+  { path: string; from: string } & (
+    | { to: string; state: "raised" | "kept-ahead" | "left-off-main" | "not-run" }
+    | { to?: string; state: "as-written" }
+  )
+>
 
 type SuperMergeResult = Readonly<{
   state: "updated" | "unchanged" | "failed" | "unknown"
@@ -585,7 +613,14 @@ type SuperMergeResult = Readonly<{
 }>
 
 type ComposedCandidate =
-  | Readonly<{ kind: "ready"; mergeCommit: string; settled: readonly SettledGitlink[]; worktree: PreparedWorktree }>
+  | Readonly<{
+      kind: "ready"
+      mergeCommit: string
+      settled: readonly SettledGitlink[]
+      worktree: PreparedWorktree
+      config: readonly string[]
+      landing: readonly RefUpdate[]
+    }>
   | Readonly<{ kind: "waiting"; detail: SuperMergeDetail }>
   | Readonly<{ kind: "failed"; detail: SuperMergeDetail; worktree: Worktree }>
 
@@ -599,7 +634,14 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     join(run.worktrees, "compose", phase, head.slice(0, 12)),
     run.options.plumbing,
   )
-  const result = await superMerge(run, composing.path, head, mergeMessage(run, entry))
+  const policy = await componentPolicy(run, entry, composing, phase)
+  const result = await superMerge(
+    run,
+    composing.path,
+    head,
+    mergeMessage(run, entry),
+    policy.filter((row) => row.authored && row.landing === "external").map((row) => row.repository),
+  )
   if (result.state !== "updated" || result.partial) {
     const detail = result.detail
     if (detail === undefined) {
@@ -610,6 +652,15 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     return { detail, kind: "waiting" }
   }
   if (result.commit === undefined) throw new Error(`git-super merge of ${head} reported updated without a commit`)
+  for (const input of policy.filter((row) => row.authored)) {
+    const row = result.gitlinks.find((row) => row.path === input.repository)
+    const observed = row === undefined ? input.pin : row.to
+    if (observed !== input.target) {
+      throw new Error(
+        `${input.repository} protected main changed during composition: policy read at ${input.target}, topology read at ${observed ?? "unreadable"}; retry with one protected target`,
+      )
+    }
+  }
   await composing.remove()
 
   const mergeCommit = result.commit
@@ -633,12 +684,112 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     join(run.worktrees, phase, head.slice(0, 12)),
     phase,
   )
-  return { kind: "ready", mergeCommit, settled: result.gitlinks, worktree }
+  const landing = result.gitlinks
+    .filter((row) => row.state === "kept-ahead")
+    .map((row): RefUpdate => {
+      const input = policy.find((input) => input.repository === row.path)
+      if (input?.landing !== "product" || row.to === undefined) {
+        throw new Error(`git-super kept ${row.path} ahead without its captured product policy`)
+      }
+      return {
+        repository: row.path,
+        remote: input.remote,
+        source: row.from,
+        destination: "refs/heads/main",
+        expectedDestination: { state: "oid", oid: row.to },
+      }
+    })
+  return {
+    kind: "ready",
+    mergeCommit,
+    settled: result.gitlinks,
+    worktree,
+    config: policy.map(({ authored: _authored, pin: _pin, ...input }) => JSON.stringify(input)),
+    landing,
+  }
+}
+
+/** Read policy only at protected component targets, never from authored config.
+ * GitSuper owns the commit census and topology. Yrd supplies only which pins
+ * must stay as written and checks that policy and topology used the same OID. */
+async function componentPolicy(run: Run, entry: QueueEntry, target: Worktree, phase: CandidatePhase) {
+  const owned = run.options.process === undefined
+  const process =
+    run.options.process ??
+    createProcess({ cwd: run.options.repo, env: gitEnvironment(run.options.env ?? globalThis.process.env) })
+  let authoredTree: Worktree | undefined
+  try {
+    const git = adaptProcessGit(process)
+    const common = await mergeBase(run.git, run.targetSha, entry.change.head)
+    if (common === undefined) throw new Error(`${changeName(entry.change)} shares no ancestry with ${run.targetSha}`)
+    const [before, after, base] = await Promise.all([
+      readCommitSubmodules(git, run.options.repo, common),
+      readCommitSubmodules(git, run.options.repo, entry.change.head),
+      readCommitSubmodules(git, run.options.repo, run.targetSha),
+    ])
+    const previous = new Map(before.map((row) => [row.path, row.target]))
+    const authored = new Set(after.filter((row) => previous.get(row.path) !== row.target).map((row) => row.path))
+    const modules = new Map(base.map((row) => [row.path, row]))
+    for (const row of after) if (authored.has(row.path)) modules.set(row.path, row)
+    const remaining = new Set(after.map((row) => row.path))
+    for (const row of before) if (!remaining.has(row.path)) modules.delete(row.path)
+    const existing = new Set(base.map((row) => row.path))
+    if ([...authored].some((path) => !existing.has(path))) {
+      authoredTree = await freshWorktree(
+        run.git,
+        run.options.repo,
+        entry.change.head,
+        join(run.worktrees, "policy", phase, entry.change.head.slice(0, 12)),
+        run.options.plumbing,
+      )
+    }
+    const inputs = []
+    for (const row of modules.values()) {
+      const tree = existing.has(row.path) ? target : authoredTree
+      if (tree === undefined) throw new Error(`${row.path} has no materialized authored tree for its landing policy`)
+      const path = join(tree.path, row.path)
+      const cg = gitIn(path, run.options.process)
+      const remote = await remoteUrl(cg, "origin")
+      await cg(["fetch", "--quiet", "--no-tags", remote, "+refs/heads/main:refs/remotes/origin/main"])
+      const targetOid = (await cg(["rev-parse", "refs/remotes/origin/main^{commit}"])).trim()
+      const config = await readConfig(cg, targetOid, { remote, branch: "main" })
+      if (config?.landing === undefined) {
+        throw new Error(
+          `${row.path} .yrd.yml at protected main ${targetOid} must declare landing: product or external before the queue can judge it`,
+        )
+      }
+      inputs.push({
+        repository: row.path,
+        remote,
+        target: targetOid,
+        blob: config.blob,
+        landing: config.landing,
+        authored: authored.has(row.path),
+        pin: row.target,
+      })
+    }
+    return inputs
+  } finally {
+    if (authoredTree !== undefined) await authoredTree.remove()
+    if (owned) await process.close()
+  }
 }
 
 /** Run git-super as the ruled command boundary; malformed or truncated JSON is never treated as a verdict. */
-async function superMerge(run: Run, cwd: string, commit: string, message: string): Promise<SuperMergeResult> {
-  const execution = await gitSuperExecution(run, cwd, ["merge", commit, "-m", message])
+async function superMerge(
+  run: Run,
+  cwd: string,
+  commit: string,
+  message: string,
+  pinAsWritten: readonly string[],
+): Promise<SuperMergeResult> {
+  const execution = await gitSuperExecution(run, cwd, [
+    "merge",
+    commit,
+    "-m",
+    message,
+    ...pinAsWritten.flatMap((path) => ["--pin-as-written", path]),
+  ])
   let parsed: unknown
   try {
     parsed = JSON.parse(execution.stdout)
@@ -660,6 +811,7 @@ async function gitSuperExecution(
   run: Run,
   cwd: string,
   argv: readonly string[],
+  stdin?: string,
 ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
   const owned = run.options.process === undefined
   const process =
@@ -669,6 +821,7 @@ async function gitSuperExecution(
       argv: ["git", "-c", `core.hooksPath=${run.hooksPath}`, "super", "--json", ...argv],
       cwd,
       env: gitEnvironment(run.options.env ?? globalThis.process.env),
+      ...(stdin === undefined ? {} : { stdin }),
     })
     if (
       execution.timedOut ||
@@ -708,8 +861,8 @@ function readSuperMergeResult(value: unknown): SuperMergeResult {
     if (
       typeof entry.path !== "string" ||
       typeof entry.from !== "string" ||
-      typeof entry.to !== "string" ||
-      !new Set(["raised", "left-off-main", "not-run"]).has(String(entry.state))
+      (typeof entry.to !== "string" && entry.state !== "as-written") ||
+      !new Set(["raised", "kept-ahead", "as-written", "left-off-main", "not-run"]).has(String(entry.state))
     ) {
       throw new Error(`git-super merge gitlink ${String(index)} is incomplete`)
     }
@@ -840,7 +993,7 @@ async function attributedFailure(
   phase: CandidatePhase,
   settled: readonly SettledGitlink[],
 ): Promise<Ended> {
-  const raises = settled.filter((row) => row.state === "raised")
+  const raises = settled.filter((row): row is Extract<SettledGitlink, { to: string }> => row.state === "raised")
   if (raises.length === 0) return endFailing(run, entry, results, failing, phase)
   const base = await prepareSettledBase(run, entry, raises)
   try {
@@ -885,7 +1038,7 @@ async function attributedFailure(
 async function prepareSettledBase(
   run: Run,
   entry: QueueEntry,
-  raises: readonly SettledGitlink[],
+  raises: readonly Extract<SettledGitlink, { to: string }>[],
 ): Promise<PreparedWorktree> {
   const composing = await freshWorktree(
     run.git,
@@ -947,11 +1100,10 @@ async function superGitlinkWrite(run: Run, cwd: string, path: string, commit: st
 async function land(run: Run, entry: QueueEntry): Promise<Ended> {
   const { change } = entry
   const { branch, head } = change
-  const name = changeName(change)
   const composed = await composeCandidate(run, entry, "merge")
   if (composed.kind === "waiting") return waiting(run, entry, composed.detail)
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
-  const { mergeCommit, settled, worktree } = composed
+  const { mergeCommit, settled, worktree, config, landing } = composed
   try {
     const wt = gitIn(worktree.path, run.options.process)
     // The built-in check at merge (ruling D2): the merged tree's own declaration
@@ -1006,70 +1158,234 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         head,
         kind: "change",
         reason: remoteNow.target !== run.targetSha ? "target-moved" : "branch-moved",
+        saw: remoteNow.target !== run.targetSha ? remoteNow.target ?? "gone" : remoteNow.branch ?? "gone",
       })
       return "checked"
     }
-    // The merged record says how it was merged and what it checked: by the queue,
-    // with the on-merge checks' results, in the shape the checked record uses.
+    // A gitlink does not retain objects in another repository. Prove every
+    // child source is advertised/reachable at its frozen remote before making
+    // the checked intent durable. GitSuper owns this proof as well as the push.
+    const owned = run.options.process === undefined
+    const process =
+      run.options.process ??
+      createProcess({ cwd: worktree.path, env: gitEnvironment(run.options.env ?? globalThis.process.env) })
+    try {
+      for (const row of landing) {
+        if (
+          !(await remoteContainsCommit({
+            repository: join(worktree.path, row.repository),
+            remote: row.remote,
+            commit: row.source,
+            git: adaptProcessGit(process),
+          }))
+        ) {
+          throw new Error(
+            `${row.repository} landing source ${row.source} is not reachable at ${row.remote}; publish the source before retrying this change`,
+          )
+        }
+      }
+    } finally {
+      if (owned) await process.close()
+    }
     const ref = changeRef(run.options.target.branch, change)
     const expectedTip = tipOf(entry.change).sha
-    const mergedRecord = await recordCommit(
+    const intent = await recordCommit(
       run.git,
       {
         change,
-        kind: "merged",
-        subject: `${branch} merged into ${run.options.target.branch} as ${mergeCommit.slice(0, 12)}`,
+        kind: "checked",
+        subject: `${branch} checked for landing as ${mergeCommit.slice(0, 12)}`,
         trailers: [
           ["Merge", mergeCommit],
           ["Base", run.targetSha],
+          ["Config", run.options.configBlob],
+          ["Config", JSON.stringify({ repository: ".", remote: await remoteUrl(run.git, run.options.target.remote) })],
+          ...config.map((input) => ["Config", input] as const),
           ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
           ...checkTrailers(results),
+          ...landing.map((row) => ["Landing", JSON.stringify(row)] as const),
         ],
       },
       expectedTip,
     )
-    const pushed = await run.steps.push(run, entry, {
-      leases: [
-        [`refs/heads/${run.options.target.branch}`, run.targetSha],
-        [ref, expectedTip],
-      ],
-      updates: [
-        [mergeCommit, `refs/heads/${run.options.target.branch}`],
-        [mergedRecord, ref],
-      ],
-    })
-    if (!pushed.landed) {
-      // Something can win after our reads, and then the atomic leases reject
-      // every update. A push that read what moved says so and the change simply
-      // keeps its place; one that could read nothing raises, because a queue
-      // that cannot explain a refused merge has not judged anything.
-      if (pushed.reason === undefined) throw pushed.error
-      run.log.write({
-        branch,
-        decision: "checked",
-        head,
-        kind: "change",
-        reason: pushed.reason,
-        ...(pushed.reason === "change-ref-moved" ? { expected: expectedTip } : {}),
-        ...(pushed.saw === undefined ? {} : { saw: pushed.saw }),
-      })
-      return "checked"
+    try {
+      // One CAS, not writeRecord's bookkeeping retry: losing this lease is a
+      // stop, never permission to attach an old tested plan to a new record.
+      await run.git([
+        "push",
+        "--quiet",
+        `--force-with-lease=${ref}:${expectedTip}`,
+        run.options.target.remote,
+        `${intent}:${ref}`,
+      ])
+    } catch (error) {
+      let now: string
+      try {
+        now = await fetchRemoteChange(run, ref)
+      } catch (readError) {
+        throw new QueueAuthorityUnreadable(`${ref} after landing-intent push`, readError)
+      }
+      if (now !== intent) {
+        if (now === expectedTip) throw error
+        run.log.write({
+          branch,
+          head,
+          kind: "change",
+          decision: "checked",
+          reason: "change-ref-moved",
+          expected: expectedTip,
+          saw: now,
+        })
+        return "checked"
+      }
     }
-    run.targetAfter.sha = mergeCommit
-    run.log.write({
-      branch,
-      change: name,
-      commit: mergeCommit,
-      gitlinks: settled.filter((row) => row.state === "raised").map((row) => `${row.path} ${row.from} -> ${row.to}`),
-      head,
-      kind: "merge",
-      tip: mergeCommit,
-    })
-    run.log.write({ branch, decision: "merged", head, kind: "change" })
-    await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
-    return "merged"
+    return await resumeLanding(run, entry, await readRecord(run.git, intent), worktree, settled)
   } finally {
     await worktree.remove()
+  }
+}
+
+/** Finish only the frozen intent. Local journals, branch selection, setup and
+ * checks are deliberately absent from this path; the record ref retains M. */
+async function resumeLanding(
+  run: Run,
+  entry: QueueEntry,
+  intent: ChangeRecord,
+  prepared?: Worktree,
+  settled: readonly SettledGitlink[] = [],
+): Promise<Ended> {
+  const { branch, head } = entry.change
+  let worktree = prepared
+  try {
+    const one = (name: string): string => {
+      const values = intent.trailers.filter(([key]) => key === name).map(([, value]) => value)
+      const value = values[0]
+      if (values.length !== 1 || value === undefined) {
+        throw new Error(`${intent.sha} landing intent requires exactly one ${name}: trailer`)
+      }
+      return value
+    }
+    const merge = one("Merge")
+    const base = one("Base")
+    const by = one("Merged-By")
+    const configs = intent.trailers.filter(([name]) => name === "Config").map(([, value]) => value)
+    const rootConfig = configs[1]
+    if (rootConfig === undefined) throw new Error(`${intent.sha} landing intent has no frozen root Config: identity`)
+    const root: unknown = JSON.parse(rootConfig)
+    if (
+      typeof root !== "object" ||
+      root === null ||
+      !("repository" in root) ||
+      root.repository !== "." ||
+      !("remote" in root) ||
+      typeof root.remote !== "string" ||
+      root.remote.trim() === ""
+    ) {
+      throw new Error(`${intent.sha} landing intent has an unreadable root Config: identity`)
+    }
+    // This is the same parser as git super push --plan. Its source is the
+    // durable checked record identity, never this machine's journal pathname.
+    const children = parsePushPlan(
+      JSON.stringify({
+        updates: intent.trailers
+          .filter(([name]) => name === "Landing")
+          .map(([, value]) => JSON.parse(value) as unknown),
+      }),
+      intent.sha,
+    )
+    if (children.some((row) => row.repository === ".")) {
+      throw new Error(`${intent.sha} Landing: rows must name components; root updates are derived from the record`)
+    }
+    if (worktree === undefined) {
+      worktree = await freshWorktree(
+        run.git,
+        run.options.repo,
+        merge,
+        join(run.worktrees, "landing", intent.sha),
+        run.options.plumbing,
+      )
+    }
+    const mergedRecord = await recordCommit(
+      run.git,
+      {
+        change: entry.change,
+        kind: "merged",
+        subject: `${branch} merged into ${run.options.target.branch} as ${merge.slice(0, 12)}`,
+        trailers: [
+          ["Merge", merge],
+          ["Base", base],
+          ["Merged-By", by],
+          ...intent.trailers.filter(([name]) => name === "Check"),
+        ],
+      },
+      intent.sha,
+    )
+    const plan = parsePushPlan(
+      JSON.stringify({
+        updates: [
+          ...children,
+          {
+            repository: ".",
+            remote: root.remote,
+            source: merge,
+            destination: `refs/heads/${run.options.target.branch}`,
+            expectedDestination: { state: "oid", oid: base },
+          },
+          {
+            repository: ".",
+            remote: root.remote,
+            source: mergedRecord,
+            destination: changeRef(run.options.target.branch, entry.change),
+            expectedDestination: { state: "oid", oid: intent.sha },
+          },
+        ],
+      }),
+      intent.sha,
+    )
+    const pushed = await run.steps.push(run, entry, { repository: worktree.path, updates: plan })
+    if (!pushed.landed) {
+      run.log.write({
+        branch,
+        head,
+        kind: "change",
+        decision: "checked",
+        reason: pushed.reason ?? "landing-unresolved",
+        intent: intent.sha,
+        text: pushed.error instanceof Error ? pushed.error.message : String(pushed.error),
+        ...(pushed.saw === undefined ? {} : { saw: pushed.saw }),
+      })
+      return pushed.reason === "paused" || pushed.reason === "pause-moved" ? "checked" : "stuck"
+    }
+    run.targetAfter.sha = merge
+    run.log.write({
+      branch,
+      head,
+      kind: "merge",
+      change: changeName(entry.change),
+      commit: merge,
+      tip: merge,
+      intent: intent.sha,
+      gitlinks: settled.filter((row) => row.state === "raised").map((row) => `${row.path} ${row.from} -> ${row.to}`),
+    })
+    run.log.write({ branch, head, kind: "change", decision: "merged" })
+    await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
+    return "merged"
+  } catch (error) {
+    // An incomplete landing must stay checked-with-Merge. Appending stuck
+    // would hide the only durable authority needed by the next clone.
+    if (error instanceof QueueAuthorityUnreadable) throw error
+    run.log.write({
+      branch,
+      head,
+      kind: "change",
+      decision: "checked",
+      reason: "landing-unresolved",
+      intent: intent.sha,
+      text: error instanceof Error ? error.message : String(error),
+    })
+    return "stuck"
+  } finally {
+    if (prepared === undefined && worktree !== undefined) await worktree.remove()
   }
 }
 
@@ -1084,28 +1400,71 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
  * with the rejection, for a caller that knows more to explain or raise.
  */
 async function push(run: Run, entry: QueueEntry, plan: PushPlan): Promise<Pushed> {
+  const execution = await gitSuperExecution(
+    run,
+    plan.repository,
+    ["push", "--atomic", "--plan", "-"],
+    JSON.stringify({ updates: plan.updates }),
+  )
+  let result: GitSuperResult
   try {
-    await run.git([
-      "push",
-      "--quiet",
-      "--atomic",
-      ...plan.leases.map(([ref, expected]) => `--force-with-lease=${ref}:${expected}`),
-      run.options.target.remote,
-      ...plan.updates.map(([object, ref]) => `${object}:${ref}`),
-    ])
-    return { landed: true }
+    result = JSON.parse(execution.stdout) as GitSuperResult
   } catch (error) {
-    const ref = changeRef(run.options.target.branch, entry.change)
-    const moved = await remoteHeads(run, entry.change.branch, ref)
-    if (moved.target !== run.targetSha) {
-      return { error, landed: false, reason: "target-moved", saw: moved.target ?? "gone" }
+    throw new Error(
+      `git-super push exited ${execution.exitCode} without readable JSON: ${execution.stderr.trim() || execution.stdout.trim()}`,
+      { cause: error },
+    )
+  }
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    !Array.isArray(result.repositories) ||
+    typeof result.partial !== "boolean"
+  ) {
+    throw new Error(`git-super push returned unreadable results: ${execution.stdout}`)
+  }
+  // Keep EVERY repository/ref outcome in the existing journal, including
+  // already completed, not-run and unknown groups after a partial landing.
+  run.log.write({
+    branch: entry.change.branch,
+    head: entry.change.head,
+    kind: "change",
+    decision: "checked",
+    reason: "landing-push",
+    diagnosis: execution.stdout.trim(),
+  })
+  const repositories: GitSuperResult["repositories"] = result.repositories
+  if (
+    execution.exitCode === 0 &&
+    !result.partial &&
+    (result.state === "updated" || result.state === "unchanged") &&
+    repositories.length > 0 &&
+    repositories.every(
+      (row) =>
+        (row.state === "updated" || row.state === "unchanged") &&
+        row.refs.length > 0 &&
+        row.refs.every((ref) => ref.state === "updated" || ref.state === "unchanged"),
+    )
+  ) {
+    const expected = plan.updates
+      .map((row) => JSON.stringify([resolve(plan.repository, row.repository), row.source, row.destination]))
+      .sort()
+    const observed = repositories
+      .flatMap((row) => row.refs.map((ref) => JSON.stringify([row.repository, ref.source, ref.destination])))
+      .sort()
+    if (JSON.stringify(expected) !== JSON.stringify(observed)) {
+      throw new Error(
+        `git-super push returned incomplete or unrelated successful outcomes: expected ${JSON.stringify(expected)}; observed ${JSON.stringify(observed)}`,
+      )
     }
-    if (moved.branch !== entry.change.head) return { error, landed: false, reason: "branch-moved" }
-    const expectedTip = plan.leases.find(([leased]) => leased === ref)?.[1]
-    if (expectedTip !== undefined && moved.change !== expectedTip) {
-      return { error, landed: false, reason: "change-ref-moved", saw: moved.change ?? "gone" }
-    }
-    return { error, landed: false }
+    return { landed: true }
+  }
+  return {
+    landed: false,
+    reason: "landing-unresolved",
+    error: new Error(
+      `git-super push exit ${execution.exitCode}: ${execution.stdout.trim()}${execution.stderr.trim() === "" ? "" : `; ${execution.stderr.trim()}`}`,
+    ),
   }
 }
 

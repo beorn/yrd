@@ -14,7 +14,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
 import {
@@ -24,6 +24,7 @@ import {
   incidentFrom,
   list,
   queueRun,
+  pauseRef,
   readJournals,
   readQueue,
   readRecords,
@@ -55,7 +56,7 @@ type World = Readonly<{
  * A component whose main is `one` then `three`, with a branch `feature` at
  * `two` off `one`; a root whose main records the component at `three`.
  */
-async function world(): Promise<World> {
+async function world(landing: "product" | "external" = "product"): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-core-gitlink-"))
   roots.push(root)
   // A component at a local path: git refuses file transport for submodule
@@ -79,7 +80,8 @@ async function world(): Promise<World> {
   await identity(cg)
   await cg(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(componentWork, "lib.txt"), "one\n")
-  await cg(["add", "lib.txt"])
+  writeFileSync(join(componentWork, ".yrd.yml"), `landing: ${landing}\n`)
+  await cg(["add", "lib.txt", ".yrd.yml"])
   await cg(["commit", "--quiet", "-m", "one"])
   const onMain = (await cg(["rev-parse", "HEAD"])).trim()
   await cg(["checkout", "--quiet", "-b", "feature"])
@@ -127,12 +129,16 @@ async function world(): Promise<World> {
 }
 
 /** A change that moves the component's gitlink to `sha`, submitted. */
-async function submitGitlink(w: World, branch: string, sha: string): Promise<string> {
+async function submitGitlink(w: World, branch: string, sha: string, consumer?: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
   const sub = gitIn(join(w.work, "component"))
   await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
   await sub(["checkout", "--quiet", sha])
   await w.git(["add", "component"])
+  if (consumer !== undefined) {
+    writeFileSync(join(w.work, "consumer.txt"), `${consumer}\n`)
+    await w.git(["add", "consumer.txt"])
+  }
   // The branch is in the message, so two branches recording the same commit in
   // the same second are two heads, not one head under two names.
   await w.git(["commit", "--quiet", "-m", `${branch}: move the component gitlink to ${sha.slice(0, 12)}`])
@@ -203,6 +209,153 @@ async function advanceComponent(w: World, contents: string): Promise<string> {
 }
 
 describe("settling gitlinks", () => {
+  // M8.5 K1: the authored component and its root consumer pass together;
+  // component main advances before root main. The older fixtures only proved
+  // behind pins or divergent pins, never an authored descendant of main.
+  it("lands the tested ahead product pin before its root consumer", async () => {
+    const w = await world()
+    const component = gitIn(join(w.work, "..", "component-work"))
+    await component(["checkout", "--quiet", "-b", "ahead", "main"])
+    writeFileSync(join(w.work, "..", "component-work", "lib.txt"), "four\n")
+    await component(["commit", "--quiet", "-am", "four"])
+    const ahead = (await component(["rev-parse", "HEAD"])).trim()
+    await component(["push", "--quiet", "origin", "ahead"])
+    await submitGitlink(w, "task/product", ahead, "four")
+    const hook = join(w.work, "..", "remote.git", "hooks", "pre-receive")
+    writeFileSync(
+      hook,
+      `#!/bin/sh\nwhile read old new ref; do\n  if [ "$ref" = refs/heads/main ]; then\n    test "$(git --git-dir='${join(w.work, "..", "component.git")}' rev-parse refs/heads/main)" = '${ahead}' || exit 1\n  fi\ndone\n`,
+    )
+    chmodSync(hook, 0o755)
+
+    const outcome = await queueRun(await w.options({
+      run: 'test "$(cat component/lib.txt)" = four && test "$(cat consumer.txt)" = four',
+      on: ["submit", "merge"],
+    }))
+
+    expect(outcome, readFileSync(outcome.log, "utf8")).toMatchObject({ exitCode: 0, merged: ["task/product"], failed: [], stuck: [] })
+    expect(await remoteTip(component, "refs/heads/main")).toBe(ahead)
+    expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(ahead)
+  })
+
+  // M8.5 K2: a checked intent must retain and resume its frozen M after a
+  // post-child-push death. Older tests neither kill a child push nor restart
+  // from a clone with the original workdir and journals gone.
+  it.each([
+    ["recovers the identical frozen merge from a fresh clone", false],
+    ["reports every push row and makes no write after a third OID diverges", true],
+  ] as const)("K2 %s", async (_name, diverge) => {
+    const w = await world()
+    const componentWork = join(w.work, "..", "component-work")
+    const component = gitIn(componentWork)
+    await component(["checkout", "--quiet", "-b", "ahead", "main"])
+    writeFileSync(join(componentWork, "lib.txt"), "four\n")
+    await component(["commit", "--quiet", "-am", "four"])
+    const ahead = (await component(["rev-parse", "HEAD"])).trim()
+    await component(["push", "--quiet", "origin", "ahead"])
+    const head = await submitGitlink(w, "task/k2", ahead, "four")
+    const checkMarker = join(w.work, "..", "k2-checks.log")
+    const queueBin = join(process.cwd(), "packages", "yrd-queue-core", "node_modules", ".bin")
+    const env = { ...process.env, PATH: `${queueBin}:${process.env.PATH ?? ""}` }
+    const options = { ...(await w.options({ on: ["submit", "merge"], run: `printf check >> '${checkMarker}'` })), env }
+    const event = join(w.work, "..", "k2-component-pushed.pgid")
+    const hook = join(w.work, "..", "component.git", "hooks", "post-receive")
+    writeFileSync(hook, `#!/bin/sh\nps -o pgid= -p $$ | tr -d ' ' > '${event}'\nwhile :; do sleep 1; done\n`)
+    chmodSync(hook, 0o755)
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `import { queueRun } from ${JSON.stringify(join(process.cwd(), "packages/yrd-queue-core/src/run.ts"))}; await queueRun(JSON.parse(process.env.YRD_K2_OPTIONS ?? ""))`,
+      ],
+      { cwd: w.work, env: { ...env, YRD_K2_OPTIONS: JSON.stringify(options) }, stderr: "pipe", stdout: "ignore" },
+    )
+    await vi.waitFor(
+      () => expect(readFileSync(event, "utf8").trim()).toMatch(/^[1-9][0-9]*$/u),
+      { interval: 10, timeout: 5_000 },
+    )
+    const group = Number(readFileSync(event, "utf8").trim())
+    if (!Number.isSafeInteger(group) || group <= 0) throw new Error(`component hook wrote invalid process group ${String(group)}`)
+    process.kill(child.pid, "SIGKILL")
+    process.kill(-group, "SIGKILL")
+    await child.exited
+    writeFileSync(hook, "#!/bin/sh\nexit 0\n")
+    chmodSync(hook, 0o755)
+
+    expect(await remoteTip(component, "refs/heads/main")).toBe(ahead)
+    const ref = changeRef("main", { branch: "task/k2", head })
+    const intent = (await readRecords(w.git, await remoteTip(w.git, ref))).at(-1)!
+    expect(intent.kind).toBe("checked")
+    const frozen = trailer(intent, "Merge")
+    if (frozen === undefined) throw new Error("the SIGKILL left no frozen Merge: intent")
+    const checksBefore = readFileSync(checkMarker, "utf8")
+    rmSync(options.workdir, { force: true, recursive: true })
+    mkdirSync(options.workdir, { recursive: true })
+
+    if (diverge) {
+      await component(["checkout", "--quiet", "--detach", w.main])
+      writeFileSync(join(componentWork, "lib.txt"), "third\n")
+      await component(["commit", "--quiet", "-am", "third, divergent from ahead"])
+      const third = (await component(["rev-parse", "HEAD"])).trim()
+      await component(["push", "--quiet", "origin", "HEAD:refs/heads/third"])
+      await gitIn(join(w.work, "..", "component.git"))(["update-ref", "refs/heads/main", third])
+    }
+
+    const recovery = join(w.work, "..", diverge ? "k2-divergent-recovery" : "k2-recovery")
+    await w.git(["clone", "--quiet", join(w.work, "..", "remote.git"), recovery])
+    const fresh = gitIn(recovery)
+    await fresh(["config", "user.email", "queue@yrd.test"])
+    await fresh(["config", "user.name", "yrd"])
+    const before = {
+      change: await remoteTip(fresh, ref),
+      component: await remoteTip(component, "refs/heads/main"),
+      root: await remoteTip(fresh, "refs/heads/main"),
+    }
+    const outcome = await queueRun({ ...options, repo: recovery, targetSha: before.root })
+
+    expect(readFileSync(checkMarker, "utf8")).toBe(checksBefore)
+    if (!diverge) {
+      expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/k2"], stuck: [] })
+      expect(await remoteTip(fresh, "refs/heads/main")).toBe(frozen)
+      expect(await remoteTip(component, "refs/heads/main")).toBe(ahead)
+      return
+    }
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/k2"] })
+    expect({
+      change: await remoteTip(fresh, ref),
+      component: await remoteTip(component, "refs/heads/main"),
+      root: await remoteTip(fresh, "refs/heads/main"),
+    }).toEqual(before)
+    const push = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((row) => row.kind === "change" && row.reason === "landing-push")
+    const repositories = (JSON.parse(String(push?.diagnosis)) as { repositories: { refs: { destination: string; state: string }[] }[] }).repositories
+    expect(repositories.flatMap((repository) => repository.refs).map((row) => [row.destination, row.state])).toEqual([
+      ["refs/heads/main", "failed"],
+      ["refs/heads/main", "not-run"],
+      [ref, "not-run"],
+      [pauseRef("main"), "not-run"],
+    ])
+  }, 30_000)
+
+  // M8.5 K3: an external release pin is deliberately as-written, unlike the
+  // product landing rows exercised above.
+  it("K3 keeps an external release pin as written without pushing its component", async () => {
+    const w = await world("external")
+    await submitGitlink(w, "task/external-release", w.offMain)
+    const component = gitIn(join(w.work, "..", "component-work"))
+    const main = await remoteTip(component, "refs/heads/main")
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/external-release"], stuck: [] })
+    expect(await remoteTip(component, "refs/heads/main")).toBe(main)
+    expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(w.offMain)
+  })
+
   it("an off-main gitlink waits in place while the next change proceeds", async () => {
     const w = await world()
     const head = await submitGitlink(w, "task/off", w.offMain)
@@ -310,7 +463,7 @@ describe("settling gitlinks", () => {
       (
         await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/hook-isolation", head })))
       ).map((record) => record.kind),
-    ).toEqual(["opened", "checked", "merged", "sent"])
+    ).toEqual(["opened", "checked", "checked", "merged", "sent"])
   })
 
   /** An anomaly already on root main is not the candidate's authorship, but every merge that passes over it must expose it. */
@@ -423,7 +576,7 @@ describe("settling gitlinks", () => {
   it("a candidate failure introduced by raising component main is queue-owned stuck", async () => {
     const w = await world()
     const breaking = await advanceComponent(w, "breaking component main")
-    const head = await submitFile(w, "task/base-red")
+    const head = await submitGitlink(w, "task/base-red", w.onMain)
 
     const outcome = await queueRun(
       await w.options({ on: ["submit"], run: "! grep -q 'breaking component main' component/lib.txt" }),
@@ -483,12 +636,12 @@ describe("settling gitlinks", () => {
   it("a candidate-only failure stays the submitter's when the settled base is green", async () => {
     const w = await world()
     await advanceComponent(w, "healthy component main")
-    const head = await submitFile(w, "task/candidate-red")
+    const head = await submitGitlink(w, "task/candidate-red", w.onMain, "candidate")
 
     const outcome = await queueRun(
       await w.options({
         on: ["submit"],
-        run: "if test -f task-candidate-red.txt; then echo CANDIDATE_FAIL; exit 1; else echo BASE_PASS; fi",
+        run: "if test -f consumer.txt; then echo CANDIDATE_FAIL; exit 1; else echo BASE_PASS; fi",
       }),
     )
 

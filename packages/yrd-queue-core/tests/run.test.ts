@@ -288,6 +288,22 @@ async function fetchChanges(w: World): Promise<void> {
   await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
 }
 
+/** Race real refs at the ordered-push boundary, after the durable intent and
+ * pause read. The old plain-Git push callback no longer sees this command. */
+async function runBeforeLanding(options: QueueRunOptions, before: () => Promise<void>): Promise<QueueRunOutcome> {
+  const runner = createProcess({ cwd: options.repo, env: gitEnvironment(options.env ?? process.env) })
+  let raced = false
+  try {
+    return await queueRun({ ...options, process: { ...runner, async run(request) {
+      if (!raced && request.argv.includes("super") && request.argv.includes("push")) {
+        raced = true
+        await before()
+      }
+      return runner.run(request)
+    } } })
+  } finally { await runner.close() }
+}
+
 /** One program the queue ran, as it recorded itself: the name it goes by, then its `key=value` fields. */
 type Recorded = Readonly<{ program: string; cwd: string; repo: string; candidate: string; base: string }>
 
@@ -533,8 +549,9 @@ describe("a queue run", () => {
     expect(parents).toEqual([w.target, head])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
-    // checked after the on-submit phase, merged after the on-merge phase, sent last.
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
+    // checked after the on-submit phase, checked intent before landing, merged after
+    // the on-merge phase, sent last.
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "sent"])
     // The queue list row names the merge commit and its base in full, for whoever proves a landing by ancestry.
     const row = list((await readQueue(w.git, "origin", "main", after)).changes).find(
       (candidate) => candidate.branch === "task/one",
@@ -645,16 +662,16 @@ describe("a queue run", () => {
       const records = await readRecords(w.git, (await refAt(w.git, ref))!)
       expect(records.map((record) => record.kind)).toEqual(
         kind === "checked"
-          ? ["opened", "stuck", "checked", "merged", "sent"]
+          ? ["opened", "stuck", "checked", "checked", "merged", "sent"]
           : relation === "equal"
-            ? ["opened", "checked", "merged", "sent"]
+            ? ["opened", "checked", "checked", "merged", "sent"]
             : relation === "ahead"
-              ? ["opened", "checked", "sent"]
+              ? ["opened", "checked", "checked", "sent"]
               : relation === "behind"
-                ? ["opened", "checked", "merged", "sent", "stuck", "sent"]
+                ? ["opened", "checked", "checked", "merged", "sent", "stuck", "sent"]
                 : refusals === 2
-                  ? ["opened", "checked", "merged", "stuck", "stuck"]
-                  : ["opened", "checked", "merged", "stuck", "sent"],
+                  ? ["opened", "checked", "checked", "merged", "stuck", "stuck"]
+                  : ["opened", "checked", "checked", "merged", "stuck", "sent"],
       )
       expect(records.map((record) => record.sha)).toContain(concurrent)
       expect(intended).toMatch(/^[0-9a-f]{40}$/u)
@@ -782,6 +799,65 @@ describe("a queue run", () => {
     expect(messages(w)[0]?.failures).toBeUndefined()
   })
 
+  // A command boundary can return a complete JSON document with incomplete
+  // outcomes. The existing malformed/failing merge test does not catch a
+  // green push response which silently omits the change and pause refs.
+  it("refuses a green landing response that omits frozen plan rows", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/omitted", "omitted.txt")
+    const options = await w.options({ exit: 0 })
+    const runner = createProcess({ cwd: w.work, env: gitEnvironment(options.env ?? process.env) })
+    try {
+      const outcome = await queueRun({
+        ...options,
+        process: {
+          ...runner,
+          async run(request) {
+            if (request.argv.includes("super") && request.argv.includes("push")) {
+              if (typeof request.stdin !== "string") throw new Error("landing command had no JSON plan")
+              const plan = JSON.parse(request.stdin) as {
+                updates: { repository: string; source: string; destination: string }[]
+              }
+              const root = plan.updates.find((row) => row.destination === "refs/heads/main")!
+              const settled = await runner.run({ argv: ["git", "--version"] })
+              return {
+                ...settled,
+                stdout: JSON.stringify({
+                  state: "updated",
+                  partial: false,
+                  repositories: [
+                    {
+                      repository: request.cwd,
+                      state: "updated",
+                      refs: [{ source: root.source, destination: root.destination, state: "updated" }],
+                    },
+                  ],
+                }),
+              }
+            }
+            return runner.run(request)
+          },
+        },
+      })
+      expect(outcome, readFileSync(outcome.log, "utf8")).toMatchObject({
+        exitCode: 2,
+        merged: [],
+        stuck: ["task/omitted"],
+      })
+      expect(await remoteTarget(w)).toBe(w.target)
+      await fetchChanges(w)
+      const records = await readRecords(
+        w.git,
+        (await refAt(w.git, changeRef("main", { branch: "task/omitted", head })))!,
+      )
+      expect(records.at(-1)?.kind).toBe("checked")
+      expect(trailer(records.at(-1)!, "Merge")).toMatch(/^[0-9a-f]{40}$/u)
+      expect(records.some((record) => record.kind === "merged")).toBe(false)
+    } finally {
+      await runner.close()
+    }
+  })
+
   it("git-super stuck preserves its worktree and carries complete failure evidence to the journal and supervisor", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/git-super-stuck", "git-super-stuck.txt")
@@ -879,13 +955,13 @@ describe("a queue run", () => {
     expect(messages(w).map((message) => message.record)).toEqual(["merged", "merged"])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "sent", "sent"])
     // One sent record per entry, each naming the entry it is about.
     expect(records.slice(-2).map((record) => trailer(record, "To"))).toEqual(["submitter", "board"])
     expect(records.slice(-2).map((record) => trailer(record, "Delivery"))).toEqual(["sent", "sent"])
-    const merged = records[2]
-    const firstSent = records[3]
-    const secondSent = records[4]
+    const merged = records.find((record) => record.kind === "merged")
+    const firstSent = records[records.length - 2]
+    const secondSent = records[records.length - 1]
     if (merged === undefined || firstSent === undefined || secondSent === undefined) throw new Error("missing record")
     expect(records.slice(-2).map((record) => trailer(record, "For"))).toEqual([merged.sha, merged.sha])
     expect(records.slice(-2).map((record) => trailer(record, "Message-Id"))).toEqual([merged.sha, merged.sha])
@@ -903,13 +979,12 @@ describe("a queue run", () => {
     await rival(["config", "user.email", "rival@yrd.test"])
     await rival(["config", "user.name", "rival"])
 
-    let landed = false
     const attempted: string[] = []
     const competing: string[] = []
     const git: Git = async (args, input) => {
-      if (args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) landed = true
+      const intended = args[0] === "push" ? args.find((arg) => arg.endsWith(`:${ref}`))?.slice(0, -`:${ref}`.length) : undefined
       const recordPush =
-        landed &&
+        intended !== undefined && (await readRecord(w.git, intended)).kind === "sent" &&
         args[0] === "push" &&
         !args.includes("--atomic") &&
         args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))
@@ -947,7 +1022,7 @@ describe("a queue run", () => {
     const records = await readRecords(w.git, (await refAt(w.git, ref))!)
     const merged = records.find((record) => record.kind === "merged")
     if (merged === undefined) throw new Error("missing merged record")
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "stuck", "stuck"])
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "stuck", "stuck"])
     expect(records.slice(-2).map((record) => record.sha)).toEqual(competing)
     const rows = logRecords(outcome).filter((record) => record.kind === "message")
     expect(rows.map(({ delivered, id, to }) => ({ delivered, id, to }))).toEqual([
@@ -975,7 +1050,7 @@ describe("a queue run", () => {
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     const ref = changeRef("main", { branch: "task/one", head })
     const records = await readRecords(w.git, (await refAt(w.git, ref))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "sent"])
     expect(records.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
         ["To", "none"],
@@ -983,7 +1058,8 @@ describe("a queue run", () => {
         ["State", "merged"],
       ]),
     )
-    const [merged, none] = [records[2]!, records[3]!]
+    const merged = records.find((record) => record.kind === "merged")!
+    const none = records.find((record) => trailer(record, "To") === "none")!
     // An unchanged declaration neither sends nor records `none` a second time.
     const unchanged = await queueRun({
       ...(await w.options({ exit: 0 })),
@@ -1089,7 +1165,7 @@ describe("a queue run", () => {
     expect(existsSync(check.match(/log=(\S+)/u)?.[1] ?? "")).toBe(true)
   }, 30_000)
 
-  it("the target moving between the merge reading and the lease keeps the change checked, not stuck (D4)", async () => {
+  it("the target moving before the frozen intent keeps the change checked, not stuck (D4)", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const rivalPath = join(w.workdir, "..", "target-mover")
@@ -1100,9 +1176,9 @@ describe("a queue run", () => {
 
     let moved: string | undefined
     const git: Git = async (args, input) => {
-      // The window the lease exists for: the run has read the remote heads and
-      // is about to push, and somebody else lands on the target in between.
-      if (moved === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+      // D4 precedes the M8.5 intent commit point. After that point a moved
+      // destination refuses the frozen plan instead of silently rejudging it.
+      if (moved === undefined && args[0] === "ls-remote" && args.includes("refs/heads/main")) {
         writeFileSync(join(rivalPath, "rival.txt"), "rival\n")
         await rival(["add", "rival.txt"])
         await rival(["commit", "--quiet", "-m", "the target moved under the change"])
@@ -1132,7 +1208,7 @@ describe("a queue run", () => {
     )
   })
 
-  it("a change tip moving before the atomic landing loses neither history nor the target", async () => {
+  it("a change tip winning the intent CAS loses neither history nor the target", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const ref = changeRef("main", { branch: "task/one", head })
@@ -1145,7 +1221,8 @@ describe("a queue run", () => {
     let expected = ""
     let moved: string | undefined
     const git: Git = async (args, input) => {
-      if (moved === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+      const intended = args[0] === "push" ? args.find((arg) => arg.endsWith(`:${ref}`))?.slice(0, -`:${ref}`.length) : undefined
+      if (moved === undefined && intended !== undefined && trailer(await readRecord(w.git, intended), "Merge") !== undefined) {
         expected = (await rival(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
         await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
         moved = await appendRecord(rival, "main", {
@@ -1257,25 +1334,21 @@ describe("a queue run", () => {
       let reads = 0
       let raced: PauseRecord | undefined
       let changeBefore = ""
+      const race = async (): Promise<void> => {
+        changeBefore = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
+        await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "new decision" })
+        raced = await writePause(w.git, "origin", "main", { by: "operator", kind: "paused", reason: "stop this round" })
+      }
       const git: Git = async (args, input) => {
         if (args[0] === "ls-remote" && args.includes(PAUSE_REF)) reads += 1
         // Admission now comes from readQueue's broad captured advertisement;
         // this is the first separate pause read, immediately before the fence.
         const fence = when === "before-fence" && args[0] === "ls-remote" && args.includes(PAUSE_REF) && reads === 1
-        const push =
-          when === "before-push" && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))
-        if (raced === undefined && (fence || push)) {
-          changeBefore = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
-          await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "new decision" })
-          raced = await writePause(w.git, "origin", "main", {
-            by: "operator",
-            kind: "paused",
-            reason: "stop this round",
-          })
-        }
+        if (raced === undefined && fence) await race()
         return w.git(args, input)
       }
-      const outcome = await queueRun({ ...(await w.options({ exit: 0 })), foreground: true, git })
+      const options = { ...(await w.options({ exit: 0 })), foreground: true, git }
+      const outcome = when === "before-push" ? await runBeforeLanding(options, race) : await queueRun(options)
       expect(raced?.reason).toBe("stop this round")
       expect(outcome.merged).toEqual([])
       expect(outcome.stopped?.what).toEqual(raced)
@@ -1365,8 +1438,7 @@ describe("a queue run", () => {
     let paused: PauseRecord | undefined
     let targetBeforePush = ""
     let changeBeforePush = ""
-    const git: Git = async (args, input) => {
-      if (paused === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
+    const outcome = await runBeforeLanding(await w.options({ exit: 0 }), async () => {
         targetBeforePush = await remoteTarget(w)
         changeBeforePush = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
         paused = await writePause(rival, "origin", "main", {
@@ -1374,11 +1446,7 @@ describe("a queue run", () => {
           kind: "paused",
           reason: "stop before merge",
         })
-      }
-      return await w.git(args, input)
-    }
-
-    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), git })
+    })
 
     expect(paused).toBeDefined()
     expect(outcome.stopped?.what).toEqual(paused)
@@ -1390,7 +1458,7 @@ describe("a queue run", () => {
       (await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)).map(
         (record) => record.kind,
       ),
-    ).toEqual(["opened", "checked"])
+    ).toEqual(["opened", "checked", "checked"])
     expect(logRecords(outcome)).toContainEqual(expect.objectContaining({ decision: "checked", reason: "paused" }))
   })
 
@@ -1425,14 +1493,14 @@ describe("a queue run", () => {
     }
 
     await expect(queueRun({ ...(await w.options({ exit: 0 })), git })).rejects.toThrow(
-      `origin ${PAUSE_REF} could not be read: origin ${PAUSE_REF} at`,
+      `${w.remote} ${PAUSE_REF} could not be read: ${w.remote} ${PAUSE_REF} at`,
     )
 
     expect(malformed).not.toBe("")
     expect(await remoteTarget(w)).toBe(w.target)
     await fetchChanges(w)
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked"])
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked"])
     expect(records.some((record) => record.kind === "stuck" || record.kind === "failed")).toBe(false)
     expect(messages(w)).toEqual([])
   })
@@ -1461,8 +1529,8 @@ describe("a queue run", () => {
     expect(down).toMatchObject({ exitCode: 0, merged: ["task/one"], stuck: [] })
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     let records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
-    const merged = records[2]
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "sent", "sent"])
+    const merged = records.find((record) => record.kind === "merged")
     const appendTip = records.at(-1)
     if (merged === undefined || appendTip === undefined) throw new Error("missing merged or sent record")
     expect(records.slice(-2).map((record) => trailer(record, "To"))).toEqual(["recovering", "recorder"])
@@ -1499,7 +1567,7 @@ describe("a queue run", () => {
     ).toEqual([{ delivered: true, id: merged.sha, to: "recovering" }])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     records = await readRecords(w.git, (await refAt(w.git, ref))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent", "sent"])
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "sent", "sent", "sent"])
     expect(records.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
         ["To", "recovering"],
@@ -1701,7 +1769,7 @@ describe("a queue run", () => {
     // The records and the genesis, on the ref's first-parent line (records.ts).
     expect(
       (await w.git(["log", "--first-parent", "--format=%s", `${CHANGES}/${named}`])).trim().split("\n"),
-    ).toHaveLength(5)
+    ).toHaveLength(6)
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
     const merged = records.find((record) => record.kind === "merged")
     if (merged === undefined) throw new Error("no merged record")
@@ -1839,8 +1907,10 @@ describe("a queue run", () => {
     expect(next.merged).toEqual(["task/two"])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/two", head: second })))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "sent"])
-    expect(records[2]?.trailers).toEqual(expect.arrayContaining([["Config", "config-B"]]))
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "checked", "merged", "sent"])
+    expect(records.find((record) => trailer(record, "Config") === "config-B")?.trailers).toEqual(
+      expect.arrayContaining([["Config", "config-B"]]),
+    )
   })
 })
 
