@@ -68,6 +68,7 @@ import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
+import { clock } from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOf, type RunDecision } from "./watch-stats.ts"
 import { readGarageDeclaration } from "./garage.ts"
@@ -520,9 +521,12 @@ export async function coreQueueCommand(
         }
         first = false
         // A real terminal is redrawn in place; a pipe or a test keeps every
-        // round, because a watch whose output is being read later is a log.
+        // round, because a watch whose output is being read later is a log —
+        // and a log's rounds carry the instant they were printed: the
+        // `updated HH:MM:SS` stamp of the retired watch (item 30), under the
+        // queue's name, where the live pane shows the RUNNER timer instead.
         if (io.color === true) io.stdout("\u001b[H\u001b[2J")
-        emit(io, options.json, one.data, one.text)
+        emit(io, options.json, one.data, stampRound(one.text, one.queue, new Date()))
         if (selected) {
           const ending = endingCode(one.rows)
           if (ending !== undefined) return ending
@@ -881,6 +885,15 @@ function describeRun(
   ].filter((part): part is string => part !== undefined)
   const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`
+}
+
+/** One printed round of the text watch, with `updated HH:MM:SS` under the queue's name (item 30). */
+function stampRound(text: string, queue: string, at: Date): string {
+  const stamp = `updated ${clock(at, { seconds: true })}`
+  const lines = text.split("\n")
+  const name = lines.indexOf(queue)
+  if (name === -1) return `${stamp}\n${text}`
+  return [...lines.slice(0, name + 1), stamp, ...lines.slice(name + 1)].join("\n")
 }
 
 /** A selector was given and nothing answered to it: the one case a watch must refuse rather than wait out. */

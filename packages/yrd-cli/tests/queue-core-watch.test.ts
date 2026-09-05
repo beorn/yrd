@@ -139,6 +139,12 @@ describe("yrd watch, the ending's exit code", () => {
     expect(exit, run.stdout()).toBe(0)
     expect(run.stdout()).toContain("task/good")
     expect(run.stdout()).toContain("merged")
+    // A printed round is a log, and a log's rounds carry the instant they were
+    // printed: the retired watch's `updated HH:MM:SS`, under the queue's name (item 30).
+    const lines = run.stdout().split("\n")
+    const stamp = lines.findIndex((line) => /^updated \d\d:\d\d:\d\d$/u.test(line))
+    expect(stamp).toBeGreaterThan(0)
+    expect(lines[stamp - 1]).toMatch(/#main$/u)
   })
 
   it("exits 1 for a change the queue failed, so a seat can script on it", async () => {
