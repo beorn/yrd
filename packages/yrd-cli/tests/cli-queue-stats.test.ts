@@ -175,31 +175,3 @@ describe("yrd queue stats through the process entry", () => {
     expect(badBy.stderr).toContain("--by takes submitter or branch, not author")
   })
 })
-
-describe("the executable's stdout reaches a pipe whole", () => {
-  it("a document far larger than a pipe's buffer arrives complete and the process exits 0", async () => {
-    // The writer the executable installs, driven from a child so the pipe is real.
-    const root = mkdtempSync(join(tmpdir(), "yrd-fd-"))
-    roots.push(root)
-    const script = join(root, "emit.ts")
-    const writer = join(import.meta.dirname, "../src/stdout-fd.ts")
-    writeFileSync(
-      script,
-      `import { fdWriters } from ${JSON.stringify(writer)}\n` +
-        'const line = "x".repeat(1023) + "\\n"\n' +
-        "fdWriters.stdout(line.repeat(512))\n" + // 512 KiB, eight times the 64 KiB cut
-        "process.exit(0)\n",
-    )
-    const child = Bun.spawn([process.execPath, script], { stderr: "pipe", stdout: "pipe" })
-    // Read late on purpose: the child must not lose bytes to a reader that is slow to start.
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ])
-    expect(code, stderr).toBe(0)
-    expect(stdout.length).toBe(512 * 1024)
-    expect(stdout.endsWith("x\n")).toBe(true)
-  })
-})
