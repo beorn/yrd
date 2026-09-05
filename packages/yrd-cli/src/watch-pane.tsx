@@ -418,6 +418,7 @@ export function WatchPane({
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
       <Table
         rows={visible}
+        empty={shown.rows.length === 0 ? "nothing in line" : "no change matches the filters"}
         label={label}
         cursor={at}
         listRef={listRef}
@@ -547,6 +548,7 @@ function readFailureLine(what: string, failure: ReadFailure, still = ""): string
 /** The table: header, then the virtualized rows with a date separator between days. */
 function Table({
   rows,
+  empty,
   label,
   cursor,
   listRef,
@@ -554,6 +556,8 @@ function Table({
   onCursor,
 }: {
   rows: readonly WatchRow[]
+  /** What an empty table says: an empty queue and a filter that hides everything are different facts. */
+  empty: string
   label: string
   cursor: number
   listRef: RefObject<ListViewHandle | null>
@@ -569,7 +573,7 @@ function Table({
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <ListHeader layout={layout} />
       {rows.length === 0 ? (
-        <Text color="$fg-muted">no change matches the filters</Text>
+        <Text color="$fg-muted">{empty}</Text>
       ) : (
         <ListView
           ref={listRef}

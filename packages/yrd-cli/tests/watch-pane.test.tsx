@@ -239,6 +239,18 @@ describe("the table (items 3, 28, 38)", () => {
     app.unmount()
   })
 
+  it("an empty queue says `nothing in line`, as the printed list does; only a filter that hides everything blames the filters", async () => {
+    const empty = await paint(<WatchPane snapshot={snapshot({ rows: [] })} live={false} />)
+    expect(empty).toContain("nothing in line")
+    expect(empty).not.toContain("no change matches the filters")
+
+    const filtered = await paint(<WatchPane snapshot={snapshot({ rows: [{ row: failedRow() }] })} live={false} />, [
+      "o",
+    ])
+    expect(filtered).toContain("no change matches the filters")
+    expect(filtered).not.toContain("nothing in line")
+  })
+
   it("renders the status pills right-aligned on the bottom row, `all` included", async () => {
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} />)
 
