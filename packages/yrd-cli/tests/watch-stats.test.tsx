@@ -101,8 +101,8 @@ describe("the STATS box", () => {
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
-        <StatsBox decisions={decisions} columns={cols - 2} {...(absent === undefined ? {} : { absent })} />
-      </MinuteContext.Provider>
+          <StatsBox decisions={decisions} columns={cols - 2} {...(absent === undefined ? {} : { absent })} />
+        </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols, rows: 12 },
     )

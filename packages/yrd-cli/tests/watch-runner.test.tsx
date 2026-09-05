@@ -99,15 +99,15 @@ describe("the RUNNER box", () => {
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
-        <RunnerBox
-          facts={facts}
-          label="main"
-          inLine={inLine}
-          columns={70}
-          live={false}
-          {...(pause === undefined ? {} : { pause })}
-        />
-      </MinuteContext.Provider>
+          <RunnerBox
+            facts={facts}
+            label="main"
+            inLine={inLine}
+            columns={70}
+            live={false}
+            {...(pause === undefined ? {} : { pause })}
+          />
+        </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols: 72, rows: 12 },
     )
@@ -178,14 +178,14 @@ describe("the RUNNER box", () => {
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
-        <RunnerBox
-          facts={latest({ alive: true, pid: 4242 })}
-          label="a-very-long-queue-label-indeed-and-then-some-more-of-it"
-          inLine={1}
-          columns={30}
-          live={false}
-        />
-      </MinuteContext.Provider>
+          <RunnerBox
+            facts={latest({ alive: true, pid: 4242 })}
+            label="a-very-long-queue-label-indeed-and-then-some-more-of-it"
+            inLine={1}
+            columns={30}
+            live={false}
+          />
+        </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols: 32, rows: 14 },
     )
