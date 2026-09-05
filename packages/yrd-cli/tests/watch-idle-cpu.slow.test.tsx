@@ -43,7 +43,12 @@ function snapshot(): WatchSnapshot {
     state: index === 0 ? "queued" : index === 1 ? "checked" : index === 2 ? "merged" : "failed",
     subject: `${branch} does its work`,
   }))
-  return { at, detail: new Map(), queue: "example.test/repo#main", rows: rows.map((row) => ({ row })) }
+  return {
+    at,
+    queue: "example.test/repo#main",
+    queues: [{ branch: "main", label: "main", path: "/repo" }],
+    rows: rows.map((row) => ({ row })),
+  }
 }
 
 /** CPU seconds this process has burned, user and system together. */
@@ -53,37 +58,33 @@ function cpuSeconds(): number {
 }
 
 describe("yrd watch idle CPU", () => {
-  it(
-    "uses at most 5% of one core across a 60-second idle window with the pane live",
-    async () => {
-      const render = createRenderer({ cols: 120, rows: 40 })
-      const tree = () => createElement(WatchPane, { live: true, snapshot: snapshot() })
-      const app = await act(async () => render(tree()))
-      try {
-        await act(async () => {
-          await app.waitForLayoutStable()
-        })
-        // Warm-up is not the measurement: the first paint, the layout settle
-        // and the module loads all land before the clock starts.
-        await Bun.sleep(2_000)
+  it("uses at most 5% of one core across a 60-second idle window with the pane live", async () => {
+    const render = createRenderer({ cols: 120, rows: 40 })
+    const tree = () => createElement(WatchPane, { live: true, snapshot: snapshot() })
+    const app = await act(async () => render(tree()))
+    try {
+      await act(async () => {
+        await app.waitForLayoutStable()
+      })
+      // Warm-up is not the measurement: the first paint, the layout settle
+      // and the module loads all land before the clock starts.
+      await Bun.sleep(2_000)
 
-        const startedAt = Date.now()
-        const startedCpu = cpuSeconds()
-        // Nobody touches it. The only thing that should run is the one tick.
-        await Bun.sleep(SAMPLE_MS)
-        const usedCpuSeconds = cpuSeconds() - startedCpu
-        const elapsedSeconds = (Date.now() - startedAt) / 1_000
+      const startedAt = Date.now()
+      const startedCpu = cpuSeconds()
+      // Nobody touches it. The only thing that should run is the one tick.
+      await Bun.sleep(SAMPLE_MS)
+      const usedCpuSeconds = cpuSeconds() - startedCpu
+      const elapsedSeconds = (Date.now() - startedAt) / 1_000
 
-        expect(
-          usedCpuSeconds,
-          `idle watch used ${usedCpuSeconds.toFixed(2)} CPU seconds across ${elapsedSeconds.toFixed(2)} wall seconds`,
-        ).toBeLessThanOrEqual(MAX_IDLE_CPU_SECONDS)
-      } finally {
-        await act(async () => {
-          app.unmount()
-        })
-      }
-    },
-    110_000,
-  )
+      expect(
+        usedCpuSeconds,
+        `idle watch used ${usedCpuSeconds.toFixed(2)} CPU seconds across ${elapsedSeconds.toFixed(2)} wall seconds`,
+      ).toBeLessThanOrEqual(MAX_IDLE_CPU_SECONDS)
+    } finally {
+      await act(async () => {
+        app.unmount()
+      })
+    }
+  }, 110_000)
 })

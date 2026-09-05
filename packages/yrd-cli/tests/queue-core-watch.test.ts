@@ -18,18 +18,32 @@ import { afterAll, describe, expect, it, vi } from "vitest"
 import { gitIn, submit, type Git } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import type { ChangeDetail } from "../src/watch-detail.tsx"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
+import type { WatchRow } from "../src/watch-rows.ts"
 
-const rendered: { snapshot: WatchSnapshot | undefined } = vi.hoisted(() => ({ snapshot: undefined }))
+type PaneProps = Readonly<{ snapshot: WatchSnapshot; open?: (row: WatchRow) => Promise<ChangeDetail> }>
+const rendered: { snapshot: WatchSnapshot | undefined; open: PaneProps["open"] } = vi.hoisted(() => ({
+  open: undefined,
+  snapshot: undefined,
+}))
 vi.mock("silvery/runtime", () => ({
-  run: async (element: Readonly<{ props: Readonly<{ snapshot: WatchSnapshot }> }>) => {
+  run: async (element: Readonly<{ props: PaneProps }>) => {
     rendered.snapshot = element.props.snapshot
+    rendered.open = element.props.open
     return { waitUntilExit: async () => {} }
   },
 }))
 
 function renderedSnapshot(): WatchSnapshot | undefined {
   return rendered.snapshot
+}
+
+/** The detail the pane would open for each row: the loader the command handed it, called as the pane would. */
+async function renderedDetails(snapshot: WatchSnapshot): Promise<readonly ChangeDetail[]> {
+  const open = rendered.open
+  if (open === undefined) throw new Error("interactive watch rendered no detail loader")
+  return Promise.all(snapshot.rows.map((row) => open(row)))
 }
 
 const roots: string[] = []
@@ -274,7 +288,7 @@ describe("what a watch says it looked at", () => {
     expect(exit).toBe(0)
     const snapshot = renderedSnapshot()
     if (snapshot === undefined) throw new Error("interactive watch rendered no snapshot")
-    const detail = snapshot.detail.values().next().value
+    const [detail] = await renderedDetails(snapshot)
     if (detail === undefined) throw new Error("interactive watch rendered no change detail")
     // Each measured occurrence survives, including the same name in two
     // phases; CTO b55a973f forbids collapsing the candidate/comparator pair.
@@ -371,7 +385,7 @@ describe("what a watch says it looked at", () => {
     const snapshot = renderedSnapshot()
     if (snapshot === undefined) throw new Error("interactive list rendered no snapshot")
     expect(snapshot.rows.map((entry) => entry.row.run)).toEqual([secondId, firstId])
-    const details = [...snapshot.detail.values()]
+    const details = await renderedDetails(snapshot)
     expect(details).toHaveLength(2)
     expect(details.find((detail) => detail.row.run === firstId)?.checks[0]).toMatchObject({
       state: "stuck",

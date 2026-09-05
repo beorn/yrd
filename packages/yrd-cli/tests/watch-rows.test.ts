@@ -90,8 +90,19 @@ describe("the rows a watch shows", () => {
     const options = { journals: journals({ [journalKey(current.branch, current.head)]: ["old"] }) }
     const historical = watchRows([current], options)[0]!
     expect(historical.row).toMatchObject({ state: "failed", next: current.next, run: "old" })
-    for (const key of ["result", "reason", "log", "base", "merge", "incident", "startedAt", "endedAt", "live"] as const)
+    for (const key of [
+      "result",
+      "reason",
+      "log",
+      "base",
+      "merge",
+      "incident",
+      "startedAt",
+      "endedAt",
+      "live",
+    ] as const) {
       expect(historical.row[key], key).toBeUndefined()
+    }
     expect(filterRows([historical], ["later"])).toHaveLength(0)
     expect(watchRows([current], { ...options, latest: true })[0]?.row).toBe(current)
     expect(watchRows([current])[0]?.row).toBe(current)
@@ -199,7 +210,7 @@ describe("the notice", () => {
 })
 
 describe("the clocks line", () => {
-  it("reads Age, Runtime and Wait in the operator's own order", () => {
+  it("reads Age, Runtime and Wait time in the operator's own order and duration form (item 1)", () => {
     const line = clocksLine(
       row({
         endedAt: new Date("2026-09-03T19:45:00.000Z"),
@@ -209,10 +220,10 @@ describe("the clocks line", () => {
       now,
     )
 
-    expect(line).toBe("Age 1h · Runtime 15m · Wait 30m")
+    expect(line).toBe("Age 1h00m · Runtime 15:00 · Wait time 30:00")
   })
 
   it("leaves out a clock nothing measured rather than printing it as zero", () => {
-    expect(clocksLine(row(), now)).toBe("Age 1h")
+    expect(clocksLine(row(), now)).toBe("Age 1h00m")
   })
 })

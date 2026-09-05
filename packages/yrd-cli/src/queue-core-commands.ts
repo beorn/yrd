@@ -64,8 +64,10 @@ import {
 import { declarationHere } from "./declaration.ts"
 import { clocksLine, noticeLine, duration } from "./watch-notice.ts"
 import { filterRows, rowLine, rowTable, watchRows, watchRowKey, type WatchRow } from "./watch-rows.ts"
-import type { ChangeDetail, CheckPanel } from "./watch-detail.tsx"
+import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
+import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
+import { runOf } from "./watch-run.ts"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -373,9 +375,11 @@ export async function coreQueueCommand(
           text: string
           data: unknown
           queue: string
+          queues: readonly WatchQueue[]
           pause?: string
           journalAbsent?: string
-          detail: ReadonlyMap<string, ChangeDetail>
+          /** The queue read the rows came from, so a detail opened later reads the same tip. */
+          entries: QueueEntries
         }>
       > => {
         const queue = await readQueue(git, config.target.remote, config.target.branch)
@@ -405,55 +409,17 @@ export async function coreQueueCommand(
           request.terms === undefined || request.terms.length === 0
             ? undefined
             : `${String(rows.length)} of ${String(all.length)} change(s) match ${request.terms.join(" or ")}`
-        // Every change's checks, joined to the declaration it was judged by and
-        // to what its logs actually hold. Built only for a pane that will show
-        // them: the text round never opens a log file.
-        const detail = new Map<string, ChangeDetail>()
-        if (options.interactive === true && options.json !== true) {
-          const heads = new Set(rows.map((row) => row.row.head))
-          const histories = await readHistories(
-            git,
-            queue.changes.filter((entry) => heads.has(entry.change.head)),
-            config.target.remote,
-          )
-          const packed = new Map(
-            histories.flatMap((entry) =>
-              show([entry], entry.change.branch).map(
-                (change) => [journalKey(entry.change.branch, entry.change.head), change.checks] as const,
-              ),
-            ),
-          )
-          for (const row of rows) {
-            const key = watchRowKey(row)
-            if (detail.has(key)) continue
-            const declared = await declarationFor(git, config, row.row.base)
-            const views = checksOf(
-              packed.get(journalKey(row.row.branch, row.row.head)) ?? [],
-              endingOf(row.row),
-              declared.checks,
-              row.row.live === undefined
-                ? undefined
-                : {
-                    name: row.row.live.check,
-                    ...(row.row.live.log === undefined ? {} : { log: row.row.live.log }),
-                  },
-              row.run?.checks,
-            )
-            detail.set(key, {
-              checks: views.map(readOutput),
-              row: row.row,
-              ...(declared.note === undefined ? {} : { note: declared.note }),
-            })
-          }
-        }
         return {
           data: {
             changes: rows.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
           },
-          detail,
+          entries: queue.changes,
           queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
+          // Pre-M8 a repository has exactly one queue: the target's branch, on
+          // this repository. M8 turns this list of one into N.
+          queues: [{ branch: config.target.branch, label: config.target.branch, path: here.root }],
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
           ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
           rows,
@@ -501,13 +467,19 @@ export async function coreQueueCommand(
         const { run } = await import("silvery/runtime")
         const { createElement } = await import("react")
         let ending: YrdCliExitCode | undefined
+        // The queue read the LAST round made: a detail opened between rounds
+        // reads the same tips the table shows, never a fresher or staler one.
+        let entries: QueueEntries = first.entries
         const app = await run(
           createElement(WatchPane, {
             intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
             load: async () => {
               const next = await round()
+              entries = next.entries
               return snapshotOf(next)
             },
+            loadDiff: (item) => readDiff(git, config, item),
+            open: (item) => openDetail(git, config, entries, item, config.target.branch),
             onEnding:
               request.terms === undefined || request.terms.length === 0
                 ? undefined
@@ -917,19 +889,136 @@ function missedSelector(terms: readonly string[], queue: string, matched: number
 }
 
 /** One reading of the queue as the pane consumes it. */
+/** The entries one queue read yields: the type `readQueue` returns, named here rather than widened in the core. */
+type QueueEntries = Awaited<ReturnType<typeof readQueue>>["changes"]
+
+/**
+ * One change's detail, read for the row under the cursor and for nothing else
+ * (plan D2): its checks joined to the declaration it was judged by and to what
+ * their logs hold, its records for HISTORY, and what git says about the head:
+ * body, the commits past the base, the diff's size. Every git-derived part is
+ * ABSENT with a sentence when the head is not in this repository, never a
+ * blank. Nothing here writes.
+ */
+async function openDetail(
+  git: Git,
+  config: QueueConfig,
+  entries: QueueEntries,
+  item: WatchRow,
+  label: string,
+): Promise<ChangeDetail> {
+  const { row } = item
+  const own = entries.filter((entry) => entry.change.branch === row.branch && entry.change.head === row.head)
+  const histories = own.length === 0 ? [] : await readHistories(git, own, config.target.remote)
+  const shown = histories.flatMap((entry) => show([entry], entry.change.branch))
+  const packed = shown.flatMap((change) => change.checks)
+  const records = shown.flatMap((change) => change.records)
+  const declared = await declarationFor(git, config, row.base)
+  const views = checksOf(
+    packed,
+    endingOf(row),
+    declared.checks,
+    row.live === undefined
+      ? undefined
+      : { name: row.live.check, ...(row.live.log === undefined ? {} : { log: row.live.log }) },
+    item.run?.checks,
+  )
+  const checks = views.map(readOutput)
+  const about = row.state === "direct" ? {} : await headFacts(git, config, row)
+  return {
+    checks,
+    row,
+    run: runOf(row, label, views, item.run?.id ?? row.run),
+    ...(histories.length === 0 ? {} : { records }),
+    ...about,
+    ...(declared.note === undefined ? {} : { note: declared.note }),
+  }
+}
+
+/** The base a change's own commits are counted and diffed from: the record's, else the target as it stands. */
+async function baseOf(git: Git, config: QueueConfig, row: Row): Promise<string> {
+  if (row.base !== undefined) return row.base
+  return (await git(["merge-base", `refs/remotes/${config.target.remote}/${config.target.branch}`, row.head])).trim()
+}
+
+/** What git says about the head: body, the commits past the base, the diff's size, or why it says nothing. */
+async function headFacts(
+  git: Git,
+  config: QueueConfig,
+  row: Row,
+): Promise<Pick<ChangeDetail, "body" | "commits" | "diffStat" | "gitAbsent">> {
+  try {
+    const base = await baseOf(git, config, row)
+    const body = (await git(["log", "-1", "--format=%b", row.head])).trimEnd()
+    const dates = (await git(["log", "--format=%cI", `${base}..${row.head}`]))
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "")
+      .map((line) => new Date(line))
+      .filter((at) => !Number.isNaN(at.getTime()))
+    const numstat = (await git(["diff", "--numstat", base, row.head])).split("\n").filter((line) => line.trim() !== "")
+    let additions = 0
+    let deletions = 0
+    for (const line of numstat) {
+      const [added, removed] = line.split("\t")
+      additions += Number.parseInt(added ?? "0", 10) || 0
+      deletions += Number.parseInt(removed ?? "0", 10) || 0
+    }
+    const last = dates[0]
+    const first = dates.at(-1)
+    return {
+      ...(body === "" ? {} : { body }),
+      commits: {
+        count: dates.length,
+        ...(first === undefined ? {} : { first }),
+        ...(last === undefined ? {} : { last }),
+      },
+      diffStat: { additions, deletions, files: numstat.length },
+    }
+  } catch (error) {
+    return {
+      gitAbsent: `git could not read ${row.head.slice(0, 12)} here (${firstLine(error)}): the body, the commits and the diff are not shown`,
+    }
+  }
+}
+
+/** The first line of what went wrong, for a sentence on screen. */
+function firstLine(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error)
+  return text.split("\n")[0] ?? text
+}
+
+/** How much of a diff the fold holds: the head of it, so a generated-file change never becomes the pane's memory. */
+const DIFF_HEAD_BYTES = 256 * 1024
+
+/** The unified diff of a change against its base, read only when its fold opens. */
+async function readDiff(git: Git, config: QueueConfig, item: WatchRow): Promise<DiffText> {
+  try {
+    const base = await baseOf(git, config, item.row)
+    const text = await git(["diff", "--no-color", base, item.row.head])
+    if (text.trim() === "") return { why: `git diff ${base.slice(0, 12)} ${item.row.head.slice(0, 12)} is empty` }
+    if (text.length <= DIFF_HEAD_BYTES) return { text }
+    return {
+      text: `${text.slice(0, DIFF_HEAD_BYTES)}\n… ${String(text.length - DIFF_HEAD_BYTES)} more bytes not shown`,
+    }
+  } catch (error) {
+    return { why: `git could not diff ${item.row.head.slice(0, 12)} here: ${firstLine(error)}` }
+  }
+}
+
 function snapshotOf(
   round: Readonly<{
     rows: readonly WatchRow[]
     queue: string
+    queues: readonly WatchQueue[]
     pause?: string
     journalAbsent?: string
-    detail: ReadonlyMap<string, ChangeDetail>
   }>,
 ): WatchSnapshot {
   return {
     at: new Date(),
-    detail: round.detail,
     queue: round.queue,
+    queues: round.queues,
     rows: round.rows,
     ...(round.pause === undefined ? {} : { pause: round.pause }),
     ...(round.journalAbsent === undefined ? {} : { journalAbsent: round.journalAbsent }),

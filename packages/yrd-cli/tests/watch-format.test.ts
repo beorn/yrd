@@ -10,7 +10,14 @@
 
 import { describe, expect, it } from "vitest"
 import { runId } from "@yrd/queue-core"
-import { boundedHangingLines, clock, friendlyPath, runShortName, stateGlyph } from "../src/watch-format.ts"
+import {
+  boundedHangingLines,
+  clock,
+  friendlyPath,
+  mediaDuration,
+  runShortName,
+  stateGlyph,
+} from "../src/watch-format.ts"
 
 describe("the one glyph table", () => {
   it("overlays the working glyph on any state while a check runs, and keeps the state's glyph otherwise", () => {
@@ -73,5 +80,18 @@ describe("boundedHangingLines (item 29)", () => {
 
   it("returns nothing for nothing", () => {
     expect(boundedHangingLines("   ", 10)).toEqual([])
+  })
+})
+
+describe("mediaDuration (item 1's `34:23`)", () => {
+  it("counts like a media player and steps up past six cells", () => {
+    expect(mediaDuration(10_000)).toBe("0:10")
+    expect(mediaDuration(34 * 60_000 + 23_000)).toBe("34:23")
+    expect(mediaDuration(59 * 60_000 + 59_000)).toBe("59:59")
+    // Seven cells no longer fit the column the retired pane sized for six, so an hour steps to `Hh MMm`.
+    expect(mediaDuration(3_600_000 + 15 * 60_000)).toBe("1h15m")
+    expect(mediaDuration(12 * 3_600_000 + 5 * 60_000)).toBe("12h05m")
+    expect(mediaDuration(5 * 86_400_000 + 3 * 3_600_000)).toBe("5d03h")
+    expect(mediaDuration(-5)).toBe("0:00")
   })
 })

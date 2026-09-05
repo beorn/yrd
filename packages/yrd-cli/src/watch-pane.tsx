@@ -1,21 +1,36 @@
 /**
- * The watch's interactive pane: the change list on one side, one change opened
- * on the other, refreshing itself until the reader leaves or the change they
- * named ends.
+ * The watch's interactive pane: the queue's table on one side, one change
+ * opened on the other, refreshing itself until the reader leaves or the change
+ * they named ends. The operator's screen (watch-redesign items 1–39, the
+ * detail in `watch-detail.tsx`, the table in `watch-list.tsx`), rebuilt on the
+ * queue core's `Row`.
  *
- * Ported from the monitor deleted at yrd `1f638504` — its split/focus/scroll
- * shell, its keys and its layout tiers — re-typed against the new core's `Row`
- * and rewritten wherever it read the retired timeline. Nothing here imports the
- * retired core, its status result or its run timeline; nothing here writes; and
- * nothing here derives a change's state, which `readChange` alone does.
+ * Three loaders, and the pane reads nothing itself:
  *
- * Keys, kept from the monitor: `q` leaves, `Enter`/`Space` opens the change
- * under the cursor, `Escape` closes it, `End` follows the tail again, `?`
- * opens the help and `Escape` closes it. The cancel key is NOT ported: the way
- * to stop a running change is to move its branch or to pause the queue (S2.2).
+ * - `load()` — the table, every interval.
+ * - `open(row)` — one change's detail, for the row under the cursor only.
+ *   Called again every round while that change is in line or under a check
+ *   (its journal advances under an unmoving tip, so a key on the tip alone
+ *   would freeze the step lines for the whole run — item 16 recreated); held
+ *   once it has ended. The cache keeps the selection and one row back, keyed
+ *   by `watchRowKey`, because the default table has one row per run and two
+ *   rows of one change open two details.
+ * - `loadDiff(row)` — the unified diff, only when the fold opens.
+ *
+ * Nothing here writes; nothing here derives a change's state, which
+ * `readChange` alone does. The 1-second clock lives in `NowProvider` and is
+ * read by the leaves that format a relative time, so a tick re-renders those
+ * cells and nothing else.
+ *
+ * Keys: `q` leaves · `Enter`/`Space` opens the change · `Escape` closes it ·
+ * `End` follows the newest rows · `←`/`→` move between the detail's tabs ·
+ * `v` folds the diff · `o r d f` show one status bucket, `O R D F` toggle one,
+ * `a` shows everything · `1`–`9` toggle a queue's pill · `?` this help. The
+ * cancel key is NOT ported: a running change is stopped by moving its branch
+ * or pausing the queue (S2.2).
  */
 
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import {
   Box,
   ListView,
@@ -30,21 +45,33 @@ import {
   type ListViewHandle,
 } from "silvery"
 import type { Row } from "@yrd/queue-core"
-import { useCoarseNow } from "./watch-clock.ts"
-import { WatchDetail, type ChangeDetail } from "./watch-detail.tsx"
-import { rowGlyph, rowLine, watchRowKey, type WatchRow } from "./watch-rows.ts"
+import { NowProvider, useNow } from "./watch-clock.ts"
+import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
+import {
+  BUCKETS,
+  ListHeader,
+  ListRow,
+  StatusPills,
+  TopLine,
+  bucketOf,
+  listLayout,
+  separatorBefore,
+  type StatusBucket,
+  type WatchQueue,
+} from "./watch-list.tsx"
+import { watchRowKey, type WatchRow } from "./watch-rows.ts"
 
 /** Everything one reading of the queue put on screen. The pane renders it and reads nothing itself. */
 export type WatchSnapshot = Readonly<{
-  /** The queue's own name, as a stranger would spell it. */
+  /** The queue's own name, as a stranger would spell it (`github.com/beorn/hh#main`). */
   queue: string
+  /** The queues on this screen: pre-M8 exactly one. */
+  queues: readonly WatchQueue[]
   /** The pause line, when the queue is paused. */
   pause?: string
   /** Where the run journal was looked for and why there was none — never a blank where a fact belongs. */
   journalAbsent?: string
   rows: readonly WatchRow[]
-  /** Detail by watchRowKey: change head plus selected journal run, with its own output. */
-  detail: ReadonlyMap<string, ChangeDetail>
   /** The instant this reading was made; every age on screen counts from it. */
   at: Date
 }>
@@ -81,16 +108,27 @@ const HELP = [
   "Enter/Space  open the change",
   "Escape       close it, or this help",
   "End          follow the newest rows",
-  "Tab          move between checks",
+  "←/→          move between the tabs",
+  "v            fold the diff open or shut",
+  "o r d f      show one status; O R D F toggle",
+  "a            show everything",
+  "1-9          toggle a queue",
   "?            this help",
   "",
   "The watch writes nothing. Stop a change",
   "by moving its ref or pausing the queue.",
 ]
 
+/** A row's detail, read at one instant; held while the change is ended, re-read while it moves. */
+type HeldDetail = Readonly<{ key: string; tipAt: number | undefined; detail: ChangeDetail }>
+
+const HELD_DETAILS = 2
+
 export function WatchPane({
   snapshot,
   load,
+  open,
+  loadDiff,
   intervalMs = 5000,
   live = true,
   onEnding,
@@ -98,8 +136,12 @@ export function WatchPane({
   snapshot: WatchSnapshot
   /** One reading of the queue. The pane calls it on a timer and never reads anything itself. */
   load?: () => Promise<WatchSnapshot>
+  /** One change's detail, for the row under the cursor. Absent in a test of the table alone. */
+  open?: (row: WatchRow) => Promise<ChangeDetail>
+  /** The unified diff of one change, read only when its fold opens. */
+  loadDiff?: (row: WatchRow) => Promise<DiffText>
   intervalMs?: number
-  /** False in a test or a single frame: the tick that ages the screen stands still. */
+  /** False in a test or a single frame: the tick that ages the screen stands still and nothing pulses. */
   live?: boolean
   /** Called with the ending's code when every watched change has ended, so the command can exit with it. */
   onEnding?: (code: 0 | 1 | 2) => void
@@ -107,13 +149,17 @@ export function WatchPane({
   const [shown, setShown] = useState(snapshot)
   const [failure, setFailure] = useState<Error | undefined>(undefined)
   const [cursor, setCursor] = useState(0)
-  const [open, setOpen] = useState(false)
+  const [opened, setOpened] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
-  const [checkTab, setCheckTab] = useState<number | undefined>(undefined)
+  const [tab, setTab] = useState<string | undefined>(undefined)
   const [atEnd, setAtEnd] = useState(true)
+  const [buckets, setBuckets] = useState<ReadonlySet<StatusBucket>>(new Set(BUCKETS))
+  const [visibleQueues, setVisibleQueues] = useState<ReadonlySet<string> | undefined>(undefined)
+  const [held, setHeld] = useState<readonly HeldDetail[]>([])
+  const [diffOpen, setDiffOpen] = useState(false)
+  const [diffs, setDiffs] = useState<ReadonlyMap<string, DiffText>>(new Map())
   const listRef = useRef<ListViewHandle | null>(null)
   const { columns, rows: terminalRows } = useWindowSize()
-  const now = useCoarseNow(shown.at, live)
   const tier = watchTier(columns, terminalRows)
 
   const refresh = useCallback(async () => {
@@ -144,6 +190,99 @@ export function WatchPane({
     [intervalMs, live, load, refresh],
   )
 
+  // The rows on screen: the status buckets and the queue pills are ON/OFF
+  // filters over the one table (items 9, 32); `all` is every one of both.
+  const visible = shown.rows.filter(
+    (item) =>
+      buckets.has(bucketOf(item.row)) &&
+      (visibleQueues === undefined || shown.queues.length === 0 || visibleQueues.has(shown.queues[0]?.label ?? "")),
+  )
+  const allOn = buckets.size === BUCKETS.length && visibleQueues === undefined
+  const selected = visible[Math.min(cursor, Math.max(0, visible.length - 1))]
+  const selectedKey = selected === undefined ? undefined : watchRowKey(selected)
+  const label = shown.queues[0]?.label ?? shown.queue
+
+  // The detail for the row under the cursor, read only while the detail is
+  // open, re-read every round while the change moves, held once it ended.
+  const heldDetail = held.find((entry) => entry.key === selectedKey)
+  const moving = selected !== undefined && (selected.row.position !== undefined || selected.row.live !== undefined)
+  const stale =
+    selected !== undefined && (heldDetail === undefined || moving || heldDetail.tipAt !== selected.row.at?.getTime())
+  useEffect(() => {
+    if (!opened || open === undefined || selected === undefined || selectedKey === undefined || !stale) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const detail = await open(selected)
+        if (cancelled) return
+        setHeld((was) =>
+          [
+            { detail, key: selectedKey, tipAt: selected.row.at?.getTime() },
+            ...was.filter((entry) => entry.key !== selectedKey),
+          ].slice(0, HELD_DETAILS),
+        )
+      } catch (error: unknown) {
+        if (cancelled) return
+        setFailure(error instanceof Error ? error : new Error(String(error)))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // `shown.at` is the round: a new reading re-runs this for a moving change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, open, selectedKey, shown.at, stale])
+
+  // The diff, read once per row when its fold opens.
+  useEffect(() => {
+    if (!diffOpen || loadDiff === undefined || selected === undefined || selectedKey === undefined) return
+    if (diffs.has(selectedKey)) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const diff = await loadDiff(selected)
+        if (cancelled) return
+        setDiffs((was) => new Map([...was, [selectedKey, diff]]))
+      } catch (error: unknown) {
+        if (cancelled) return
+        setDiffs(
+          (was) => new Map([...was, [selectedKey, { why: error instanceof Error ? error.message : String(error) }]]),
+        )
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [diffOpen, loadDiff, selected, selectedKey, diffs])
+
+  const selectOnly = (bucket: StatusBucket): void => {
+    setBuckets(new Set([bucket]))
+    setCursor(0)
+  }
+  const toggleBucket = (bucket: StatusBucket): void => {
+    setBuckets((was) => {
+      const next = new Set(was)
+      if (next.has(bucket)) next.delete(bucket)
+      else next.add(bucket)
+      return next
+    })
+    setCursor(0)
+  }
+  const showAll = (): void => {
+    setBuckets(new Set(BUCKETS))
+    setVisibleQueues(undefined)
+  }
+  const toggleQueue = (queueLabel: string): void => {
+    setVisibleQueues((was) => {
+      const every = new Set(shown.queues.map((queue) => queue.label))
+      const next = new Set(was ?? every)
+      if (next.has(queueLabel)) next.delete(queueLabel)
+      else next.add(queueLabel)
+      return next.size === every.size ? undefined : next
+    })
+    setCursor(0)
+  }
+
   useInput((input, key) => {
     const character = key.text ?? input
     if (character === "?") {
@@ -161,15 +300,33 @@ export function WatchPane({
       return undefined
     }
     if (key.escape === true) {
-      setOpen(false)
+      setOpened(false)
       return undefined
     }
     if (key.return === true || (character === " " && key.ctrl !== true && key.meta !== true)) {
-      setOpen(true)
+      setOpened(true)
       // A newly opened change lands on ITS newest output, not on whatever tab
-      // index the previous change happened to leave behind.
-      setCheckTab(undefined)
+      // the previous change happened to leave behind.
+      setTab(undefined)
+      setDiffOpen(false)
       return undefined
+    }
+    if (character === "v" && opened) {
+      setDiffOpen((was) => !was)
+      return undefined
+    }
+    if (character === "o") selectOnly("open")
+    if (character === "r") selectOnly("running")
+    if (character === "d") selectOnly("done")
+    if (character === "f") selectOnly("failed")
+    if (character === "O") toggleBucket("open")
+    if (character === "R") toggleBucket("running")
+    if (character === "D") toggleBucket("done")
+    if (character === "F") toggleBucket("failed")
+    if (character === "a") showAll()
+    if (character !== undefined && /^[1-9]$/u.test(character)) {
+      const queue = shown.queues[Number(character) - 1]
+      if (queue !== undefined) toggleQueue(queue.label)
     }
     return undefined
   })
@@ -179,39 +336,41 @@ export function WatchPane({
   // above prints what went wrong.
   if (failure !== undefined) throw failure
 
-  const selected = shown.rows[cursor]
-  const detail = selected === undefined ? undefined : shown.detail.get(watchRowKey(selected))
+  const detail = heldDetail?.detail
+  const detailPane = (
+    <WatchDetail
+      detail={detail}
+      joinedRun={selected?.run !== undefined}
+      live={live}
+      {...(tab === undefined ? {} : { selected: tab })}
+      onSelect={setTab}
+      diffOpen={diffOpen}
+      {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
+      onToggleDiff={() => {
+        setDiffOpen((was) => !was)
+      }}
+    />
+  )
   const list = (
-    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      <ListView
-        ref={listRef}
-        items={[...shown.rows]}
-        getKey={watchRowKey}
-        cursorKey={cursor}
-        nav
-        active={!open || tier !== "full"}
-        onCursor={(index: number) => {
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
+      <Table
+        rows={visible}
+        label={label}
+        cursor={cursor}
+        listRef={listRef}
+        active={!opened || tier !== "full"}
+        onCursor={(index) => {
           setCursor(index)
           setAtEnd(false)
         }}
-        renderItem={(item: WatchRow) => (
-          <Text wrap="truncate">
-            {rowGlyph(item.row)} {rowLine(item)}
-          </Text>
-        )}
       />
+      <StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />
     </Box>
   )
   const body =
-    tier === "full" || !open ? (
-      open ? (
-        <WatchDetail
-          detail={detail}
-          joinedRun={selected?.run !== undefined}
-          now={now}
-          {...(checkTab === undefined ? {} : { selected: checkTab })}
-          onSelect={setCheckTab}
-        />
+    tier === "full" || !opened ? (
+      opened ? (
+        detailPane
       ) : (
         list
       )
@@ -224,52 +383,102 @@ export function WatchPane({
         })}
         dividerSize={DIVIDER_SIZE}
         primary={list}
-        secondary={
-          <WatchDetail
-            detail={detail}
-            joinedRun={selected?.run !== undefined}
-            now={now}
-            {...(checkTab === undefined ? {} : { selected: checkTab })}
-            onSelect={setCheckTab}
-          />
-        }
+        secondary={detailPane}
       />
     )
 
   return (
-    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      {/* The top line: which queue this is, and — loudest first — whether it is
-          running at all. */}
-      {shown.pause === undefined ? null : (
-        <Text bold color="$fg-warning" wrap="truncate">
-          {shown.pause}
-        </Text>
-      )}
-      <Text bold wrap="truncate">
-        {shown.queue}
-      </Text>
-      {/* Where the journal was looked for, when there was none. A watch that
-          showed no running check because it had no journal to read must say
-          so, or it reads as a queue with nothing to do. */}
-      {shown.journalAbsent === undefined ? null : (
-        <Text color="$fg-muted" wrap="truncate">
-          {shown.journalAbsent}
-        </Text>
-      )}
-      {body}
-      <Box height={1} flexShrink={0}>
-        <Text color="$fg-muted" wrap="truncate">
-          {atEnd ? "" : "End follows again · "}
-          {String(shown.rows.length)} change(s) · ? for help · q leaves
-        </Text>
+    <NowProvider readAt={shown.at} live={live}>
+      <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+        {/* Loudest first: a queue that is not running is the loudest thing about it. */}
+        {shown.pause === undefined ? null : (
+          <Text bold color="$fg-warning" wrap="truncate">
+            {shown.pause}
+          </Text>
+        )}
+        {/* The top line is ONLY the title and the queue pills (items 30, 32b, 33). */}
+        <TopLine queues={shown.queues} visible={visibleQueues} onToggle={toggleQueue} />
+        {/* Where the journal was looked for, when there was none. A watch that
+            showed no running check because it had no journal to read must say
+            so, or it reads as a queue with nothing to do. */}
+        {shown.journalAbsent === undefined ? null : (
+          <Text color="$fg-muted" wrap="truncate">
+            {shown.journalAbsent}
+          </Text>
+        )}
+        {body}
+        <Box height={1} flexShrink={0}>
+          <Text color="$fg-muted" wrap="truncate">
+            {atEnd ? "" : "End follows again · "}
+            {String(visible.length)} of {String(shown.rows.length)} change(s) · ? for help · q leaves
+          </Text>
+        </Box>
+        {helpOpen ? (
+          <ModalDialog title="yrd watch">
+            {HELP.map((line) => (
+              <Text key={line}>{line}</Text>
+            ))}
+          </ModalDialog>
+        ) : null}
       </Box>
-      {helpOpen ? (
-        <ModalDialog title="yrd watch">
-          {HELP.map((line) => (
-            <Text key={line}>{line}</Text>
-          ))}
-        </ModalDialog>
-      ) : null}
+    </NowProvider>
+  )
+}
+
+/** The table: header, then the virtualized rows with a date separator between days. */
+function Table({
+  rows,
+  label,
+  cursor,
+  listRef,
+  active,
+  onCursor,
+}: {
+  rows: readonly WatchRow[]
+  label: string
+  cursor: number
+  listRef: RefObject<ListViewHandle | null>
+  active: boolean
+  onCursor: (index: number) => void
+}) {
+  const now = useNow()
+  const { columns } = useWindowSize()
+  const layout = listLayout(rows, label, columns, now)
+  return (
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+      <ListHeader layout={layout} />
+      {rows.length === 0 ? (
+        <Text color="$fg-muted">no change matches the filters</Text>
+      ) : (
+        <ListView
+          ref={listRef}
+          items={[...rows]}
+          getKey={watchRowKey}
+          cursorKey={cursor}
+          nav
+          active={active}
+          virtualization="index"
+          estimateHeight={(index: number) => (separatorBefore(rows, index) === undefined ? 1 : 2)}
+          onItemHover={() => undefined}
+          onCursor={onCursor}
+          renderItem={(item: WatchRow, index: number) => {
+            const separator = separatorBefore(rows, index)
+            const row = (
+              <ListRow item={item} previous={rows[index - 1]} label={label} layout={layout} cursor={index === cursor} />
+            )
+            return separator === undefined ? (
+              row
+            ) : (
+              <Box flexDirection="column">
+                <Text bold color="$fg-muted">
+                  {separator}
+                </Text>
+                {row}
+              </Box>
+            )
+          }}
+        />
+      )}
     </Box>
   )
 }

@@ -29,6 +29,24 @@ export function stateGlyph(row: Pick<Row, "state" | "live">): string {
   return row.live === undefined ? STATE_GLYPH[row.state] : RUNNING_GLYPH
 }
 
+/** The one severity color per state: the retired presentation's ladder, kept — open is accent, working is info, done is success, fail is error, stuck is warning. */
+export const STATE_COLOR: Readonly<Record<Row["state"], string>> = {
+  checked: "$fg-warning",
+  direct: "$fg-muted",
+  failed: "$fg-error",
+  merged: "$fg-success",
+  queued: "$fg-accent",
+  stuck: "$fg-warning",
+}
+
+/** The working color a live check overlays on any state. */
+export const RUNNING_COLOR = "$fg-info"
+
+/** The color for a row: the working one while a check runs on it, else its state's. */
+export function stateColor(row: Pick<Row, "state" | "live">): string {
+  return row.live === undefined ? STATE_COLOR[row.state] : RUNNING_COLOR
+}
+
 /**
  * Bounded hanging wrap for one marker-led line (item 29, which settled the
  * item-13 deviation): wrapped text hangs off the marker and the line's HEIGHT
@@ -92,6 +110,28 @@ export function runShortName(label: string, id: string): string {
   const startedAt = runStartedAt(id)
   if (startedAt === undefined) return `${label}#${id}`
   return `${label}#${clock(startedAt, { seconds: true }).replace(/:/gu, "")}`
+}
+
+/**
+ * A duration the way a media player counts it — `M:SS`, `H:MM:SS` — the form
+ * the operator's item 1 sample uses (`Age 34:23 · Runtime 3:45 · Wait time
+ * 00:10`) and the retired pane's `mediaDuration`, ported as it was. Past what
+ * fits in six cells it steps to `Hh MMm`, then `Dd HHh`, then days.
+ */
+export function mediaDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000))
+  const hours = Math.floor(seconds / 3_600)
+  const minutes = Math.floor((seconds % 3_600) / 60)
+  const remainder = String(seconds % 60).padStart(2, "0")
+  const compact =
+    hours > 0 ? `${String(hours)}:${String(minutes).padStart(2, "0")}:${remainder}` : `${String(minutes)}:${remainder}`
+  if (compact.length <= 6) return compact
+  const totalMinutes = Math.floor(milliseconds / 60_000)
+  const totalHours = Math.floor(totalMinutes / 60)
+  if (totalHours < 100) return `${String(totalHours)}h${String(totalMinutes % 60).padStart(2, "0")}m`
+  const totalDays = Math.floor(totalHours / 24)
+  if (totalDays < 100) return `${String(totalDays)}d${String(totalHours % 24).padStart(2, "0")}h`
+  return `${String(totalDays)}d`
 }
 
 /** A local wall-clock time, `HH:MM` or `HH:MM:SS`, for the absolute half of every time on screen. */
