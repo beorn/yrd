@@ -1200,7 +1200,8 @@ describe("a queue run", () => {
     // what a reader needs, and one formatter writes it on both the record and
     // the merge commit, so the two can never say different things.
     const by = trailer(merged, "Merged-By") ?? ""
-    expect(by).toBe(`yrd queue ${w.remote}#main [${outcome.run}]`)
+    expect(by).toBe(`yrd queue main [${outcome.run}]`)
+    expect(logRecords(outcome).find((record) => record.kind === "run")).toMatchObject({ queue: `${w.remote}#main` })
     expect(mergedByRun(by)).toBe(outcome.run)
     expect(await trailerOn(w, merge, "Merged-By")).toBe(by)
     // The queue commits as itself, so a reader tells its merges from a person's

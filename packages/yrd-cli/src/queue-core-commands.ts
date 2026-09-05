@@ -664,6 +664,7 @@ export async function coreQueueCommand(
         {
           changes: changes.map((change) => ({
             ...change.row,
+            queue: config.target.branch,
             checks: views.get(change.row.head)?.checks ?? [],
             ...(views.get(change.row.head)?.note === undefined ? {} : { checksNote: views.get(change.row.head)?.note }),
             records: change.records.map((record) => ({
@@ -686,6 +687,7 @@ export async function coreQueueCommand(
                     : rowLine({ row: { ...change.row, reason: undefined, result: undefined } })
                 return [
                   headline,
+                  `  queue: ${config.target.branch}`,
                   ...(change.row.incident === undefined
                     ? []
                     : incidentLines(change.row.incident).map((line) => `  ${line}`)),

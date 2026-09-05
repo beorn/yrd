@@ -231,6 +231,10 @@ describe("a queue is the selected origin branch carrying config", () => {
         expect(run.stdout()).toContain("task/topic")
         expect(run.stdout()).not.toContain("task/default")
         expect(run.stdout()).not.toContain("task/other")
+        if (command[1] === "show") {
+          const shown = JSON.parse(run.stdout()) as Readonly<{ changes: readonly Readonly<{ queue: string }>[] }>
+          expect(shown.changes[0]?.queue).toBe("release/1.x")
+        }
       }
     }
   })

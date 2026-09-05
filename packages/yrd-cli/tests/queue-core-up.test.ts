@@ -567,12 +567,13 @@ describe("yrd queue list, the table", () => {
       ),
     ).toBe(0)
     const shown = records(shownJson)[0] as Readonly<{ changes: readonly Record<string, unknown>[] }>
-    expect(shown.changes[0]).toMatchObject({ incident, reason: incident.code, state: "stuck" })
+    expect(shown.changes[0]).toMatchObject({ incident, queue: "main", reason: incident.code, state: "stuck" })
 
     const shownText = capture(w.work)
     expect(
       await coreQueueCommand(w.work, shownText.io, { command: "show", branch: change.branch }, { workdir: w.workdir }),
     ).toBe(0)
+    expect(shownText.stdout()).toContain("  queue: main\n")
     expect(shownText.stdout()).toContain(`  subject: ${subject}`)
     expect(shownText.stdout()).toContain(`  via: ${incident.via}`)
     expect(shownText.stdout()).toContain(`  evidence: ${evidence}`)

@@ -707,7 +707,7 @@ function mergeMessage(run: Run, entry: QueueEntry): string {
     `merge ${short(branch, head)} into ${run.options.target.branch}`,
     "",
     `Change: ${changeName(entry.change)}`,
-    `Merged-By: ${mergedBy(run.name, run.log.id)}`,
+    `Merged-By: ${mergedBy(run.options.target.branch, run.log.id)}`,
     ...(issue === undefined ? [] : [`Issue: ${issue}`]),
     ...(submitter === undefined ? [] : [`Submitter: ${submitter}`]),
   ].join("\n")
@@ -967,7 +967,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       trailers: [
         ["Merge", mergeCommit],
         ["Base", run.targetSha],
-        ["Merged-By", mergedBy(run.name, run.log.id)],
+        ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
         ...checkTrailers(results),
       ],
     })
