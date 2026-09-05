@@ -162,9 +162,8 @@ The common thread: every system above answers "what exactly did we test, and is 
 | Package | What it is |
 |---|---|
 | `packages/yrd-queue-core` | the queue: submit, the queue read, the queue run, checks, records |
-| `packages/yrd-cli` | the commands |
+| `packages/yrd-cli` | the commands and retained environments |
 | `packages/yrd-process` | running commands and Git: checkouts, time limits, and reading which processes still hold a path |
-| `packages/yrd-bay` | `yrd env`: a checkout of one branch for a person or an agent to work in |
 
 `tests/boundary` proves the queue from the outside, as a user would see it: real repositories, real pushes, real checks in their own checkouts.
 

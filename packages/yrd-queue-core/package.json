@@ -7,7 +7,6 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@yrd/process": "workspace:*",
-    "git-super": "^0.1.0"
+    "@yrd/process": "workspace:*"
   }
 }

@@ -9,7 +9,6 @@
   "dependencies": {
     "@silvery/ansi": "^0.24.0",
     "@silvery/commander": "^0.24.0",
-    "@yrd/bay": "workspace:*",
     "@yrd/process": "workspace:*",
     "@yrd/queue-core": "workspace:*",
     "loggily": "^0.10.2",

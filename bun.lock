@@ -20,22 +20,12 @@
         "vitest": "4.1.9",
       },
     },
-    "packages/yrd-bay": {
-      "name": "@yrd/bay",
-      "version": "0.0.1",
-      "dependencies": {
-        "@yrd/process": "workspace:*",
-        "git-super": "^0.1.0",
-        "zod": "^4.4.3",
-      },
-    },
     "packages/yrd-cli": {
       "name": "@yrd/cli",
       "version": "0.0.1",
       "dependencies": {
         "@silvery/ansi": "^0.24.0",
         "@silvery/commander": "^0.24.0",
-        "@yrd/bay": "workspace:*",
         "@yrd/process": "workspace:*",
         "@yrd/queue-core": "workspace:*",
         "loggily": "^0.10.2",
@@ -61,7 +51,6 @@
       "version": "0.0.1",
       "dependencies": {
         "@yrd/process": "workspace:*",
-        "git-super": "^0.1.0",
       },
     },
   },
@@ -223,8 +212,6 @@
     "@xterm/addon-unicode11": ["@xterm/addon-unicode11@0.9.0", "", {}, "sha512-FxDnYcyuXhNl+XSqGZL/t0U9eiNb/q3EWT5rYkQT/zuig8Gz/VagnQANKHdDWFM2lTMk9ly0EFQxxxtZUoRetw=="],
 
     "@xterm/headless": ["@xterm/headless@6.0.0", "", {}, "sha512-5Yj1QINYCyzrZtf8OFIHi47iQtI+0qYFPHmouEfG8dHNxbZ9Tb9YGSuLcsEwj9Z+OL75GJqPyJbyoFer80a2Hw=="],
-
-    "@yrd/bay": ["@yrd/bay@workspace:packages/yrd-bay"],
 
     "@yrd/cli": ["@yrd/cli@workspace:packages/yrd-cli"],
 
