@@ -6,14 +6,6 @@
  * rather than each component asking `Date.now()` on its own render path. Two
  * clocks on one screen drift, and the operator sees one row age while its
  * neighbour stalls.
- *
- * **The tick is also where the process's memory is kept bounded.** React's
- * dev build fires `performance.mark()`/`measure()` several hundred times a
- * second and never clears them, and a four-hour soak of the retired watch
- * measured RSS going from 1,775.8 MB to 14,918.0 MB — 59 MB/min, OLS r² 0.990
- * (`watch-rss-bounded`, closed 2026-08-30 at yrd f42e8022). One interval, one
- * clearing, both ends of the timeline: clearing only marks or only measures
- * leaves half the noise accumulating.
  */
 
 import { createContext, createElement, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
@@ -38,10 +30,6 @@ export function useCoarseNow(readAt: Date, live: boolean, tickMs = 1000): Date {
   useEffect(() => {
     if (!live) return undefined
     const id = setInterval(() => {
-      // Bound the dev-build performance timeline BEFORE it grows again this
-      // tick. Both ends, every tick — see the note above.
-      performance.clearMeasures()
-      performance.clearMarks()
       forceTick((tick) => (tick + 1) % 1_000_000)
     }, tickMs)
     return () => {

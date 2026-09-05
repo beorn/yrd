@@ -7,43 +7,31 @@
  * @level   l2
  * @consumer @yrd/cli queue watch
  *
- * `useCoarseNow` (watch-clock.ts) owns the ONE `setInterval` that runs for the
- * life of the live pane. This test drives that loop through many ticks while
- * entries keep landing on the shared `performance` timeline — standing in for
- * whatever dev-build instrumentation produces them, independent of this test's
- * own renderer — and asserts the entry count STAYS BOUNDED across the run. It
- * never asserts that a particular clearing function was called; an
- * implementation that bounds the count by any means satisfies it, and one that
- * clears only marks or only measures fails it, because half the injected noise
- * keeps accumulating.
- *
- * Ported from `1f638504^:packages/yrd-cli/tests/watch-rss-bounded.test.ts`. The
- * component under test changed — it is `WatchPane` over `Row`s now, not
- * `QueueTimelineView` over the retired projection — and the test survived that
- * rewrite unchanged in substance, which is exactly what its own docstring
- * promised it would.
+ * Silvery bounds the development performance timeline at its commit boundary.
+ * Render with the watch timer off so a Yrd-specific interval cannot mask a
+ * missing renderer bound. Real marks and measures arrive before each commit;
+ * clearing only one type still lets the other accumulate.
  */
 
-import { act, createElement } from "react"
-import { createRenderer } from "silvery/test"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { createElement } from "react"
+import { render } from "silvery/test"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import type { Row } from "@yrd/queue-core"
 import { WatchPane, type WatchSnapshot } from "../src/watch-pane.tsx"
 
 const NOW = Date.parse("2026-09-03T12:00:00.000Z")
-const TICK_MS = 1000
-const ENTRIES_PER_TICK = 40
+const ENTRIES_PER_COMMIT = 40
 const ROUNDS = 25
 
 /**
  * Stands in for React's dev-build profiling marks/measures: one mark plus one
- * measure derived from it, `ENTRIES_PER_TICK` times. `measure()` leaves its
+ * measure derived from it, `ENTRIES_PER_COMMIT` times. `measure()` leaves its
  * start mark on the timeline too, so this exercises both entry types — an
  * implementation that clears only one of `clearMeasures`/`clearMarks` still
  * lets half the noise accumulate.
  */
 function addPerformanceNoise(): void {
-  for (let index = 0; index < ENTRIES_PER_TICK; index += 1) {
+  for (let index = 0; index < ENTRIES_PER_COMMIT; index += 1) {
     performance.mark(`watch-rss-bounded-mark-${String(index)}`)
     performance.measure(`watch-rss-bounded-measure-${String(index)}`, `watch-rss-bounded-mark-${String(index)}`)
   }
@@ -70,7 +58,7 @@ function snapshot(): WatchSnapshot {
   }
 }
 
-describe("watch tick loop bounds the performance timeline (@yrd/cli/watch-rss-bounded)", () => {
+describe("watch rendering bounds the performance timeline (@yrd/cli/watch-rss-bounded)", () => {
   beforeEach(() => {
     performance.clearMarks()
     performance.clearMeasures()
@@ -81,67 +69,35 @@ describe("watch tick loop bounds the performance timeline (@yrd/cli/watch-rss-bo
     performance.clearMeasures()
   })
 
-  it("keeps the performance entry count bounded across many live ticks instead of growing with tick count", async () => {
-    // `performance` is deliberately left OUT of the faked method set: Vitest's
-    // (sinon) fake timers, when they fake `performance`, replace
-    // `mark`/`measure` with no-ops and `getEntries*` with a constant empty
-    // array — which would make this test pass unconditionally, with or without
-    // the fix, because the injected noise would never really land on the
-    // timeline. Only the timer surface the tick loop itself needs is faked, so
-    // `setInterval` still advances deterministically while `performance` stays
-    // real.
-    vi.useFakeTimers({
-      toFake: [
-        "setTimeout",
-        "clearTimeout",
-        "setInterval",
-        "clearInterval",
-        "setImmediate",
-        "clearImmediate",
-        "Date",
-        "queueMicrotask",
-      ],
-    })
-    vi.setSystemTime(NOW)
-    const render = createRenderer({ cols: 120, rows: 40 })
-    const tree = () => createElement(WatchPane, { live: true, snapshot: snapshot() })
-    const app = await act(async () => render(tree()))
+  it("keeps entries bounded across commits without the watch timer", async () => {
+    const app = render(createElement(WatchPane, { live: false, snapshot: snapshot() }), { cols: 120, rows: 40 })
     try {
-      await act(async () => {
-        await app.waitForLayoutStable()
-      })
+      await app.waitForLayoutStable()
 
-      const countsAfterTick: number[] = []
+      const countsAfterCommit: number[] = []
       for (let round = 0; round < ROUNDS; round += 1) {
         addPerformanceNoise()
-        // The tick's own state update happens inside this fake timer advance
-        // (watch-clock.ts's `useCoarseNow` interval); `act` keeps it and the
-        // resulting re-render batched the way the real event loop would.
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(TICK_MS)
-          app.rerender(tree())
-        })
-        countsAfterTick.push(performance.getEntries().length)
+        // A stubbed performance API must not turn boundedness into a vacuous pass.
+        if (round === 0) expect(performance.getEntries().length).toBeGreaterThanOrEqual(2 * ENTRIES_PER_COMMIT)
+        // The snapshot prop seeds state only once. Toggle visible help to
+        // force a real commit without relying on the watch's aging timer.
+        await app.press(round % 2 === 0 ? "?" : "Escape")
+        await app.waitForLayoutStable()
+        expect(app.text.includes("leave the watch"), app.text).toBe(round % 2 === 0)
+        countsAfterCommit.push(performance.getEntries().length)
       }
 
-      // Unbounded accumulation puts round N's count near
-      // N * 2 * ENTRIES_PER_TICK (one mark + one measure per noise entry,
-      // never cleared) — 2,000 by the last of 25 rounds here, and already past
-      // this bound (200 = 5 ticks' worth) by round 3. A tick loop that clears
-      // every tick keeps every round's count near a single round's leftover,
-      // nowhere close to that line, at any point in the run — so this checks
-      // the max across the WHOLE run, not just the final tick.
-      const bound = 5 * ENTRIES_PER_TICK
-      const peak = Math.max(...countsAfterTick)
+      // Each round adds 80 entries: without a bound, 25 rounds retain 2,000.
+      // Check the whole run, not only the final commit; one uncleared type
+      // alone grows past this bound of 200.
+      const bound = 5 * ENTRIES_PER_COMMIT
+      const peak = Math.max(...countsAfterCommit)
       expect(
         peak,
-        `entry count must stay bounded across ${String(ROUNDS)} ticks, not grow with tick count (samples: ${countsAfterTick.join(", ")})`,
+        `entry count must stay bounded across ${String(ROUNDS)} commits (samples: ${countsAfterCommit.join(", ")})`,
       ).toBeLessThan(bound)
     } finally {
-      await act(async () => {
-        app.unmount()
-      })
-      vi.useRealTimers()
+      app.unmount()
     }
   })
 })
