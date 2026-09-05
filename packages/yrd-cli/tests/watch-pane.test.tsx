@@ -191,6 +191,20 @@ describe("the top line (items 30, 32d, 33)", () => {
     expect(text.match(new RegExp(pause, "gu"))).toHaveLength(1)
   })
 
+  it("keeps the pause above the table when there is no RUNNER rail", async () => {
+    // The RUNNER-first layout must not hide the pause when no run journal was
+    // available, because that is exactly when the queue state needs context.
+    const pause = "paused by @chief: the host is down"
+    const text = await paint(<WatchPane snapshot={snapshot({ pause })} live={false} />)
+
+    const lines = text.split("\n").filter((line) => line.trim() !== "")
+    expect(lines[0]).toContain(pause)
+    expect(lines.findIndex((line) => line.includes(pause))).toBeLessThan(
+      lines.findIndex((line) => line.includes("CHANGES")),
+    )
+    expect(text.match(new RegExp(pause, "gu"))).toHaveLength(1)
+  })
+
   it("says WHERE the run journal was looked for when there was none, so no journal never reads as nothing running", async () => {
     const text = await paint(
       <WatchPane

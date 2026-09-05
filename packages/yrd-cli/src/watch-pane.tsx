@@ -100,6 +100,10 @@ export type WatchSnapshot = Readonly<{
   at: Date
 }>
 
+function pauseWithoutRunner(snapshot: WatchSnapshot): string | undefined {
+  return snapshot.runner === undefined ? snapshot.pause : undefined
+}
+
 // The natural sizes the monitor used, and the ratio it settled on: 0.65 is the
 // smallest share that still gives the list 24 rows at the 40-row production
 // geometry without changing the tier ladder.
@@ -181,6 +185,8 @@ export function WatchPane({
   const [readFailure, setReadFailure] = useState<ReadFailure | undefined>(undefined)
   const [detailFailure, setDetailFailure] = useState<(ReadFailure & { key: string }) | undefined>(undefined)
   const [cursor, setCursor] = useState(0)
+  // Start split layouts with their detail visible; later resizes preserve the
+  // operator's open/closed choice instead of reopening it behind their back.
   const [opened, setOpened] = useState(() => tier !== "full")
   const [helpOpen, setHelpOpen] = useState(false)
   const [tab, setTab] = useState<string | undefined>(undefined)
@@ -416,6 +422,7 @@ export function WatchPane({
   // The width the list pane gets: the whole terminal, or its share of a split.
   const listColumns = opened && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) - DIVIDER_SIZE : columns
   const inLine = shown.rows.filter((item) => item.row.position !== undefined).length
+  const topPause = pauseWithoutRunner(shown)
   const list = (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
       {shown.runner === undefined ? null : (
@@ -474,6 +481,13 @@ export function WatchPane({
   return (
     <NowProvider readAt={shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+        {/* RUNNER normally owns the pause rail. Without a run journal there is
+            no rail, so keep the queue's loudest state visible here. */}
+        {topPause === undefined ? null : (
+          <Text bold color="$fg-warning" wrap="truncate">
+            {topPause}
+          </Text>
+        )}
         {/* The top line is ONLY the title and the queue pills (items 30, 32b, 33). */}
         <TopLine
           queues={shown.queues}
