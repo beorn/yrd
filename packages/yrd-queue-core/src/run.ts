@@ -49,6 +49,8 @@ import {
   recordCommit,
   readRecord,
   mergedBy,
+  isLandingIntent,
+  landingUpdates,
   trailer,
   type Git,
   type WriteRecord,
@@ -59,7 +61,8 @@ import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
 import { incidentTrailers, type Incident, type IncidentCode } from "./incident.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import type { PauseRecord } from "./pause.ts"
-import { directMergeCommits, type DirectMerge } from "./direct.ts"
+import { DirectReadChanged, directMergeCommits, type DirectMerge } from "./direct.ts"
+import { readComponentTarget } from "./components.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
 import { CapturedQueueObjectsUnavailable, readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
@@ -329,7 +332,23 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // direct that merged a submitted head is reported before the catch-up below
   // accounts for it (E5). Nothing stops for it: the run judges every change on
   // the base it read.
-  const directMerges = await reportDirectMerges(run, entries)
+  let directMerges: readonly string[]
+  try {
+    directMerges = await reportDirectMerges(run, entries)
+  } catch (error) {
+    if (!(error instanceof DirectReadChanged)) throw error
+    run.log.write({ kind: "result", reason: "direct-read-changed", text: error.message, exit: 0 })
+    return finish(
+      run,
+      0,
+      { directMerges: [], failed, merged, stuck },
+      {
+        ring: "direct",
+        says: error.message,
+        what: { reason: "direct-read-changed" },
+      },
+    )
+  }
 
   // A ring stops the round here. Reaping only cleans local scratch, and direct
   // reporting only observes work already done outside the queue. Everything
@@ -395,10 +414,6 @@ function staleChecked(run: Run, entry: QueueEntry): boolean {
   return tip.kind === "checked" && !isLandingIntent(tip) && trailer(tip, "Config") !== run.options.configBlob
 }
 
-function isLandingIntent(record: ChangeRecord): boolean {
-  return record.kind === "checked" && trailer(record, "Merge") !== undefined
-}
-
 /** The entries in the named states, in line order. */
 function ordered(entries: QueueRead, ...states: readonly ("queued" | "checked" | "stuck")[]): readonly QueueEntry[] {
   const byHead = new Map(entries.map((entry) => [entry.change.head, entry]))
@@ -421,11 +436,16 @@ function ordered(entries: QueueRead, ...states: readonly ("queued" | "checked" |
  * change on the base it read.
  */
 async function reportDirectMerges(run: Run, entries: QueueRead): Promise<readonly string[]> {
-  const found = await directMergeCommits(run.git, run.options.target.branch, run.targetSha, entries)
-  const target = run.options.target.branch
+  const found = await directMergeCommits(run.git, run.options.target.branch, run.targetSha, entries, {
+    repo: run.options.repo,
+    remote: run.options.target.remote,
+    workdir: run.options.workdir,
+    ...(run.options.process === undefined ? {} : { process: run.options.process }),
+    ...(run.options.plumbing === undefined ? {} : { plumbing: run.options.plumbing }),
+  })
   for (const commit of found) {
     run.log.write({
-      branch: target,
+      branch: commit.target,
       commit: commit.commit,
       gitlinks: commit.gitlinks,
       kind: "merged-direct",
@@ -749,21 +769,8 @@ async function componentPolicy(run: Run, entry: QueueEntry, target: Worktree, ph
       if (tree === undefined) throw new Error(`${row.path} has no materialized authored tree for its landing policy`)
       const path = join(tree.path, row.path)
       const cg = gitIn(path, run.options.process)
-      const remote = await remoteUrl(cg, "origin")
-      await cg(["fetch", "--quiet", "--no-tags", remote, "+refs/heads/main:refs/remotes/origin/main"])
-      const targetOid = (await cg(["rev-parse", "refs/remotes/origin/main^{commit}"])).trim()
-      const config = await readConfig(cg, targetOid, { remote, branch: "main" })
-      if (config?.landing === undefined) {
-        throw new Error(
-          `${row.path} .yrd.yml at protected main ${targetOid} must declare landing: product or external before the queue can judge it`,
-        )
-      }
       inputs.push({
-        repository: row.path,
-        remote,
-        target: targetOid,
-        blob: config.blob,
-        landing: config.landing,
+        ...(await readComponentTarget(cg, row.path)),
         authored: authored.has(row.path),
         pin: row.target,
       })
@@ -1285,17 +1292,7 @@ async function resumeLanding(
     }
     // This is the same parser as git super push --plan. Its source is the
     // durable checked record identity, never this machine's journal pathname.
-    const children = parsePushPlan(
-      JSON.stringify({
-        updates: intent.trailers
-          .filter(([name]) => name === "Landing")
-          .map(([, value]) => JSON.parse(value) as unknown),
-      }),
-      intent.sha,
-    )
-    if (children.some((row) => row.repository === ".")) {
-      throw new Error(`${intent.sha} Landing: rows must name components; root updates are derived from the record`)
-    }
+    const children = landingUpdates(intent)
     if (worktree === undefined) {
       worktree = await freshWorktree(
         run.git,

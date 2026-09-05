@@ -20,7 +20,7 @@
 import { changeOf, readRecords, recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
 import { GitExit, isAncestor } from "./git.ts"
 import { parsePause, type PauseRecord } from "./pause.ts"
-import { changeName, parseChangeRef, pauseRef, type Change } from "./refs.ts"
+import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
 
 /** One change as the queue read sees it. */
@@ -32,6 +32,14 @@ export type QueueEntry = Readonly<{
 
 /** What one reading of the remote yields: every change, and where each stands. */
 export type QueueRead = readonly QueueEntry[]
+
+/** One complete remote advertisement, before object fetch or record reading. */
+export type QueueRefs = Readonly<{
+  target: string | undefined
+  heads: ReadonlyMap<string, string>
+  changeRefs: readonly Readonly<{ change: Change; oid: string; ref: string }>[]
+  pauseSha: string | undefined
+}>
 
 /** One captured queue reading whose exact-object fetch failed. */
 export class CapturedQueueObjectsUnavailable extends Error {
@@ -68,34 +76,7 @@ export async function readQueue(
   target: string,
   targetSha: string,
 ): Promise<Readonly<{ changes: QueueRead; pause: PauseRecord | undefined }>> {
-  const pause = pauseRef(target)
-  // Where every branch and every change stands at the remote, in one reading.
-  // Every later operation uses these captured object ids, never a tracking or
-  // queue ref that another reader or writer can move underneath it.
-  const rows = (await git(["ls-remote", "--refs", remote])).split("\n")
-  const heads = new Map<string, string>()
-  const changeRefs: Array<Readonly<{ change: Change; oid: string; ref: string }>> = []
-  let pauseSha: string | undefined
-  for (const row of rows) {
-    const [sha, ref] = row.trim().split(/\s+/u)
-    if (sha === undefined || ref === undefined) continue
-    if (ref === `refs/heads/${target}`) {
-      continue
-    } else if (ref.startsWith("refs/heads/")) {
-      heads.set(ref.slice("refs/heads/".length), sha)
-    } else if (ref === pause) {
-      pauseSha = sha
-    } else {
-      const change = parseChangeRef(target, ref)
-      // A ref named after the target is not a change, so the read yields none
-      // for it: it is never judged, never given a record and never messaged
-      // about, and above all it never accounts for a commit on the target's
-      // own first-parent line, where an accounted commit hides every direct
-      // at or below it (direct.ts; E5). `submit` refuses to open one, so this
-      // is only about the ones a remote already holds.
-      if (change !== undefined && change.branch !== target) changeRefs.push({ change, oid: sha, ref })
-    }
-  }
+  const { heads, changeRefs, pauseSha } = await readQueueRefs(git, remote, target)
   const named = new Set(changeRefs.map(({ change }) => change.branch))
   const relevantHeads = [...named]
     .filter((branch) => branch !== target)
@@ -125,7 +106,8 @@ export async function readQueue(
 
   const tips = await tipRecords(git, changeRefs)
   const headOnTarget = new Map<string, boolean>()
-  const capturedPause = pauseSha === undefined ? undefined : await parsePause(git, pauseSha, `${remote} ${pause}`)
+  const capturedPause =
+    pauseSha === undefined ? undefined : await parsePause(git, pauseSha, `${remote} ${pauseRef(target)}`)
 
   const entries: QueueEntry[] = []
   for (const { change: submitted, ref } of changeRefs) {
@@ -151,6 +133,50 @@ export async function readQueue(
     entries.push({ change, reading: readChange(change) })
   }
   return { changes: entries, pause: capturedPause }
+}
+
+/**
+ * Capture every ref the queue owns from one remote advertisement, without
+ * fetching or resolving any moving local name. The target is returned apart
+ * from other heads because callers may need to compare the advertised target
+ * after their own component fetch.
+ */
+export async function readQueueRefs(git: Git, remote: string, target: string): Promise<QueueRefs> {
+  const pause = pauseRef(target)
+  const targetRef = `refs/heads/${target}`
+  const rows = (await git(["ls-remote", "--refs", remote])).split("\n")
+  const heads = new Map<string, string>()
+  const changeRefs: Array<Readonly<{ change: Change; oid: string; ref: string }>> = []
+  let targetOid: string | undefined
+  let pauseSha: string | undefined
+  for (const row of rows) {
+    const text = row.trim()
+    if (text === "") continue
+    const columns = text.split(/\s+/u)
+    const [sha, ref] = columns
+    if (sha === undefined || ref === undefined || columns.length !== 2) {
+      throw new Error(`${remote} returned malformed ref advertisement row: ${text}`)
+    }
+    if (ref === targetRef) {
+      targetOid = sha
+    } else if (ref.startsWith("refs/heads/")) {
+      heads.set(ref.slice("refs/heads/".length), sha)
+    } else if (ref === pause) {
+      pauseSha = sha
+    } else {
+      const change = parseChangeRef(target, ref)
+      if (change === undefined) {
+        if (ref.startsWith(`${queueRefPrefix(target)}/`)) {
+          throw new Error(`${ref} at ${remote} is not a queue change ref or pause ref`)
+        }
+        continue
+      }
+      // A ref named after the target is not a change, so it never accounts for
+      // a target direct or becomes a queue entry (E2/E5).
+      if (change.branch !== target) changeRefs.push({ change, oid: sha, ref })
+    }
+  }
+  return { changeRefs, heads, pauseSha, target: targetOid }
 }
 
 /**

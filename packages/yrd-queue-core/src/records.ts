@@ -37,6 +37,7 @@
  * on one change lose loudly instead of interleaving.
  */
 
+import { parsePushPlan, type RefUpdate } from "git-super"
 import { refAt } from "./git.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
 
@@ -235,6 +236,29 @@ export const DIRECT_MERGE = "direct"
 /** The first value of a trailer, or undefined. */
 export function trailer(record: ChangeRecord, name: string): string | undefined {
   return record.trailers.find(([key]) => key === name)?.[1]
+}
+
+/** A checked record with a frozen merge is the durable ordered-landing intent. */
+export function isLandingIntent(record: ChangeRecord): boolean {
+  return record.kind === "checked" && trailer(record, "Merge") !== undefined
+}
+
+/**
+ * The frozen component-only push rows of a landing intent. GitSuper owns the
+ * JSON grammar; root rows are derived from the record and are never durable
+ * Landing: rows.
+ */
+export function landingUpdates(record: ChangeRecord): readonly RefUpdate[] {
+  const updates = parsePushPlan(
+    JSON.stringify({
+      updates: record.trailers.filter(([name]) => name === "Landing").map(([, value]) => JSON.parse(value) as unknown),
+    }),
+    record.sha,
+  )
+  if (updates.some((row) => row.repository === ".")) {
+    throw new Error(`${record.sha} Landing: rows must name components; root updates are derived from the record`)
+  }
+  return updates
 }
 
 /**

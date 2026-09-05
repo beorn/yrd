@@ -247,6 +247,14 @@ describe("settling gitlinks", () => {
     const next = await queueRun(await w.options())
 
     expect(next.directMerges).toEqual([])
+
+    // This changes only the temporary component remote; root main still
+    // carries `ahead`. A current tip that retreats to the old root pin went
+    // around the ordered landing and must not be hidden by the prior landing.
+    await gitIn(join(w.work, "..", "component.git"))(["update-ref", "refs/heads/main", w.main])
+    const componentDirect = await queueRun(await w.options())
+
+    expect(componentDirect.directMerges).toEqual([w.main])
   })
 
   // A root gitlink cannot retain its component objects. Existing successful
@@ -353,11 +361,12 @@ describe("settling gitlinks", () => {
       rmSync(options.workdir, { force: true, recursive: true })
       mkdirSync(options.workdir, { recursive: true })
 
+      let third: string | undefined
       if (diverge) {
         await component(["checkout", "--quiet", "--detach", w.main])
         writeFileSync(join(componentWork, "lib.txt"), "third\n")
         await component(["commit", "--quiet", "-am", "third, divergent from ahead"])
-        const third = (await component(["rev-parse", "HEAD"])).trim()
+        third = (await component(["rev-parse", "HEAD"])).trim()
         await component(["push", "--quiet", "origin", "HEAD:refs/heads/third"])
         await gitIn(join(w.work, "..", "component.git"))(["update-ref", "refs/heads/main", third])
       }
@@ -384,6 +393,8 @@ describe("settling gitlinks", () => {
       }
 
       expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/k2"] })
+      if (third === undefined) throw new Error("the divergent K2 row has no third component OID")
+      expect(outcome.directMerges).toEqual([third])
       expect({
         change: await remoteTip(fresh, ref),
         component: await remoteTip(component, "refs/heads/main"),
@@ -874,29 +885,35 @@ describe("settling gitlinks", () => {
   // landing. The root-direct case above cannot expose a component-only push;
   // external keeps its own release identity and is deliberately exempt.
   it.each([
-    ["product", true],
-    ["external", false],
-  ] as const)("reports a %s component main hand push only when it is product (E5)", async (landing, reports) => {
-    const w = await world(landing)
-    await submitFile(w, "task/first")
-    await w.git(["push", "--quiet", "origin", ":task/first"])
-    const direct = await advanceComponent(w, `${landing} main moved around the queue`)
-    const root = await remoteTip(w.git, "refs/heads/main")
+    ["product with queue history", "product", true, true],
+    ["product without queue history", "product", true, false],
+    ["external with queue history", "external", false, true],
+  ] as const)(
+    "reports a %s component main hand push only when it is product (E5)",
+    async (_name, landing, reports, history) => {
+      const w = await world(landing)
+      if (history) {
+        await submitFile(w, "task/first")
+        await w.git(["push", "--quiet", "origin", ":task/first"])
+      }
+      const direct = await advanceComponent(w, `${landing} main moved around the queue`)
+      const root = await remoteTip(w.git, "refs/heads/main")
 
-    expect(await gitlinkAt(w, root)).toBe(w.main)
+      expect(await gitlinkAt(w, root)).toBe(w.main)
 
-    const outcome = await queueRun(await w.options())
+      const outcome = await queueRun(await w.options())
 
-    // `directMerges` is the existing queue-run/direct hook; no new public
-    // output shape is needed to prove that the component push is observed.
-    expect(outcome.directMerges).toEqual(reports ? [direct] : [])
-    const records = readFileSync(outcome.log, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
-      .filter((record) => record.kind === "merged-direct")
-    expect(records).toMatchObject(reports ? [{ branch: "component/main", commit: direct }] : [])
-  })
+      // `directMerges` is the existing queue-run/direct hook; no new public
+      // output shape is needed to prove that the component push is observed.
+      expect(outcome.directMerges).toEqual(reports ? [direct] : [])
+      const records = readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((record) => record.kind === "merged-direct")
+      expect(records).toMatchObject(reports ? [{ branch: "component/main", commit: direct }] : [])
+    },
+  )
 
   it("a gitlink the reference checkout never fetched is materialized from the component's remote, and the change merges", async () => {
     const w = await world()

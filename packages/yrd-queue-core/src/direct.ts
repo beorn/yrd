@@ -39,14 +39,29 @@
  * at-least-once, the plan's shape for every message.
  */
 
-import { endedKind, mergedByRun, trailer, type ChangeRecord, type Git } from "./records.ts"
-import { gitlinkRows } from "./git.ts"
-import { changeName } from "./refs.ts"
-import type { QueueRead } from "./remote.ts"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { join } from "node:path"
+import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
+import { readCommitSubmodules } from "git-super/commit-graph"
+import {
+  endedKind,
+  isLandingIntent,
+  landingUpdates,
+  mergedByRun,
+  trailer,
+  type ChangeRecord,
+  type Git,
+} from "./records.ts"
+import { gitEnvironment, gitIn, gitlinkRows } from "./git.ts"
+import { changeName, changeRef } from "./refs.ts"
+import { readQueueRefs, type QueueRead } from "./remote.ts"
 import { tipOf } from "./state.ts"
+import { readComponentTarget } from "./components.ts"
+import { queueName } from "./config.ts"
+import { claimWorktrees, freshWorktree, type PlumbingLog, type Worktree } from "./worktree.ts"
 
 export type DirectMerge = Readonly<{
-  /** The branch it moved: the queue's target. */
+  /** The branch it moved: the queue's target, or `<component path>/main`. */
   target: string
   commit: string
   parents: readonly string[]
@@ -59,13 +74,41 @@ export type DirectMerge = Readonly<{
   why: string
 }>
 
+/** The shared run/list reader needs an explicit repository and scratch scope. */
+export type DirectReadContext = Readonly<{
+  repo: string
+  remote: string
+  workdir: string
+  process?: Process
+  plumbing?: PlumbingLog
+}>
+
+/** A mixed observation has no verdict. The caller ends this pass, not the queue. */
+export class DirectReadChanged extends Error {
+  constructor(message: string) {
+    super(`${message}; read the queue again`)
+    this.name = "DirectReadChanged"
+  }
+}
+
 /**
- * The direct merges on the target's first-parent line since the moment that
- * the queue has not yet accounted for, oldest first. Loud when no commit on
- * that line introduced the `remote:` line: a target that never named this core
- * has no queue.
+ * Root direct commits and unexplained product component tips, read once for
+ * run and list/watch. Component ownership comes from protected policy, not the
+ * existence of a root change record. No setup or checks run during this read.
  */
 export async function directMergeCommits(
+  git: Git,
+  target: string,
+  targetSha: string,
+  entries: QueueRead,
+  context: DirectReadContext,
+): Promise<readonly DirectMerge[]> {
+  const root = await rootDirectCommits(git, target, targetSha, entries)
+  const components = await componentDirectCommits(git, target, targetSha, entries, context)
+  return [...root, ...components]
+}
+
+async function rootDirectCommits(
   git: Git,
   target: string,
   targetSha: string,
@@ -121,6 +164,98 @@ export async function directMergeCommits(
     found.push({ at: new Date(at), commit, gitlinks, parents, subject, target, why })
   }
   return found.reverse()
+}
+
+/** A component's current position is explained, not its entire ref history.
+ * Old landed pins never excuse a rewind. A live intent excuses its exact
+ * source only, never its CAS pre-image or some descendant of its source. */
+async function componentDirectCommits(
+  git: Git,
+  target: string,
+  targetSha: string,
+  entries: QueueRead,
+  context: DirectReadContext,
+): Promise<readonly DirectMerge[]> {
+  const owned = context.process === undefined
+  const process = context.process ?? createProcess({ cwd: context.repo, env: gitEnvironment(globalThis.process.env) })
+  let tree: Worktree | undefined
+  let directory: string | undefined
+  try {
+    const modules = await readCommitSubmodules(adaptProcessGit(process), context.repo, targetSha)
+    if (modules.length === 0) return []
+    const worktrees = join(context.workdir, "worktrees")
+    mkdirSync(worktrees, { recursive: true })
+    directory = mkdtempSync(join(worktrees, "direct-"))
+    claimWorktrees(directory)
+    tree = await freshWorktree(git, context.repo, targetSha, join(directory, "target"), context.plumbing)
+    const updates = entries.flatMap((entry) => {
+      const tip = tipOf(entry.change)
+      return isLandingIntent(tip) ? landingUpdates(tip) : []
+    })
+    const found: DirectMerge[] = []
+    for (const module of modules) {
+      const componentGit = gitIn(join(tree.path, module.path), context.process)
+      const component = await readComponentTarget(componentGit, module.path)
+      if (component.landing === "external" || component.target === module.target) continue
+      const identity = queueName({ remote: component.remote, branch: "main" }, component.remote)
+      const explained = updates.some(
+        (row) =>
+          row.repository === module.path &&
+          row.destination === "refs/heads/main" &&
+          row.source === component.target &&
+          queueName({ remote: row.remote, branch: "main" }, row.remote) === identity,
+      )
+      if (explained) continue
+      const detail = (
+        await componentGit(["show", "--no-patch", "--format=%H%x00%P%x00%cI%x00%s", component.target])
+      ).trimEnd()
+      const [commit, parentList, at, subject] = detail.split("\x00")
+      if (
+        commit !== component.target ||
+        parentList === undefined ||
+        at === undefined ||
+        subject === undefined ||
+        !Number.isFinite(Date.parse(at))
+      ) {
+        throw new Error(`${module.path}/main at ${component.target} returned unreadable commit metadata`)
+      }
+      const parents = parentList.split(" ").filter((parent) => parent !== "")
+      const first = parents[0]
+      const gitlinks =
+        first === undefined ? [] : (await gitlinkRows(componentGit, first, commit)).map((row) => row.path)
+      found.push({
+        at: new Date(at),
+        commit,
+        gitlinks,
+        parents,
+        subject,
+        target: `${module.path}/main`,
+        why: `its protected tip is neither root pin ${module.target} nor the exact source of a current landing intent`,
+      })
+    }
+    // An intent can be published after the caller captured the queue and
+    // before its child push is observed. Fence AFTER observing every child,
+    // including newly introduced change refs, before returning any verdict.
+    const observed = await readQueueRefs(git, context.remote, target)
+    const captured = new Map(entries.map((entry) => [changeRef(target, entry.change), tipOf(entry.change).sha]))
+    const current = new Map(observed.changeRefs.map((row) => [row.ref, row.oid]))
+    const moved = [...new Set([...captured.keys(), ...current.keys()])].filter(
+      (ref) => captured.get(ref) !== current.get(ref),
+    )
+    if (observed.target !== targetSha || moved.length > 0) {
+      throw new DirectReadChanged(
+        `${context.remote}/${target} changed while component mains were read (root ${targetSha} -> ${observed.target ?? "absent"}; changed refs: ${moved.length === 0 ? "none" : moved.join(", ")})`,
+      )
+    }
+    return found
+  } finally {
+    try {
+      if (tree !== undefined) await tree.remove()
+      if (directory !== undefined) rmSync(directory, { recursive: true, force: true })
+    } finally {
+      if (owned) await process.close()
+    }
+  }
 }
 
 /**

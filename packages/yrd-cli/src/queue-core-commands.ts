@@ -472,7 +472,11 @@ export async function coreQueueCommand(
         // were running.
         const journals = readJournals(join(workdir, "logs"))
         const all = list(queue.changes, {
-          directMerges: await directMergeCommits(git, config.target.branch, declared.oid, queue.changes),
+          directMerges: await directMergeCommits(git, config.target.branch, declared.oid, queue.changes, {
+            repo,
+            remote: config.target.remote,
+            workdir,
+          }),
           journals,
           subjects: await subjects(
             git,

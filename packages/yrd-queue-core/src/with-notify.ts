@@ -67,7 +67,7 @@ export const withNotify: Ring = (steps) => ({
 
 /** A commit that went around the queue, told about: there is no change to end. */
 async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
-  const target = run.options.target.branch
+  const target = commit.target
   const text = `${directMergeLine(commit)}: ${commit.why}. The queue goes on from the new base; a rollback is a git revert, pushed through the queue.`
   // A direct merge has no change, so the commit that went around the queue stands
   // where a change's name would (`NotifyRecord`).
