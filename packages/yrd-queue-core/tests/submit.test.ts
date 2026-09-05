@@ -187,7 +187,10 @@ describe("a change is named <branch>@<sha>, and that name is the last part of it
     expect(await remoteRefs(w)).toContain(`refs/yrd/main/task/one@v2@${head}`)
     expect((await readRecords(w.git, submitted.opened)).map((record) => record.kind)).toEqual(["opened"])
     expect(
-      (await readQueue(w.git, "origin", "main")).changes.map((entry) => [entry.change.branch, entry.change.head]),
+      (await readQueue(w.git, "origin", "main", w.target)).changes.map((entry) => [
+        entry.change.branch,
+        entry.change.head,
+      ]),
     ).toEqual([["task/one@v2", head]])
   })
 
@@ -228,7 +231,7 @@ describe("the queue read is every submitted change at the remote", () => {
     await w.git(["push", "--quiet", "origin", "task/bare"])
 
     expect(
-      (await readQueue(w.git, "origin", "main")).changes.find((entry) => entry.change.branch === "task/bare"),
+      (await readQueue(w.git, "origin", "main", w.target)).changes.find((entry) => entry.change.branch === "task/bare"),
     ).toBeUndefined()
     // Nothing is lost: the branch stands at the remote until its author says so.
     expect(await remoteRefs(w)).toContain("refs/heads/task/bare")
@@ -238,7 +241,7 @@ describe("the queue read is every submitted change at the remote", () => {
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
     })
-    const opened = (await readQueue(w.git, "origin", "main")).changes.find(
+    const opened = (await readQueue(w.git, "origin", "main", w.target)).changes.find(
       (entry) => entry.change.branch === "task/bare",
     )
     expect(opened?.change.head).toBe(head)
@@ -283,7 +286,10 @@ describe("the queue read is every submitted change at the remote", () => {
     const fetchHead = (await w.git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
     writeFileSync(fetchHead, "caller-owned fetch evidence\n")
 
-    const [first, second] = await Promise.all([readQueue(w.git, "origin", "main"), readQueue(w.git, "origin", "main")])
+    const [first, second] = await Promise.all([
+      readQueue(w.git, "origin", "main", w.target),
+      readQueue(w.git, "origin", "main", w.target),
+    ])
 
     expect(first.changes.map((entry) => entry.change.branch).sort()).toEqual(["task/one", "task/two"])
     expect(second).toEqual(first)
@@ -319,7 +325,7 @@ describe("the queue read is every submitted change at the remote", () => {
       return result
     }
 
-    const reading = await readQueue(git, "origin", "main")
+    const reading = await readQueue(git, "origin", "main", w.target)
 
     const gone = reading.changes.find((entry) => entry.change.branch === "task/gone")
     expect(gone?.change.head).toBe(head)
@@ -368,7 +374,7 @@ describe("the queue read is every submitted change at the remote", () => {
       return readerGit(args, input)
     }
 
-    const error = await readQueue(git, "origin", "main").then(
+    const error = await readQueue(git, "origin", "main", w.target).then(
       () => undefined,
       (cause: unknown) => cause,
     )
@@ -395,9 +401,9 @@ describe("the queue read is every submitted change at the remote", () => {
     await expect(readerGit(["cat-file", "-e", submitted.opened])).rejects.toThrow(/exited 1/u)
 
     await w.git(["push", "--quiet", "origin", `${submitted.opened}:${ref}`])
-    expect((await readQueue(readerGit, "origin", "main")).changes.map((entry) => entry.change.branch)).toEqual([
-      "task/one",
-    ])
+    expect(
+      (await readQueue(readerGit, "origin", "main", w.target)).changes.map((entry) => entry.change.branch),
+    ).toEqual(["task/one"])
   })
 
   it("orders by the first opened record, and a superseded head reads failed, replaced", async () => {
@@ -429,7 +435,7 @@ describe("the queue read is every submitted change at the remote", () => {
       target: { branch: "main", remote: "origin" },
     })
 
-    const entries = (await readQueue(w.git, "origin", "main")).changes
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
     const byHead = new Map(entries.map((entry) => [entry.change.head, entry]))
     expect(byHead.get(one)?.reading).toMatchObject({ reason: "replaced", state: "failed" })
     expect(byHead.get(oneAgain)?.reading.state).toBe("queued")
@@ -454,7 +460,9 @@ describe("the queue read is every submitted change at the remote", () => {
     await w.git(["merge", "--quiet", "--no-ff", "-m", "merge task/one", head])
     await w.git(["push", "--quiet", "origin", "main"])
 
-    const entries = (await readQueue(w.git, "origin", "main")).changes
+    const target = (await w.git(["ls-remote", "--refs", "origin", "refs/heads/main"])).trim().split(/\s+/u)[0]
+    if (target === undefined || target === "") throw new Error("the remote target is absent")
+    const entries = (await readQueue(w.git, "origin", "main", target)).changes
     expect(entries.find((entry) => entry.change.branch === "task/one")?.reading.state).toBe("merged")
   })
 })

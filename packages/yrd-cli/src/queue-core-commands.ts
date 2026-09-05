@@ -150,13 +150,14 @@ export async function coreQueueCommand(
   const queue = options.queue ?? (await originHead(git))
   const target = { branch: queue, remote }
   const targetLabel = `${remote}/${queue}`
+  type CapturedDeclaration = Readonly<{ config: QueueConfig; oid: string }>
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
   // target carries no `.yrd.yml` at all — there is no queue there; a
   // declaration that exists and cannot be read throws. One reading serves a
   // one-shot command; the service reads again before every round, so an edit at
   // the target takes effect on the next round.
-  const declaration = async (): Promise<Readonly<{ config: QueueConfig; oid: string }> | undefined> => {
+  const declaration = async (): Promise<CapturedDeclaration | undefined> => {
     const ref = `refs/heads/${queue}`
     const rows = (await git(["ls-remote", "--refs", remote, ref]))
       .split("\n")
@@ -208,7 +209,7 @@ export async function coreQueueCommand(
    * side: a run that could not even judge — a bad invocation, a remote that
    * cannot be read — is stuck, and has already said so.
    */
-  const oneRound = async (declared: QueueConfig): Promise<QueueRunOutcome | undefined> => {
+  const oneRound = async (declared: CapturedDeclaration): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
       outcome = await queueRun({
@@ -304,7 +305,7 @@ export async function coreQueueCommand(
       return 0
     }
     case "run": {
-      const outcome = await oneRound(config)
+      const outcome = await oneRound(captured)
       return outcome?.exitCode ?? 2
     }
     case "up": {
@@ -336,7 +337,7 @@ export async function coreQueueCommand(
           }
           if (why !== undefined) return stuck(why)
         }
-        const outcome = await oneRound(current.config)
+        const outcome = await oneRound(current)
         if (outcome === undefined || outcome.exitCode === 2) return 2
         await request.afterRound?.(outcome)
         // The gitlink, at the target as this round left it: the round that merged
@@ -369,10 +370,12 @@ export async function coreQueueCommand(
        * the one a plain `queue list` would print at the same instant.
        *
        * The commits that went around the queue are rows too (E5), judged at
-       * the target the queue read itself saw, so the rows and the reading are
-       * about one and the same tip and no second reading can disagree with it.
+       * the same captured declaration as the queue reading, so the rows and
+       * the reading share one tip and no second reading can disagree with it.
        */
-      const round = async (): Promise<
+      const round = async (
+        declared: CapturedDeclaration,
+      ): Promise<
         Readonly<{
           rows: readonly WatchRow[]
           text: string
@@ -383,7 +386,8 @@ export async function coreQueueCommand(
           detail: ReadonlyMap<string, ChangeDetail>
         }>
       > => {
-        const queue = await readQueue(git, config.target.remote, config.target.branch)
+        const config = declared.config
+        const queue = await readQueue(git, config.target.remote, config.target.branch, declared.oid)
         // The run journal on THIS machine, and the head subjects in one
         // batched read: the two joins the table needs and neither of them a
         // second derivation of anything the records already say. A machine
@@ -392,7 +396,7 @@ export async function coreQueueCommand(
         // were running.
         const journals = readJournals(join(workdir, "logs"))
         const all = list(queue.changes, {
-          directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
+          directMerges: await directMergeCommits(git, config.target.branch, declared.oid, queue.changes),
           journals,
           subjects: await subjects(
             git,
@@ -481,7 +485,7 @@ export async function coreQueueCommand(
       }
 
       if (request.watch !== true) {
-        const one = await round()
+        const one = await round(captured)
         emit(io, options.json, one.data, one.text)
         return 0
       }
@@ -492,7 +496,7 @@ export async function coreQueueCommand(
       // all — the same separation the retired build script named, restored
       // with it.
       if (options.interactive === true && options.json !== true) {
-        const first = await round()
+        const first = await round(captured)
         if (selectedNothing(request.terms, first.rows)) {
           io.stderr(missedSelector(request.terms ?? [], first.queue, first.rows.length))
           return 2
@@ -505,7 +509,9 @@ export async function coreQueueCommand(
           createElement(WatchPane, {
             intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
             load: async () => {
-              const next = await round()
+              const refreshed = await declaration()
+              if (refreshed === undefined) throw new Error(`${targetLabel} no longer carries a .yrd.yml`)
+              const next = await round(refreshed)
               return snapshotOf(next)
             },
             onEnding:
@@ -529,8 +535,9 @@ export async function coreQueueCommand(
       const interval = Math.max(1, request.intervalSeconds ?? 5) * 1000
       const stopped = (): boolean => request.stop?.aborted === true
       let first = true
+      let declared = captured
       for (;;) {
-        const one = await round()
+        const one = await round(declared)
         // A selector that matches nothing would otherwise wait forever for a
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.
@@ -552,6 +559,9 @@ export async function coreQueueCommand(
           setTimeout(resolve, interval)
         })
         if (stopped()) return 0
+        const refreshed = await declaration()
+        if (refreshed === undefined) return noQueueOnTarget(targetLabel)
+        declared = refreshed
       }
     }
     case "check": {
@@ -647,7 +657,7 @@ export async function coreQueueCommand(
           : 0
     }
     case "show": {
-      const queue = await readQueue(git, config.target.remote, config.target.branch)
+      const queue = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
       const journals = readJournals(join(workdir, "logs"))
       const matching = queue.changes.filter((entry) => entry.change.branch === request.branch)
       const hydrated = await readHistories(git, matching, config.target.remote, config.target.branch)
@@ -772,11 +782,12 @@ function gitlinks(listing: string): readonly Readonly<{ path: string; sha: strin
 
 function runOptions(
   repo: string,
-  config: QueueConfig,
+  declared: Readonly<{ config: QueueConfig; oid: string }>,
   workdir: string,
   env?: NodeJS.ProcessEnv,
   log?: ConditionalLogger,
 ) {
+  const { config, oid } = declared
   return {
     checks: config.checks,
     configBlob: config.blob,
@@ -791,6 +802,7 @@ function runOptions(
     // finishes it, once per worktree, before any check runs in it.
     setup: config.setup,
     target: config.target,
+    targetSha: oid,
     workdir,
   }
 }

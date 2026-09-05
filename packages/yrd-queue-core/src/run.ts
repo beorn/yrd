@@ -50,7 +50,7 @@ import type { PauseRecord } from "./pause.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
-import { readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
+import { CapturedQueueObjectsUnavailable, readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine, tipOf } from "./state.ts"
 import {
   checkedTree,
@@ -69,6 +69,8 @@ export type QueueRunOptions = Readonly<{
   repo: string
   /** The branch the queue lands on, at the remote holding it: `<remote>#<branch>`. */
   target: Target
+  /** The target commit whose declaration supplied this round's config and checks. */
+  targetSha: string
   /** The checks the target declares, read from the target commit by the caller. A check with no `on` runs at merge. */
   checks: readonly CheckSpec[]
   /** The target's `setup:`: one shell command run in every worktree this run makes, before any check runs in it. */
@@ -113,7 +115,7 @@ export type Run = Readonly<{
   /** The temp root every program this run starts gets as `TMPDIR`: `<workdir>/tmp`. */
   tmpdir: string
   worktrees: string
-  /** The target the run read at its start; every judgement is against it. */
+  /** The caller's declaration-captured target; every judgement is against it. */
   targetSha: string
   /** The pause record captured in the same remote advertisement as the queue. */
   pause: PauseRecord | undefined
@@ -215,11 +217,34 @@ export class QueueAuthorityUnreadable extends Error {
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   const git = options.git ?? gitIn(options.repo, options.process)
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
-  // One reading of the remote yields both the queue and the commit the target
-  // stood at when it was read, so the run never asks a second time and can
-  // never judge against a target its own queue read did not see.
-  const queue = await readQueue(git, options.target.remote, options.target.branch)
-  const targetSha = queue.target
+  const targetSha = options.targetSha
+  // One captured-object refusal earns one retry across the whole round. Keep
+  // that first failure even after a successful retry: if the post-judge read
+  // then fails, the one error names both facts rather than erasing the first.
+  let retried: CapturedQueueObjectsUnavailable | undefined
+  const failedAgain = (first: CapturedQueueObjectsUnavailable, error: unknown): AggregateError => {
+    const later = error instanceof Error ? error.message : String(error)
+    return new AggregateError(
+      [first, error],
+      `${first.message}; after one queue-read retry, another read failed: ${later}`,
+      { cause: first },
+    )
+  }
+  const read = async () => {
+    try {
+      return await readQueue(git, options.target.remote, options.target.branch, targetSha)
+    } catch (error) {
+      if (retried !== undefined) throw failedAgain(retried, error)
+      if (!(error instanceof CapturedQueueObjectsUnavailable)) throw error
+      retried = error
+      try {
+        return await readQueue(git, options.target.remote, options.target.branch, targetSha)
+      } catch (again) {
+        throw failedAgain(error, again)
+      }
+    }
+  }
+  const queue = await read()
   let stopped: Stopped | undefined
   const run: Run = {
     git,
@@ -305,9 +330,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
   // On-merge: the first checked change in line, re-read so this run's own
   // checked records count.
-  const checked = ordered((await readQueue(git, options.target.remote, options.target.branch)).changes, "checked").find(
-    (entry) => !staleChecked(run, entry),
-  )
+  const checked = ordered((await read()).changes, "checked").find((entry) => !staleChecked(run, entry))
   if (checked !== undefined) {
     const outcome = await guarded(run, checked, () => run.steps.land(run, checked))
     if (outcome === "stuck") stuck.push(checked.change.branch)

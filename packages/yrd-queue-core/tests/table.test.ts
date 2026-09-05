@@ -30,7 +30,7 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
 
-type World = Readonly<{ git: Git; work: string }>
+type World = Readonly<{ git: Git; target: string; work: string }>
 
 async function world(config: string): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-core-table-"))
@@ -48,7 +48,8 @@ async function world(config: string): Promise<World> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "declare the queue"])
   await git(["push", "--quiet", "origin", "main"])
-  return { git, work }
+  const target = (await git(["rev-parse", "HEAD"])).trim()
+  return { git, target, work }
 }
 
 async function submitCommit(w: World, branch: string, file: string): Promise<string> {
@@ -212,7 +213,7 @@ describe("the table is the queue read rendered", () => {
     const one = await submitCommit(w, "task/one", "one.txt")
     await new Promise((resolve) => setTimeout(resolve, 1100))
     const two = await submitCommit(w, "task/two", "two.txt")
-    const rows = list((await readQueue(w.git, "origin", "main")).changes)
+    const rows = list((await readQueue(w.git, "origin", "main", w.target)).changes)
     expect(rows.map((row) => [row.branch, row.position, row.state, row.issue])).toEqual([
       ["task/one", 1, "queued", "@i/1/one.txt"],
       ["task/two", 2, "queued", "@i/1/two.txt"],
@@ -230,7 +231,7 @@ describe("the table is the queue read rendered", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const direct = (await w.git(["rev-parse", "HEAD"])).trim()
 
-    const entries = (await readQueue(w.git, "origin", "main")).changes
+    const entries = (await readQueue(w.git, "origin", "main", direct)).changes
     // The captured reading owns its history even when no local change ref remains.
     await w.git(["update-ref", "-d", changeRef("main", entries[0]!.change)])
     const directMerges = await directMergeCommits(w.git, "main", direct, entries)
@@ -269,7 +270,7 @@ describe("the table is the queue read rendered", () => {
       target: { branch: "main", remote: "origin" },
     })
 
-    const shown = show((await readQueue(w.git, "origin", "main")).changes, "task/one")
+    const shown = show((await readQueue(w.git, "origin", "main", w.target)).changes, "task/one")
     expect(shown.map((entry) => [entry.row.head, entry.row.state, entry.row.reason])).toEqual([
       [second, "queued", undefined],
       [first, "failed", "replaced"],
@@ -298,7 +299,7 @@ describe("the table is the queue read rendered", () => {
       })
     }
     await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
-    const beforeRecheck = (await readQueue(w.git, "origin", "main")).changes
+    const beforeRecheck = (await readQueue(w.git, "origin", "main", w.target)).changes
     expect(beforeRecheck[0]?.reading.state).toBe("stuck")
     await appendRecord(w.git, "main", {
       change,
@@ -339,7 +340,7 @@ describe("the table is the queue read rendered", () => {
     })
     await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
 
-    const queue = await readQueue(w.git, "origin", "main")
+    const queue = await readQueue(w.git, "origin", "main", w.target)
     const entry = queue.changes[0]
     if (entry === undefined) throw new Error("submitted change missing from the queue read")
     const shown = show(await readHistories(w.git, [entry], "origin", "main"), change.branch)

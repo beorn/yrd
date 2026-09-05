@@ -8,7 +8,7 @@
  * else. The remote is the one store; a working repository is a reader that
  * fetches their captured objects before it reads. Nothing here stores a status: the queue
  * is read again from one remote advertisement every time it is asked for.
- * One object-only fetch brings the captured target, pause, change tips and
+ * One object-only fetch brings the declared target, captured pause, change tips and
  * relevant branch heads without moving a local ref or writing `FETCH_HEAD`.
  * One no-walk log reads the tip records, then ancestry is asked once per
  * distinct submitted head. A detail view expands only its selected entries
@@ -54,14 +54,10 @@ export class CapturedQueueObjectsUnavailable extends Error {
 
 /**
  * Every change at the remote, read: one entry per change ref, and nothing for
- * a branch nobody submitted (E2; `submit` is the one writer of a change), plus
- * the commit the target stood at in that same reading.
- *
- * The target's commit is the queue read's own answer, not a second question:
- * the `ls-remote` below already carries it and the fetch below already brings
- * it, so every caller that used to ask again — the queue run with an
- * `ls-remote` and a fetch of its own, `queue list` with a local re-read that
- * only worked because this fetch had run first — reads it from here.
+ * a branch nobody submitted (E2; `submit` is the one writer of a change), with
+ * every entry judged against the caller's target commit. The caller supplies
+ * that declaration-owning commit: a target moving after its declaration was
+ * read belongs to the next round, not this one.
  *
  * Order is not decided here; `inLine` in state.ts is the one place that knows
  * the position in line.
@@ -70,7 +66,8 @@ export async function readQueue(
   git: Git,
   remote: string,
   target: string,
-): Promise<Readonly<{ target: string; changes: QueueRead; pause: PauseRecord | undefined }>> {
+  targetSha: string,
+): Promise<Readonly<{ changes: QueueRead; pause: PauseRecord | undefined }>> {
   const pause = pauseRef(target)
   // Where every branch and every change stands at the remote, in one reading.
   // Every later operation uses these captured object ids, never a tracking or
@@ -78,13 +75,12 @@ export async function readQueue(
   const rows = (await git(["ls-remote", "--refs", remote])).split("\n")
   const heads = new Map<string, string>()
   const changeRefs: Array<Readonly<{ change: Change; oid: string; ref: string }>> = []
-  let targetSha: string | undefined
   let pauseSha: string | undefined
   for (const row of rows) {
     const [sha, ref] = row.trim().split(/\s+/u)
     if (sha === undefined || ref === undefined) continue
     if (ref === `refs/heads/${target}`) {
-      targetSha = sha
+      continue
     } else if (ref.startsWith("refs/heads/")) {
       heads.set(ref.slice("refs/heads/".length), sha)
     } else if (ref === pause) {
@@ -100,8 +96,6 @@ export async function readQueue(
       if (change !== undefined && change.branch !== target) changeRefs.push({ change, oid: sha, ref })
     }
   }
-  if (targetSha === undefined) throw new Error(`the target ${target} is not at ${remote}`)
-
   const named = new Set(changeRefs.map(({ change }) => change.branch))
   const relevantHeads = [...named]
     .filter((branch) => branch !== target)
@@ -156,7 +150,7 @@ export async function readQueue(
     }
     entries.push({ change, reading: readChange(change) })
   }
-  return { changes: entries, pause: capturedPause, target: targetSha }
+  return { changes: entries, pause: capturedPause }
 }
 
 /**

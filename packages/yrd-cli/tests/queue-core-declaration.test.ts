@@ -121,7 +121,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await yrdRefs()).toEqual(expectedYrdRefs)
     expect(await git(refs)).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
-    await expect(readQueue(git, "origin", "release/1.x")).rejects.toThrow(malformedRef)
+    await expect(readQueue(git, "origin", "release/1.x", advanced)).rejects.toThrow(malformedRef)
   })
 
   it("requires pause --reason before any pause ref changes", async () => {

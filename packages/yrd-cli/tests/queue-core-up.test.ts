@@ -15,7 +15,7 @@
  *           expects the next round to read it
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -387,8 +387,57 @@ describe("yrd queue up, the service", () => {
     expect(await w.git(["ls-remote", "--refs", "origin", ref])).toBe(beforeRetry)
   })
 
-  it("reads the target's declaration again every round: a key the target's edit mistyped ends it stuck, naming the key", async () => {
+  it("keeps a round on its declaration's target, then reads the next target's declaration", async () => {
     const w = await world()
+    const checkLog = join(w.workdir, "fixed-target-checks.log")
+    const checkA = join(w.workdir, "check-a.sh")
+    const checkB = join(w.workdir, "check-b.sh")
+    writeFileSync(checkA, `#!/bin/sh\nprintf 'A:%s\\n' "$YRD_BASE_SHA" >> "${checkLog}"\n`)
+    writeFileSync(checkB, `#!/bin/sh\nprintf 'B:%s\\n' "$YRD_BASE_SHA" >> "${checkLog}"\n`)
+    chmodSync(checkA, 0o755)
+    chmodSync(checkB, 0o755)
+    await redeclare(w, `checks:\n  - fixed:\n      run: ${checkA}\n      on: submit\n`)
+    const a = (await w.git(["rev-parse", "HEAD"])).trim()
+    const configA = (await w.git(["rev-parse", `${a}:.yrd.yml`])).trim()
+    await w.git(["checkout", "--quiet", "-b", "task/one", a])
+    writeFileSync(join(w.work, "one.txt"), "one\n")
+    await w.git(["add", "one.txt"])
+    await w.git(["commit", "--quiet", "-m", "one"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    // B exists at the remote but is not main yet. The upload-pack wrapper
+    // advances main after declaration A is captured and fetched, immediately
+    // before the queue's broad advertisement.
+    writeFileSync(join(w.work, ".yrd.yml"), `checks:\n  - fixed:\n      run: ${checkB}\n      on: submit\n`)
+    await w.git(["commit", "--quiet", "-am", "declaration B"])
+    const b = (await w.git(["rev-parse", "HEAD"])).trim()
+    const configB = (await w.git(["rev-parse", `${b}:.yrd.yml`])).trim()
+    await w.git(["push", "--quiet", "origin", `${b}:refs/testing/target-b`])
+    const wrapper = join(w.workdir, "upload-pack-target-race.sh")
+    const calls = join(w.workdir, "upload-pack-target-race.count")
+    writeFileSync(
+      wrapper,
+      [
+        "#!/bin/sh",
+        `count=0; test ! -f "${calls}" || count=$(cat "${calls}")`,
+        "count=$((count + 1))",
+        `printf '%s\\n' "$count" > "${calls}"`,
+        // An exact fetch may be skipped when A is already local. Invocation
+        // two is therefore either that fetch or the queue advertisement; in
+        // both cases A has already been declared and B precedes the queue read.
+        `if test "$count" -eq 2; then git --git-dir="$1" update-ref refs/heads/main ${b} ${a} || exit $?; fi`,
+        'exec git-upload-pack "$@"',
+        "",
+      ].join("\n"),
+    )
+    chmodSync(wrapper, 0o755)
+    await w.git(["config", "remote.origin.uploadpack", wrapper])
+
     const run = capture(w.work)
     let rounds = 0
 
@@ -396,23 +445,32 @@ describe("yrd queue up, the service", () => {
       w.work,
       run.io,
       {
-        afterRound: async () => {
+        afterRound: async (outcome) => {
           rounds += 1
-          if (rounds === 1) await redeclare(w, "batch: 1\n")
+          expect(rounds).toBeLessThanOrEqual(2)
+          if (rounds === 2) {
+            await w.git(["fetch", "--quiet", "origin", "main"])
+            await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+            await redeclare(w, "batch: 1\n")
+          }
+          expect(outcome.base).toBe(rounds === 1 ? a : b)
         },
         command: "up",
         intervalSeconds: 0,
       },
-      { json: true, workdir: w.workdir },
+      { json: true, queue: "main", workdir: w.workdir },
     )
 
     expect(exit, run.stdout()).toBe(2)
-    // The second round never ran: the declaration is read before it, not after.
-    expect(rounds).toBe(1)
+    expect(rounds).toBe(2)
+    expect(Number(readFileSync(calls, "utf8").trim())).toBeGreaterThanOrEqual(2)
     const written = records(run)
-    expect(written).toHaveLength(2)
-    expect(written[0]).toMatchObject({ exitCode: 0, merged: [] })
-    expect(written[1]).toEqual({ ...STUCK, why: expect.stringContaining("batch") as string })
+    expect(written).toHaveLength(3)
+    expect(written[0]).toMatchObject({ base: a, config: configA, exitCode: 0, merged: [], target: a })
+    expect(written[1]).toMatchObject({ base: b, config: configB, exitCode: 0, merged: ["task/one"] })
+    expect(readFileSync(checkLog, "utf8")).toBe(`A:${a}\nB:${b}\n`)
+    // The third round never ran: its malformed declaration is read before it.
+    expect(written[2]).toEqual({ ...STUCK, why: expect.stringContaining("batch") as string })
   })
 
   it("ends stuck when the target no longer carries a declaration at all", async () => {

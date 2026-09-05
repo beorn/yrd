@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { changeRef, gitIn, list, queueRun, readQueue, readRecords, refAt, submit, trailer } from "../src/index.ts"
+import { changeRef, gitIn, list, queueRun, readQueue, readRecords, submit, trailer } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 
 const roots: string[] = []
@@ -33,7 +33,7 @@ type World = Readonly<{
   offMain: string
   /** The newest commit on the component's main when the fixture was made. */
   main: string
-  options(check?: Readonly<{ run: string; on: readonly ("submit" | "merge")[] }>): QueueRunOptions
+  options(check?: Readonly<{ run: string; on: readonly ("submit" | "merge")[] }>): Promise<QueueRunOptions>
 }>
 
 /**
@@ -96,14 +96,17 @@ async function world(): Promise<World> {
     main,
     offMain,
     onMain,
-    options: (check) => ({
-      checks: check === undefined ? [] : [{ name: "component-check", on: check.on, run: check.run }],
-      configBlob: "test-config",
-      env: process.env,
-      repo: work,
-      target: { branch: "main", remote: "origin" },
-      workdir,
-    }),
+    options: async (check) => {
+      return {
+        checks: check === undefined ? [] : [{ name: "component-check", on: check.on, run: check.run }],
+        configBlob: "test-config",
+        env: process.env,
+        repo: work,
+        target: { branch: "main", remote: "origin" },
+        targetSha: await remoteTip(git, "refs/heads/main"),
+        workdir,
+      }
+    },
     work,
   }
 }
@@ -163,8 +166,10 @@ async function submitMissingGitlink(w: World, branch: string, missing: string): 
   return head
 }
 
-async function remoteTarget(w: World): Promise<string> {
-  return (await w.git(["ls-remote", "--refs", "origin", "refs/heads/main"])).trim().split(/\s+/u)[0] ?? ""
+async function remoteTip(git: Git, ref: string): Promise<string> {
+  const tip = (await git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]
+  if (tip === undefined || tip === "") throw new Error(`the remote ref ${ref} is absent`)
+  return tip
 }
 
 async function gitlinkAt(w: World, commit: string): Promise<string> {
@@ -188,18 +193,18 @@ describe("settling gitlinks", () => {
     const head = await submitGitlink(w, "task/off", w.offMain)
     await submitFile(w, "task/next")
 
-    const outcome = await queueRun(w.options())
+    const outcome = await queueRun(await w.options())
 
     expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/next"], stuck: [] })
     const waitingRecords = await readRecords(
       w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/off", head })))!,
+      await remoteTip(w.git, changeRef("main", { branch: "task/off", head })),
     )
     expect(waitingRecords.map((record) => record.kind)).toEqual(["opened", "opened"])
     expect(trailer(waitingRecords.at(-1)!, "Code")).toBe("gitlink-off-main")
     expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("main")
     expect(trailer(waitingRecords.at(-1)!, "Owner")).toBe("the component writer")
-    const waitingQueue = await readQueue(w.git, "origin", "main")
+    const waitingQueue = await readQueue(w.git, "origin", "main", await remoteTip(w.git, "refs/heads/main"))
     expect(waitingQueue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("queued")
     const waitingRow = list(waitingQueue.changes).find((row) => row.head === head)
     expect(waitingRow).toMatchObject({
@@ -218,26 +223,26 @@ describe("settling gitlinks", () => {
     await component(["push", "--quiet", "origin", "main"])
     const componentMain = (await component(["rev-parse", "HEAD"])).trim()
 
-    const retried = await queueRun(w.options())
+    const retried = await queueRun(await w.options())
 
     expect(retried).toMatchObject({ exitCode: 0, failed: [], merged: ["task/off"], stuck: [] })
     expect(
-      (await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/off", head })))!)).map(
+      (await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/off", head })))).map(
         (record) => record.kind,
       ),
     ).toEqual(["opened", "opened", "checked", "merged", "sent"])
-    expect(await gitlinkAt(w, await remoteTarget(w))).toBe(componentMain)
+    expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(componentMain)
   })
 
   it("a held-back authored pin merges raised and keeps the submitted Change identity", async () => {
     const w = await world()
     const head = await submitGitlink(w, "task/on", w.onMain)
 
-    const outcome = await queueRun(w.options())
+    const outcome = await queueRun(await w.options())
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/on"])
-    const target = await remoteTarget(w)
+    const target = await remoteTip(w.git, "refs/heads/main")
     expect(await gitlinkAt(w, target)).toBe(w.main)
     const message = await w.git(["show", "-s", "--format=%B", target])
     expect(message).toContain(`Change: task/on@${head}`)
@@ -256,10 +261,10 @@ describe("settling gitlinks", () => {
     await gitlinkAroundQueue(w, w.offMain)
     await submitFile(w, "task/pass-over-off-main")
 
-    const outcome = await queueRun(w.options())
+    const outcome = await queueRun(await w.options())
 
     expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/pass-over-off-main"] })
-    const target = await remoteTarget(w)
+    const target = await remoteTip(w.git, "refs/heads/main")
     expect(await gitlinkAt(w, target)).toBe(w.offMain)
     expect(await w.git(["show", "-s", "--format=%(trailers:key=Settled,valueonly)", target])).toContain(
       `component@${w.offMain} left-off-main component-main@${w.main}`,
@@ -285,10 +290,13 @@ describe("settling gitlinks", () => {
     const head = await submitMissingGitlink(w, "task/missing", missing)
     await submitFile(w, "task/next")
 
-    const outcome = await queueRun(w.options())
+    const outcome = await queueRun(await w.options())
 
     expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/missing"], merged: ["task/next"], stuck: [] })
-    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/missing", head })))!)
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/missing", head })),
+    )
     expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
     const failed = records.find((record) => record.kind === "failed")
     expect(trailer(failed!, "Fault")).toBe("submitter")
@@ -302,13 +310,13 @@ describe("settling gitlinks", () => {
     const head = await submitFile(w, "task/base-red")
 
     const outcome = await queueRun(
-      w.options({ on: ["submit"], run: "! grep -q 'breaking component main' component/lib.txt" }),
+      await w.options({ on: ["submit"], run: "! grep -q 'breaking component main' component/lib.txt" }),
     )
 
     expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/base-red"] })
     const records = await readRecords(
       w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/base-red", head })))!,
+      await remoteTip(w.git, changeRef("main", { branch: "task/base-red", head })),
     )
     const stuck = records.find((record) => record.kind === "stuck")
     expect(trailer(stuck!, "Code")).toBe("yrd-submodule-main-regression")
@@ -330,12 +338,12 @@ describe("settling gitlinks", () => {
     await gitlinkAroundQueue(w, w.offMain)
     const head = await submitGitlink(w, "task/repair-off-main", w.onMain)
 
-    const outcome = await queueRun(w.options({ on: ["submit"], run: "! grep -q '^three$' component/lib.txt" }))
+    const outcome = await queueRun(await w.options({ on: ["submit"], run: "! grep -q '^three$' component/lib.txt" }))
 
     expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/repair-off-main"] })
     const records = await readRecords(
       w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/repair-off-main", head })))!,
+      await remoteTip(w.git, changeRef("main", { branch: "task/repair-off-main", head })),
     )
     const stuck = records.find((record) => record.kind === "stuck")
     expect(trailer(stuck!, "Code")).toBe("yrd-submodule-main-regression")
@@ -354,12 +362,12 @@ describe("settling gitlinks", () => {
     await advanceComponent(w, "healthy component main")
     const head = await submitFile(w, "task/candidate-red")
 
-    const outcome = await queueRun(w.options({ on: ["submit"], run: "test ! -f task-candidate-red.txt" }))
+    const outcome = await queueRun(await w.options({ on: ["submit"], run: "test ! -f task-candidate-red.txt" }))
 
     expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/candidate-red"], merged: [], stuck: [] })
     const records = await readRecords(
       w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/candidate-red", head })))!,
+      await remoteTip(w.git, changeRef("main", { branch: "task/candidate-red", head })),
     )
     expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
     expect(trailer(records.find((record) => record.kind === "failed")!, "Fault")).toBe("submitter")
@@ -382,7 +390,7 @@ describe("settling gitlinks", () => {
     await w.git(["push", "--quiet", "origin", ":task/first"])
     const direct = await gitlinkAroundQueue(w, w.offMain)
 
-    const outcome = await queueRun(w.options())
+    const outcome = await queueRun(await w.options())
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.directMerges).toEqual([direct])
@@ -436,11 +444,11 @@ describe("settling gitlinks", () => {
       target: { branch: "main", remote: "origin" },
     })
 
-    const outcome = await queueRun(w.options())
+    const outcome = await queueRun(await w.options())
 
     expect(outcome.exitCode).toBe(0)
     const kinds = (
-      await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/unfetched", head })))!)
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/unfetched", head })))
     ).map((record) => record.kind)
     expect(kinds).not.toContain("stuck")
     expect(kinds).toContain("merged")
@@ -451,16 +459,16 @@ describe("settling gitlinks", () => {
     await submitGitlink(w, "task/first", w.onMain)
     const second = await submitGitlink(w, "task/second", w.onMain)
 
-    const outcome = await queueRun(w.options())
+    const outcome = await queueRun(await w.options())
 
     // Both were judged on submit — the first fetched, the second read the
     // run's answer — and one merge per run lands the first (ruling D4).
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/first"])
     expect(
-      (await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/second", head: second })))!)).map(
-        (record) => record.kind,
-      ),
+      (
+        await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/second", head: second })))
+      ).map((record) => record.kind),
     ).toEqual(["opened", "checked"])
   })
 })
