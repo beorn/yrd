@@ -15,6 +15,7 @@
  */
 
 import type { Row, WatchRow } from "@yrd/queue-core"
+import { stateGlyph } from "./watch-format.ts"
 export { watchRows, watchRowKey, type WatchRow, type WatchRowOptions } from "@yrd/queue-core"
 
 /**
@@ -30,7 +31,7 @@ export function matchesTerm(row: WatchRow, term: string): boolean {
   const wanted = term.trim().toLocaleLowerCase()
   if (wanted === "") return true
   return [row.row.branch, row.row.subject, row.run?.id ?? row.row.run, row.row.result, row.row.reason].some(
-    (field) => field !== undefined && field.toLocaleLowerCase().includes(wanted),
+    (field) => field?.toLocaleLowerCase().includes(wanted) === true,
   )
 }
 
@@ -41,27 +42,9 @@ export function filterRows(rows: readonly WatchRow[], terms: readonly string[]):
   return rows.filter((row) => wanted.some((term) => matchesTerm(row, term)))
 }
 
-/**
- * The glyphs the retired watch used for exactly these conditions, kept because
- * the operator already reads them. A change under a check right now takes the
- * working glyph whatever its recorded state says: `live` is an overlay ON the
- * state (table.ts), so the glyph reads the overlay and the WORD still reads
- * the state.
- */
-const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
-  checked: "◉",
-  direct: "→",
-  failed: "×",
-  merged: "✓",
-  queued: "○",
-  stuck: "◌",
-}
-
-const RUNNING_GLYPH = "◉"
-
-/** The glyph for a row: the running one while a check runs on it, else its state's. */
+/** The glyph for a row: the running one while a check runs on it, else its state's — the one table in watch-primitives. */
 export function rowGlyph(row: Row): string {
-  return row.live === undefined ? STATE_GLYPH[row.state] : RUNNING_GLYPH
+  return stateGlyph(row)
 }
 
 /**

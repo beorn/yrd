@@ -17,6 +17,7 @@
  */
 
 import { clocks, type Row } from "@yrd/queue-core"
+import { stateGlyph } from "./watch-format.ts"
 
 export type Notice = Readonly<{
   glyph: string
@@ -27,18 +28,6 @@ export type Notice = Readonly<{
   /** Whose move it is, and why it is theirs. */
   next?: string
 }>
-
-/** The one glyph per state, and the working glyph a live check overlays on any of them. */
-const GLYPH: Readonly<Record<Row["state"], string>> = {
-  checked: "◉",
-  direct: "→",
-  failed: "×",
-  merged: "✓",
-  queued: "○",
-  stuck: "◌",
-}
-
-const RUNNING = "◉"
 
 /**
  * How each state reads in a notice. The core's five words plus `direct` stand
@@ -60,7 +49,7 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
   const cause = joinedRun && row.result !== undefined ? `run result: ${row.result}` : (row.reason ?? row.result)
   const state = joinedRun ? `change ${WORD[row.state]}` : WORD[row.state]
   return {
-    glyph: live === undefined ? GLYPH[row.state] : RUNNING,
+    glyph: stateGlyph(row),
     // The overlay says what is happening RIGHT NOW; the state still says what
     // the records say, and both are on the line, because a change under a
     // check reads `queued` until its checked record lands and that is an
