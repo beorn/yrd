@@ -316,12 +316,14 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     if (record.kind === "result") {
       const index = change.checks.findLastIndex((check) => check.name === record.name && check.phase === record.phase)
       const check = change.checks[index]
-      if (check === undefined)
+      if (check === undefined) {
         throw new Error(
           `run journal ${id} has a result without a check for ${journalKey(branch, head)}: ${String(record.name)}`,
         )
-      if (record.result !== "pass" && record.result !== "fail" && record.result !== "stuck")
+      }
+      if (record.result !== "pass" && record.result !== "fail" && record.result !== "stuck") {
         throw new Error(`run journal ${id} has an invalid check result: ${String(record.result)}`)
+      }
       change.checks[index] = {
         ...check,
         result: record.result,

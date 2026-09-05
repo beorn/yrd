@@ -37,12 +37,14 @@ import { readFile } from "node:fs/promises"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   boundaryRepository,
+  boundaryRepositoryWith,
   mergeAroundQueue,
   queueRunOnce,
   refreshSecondReader,
   removeTemporaryRoots,
   secondReader,
   submitOneCommit,
+  submitFromBay,
   targetTip,
   yrdJson,
   type YrdJsonResult,
@@ -70,8 +72,11 @@ type PlanRow = Readonly<Record<string, unknown>> & { branch?: unknown; head?: un
  * the changes in line, so a reader that answers with something else fails here,
  * once, saying what it answered with instead.
  */
-async function changesListed(repo: string): Promise<{ rows: readonly PlanRow[]; result: YrdJsonResult }> {
-  const result = await yrdJson(repo, "queue", "list")
+async function changesListed(
+  repo: string,
+  latest = false,
+): Promise<{ rows: readonly PlanRow[]; result: YrdJsonResult }> {
+  const result = await yrdJson(repo, "queue", "list", ...(latest ? ["--latest"] : []))
   if (result.exitCode !== 0) throw new Error(`queue list did not answer\n${result.report}`)
   if (typeof result.json !== "object" || result.json === null) {
     throw new Error(`queue list answered with no JSON object, so it named no changes\n${result.report}`)
@@ -327,27 +332,61 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     ).toContain("24058")
   })
 
-  it("a row names its last result and the log that result came from", async () => {
-    // § Commands: `queue list` shows "last result and log path". A failed row
-    // an author cannot open is a row that tells them to go and ask the queue.
-    const { repo } = await boundaryRepository({ exit: 1 })
-    const { branch } = await submitOneCommit(repo, "red")
+  it("two changes running one check keep their own result and exact log bytes in list", async () => {
+    // 24095: both changes share one check name. A later
+    // pass must not replace the earlier failure's bytes, or its list pointer.
+    // Merely proving one log is readable missed that regression.
+    const { repo } = await boundaryRepositoryWith({
+      checks: [
+        {
+          name: "check",
+          run: 'if test -f red.txt; then echo "FAIL red"; exit 1; else echo "PASS green"; fi',
+        },
+      ],
+    })
+    const red = await submitOneCommit(repo, "red")
+    const green = await submitOneCommit(repo, "green")
+    const outcome = await queueRunOnce(repo)
+    expect(outcome.exitCode, outcome.report).toBe(1)
+    const next = await queueRunOnce(repo)
+    expect(next.exitCode, next.report).toBe(0)
 
-    await queueRunOnce(repo)
+    // Default history is separately broken: historical-run-rows-use-latest-result pairs old rows with the latest result.
+    const { rows, result } = await changesListed(repo, true)
+    const failed = rowFor(rows, red.branch, result.report)
+    const passed = rowFor(rows, green.branch, result.report)
+    expect(stateOf(failed, result.report)).toBe("failed")
+    expect(stateOf(passed, result.report)).toBe("merged")
+    expect(String(failed.result), result.report).toContain("fail")
+    expect(failed.log, result.report).not.toBe(passed.log)
+    for (const [row, change, verdict] of [
+      [failed, red, "FAIL"],
+      [passed, green, "PASS"],
+    ] as const) {
+      expect(typeof row.log, result.report).toBe("string")
+      expect(String(row.log), result.report).toContain(`${change.branch}@${change.headSha}`)
+      expect(typeof row.run, result.report).toBe("string")
+      expect(String(row.log), result.report).toContain(String(row.run))
+      await expect(readFile(String(row.log), "utf8"), result.report).resolves.toBe(
+        `${verdict} ${change === red ? "red" : "green"}\n`,
+      )
+    }
 
-    const { rows, result } = await changesListed(repo)
-    const row = rowFor(rows, branch, result.report)
-    expect(String(row.result), result.report).toContain("fail")
-
-    const log = row.log
-    expect(
-      typeof log === "string" && log !== "",
-      `the row for ${branch} names no log path; its keys are ${Object.keys(row).join(",")}\n${result.report}`,
-    ).toBe(true)
-    await expect(
-      readFile(String(log), "utf8"),
-      `the row names ${String(log)}, which is not there to read\n${result.report}`,
-    ).resolves.toBeTypeOf("string")
+    // Retrying the SAME head needs another run directory, not another name
+    // for this change. Collapse to change-only and wx refuses this run.
+    const retry = await submitFromBay(repo, red.bayPath)
+    expect(retry.exitCode, retry.report).toBe(0)
+    const retried = await queueRunOnce(repo)
+    expect(retried.exitCode, retried.report).toBe(1)
+    const latest = await changesListed(repo, true)
+    const redAgain = rowFor(latest.rows, red.branch, latest.result.report)
+    expect(stateOf(redAgain, latest.result.report)).toBe("failed")
+    expect(redAgain.log).not.toBe(failed.log)
+    expect(redAgain.run).not.toBe(failed.run)
+    expect(String(redAgain.log)).toContain(String(redAgain.run))
+    await expect(readFile(String(redAgain.log), "utf8")).resolves.toBe("FAIL red\n")
+    await expect(readFile(String(failed.log), "utf8")).resolves.toBe("FAIL red\n")
+    await expect(readFile(String(passed.log), "utf8")).resolves.toBe("PASS green\n")
   })
 
   it("merged rows go below the changes in line", async () => {
