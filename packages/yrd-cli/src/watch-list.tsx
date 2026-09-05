@@ -129,16 +129,29 @@ export function separatorBefore(rows: readonly WatchRow[], index: number): strin
   return day !== undefined && previous !== undefined && day !== previous ? day : undefined
 }
 
-/** The top line (items 30, 32, 33): `YRD QUEUES`, then one pill per queue; a selected pill fills its background. */
+/**
+ * The top line (items 30, 32, 32b, 33, 36): `YRD QUEUES`, then one pill per
+ * queue — `digit path ⎇ branch` — and, on an interactive surface, the trailing
+ * `all` pill that clears BOTH filter kinds, as the retired pane drew it. ON
+ * pills are bright and OFF pills muted through the pill's own colour ladder:
+ * a filled background behind a pill is not this line's idiom, and the theme
+ * guarantees no contrast for the pill's text on one.
+ */
 export function TopLine({
   queues,
   visible,
   onToggle,
+  allOn,
+  onShowAll,
 }: {
   queues: readonly WatchQueue[]
   /** The labels of the queues shown; `undefined` means every one. */
   visible: ReadonlySet<string> | undefined
   onToggle: (label: string) => void
+  /** True when neither filter kind narrows anything. */
+  allOn: boolean
+  /** Clears both filter kinds; absent on a one-shot print, where there is nothing to clear. */
+  onShowAll?: () => void
 }) {
   return (
     <Box height={1} flexDirection="row" columnGap={2} flexShrink={0} minWidth={0} overflow="hidden" paddingLeft={1}>
@@ -146,26 +159,20 @@ export function TopLine({
         YRD QUEUES
       </Text>
       <TogglePillGroup flexShrink={1} minWidth={0} overflow="hidden">
-        {queues.map((queue, index) => {
-          const selected = visible === undefined || visible.has(queue.label)
-          return (
-            <Box
-              key={`${queue.path}@${queue.branch}`}
-              backgroundColor={selected ? "$bg-selected" : "$bg-surface-subtle"}
-              paddingX={1}
-              flexShrink={0}
-            >
-              <TogglePill
-                label={pillLabel(queue, index + 1)}
-                boldFirstLetter
-                active={selected}
-                onToggle={() => {
-                  onToggle(queue.label)
-                }}
-              />
-            </Box>
-          )
-        })}
+        {queues.map((queue, index) => (
+          <TogglePill
+            key={`${queue.path}@${queue.branch}`}
+            label={pillLabel(queue, index + 1)}
+            boldFirstLetter
+            active={visible === undefined || visible.has(queue.label)}
+            onToggle={() => {
+              onToggle(queue.label)
+            }}
+          />
+        ))}
+        {onShowAll === undefined ? null : (
+          <TogglePill label="all" boldFirstLetter active={allOn} onToggle={onShowAll} />
+        )}
       </TogglePillGroup>
     </Box>
   )

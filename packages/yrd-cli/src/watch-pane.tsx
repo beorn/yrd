@@ -478,7 +478,13 @@ export function WatchPane({
           </Text>
         )}
         {/* The top line is ONLY the title and the queue pills (items 30, 32b, 33). */}
-        <TopLine queues={shown.queues} visible={visibleQueues} onToggle={toggleQueue} />
+        <TopLine
+          queues={shown.queues}
+          visible={visibleQueues}
+          onToggle={toggleQueue}
+          allOn={allOn}
+          {...(live ? { onShowAll: showAll } : {})}
+        />
         {/* Where the journal was looked for, when there was none. A watch that
             showed no running check because it had no journal to read must say
             so, or it reads as a queue with nothing to do. */}

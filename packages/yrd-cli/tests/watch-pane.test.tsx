@@ -140,6 +140,25 @@ describe("the top line (items 30, 32d, 33)", () => {
     // The old `QUEUE main ROOT /repo` row and the queue's address are gone from the top.
     expect(text).not.toContain("QUEUE main")
     expect(first).not.toContain("example.test")
+    // A one-shot print has nothing to clear, so the retired pane's trailing `all` pill is absent from it.
+    expect(first?.trimEnd().endsWith("all")).toBe(false)
+  })
+
+  it("on the live pane carries the retired pane's trailing `all` pill, which clears both filter kinds", async () => {
+    const rows: WatchRow[] = [{ row: row({ branch: "task/queued", state: "queued" }) }, { row: failedRow() }]
+    const app = render(<WatchPane snapshot={snapshot({ rows })} live />, { cols: 120, rows: 40 })
+    await app.waitForLayoutStable()
+    const [first] = app.text.split("\n")
+    expect(first).toContain("1 /repo ⎇ main")
+    expect(first?.trimEnd().endsWith("all")).toBe(true)
+
+    app.press("f")
+    await app.waitForLayoutStable()
+    expect(app.text).toContain("1 of 2 change(s)")
+    app.press("a")
+    await app.waitForLayoutStable()
+    expect(app.text).toContain("2 of 2 change(s)")
+    app.unmount()
   })
 
   it("puts the pause above everything, because a queue that is not running is the loudest thing about it", async () => {
