@@ -91,6 +91,8 @@ export const ENDINGS = ["merged", "failed", "stuck", "merged-direct"] as const
 
 export type Ending = (typeof ENDINGS)[number]
 
+export type Landing = "product" | "external"
+
 /**
  * One entry of `notify:`: a name the declaration chooses, the endings it wants,
  * and the command that gets the record on stdin.
@@ -113,6 +115,8 @@ export type Notifier = Readonly<{
 export type QueueConfig = Readonly<{
   /** The branch the queue lands on, at the remote holding it; `origin#main` unless declared. */
   target: Target
+  /** A component's landing policy, when the declaration names one. */
+  landing?: Landing
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */
   setup?: string
@@ -150,9 +154,18 @@ export function parseConfig(
   if (!isRecord(raw)) throw new Error(`.yrd.yml at ${at.slice(0, 12)} is not a mapping`)
   onlyKeys(raw, TOP_KEYS, ".yrd.yml")
   const notify = readNotify(raw.notify)
+  const landing = optionalLanding(raw)
   const setup = optionalString(raw, "setup")
   const teardown = optionalString(raw, "teardown")
-  return { blob, checks: readChecks(raw.checks), notify, setup, teardown, target }
+  return {
+    blob,
+    checks: readChecks(raw.checks),
+    ...(landing === undefined ? {} : { landing }),
+    notify,
+    setup,
+    teardown,
+    target,
+  }
 }
 
 export type Hints = Readonly<{
@@ -288,7 +301,7 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 // consumer, and one nobody reads is still refused. A fresh worktree has
 // submodules and nothing else, so the target says how to finish it once
 // instead of every check prefixing its own `run:` with the same install.
-const TOP_KEYS = ["checks", "setup", "teardown", "notify"] as const
+const TOP_KEYS = ["checks", "setup", "teardown", "notify", "landing"] as const
 
 /**
  * A key the declaration used to read, and where its meaning went. A typo is
@@ -319,6 +332,15 @@ function optionalString(record: Record<string, unknown>, key: string): string | 
   const value = record[key]
   if (value === undefined) return undefined
   if (typeof value !== "string" || value === "") throw new Error(`.yrd.yml ${key}: must be a non-empty string`)
+  return value
+}
+
+function optionalLanding(record: Record<string, unknown>): Landing | undefined {
+  const value = record.landing
+  if (value === undefined) return undefined
+  if (value !== "product" && value !== "external") {
+    throw new Error(".yrd.yml landing: must be product or external")
+  }
   return value
 }
 

@@ -84,6 +84,26 @@ describe("the queue declaration grammar", () => {
     })
   })
 
+  // Requirement: component declarations explicitly name product or external;
+  // existing root declarations remain mode-less. Before this table, the parser
+  // had no accepted landing mode and so could not distinguish that contract
+  // from an ignored or malformed component mode.
+  it.each([
+    ["a product component", "landing: product\n", "product"],
+    ["an external component", "landing: external\n", "external"],
+    ["an existing root declaration", "{}\n", undefined],
+  ] as const)("reads %s landing mode", (_name, text, landing) => {
+    expect(parseConfig(text, SOURCE).landing).toBe(landing)
+  })
+
+  it.each([
+    ["an unknown mode", "landing: neither\n"],
+    ["an explicit null mode", "landing: null\n"],
+    ["a non-string mode", "landing: true\n"],
+  ] as const)("refuses %s", (_name, text) => {
+    expect(() => parseConfig(text, SOURCE)).toThrow(/\.yrd\.yml landing: must be product or external/u)
+  })
+
   it.each([
     ["unknown top-level key", "setupp: bun install\n", /unknown key setupp .*known:/u],
     ["empty setup", "setup: ''\n", /setup: must be a non-empty string/u],
