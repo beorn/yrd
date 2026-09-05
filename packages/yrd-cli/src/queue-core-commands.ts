@@ -72,6 +72,7 @@ import { stripAnsi } from "@silvery/ansi"
 import { CHECK_GLYPH, clock, firstLine, mediaDuration } from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOf, type RunDecision } from "./watch-stats.ts"
+import { formatQueueStats, parseSince, queueStats, type PushedRef, type StatsBy } from "./queue-stats.ts"
 import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
@@ -108,6 +109,15 @@ export type CoreQueueCommand =
       stop?: AbortSignal
     }>
   | Readonly<{ command: "show"; branch: string }>
+  | Readonly<{
+      command: "stats"
+      /** `3h`, an instant, or a commit: rows decided before it and refs whose tip is older are outside the window. */
+      since?: string
+      /** The grouping under the whole-queue line: `submitter` (default) or `branch`. */
+      by?: StatsBy
+      /** The instant the stats are at; a test pins it, the CLI takes the clock. */
+      now?: Date
+    }>
   | Readonly<{ command: "check"; names: readonly string[] }>
 
 /** What each command is called when it has to say it needs a queue. */
@@ -117,6 +127,7 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   list: "queue list",
   run: "queue run",
   show: "queue show",
+  stats: "queue stats",
   submit: "submit",
   resume: "queue resume",
   up: "queue up",
@@ -390,22 +401,7 @@ export async function coreQueueCommand(
           entries: QueueEntries
         }>
       > => {
-        const queue = await readQueue(git, config.target.remote, config.target.branch)
-        // The run journal on THIS machine, and the head subjects in one
-        // batched read: the two joins the table needs and neither of them a
-        // second derivation of anything the records already say. A machine
-        // that runs no queue has no journal, and `journals.absent` is the
-        // sentence that says so rather than a row that reads as if nothing
-        // were running.
-        const journals = readJournals(join(workdir, "logs"))
-        const all = list(queue.changes, {
-          directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
-          journals,
-          subjects: await subjects(
-            git,
-            queue.changes.map((entry) => entry.change.head),
-          ),
-        })
+        const { queue, journals, all } = await readListing(git, config, workdir)
         const rows = filterRows(
           watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
           request.terms ?? [],
@@ -630,6 +626,33 @@ export async function coreQueueCommand(
         : results.some((result) => result.result === "fail")
           ? 1
           : 0
+    }
+    case "stats": {
+      // The same reading `queue list` prints, then the numbers (@i/10-yrd/24164):
+      // one row per run per change, exactly the rows the watch and the list
+      // show, so a stat can never disagree with the table it summarizes.
+      const now = request.now ?? new Date()
+      let since: Date | undefined
+      if (request.since !== undefined) {
+        since = parseSince(request.since, now) ?? (await instantOfCommit(git, request.since))
+        if (since === undefined) {
+          io.stderr(
+            `yrd: --since ${request.since} is not a duration (3h, 45m, 2d, 1w), an instant, or a commit this repository has\n`,
+          )
+          return 2
+        }
+      }
+      const { journals, all } = await readListing(git, config, workdir)
+      const rows = watchRows(all, { journals })
+      const refs = await pushedRefs(git, config.target.remote, config.target.branch)
+      const stats = queueStats(rows, refs, {
+        now,
+        ...(since === undefined ? {} : { since }),
+        ...(request.by === undefined ? {} : { by: request.by }),
+      })
+      const name = queueName(config.target, await remoteUrl(git, config.target.remote))
+      emit(io, options.json, { queue: name, ...stats }, formatQueueStats(stats, name))
+      return 0
     }
     case "show": {
       const queue = await readQueue(git, config.target.remote, config.target.branch)
@@ -1180,6 +1203,92 @@ function checkLines(check: CheckView): readonly string[] {
     check.spec === undefined ? "      (the declaration does not name this check)" : `      $ ${check.spec.run}`,
     ...(check.log === undefined ? [] : [`      log ${check.log}`]),
   ]
+}
+
+/**
+ * One reading of the queue as the list, the watch and the stats consume it:
+ * the change refs at the remote, the run journal on THIS machine, the direct
+ * commits on the target (E5) and the head subjects, in one batched read. A
+ * machine that runs no queue has no journal, and `journals.absent` is the
+ * sentence that says so rather than a row that reads as if nothing were
+ * running. Nothing here derives a state: `list()` does, once, for everyone.
+ */
+async function readListing(
+  git: Git,
+  config: QueueConfig,
+  workdir: string,
+): Promise<Readonly<{ queue: Awaited<ReturnType<typeof readQueue>>; journals: Journals; all: readonly Row[] }>> {
+  const queue = await readQueue(git, config.target.remote, config.target.branch)
+  const journals = readJournals(join(workdir, "logs"))
+  const all = list(queue.changes, {
+    directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
+    journals,
+    subjects: await subjects(
+      git,
+      queue.changes.map((entry) => entry.change.head),
+    ),
+  })
+  return { all, journals, queue }
+}
+
+/** A commit's committer instant, when this repository has it; undefined for anything git cannot resolve to a commit. */
+async function instantOfCommit(git: Git, text: string): Promise<Date | undefined> {
+  try {
+    const seconds = (await git(["log", "-1", "--format=%ct", `${text}^{commit}`, "--"])).trim()
+    return seconds === "" ? undefined : new Date(Number(seconds) * 1000)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Every branch at the remote but the target, with whether a change ref names it
+ * (plan E2: a push without a submit is not a change) and the tip's committer
+ * instant when the commit is here — the queue read fetches the submitted heads
+ * and the target, never the rest, so an unsubmitted tip is dated only when
+ * some earlier fetch brought it, and the stats say how many it could not date.
+ * One `ls-remote`, the same list the queue read itself starts from.
+ */
+async function pushedRefs(git: Git, remote: string, target: string): Promise<readonly PushedRef[]> {
+  const listed = (await git(["ls-remote", "--refs", remote])).split("\n")
+  const heads = new Map<string, string>()
+  const submitted = new Set<string>()
+  for (const line of listed) {
+    const [sha, ref] = line.trim().split(/\s+/u)
+    if (sha === undefined || ref === undefined) continue
+    if (ref.startsWith("refs/heads/")) heads.set(ref.slice("refs/heads/".length), sha)
+    else if (ref.startsWith("refs/yrd/changes/")) {
+      const name = ref.slice("refs/yrd/changes/".length)
+      const at = name.lastIndexOf("@")
+      submitted.add(at === -1 ? name : name.slice(0, at))
+    }
+  }
+  heads.delete(target)
+  // The committer instants of the tips this repository has, in one batched
+  // read; a sha git does not have answers `missing` and stays undated.
+  const dated = new Map<string, Date>()
+  const shas = [...new Set(heads.values())]
+  if (shas.length > 0) {
+    const answer = await git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], `${shas.join("\n")}\n`)
+    const present = answer
+      .split("\n")
+      .map((line) => line.trim().split(" "))
+      .filter((parts) => parts[1] === "commit")
+      .map((parts) => parts[0] ?? "")
+    if (present.length > 0) {
+      const stamps = await git(["log", "--no-walk=unsorted", "--format=%H %ct", ...present, "--"])
+      for (const line of stamps.split("\n")) {
+        const [sha, seconds] = line.trim().split(" ")
+        if (sha !== undefined && seconds !== undefined && seconds !== "") {
+          dated.set(sha, new Date(Number(seconds) * 1000))
+        }
+      }
+    }
+  }
+  return [...heads.entries()].map(([branch, head]) => {
+    const committedAt = dated.get(head)
+    return { branch, head, submitted: submitted.has(branch), ...(committedAt === undefined ? {} : { committedAt }) }
+  })
 }
 
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {

@@ -38,6 +38,7 @@ yrd queue pause <reason> [--notify <seat>]                        stop checking 
 yrd queue resume [reason] [--notify <seat>]                       resume on the next service interval
 yrd queue list [filter...] [--latest] [--watch]                   every change in line, its state, position, last result and log; `yrd list` is the same command
 yrd watch [filter...]                                             `yrd queue list --watch`: on a terminal, the pane
+yrd queue stats [--since 3h|<time>|<sha>] [--by submitter|branch] merged, failed, same-head retries, re-pushed branches, refs pushed and never submitted, opened→merged latency
 yrd queue show <branch>                                           that branch's changes, newest first, each check's result and log
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD
 yrd env open|list                                                 a checkout of one branch to work in

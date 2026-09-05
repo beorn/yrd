@@ -2,7 +2,7 @@
  * The whole command surface ([plan](../../../../pm/@i/10-yrd/plan.md)
  * § The final design, Commands).
  *
- * The command surface is `yrd queue submit|run|up|pause|resume|list|show`,
+ * The command surface is `yrd queue submit|run|up|pause|resume|list|stats|show`,
  * `yrd check`, `yrd env open|list`, with `yrd submit` and `yrd list` as the
  * aliases of the two used most, `yrd watch` as `queue list --watch`, and
  * `yrd bay` as `env`'s until flag day's word is retired. Every
@@ -27,6 +27,7 @@
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
+import { fdWriters } from "./stdout-fd.ts"
 import { listEnvironments, openEnvironment } from "./env-commands.ts"
 import {
   closeGarage,
@@ -242,6 +243,33 @@ function buildProgram(
       .option("--watch", WATCH_FLAG_HELP),
   ).action(async (filters, options) => queueList(filters as string[] | undefined, options))
   queue
+    .command("stats")
+    .description(
+      "the queue's numbers from the same rows `queue list` shows: merged, failed, same-head retries, re-pushed " +
+        "branches, refs pushed and never submitted, opened→merged latency; for the whole queue and per submitter or branch",
+    )
+    .option(
+      "--since <when>",
+      "a duration (3h, 45m, 2d, 1w), an instant, or a commit; rows decided before it are outside",
+    )
+    .option("--by <key>", "group under the queue line by submitter (default) or branch")
+    .option("--json", "emit stable JSON: one document, complete on a pipe or a file")
+    .action(async (options) => {
+      const { by, json, since } = options as { by?: string; json?: boolean; since?: string }
+      if (by !== undefined && by !== "submitter" && by !== "branch") {
+        io.stderr(`yrd: --by takes submitter or branch, not ${by}\n`)
+        setExit(2)
+        return
+      }
+      const taken = await coreQueueCommand(
+        cwd(),
+        io,
+        { command: "stats", ...(since === undefined ? {} : { since }), ...(by === undefined ? {} : { by }) },
+        { json, env, log: log() },
+      )
+      setExit(taken)
+    })
+  queue
     .command("show <branch>")
     .description("the branch's changes, each check's result and log")
     .option("--json", "emit stable JSON")
@@ -373,6 +401,7 @@ function addExamples(program: CliCommand, name: string): void {
   program.addHelpSection("Examples:", [
     [`$ ${name} submit fix-login`, "push the branch and open its change"],
     [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
+    [`$ ${name} queue stats --since 1d`, "merged, failed, retries, re-pushes and latency, per submitter"],
     [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
     [`$ ${name} queue run`, "one round of queue work, run now"],
     [`$ ${name} check affected-tests`, "run one of the queue's checks here, now"],
@@ -384,6 +413,7 @@ function addQueueExamples(queue: CliCommand, name: string): void {
   queue.addHelpSection("Examples:", [
     [`$ ${name} queue submit fix-login`, "push the branch and open its change"],
     [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
+    [`$ ${name} queue stats --since 1d`, "merged, failed, retries, re-pushes and latency, per submitter"],
     [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
     [`$ ${name} queue run`, "one round of queue work, run now"],
     [`$ ${name} queue up`, "the service: the same round on a loop"],
@@ -439,9 +469,11 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
 /** The process entry, shared by `yrd` and `git-yrd`. */
 export async function runYrdExecutable(): Promise<never> {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
+  // Direct fd writes: a `--json` document larger than a pipe's buffer reaches
+  // `| jq` and `> file` whole, where an asynchronous write could be cut at exit.
   const io: YrdCliIO = {
-    stdout: (text) => void process.stdout.write(text),
-    stderr: (text) => void process.stderr.write(text),
+    stdout: fdWriters.stdout,
+    stderr: fdWriters.stderr,
     color,
     cwd: process.cwd(),
   }
