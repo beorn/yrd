@@ -15,11 +15,11 @@
  *           expects the next round to read it
  */
 
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
-import { appendRecord, changeRef, gitIn, submit, type Git } from "@yrd/queue-core"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import { appendRecord, changeRef, gitIn, readRecords, submit, trailer, type Git } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -141,6 +141,8 @@ type GitlinkWorld = World &
     a: string
     /** The component's next commit, on its main; the root does not record it yet. */
     b: string
+    /** The real CLI loaded from this world's component, not an injected gitlink. */
+    command: typeof coreQueueCommand
   }>
 
 /**
@@ -148,7 +150,7 @@ type GitlinkWorld = World &
  * at `a`. Modelled on the queue core's own gitlink case: `b` is on the
  * component's main, so candidate settling accepts a change that records it.
  */
-async function gitlinkWorld(): Promise<GitlinkWorld> {
+async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-gitlink-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -160,8 +162,9 @@ async function gitlinkWorld(): Promise<GitlinkWorld> {
   const cg = gitIn(componentWork)
   await identity(cg)
   await cg(["checkout", "--quiet", "-b", "main"])
+  cpSync(resolve(import.meta.dirname, "../src"), join(componentWork, "packages/yrd-cli/src"), { recursive: true })
   writeFileSync(join(componentWork, "lib.txt"), "a\n")
-  await cg(["add", "lib.txt"])
+  await cg(["add", "lib.txt", "packages"])
   await cg(["commit", "--quiet", "-m", "a"])
   const a = (await cg(["rev-parse", "HEAD"])).trim()
   await cg(["push", "--quiet", "origin", "main"])
@@ -188,7 +191,15 @@ async function gitlinkWorld(): Promise<GitlinkWorld> {
 
   const workdir = join(root, "queue")
   mkdirSync(workdir, { recursive: true })
-  return { a, b, git, work, workdir }
+  const cli = join(work, "component/packages/yrd-cli")
+  symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(cli, "node_modules"), "dir")
+  if (sourceReadFailure) {
+    // Leave real source files readable but make HEAD unborn: rev-parse must
+    // fail, not turn an embedded service into an unchecked standalone one.
+    await gitIn(join(work, "component"))(["symbolic-ref", "HEAD", "refs/heads/unborn-runtime"])
+  }
+  const { coreQueueCommand: command } = await import(join(cli, "src/queue-core-commands.ts"))
+  return { a, b, command, git, work, workdir }
 }
 
 /** A change that moves the component's gitlink to `sha`, submitted to the queue. */
@@ -203,27 +214,47 @@ async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Prom
   await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 }
 
-/** This checkout's own commit: what the service finds when nothing names the gitlink. */
-async function thisCheckout(): Promise<string> {
-  return (await gitIn(resolve(import.meta.dirname, "../../.."))(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
-}
-
 const STUCK = { exitCode: 2, failed: [], merged: [], stuck: [] }
 
 describe("yrd queue up, the service", () => {
-  it("stays alive through a paused round and resumes the queued change after resume", async () => {
+  it("stays alive through pause and two consecutive merges after resume (24096)", async () => {
     const w = await world()
-    await w.git(["checkout", "--quiet", "-b", "task/one", "main"])
-    writeFileSync(join(w.work, "one.txt"), "one\n")
-    await w.git(["add", "one.txt"])
-    await w.git(["commit", "--quiet", "-m", "one"])
-    const head = (await w.git(["rev-parse", "HEAD"])).trim()
-    await w.git(["checkout", "--quiet", "main"])
-    await submit(w.git, "origin", {
-      branch: "task/one",
-      submitter: "@dev/2",
-      target: { branch: "main", remote: "origin" },
-    })
+    const heads = new Map<string, string>()
+    // The notifier runs after the atomic merge and before its sent record.
+    // A second writer at the real remote wins that interval for each merge.
+    const remote = (await w.git(["remote", "get-url", "origin"])).trim()
+    await identity(gitIn(remote))
+    const rival = join(w.work, "..", "notify-rival.ts")
+    writeFileSync(
+      rival,
+      `
+import { appendRecord, changeRef, gitIn, parseChangeName, readRecords } from ${JSON.stringify(resolve(import.meta.dirname, "../../yrd-queue-core/src/index.ts"))}
+const change = parseChangeName(JSON.parse(await Bun.stdin.text()).change)
+if (!change) throw new Error("notifier received no change")
+const git = gitIn(${JSON.stringify(remote)})
+const ref = changeRef("main", change)
+const oid = (await git(["rev-parse", "--verify", ref + "^{commit}"])).trim()
+const tip = (await readRecords(git, oid)).at(-1)
+if (!tip || tip.kind !== "merged") throw new Error("notifier ran before the merge record landed")
+await appendRecord(git, "main", { change, kind: "merged", subject: "another observer recorded the merge", trailers: tip.trailers })
+`,
+    )
+    await redeclare(w, `notify:\n  - rival:\n      on: [merged]\n      run: ${JSON.stringify(`bun '${rival}'`)}\n`)
+    // One service invocation must survive its first merge's bookkeeping and
+    // reach the next admitted change, not merely return success for one round.
+    for (const name of ["one", "two"]) {
+      await w.git(["checkout", "--quiet", "-b", `task/${name}`, "main"])
+      writeFileSync(join(w.work, `${name}.txt`), `${name}\n`)
+      await w.git(["add", `${name}.txt`])
+      await w.git(["commit", "--quiet", "-m", name])
+      heads.set(name, (await w.git(["rev-parse", "HEAD"])).trim())
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", {
+        branch: `task/${name}`,
+        submitter: "@dev/2",
+        target: { branch: "main", remote: "origin" },
+      })
+    }
     expect(
       await coreQueueCommand(
         w.work,
@@ -236,6 +267,7 @@ describe("yrd queue up, the service", () => {
     const stop = new AbortController()
     let rounds = 0
     const service = capture(w.work)
+    const { log, rows } = logRows()
     expect(
       await coreQueueCommand(
         w.work,
@@ -253,21 +285,39 @@ describe("yrd queue up, the service", () => {
                 { by: "@chief", command: "resume", reason: "repair landed" },
                 { workdir: w.workdir },
               )
-            } else {
+            } else if (rounds === 3) {
               stop.abort()
             }
           },
         },
-        { json: true, workdir: w.workdir },
+        { json: true, log, workdir: w.workdir },
       ),
     ).toBe(0)
-    expect(rounds).toBe(2)
+    expect(rounds).toBe(3)
     expect(records(service)[0]).toMatchObject({
       exitCode: 0,
       merged: [],
       stopped: { ring: "pause", what: { kind: "paused" } },
     })
     expect(records(service)[1]).toMatchObject({ exitCode: 0, merged: ["task/one"] })
+    expect(records(service)[2]).toMatchObject({ exitCode: 0, merged: ["task/two"] })
+    for (const name of ["one", "two"]) {
+      expect((await w.git(["show", `origin/main:${name}.txt`])).trim()).toBe(name)
+      const head = heads.get(name)
+      if (head === undefined) throw new Error(`no submitted head for ${name}`)
+      const change = { branch: `task/${name}`, head }
+      const ref = changeRef("main", change)
+      await w.git(["fetch", "--quiet", "origin", `+${ref}:${ref}`])
+      const tip = (await w.git(["rev-parse", "--verify", `${ref}^{commit}`])).trim()
+      const history = await readRecords(w.git, tip)
+      expect(history.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "merged", "sent"])
+      expect(trailer(history[4]!, "State")).toBe("merged")
+      const merge = trailer(history[2]!, "Merge")
+      expect(merge).toMatch(/^[0-9a-f]{40}$/u)
+      await w.git(["merge-base", "--is-ancestor", merge!, "origin/main"])
+      const warning = rows.find((row) => row.level === "warn" && row.message.startsWith(`${ref}:`))
+      expect(warning?.message).toMatch(/remote [0-9a-f]{40}, intended [0-9a-f]{40} \(diverged\); inspect: git -C /u)
+    }
   })
 
   it("pause is visible, refuses live and dry-run submit, and resume admits the same branch", async () => {
@@ -500,12 +550,20 @@ describe("yrd queue up, the service", () => {
   it("ends the loop, exit 0, when the round it ran merged the change that moves its own gitlink", async () => {
     const w = await gitlinkWorld()
     await submitGitlink(w, "task/gitlink", w.b)
+    await gitIn(join(w.work, "component"))(["checkout", "--quiet", w.a])
     const run = capture(w.work)
 
-    const exit = await coreQueueCommand(
+    const exit = await w.command(
       w.work,
       run.io,
-      { command: "up", intervalSeconds: 0, gitlink: { path: "component", sha: w.a } },
+      {
+        command: "up",
+        intervalSeconds: 0,
+        afterRound: async () => {
+          await w.git(["merge", "--ff-only", "origin/main"])
+          await gitIn(join(w.work, "component"))(["checkout", "--quiet", w.b])
+        },
+      },
       { json: true, workdir: w.workdir },
     )
 
@@ -521,7 +579,89 @@ describe("yrd queue up, the service", () => {
     expect((await w.git(["ls-tree", "origin/main", "--", "component"])).trim()).toBe(`160000 commit ${w.b}\tcomponent`)
   })
 
-  it("a signal ends it, exit 0; and with no gitlink named, it finds its own commit and says the target carries no gitlink at it", async () => {
+  it.each(["stop", "project", "already projected"])("runs no stale round during checkout lag (%s)", async (ending) => {
+    const w = await gitlinkWorld()
+    // The recorded target moves first; the process still loads a from its checkout.
+    await w.git(["update-index", "--cacheinfo", "160000", w.b, "component"])
+    await w.git(["commit", "--quiet", "-m", "target records b before local projection"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const { log, rows } = logRows()
+    let rounds = 0
+    const project = async () => {
+      const sub = gitIn(join(w.work, "component"))
+      await sub(["fetch", "--quiet", "origin", "main"])
+      await sub(["checkout", "--quiet", w.b])
+    }
+    // The module is already imported at a. Moving disk HEAD before up must not
+    // re-label its cached code as b.
+    if (ending === "already projected") await project()
+    const service = w.command(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterRound: () => {
+          rounds += 1
+          stop.abort()
+        },
+      },
+      { json: true, log, workdir: w.workdir },
+    )
+    try {
+      if (ending !== "already projected") {
+        await vi.waitFor(() => expect(run.stdout()).toContain("waiting for checkout"))
+        expect(rounds).toBe(0)
+        if (ending === "stop") stop.abort()
+        else await project()
+      }
+      expect(await service).toBe(0)
+    } finally {
+      stop.abort()
+      await service
+    }
+    expect(rounds).toBe(0)
+    expect(rows.some((row) => row.message.startsWith("the gitlink exit is off"))).toBe(false)
+    expect(run.stdout()).toContain(w.a)
+    expect(run.stdout()).toContain(w.b)
+    if (ending !== "stop") {
+      expect(records(run).at(-1)).toEqual({
+        exitCode: 0,
+        from: w.a,
+        gitlink: "component",
+        reason: "gitlink-moved",
+        to: w.b,
+      })
+    }
+  })
+
+  it("refuses an embedded runtime whose source identity could not be read", async () => {
+    const w = await gitlinkWorld(true)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let rounds = 0
+    await expect(
+      w.command(
+        w.work,
+        run.io,
+        {
+          command: "up",
+          stop: stop.signal,
+          afterRound: () => {
+            rounds += 1
+            stop.abort()
+          },
+        },
+        { json: true, workdir: w.workdir },
+      ),
+    ).rejects.toThrow("cannot identify embedded runtime")
+    expect(rounds).toBe(0)
+  })
+
+  it("a standalone runtime runs normally and explicitly names the checkout outside this queue", async () => {
     const w = await world()
     const run = capture(w.work)
     const stop = new AbortController()
@@ -536,13 +676,11 @@ describe("yrd queue up, the service", () => {
 
     expect(exit, run.stdout()).toBe(0)
     expect(records(run)).toHaveLength(1)
-    // The gitlink exit is off in this world, said once at info with the commit it
-    // looked for: this suite's own checkout, which the world's target does not carry.
-    const commit = await thisCheckout()
+    // This CLI is outside the world's queue checkout, not an embedded stale pin.
     expect(rows.filter((row) => row.message.startsWith("the gitlink exit is off"))).toEqual([
       {
         level: "info",
-        message: `the gitlink exit is off: the target carries no gitlink at this yrd's commit ${commit.slice(0, 12)}`,
+        message: `the gitlink exit is off: runtime checkout ${resolve(import.meta.dirname, "../../..")} is not embedded in queue checkout ${w.work}`,
       },
     ])
   })

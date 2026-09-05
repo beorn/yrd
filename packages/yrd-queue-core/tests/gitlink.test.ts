@@ -11,13 +11,25 @@
  * and 13.7 s per judged change.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
-import { changeRef, gitIn, list, queueRun, readQueue, readRecords, submit, trailer } from "../src/index.ts"
+import {
+  changeRef,
+  checksOf,
+  gitIn,
+  list,
+  queueRun,
+  readJournals,
+  readQueue,
+  readRecords,
+  submit,
+  trailer,
+  watchRows,
+} from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 
 const roots: string[] = []
@@ -265,6 +277,34 @@ describe("settling gitlinks", () => {
     expect(merge?.gitlinks).toContain(`component ${w.onMain} -> ${w.main}`)
   })
 
+  it("the queue-owned merge is isolated from vetoing and observing repository hooks", async () => {
+    const w = await world()
+    const head = await submitGitlink(w, "task/hook-isolation", w.onMain)
+    const observed = join(w.work, "..", "queue-hook-observed.log")
+    for (const [hook, exit] of [
+      ["prepare-commit-msg", 1],
+      ["post-commit", 0],
+    ] as const) {
+      const path = join(w.work, ".git", "hooks", hook)
+      writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' '${hook}' >> '${observed}'\nexit ${String(exit)}\n`)
+      chmodSync(path, 0o755)
+    }
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/hook-isolation"], stuck: [] })
+    expect(existsSync(observed)).toBe(false)
+    const target = await remoteTip(w.git, "refs/heads/main")
+    expect((await w.git(["rev-list", "--parents", "-n", "1", target])).trim().split(" ")).toHaveLength(3)
+    expect(await w.git(["show", "-s", "--format=%B", target])).toContain(`Settled: component@${w.main}`)
+    expect(await gitlinkAt(w, target)).toBe(w.main)
+    expect(
+      (
+        await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/hook-isolation", head })))
+      ).map((record) => record.kind),
+    ).toEqual(["opened", "checked", "merged", "sent"])
+  })
+
   /** An anomaly already on root main is not the candidate's authorship, but every merge that passes over it must expose it. */
   it("an untouched off-main target pin stays put and is reported in the run log", async () => {
     const w = await world()
@@ -323,7 +363,8 @@ describe("settling gitlinks", () => {
     const observing: Process = {
       ...real,
       async run(request) {
-        const merge = request.argv[0] === "git-super" && request.argv[2] === "merge"
+        const merge =
+          request.argv.includes("merge") && (request.argv[0] === "git-super" || request.argv.includes("super"))
         if (merge) await gitIn(join(request.cwd ?? w.work, "component"))(["remote", "set-url", "origin", missing])
         const result = await real.run(request)
         if (merge) {
@@ -362,8 +403,9 @@ describe("settling gitlinks", () => {
     expect(evidence.filter((record) => record.kind === "change" && record.head === head)).toEqual([
       expect.objectContaining({
         branch: "task/unreadable-main",
-        code: external.code,
+        code: "yrd-merge-unresolved",
         decision: "stuck",
+        diagnosisCode: external.code,
         phase: external.phase,
         reason: external.message,
       }),
@@ -435,7 +477,12 @@ describe("settling gitlinks", () => {
     await advanceComponent(w, "healthy component main")
     const head = await submitFile(w, "task/candidate-red")
 
-    const outcome = await queueRun(await w.options({ on: ["submit"], run: "test ! -f task-candidate-red.txt" }))
+    const outcome = await queueRun(
+      await w.options({
+        on: ["submit"],
+        run: "if test -f task-candidate-red.txt; then echo CANDIDATE_FAIL; exit 1; else echo BASE_PASS; fi",
+      }),
+    )
 
     expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/candidate-red"], merged: [], stuck: [] })
     const records = await readRecords(
@@ -451,6 +498,18 @@ describe("settling gitlinks", () => {
       .filter((record) => record.kind === "result" && record.name === "component-check")
       .map((record) => record.phase)
     expect(phases).toEqual(["submit", "base"])
+    // The read-side must not relabel the green comparator as the candidate's
+    // deciding artifact, nor collapse its two measured phase occurrences.
+    const journals = readJournals(dirname(outcome.log))
+    const queue = await readQueue(w.git, "origin", "main", outcome.target)
+    const shown = watchRows(list(queue.changes, { journals }), { journals }).find((row) => row.row.head === head)!
+    expect(shown.row.result).toBe("fail component-check")
+    expect(readFileSync(shown.row.log!, "utf8")).toBe("CANDIDATE_FAIL\n")
+    const detail = checksOf([], "failed", [], shown.run?.running, shown.run?.checks)
+    expect(detail.map((check) => [check.phase, check.state, readFileSync(check.log!, "utf8")])).toEqual([
+      ["submit", "failed", "CANDIDATE_FAIL\n"],
+      ["base", "passed", "BASE_PASS\n"],
+    ])
   })
 
   it("a gitlink moved on the target around the queue is reported with its path, and no component is asked about it (E5)", async () => {

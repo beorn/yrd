@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest"
 import type { Journals, Row } from "@yrd/queue-core"
 import { journalKey } from "@yrd/queue-core"
 import { clocksLine, noticeLine, watchNotice } from "../src/watch-notice.ts"
-import { filterRows, rowLine, rowTable, watchRows } from "../src/watch-rows.ts"
+import { filterRows, rowLine, rowTable, watchRows, watchRowKey } from "../src/watch-rows.ts"
 
 const since = new Date("2026-09-03T19:00:00.000Z")
 const now = new Date("2026-09-03T20:00:00.000Z")
@@ -44,6 +44,8 @@ describe("the rows a watch shows", () => {
     })
 
     expect(rows.map((entry) => entry.run?.id)).toEqual(["q-2", "q-1"])
+    const first = rows[0]!
+    expect(watchRowKey(first)).not.toBe(watchRowKey({ ...first, row: { ...first.row, branch: "task/other" } }))
   })
 
   it("collapses to one row per change under --latest, the opt-in lens", () => {
@@ -61,6 +63,48 @@ describe("the rows a watch shows", () => {
 
     expect(rows).toHaveLength(1)
     expect(rows[0]?.row.branch).toBe("task/one")
+  })
+
+  it("clears newer evidence absent from an old run, but keeps the current state and next owner", () => {
+    const current = row({
+      state: "failed",
+      result: "fail later",
+      reason: "later",
+      log: "/later/log",
+      base: "later",
+      merge: "later",
+      run: "later",
+      startedAt: now,
+      endedAt: now,
+      incident: {
+        code: "later",
+        subject: "later",
+        via: "later",
+        evidence: "/later",
+        next: "repair",
+      },
+      live: { run: "later", check: "later", phase: "merge", since: now },
+      next: { owner: "submitter", because: "fix the change" },
+    })
+    const options = { journals: journals({ [journalKey(current.branch, current.head)]: ["old"] }) }
+    const historical = watchRows([current], options)[0]!
+    expect(historical.row).toMatchObject({ state: "failed", next: current.next, run: "old" })
+    for (const key of [
+      "result",
+      "reason",
+      "log",
+      "base",
+      "merge",
+      "incident",
+      "startedAt",
+      "endedAt",
+      "live",
+    ] as const) {
+      expect(historical.row[key], key).toBeUndefined()
+    }
+    expect(filterRows([historical], ["later"])).toHaveLength(0)
+    expect(watchRows([current], { ...options, latest: true })[0]?.row).toBe(current)
+    expect(watchRows([current])[0]?.row).toBe(current)
   })
 })
 
@@ -99,9 +143,15 @@ describe("the filter terms", () => {
 
 describe("the one row renderer", () => {
   it("draws the plain list's line unchanged when there is no subject, run or live check to add", () => {
-    expect(rowLine({ row: row({ head: "abcdef0123456789", issue: "@i/1", position: 1, result: "pass" }) })).toBe(
-      " 1 queued  task/one abcdef012345 pass @i/1",
-    )
+    const current = row({ head: "abcdef0123456789", issue: "@i/1", position: 1, result: "pass" })
+    expect(rowLine({ row: current })).toBe(" 1 queued  task/one abcdef012345 pass @i/1")
+    // Joined and record-only rows share fixed columns; only the run suffix differs.
+    expect(
+      rowLine({
+        row: current,
+        run: { id: "q-1", branch: current.branch, head: current.head, startedAt: now, at: now, checks: [] },
+      }),
+    ).toBe(" 1 queued  task/one abcdef012345 pass @i/1 [q-1]")
   })
 
   it("adds the subject, the run and the check running now when there is something to put there", () => {
@@ -178,6 +228,10 @@ describe("the notice", () => {
 
   it("carries the queue position in the notice, where a live fact belongs", () => {
     expect(watchNotice(row({ position: 3 })).word).toBe("queued #3")
+    const historical = row({ state: "failed", position: 1, result: "stuck verify", run: "q-1" })
+    expect(watchNotice(historical, true)).toMatchObject({ word: "change failed #1", cause: "run result: stuck verify" })
+    // The join is a caller's fact, not inferred from a result or run identifier.
+    expect(watchNotice(historical).word).toBe("failed #1")
   })
 })
 

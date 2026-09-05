@@ -37,14 +37,14 @@
  * could not do its own job, and the next thing to happen is a person.
  */
 
-import { mkdirSync, rmSync } from "node:fs"
+import { mkdirSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import { DIRECT_MERGE, endedKind, recordCommit, mergedBy, trailer, type Git, type WriteRecord } from "./records.ts"
 import { queueName, readConfig, type Target } from "./config.ts"
 import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
-import { incidentTrailers, type IncidentCode } from "./incident.ts"
+import { incidentTrailers, type Incident, type IncidentCode } from "./incident.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import type { PauseRecord } from "./pause.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
@@ -62,6 +62,7 @@ import {
   SetupFailed,
   type PlumbingLog,
   type PreparedWorktree,
+  type Worktree,
 } from "./worktree.ts"
 
 export type QueueRunOptions = Readonly<{
@@ -114,6 +115,8 @@ export type Run = Readonly<{
   log: QueueRunLog
   /** The temp root every program this run starts gets as `TMPDIR`: `<workdir>/tmp`. */
   tmpdir: string
+  /** An asserted-empty directory that isolates queue-owned Git commits from repository hooks. */
+  hooksPath: string
   worktrees: string
   /** The caller's declaration-captured target; every judgement is against it. */
   targetSha: string
@@ -144,6 +147,9 @@ type EndedWrite = Readonly<{
   remedy?: string
   /** The foreign diagnosis, preserved verbatim in this ending's existing journal row. */
   diagnosis?: SuperMergeDetail
+  incident?: Incident
+  detail?: string
+  worktree?: string
 }>
 
 /**
@@ -219,6 +225,14 @@ export class QueueAuthorityUnreadable extends Error {
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   const git = options.git ?? gitIn(options.repo, options.process)
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
+  const hooksPath = join(options.workdir, "hooks-disabled")
+  mkdirSync(hooksPath, { recursive: true })
+  const hooks = readdirSync(hooksPath).sort()
+  if (hooks.length > 0) {
+    throw new Error(
+      `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries, then run yrd queue run`,
+    )
+  }
   const targetSha = options.targetSha
   // One captured-object refusal earns one retry across the whole round. Keep
   // that first failure even after a successful retry: if the post-judge read
@@ -250,6 +264,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   let stopped: Stopped | undefined
   const run: Run = {
     git,
+    hooksPath,
     log,
     name: queueName(options.target, await remoteUrl(git, options.target.remote)),
     options,
@@ -507,7 +522,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
   }
   const composed = await composeCandidate(run, entry, "submit")
   if (composed.kind === "waiting") return waiting(run, entry, composed.detail)
-  if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail)
+  if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
   const { worktree } = composed
   try {
     const results = await runPhase(run, entry, "submit", worktree.path, worktree.tree)
@@ -572,7 +587,7 @@ type SuperMergeResult = Readonly<{
 type ComposedCandidate =
   | Readonly<{ kind: "ready"; mergeCommit: string; settled: readonly SettledGitlink[]; worktree: PreparedWorktree }>
   | Readonly<{ kind: "waiting"; detail: SuperMergeDetail }>
-  | Readonly<{ kind: "failed"; detail: SuperMergeDetail }>
+  | Readonly<{ kind: "failed"; detail: SuperMergeDetail; worktree: Worktree }>
 
 /** Compose and settle the exact tree a phase will judge, then materialize that final commit before setup or checks run. */
 async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePhase): Promise<ComposedCandidate> {
@@ -584,20 +599,18 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     join(run.worktrees, "compose", phase, head.slice(0, 12)),
     run.options.plumbing,
   )
-  let result: SuperMergeResult
-  try {
-    result = await superMerge(run, composing.path, head, mergeMessage(run, entry))
-    if (result.state !== "updated" || result.partial) {
-      const detail = result.detail
-      if (detail === undefined) {
-        throw new Error(`git-super merge of ${head} returned ${result.state} without a failure detail`)
-      }
-      return { detail, kind: detail.code === "gitlink-off-main" ? "waiting" : "failed" }
+  const result = await superMerge(run, composing.path, head, mergeMessage(run, entry))
+  if (result.state !== "updated" || result.partial) {
+    const detail = result.detail
+    if (detail === undefined) {
+      throw new Error(`git-super merge of ${head} returned ${result.state} without a failure detail`)
     }
-    if (result.commit === undefined) throw new Error(`git-super merge of ${head} reported updated without a commit`)
-  } finally {
+    if (detail.code !== "gitlink-off-main") return { detail, kind: "failed", worktree: composing }
     await composing.remove()
+    return { detail, kind: "waiting" }
   }
+  if (result.commit === undefined) throw new Error(`git-super merge of ${head} reported updated without a commit`)
+  await composing.remove()
 
   const mergeCommit = result.commit
   if (mergeCommit === undefined) throw new Error(`git-super merge of ${head} lost its commit after composition`)
@@ -653,7 +666,7 @@ async function gitSuperExecution(
     run.options.process ?? createProcess({ cwd, env: gitEnvironment(run.options.env ?? globalThis.process.env) })
   try {
     const execution = await process.run({
-      argv: ["git-super", "--json", ...argv],
+      argv: ["git", "-c", `core.hooksPath=${run.hooksPath}`, "super", "--json", ...argv],
       cwd,
       env: gitEnvironment(run.options.env ?? globalThis.process.env),
     })
@@ -780,8 +793,14 @@ async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): P
   return "waiting"
 }
 
-async function candidateFailure(run: Run, entry: QueueEntry, detail: SuperMergeDetail): Promise<Ended> {
+async function candidateFailure(
+  run: Run,
+  entry: QueueEntry,
+  detail: SuperMergeDetail,
+  worktree: Worktree,
+): Promise<Ended> {
   if (detail.code === "merge-conflict") {
+    await worktree.remove()
     return run.steps.end(run, entry, "failed", {
       remedy: detail.next ?? `rebase ${entry.change.branch} onto ${run.options.target.branch} and submit again`,
       subject: detail.subject ?? `${entry.change.branch} conflicts with ${run.options.target.branch}`,
@@ -792,6 +811,7 @@ async function candidateFailure(run: Run, entry: QueueEntry, detail: SuperMergeD
     })
   }
   if (detail.phase === "prove-gitlink-on-main") {
+    await worktree.remove()
     const reason = detail.message.replace(/\s+/gu, " ").trim()
     return run.steps.end(run, entry, "failed", {
       remedy: detail.next ?? "publish a materializable component commit, then submit again",
@@ -802,9 +822,11 @@ async function candidateFailure(run: Run, entry: QueueEntry, detail: SuperMergeD
   return run.steps.end(run, entry, "stuck", {
     ...stuckWrite(run, {
       code: "yrd-merge-unresolved",
+      detail: detail.message,
       next: detail.next ?? "repair the queue fault, then run yrd queue run",
-      subject: detail.subject ?? detail.message,
-      via: `git-super merge (${detail.code}, ${detail.phase})`,
+      subject: detail.message,
+      via: `git-super merge (${detail.code}, ${detail.phase}) at ${worktree.path}`,
+      worktree: worktree.path,
     }),
     diagnosis: detail,
   })
@@ -928,7 +950,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
   const name = changeName(change)
   const composed = await composeCandidate(run, entry, "merge")
   if (composed.kind === "waiting") return waiting(run, entry, composed.detail)
-  if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail)
+  if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
   const { mergeCommit, settled, worktree } = composed
   try {
     const wt = gitIn(worktree.path, run.options.process)
@@ -1383,7 +1405,10 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
     head: entry.change.head,
     kind: "change",
     reason: ended.diagnosis?.message ?? ended.subject,
-    ...(ended.diagnosis === undefined ? {} : { code: ended.diagnosis.code, phase: ended.diagnosis.phase }),
+    ...ended.incident,
+    ...(ended.diagnosis === undefined ? {} : { diagnosisCode: ended.diagnosis.code, phase: ended.diagnosis.phase }),
+    ...(ended.detail === undefined ? {} : { detail: ended.detail }),
+    ...(ended.worktree === undefined ? {} : { worktree: ended.worktree }),
   })
   // No record, no message: the message's id IS that record's sha, and the next
   // run's reading of the remote is what repairs the ending (24096).
@@ -1399,22 +1424,25 @@ function stuckWrite(
     subject: string
     via: string
     next: string
+    detail?: string
+    worktree?: string
     trailers?: readonly (readonly [string, string])[]
   }>,
 ): EndedWrite {
   const subject = cause.subject.replace(/\s+/gu, " ").trim()
+  const incident = {
+    code: cause.code,
+    subject,
+    via: `${cause.via} in yrd queue ${run.name} [${run.log.id}]`,
+    evidence: run.log.path,
+    next: cause.next,
+  }
   return {
     subject,
-    trailers: [
-      ...incidentTrailers({
-        code: cause.code,
-        subject,
-        via: `${cause.via} in yrd queue ${run.name} [${run.log.id}]`,
-        evidence: run.log.path,
-        next: cause.next,
-      }),
-      ...(cause.trailers ?? []),
-    ],
+    incident,
+    ...(cause.detail === undefined ? {} : { detail: cause.detail }),
+    ...(cause.worktree === undefined ? {} : { worktree: cause.worktree }),
+    trailers: [...incidentTrailers(incident), ...(cause.trailers ?? [])],
   }
 }
 
@@ -1455,25 +1483,39 @@ export async function writeRecord(run: Run, write: WriteRecord, expectedTip: str
       // stays loud.
       const now = await fetchRemoteChange(run, ref)
       if (now === onto) throw error
-      run.log.write({
+      onto = now
+      // Compare the exact fetched object, not a second reading of a moving
+      // remote ref. Relation describes the intended record relative to remote.
+      let relation = "unknown"
+      let relationError: string | undefined
+      try {
+        const base = await mergeBase(run.git, record, now)
+        relation = record === now ? "equal" : base === record ? "behind" : base === now ? "ahead" : "diverged"
+      } catch (error) {
+        // Explaining a refused bookkeeping write must not kill a landed run.
+        relationError = error instanceof Error ? error.message : String(error)
+      }
+      // Both objects exist here now. After Git's prune window the intended
+      // object can disappear; the stored OIDs remain the durable evidence.
+      const next = `git -C '${run.options.repo.replaceAll("'", "'\\''")}' log --oneline --left-right ${record}...${now}`
+      const diagnostic = {
         branch: write.change.branch,
         decision: write.kind,
+        ...(relationError === undefined ? {} : { error: relationError }),
         head: write.change.head,
-        kind: "change",
+        intended: record,
+        kind: "change" as const,
+        next,
         reason: "change-ref-taken",
+        ref,
+        relation,
         remote: now,
-      })
-      onto = now
+        text: `${ref}: remote ${now}, intended ${record} (${relation})${relationError === undefined ? "" : `; ancestry read failed: ${relationError}`}; inspect: ${next}`,
+      }
+      run.log.write(diagnostic)
+      if (attempt === 1) run.log.write({ ...diagnostic, reason: "change-ref-contended" })
     }
   }
-  run.log.write({
-    branch: write.change.branch,
-    decision: write.kind,
-    head: write.change.head,
-    kind: "change",
-    reason: "change-ref-contended",
-    remote: onto,
-  })
   return undefined
 }
 
@@ -1541,13 +1583,12 @@ function finish(
   // The accepted merge object is the target this run left; readers and pushes
   // never need a tracking ref to recover an OID the run already owns.
   const targetNow = run.targetAfter.sha
-  // A run that reaches here removed every worktree it made, so its own
-  // directory and the pid file in it have nothing left to say. Taking them
-  // leaves exactly the runs that did NOT end under the worktrees root, which
-  // is what the next run's reap reads. `queue up` is one process running many
-  // rounds, so without this every round of a day-long service would leave a
-  // directory behind that no reap may touch: its pid is alive.
-  rmSync(run.worktrees, { force: true, recursive: true })
+  // A settled run removed every worktree it made, so its directory and pid
+  // file have nothing left to say. A stuck run is evidence: in particular,
+  // git-super may have left an uncommitted composition whose index and
+  // component checkouts explain the refusal. Keep that whole run directory
+  // for the mechanic; a later process reaps it after the repair.
+  if (exitCode !== 2) rmSync(run.worktrees, { force: true, recursive: true })
   return {
     base: run.targetSha,
     config: run.options.configBlob,

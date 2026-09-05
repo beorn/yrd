@@ -14,7 +14,17 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { checksOf, clocks, gitIn, journalKey, nextOwner, readJournals, runStartedAt, subjects } from "../src/index.ts"
+import {
+  checksOf,
+  clocks,
+  gitIn,
+  journalKey,
+  nextOwner,
+  readJournals,
+  runStartedAt,
+  subjects,
+  watchRows,
+} from "../src/index.ts"
 import type { CheckSpec, Git, Row } from "../src/index.ts"
 // `openLog` is the writer, and index.ts lists only what a consumer outside the
 // package imports. A test that writes a journal is inside it.
@@ -96,6 +106,12 @@ describe("a run's journal, read back", () => {
     expect(runs?.[0]?.checks).toHaveLength(2)
     expect(runs?.[0]?.checks[0]?.endedAt?.toISOString()).toBe("2026-09-03T19:59:00.000Z")
     expect(runs?.[0]?.checks[0]?.ms).toBe(60_000)
+    expect(runs?.[0]?.base).toBe("aaa")
+    expect(runs?.[0]?.checks[0]?.result).toBeUndefined()
+    expect(checksOf([], "open", [], runs?.[0]?.running, runs?.[0]?.checks).map((check) => check.state)).toEqual([
+      "unmeasured",
+      "running",
+    ])
   })
 
   it("says nothing is running once the run reached a decision, whatever start row it left open", () => {
@@ -119,6 +135,51 @@ describe("a run's journal, read back", () => {
     const runs = readJournals(dir, { now: at }).runs.get(journalKey("task/one", "abc123"))
     expect(runs?.[0]?.decision).toBe("failed")
     expect(runs?.[0]?.running).toBeUndefined()
+    const views = checksOf([], "failed", [], runs?.[0]?.running, runs?.[0]?.checks)
+    expect(views[0]?.state).toBe("unmeasured")
+    expect(views[0]?.result).toBeUndefined()
+  })
+
+  it("an abandoned older run is unmeasured after a newer run, while the newest unended run stays live", () => {
+    // A single decided-run fixture misses a process that died before writing
+    // its decision. Serialization makes a subsequent run proof it is no longer live.
+    const start = new Date("2026-09-03T19:00:00.000Z")
+    const later = new Date("2026-09-03T20:00:00.000Z")
+    const check = {
+      branch: "task/one",
+      head: "abc123",
+      kind: "check" as const,
+      name: "test",
+      phase: "merge",
+      log: "/w/old/test.log",
+      start: start.toISOString(),
+    }
+    const { dir, run: oldId } = journalDir([check], start)
+    const current: Row = { branch: check.branch, head: check.head, state: "failed" }
+    const newestUnended = watchRows([current], { journals: readJournals(dir, { now: later }) })[0]!
+    expect(newestUnended.row.live?.run).toBe(oldId)
+    const log = openLog(dir, () => later)
+    log.write({ ...check, log: "/w/new/test.log", start: later.toISOString() })
+    log.write({ ...check, kind: "result", result: "fail", exit: "1" })
+    log.write({ branch: check.branch, head: check.head, kind: "change", decision: "failed", reason: "test" })
+    const rows = watchRows([current], { journals: readJournals(dir, { now: later }) })
+    expect(rows.map(({ row }) => row.run)).toEqual([log.id, oldId])
+    const old = rows[1]!
+    expect(old.row.live).toBeUndefined()
+    const views = checksOf(
+      [],
+      "failed",
+      [],
+      old.row.live === undefined
+        ? undefined
+        : {
+            name: old.row.live.check,
+            log: old.row.live.log,
+          },
+      old.run?.checks,
+    )
+    expect(views[0]?.state).toBe("unmeasured")
+    expect(rows[0]?.row).toMatchObject({ result: "fail test", run: log.id, log: "/w/new/test.log" })
   })
 
   it("says where it looked when there is no journal there at all, and never returns an empty answer silently", () => {
@@ -193,6 +254,40 @@ describe("the declared checks, joined to what ran", () => {
     { name: "lint", run: "bun run lint" },
   ]
 
+  it("keeps candidate failure and green baseline comparator as separate measured occurrences", () => {
+    const startedAt = new Date("2026-09-03T20:00:00Z")
+    const measured = [
+      {
+        name: "test",
+        phase: "merge",
+        startedAt,
+        endedAt: startedAt,
+        result: "fail" as const,
+        log: "/candidate/test.log",
+      },
+      { name: "test", phase: "base", startedAt, endedAt: startedAt, result: "pass" as const, log: "/base/test.log" },
+    ]
+    const views = checksOf([], "failed", [{ name: "test", run: "test" }], undefined, measured)
+    expect(views.map((view) => [view.name, view.phase, view.state, view.log])).toEqual([
+      ["test", "merge", "failed", "/candidate/test.log"],
+      ["test", "base", "passed", "/base/test.log"],
+    ])
+    const current: Row = { branch: "task/one", head: "abc", state: "failed" }
+    const projected = watchRows([current], {
+      journals: {
+        dir: "/logs",
+        runs: new Map([
+          [
+            journalKey(current.branch, current.head),
+            [{ ...current, id: "q", startedAt, at: startedAt, checks: measured, decision: "failed" }],
+          ],
+        ]),
+      },
+    })
+    expect(projected[0]?.row.log).toBe("/candidate/test.log")
+    expect(projected[0]?.row.result).toBe("fail test")
+  })
+
   it("renders every check after a failing one as NOT RUN, with the command that would have run it", () => {
     const views = checksOf(
       ["typecheck exit=0 ms=1000 log=/w/typecheck.log", "test exit=1 ms=2000 log=/w/test.log"],
@@ -219,6 +314,34 @@ describe("the declared checks, joined to what ran", () => {
 
     expect(views.map((view) => view.state)).toEqual(["passed", "running", "not-run"])
     expect(views[1]?.log).toBe("/w/test.log")
+  })
+
+  it("uses only the selected run's measured checks, including an end without a result", () => {
+    // Historical detail must not mix a current failed trailer into an older
+    // run, nor turn an interrupted result write into an invented pass.
+    const startedAt = new Date("2026-09-03T20:00:00Z")
+    const views = checksOf(["lint exit=1 ms=5 log=/later/lint.log"], "failed", declared, undefined, [
+      {
+        name: "typecheck",
+        phase: "merge",
+        startedAt,
+        endedAt: startedAt,
+        result: "stuck",
+        exit: "missing",
+        log: "/old/typecheck.log",
+      },
+      { name: "test", phase: "merge", startedAt, endedAt: startedAt, log: "/old/test.log" },
+    ])
+    expect(views.map((view) => view.state)).toEqual(["stuck", "unmeasured", "not-run"])
+    expect(views[0]?.result).toMatchObject({ result: "stuck", exit: "missing", log: "/old/typecheck.log" })
+    expect(views[1]?.result).toBeUndefined()
+    expect(views[1]?.log).toBe("/old/test.log")
+    expect(views[2]?.log).toBeUndefined()
+    expect(
+      checksOf(["lint exit=1 ms=5 log=/later/lint.log"], "failed", declared, undefined, []).every(
+        (view) => view.state === "not-run",
+      ),
+    ).toBe(true)
   })
 
   it("keeps a measured result the declaration no longer names, and says its command is not knowable", () => {

@@ -7,7 +7,16 @@
  */
 
 import { spawnSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -27,6 +36,7 @@ import {
   queueRun,
   readRecords,
   refAt,
+  readRecord,
   readQueue,
   readPause,
   runCheck,
@@ -393,6 +403,31 @@ describe("a check log is written once", () => {
     expect(readFileSync(path, "utf8")).toContain("hello")
     await expect(runCheck({ ...where, spec: { name: "verify", run: "echo again" } })).rejects.toThrow(path)
     expect(readFileSync(path, "utf8")).toContain("hello")
+
+    // Two overlapping check processes compete for a previously absent path.
+    // Either may finish first; exactly one publishes, the loser names the
+    // collision, and the winner's bytes survive. No timing/order assumption.
+    const contenders = ["failure", "pass"] as const
+    const attempts = await Promise.allSettled(
+      contenders.map((word) =>
+        runCheck({
+          ...where,
+          spec: { name: "overlap", run: `echo ${word}; exit ${word === "failure" ? "1" : "0"}` },
+        }),
+      ),
+    )
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1)
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1)
+    const overlap = checkLogPath(where.logDir, "overlap")
+    for (const [index, attempt] of attempts.entries()) {
+      if (attempt.status === "rejected") {
+        expect(String(attempt.reason)).toContain(`a check log already exists at ${overlap}`)
+      } else {
+        expect(attempt.value.log).toBe(overlap)
+        expect(readFileSync(overlap, "utf8")).toBe(`${contenders[index]}\n`)
+        expect(attempt.value.result).toBe(contenders[index] === "failure" ? "fail" : "pass")
+      }
+    }
   })
 })
 
@@ -455,15 +490,42 @@ describe("a queue run", () => {
     ).toEqual(["opened", "checked"])
   })
 
+  it("refuses a queue-owned hooks path that is not empty", async () => {
+    const w = await world()
+    const hooksPath = join(w.workdir, "hooks-disabled")
+    const unexpected = join(hooksPath, "unexpected-hook")
+    mkdirSync(hooksPath, { recursive: true })
+    writeFileSync(unexpected, "must not run\n")
+
+    await expect(queueRun(await w.options({ exit: 0 }))).rejects.toThrow(
+      `queue-owned hooks path ${hooksPath} is not empty (unexpected-hook); remove the named entries, then run yrd queue run`,
+    )
+  })
+
   it("pass: the change is checked, merged, the target moves by one merge commit, and the submitter is told to close their bead", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
+    const secondHead = await submitCommit(w, "task/two", "two.txt")
 
-    const outcome = await queueRun(await w.options({ exit: 0 }))
+    const outcome = await queueRun({
+      ...(await w.options({ exit: 0 })),
+      checks: [
+        { name: "verify", on: ["submit", "merge"], run: "if test -f one.txt; then cat one.txt; else cat two.txt; fi" },
+      ],
+    })
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/one"])
     expect(outcome.directMerges).toEqual([])
+    // Two changes in this SAME run and phase must not share an artifact.
+    // This preserves the class witness removed with the old attribution suite.
+    const oneLog = checkLogFor(outcome, "task/one", "submit", "verify")
+    const twoLog = checkLogFor(outcome, "task/two", "submit", "verify")
+    expect(oneLog).not.toBe(twoLog)
+    expect(oneLog).toContain(changeName({ branch: "task/one", head }))
+    expect(twoLog).toContain(changeName({ branch: "task/two", head: secondHead }))
+    expect(readFileSync(oneLog, "utf8")).toBe("one.txt\n")
+    expect(readFileSync(twoLog, "utf8")).toBe("two.txt\n")
     const after = await remoteTarget(w)
     expect(after).not.toBe(w.target)
     await w.git(["fetch", "--quiet", "origin", "main"])
@@ -501,59 +563,139 @@ describe("a queue run", () => {
     ).toEqual(expect.arrayContaining(["run", "change", "check", "result", "merge", "message"]))
   })
 
-  it("a second writer that takes the change ref between the read and the push loses neither record", async () => {
-    const w = await world()
-    const head = await submitCommit(w, "task/one", "one.txt")
-    const ref = changeRef("main", { branch: "task/one", head })
-    const rivalPath = join(w.workdir, "..", "record-rival")
-    await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
-    const rival = gitIn(rivalPath)
-    await rival(["config", "user.email", "rival@yrd.test"])
-    await rival(["config", "user.name", "rival"])
+  it.each([
+    ["checked", "diverged", 1],
+    ["sent", "diverged", 1],
+    ["sent", "behind", 1],
+    ["sent", "equal", 1],
+    ["sent", "ahead", 1],
+    ["sent", "unknown", 1],
+    ["sent", "diverged", 2],
+  ] as const)(
+    "a second writer racing the %s record (%s, %i refusals) preserves records and explains the tips (24096)",
+    async (kind, relation, refusals) => {
+      const w = await world()
+      const head = await submitCommit(w, "task/one", "one.txt")
+      const ref = changeRef("main", { branch: "task/one", head })
+      const rivalPath = join(w.workdir, "..", "record-rival")
+      await gitIn(join(w.workdir, ".."))(["clone", "--quiet", w.remote, rivalPath])
+      const rival = gitIn(rivalPath)
+      await rival(["config", "user.email", "rival@yrd.test"])
+      await rival(["config", "user.name", "rival"])
 
-    let concurrent: string | undefined
-    let poisoned = false
-    const git: Git = async (args, input) => {
-      // Between the tip this run read the change at and its leased push, a
-      // second queue appends a record of its own and pushes it first. A real
-      // writer at the real remote, not a reading of this one's argv.
-      if (concurrent === undefined && args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))) {
-        await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
-        concurrent = await appendRecord(rival, "main", {
-          change: { branch: "task/one", head },
-          kind: "stuck",
-          subject: "another queue got there first",
-          trailers: [["Reason", "crash"]],
-        })
-        await rival(["push", "--quiet", "origin", `${concurrent}:${ref}`])
+      let concurrent: string | undefined
+      let intended: string | undefined
+      let raced = 0
+      const git: Git = async (args, input) => {
+        if (relation === "unknown" && args[0] === "merge-base" && args[1] === intended && args[2] === concurrent) {
+          throw new Error("diagnostic ancestry read unavailable")
+        }
+        // Between the tip this run read the change at and its leased push, a
+        // second queue appends a record of its own and pushes it first. A real
+        // writer at the real remote, not a reading of this one's argv.
+        const refspec = args.find((arg) => arg.endsWith(`:${ref}`))
+        if (
+          raced < refusals &&
+          args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`)) &&
+          refspec !== undefined &&
+          (await readRecord(w.git, refspec.slice(0, -ref.length - 1))).kind === kind
+        ) {
+          raced += 1
+          intended = refspec.slice(0, -ref.length - 1)
+          await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
+          const previous = (await rival(["rev-parse", ref])).trim()
+          if (relation === "behind" || relation === "equal" || relation === "ahead") {
+            // A real second writer already has our intended record (or has
+            // appended after it), but our captured lease still names its parent.
+            await rival(["fetch", "--quiet", w.work, intended])
+            await rival(["update-ref", ref, intended])
+          }
+          concurrent =
+            relation === "ahead"
+              ? (await rival(["rev-parse", `${intended}^^`])).trim()
+              : relation === "equal"
+                ? intended
+                : await appendRecord(rival, "main", {
+                    change: { branch: "task/one", head },
+                    kind: "stuck",
+                    subject: "another queue got there first",
+                    trailers: [["Reason", "crash"]],
+                  })
+          // Only the disposable fixture's remote rewinds, under its exact
+          // previous value, to exercise an external writer moving backwards.
+          await rival([
+            "push",
+            "--quiet",
+            ...(relation === "ahead" ? [`--force-with-lease=${ref}:${previous}`] : []),
+            "origin",
+            `${concurrent}:${ref}`,
+          ])
+        }
+        return w.git(args, input)
       }
-      const output = await w.git(args, input)
-      // A local reader/cache is not authority for this append. Poison it after
-      // the queue captured the remote record, before the writer begins.
-      if (!poisoned && args[0] === "merge-base") {
-        await w.git(["update-ref", ref, head])
-        poisoned = true
+
+      const outcome = await queueRun({ ...(await w.options({ exit: 0, on: ["submit"] })), git })
+
+      // The lease refused the first push, so the rival's record stands; the same
+      // record was written again onto it and pushed, so neither is lost and the
+      // run went on to merge.
+      expect(outcome.exitCode).toBe(0)
+      expect(outcome.merged).toEqual(["task/one"])
+      await fetchChanges(w)
+      const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+      expect(records.map((record) => record.kind)).toEqual(
+        kind === "checked"
+          ? ["opened", "stuck", "checked", "merged", "sent"]
+          : relation === "equal"
+            ? ["opened", "checked", "merged", "sent"]
+            : relation === "ahead"
+              ? ["opened", "checked", "sent"]
+              : relation === "behind"
+                ? ["opened", "checked", "merged", "sent", "stuck", "sent"]
+                : refusals === 2
+                  ? ["opened", "checked", "merged", "stuck", "stuck"]
+                  : ["opened", "checked", "merged", "stuck", "sent"],
+      )
+      expect(records.map((record) => record.sha)).toContain(concurrent)
+      expect(intended).toMatch(/^[0-9a-f]{40}$/u)
+      if (relation === "equal") {
+        // Git accepts an already-equal ref as up-to-date, even with the old
+        // lease. There was no rejected write to diagnose or retry.
+        expect(logRecords(outcome).filter((record) => record.reason === "change-ref-taken")).toEqual([])
+        return
       }
-      return output
-    }
-
-    const outcome = await queueRun({ ...(await w.options({ exit: 0, on: ["submit"] })), git })
-
-    // The lease refused the first push, so the rival's record stands; the same
-    // record was written again onto it and pushed, so neither is lost and the
-    // run went on to merge.
-    expect(outcome.exitCode).toBe(0)
-    expect(poisoned).toBe(true)
-    expect(outcome.merged).toEqual(["task/one"])
-    expect(await refAt(w.git, ref)).toBe(head)
-    await fetchChanges(w)
-    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "checked", "merged", "sent"])
-    expect(records.map((record) => record.sha)).toContain(concurrent)
-    expect(logRecords(outcome)).toContainEqual(
-      expect.objectContaining({ decision: "checked", reason: "change-ref-taken", remote: concurrent }),
-    )
-  })
+      expect(logRecords(outcome)).toContainEqual(
+        expect.objectContaining({
+          decision: kind,
+          reason: "change-ref-taken",
+          ref,
+          remote: concurrent,
+          intended,
+          relation,
+        }),
+      )
+      const diagnostic = logRecords(outcome).findLast((record) => record.reason === "change-ref-taken")
+      expect(diagnostic?.text).toBe(
+        `${ref}: remote ${concurrent}, intended ${intended} (${relation})${relation === "unknown" ? "; ancestry read failed: diagnostic ancestry read unavailable" : ""}; inspect: ${String(diagnostic?.next)}`,
+      )
+      // The diagnostic's read is executable in the emitting state, using the
+      // exact fetched objects even though the remote ref has moved again.
+      const read = spawnSync("sh", ["-c", String(diagnostic?.next)], { encoding: "utf8" })
+      expect(read.status, read.stderr).toBe(0)
+      if (relation === "ahead") expect(read.stdout).toMatch(/^</mu)
+      else expect(read.stdout).toMatch(/^>/mu)
+      if (relation === "diverged" || relation === "unknown") expect(read.stdout).toMatch(/^</mu)
+      if (relation === "unknown") expect(diagnostic?.error).toBe("diagnostic ancestry read unavailable")
+      if (refusals === 2) {
+        expect(logRecords(outcome)).toContainEqual(
+          expect.objectContaining({ reason: "change-ref-contended", ref, remote: concurrent, intended, relation }),
+        )
+        expect(logRecords(outcome)).toContainEqual(
+          expect.objectContaining({ kind: "message", delivered: false, says: "merged" }),
+        )
+      }
+    },
+  )
 
   it("a refused record push with an unchanged remote tip rethrows its original error", async () => {
     const w = await world()
@@ -638,6 +780,85 @@ describe("a queue run", () => {
       reason: expect.stringContaining("could not judge task/one"),
     })
     expect(messages(w)[0]?.failures).toBeUndefined()
+  })
+
+  it("git-super stuck preserves its worktree and carries complete failure evidence to the journal and supervisor", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/git-super-stuck", "git-super-stuck.txt")
+    const bin = join(w.workdir, "bin")
+    const invocationLog = join(w.workdir, "git-super-invocation.json")
+    mkdirSync(bin, { recursive: true })
+    const stderrTail = `hook stderr start\n${"checkout drift ".repeat(400)}\nhook stderr end`
+    const detail = {
+      code: "settled-merge-commit-failed",
+      phase: "write-settled-merge",
+      message: `settled-merge-commit-failed: the candidate merge could not be committed\n${stderrTail}`,
+      subject: "the candidate merge could not be committed",
+      evidence: `git -C ${w.work} status --short`,
+      next: "repair the queue checkout, then run yrd queue run",
+    }
+    const result = {
+      state: "failed",
+      partial: true,
+      detail,
+      gitlinks: [],
+      repositories: [{ repository: w.work, state: "failed", refs: [] }],
+    }
+    const fakeGitSuper = join(bin, "git-super")
+    writeFileSync(
+      fakeGitSuper,
+      `#!/usr/bin/env bun\nimport { spawnSync } from "node:child_process"\nimport { writeFileSync } from "node:fs"\nconst hooksPath = spawnSync("git", ["config", "--get", "core.hooksPath"], { encoding: "utf8" }).stdout.trim()\nwriteFileSync(${JSON.stringify(invocationLog)}, JSON.stringify({ argv: process.argv.slice(2), hooksPath }))\nprocess.stdout.write(${JSON.stringify(`${JSON.stringify(result)}\n`)})\nprocess.exit(2)\n`,
+    )
+    chmodSync(fakeGitSuper, 0o755)
+    const base = await w.options({ exit: 0 })
+
+    const outcome = await queueRun({
+      ...base,
+      env: { ...base.env, PATH: `${bin}:${base.env?.PATH ?? process.env.PATH ?? ""}` },
+    })
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/git-super-stuck"] })
+    const composing = join(w.workdir, "worktrees", outcome.run, "compose", "submit", head.slice(0, 12))
+    const hooksPath = join(w.workdir, "hooks-disabled")
+    const invocation = JSON.parse(readFileSync(invocationLog, "utf8")) as {
+      argv: string[]
+      hooksPath: string
+    }
+    expect(invocation.argv).not.toContain("--no-verify")
+    expect(invocation.hooksPath).toBe(hooksPath)
+    expect(existsSync(hooksPath)).toBe(true)
+    expect(readdirSync(hooksPath)).toEqual([])
+    expect(existsSync(composing)).toBe(true)
+    await fetchChanges(w)
+    const records = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/git-super-stuck", head })))!,
+    )
+    const stuck = records.find((record) => record.kind === "stuck")
+    const incident = incidentOf(stuck)
+    expect(incident.Subject).toContain("hook stderr start")
+    expect(incident.Subject).toContain("hook stderr end")
+    expect(incident.Subject).toContain("checkout drift ".repeat(400).trim())
+    expect(incident.Via).toContain(composing)
+    const journal = logRecords(outcome).find(
+      (record) => record.kind === "change" && record.decision === "stuck" && record.branch === "task/git-super-stuck",
+    )
+    expect(journal).toMatchObject({
+      code: incident.Code,
+      diagnosisCode: detail.code,
+      subject: incident.Subject,
+      via: incident.Via,
+      evidence: incident.Evidence,
+      next: incident.Next,
+      detail: detail.message,
+      worktree: composing,
+    })
+    expect(messages(w)[0]).toMatchObject({
+      change: changeName({ branch: "task/git-super-stuck", head }),
+      record: "stuck",
+      reason: incident.Subject,
+    })
+    expect(messages(w)[0]?.reason).toContain("hook stderr end")
   })
 
   it("runs every notify entry that wants this ending, once each, and writes one sent record per entry", async () => {

@@ -9,7 +9,7 @@ import hab, { yrdQueueRunnerDeclarations } from "../hab.projects.ts"
 describe("Yrd Hab runner declarations", () => {
   it("declares one supervised service whose repository, argv, owner and exit policy are explicit", () => {
     expect(yrdQueueRunnerDeclarations).toEqual([
-      { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
+      { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@ci" },
     ])
     expect(hab.services).toEqual({
       "yrd-service": {
@@ -24,7 +24,7 @@ describe("Yrd Hab runner declarations", () => {
         // No health probe: the loop's process and journal are its liveness (M7).
         restart: "always",
         permanentExitCodes: [2],
-        owner: "@cto",
+        owner: "@ci",
       },
     })
   })

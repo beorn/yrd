@@ -25,7 +25,7 @@
  */
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
-import { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
+import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { resolveQueueLocation } from "./queue-location.ts"
@@ -40,6 +40,13 @@ type GlobalOptions = YrdObservabilityFlags
 
 type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean; queue?: string }>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string }>
+
+// Only queue actions load the runtime identity fence. Help and --version must
+// not perform its Git reads (version owns its own bounded source diagnostic).
+const coreQueueCommand: typeof import("./queue-core-commands.ts").coreQueueCommand = async (...args) => {
+  const queue = await import("./queue-core-commands.ts")
+  return queue.coreQueueCommand(...args)
+}
 
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
@@ -209,7 +216,7 @@ function buildProgram(
   ): T =>
     command
       .option("--latest", "one row per change; the default keeps every run that touched it")
-      .option("--json", "emit stable JSON")
+      .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")
       .option("--queue <value>", QUEUE_HELP)
       .option("--interval <seconds>", "seconds between refreshes while watching (default 5)", int)
   listOptions(

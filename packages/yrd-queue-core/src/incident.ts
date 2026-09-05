@@ -28,6 +28,20 @@ export type Incident = Readonly<{
   next?: string
 }>
 
+/** Validate the one incident shape shared by commit trailers and run journals. */
+export function assertIncident(incident: Incident, where = "incident"): void {
+  for (const field of ["code", "subject", "via", "evidence", "next"] as const) {
+    const value = incident[field]
+    if (value === undefined && field !== "code" && field !== "subject") continue
+    if (value === undefined || value.trim() === "" || value.includes("\n")) {
+      throw new Error(`${where} ${field} must be one non-empty line`)
+    }
+  }
+  if (incident.evidence !== undefined && !isAbsolute(incident.evidence)) {
+    throw new Error(`${where} evidence is not an absolute path: ${incident.evidence}`)
+  }
+}
+
 const PROPERTY: Readonly<Record<(typeof INCIDENT_TRAILERS)[number], keyof Incident>> = {
   Code: "code",
   Subject: "subject",
@@ -50,9 +64,7 @@ export function incidentFrom(record: ChangeRecord): Incident {
       return [[PROPERTY[name], found[0]]]
     }),
   ) as Incident
-  if (values.evidence !== undefined && !isAbsolute(values.evidence)) {
-    throw new Error(`record ${record.sha.slice(0, 12)} Evidence: is not an absolute path: ${values.evidence}`)
-  }
+  assertIncident(values, `record ${record.sha.slice(0, 12)} incident`)
   return values
 }
 
@@ -60,15 +72,11 @@ export function incidentFrom(record: ChangeRecord): Incident {
 export function incidentTrailers(
   incident: Incident & { readonly code: IncidentCode },
 ): readonly (readonly [string, string])[] {
-  if (incident.evidence !== undefined && !isAbsolute(incident.evidence)) {
-    throw new Error(`incident Evidence: is not an absolute path: ${incident.evidence}`)
-  }
+  assertIncident(incident)
   return INCIDENT_TRAILERS.flatMap((name) => {
     const value = incident[PROPERTY[name]]
     if (value === undefined && name !== "Code" && name !== "Subject") return []
-    if (value === undefined || value.trim() === "" || value.includes("\n")) {
-      throw new Error(`incident ${name}: must be one non-empty line`)
-    }
+    if (value === undefined) throw new Error(`incident ${name}: must be one non-empty line`)
     return [[name, value] as const]
   })
 }

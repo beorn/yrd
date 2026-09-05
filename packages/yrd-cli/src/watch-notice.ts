@@ -54,10 +54,16 @@ const WORD: Readonly<Record<Row["state"], string>> = {
   stuck: "stuck",
 }
 
-export function watchNotice(row: Row): Notice {
+export function watchNotice(row: Row, joinedRun = false): Notice {
   const live = row.live
   const position = row.position === undefined ? "" : ` #${String(row.position)}`
-  const cause = row.incident === undefined ? (row.reason ?? row.result) : incidentLine(row.incident)
+  const cause =
+    row.incident !== undefined
+      ? incidentLine(row.incident)
+      : joinedRun && row.result !== undefined
+        ? `run result: ${row.result}`
+        : (row.reason ?? row.result)
+  const state = joinedRun ? `change ${WORD[row.state]}` : WORD[row.state]
   const next =
     row.incident !== undefined
       ? row.incident.next
@@ -70,16 +76,15 @@ export function watchNotice(row: Row): Notice {
     // the records say, and both are on the line, because a change under a
     // check reads `queued` until its checked record lands and that is an
     // answer, not a bug to paper over.
-    word:
-      live === undefined ? `${WORD[row.state]}${position}` : `${WORD[row.state]}${position}, checking ${live.check}`,
+    word: live === undefined ? `${state}${position}` : `${state}${position}, checking ${live.check}`,
     ...(cause === undefined ? {} : { cause }),
     ...(next === undefined ? {} : { next }),
   }
 }
 
-/** The notice as one line: state, cause, and any next step. */
-export function noticeLine(row: Row): string {
-  const notice = watchNotice(row)
+/** The notice as one line: state, then cause, then whose move it is. */
+export function noticeLine(row: Row, joinedRun = false): string {
+  const notice = watchNotice(row, joinedRun)
   return [
     `${notice.glyph} ${notice.word}`,
     notice.cause === undefined ? undefined : notice.cause,
