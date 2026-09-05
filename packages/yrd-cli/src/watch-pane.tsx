@@ -77,7 +77,8 @@ import {
   type WatchQueue,
 } from "./watch-list.tsx"
 import { watchRowKey, type WatchRow } from "./watch-rows.ts"
-import { RunnerBox, StatsBox } from "./watch-boxes.tsx"
+import { StatsBox } from "./watch-boxes.tsx"
+import { ListStack, LoudPause } from "./watch-frame.tsx"
 import type { RunnerFacts } from "./watch-runner.ts"
 import type { RunDecision } from "./watch-stats.ts"
 
@@ -100,10 +101,6 @@ export type WatchSnapshot = Readonly<{
   at: Date
 }>
 
-function pauseWithoutRunner(snapshot: WatchSnapshot): string | undefined {
-  return snapshot.runner === undefined ? snapshot.pause : undefined
-}
-
 // The natural sizes the monitor used, and the ratio it settled on: 0.65 is the
 // smallest share that still gives the list 24 rows at the 40-row production
 // geometry without changing the tier ladder.
@@ -114,13 +111,16 @@ const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 1
 const DEFAULT_SPLIT_RATIO = 0.65
 /** Below this many terminal rows the STATS box would push the table off the screen, so it yields (the retired pane's own rule). */
-const STATS_MIN_ROWS = 30
 /** The TIME rows under the counts cost five more; below this height the list keeps them. */
-const STATS_TIME_MIN_ROWS = 44
 
 export type WatchTier = "right" | "below" | "full"
 
 /** Where the detail goes at this terminal size, or `full` when there is no room for a split. */
+// The STATS box needs rows the list would otherwise have: below 30 rows the
+// list keeps them all, below 44 the box drops its TIME rows (item 21).
+const STATS_MIN_ROWS = 30
+const STATS_TIME_MIN_ROWS = 44
+
 export function watchTier(columns: number, rows: number): WatchTier {
   const layout = resolveSplitPaneLayout({
     availableWidth: columns,
@@ -421,20 +421,24 @@ export function WatchPane({
   )
   // The width the list pane gets: the whole terminal, or its share of a split.
   const listColumns = opened && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) - DIVIDER_SIZE : columns
-  const inLine = shown.rows.filter((item) => item.row.position !== undefined).length
-  const topPause = pauseWithoutRunner(shown)
   const list = (
-    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
-      {shown.runner === undefined ? null : (
-        <RunnerBox
-          facts={shown.runner}
-          label={label}
-          inLine={inLine}
-          columns={listColumns - 2}
-          live={live}
-          {...(shown.pause === undefined ? {} : { pause: shown.pause })}
-        />
-      )}
+    <ListStack
+      snapshot={shown}
+      label={label}
+      columns={listColumns - 2}
+      live={live}
+      paddingX={1}
+      pills={<StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />}
+      stats={
+        shown.decisions === undefined || terminalRows < STATS_MIN_ROWS ? null : (
+          <StatsBox
+            decisions={shown.decisions}
+            columns={listColumns - 2}
+            timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+          />
+        )
+      }
+    >
       <Table
         rows={visible}
         empty={shown.rows.length === 0 ? "nothing in line" : "no change matches the filters"}
@@ -448,15 +452,7 @@ export function WatchPane({
           setCursorRow(index === 0 ? undefined : visible[index])
         }}
       />
-      {shown.decisions === undefined || terminalRows < STATS_MIN_ROWS ? null : (
-        <StatsBox
-          decisions={shown.decisions}
-          columns={listColumns - 2}
-          timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
-        />
-      )}
-      <StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />
-    </Box>
+    </ListStack>
   )
   const body =
     tier === "full" || !opened ? (
@@ -481,13 +477,9 @@ export function WatchPane({
   return (
     <NowProvider readAt={shown.at} live={live}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-        {/* RUNNER normally owns the pause rail. Without a run journal there is
-            no rail, so keep the queue's loudest state visible here. */}
-        {topPause === undefined ? null : (
-          <Text bold color="$fg-warning" wrap="truncate">
-            {topPause}
-          </Text>
-        )}
+        {/* RUNNER owns the pause rail; without a run journal there is no rail,
+            so the queue's loudest state is said up here (watch-frame.tsx). */}
+        <LoudPause snapshot={shown} />
         {/* The top line is ONLY the title and the queue pills (items 30, 32b, 33). */}
         <TopLine
           queues={shown.queues}

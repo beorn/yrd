@@ -16,7 +16,7 @@
 
 import React from "react"
 import { Box, Text, renderString } from "silvery"
-import { RunnerBox } from "./watch-boxes.tsx"
+import { ListStack, LoudPause } from "./watch-frame.tsx"
 import { NowProvider } from "./watch-clock.ts"
 import { ListHeader, ListRow, TopLine, listLayout, separatorBefore } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
@@ -38,15 +38,11 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
   const label = queues[0]?.label ?? "main"
   const columns = Math.max(40, options.columns)
   const layout = listLayout(rows, label, columns, snapshot.at)
-  const inLine = rows.filter((item) => item.row.position !== undefined).length
   return (
     <NowProvider readAt={snapshot.at} live={false}>
       <Box flexDirection="column" width={columns} minWidth={0}>
-        {snapshot.pause === undefined ? null : (
-          <Text color="$fg-warning" wrap="truncate">
-            {snapshot.pause}
-          </Text>
-        )}
+        {/* The pause rides RUNNER's rail; only a page with no run journal says it up here. */}
+        <LoudPause snapshot={snapshot} />
         {/* The queue's own name, as a stranger spells it — the line a logged round's `updated` stamp sits under. */}
         <Text wrap="truncate">{snapshot.queue}</Text>
         <TopLine queues={queues} visible={undefined} onToggle={() => undefined} allOn />
@@ -60,43 +56,36 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
             {options.scope}
           </Text>
         )}
-        <ListHeader layout={layout} />
-        {rows.length === 0 ? (
-          <Text color="$fg-muted">nothing in line</Text>
-        ) : (
-          rows.map((item, index) => {
-            const separator = separatorBefore(rows, index)
-            const key = `${item.row.branch}@${item.row.head}#${item.run?.id ?? item.row.run ?? String(index)}`
-            return (
-              <Box key={key} flexDirection="column" minWidth={0}>
-                {separator === undefined ? null : (
-                  <Text bold color="$fg-muted">
-                    {separator}
-                  </Text>
-                )}
-                <ListRow item={item} previous={rows[index - 1]} label={label} layout={layout} cursor={false} />
-              </Box>
-            )
-          })
-        )}
-        {(options.trailer ?? []).map((line) => (
-          <Text key={line} wrap="truncate">
-            {line}
-          </Text>
-        ))}
-        {options.scope === undefined ? (
-          <Text color="$fg-muted">{`${String(rows.length)} change(s) · one row per run per change`}</Text>
-        ) : null}
-        {snapshot.runner === undefined ? null : (
-          <RunnerBox
-            facts={snapshot.runner}
-            label={label}
-            inLine={inLine}
-            columns={columns - 2}
-            live={false}
-            {...(snapshot.pause === undefined ? {} : { pause: snapshot.pause })}
-          />
-        )}
+        {/* RUNNER above the table, as the retired page had it (24169-old-list.md §1.3), then the rows. */}
+        <ListStack snapshot={snapshot} label={label} columns={columns - 2} live={false}>
+          <ListHeader layout={layout} />
+          {rows.length === 0 ? (
+            <Text color="$fg-muted">nothing in line</Text>
+          ) : (
+            rows.map((item, index) => {
+              const separator = separatorBefore(rows, index)
+              const key = `${item.row.branch}@${item.row.head}#${item.run?.id ?? item.row.run ?? String(index)}`
+              return (
+                <Box key={key} flexDirection="column" minWidth={0}>
+                  {separator === undefined ? null : (
+                    <Text bold color="$fg-muted">
+                      {separator}
+                    </Text>
+                  )}
+                  <ListRow item={item} previous={rows[index - 1]} label={label} layout={layout} cursor={false} />
+                </Box>
+              )
+            })
+          )}
+          {(options.trailer ?? []).map((line) => (
+            <Text key={line} wrap="truncate">
+              {line}
+            </Text>
+          ))}
+          {options.scope === undefined ? (
+            <Text color="$fg-muted">{`${String(rows.length)} change(s) · one row per run per change`}</Text>
+          ) : null}
+        </ListStack>
       </Box>
     </NowProvider>
   )
