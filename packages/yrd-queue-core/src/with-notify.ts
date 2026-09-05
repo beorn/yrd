@@ -49,9 +49,8 @@ export const withNotify: Ring = (steps) => ({
 
   bookkeep: async (run, entry) => {
     await steps.bookkeep(run, entry)
-    // An ended change whose message reached nobody is sent again (at-least-once,
-    // § The queue run), so the repair rides on the pass that runs before
-    // anything is judged.
+    // Repair delivery to each still-owed recipient before anything is judged
+    // (at-least-once, § The queue run).
     await resend(run, entry)
   },
 
@@ -92,10 +91,9 @@ async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
 }
 
 /**
- * Resend an undelivered ending exposed by the captured tip: an ended tip with
- * no sent record (a crash between the two), or a sent record whose delivery
- * failed. The id is the ended record's sha, so whoever hears it can identify
- * repeated attempts (§ The queue run, at-least-once).
+ * Repair the current ending's delivery: a successful sent tip can cover an
+ * earlier failed recipient. `told` reads this ending's receipts, not just its
+ * tip, and retries only the names still owed (ruling D9).
  */
 async function resend(run: Run, entry: QueueEntry): Promise<void> {
   const tip = tipOf(entry.change)
@@ -105,9 +103,8 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   // it would put `sent State: failed` on top of a merged change and tell its
   // submitter to fix what has already landed (ruling A2).
   if (entry.change.headOnTarget && endedKind(tip) !== "merged") return
-  const undelivered = tip.kind === "sent" && trailer(tip, "Delivery") === "failed"
   const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged"
-  if (!undelivered && !unsent) return
+  if (tip.kind !== "sent" && !unsent) return
   // A retired change sends nothing (ruling B3).
   const reason = trailer(tip, "Reason")
   if (reason === "replaced" || reason === "deleted") return
@@ -149,6 +146,27 @@ async function told(
   endedRecord: string,
   initialAppendTip: string,
 ): Promise<void> {
+  // Only this ending's receipts count. The captured range excludes older
+  // endings; a contended append can interleave unrelated records above it.
+  const receipts =
+    initialAppendTip === endedRecord
+      ? []
+      : (await readRecords(run.git, `${endedRecord}..${initialAppendTip}`)).filter(
+          (record) => record.kind === "sent" && trailer(record, "For") === endedRecord,
+        )
+  const successful = new Set<string>()
+  for (const receipt of receipts) {
+    if (trailer(receipt, "Delivery") !== "sent") continue
+    const name = trailer(receipt, "To")
+    if (name === undefined || name === "") {
+      throw new Error(`${entry.change.branch}: successful sent record ${receipt.sha.slice(0, 12)} names no recipient`)
+    }
+    successful.add(name)
+  }
+  const owed = (run.options.notify ?? []).filter((entry) => entry.on.includes(kind) && !successful.has(entry.name))
+  // An absent name runs nothing; a newly declared name is owed this ending.
+  // Only the first telling can record `none`, never a completed repair pass.
+  if (receipts.length > 0 && owed.length === 0) return
   const written = await readRecord(run.git, endedRecord)
   const text = messageFor(kind, {
     branch: entry.change.branch,
@@ -167,14 +185,19 @@ async function told(
   const issue = trailer(written, "Issue")
   const lastCheck = trailers(written, "Check").at(-1)
   const log = lastCheck === undefined ? run.log.path : (readCheckTrailer(lastCheck).log ?? run.log.path)
-  const handed = await notifyAll(run, kind, {
-    change: changeName(entry.change),
-    record: kind,
-    ...(issue === undefined ? {} : { issue }),
-    ...(known ? { submitter } : {}),
-    ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
-    ...(kind === "failed" ? { failures: await failuresOf(run, entry, endedRecord) } : {}),
-  })
+  const handed = await notifyAll(
+    run,
+    kind,
+    {
+      change: changeName(entry.change),
+      record: kind,
+      ...(issue === undefined ? {} : { issue }),
+      ...(known ? { submitter } : {}),
+      ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
+      ...(kind === "failed" ? { failures: await failuresOf(run, entry, endedRecord) } : {}),
+    },
+    owed,
+  )
   let appendTip: string | undefined = initialAppendTip
   for (const { name, delivery, failure } of handed) {
     // One sent record per entry that fired, so a reader can see which of them the
@@ -308,8 +331,13 @@ type Handed = Readonly<{ name: string; delivery: Delivery; failure?: string }>
  * to say and nobody to say it to, because an ending with no record at all reads
  * exactly like an ending nobody has got to yet.
  */
-async function notifyAll(run: Run, ending: Ending, record: NotifyRecord): Promise<readonly Handed[]> {
-  const wanted = (run.options.notify ?? []).filter((entry) => entry.on.includes(ending))
+async function notifyAll(
+  run: Run,
+  ending: Ending,
+  record: NotifyRecord,
+  selected?: readonly Notifier[],
+): Promise<readonly Handed[]> {
+  const wanted = selected ?? (run.options.notify ?? []).filter((entry) => entry.on.includes(ending))
   if (wanted.length === 0) return [{ delivery: "none", name: NOBODY }]
   const handed: Handed[] = []
   for (const entry of wanted) handed.push({ ...(await deliver(run, entry, record)), name: entry.name })

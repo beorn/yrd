@@ -739,7 +739,7 @@ describe("a queue run", () => {
     ])
   })
 
-  it("an ending no entry wants is still recorded: one sent record, To: none and Delivery: none", async () => {
+  it("an ending nobody wants records none once, and a newly declared recipient is still owed", async () => {
     // Silence and "nobody was told" read the same in a log that writes nothing,
     // so the queue writes the second one down.
     const w = await world()
@@ -752,7 +752,8 @@ describe("a queue run", () => {
 
     expect(messages(w)).toEqual([])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
-    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
+    const ref = changeRef("main", { branch: "task/one", head })
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
     expect(records.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
@@ -761,6 +762,34 @@ describe("a queue run", () => {
         ["State", "merged"],
       ]),
     )
+    const [merged, none] = [records[2]!, records[3]!]
+    // An unchanged declaration neither sends nor records `none` a second time.
+    const unchanged = await queueRun({
+      ...(await w.options({ exit: 0 })),
+      notify: [{ name: "supervisor", on: ["stuck"], run: w.notifier }],
+    })
+    expect(logRecords(unchanged).filter((record) => record.kind === "message")).toEqual([])
+    expect(await refAt(gitIn(w.remote), ref)).toBe(none.sha)
+    // `none` describes the old declaration; a newly wanted recipient is owed E.
+    const added = await queueRun({
+      ...(await w.options({ exit: 0 })),
+      notify: [{ name: "recorder", on: ["merged"], run: w.notifier }],
+    })
+    expect(
+      logRecords(added)
+        .filter((record) => record.kind === "message")
+        .map(({ delivered, id, to }) => ({ delivered, id, to })),
+    ).toEqual([{ delivered: true, id: merged.sha, to: "recorder" }])
+    await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
+    const receipt = (await readRecords(w.git, (await refAt(w.git, ref))!)).at(-1)!
+    expect(receipt.kind).toBe("sent")
+    expect(["To", "Delivery", "For", "Message-Id"].map((name) => trailer(receipt, name))).toEqual([
+      "recorder",
+      "sent",
+      merged.sha,
+      merged.sha,
+    ])
+    expect((await w.git(["rev-parse", `${receipt.sha}^`])).trim()).toBe(none.sha)
   })
 
   it("a check past its bound is stuck, not the submitter's", async () => {
@@ -1221,13 +1250,24 @@ describe("a queue run", () => {
     expect(records.slice(-2).map((record) => trailer(record, "Message-Id"))).toEqual([merged.sha, merged.sha])
     expect(messages(w)).toHaveLength(1)
 
+    // With no currently matching names, the failed old name writes nothing;
+    // the nonempty receipt chain also never grows a synthetic `none` receipt.
+    const ref = changeRef("main", { branch: "task/one", head })
+    const absent = await queueRun({ ...(await w.options({ exit: 0 })), notify: [] })
+    expect(logRecords(absent).filter((record) => record.kind === "message")).toEqual([])
+    expect(await refAt(gitIn(w.remote), ref)).toBe(appendTip.sha)
+    expect(messages(w)).toHaveLength(1)
+
     // The failed recipient is back. A poisoned local ref cannot replace either
     // the immutable ending id or the captured sent tip used as append parent.
-    const ref = changeRef("main", { branch: "task/one", head })
     await w.git(["update-ref", ref, head])
+    const healthy = [
+      { name: "recovering", on: ["merged"] as const, run: w.notifier },
+      { name: "recorder", on: ["merged"] as const, run: w.notifier },
+    ]
     const again = await queueRun({
       ...(await w.options({ exit: 0 })),
-      notify: [{ name: "recovering", on: ["merged"], run: w.notifier }],
+      notify: healthy,
     })
     expect(again.exitCode).toBe(0)
     expect(await refAt(w.git, ref)).toBe(head)
@@ -1250,6 +1290,12 @@ describe("a queue run", () => {
     expect((await w.git(["rev-parse", `${records.at(-1)!.sha}^`])).trim()).toBe(appendTip.sha)
     expect(messages(w)).toHaveLength(2)
     expect(messages(w).map((message) => message.record)).toEqual(["merged", "merged"])
+
+    const repairedTip = records.at(-1)!
+    const settled = await queueRun({ ...(await w.options({ exit: 0 })), notify: healthy })
+    expect(logRecords(settled).filter((record) => record.kind === "message")).toEqual([])
+    expect(await refAt(gitIn(w.remote), ref)).toBe(repairedTip.sha)
+    expect(messages(w)).toHaveLength(2)
   })
 
   it("a change merged around the queue reads merged, its catch-up record says a direct merge did it, and the direct merge is reported once (E5)", async () => {
