@@ -90,8 +90,19 @@ describe("the rows a watch shows", () => {
     const options = { journals: journals({ [journalKey(current.branch, current.head)]: ["old"] }) }
     const historical = watchRows([current], options)[0]!
     expect(historical.row).toMatchObject({ state: "failed", next: current.next, run: "old" })
-    for (const key of ["result", "reason", "log", "base", "merge", "incident", "startedAt", "endedAt", "live"] as const)
+    for (const key of [
+      "result",
+      "reason",
+      "log",
+      "base",
+      "merge",
+      "incident",
+      "startedAt",
+      "endedAt",
+      "live",
+    ] as const) {
       expect(historical.row[key], key).toBeUndefined()
+    }
     expect(filterRows([historical], ["later"])).toHaveLength(0)
     expect(watchRows([current], { ...options, latest: true })[0]?.row).toBe(current)
     expect(watchRows([current])[0]?.row).toBe(current)
