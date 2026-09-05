@@ -247,8 +247,11 @@ function buildProgram(
       .command("watch [filter...]")
       .description(
         "queue list with --watch implied: refresh until the selected change ends. " +
+          "On a terminal it draws the pane: the table, the RUNNER and STATS boxes, and one change opened " +
+          "(Enter) as its run: status box, change list, Changes tab and one tab per check. Keys: j/k move, " +
+          "Enter opens, Escape closes, o r d f show one status, a shows everything, v folds the diff, ? help, q leaves. " +
           "The run journal is local to the machine the queue runs on, so off it the check running now, " +
-          "the run id and the check clocks are absent and the watch says where it looked.",
+          "the run id, the RUNNER and STATS boxes and the check clocks are absent and the watch says where it looked.",
       ),
   ).action(async (filters, options) => {
     const { interval, json, latest } = options as { interval?: number; json?: boolean; latest?: boolean }
