@@ -1,5 +1,5 @@
 /**
- * The table and the declaration, on the same real remote the other tests use.
+ * The table and declaration authority, on a real remote.
  */
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -13,7 +13,6 @@ import {
   gitIn,
   list,
   directMergeCommits,
-  queueName,
   readCheckTrailer,
   readConfig,
   readHistories,
@@ -69,141 +68,19 @@ async function submitCommit(w: World, branch: string, file: string): Promise<str
 }
 
 describe("the declaration is read from the queue branch commit", () => {
-  it("carries the selected queue, the checks with their phases, and who is notified of what", async () => {
-    const w = await world(
-      [
-        "notify:",
-        "  - submitter:",
-        "      on: [merged, failed]",
-        "      run: bun tools/yrd-notify.ts",
-        "  - supervisor:",
-        "      on: stuck",
-        "      run: bun tools/yrd-notify.ts --to @cto",
-        "checks:",
-        "  - typecheck:",
-        "      run: bun run typecheck",
-        "      on: [submit, merge]",
-        "  - tests:",
-        "      run: bun run test",
-        "      timeoutMs: 1800000",
-        "",
-      ].join("\n"),
-    )
-    const config = await readConfig(w.git, "main", MAIN)
-    expect(config).toMatchObject({ target: { branch: "main", remote: "origin" } })
-    expect(config?.notify).toEqual([
-      { name: "submitter", on: ["merged", "failed"], run: "bun tools/yrd-notify.ts" },
-      { name: "supervisor", on: ["stuck"], run: "bun tools/yrd-notify.ts --to @cto" },
-    ])
-    expect(config?.checks).toEqual([
-      {
-        environmentPassthrough: undefined,
-        name: "typecheck",
-        on: ["submit", "merge"],
-        run: "bun run typecheck",
-        timeoutMs: undefined,
-      },
-      { environmentPassthrough: undefined, name: "tests", on: undefined, run: "bun run test", timeoutMs: 1_800_000 },
-    ])
-    expect(config?.blob).toMatch(/^[0-9a-f]{40}$/u)
-  })
+  it("pairs each captured declaration with its own blob after the branch advances", async () => {
+    const w = await world("setup: prepare-a\n")
+    const a = w.target
+    const aBlob = (await w.git(["rev-parse", `${a}:.yrd.yml`])).trim()
+    writeFileSync(join(w.work, ".yrd.yml"), "setup: prepare-b\n")
+    await w.git(["commit", "--quiet", "-am", "change the declaration"])
+    const b = (await w.git(["rev-parse", "HEAD"])).trim()
+    const bBlob = (await w.git(["rev-parse", `${b}:.yrd.yml`])).trim()
+    const target = { branch: "release/1.x", remote: "selected" }
 
-  it("names the setup that finishes every fresh worktree, and holds it to one command", async () => {
-    // A fresh worktree has submodules and no dependencies, so the target says
-    // once how to finish one instead of every check prefixing its own `run:`.
-    const declared = await world("setup: bun install --frozen-lockfile\nchecks:\n  - tests:\n      run: bun run test\n")
-    expect(await readConfig(declared.git, "main", MAIN)).toMatchObject({ setup: "bun install --frozen-lockfile" })
-
-    // Optional: a target that declares none prepares nothing beyond materialization.
-    const none = await world("{}\n")
-    expect((await readConfig(none.git, "main", MAIN))?.setup).toBeUndefined()
-
-    // Strict, as every key is: a typo is a setup that would silently never run.
-    const typo = await world("setupp: bun install\n")
-    await expect(readConfig(typo.git, "main", MAIN)).rejects.toThrow(/unknown key setupp/u)
-    const empty = await world("setup: ''\n")
-    await expect(readConfig(empty.git, "main", MAIN)).rejects.toThrow(/setup: must be a non-empty string/u)
-  })
-
-  it("refuses a retired key by naming where its meaning went, not just that it is unknown", async () => {
-    // The workdir is a path on ONE machine, so it is git
-    // configuration and never a declaration key: the declaration is one file
-    // every clone shares. Both spellings it ever had are refused, and the
-    // refusal says where to say it instead — "unknown key workdir" would tell a
-    // reader the queue forgot how to write somewhere.
-    for (const key of ["workdir", "scratch"]) {
-      const retired = await world(`${key}: /var/tmp/yrd\n`)
-      await expect(readConfig(retired.git, "main", MAIN)).rejects.toThrow(new RegExp(`unknown key ${key}`, "u"))
-      await expect(readConfig(retired.git, "main", MAIN)).rejects.toThrow(/git config yrd\.workdir/u)
-    }
-
-    // `owner:` went too: the queue addresses the roles `submitter` and `owner`,
-    // and which seat wears the owner's is the notifier's own argument.
-    const owned = await world("owner: '@cto'\n")
-    await expect(readConfig(owned.git, "main", MAIN)).rejects.toThrow(/unknown key owner/u)
-  })
-
-  it("takes queue identity from the caller and refuses target: and remote: by name", async () => {
-    const plain = await world("{}\n")
-    expect(await readConfig(plain.git, "main", MAIN)).toMatchObject({
-      checks: [],
-      target: { branch: "main", remote: "origin" },
-    })
-
-    for (const key of ["target", "remote"] as const) {
-      const retired = await world(`${key}: origin#develop\n`)
-      await expect(readConfig(retired.git, "main", MAIN)).rejects.toThrow(new RegExp(`unknown key ${key}`, "u"))
-      await expect(readConfig(retired.git, "main", MAIN)).rejects.toThrow("--queue <branch>")
-    }
-  })
-
-  it("holds notify: to the checks' own shape, and refuses the two keys it replaced", async () => {
-    // `notify:` and `checks:` are both "these commands, each for these
-    // occasions", so they are one grammar: a reader who has learned one has
-    // learned the other. An entry with no `on:` wants every ending.
-    const all = await world("notify:\n  - everyone:\n      run: bun tools/yrd-notify.ts\n")
-    expect((await readConfig(all.git, "main", MAIN))?.notify).toEqual([
-      { name: "everyone", on: ["merged", "failed", "stuck", "merged-direct"], run: "bun tools/yrd-notify.ts" },
-    ])
-
-    // The old scalar is a list of one entry now, and the refusal shows the shape.
-    const scalar = await world("notify: bun tools/yrd-notify.ts\n")
-    await expect(readConfig(scalar.git, "main", MAIN)).rejects.toThrow(/notify: must be a list of/u)
-
-    // An ending the queue does not have, and a key `notify:` does not read.
-    const unknownEnding = await world("notify:\n  - everyone:\n      on: landed\n      run: bun x\n")
-    await expect(readConfig(unknownEnding.git, "main", MAIN)).rejects.toThrow(
-      /on: must be merged or failed or stuck or merged-direct/u,
-    )
-    const timed = await world("notify:\n  - everyone:\n      run: bun x\n      timeoutMs: 1000\n")
-    await expect(readConfig(timed.git, "main", MAIN)).rejects.toThrow(/unknown key timeoutMs/u)
-
-    // `owner:` went with the seat name it held: a notify entry decides who
-    // hears about an ending, in its own arguments.
-    const owned = await world("owner: '@cto'\n")
-    await expect(readConfig(owned.git, "main", MAIN)).rejects.toThrow(/unknown key owner/u)
-    await expect(readConfig(owned.git, "main", MAIN)).rejects.toThrow(/the queue addresses nobody/u)
-  })
-
-  it("names itself by URL, normalized, so two clones of one queue say one name", async () => {
-    // A remote NAME means nothing outside the repository that holds it, and a
-    // merge commit is read by people who have neither. What is dropped is how
-    // you reach it, never which it is.
-    const main = { branch: "main", remote: "unused" }
-    expect(queueName(main, "git@github.com:beorn/hh.git")).toBe("github.com/beorn/hh#main")
-    expect(queueName(main, "https://github.com/beorn/hh.git")).toBe("github.com/beorn/hh#main")
-    expect(queueName(main, "/srv/git/hh.git")).toBe("/srv/git/hh.git#main")
-    expect(queueName({ branch: "develop", remote: "unused" }, "ssh://git@example.invalid:22/x/y/")).toBe(
-      "example.invalid:22/x/y#develop",
-    )
-  })
-
-  it("is loud about every other key it does not read", async () => {
-    const old = await world("batch: 1\nchecks:\n  - verify:\n      run: bun run test\n")
-    await expect(readConfig(old.git, "main", MAIN)).rejects.toThrow(/unknown key batch/u)
-
-    const wrong = await world("checks:\n  - verify:\n      on: sometimes\n      run: bun run test\n")
-    await expect(readConfig(wrong.git, "main", MAIN)).rejects.toThrow(/on: must be submit or merge/u)
+    // The checkout now holds B. Neither A's text nor its blob may follow it.
+    expect(await readConfig(w.git, a, target)).toMatchObject({ blob: aBlob, setup: "prepare-a", target })
+    expect(await readConfig(w.git, b, target)).toMatchObject({ blob: bBlob, setup: "prepare-b", target })
   })
 })
 

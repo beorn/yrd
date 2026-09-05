@@ -133,13 +133,21 @@ export async function readConfig(git: Git, commit: string, target: Target): Prom
   const blob = await refAt(git, `${commit}:.yrd.yml`, "blob")
   if (blob === undefined) return undefined
   const text = await git(["show", `${commit}:.yrd.yml`])
+  return parseConfig(text, { at: commit, blob, target })
+}
+
+/** Parse the declaration's text with its captured source and caller-owned queue identity. */
+export function parseConfig(
+  text: string,
+  { at, blob, target }: Readonly<{ at: string; blob: string; target: Target }>,
+): QueueConfig {
   let raw: unknown
   try {
     raw = Bun.YAML.parse(text)
   } catch (error) {
-    throw new Error(`.yrd.yml at ${commit} does not parse: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`.yrd.yml at ${at} does not parse: ${error instanceof Error ? error.message : String(error)}`)
   }
-  if (!isRecord(raw)) throw new Error(`.yrd.yml at ${commit.slice(0, 12)} is not a mapping`)
+  if (!isRecord(raw)) throw new Error(`.yrd.yml at ${at.slice(0, 12)} is not a mapping`)
   onlyKeys(raw, TOP_KEYS, ".yrd.yml")
   const notify = readNotify(raw.notify)
   const setup = optionalString(raw, "setup")
