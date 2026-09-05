@@ -393,6 +393,31 @@ describe("a check log is written once", () => {
     expect(readFileSync(path, "utf8")).toContain("hello")
     await expect(runCheck({ ...where, spec: { name: "verify", run: "echo again" } })).rejects.toThrow(path)
     expect(readFileSync(path, "utf8")).toContain("hello")
+
+    // Two overlapping check processes compete for a previously absent path.
+    // Either may finish first; exactly one publishes, the loser names the
+    // collision, and the winner's bytes survive. No timing/order assumption.
+    const contenders = ["failure", "pass"] as const
+    const attempts = await Promise.allSettled(
+      contenders.map((word) =>
+        runCheck({
+          ...where,
+          spec: { name: "overlap", run: `echo ${word}; exit ${word === "failure" ? "1" : "0"}` },
+        }),
+      ),
+    )
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1)
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1)
+    const overlap = checkLogPath(where.logDir, "overlap")
+    for (const [index, attempt] of attempts.entries()) {
+      if (attempt.status === "rejected") {
+        expect(String(attempt.reason)).toContain(`a check log already exists at ${overlap}`)
+      } else {
+        expect(attempt.value.log).toBe(overlap)
+        expect(readFileSync(overlap, "utf8")).toBe(`${contenders[index]}\n`)
+        expect(attempt.value.result).toBe(contenders[index] === "failure" ? "fail" : "pass")
+      }
+    }
   })
 })
 
@@ -412,12 +437,27 @@ describe("a queue run", () => {
   it("pass: the change is checked, merged, the target moves by one merge commit, and the submitter is told to close their bead", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
+    const secondHead = await submitCommit(w, "task/two", "two.txt")
 
-    const outcome = await queueRun(w.options({ exit: 0 }))
+    const outcome = await queueRun({
+      ...w.options({ exit: 0 }),
+      checks: [
+        { name: "verify", on: ["submit", "merge"], run: "if test -f one.txt; then cat one.txt; else cat two.txt; fi" },
+      ],
+    })
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/one"])
     expect(outcome.directMerges).toEqual([])
+    // Two changes in this SAME run and phase must not share an artifact.
+    // This preserves the class witness removed with the old attribution suite.
+    const oneLog = checkLogFor(outcome, "task/one", "submit", "verify")
+    const twoLog = checkLogFor(outcome, "task/two", "submit", "verify")
+    expect(oneLog).not.toBe(twoLog)
+    expect(oneLog).toContain(changeName({ branch: "task/one", head }))
+    expect(twoLog).toContain(changeName({ branch: "task/two", head: secondHead }))
+    expect(readFileSync(oneLog, "utf8")).toBe("one.txt\n")
+    expect(readFileSync(twoLog, "utf8")).toBe("two.txt\n")
     const after = await remoteTarget(w)
     expect(after).not.toBe(w.target)
     await w.git(["fetch", "--quiet", "origin", "main"])
