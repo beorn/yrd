@@ -27,4 +27,6 @@ export type YrdCliIO = {
   cwd?: string
   /** Human output may carry colour. Tests and pipes say no. */
   color?: boolean
+  /** The terminal's width in cells, for the pages that lay out to it; absent, they assume 120. */
+  columns?: number
 }

@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest"
 import type { Journals, Row } from "@yrd/queue-core"
 import { journalKey } from "@yrd/queue-core"
 import { clocksLine, noticeLine, watchNotice } from "../src/watch-notice.ts"
-import { filterRows, rowLine, rowTable, watchRows, watchRowKey } from "../src/watch-rows.ts"
+import { filterRows, rowLine, watchRows, watchRowKey } from "../src/watch-rows.ts"
 
 const since = new Date("2026-09-03T19:00:00.000Z")
 const now = new Date("2026-09-03T20:00:00.000Z")
@@ -167,10 +167,6 @@ describe("the one row renderer", () => {
     expect(line).toContain("fix the parser")
     expect(line).toContain("[q-1]")
     expect(line).toContain("(test running)")
-  })
-
-  it("says there is nothing in line rather than printing an empty table", () => {
-    expect(rowTable([])).toBe("nothing in line")
   })
 })
 

@@ -111,6 +111,8 @@ const DIVIDER_SIZE = 1
 const DEFAULT_SPLIT_RATIO = 0.65
 /** Below this many terminal rows the STATS box would push the table off the screen, so it yields (the retired pane's own rule). */
 const STATS_MIN_ROWS = 30
+/** The TIME rows under the counts cost five more; below this height the list keeps them. */
+const STATS_TIME_MIN_ROWS = 44
 
 export type WatchTier = "right" | "below" | "full"
 
@@ -440,7 +442,11 @@ export function WatchPane({
         />
       )}
       {shown.decisions === undefined || terminalRows < STATS_MIN_ROWS ? null : (
-        <StatsBox decisions={shown.decisions} columns={listColumns - 2} />
+        <StatsBox
+          decisions={shown.decisions}
+          columns={listColumns - 2}
+          timeRows={terminalRows >= STATS_TIME_MIN_ROWS}
+        />
       )}
       <StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />
     </Box>
@@ -584,12 +590,23 @@ function Table({
           active={active}
           virtualization="index"
           estimateHeight={(index: number) => (separatorBefore(rows, index) === undefined ? 1 : 2)}
+          // Hover is an affordance, not a selection: the row under the pointer
+          // is tinted (`meta.isHovered` below) and the cursor stays put, so a
+          // detail open on one change is not switched by a passing mouse. A
+          // click selects, as ListView does by default.
           onItemHover={() => undefined}
           onCursor={onCursor}
-          renderItem={(item: WatchRow, index: number) => {
+          renderItem={(item: WatchRow, index: number, meta: { isHovered: boolean }) => {
             const separator = separatorBefore(rows, index)
             const row = (
-              <ListRow item={item} previous={rows[index - 1]} label={label} layout={layout} cursor={index === cursor} />
+              <ListRow
+                item={item}
+                previous={rows[index - 1]}
+                label={label}
+                layout={layout}
+                cursor={index === cursor}
+                hovered={meta.isHovered}
+              />
             )
             return separator === undefined ? (
               row

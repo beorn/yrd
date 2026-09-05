@@ -24,6 +24,17 @@ export type RunDecision = Readonly<{
   decision: "merged" | "failed" | "stuck" | "checked"
   /** A merged decision the run made without merging: the change was already on the target. */
   duplicate: boolean
+  /**
+   * The three durations the box's TIME rows read, each present only when both
+   * instants are on the row: opened → this run started (`queuedMs`), this run
+   * started → ended (`runMs`), and for a merge that merged, opened → merged
+   * (`totalMs`). Milliseconds.
+   */
+  queuedMs?: number
+  runMs?: number
+  totalMs?: number
+  /** For a merge that merged: the runs the change took beyond the first — its same-head retries. */
+  retries?: number
 }>
 
 /**
@@ -104,13 +115,32 @@ export function rowDecision(row: Row): RowVerdict | undefined {
  * change itself, so `runs` counts distinct deciders wherever it is read.
  */
 export function decisionsOfRows(rows: readonly WatchRow[]): readonly RunDecision[] {
+  // Rows per change, for the retries a merged change took: every run beyond its first.
+  const runsOf = new Map<string, number>()
+  for (const { row } of rows) {
+    const change = `${row.branch}@${row.head}`
+    runsOf.set(change, (runsOf.get(change) ?? 0) + 1)
+  }
   const decisions: RunDecision[] = []
   for (const item of rows) {
     const verdict = verdictOfRow(item)
     if (verdict === undefined || verdict === UNCLASSIFIED) continue
     const at = item.run?.at ?? item.row.at
     if (at === undefined) continue
-    decisions.push({ at, ...verdict, run: item.run?.id ?? item.row.run ?? `${item.row.branch}@${item.row.head}` })
+    const { since, startedAt, endedAt } = item.row
+    const merged = verdict.decision === "merged" && !verdict.duplicate
+    const spans = {
+      ...(since !== undefined && startedAt !== undefined ? { queuedMs: startedAt.getTime() - since.getTime() } : {}),
+      ...(startedAt !== undefined && endedAt !== undefined ? { runMs: endedAt.getTime() - startedAt.getTime() } : {}),
+      ...(merged && since !== undefined ? { totalMs: at.getTime() - since.getTime() } : {}),
+      ...(merged ? { retries: (runsOf.get(`${item.row.branch}@${item.row.head}`) ?? 1) - 1 } : {}),
+    }
+    decisions.push({
+      at,
+      ...verdict,
+      run: item.run?.id ?? item.row.run ?? `${item.row.branch}@${item.row.head}`,
+      ...spans,
+    })
   }
   return decisions
 }
@@ -139,7 +169,7 @@ export function unclassifiedRows(rows: readonly WatchRow[]): readonly WatchRow[]
 
 export type StatsBucket = Readonly<{
   key: string
-  /** `TODAY`, `YSTRDAY` (item 18), or the two-digit hour of day. */
+  /** `TODAY`, `YSTRDAY` (item 18), `WEEK`, `MONTH`, or the two-digit hour of day. */
   label: string
   kind: "period" | "hour"
   startMs: number
@@ -147,21 +177,56 @@ export type StatsBucket = Readonly<{
   /** A local calendar day starts at or before this bucket, right after the (newer) one to its left (item 20). */
   dayBoundary: boolean
   merges: number
+  /** Runs that passed every check and merged nothing: a `checked` verdict — the retired box's PASS. */
+  passes: number
   duplicates: number
   fails: number
   stuck: number
   /** Distinct runs that wrote a decision in the bucket. */
   runs: number
+  /** Medians over the decisions in the bucket that carry the span; absent when none does. */
+  totalMs?: number
+  queuedMs?: number
+  runMs?: number
+  /** Mean same-head retries over the merges in the bucket; absent when nothing merged. */
+  retries?: number
 }>
 
-/** The rows the box shows, in order: DUP sits just above FAILS (items 21, 22). */
+/** The count rows the box shows, in order: PASS beside MERGES as before, DUP just above FAILS (items 21, 22). */
 export const STATS_ROWS = [
   { key: "merges", label: "MERGES" },
+  { key: "passes", label: "PASS" },
   { key: "duplicates", label: "DUP" },
   { key: "fails", label: "FAILS" },
   { key: "stuck", label: "STUCK" },
   { key: "runs", label: "RUNS" },
 ] as const satisfies readonly Readonly<{ key: keyof StatsBucket; label: string }>[]
+
+/**
+ * The time rows the box shows under the counts — the retired box's AVG TIME
+ * section, as medians (a queue day has a few long outliers and the middle is
+ * the number a reader wants): opened → merged, opened → the run started,
+ * the run started → ended, and the same-head retries a merge took.
+ */
+export const STATS_TIME_ROWS = [
+  { key: "totalMs", label: "TOTAL" },
+  { key: "queuedMs", label: "QUEUING" },
+  { key: "runMs", label: "RUNNING" },
+  { key: "retries", label: "RETRIES" },
+] as const satisfies readonly Readonly<{ key: keyof StatsBucket; label: string }>[]
+
+function median(values: readonly number[]): number | undefined {
+  if (values.length === 0) return undefined
+  const sorted = [...values].sort((left, right) => left - right)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1]! + sorted[middle]!) / 2
+}
+
+function startOfLocalWeek(today: Date): Date {
+  // Monday-start, as the retired box counted the week.
+  const back = (today.getDay() + 6) % 7
+  return new Date(today.getFullYear(), today.getMonth(), today.getDate() - back)
+}
 
 function startOfLocalDay(at: Date): Date {
   return new Date(at.getFullYear(), at.getMonth(), at.getDate())
@@ -171,15 +236,19 @@ function startOfLocalHour(at: Date): Date {
   return new Date(at.getFullYear(), at.getMonth(), at.getDate(), at.getHours())
 }
 
+type StatsWindow = Pick<StatsBucket, "key" | "label" | "kind" | "startMs" | "endMs" | "dayBoundary">
+
 /**
- * TODAY, YSTRDAY, then `hours` hour buckets ending at the current hour,
- * newest first, each with its counts. The day boundary is a fact about the
- * bucket, never a character on its label.
+ * TODAY, YSTRDAY, WEEK, MONTH, then `hours` hour buckets ending at the current
+ * hour, newest first, each with its counts and medians. The day boundary is a
+ * fact about the bucket, never a character on its label. WEEK and MONTH are
+ * the calendar's (Monday-start week, the first of the month), as the retired
+ * box counted them; both end now.
  */
 export function statsBuckets(decisions: readonly RunDecision[], now: Date, hours = 24): readonly StatsBucket[] {
   const today = startOfLocalDay(now)
   const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1)
-  const windows: Omit<StatsBucket, "merges" | "duplicates" | "fails" | "stuck" | "runs">[] = [
+  const windows: StatsWindow[] = [
     {
       dayBoundary: false,
       endMs: now.getTime() + 1,
@@ -195,6 +264,22 @@ export function statsBuckets(decisions: readonly RunDecision[], now: Date, hours
       kind: "period",
       label: "YSTRDAY",
       startMs: yesterday.getTime(),
+    },
+    {
+      dayBoundary: false,
+      endMs: now.getTime() + 1,
+      key: "week",
+      kind: "period",
+      label: "WEEK",
+      startMs: startOfLocalWeek(today).getTime(),
+    },
+    {
+      dayBoundary: false,
+      endMs: now.getTime() + 1,
+      key: "month",
+      kind: "period",
+      label: "MONTH",
+      startMs: new Date(today.getFullYear(), today.getMonth(), 1).getTime(),
     },
   ]
   const hour = startOfLocalHour(now)
@@ -218,13 +303,24 @@ export function statsBuckets(decisions: readonly RunDecision[], now: Date, hours
     const inside = decisions.filter(
       (decision) => decision.at.getTime() >= window.startMs && decision.at.getTime() < window.endMs,
     )
+    const spans = (key: "totalMs" | "queuedMs" | "runMs" | "retries"): readonly number[] =>
+      inside.flatMap((decision) => (decision[key] === undefined ? [] : [decision[key]]))
+    const retries = spans("retries")
+    const medians = {
+      ...(spans("totalMs").length === 0 ? {} : { totalMs: median(spans("totalMs")) }),
+      ...(spans("queuedMs").length === 0 ? {} : { queuedMs: median(spans("queuedMs")) }),
+      ...(spans("runMs").length === 0 ? {} : { runMs: median(spans("runMs")) }),
+      ...(retries.length === 0 ? {} : { retries: retries.reduce((sum, value) => sum + value, 0) / retries.length }),
+    }
     return {
       ...window,
       duplicates: inside.filter((decision) => decision.duplicate).length,
       fails: inside.filter((decision) => decision.decision === "failed").length,
       merges: inside.filter((decision) => decision.decision === "merged" && !decision.duplicate).length,
+      passes: inside.filter((decision) => decision.decision === "checked").length,
       runs: new Set(inside.map((decision) => decision.run)).size,
       stuck: inside.filter((decision) => decision.decision === "stuck").length,
+      ...medians,
     }
   })
 }
@@ -233,4 +329,31 @@ export function statsBuckets(decisions: readonly RunDecision[], now: Date, hours
 export function countCell(bucket: StatsBucket, key: (typeof STATS_ROWS)[number]["key"]): string {
   const value = bucket[key]
   return bucket.kind === "hour" && value === 0 ? "·" : String(value)
+}
+
+/**
+ * A duration in the fewest characters that still say the unit — an hour cell
+ * is three wide: `45s`, `24m`, `2h`, `3d`. Rounded to the unit, so `59m` is
+ * the last minute reading and `1h` the first hour one.
+ */
+export function shortDuration(ms: number): string {
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${String(seconds)}s`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${String(minutes)}m`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${String(hours)}h`
+  return `${String(Math.round(hours / 24))}d`
+}
+
+/**
+ * A TIME cell: the bucket's median as a short duration, the retries as a
+ * mean with one decimal, and `·` (an hour) or `—` (a period) where nothing
+ * in the bucket carried the span — no data, said apart from a zero.
+ */
+export function timeCell(bucket: StatsBucket, key: (typeof STATS_TIME_ROWS)[number]["key"]): string {
+  const value = bucket[key]
+  if (value === undefined) return bucket.kind === "hour" ? "·" : "—"
+  if (key === "retries") return value.toFixed(1)
+  return shortDuration(value)
 }

@@ -687,13 +687,17 @@ describe("yrd queue list, the table", () => {
 
     const listedText = capture(w.work)
     expect(await coreQueueCommand(w.work, listedText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    expect(listedText.stdout()).toContain("THE-END-OF-THE-INCIDENT")
+    // Compact: the list's row names the incident by its code, in the status
+    // suffix the pane draws (`stuck=<code>`, @cto 07b07f37); the sentence
+    // itself is `show`'s, below. The status word appears once, in STATUS.
     const listedLine = listedText
       .stdout()
       .split("\n")
       .find((line) => line.includes("task/incident"))
     expect(listedLine, listedText.stdout()).toBeDefined()
-    expect(listedLine?.match(/\bstuck\b/gu), listedText.stdout()).toHaveLength(1)
+    expect(listedLine, listedText.stdout()).toContain(`stuck=${incident.code}`)
+    expect(listedLine).toMatch(/◌ stuck\b/u)
+    expect(listedText.stdout()).not.toContain("THE-END-OF-THE-INCIDENT")
 
     const shownJson = capture(w.work)
     expect(
@@ -752,7 +756,15 @@ describe("yrd queue list, the table", () => {
 
     const asText = capture(w.work)
     expect(await coreQueueCommand(w.work, asText.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    expect(asText.stdout()).toContain(`   direct  main ${direct.slice(0, 12)} ${sentence}\n`)
+    // On the page: its own row — the direct glyph and word in STATUS, the
+    // target as its branch and the commit's own subject as its CHANGES text;
+    // the sentence is the JSON's `reason`, above.
+    const directLine = asText
+      .stdout()
+      .split("\n")
+      .find((line) => line.includes("→ direct"))
+    expect(directLine, asText.stdout()).toBeDefined()
+    expect(directLine).toContain("main direct.txt")
   })
 })
 

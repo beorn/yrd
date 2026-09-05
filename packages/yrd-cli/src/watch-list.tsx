@@ -239,6 +239,7 @@ function sameRow(left: ListRowProps, right: ListRowProps): boolean {
   const b = right.item.row
   return (
     left.cursor === right.cursor &&
+    left.hovered === right.hovered &&
     left.label === right.label &&
     left.item.run?.id === right.item.run?.id &&
     left.previous?.run?.id === right.previous?.run?.id &&
@@ -266,17 +267,32 @@ type ListRowProps = Readonly<{
   label: string
   layout: ListLayout
   cursor: boolean
+  /** The pointer is over this row: a tint under it, and nothing else — the cursor and the detail stay where they are. */
+  hovered?: boolean
 }>
 
-/** One row of the table. Reads no clock itself: its two time cells do. */
-export const ListRow = memo(function ListRow({ item, previous, label, layout, cursor }: ListRowProps) {
+/**
+ * One row of the table. Reads no clock itself: its two time cells do.
+ *
+ * Colour: the STATUS cell — glyph and word — wears the state's colour (the
+ * retired pane's `timelineStatusColor`), a live check overlays the working
+ * colour; the identity and time cells stay default or muted so the one
+ * coloured word is what the eye lands on. The cursor row forces the selected
+ * pair on every cell; a hovered row gets the hover surface only, which is the
+ * affordance the pointer had before (item P: hover never moves the selection).
+ */
+export const ListRow = memo(function ListRow({ item, previous, label, layout, cursor, hovered = false }: ListRowProps) {
   const { row } = item
   const forced = cursor ? "$fg-on-selected" : undefined
   const color = stateColor(row)
   const cell = runCell(item, label, previous)
   const suffix = changesSuffix(row)
   return (
-    <Box backgroundColor={cursor ? "$bg-selected" : undefined} minWidth={0} width="100%">
+    <Box
+      backgroundColor={cursor ? "$bg-selected" : hovered ? "$bg-surface-hover" : undefined}
+      minWidth={0}
+      width="100%"
+    >
       <Cells layout={layout}>
         {{
           age: <AgeCell since={row.since} color={forced} />,
@@ -324,7 +340,7 @@ export const ListRow = memo(function ListRow({ item, previous, label, layout, cu
               <Text color={forced ?? color} flexShrink={0}>
                 {stateGlyph(row)}
               </Text>
-              <Text color={forced ?? (row.live === undefined ? undefined : color)} wrap="truncate">
+              <Text color={forced ?? color} wrap="truncate">
                 {" "}
                 {row.state}
               </Text>

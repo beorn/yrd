@@ -19,6 +19,7 @@ import { gitIn, submit, type Git } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import type { ChangeDetail } from "../src/watch-detail.tsx"
+import { runShortName } from "../src/watch-format.ts"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
 import type { WatchRow } from "../src/watch-rows.ts"
 
@@ -367,18 +368,16 @@ describe("what a watch says it looked at", () => {
 
     const plain = capture(w.work)
     await coreQueueCommand(w.work, plain.io, { command: "list" }, { workdir: w.workdir })
-    expect(
-      plain
-        .stdout()
-        .split("\n")
-        .find((line) => line.includes(`[${firstId}]`)),
-    ).toContain(String(original.result))
-    expect(
-      plain
-        .stdout()
-        .split("\n")
-        .find((line) => line.includes(`[${secondId}]`)),
-    ).toContain("fail verify")
+    // Each historical run keeps its own row on the page, named by its failure
+    // in the status suffix (two runs started in one second share a `main#HHMMSS`).
+    const historyLines = plain
+      .stdout()
+      .split("\n")
+      .filter((line) => line.includes("task/history"))
+    expect(historyLines, plain.stdout()).toHaveLength(2)
+    expect(historyLines.some((line) => line.includes(`err=${String(original.reason)}`)), plain.stdout()).toBe(true)
+    expect(historyLines.some((line) => line.includes("failed verify")), plain.stdout()).toBe(true)
+    expect(plain.stdout()).toContain(runShortName("main", secondId))
 
     rendered.snapshot = undefined
     const interactive = capture(w.work)

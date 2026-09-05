@@ -16,6 +16,8 @@ import { MinuteContext, NowContext } from "../src/watch-clock.ts"
 import {
   UNCLASSIFIED,
   countCell,
+  shortDuration,
+  timeCell,
   decisionsOfRows,
   isDuplicateMerge,
   rowDecision,
@@ -65,14 +67,67 @@ describe("statsBuckets", () => {
       decision(20, "stuck", "r3"),
       decision(30, "merged", "r4"),
     ]
-    const [today, yesterday, ...hours] = statsBuckets(decisions, NOW, 24)
+    const [today, yesterday, week, month, ...hours] = statsBuckets(decisions, NOW, 24)
     expect(today).toMatchObject({ duplicates: 1, fails: 1, merges: 1, runs: 2, stuck: 0 })
     // 20 hours before 14:30 is 18:30 yesterday; 30 hours before is 08:30 yesterday.
     expect(yesterday).toMatchObject({ duplicates: 0, fails: 0, merges: 1, runs: 2, stuck: 1 })
+    // Thursday the 3rd: the week began Monday the 31st and the month on Tuesday the 1st; both hold every decision.
+    expect(week).toMatchObject({ duplicates: 1, fails: 1, label: "WEEK", merges: 2, runs: 4, stuck: 1 })
+    expect(month).toMatchObject({ duplicates: 1, fails: 1, label: "MONTH", merges: 2, runs: 4, stuck: 1 })
     expect(hours[0]).toMatchObject({ fails: 1, merges: 1, runs: 1 })
     expect(hours[2]).toMatchObject({ duplicates: 1, merges: 0 })
     expect(countCell(hours[1]!, "merges")).toBe("·")
     expect(countCell(today!, "merges")).toBe("1")
+  })
+
+  it("counts a checked verdict as a PASS, and reads the TIME rows as medians of the spans the decisions carry", () => {
+    const merged = (hoursAgo: number, spans: Partial<RunDecision>): RunDecision => ({
+      ...decision(hoursAgo, "merged", `m${String(hoursAgo)}`),
+      ...spans,
+    })
+    const decisions = [
+      decision(1, "checked", "c1"),
+      merged(2, { queuedMs: 60_000, retries: 0, runMs: 120_000, totalMs: 600_000 }),
+      merged(3, { queuedMs: 180_000, retries: 2, runMs: 240_000, totalMs: 1_800_000 }),
+      merged(4, { queuedMs: 120_000, retries: 1, runMs: 3_600_000 * 2, totalMs: 3_600_000 * 30 }),
+      // A failed run carries a queue wait and a run time, never a total: it merged nothing.
+      { ...decision(5, "failed", "f1"), queuedMs: 30_000, runMs: 45_000 },
+    ]
+    const [today] = statsBuckets(decisions, NOW, 24)
+    expect(today).toMatchObject({ merges: 3, passes: 1 })
+    // Medians: total over the three merges, queuing and running over the four decisions that carry them.
+    expect(today).toMatchObject({ queuedMs: 90_000, retries: 1, runMs: 180_000, totalMs: 1_800_000 })
+    expect(timeCell(today!, "totalMs")).toBe("30m")
+    expect(timeCell(today!, "queuedMs")).toBe("2m")
+    expect(timeCell(today!, "runMs")).toBe("3m")
+    expect(timeCell(today!, "retries")).toBe("1.0")
+    const [, yesterday, , , hour] = statsBuckets([], NOW, 24)
+    expect(timeCell(yesterday!, "totalMs"), "no data in a period is an em-dash, not a zero").toBe("—")
+    expect(timeCell(hour!, "totalMs"), "no data in an hour is the strip's dot").toBe("·")
+    expect([45_000, 90_000, 3_600_000 * 2, 3_600_000 * 30].map(shortDuration)).toEqual(["45s", "2m", "2h", "1d"])
+  })
+
+  it("measures the spans off the rows: opened → started, started → ended, opened → merged, and the retries a merge took", () => {
+    const since = new Date(NOW.getTime() - 3_600_000)
+    const startedAt = new Date(NOW.getTime() - 1_800_000)
+    const endedAt = new Date(NOW.getTime() - 600_000)
+    const base = { branch: "task/t", head: "t".repeat(40), since, startedAt, endedAt } as const
+    const rows: readonly WatchRow[] = [
+      // Two runs on one head: the first failed, the second merged — one retry.
+      { row: { ...base, at: startedAt, result: "fail test", state: "merged", run: "r1", endedAt: startedAt } },
+      { row: { ...base, at: endedAt, merge: "9".repeat(40), result: "pass test", state: "merged", run: "r2" } },
+    ]
+    const [failed, merged] = decisionsOfRows(rows)
+    expect(failed).toMatchObject({ decision: "failed", queuedMs: 1_800_000, runMs: 0 })
+    expect(failed).not.toHaveProperty("totalMs")
+    expect(failed).not.toHaveProperty("retries")
+    expect(merged).toMatchObject({
+      decision: "merged",
+      queuedMs: 1_800_000,
+      retries: 1,
+      runMs: 1_200_000,
+      totalMs: 3_000_000,
+    })
   })
 })
 
@@ -177,7 +232,7 @@ describe("the STATS box", () => {
     return text
   }
 
-  it("prints YSTRDAY, right-aligns every number, keeps DUP muted just above FAILS, and runs the midnight rule as its own column", async () => {
+  it("prints TODAY YSTRDAY WEEK MONTH, right-aligns every number, keeps DUP just above FAILS, runs the midnight rule as its own column, and draws the TIME rows under the counts", async () => {
     const text = await paint(
       [
         decision(0.5, "merged"),
@@ -192,12 +247,27 @@ describe("the STATS box", () => {
     expect(header).toBeDefined()
     expect(header).toContain("TODAY")
     expect(header).not.toContain("YESTERDAY")
-    const rows = ["MERGES", "DUP", "FAILS", "STUCK", "RUNS"].map((label) =>
-      lines.findIndex((line) => line.includes(label)),
-    )
-    // In order, DUP directly above FAILS.
+    expect(header).toMatch(/TODAY\s+YSTRDAY\s+WEEK\s+MONTH/u)
+    const rows = [
+      "MERGES",
+      "PASS",
+      "DUP",
+      "FAILS",
+      "STUCK",
+      "RUNS",
+      "TIME",
+      "TOTAL",
+      "QUEUING",
+      "RUNNING",
+      "RETRIES",
+    ].map((label) => lines.findIndex((line) => line.includes(label)))
+    // In order, every row present, DUP directly above FAILS, the TIME rows under the counts.
+    expect(
+      rows.every((index) => index >= 0),
+      text,
+    ).toBe(true)
     expect(rows).toEqual([...rows].sort((left, right) => left - right))
-    expect(rows[2]).toBe(rows[1]! + 1)
+    expect(rows[3]).toBe(rows[2]! + 1)
     // Right-aligned: the TODAY count ends in the same column the TODAY label ends in.
     const todayEnd = header!.indexOf("TODAY") + "TODAY".length
     const merges = lines[rows[0]!]!

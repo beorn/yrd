@@ -48,14 +48,12 @@ export function rowGlyph(row: Row): string {
 }
 
 /**
- * One row, rendered. The ONE renderer: plain `yrd queue list` and the watch's
- * list both draw a row here, so the two can never drift into different columns
- * for the same change. It replaces `table()`/`line()`, which lived in
- * queue-core-commands.ts and knew nothing of a subject or a run.
+ * One row as one line of text: the headline `queue show` prints above a
+ * change's checks and records. The list and the watch no longer draw rows
+ * here — both draw `ListRow` (watch-list.tsx), the list once through
+ * watch-print.tsx and the watch every round — so the two cannot drift.
  *
- * Extra columns appear only when there is something to put in them, so the
- * plain list of a repository with no journal and no fetched subjects prints
- * exactly the line it printed before.
+ * Extra columns appear only when there is something to put in them.
  */
 export function rowLine(row: WatchRow): string {
   const position = row.row.position === undefined ? "  " : String(row.row.position).padStart(2)
@@ -76,10 +74,4 @@ export function rowLine(row: WatchRow): string {
   ]
     .join("")
     .trimEnd()
-}
-
-/** Every row, one per line, or the one sentence that says there are none. */
-export function rowTable(rows: readonly WatchRow[]): string {
-  if (rows.length === 0) return "nothing in line"
-  return rows.map(rowLine).join("\n")
 }

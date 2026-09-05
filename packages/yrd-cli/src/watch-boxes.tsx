@@ -20,7 +20,15 @@ import { useMinute, useNow } from "./watch-clock.ts"
 import { boundedHangingLines, clock, mediaDuration, runShortName } from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { runnerHealth, type RunnerFacts, type RunnerHealth } from "./watch-runner.ts"
-import { STATS_ROWS, countCell, statsBuckets, type RunDecision, type StatsBucket } from "./watch-stats.ts"
+import {
+  STATS_ROWS,
+  STATS_TIME_ROWS,
+  countCell,
+  statsBuckets,
+  timeCell,
+  type RunDecision,
+  type StatsBucket,
+} from "./watch-stats.ts"
 
 /** Gutter 2 + borders 2 + the box's paddingX 2: what the command text cannot have (the retired box's own accounting). */
 const RUNNER_CHROME = 6
@@ -160,26 +168,52 @@ export function RunnerBox({
   )
 }
 
-/** The label column of the STATS box, wide enough for `MERGES` and a space. */
+/** The label column of the STATS box, wide enough for `QUEUING` and a space. */
 const STATS_LABEL_WIDTH = 8
-/** One hour cell: two digits or up to three digits of count, right-aligned. */
-const STATS_HOUR_WIDTH = 3
-/** The two calendar columns. */
-const STATS_PERIOD_WIDTHS = [6, 8] as const
+/** One hour cell: a count of up to three digits or a duration like `45m`, right-aligned with one cell of air. */
+const STATS_HOUR_WIDTH = 4
+/** The four calendar columns, by bucket key: `YSTRDAY` is the wide one. */
+const STATS_PERIOD_WIDTHS: Readonly<Record<string, number>> = { month: 6, today: 6, week: 6, yesterday: 8 }
+const STATS_PERIODS_WIDTH = Object.values(STATS_PERIOD_WIDTHS).reduce((sum, width) => sum + width, 0)
 
-/** How many hour buckets fit beside the label and the two calendar columns, between 6 and 24. */
+/** How many hour buckets fit beside the label and the four calendar columns, between 6 and 24. */
 export function statsHoursFor(columns: number): number {
-  const fixed = RUNNER_CHROME + STATS_LABEL_WIDTH + STATS_PERIOD_WIDTHS[0] + STATS_PERIOD_WIDTHS[1] + 2
+  const fixed = RUNNER_CHROME + STATS_LABEL_WIDTH + STATS_PERIODS_WIDTH + 2
   return Math.max(6, Math.min(24, Math.floor((columns - fixed) / STATS_HOUR_WIDTH)))
 }
 
 /**
- * The STATS box (items 18–22): `TODAY`, `YSTRDAY`, then the hours of the last
- * day newest first; every number right-aligned (item 19); the local midnight
- * as its own one-character column running through header and rows alike
- * (item 20); DUP muted and just above FAILS (items 21, 22).
+ * The colour of a count row — the retired box's: merges and passes are
+ * successes, a duplicate merged nothing and is muted, a fail is an error, a
+ * stuck run is the warning it is, and the run count is plain.
  */
-export function StatsBox({ decisions, columns }: { decisions: readonly RunDecision[]; columns: number }) {
+const STATS_ROW_COLOR: Readonly<Partial<Record<(typeof STATS_ROWS)[number]["key"], string>>> = {
+  duplicates: "$fg-muted",
+  fails: "$fg-error",
+  merges: "$fg-success",
+  passes: "$fg-success",
+  stuck: "$fg-warning",
+}
+
+/**
+ * The STATS box (items 18–22): `TODAY`, `YSTRDAY`, `WEEK`, `MONTH`, then the
+ * hours of the last day newest first; every number right-aligned (item 19);
+ * the local midnight as its own one-character column running through header
+ * and rows alike (item 20); DUP muted and just above FAILS (items 21, 22);
+ * under the counts, the TIME rows — median opened→merged, opened→started,
+ * started→ended, and the mean same-head retries a merge took — the retired
+ * box's AVG TIME section on the new core's rows.
+ */
+export function StatsBox({
+  decisions,
+  columns,
+  timeRows = true,
+}: {
+  decisions: readonly RunDecision[]
+  columns: number
+  /** Draw the TIME rows under the counts; a short terminal keeps the counts and gives the list the rows instead. */
+  timeRows?: boolean
+}) {
   // Hour buckets move on the minute at most; nothing here needs the seconds.
   const minute = useMinute()
   const buckets = statsBuckets(decisions, minute, statsHoursFor(columns))
@@ -188,7 +222,7 @@ export function StatsBox({ decisions, columns }: { decisions: readonly RunDecisi
   const cell = (bucket: StatsBucket, text: string, color: string | undefined, bold = false) => (
     <Box
       key={bucket.key}
-      width={bucket.kind === "hour" ? STATS_HOUR_WIDTH : STATS_PERIOD_WIDTHS[bucket.key === "today" ? 0 : 1]}
+      width={bucket.kind === "hour" ? STATS_HOUR_WIDTH : (STATS_PERIOD_WIDTHS[bucket.key] ?? 6)}
       flexShrink={0}
       justifyContent="flex-end"
     >
@@ -229,13 +263,12 @@ export function StatsBox({ decisions, columns }: { decisions: readonly RunDecisi
     <TitledBox title="STATS">
       {line("header", "", (bucket) => bucket.label, "$fg-muted", true)}
       {STATS_ROWS.map((row) =>
-        line(
-          row.key,
-          row.label,
-          (bucket) => countCell(bucket, row.key),
-          row.key === "duplicates" ? "$fg-muted" : undefined,
-        ),
+        line(row.key, row.label, (bucket) => countCell(bucket, row.key), STATS_ROW_COLOR[row.key]),
       )}
+      {timeRows ? line("time", "TIME", () => "", "$fg-muted", true) : null}
+      {timeRows
+        ? STATS_TIME_ROWS.map((row) => line(row.key, row.label, (bucket) => timeCell(bucket, row.key), "$fg-muted"))
+        : null}
     </TitledBox>
   )
 }

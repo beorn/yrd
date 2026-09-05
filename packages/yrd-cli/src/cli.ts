@@ -482,6 +482,7 @@ export async function runYrdExecutable(): Promise<never> {
     stdout: fdWriters.stdout,
     stderr: fdWriters.stderr,
     color,
+    ...(process.stdout.isTTY && process.stdout.columns > 0 ? { columns: process.stdout.columns } : {}),
     cwd: process.cwd(),
   }
   const exitCode = await runYrdProcess(process.argv, io)

@@ -48,7 +48,6 @@ import {
   refuseTarget,
   submit,
   issueOf,
-  journalKey,
   QueuePaused,
   QueueNotPaused,
   requireResumed,
@@ -65,7 +64,7 @@ import {
 } from "@yrd/queue-core"
 import { declarationHere } from "./declaration.ts"
 import { clocksLine, noticeLine } from "./watch-notice.ts"
-import { filterRows, rowLine, rowTable, watchRows, watchRowKey, type WatchRow } from "./watch-rows.ts"
+import { filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
@@ -467,12 +466,13 @@ export async function coreQueueCommand(
       const round = async (): Promise<
         Readonly<{
           rows: readonly WatchRow[]
-          text: string
           data: unknown
           queue: string
           queues: readonly WatchQueue[]
           pause?: string
           journalAbsent?: string
+          /** What was queried and what was left out, when a filter narrowed the rows. */
+          scope?: string
           /** The newest run journal and its process, for the RUNNER box. */
           runner: RunnerFacts
           /** Every decision the rows carry, one per run per change and unfiltered, for the STATS box. */
@@ -509,33 +509,38 @@ export async function coreQueueCommand(
           decisions: decisionsOfRows(watchRows(all, { journals })),
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
           ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
+          ...(scope === undefined ? {} : { scope }),
           rows,
-          text: [
-            // The pause stays the FIRST line it has always been: a queue that
-            // is not running is the loudest thing about it, and a reader who
-            // scrolled past the name would still see it. The name follows.
-            pause === undefined ? undefined : pauseLine(pause),
-            queueName(config.target, await remoteUrl(git, config.target.remote)),
-            // G5: journal-derived fields are absent off the queue's own
-            // machine, and the watch says where it looked rather than showing
-            // a blank where a fact belongs.
-            journals.absent,
-            scope,
-            rowTable(rows),
-            ...(rows.length === 1 && rows[0] !== undefined
-              ? [noticeLine(rows[0].row, rows[0].run !== undefined), clocksLine(rows[0].row)].filter(
-                  (part) => part !== "",
-                )
-              : []),
-          ]
-            .filter((part): part is string => part !== undefined)
-            .join("\n"),
         }
+      }
+      /**
+       * The page a human reads, drawn by the watch's own components once
+       * (watch-print.tsx): the pause first, the queue's name, the pills, the
+       * table in the state colours, the RUNNER box. Reached through a dynamic
+       * import so that `--json` and every command that prints no table never
+       * load React or silvery's renderer (the cold-graph test pins it).
+       */
+      const page = async (one: Awaited<ReturnType<typeof round>>): Promise<string> => {
+        const { printListing } = await import("./watch-print.tsx")
+        const single = one.rows.length === 1 ? one.rows[0] : undefined
+        return printListing(snapshotOf(one), {
+          color: io.color === true,
+          columns: io.columns ?? 120,
+          ...(one.scope === undefined ? {} : { scope: one.scope }),
+          ...(single === undefined
+            ? {}
+            : {
+                trailer: [noticeLine(single.row, single.run !== undefined), clocksLine(single.row)].filter(
+                  (part) => part !== "",
+                ),
+              }),
+        })
       }
 
       if (request.watch !== true) {
         const one = await round()
-        emit(io, options.json, one.data, one.text)
+        if (options.json === true) emit(io, true, one.data, "")
+        else io.stdout(`${await page(one)}\n`)
         return 0
       }
 
@@ -553,6 +558,7 @@ export async function coreQueueCommand(
         const { WatchPane } = await import("./watch-pane.tsx")
         const { run } = await import("silvery/runtime")
         const { createElement } = await import("react")
+        const { WATCH_RUN_OPTIONS } = await import("./watch-run-options.ts")
         let ending: YrdCliExitCode | undefined
         // The queue read the LAST round made: a detail opened between rounds
         // reads the same tips the table shows, never a fresher or staler one.
@@ -575,6 +581,7 @@ export async function coreQueueCommand(
                   },
             snapshot: snapshotOf(first),
           }),
+          WATCH_RUN_OPTIONS,
         )
         await app.waitUntilExit()
         return ending ?? 0
@@ -604,7 +611,8 @@ export async function coreQueueCommand(
         // `updated HH:MM:SS` stamp of the retired watch (item 30), under the
         // queue's name, where the live pane shows the RUNNER timer instead.
         if (io.color === true) io.stdout("\u001b[H\u001b[2J")
-        emit(io, options.json, one.data, stampRound(one.text, one.queue, new Date()))
+        if (options.json === true) emit(io, true, one.data, "")
+        else io.stdout(`${stampRound(await page(one), one.queue, new Date())}\n`)
         if (selected) {
           const ending = endingCode(one.rows)
           if (ending !== undefined) return ending
