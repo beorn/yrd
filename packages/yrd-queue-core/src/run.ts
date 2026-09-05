@@ -782,8 +782,8 @@ async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): P
     )
   }
   run.log.write({
+    ...incident,
     branch: entry.change.branch,
-    code: detail.code,
     decision: entry.reading.state === "checked" ? "checked" : "queued",
     head: entry.change.head,
     kind: "change",

@@ -21,6 +21,7 @@ import {
   changeRef,
   checksOf,
   gitIn,
+  incidentFrom,
   list,
   queueRun,
   readJournals,
@@ -221,12 +222,19 @@ describe("settling gitlinks", () => {
     expect(trailer(waitingRecords.at(-1)!, "Owner")).toBeUndefined()
     const waitingQueue = await readQueue(w.git, "origin", "main", await remoteTip(w.git, "refs/heads/main"))
     expect(waitingQueue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("queued")
-    const waitingRow = list(waitingQueue.changes).find((row) => row.head === head)
+    const journals = readJournals(dirname(outcome.log))
+    const incident = incidentFrom(waitingRecords.at(-1)!)
+    const waitingRow = list(waitingQueue.changes, { journals }).find((row) => row.head === head)
     expect(waitingRow).toMatchObject({
-      incident: { code: "gitlink-off-main" },
+      incident,
       position: 1,
       state: "queued",
     })
+    const shown = watchRows(list(waitingQueue.changes, { journals }), { journals }).find(
+      (row) => row.row.head === head,
+    )!
+    expect(shown.run?.incident).toEqual(incident)
+    expect(shown.row.incident).toEqual(incident)
     expect(waitingRow?.result).toContain(w.offMain)
     expect(readFileSync(outcome.log, "utf8")).toContain("gitlink-off-main")
 
