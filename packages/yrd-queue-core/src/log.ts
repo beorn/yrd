@@ -32,6 +32,7 @@
 
 import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
+import { incidentTrailers, type Incident } from "./incident.ts"
 
 /**
  * A run's own id: the instant it started, then a random tail, so two runs never
@@ -138,6 +139,9 @@ export type JournalCheck = Readonly<{
   endedAt?: Date
   /** How long it took, from the end row. */
   ms?: number
+  /** The separate result row's measured verdict and exit, not the change's current state. */
+  result?: "pass" | "fail" | "stuck"
+  exit?: string
 }>
 
 /** What one run's journal says about one change. */
@@ -154,6 +158,12 @@ export type JournalRun = Readonly<{
   running?: JournalCheck
   /** The decision this run recorded — `checked`, `merged`, `failed`, `stuck` — when it made one. */
   decision?: string
+  reason?: string
+  incident?: Incident
+  /** The target recorded in this run's header; never borrowed from a later run. */
+  base?: string
+  /** The merge commit this run recorded, if it recorded one. */
+  merge?: string
   /** When this run last wrote about the change. */
   at: Date
 }>
@@ -256,8 +266,18 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
 function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): readonly JournalRun[] {
   const byChange = new Map<
     string,
-    { branch: string; head: string; checks: JournalCheck[]; decision?: string; at: Date }
+    {
+      branch: string
+      head: string
+      checks: JournalCheck[]
+      decision?: string
+      reason?: string
+      incident?: Incident
+      merge?: string
+      at: Date
+    }
   >()
+  const base = records.find((record) => record.kind === "run")?.base
   const held = (branch: string, head: string, at: Date) => {
     const key = journalKey(branch, head)
     const found = byChange.get(key) ?? { at, branch, checks: [], head }
@@ -271,7 +291,43 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     const at = new Date(record.at)
     if (Number.isNaN(at.getTime())) continue
     const change = held(branch, head, at)
-    if (record.kind === "change" && typeof record.decision === "string") change.decision = record.decision
+    if (record.kind === "change" && typeof record.decision === "string") {
+      change.decision = record.decision
+      change.reason = typeof record.reason === "string" ? record.reason : undefined
+      const { code, subject, via, evidence, next, owner } = record
+      if ([code, subject, via, evidence, next, owner].some((value) => value !== undefined)) {
+        if (
+          typeof code !== "string" ||
+          typeof subject !== "string" ||
+          typeof via !== "string" ||
+          typeof evidence !== "string" ||
+          typeof next !== "string" ||
+          typeof owner !== "string"
+        ) {
+          throw new Error(`run journal ${id} has an incomplete incident for ${journalKey(branch, head)}`)
+        }
+        const incident = { code, subject, via, evidence, next, owner }
+        // Reuse the writer's validator: malformed incident values must throw on read too.
+        incidentTrailers(incident)
+        change.incident = incident
+      }
+    }
+    if (record.kind === "merge" && typeof record.commit === "string") change.merge = record.commit
+    if (record.kind === "result") {
+      const index = change.checks.findLastIndex((check) => check.name === record.name && check.phase === record.phase)
+      const check = change.checks[index]
+      if (check === undefined)
+        throw new Error(
+          `run journal ${id} has a result without a check for ${journalKey(branch, head)}: ${String(record.name)}`,
+        )
+      if (record.result !== "pass" && record.result !== "fail" && record.result !== "stuck")
+        throw new Error(`run journal ${id} has an invalid check result: ${String(record.result)}`)
+      change.checks[index] = {
+        ...check,
+        result: record.result,
+        ...(typeof record.exit === "string" ? { exit: record.exit } : {}),
+      }
+    }
     if (record.kind !== "check") continue
     const name = record.name
     const phase = record.phase
@@ -309,6 +365,10 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       branch: change.branch,
       checks: change.checks,
       ...(change.decision === undefined ? {} : { decision: change.decision }),
+      ...(change.reason === undefined ? {} : { reason: change.reason }),
+      ...(change.incident === undefined ? {} : { incident: change.incident }),
+      ...(change.merge === undefined ? {} : { merge: change.merge }),
+      ...(typeof base === "string" ? { base } : {}),
       head: change.head,
       id,
       // A run that reached a decision about the change is not running a check

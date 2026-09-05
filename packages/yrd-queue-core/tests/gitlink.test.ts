@@ -13,9 +13,20 @@
 
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, list, queueRun, readQueue, readRecords, submit, trailer } from "../src/index.ts"
+import {
+  checksOf,
+  gitIn,
+  list,
+  queueRun,
+  readJournals,
+  readQueue,
+  readRecords,
+  submit,
+  trailer,
+  watchRows,
+} from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
 
 const roots: string[] = []
@@ -376,7 +387,12 @@ describe("settling gitlinks", () => {
     await advanceComponent(w, "healthy component main")
     const head = await submitFile(w, "task/candidate-red")
 
-    const outcome = await queueRun(w.options({ on: ["submit"], run: "test ! -f task-candidate-red.txt" }))
+    const outcome = await queueRun(
+      w.options({
+        on: ["submit"],
+        run: "if test -f task-candidate-red.txt; then echo CANDIDATE_FAIL; exit 1; else echo BASE_PASS; fi",
+      }),
+    )
 
     expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/candidate-red"], merged: [], stuck: [] })
     const records = await readRecords(w.git, { branch: "task/candidate-red", head })
@@ -389,6 +405,18 @@ describe("settling gitlinks", () => {
       .filter((record) => record.kind === "result" && record.name === "component-check")
       .map((record) => record.phase)
     expect(phases).toEqual(["submit", "base"])
+    // The read-side must not relabel the green comparator as the candidate's
+    // deciding artifact, nor collapse its two measured phase occurrences.
+    const journals = readJournals(dirname(outcome.log))
+    const queue = await readQueue(w.git, "origin", "main")
+    const shown = watchRows(list(queue.changes, { journals }), { journals }).find((row) => row.row.head === head)!
+    expect(shown.row.result).toBe("fail component-check")
+    expect(readFileSync(shown.row.log!, "utf8")).toBe("CANDIDATE_FAIL\n")
+    const detail = checksOf([], "failed", [], shown.run?.running, shown.run?.checks)
+    expect(detail.map((check) => [check.phase, check.state, readFileSync(check.log!, "utf8")])).toEqual([
+      ["submit", "failed", "CANDIDATE_FAIL\n"],
+      ["base", "passed", "BASE_PASS\n"],
+    ])
   })
 
   it("a gitlink moved on the target around the queue is reported with its path, and no component is asked about it (E5)", async () => {

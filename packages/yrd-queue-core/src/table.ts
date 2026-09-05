@@ -41,7 +41,7 @@ export type Row = Readonly<{
   state: ChangeState | "direct"
   /** 1-based place in line for queued, checked and stuck rows; absent otherwise. */
   position?: number
-  /** The last result: pass, fail or stuck, with the check that decided it. */
+  /** The result of the run named by `run`: pass, fail or stuck, with its deciding check. */
   result?: string
   /** The log path of the deciding check, when there is one. */
   log?: string
@@ -85,6 +85,82 @@ export type Row = Readonly<{
   /** Who acts next and why, derived once beside `readChange` (state.ts). Absent for a merged change: nobody. */
   next?: NextOwner
 }>
+
+/** One line of the watch's list: a change, or a change as ONE run saw it. */
+export type WatchRow = Readonly<{
+  row: Row
+  /** The run this line is about; absent when no journal split the change by run. */
+  run?: JournalRun
+}>
+
+export type WatchRowOptions = Readonly<{
+  /** One row per change instead of one per run: the opt-in lens (S2.13). */
+  latest?: boolean
+  /** What the run journals on this machine say; absent leaves one row per change. */
+  journals?: Journals
+}>
+
+/** The same identity for selection and detail: branch, head, and journal run. */
+export function watchRowKey(row: WatchRow): string {
+  const change = journalKey(row.row.branch, row.row.head)
+  return row.run === undefined ? change : `${change}@${row.run.id}`
+}
+
+/**
+ * The rows a watch shows, in the order `list()` already put them: in line
+ * first by position, then the ended, newest first. A change with runs keeps
+ * that place and its runs follow it newest first, so the reading order is
+ * still "what is in line, then what happened".
+ */
+export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): readonly WatchRow[] {
+  if (options.latest === true || options.journals === undefined) return rows.map((row) => ({ row }))
+  const journals = options.journals
+  return rows.flatMap((row) => {
+    const runs = journals.runs.get(journalKey(row.branch, row.head)) ?? []
+    if (runs.length === 0) return [{ row }]
+    return runs.map((run, index) => ({ row: runRow(row, run, index === 0), run }))
+  })
+}
+
+/** Join already-recorded run facts; never rederive the change's state. */
+function runRow(current: Row, run: JournalRun, newest: boolean): Row {
+  const check = run.decision === "failed" ? run.checks.findLast((check) => check.result === "fail") : run.checks.at(-1)
+  const result =
+    run.incident === undefined
+      ? run.decision === "checked" || run.decision === "merged" || run.decision === "failed" || run.decision === "stuck"
+        ? resultOf(run.decision, check?.name)
+        : check?.result === undefined
+          ? undefined
+          : `${check.result} ${check.name}`
+      : incidentLine(run.incident)
+  // Runs are serialized per change: a newer run proves an abandoned older
+  // check is no longer running, even when no decision was recorded for it.
+  const live = newest ? run.running : undefined
+  return {
+    ...current,
+    // Assign absent values too: no later run's facts may survive this join.
+    at: run.at,
+    base: run.base,
+    merge: run.merge,
+    reason: run.incident?.code ?? run.reason,
+    incident: run.incident,
+    result,
+    log: check?.log,
+    run: run.id,
+    startedAt: run.checks[0]?.startedAt,
+    endedAt: run.decision === undefined ? undefined : run.at,
+    live:
+      live === undefined
+        ? undefined
+        : {
+            run: run.id,
+            check: live.name,
+            phase: live.phase,
+            since: live.startedAt,
+            ...(live.log === undefined ? {} : { log: live.log }),
+          },
+  }
+}
 
 export type ListOptions = Readonly<{
   now?: Date

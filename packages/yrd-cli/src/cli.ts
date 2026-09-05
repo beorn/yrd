@@ -202,7 +202,7 @@ function buildProgram(
   ): T =>
     command
       .option("--latest", "one row per change; the default keeps every run that touched it")
-      .option("--json", "emit stable JSON")
+      .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")
       .option("--interval <seconds>", "seconds between refreshes while watching (default 5)", int)
   listOptions(
     queue

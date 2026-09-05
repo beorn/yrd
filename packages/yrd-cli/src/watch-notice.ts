@@ -54,25 +54,26 @@ const WORD: Readonly<Record<Row["state"], string>> = {
   stuck: "stuck",
 }
 
-export function watchNotice(row: Row): Notice {
+export function watchNotice(row: Row, joinedRun = false): Notice {
   const live = row.live
   const position = row.position === undefined ? "" : ` #${String(row.position)}`
-  const cause = row.reason ?? row.result
+  const cause = joinedRun && row.result !== undefined ? `run result: ${row.result}` : (row.reason ?? row.result)
+  const state = joinedRun ? `change ${WORD[row.state]}` : WORD[row.state]
   return {
     glyph: live === undefined ? GLYPH[row.state] : RUNNING,
     // The overlay says what is happening RIGHT NOW; the state still says what
     // the records say, and both are on the line, because a change under a
     // check reads `queued` until its checked record lands and that is an
     // answer, not a bug to paper over.
-    word: live === undefined ? `${WORD[row.state]}${position}` : `${WORD[row.state]}${position}, checking ${live.check}`,
+    word: live === undefined ? `${state}${position}` : `${state}${position}, checking ${live.check}`,
     ...(cause === undefined ? {} : { cause }),
     ...(row.next === undefined ? {} : { next: `${row.next.owner} — ${row.next.because}` }),
   }
 }
 
 /** The notice as one line: state, then cause, then whose move it is. */
-export function noticeLine(row: Row): string {
-  const notice = watchNotice(row)
+export function noticeLine(row: Row, joinedRun = false): string {
+  const notice = watchNotice(row, joinedRun)
   return [
     `${notice.glyph} ${notice.word}`,
     notice.cause === undefined ? undefined : notice.cause,
