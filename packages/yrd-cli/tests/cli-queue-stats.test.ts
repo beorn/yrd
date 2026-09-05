@@ -95,7 +95,8 @@ describe("yrd queue stats through the process entry", () => {
     expect(lines[0]).toContain("#main · stats at ")
     expect(lines[0]).toContain("the default seven days")
     expect(lines[0]).toContain("by submitter")
-    expect(lines[2]).toMatch(/^queue\s+1\s+0\s+0\s+0\s+0\s+1\s+0\s+1\s+0\s+0\s+—\s+—$/u)
+    // One change, queued: in line, no verdict yet.
+    expect(lines[2]).toMatch(/^queue\s+1\s+1\s+0\s+0\s+0\s+0\s+1\s+0\s+1\s+0\s+0\s+—\s+—$/u)
     expect(lines[3]).toMatch(/^@dev\/10\s+1\b/u)
     expect(ran.stdout).toContain("pushed, never submitted: 1 (oldest 0:0")
   })
@@ -110,7 +111,13 @@ describe("yrd queue stats through the process entry", () => {
       since: string
       defaultWindow: boolean
       by: string
-      total: { rows: number; changes: number; branches: number; latency: { count: number } }
+      total: {
+        rows: number
+        changes: number
+        branches: number
+        latency: { count: number }
+        decisions: Record<string, number>
+      }
       groups: readonly { key: string; rows: number }[]
       pushedNeverSubmitted: { count: number; ageUnknown: number; refs: readonly { branch: string; ageMs?: number }[] }
     }
@@ -118,7 +125,14 @@ describe("yrd queue stats through the process entry", () => {
     expect(document.defaultWindow).toBe(false)
     expect(new Date(document.at).getTime() - new Date(document.since).getTime()).toBe(86_400_000)
     expect(document.by).toBe("branch")
-    expect(document.total).toMatchObject({ branches: 1, changes: 1, rows: 1 })
+    expect(document.total).toMatchObject({ branches: 1, changes: 1, inLine: 1, merged: 0, rows: 1 })
+    expect(document.total.decisions).toEqual({
+      checked: 0,
+      duplicates: 0,
+      failed: 0,
+      merged: 0,
+      stuck: 0,
+    })
     expect(document.groups).toEqual([expect.objectContaining({ key: "task/one", rows: 1 })])
     expect(document.pushedNeverSubmitted.count).toBe(1)
     expect(document.pushedNeverSubmitted.ageUnknown).toBe(0)

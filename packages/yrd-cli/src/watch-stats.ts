@@ -1,17 +1,20 @@
 /**
- * The STATS box's numbers (watch-redesign items 18–22): what the run
- * journals on this machine say the queue did, counted into TODAY, YSTRDAY
- * and the hour-of-day buckets of the last day, newest first, with the local
- * midnight as a boundary the renderer draws as its own one-character column.
+ * The STATS box's numbers (watch-redesign items 18–22): what the queue's own
+ * rows say it did — one row per run per change, the rows `queue list`, the
+ * watch and `queue stats` all read — counted into TODAY, YSTRDAY and the
+ * hour-of-day buckets of the last day, newest first, with the local midnight
+ * as a boundary the renderer draws as its own one-character column.
  *
- * Pure. The loader flattens the journals it already read into one
- * {@link RunDecision} per (run, change) decision; nothing here opens a file,
- * and nothing here derives a change's state: a decision is what the run
- * wrote. Off the queue's own machine there are no journals and the box says
- * so through the caller.
+ * Pure. {@link decisionsOfRows} turns rows into one {@link RunDecision} per
+ * decided row; nothing here opens a file, and nothing here derives a change's
+ * state: a decision is what the row's run recorded. This is the ONE
+ * classification the pane and `queue stats` share (@cto 6acce2e2: one source
+ * as well as one classification; the journal-based flattening is gone), so
+ * the STATS box counts the same everywhere the rows can be read, on and off
+ * the queue's own machine.
  */
 
-import type { JournalRun, Journals } from "@yrd/queue-core"
+import type { JournalRun, Row, WatchRow } from "@yrd/queue-core"
 
 /** One decision a run recorded about a change: the smallest fact STATS counts. */
 export type RunDecision = Readonly<{
@@ -34,15 +37,71 @@ export function isDuplicateMerge(run: Pick<JournalRun, "decision" | "reason" | "
   return run.decision === "merged" && run.merge === undefined && run.reason === "already on the target"
 }
 
-/** Every decision in the journals, in no particular order. */
-export function decisionsOf(journals: Journals): readonly RunDecision[] {
+/** One row's verdict, with whether it merged nothing: the reader's one answer per row. */
+export type RowDecision = Readonly<{ decision: RunDecision["decision"]; duplicate: boolean }>
+
+/**
+ * What the run behind a row decided, read from the row's own fields — the
+ * one rule for a row split by a journal run and for a row that stands for
+ * its whole change:
+ * 1. a `result` with no `endedAt` is a run that ran checks and recorded no
+ *    decision (a re-based or abandoned run): nothing;
+ * 2. a `result` says the verdict — `fail …` failed, `stuck …` stuck, `pass …`
+ *    merged when the row carries the run's merge commit, a duplicate merge
+ *    when it carries the already-on-the-target reason and no commit, checked
+ *    otherwise; any other sentence with an `endedAt` is a stuck run's incident;
+ * 3. no `result`: the change's `state` when it is a decision (a replaced or
+ *    deleted change reads failed with no run of its own), else nothing.
+ * `runRow` (queue core, table.ts) writes exactly these fields from a journal
+ * run, so a split row answers as that run and an unsplit row as its change.
+ */
+export function rowDecision(row: Row): RowDecision | undefined {
+  const result = row.result
+  if (result !== undefined) {
+    if (row.endedAt === undefined) return undefined
+    if (result.startsWith("fail")) return { decision: "failed", duplicate: false }
+    if (result.startsWith("stuck")) return { decision: "stuck", duplicate: false }
+    if (result.startsWith("pass")) {
+      if (row.merge !== undefined) return { decision: "merged", duplicate: false }
+      const duplicate = isDuplicateMerge({ decision: "merged", merge: row.merge, reason: row.reason })
+      return duplicate ? { decision: "merged", duplicate: true } : { decision: "checked", duplicate: false }
+    }
+    return { decision: "stuck", duplicate: false }
+  }
+  switch (row.state) {
+    case "merged":
+      return {
+        decision: "merged",
+        duplicate: isDuplicateMerge({ decision: "merged", merge: row.merge, reason: row.reason }),
+      }
+    case "failed":
+    case "stuck":
+    case "checked":
+      return { decision: row.state, duplicate: false }
+    default:
+      return undefined
+  }
+}
+
+/**
+ * The smallest fact STATS counts, one per decided row. A row split by a
+ * journal run answers with that run's own decision (the journal is the
+ * record); an unsplit row answers through {@link rowDecision}. The run is
+ * the journal's when one split the change, else the row's own, else the
+ * change itself, so `runs` counts distinct deciders wherever it is read.
+ */
+export function decisionsOfRows(rows: readonly WatchRow[]): readonly RunDecision[] {
   const decisions: RunDecision[] = []
-  for (const runs of journals.runs.values()) {
-    for (const run of runs) {
+  for (const { row, run } of rows) {
+    if (run !== undefined) {
       const decision = run.decision
       if (decision !== "merged" && decision !== "failed" && decision !== "stuck" && decision !== "checked") continue
       decisions.push({ at: run.at, decision, duplicate: isDuplicateMerge(run), run: run.id })
+      continue
     }
+    const decided = rowDecision(row)
+    if (decided === undefined || row.at === undefined) continue
+    decisions.push({ at: row.at, ...decided, run: row.run ?? `${row.branch}@${row.head}` })
   }
   return decisions
 }

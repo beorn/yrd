@@ -1,0 +1,210 @@
+{
+ "changes": [
+  {
+   "branch": "task/@hh/tent/tooling/24158-tent-close-yrd-issue",
+   "head": "058d28c4a158a7318af7c8e132489d09f1d52c2d",
+   "state": "merged",
+   "result": "pass",
+   "reason": "already on the target",
+   "since": "2026-09-05T05:13:21.410Z",
+   "at": "2026-09-05T05:31:57.824Z",
+   "endedAt": "2026-09-05T05:31:57.824Z",
+   "run": "q-20260905T053147781Z-5bfdc9bb",
+   "submitter": "@dev/10"
+  },
+  {
+   "branch": "task/@hh/tent/tooling/24158-tent-close-yrd-issue",
+   "head": "058d28c4a158a7318af7c8e132489d09f1d52c2d",
+   "state": "merged",
+   "result": "fail manifest-co-change",
+   "reason": "task/@hh/tent/tooling/24158-tent-close-yrd-issue failed manifest-co-change",
+   "since": "2026-09-05T05:13:21.410Z",
+   "at": "2026-09-05T05:15:01.541Z",
+   "endedAt": "2026-09-05T05:15:01.541Z",
+   "run": "q-20260905T051421000Z-47028a13",
+   "submitter": "@dev/10"
+  },
+  {
+   "branch": "task/@hh/tent/tooling/24158-tent-close-yrd-issue",
+   "head": "c3f6ffc738c0bdfd87d6192ea1c5834dc9d7215d",
+   "state": "merged",
+   "result": "pass affected-tests",
+   "merge": "a0e08398d2ea891ccfa411db914706531e4c6b9b",
+   "since": "2026-09-05T05:18:04.144Z",
+   "at": "2026-09-05T05:29:45.000Z",
+   "endedAt": "2026-09-05T05:29:45.000Z",
+   "run": "q-20260905T051917553Z-6bba3ade",
+   "submitter": "@dev/10"
+  },
+  {
+   "branch": "task/@hh/tent/tooling/24155-guard-submodule-reads",
+   "head": "5fef2bb9edf71417416e0f1a116d4379113a5aac",
+   "state": "merged",
+   "result": "pass affected-tests",
+   "merge": "bc3ba50032c6cdfbd6b2ed99daf066d20c89b9c1",
+   "since": "2026-09-05T04:25:58.641Z",
+   "at": "2026-09-05T04:50:22.467Z",
+   "endedAt": "2026-09-05T04:50:22.467Z",
+   "run": "q-20260905T044917743Z-0a3d64d7",
+   "submitter": "@dev/10"
+  },
+  {
+   "branch": "task/@hh/tent/tooling/24155-guard-submodule-reads",
+   "head": "5fef2bb9edf71417416e0f1a116d4379113a5aac",
+   "state": "merged",
+   "result": "pass substrate-pair",
+   "since": "2026-09-05T04:25:58.641Z",
+   "at": "2026-09-05T04:44:10.842Z",
+   "run": "q-20260905T044235722Z-8d42ecfa",
+   "submitter": "@dev/10"
+  },
+  {
+   "branch": "task/@hh/tent/tooling/24155-guard-submodule-reads",
+   "head": "5fef2bb9edf71417416e0f1a116d4379113a5aac",
+   "state": "merged",
+   "result": "pass substrate-pair",
+   "since": "2026-09-05T04:25:58.641Z",
+   "at": "2026-09-05T04:27:42.558Z",
+   "run": "q-20260905T042614532Z-3d963ba8",
+   "submitter": "@dev/10"
+  },
+  {
+   "branch": "task/hab-log-phase-1",
+   "head": "450ae9ec9e9a93ceae0f1c6fa4cd65f63c873634",
+   "state": "failed",
+   "result": "fail",
+   "reason": "Merge 450ae9ec9e9a93ceae0f1c6fa4cd65f63c873634 conflicts with current HEAD 5c649972f3810ac7b14a6ba13ca8b2ca150bd872; no commit was written.",
+   "since": "2026-09-05T03:43:40.645Z",
+   "at": "2026-09-05T04:37:01.393Z",
+   "endedAt": "2026-09-05T04:37:01.393Z",
+   "run": "q-20260905T043646952Z-44aeff3f",
+   "submitter": "@dev/6"
+  },
+  {
+   "branch": "task/hab-log-phase-1",
+   "head": "450ae9ec9e9a93ceae0f1c6fa4cd65f63c873634",
+   "state": "failed",
+   "result": "pass substrate-pair",
+   "since": "2026-09-05T03:43:40.645Z",
+   "at": "2026-09-05T03:53:18.632Z",
+   "run": "q-20260905T035216167Z-628cd8f2",
+   "submitter": "@dev/6"
+  },
+  {
+   "branch": "task/chief-rail-ownedpaths",
+   "head": "5fefb7ab5b8b6e3f3599d55303b73aadf8e33f72",
+   "state": "merged",
+   "result": "pass affected-tests",
+   "merge": "5c649972f3810ac7b14a6ba13ca8b2ca150bd872",
+   "since": "2026-09-05T03:42:02.390Z",
+   "at": "2026-09-05T04:36:43.505Z",
+   "endedAt": "2026-09-05T04:36:43.505Z",
+   "run": "q-20260905T042614532Z-3d963ba8",
+   "submitter": "@chief"
+  },
+  {
+   "branch": "task/chief-rail-ownedpaths",
+   "head": "5fefb7ab5b8b6e3f3599d55303b73aadf8e33f72",
+   "state": "merged",
+   "result": "pass substrate-pair",
+   "since": "2026-09-05T03:42:02.390Z",
+   "at": "2026-09-05T03:52:49.736Z",
+   "run": "q-20260905T035216167Z-628cd8f2",
+   "submitter": "@chief"
+  },
+  {
+   "branch": "task/chief-rail-ownedpaths",
+   "head": "b07f2a7970696537d1777ce315d8836272802dd4",
+   "state": "merged",
+   "result": "fail",
+   "reason": "replaced",
+   "since": "2026-09-05T03:37:58.599Z",
+   "at": "2026-09-05T03:52:23.708Z",
+   "endedAt": "2026-09-05T03:52:23.708Z",
+   "run": "q-20260905T035216167Z-628cd8f2",
+   "submitter": "@chief"
+  },
+  {
+   "branch": "task/chief-rail-ownedpaths",
+   "head": "b07f2a7970696537d1777ce315d8836272802dd4",
+   "state": "merged",
+   "result": "pass substrate-pair",
+   "since": "2026-09-05T03:37:58.599Z",
+   "at": "2026-09-05T03:40:02.137Z",
+   "run": "q-20260905T033855092Z-eacfaa91",
+   "submitter": "@chief"
+  },
+  {
+   "branch": "task/chief-rail-ownedpaths",
+   "head": "248fb68e0608eb0cef04952c58737eabb81d5a7b",
+   "state": "merged",
+   "result": "fail",
+   "reason": "replaced",
+   "since": "2026-09-05T03:26:50.387Z",
+   "at": "2026-09-05T03:39:03.936Z",
+   "endedAt": "2026-09-05T03:39:03.936Z",
+   "run": "q-20260905T033855092Z-eacfaa91",
+   "submitter": "@chief"
+  },
+  {
+   "branch": "task/chief-rail-ownedpaths",
+   "head": "248fb68e0608eb0cef04952c58737eabb81d5a7b",
+   "state": "merged",
+   "result": "pass substrate-pair",
+   "since": "2026-09-05T03:26:50.387Z",
+   "at": "2026-09-05T03:28:34.846Z",
+   "run": "q-20260905T032802177Z-31eaedb0",
+   "submitter": "@chief"
+  },
+  {
+   "branch": "task/24146-pm-outline-lint-gates-archived-documents",
+   "head": "8c756bb21a9d790eb1143511f23c48bfbd76dae7",
+   "state": "merged",
+   "result": "fail",
+   "reason": "replaced",
+   "since": "2026-09-05T02:01:31.254Z",
+   "at": "2026-09-05T03:14:52.732Z",
+   "endedAt": "2026-09-05T03:14:52.732Z",
+   "run": "q-20260905T031445072Z-d9312d7c",
+   "submitter": "@dev/6"
+  },
+  {
+   "branch": "task/24146-pm-outline-lint-gates-archived-documents",
+   "head": "8c756bb21a9d790eb1143511f23c48bfbd76dae7",
+   "state": "merged",
+   "result": "yrd-submodule-main-regression: ag@beaaee6925d16bebdc79a63d66778c692fe7537e, km@e973baf87ff5593cbf320c1bb354e6d48a791164 breaks the root at the settled base; evidence: /home/hh/scratch/yrd-check-scratch/logs/q-20260905T023932237Z-1b346abe.jsonl; next: fix or revert ag@beaaee6925d16bebdc79a63d66778c692fe7537e, km@e973baf87ff5593cbf320c1bb354e6d48a791164 on component main, then run yrd queue run; owner: the component writer",
+   "reason": "yrd-submodule-main-regression",
+   "since": "2026-09-05T02:01:31.254Z",
+   "at": "2026-09-05T03:00:34.334Z",
+   "endedAt": "2026-09-05T03:00:34.334Z",
+   "run": "q-20260905T023932237Z-1b346abe",
+   "submitter": "@dev/6"
+  },
+  {
+   "branch": "task/24146-pm-outline-lint-gates-archived-documents",
+   "head": "8c756bb21a9d790eb1143511f23c48bfbd76dae7",
+   "state": "merged",
+   "result": "yrd-submodule-main-regression: ag@2054941629843d61d68cbe7d180556b2a78b5058, km@efcec3d17b11d6772bf1f396fdeea420d9b63f57 breaks the root at the settled base; evidence: /home/hh/scratch/yrd-check-scratch/logs/q-20260905T022302902Z-e8e0a118.jsonl; next: fix or revert ag@2054941629843d61d68cbe7d180556b2a78b5058, km@efcec3d17b11d6772bf1f396fdeea420d9b63f57 on component main, then run yrd queue run; owner: the component writer",
+   "reason": "yrd-submodule-main-regression",
+   "since": "2026-09-05T02:01:31.254Z",
+   "at": "2026-09-05T02:27:05.838Z",
+   "endedAt": "2026-09-05T02:27:05.838Z",
+   "run": "q-20260905T022302902Z-e8e0a118",
+   "submitter": "@dev/6"
+  },
+  {
+   "branch": "task/24146-pm-outline-lint-gates-archived-documents",
+   "head": "8c756bb21a9d790eb1143511f23c48bfbd76dae7",
+   "state": "merged",
+   "result": "pass substrate-pair",
+   "since": "2026-09-05T02:01:31.254Z",
+   "at": "2026-09-05T02:07:28.521Z",
+   "run": "q-20260905T020555944Z-11f65146",
+   "submitter": "@dev/6"
+  }
+ ],
+ "journal": {
+  "dir": "/home/hh/scratch/yrd-check-scratch/logs"
+ },
+ "pause": null
+}

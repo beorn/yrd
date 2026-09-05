@@ -439,11 +439,7 @@ export function WatchPane({
         />
       )}
       {shown.decisions === undefined || terminalRows < STATS_MIN_ROWS ? null : (
-        <StatsBox
-          decisions={shown.decisions}
-          columns={listColumns - 2}
-          {...(shown.journalAbsent === undefined ? {} : { absent: shown.journalAbsent })}
-        />
+        <StatsBox decisions={shown.decisions} columns={listColumns - 2} />
       )}
       <StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />
     </Box>

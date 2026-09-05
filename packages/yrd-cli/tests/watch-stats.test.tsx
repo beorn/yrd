@@ -10,13 +10,18 @@
 
 import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
-import type { Journals } from "@yrd/queue-core"
+import type { JournalRun, WatchRow } from "@yrd/queue-core"
 import { StatsBox, statsHoursFor } from "../src/watch-boxes.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
-import { countCell, decisionsOf, isDuplicateMerge, statsBuckets, type RunDecision } from "../src/watch-stats.ts"
+import { countCell, decisionsOfRows, isDuplicateMerge, statsBuckets, type RunDecision } from "../src/watch-stats.ts"
 
 // A local instant: 14:30 on a Thursday, so yesterday and a midnight both fall inside 24 hours.
 const NOW = new Date(2026, 8, 3, 14, 30, 0)
+
+/** The journal's run a row was split by: its id and what it decided are what the reader takes. */
+function journalRun(id: string, decided?: Pick<JournalRun, "decision" | "reason" | "merge">): JournalRun {
+  return { at: NOW, branch: "task/x", checks: [], head: "x".repeat(40), id, startedAt: NOW, ...decided }
+}
 
 function decision(
   hoursAgo: number,
@@ -70,38 +75,66 @@ describe("the duplicate predicate and the flattening", () => {
     expect(isDuplicateMerge({ decision: "merged" })).toBe(false)
   })
 
-  it("flattens every run's decision out of the journals and skips runs that decided nothing", () => {
-    const run = (id: string, decision?: string, reason?: string) => ({
-      at: NOW,
-      branch: "task/one",
-      checks: [],
-      head: "a".repeat(40),
-      id,
-      startedAt: NOW,
-      ...(decision === undefined ? {} : { decision }),
-      ...(reason === undefined ? {} : { reason }),
-    })
-    const journals: Journals = {
-      dir: "/w/logs",
-      runs: new Map([
-        ["task/one@a", [run("r1", "merged"), run("r2")]],
-        ["task/two@b", [run("r3", "merged", "already on the target"), run("r4", "failed")]],
-      ]),
-    }
-    expect(decisionsOf(journals).map((decision) => [decision.run, decision.decision, decision.duplicate])).toEqual([
+  it("reads a split row as its journal run's decision, an unsplit row by its own fields, and skips what decided nothing", () => {
+    const one = { branch: "task/one", head: "a".repeat(40) }
+    const two = { branch: "task/two", head: "b".repeat(40) }
+    const rows: WatchRow[] = [
+      // Split by journal runs: the run's decision is the record, whatever the row's state says.
+      {
+        row: { ...one, at: NOW, merge: "m".repeat(40), state: "merged" },
+        run: journalRun("r1", { decision: "merged", merge: "m".repeat(40) }),
+      },
+      { row: { ...one, at: NOW, state: "merged" }, run: journalRun("r2") },
+      {
+        row: { ...two, at: NOW, reason: "already on the target", state: "merged" },
+        run: journalRun("r3", { decision: "merged", reason: "already on the target" }),
+      },
+      {
+        row: { ...two, at: NOW, result: "fail typecheck", state: "merged" },
+        run: journalRun("r4", { decision: "failed" }),
+      },
+      // Unsplit: the row's own fields say the verdict; the row's run names the decider.
+      {
+        row: {
+          at: NOW,
+          branch: "task/three",
+          head: "c".repeat(40),
+          endedAt: NOW,
+          result: "fail typecheck",
+          run: "q-5",
+          state: "failed",
+        },
+      },
+      // A run that ran a check and recorded no decision: a result with no endedAt.
+      {
+        row: {
+          at: NOW,
+          branch: "task/four",
+          head: "e".repeat(40),
+          result: "pass substrate-pair",
+          run: "q-6",
+          state: "merged",
+        },
+      },
+      // A queued change has no verdict; a direct commit was decided by nobody.
+      { row: { branch: "task/five", head: "f".repeat(40), position: 1, state: "queued" } },
+      { row: { at: NOW, branch: "main", head: "d".repeat(40), state: "direct" } },
+    ]
+    expect(decisionsOfRows(rows).map((decision) => [decision.run, decision.decision, decision.duplicate])).toEqual([
       ["r1", "merged", false],
       ["r3", "merged", true],
       ["r4", "failed", false],
+      ["q-5", "failed", false],
     ])
   })
 })
 
 describe("the STATS box", () => {
-  async function paint(decisions: readonly RunDecision[], cols: number, absent?: string): Promise<string> {
+  async function paint(decisions: readonly RunDecision[], cols: number): Promise<string> {
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
-          <StatsBox decisions={decisions} columns={cols - 2} {...(absent === undefined ? {} : { absent })} />
+          <StatsBox decisions={decisions} columns={cols - 2} />
         </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols, rows: 12 },
@@ -151,9 +184,9 @@ describe("the STATS box", () => {
     expect(statsHoursFor(90)).toBeLessThan(24)
   })
 
-  it("says where the journals were looked for when there is nothing to count", async () => {
-    const text = await paint([], 100, "no run journal was read: /w/logs — there is no such directory")
-    expect(text).toContain("/w/logs")
+  it("draws every row with nothing to count when the queue decided nothing: the box needs no journal", async () => {
+    const text = await paint([], 100)
     expect(text).toContain("MERGES")
+    expect(text).not.toContain("no run journal")
   })
 })

@@ -5,16 +5,23 @@
  * submit-to-merge latency, for the whole queue and per submitter or branch.
  *
  * Pure. One row is what one queue run said about one change (the default,
- * per-run lens of `queue list`); a decision is classified here exactly as the
- * STATS pane classifies the run journals' — {@link decisionsOfRows} yields the
- * same {@link RunDecision} the pane counts, through the same duplicate
- * predicate — so the two surfaces can never disagree about what a merge or a
- * failure is. Nothing here opens a file or talks to git: the caller reads the
- * rows and the remote's branch list and hands both in, with the moment `now`.
+ * per-run lens of `queue list`); a decision is classified by the STATS pane's
+ * own reader, {@link decisionsOfRows} in watch-stats.ts — one source and one
+ * classification — so the two surfaces can never disagree about what a merge
+ * or a failure is. Nothing here opens a file or talks to git: the caller reads
+ * the rows and the remote's branch list and hands both in, with the moment `now`.
  *
  * Definitions, because a number nobody can derive is a number nobody trusts:
- * - merged / failed / duplicate / stuck: rows by decision, a duplicate being a
- *   merged row that merged nothing (`isDuplicateMerge`), counted apart.
+ * - a row is what ONE run said about one change; its verdict is read by the
+ *   pane's own `rowDecision` (or the journal run's decision when the row was
+ *   split by one). `decisions` counts those verdicts per run — the STATS
+ *   pane's numbers, replaced heads counted as the failed verdicts the queue
+ *   recorded for them.
+ * - merged / byAncestry / failed / stuck / inLine count CHANGES (distinct
+ *   `branch@head`) by the queue's own current state, the one `queue list`
+ *   shows: merged includes a head the target carries by ancestry (a replaced
+ *   head whose successor landed, or one already on the target), and
+ *   byAncestry says how many of the merged had no merging run of their own.
  * - same-head retries: rows beyond the first for one `branch@head` — a resubmit
  *   of the same head, or the queue judging it again on a moved target; the
  *   records name both as runs and so does this.
@@ -32,7 +39,9 @@
  */
 
 import type { Row, WatchRow } from "@yrd/queue-core"
-import { isDuplicateMerge, type RunDecision } from "./watch-stats.ts"
+import { decisionsOfRows, rowDecision, type RunDecision } from "./watch-stats.ts"
+
+export { decisionsOfRows } from "./watch-stats.ts"
 
 /** One branch at the remote, as `ls-remote` lists it, with the tip's committer date when the commit is here. */
 export type PushedRef = Readonly<{
@@ -73,16 +82,33 @@ export type LatencyStats = Readonly<{
   p90Ms?: number
 }>
 
-export type StatsGroup = Readonly<{
-  /** `queue` for the whole queue; otherwise the submitter or the branch. */
-  key: string
-  rows: number
+/** Verdicts counted per run — what the STATS pane counts, over the same rows. */
+export type DecisionCounts = Readonly<{
   merged: number
   duplicates: number
   failed: number
   stuck: number
+  checked: number
+}>
+
+export type StatsGroup = Readonly<{
+  /** `queue` for the whole queue; otherwise the submitter or the branch. */
+  key: string
+  rows: number
   /** Distinct `branch@head` among the rows. */
   changes: number
+  /** Changes in state merged: on the target, by a merge of their own or by ancestry. */
+  merged: number
+  /** Of the merged, those no run merged: the target carries them by ancestry (replaced, or already there). */
+  byAncestry: number
+  /** Changes in state failed. */
+  failed: number
+  /** Changes in state stuck. */
+  stuck: number
+  /** Changes still in line: queued or checked. */
+  inLine: number
+  /** The same rows' verdicts counted per run: the STATS pane's numbers. */
+  decisions: DecisionCounts
   sameHeadRetries: number
   branches: number
   rePushedBranches: number
@@ -115,38 +141,6 @@ export type QueueStats = Readonly<{
   pushedNeverSubmitted: PushedNeverSubmitted
 }>
 
-/**
- * The pane's smallest fact, read from a row instead of a journal: what the run
- * that wrote the row decided about the change. A queued or checked-but-undecided
- * row, and a direct commit (which no run decided), yield nothing.
- */
-export function decisionsOfRows(rows: readonly WatchRow[]): readonly RunDecision[] {
-  const decisions: RunDecision[] = []
-  for (const { row, run } of rows) {
-    const decision = decisionOf(row)
-    if (decision === undefined || row.at === undefined) continue
-    decisions.push({
-      at: row.at,
-      decision,
-      duplicate: isDuplicateMerge({ decision, merge: row.merge, reason: row.reason }),
-      run: run?.id ?? row.run ?? `${row.branch}@${row.head}`,
-    })
-  }
-  return decisions
-}
-
-function decisionOf(row: Row): RunDecision["decision"] | undefined {
-  switch (row.state) {
-    case "merged":
-    case "failed":
-    case "stuck":
-    case "checked":
-      return row.state
-    default:
-      return undefined
-  }
-}
-
 function inWindow(at: Date | undefined, since: Date | undefined): boolean {
   if (since === undefined) return true
   return at !== undefined && at.getTime() >= since.getTime()
@@ -159,17 +153,43 @@ function percentile(sorted: readonly number[], p: number): number | undefined {
   return sorted[rank - 1]
 }
 
-function latencyOf(rows: readonly WatchRow[]): LatencyStats {
-  // One latency per merged CHANGE: the last merged row of each branch@head.
-  const lastMerged = new Map<string, Row>()
-  for (const { row } of rows) {
-    if (row.state !== "merged" || row.since === undefined || row.at === undefined) continue
-    const key = `${row.branch}@${row.head}`
-    const seen = lastMerged.get(key)
-    if (seen?.at === undefined || seen.at.getTime() <= row.at.getTime()) lastMerged.set(key, row)
+/** The verdict a row carries, journal run first, as {@link decisionsOfRows} reads it. */
+function verdictOf(item: WatchRow): Readonly<{ decision: RunDecision["decision"]; duplicate: boolean }> | undefined {
+  const [decision] = decisionsOfRows([item])
+  if (decision !== undefined) return { decision: decision.decision, duplicate: decision.duplicate }
+  return item.run === undefined ? rowDecision(item.row) : undefined
+}
+
+/**
+ * Each change's LAST verdict: the newest decided row per `branch@head`. A
+ * change with no decided row is in line.
+ */
+function lastVerdicts(
+  rows: readonly WatchRow[],
+): Map<string, Readonly<{ row: Row; verdict: ReturnType<typeof verdictOf> }>> {
+  const last = new Map<string, Readonly<{ row: Row; verdict: ReturnType<typeof verdictOf> }>>()
+  for (const item of rows) {
+    const key = `${item.row.branch}@${item.row.head}`
+    const verdict = verdictOf(item)
+    const seen = last.get(key)
+    if (seen === undefined) {
+      last.set(key, { row: item.row, verdict })
+      continue
+    }
+    // A decided row outranks an undecided one; among decided rows the newest wins.
+    if (verdict === undefined) continue
+    if (seen.verdict === undefined || (seen.row.at?.getTime() ?? 0) <= (item.row.at?.getTime() ?? 0)) {
+      last.set(key, { row: item.row, verdict })
+    }
   }
-  const ms = [...lastMerged.values()]
-    .map((row) => (row.at?.getTime() ?? 0) - (row.since?.getTime() ?? 0))
+  return last
+}
+
+function latencyOf(rows: readonly WatchRow[]): LatencyStats {
+  // One latency per merged CHANGE: from its opening to the row that merged it.
+  const ms = [...lastVerdicts(rows).values()]
+    .filter(({ verdict }) => verdict?.decision === "merged" && !verdict.duplicate)
+    .map(({ row }) => (row.since === undefined || row.at === undefined ? -1 : row.at.getTime() - row.since.getTime()))
     .filter((value) => value >= 0)
     .sort((a, b) => a - b)
   const median = percentile(ms, 50)
@@ -202,19 +222,39 @@ function groupOf(key: string, rows: readonly WatchRow[]): StatsGroup {
       rePushes += seen.size - 1
     }
   }
+  // The change's own state is the same on every one of its rows; one row speaks for it.
+  const states = new Map<string, Row["state"]>()
+  const mergedByRun = new Set<string>()
+  for (const { row } of rows) {
+    const change = `${row.branch}@${row.head}`
+    states.set(change, row.state)
+    if (row.merge !== undefined) mergedByRun.add(change)
+  }
+  const inState = (...wanted: readonly Row["state"][]): number =>
+    [...states.values()].filter((state) => wanted.includes(state)).length
+  const merged = inState("merged")
   return {
     branches: branches.size,
+    byAncestry: [...states.entries()].filter(([change, state]) => state === "merged" && !mergedByRun.has(change))
+      .length,
     changes: heads.size,
-    duplicates: decisions.filter((decision) => decision.duplicate).length,
-    failed: decisions.filter((decision) => decision.decision === "failed").length,
+    decisions: {
+      checked: decisions.filter((decision) => decision.decision === "checked").length,
+      duplicates: decisions.filter((decision) => decision.duplicate).length,
+      failed: decisions.filter((decision) => decision.decision === "failed").length,
+      merged: decisions.filter((decision) => decision.decision === "merged" && !decision.duplicate).length,
+      stuck: decisions.filter((decision) => decision.decision === "stuck").length,
+    },
+    failed: inState("failed"),
+    inLine: inState("queued", "checked"),
     key,
     latency: latencyOf(rows),
-    merged: decisions.filter((decision) => decision.decision === "merged" && !decision.duplicate).length,
+    merged,
     rePushedBranches,
     rePushes,
     rows: rows.length,
     sameHeadRetries,
-    stuck: decisions.filter((decision) => decision.decision === "stuck").length,
+    stuck: inState("stuck"),
   }
 }
 
@@ -317,11 +357,12 @@ export function formatQueueStats(stats: QueueStats, queue: string): string {
   const columns = [
     "",
     "ROWS",
+    "CHANGES",
     "MERGED",
-    "DUP",
+    "ANCESTRY",
     "FAILED",
     "STUCK",
-    "CHANGES",
+    "IN LINE",
     "RETRIES",
     "BRANCHES",
     "RE-PUSHED",
@@ -332,11 +373,12 @@ export function formatQueueStats(stats: QueueStats, queue: string): string {
   const line = (group: StatsGroup): string[] => [
     group.key,
     String(group.rows),
+    String(group.changes),
     String(group.merged),
-    String(group.duplicates),
+    String(group.byAncestry),
     String(group.failed),
     String(group.stuck),
-    String(group.changes),
+    String(group.inLine),
     String(group.sameHeadRetries),
     String(group.branches),
     String(group.rePushedBranches),
@@ -353,7 +395,10 @@ export function formatQueueStats(stats: QueueStats, queue: string): string {
       .trimEnd(),
   )
   const window = `since ${stats.since.toISOString()}${stats.defaultWindow ? " (the default seven days, the read's own horizon)" : ""}`
+  const d = stats.total.decisions
   const definitions =
+    "ROWS = one per run per change · CHANGES = distinct branch@head · MERGED/FAILED/STUCK/IN LINE = changes by the queue's current state; ANCESTRY = of the merged, those no run merged (replaced, or already on the target) · " +
+    `verdicts per run: ${String(d.merged)} merged, ${String(d.duplicates)} dup, ${String(d.failed)} failed, ${String(d.stuck)} stuck, ${String(d.checked)} checked (the STATS pane's numbers) · ` +
     "RETRIES = rows beyond the first for one branch@head · RE-PUSHED = branches with more than one head · " +
     "MEDIAN/P90 = opened → merged, per merged change · " +
     sinceLine(stats)

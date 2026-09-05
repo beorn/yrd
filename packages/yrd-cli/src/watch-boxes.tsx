@@ -179,16 +179,7 @@ export function statsHoursFor(columns: number): number {
  * as its own one-character column running through header and rows alike
  * (item 20); DUP muted and just above FAILS (items 21, 22).
  */
-export function StatsBox({
-  decisions,
-  columns,
-  absent,
-}: {
-  decisions: readonly RunDecision[]
-  columns: number
-  /** Why there are no decisions to count, when there are none: the journal sentence. */
-  absent?: string
-}) {
+export function StatsBox({ decisions, columns }: { decisions: readonly RunDecision[]; columns: number }) {
   // Hour buckets move on the minute at most; nothing here needs the seconds.
   const minute = useMinute()
   const buckets = statsBuckets(decisions, minute, statsHoursFor(columns))
@@ -245,11 +236,6 @@ export function StatsBox({
           row.key === "duplicates" ? "$fg-muted" : undefined,
         ),
       )}
-      {decisions.length === 0 && absent !== undefined ? (
-        <Text color="$fg-muted" wrap="wrap">
-          {absent}
-        </Text>
-      ) : null}
     </TitledBox>
   )
 }
