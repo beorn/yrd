@@ -16,7 +16,7 @@
  * leaves half the noise accumulating.
  */
 
-import { createContext, createElement, useContext, useEffect, useRef, useState, type ReactNode } from "react"
+import { createContext, createElement, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 
 /**
  * A clock that advances about once a second while the pane is live, and stands
@@ -53,23 +53,55 @@ export function useCoarseNow(readAt: Date, live: boolean, tickMs = 1000): Date {
 }
 
 /**
- * The clock as a context, so the leaves that format a relative time (a
- * RUNTIME cell, the clocks line, the runner's border timer) subscribe to the
- * tick and nothing else re-renders on it. The pane's root provides it; a
- * component rendered outside a provider (a test of one box) reads the instant
- * it was first asked, which is a still frame, not a lie.
+ * The clock as TWO contexts, so a leaf subscribes to the resolution it can
+ * show and nothing else re-renders on the tick:
+ *
+ * - {@link NowContext} moves every second: the AGE and RUNTIME cells, the
+ *   status box's clocks line and the RUNNER timer read it.
+ * - {@link MinuteContext} moves once a minute and is referentially stable in
+ *   between, so a consumer does not re-render on the seconds: the table's
+ *   column widths, the STATS buckets and the Changes tab's `ago` clocks read
+ *   it. Measured 2026-09-05 01:4x PDT on the /hh queue: with every row and box
+ *   on the one-second context the pane burned 22% of a core at a 60-second
+ *   poll — the tick, not the rounds.
+ *
+ * The pane's root provides both; a component rendered outside a provider (a
+ * test of one box) reads the instant it was first asked, which is a still
+ * frame, not a lie.
  */
 export const NowContext = createContext<Date | undefined>(undefined)
+export const MinuteContext = createContext<Date | undefined>(undefined)
 
-/** The one coarse `now` on screen; a still instant outside a provider. */
+const MINUTE_MS = 60_000
+
+/** The one coarse `now` on screen, to the second; a still instant outside a provider. */
 export function useNow(): Date {
   const provided = useContext(NowContext)
   const [still] = useState(() => new Date())
   return provided ?? still
 }
 
-/** Provides the coarse clock to a subtree: `readAt` is the instant the snapshot on screen was read. */
+/** `now` to the minute, stable within it, so a consumer re-renders once a minute and not on the seconds. */
+export function useMinute(): Date {
+  const provided = useContext(MinuteContext)
+  const [still] = useState(() => floorToMinute(new Date()))
+  return provided ?? still
+}
+
+function floorToMinute(at: Date): Date {
+  return new Date(Math.floor(at.getTime() / MINUTE_MS) * MINUTE_MS)
+}
+
+/** Provides both clocks to a subtree: `readAt` is the instant the snapshot on screen was read. */
 export function NowProvider({ readAt, live, children }: { readAt: Date; live: boolean; children: ReactNode }) {
   const now = useCoarseNow(readAt, live)
-  return createElement(NowContext.Provider, { value: now }, children)
+  // The minute value is a new Date only when the minute changes, so
+  // MinuteContext's consumers see one identity per minute.
+  const minuteMs = Math.floor(now.getTime() / MINUTE_MS) * MINUTE_MS
+  const minute = useMemo(() => new Date(minuteMs), [minuteMs])
+  return createElement(
+    NowContext.Provider,
+    { value: now },
+    createElement(MinuteContext.Provider, { value: minute }, children),
+  )
 }

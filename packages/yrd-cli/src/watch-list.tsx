@@ -18,7 +18,7 @@
  * are retired and the branch is the readable half of `<branch>@<sha>`).
  */
 
-import type React from "react"
+import React, { memo } from "react"
 import { Box, Text, TogglePill, TogglePillGroup } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
@@ -193,36 +193,86 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
   )
 }
 
-/** One row of the table. */
-export function ListRow({
-  item,
-  previous,
-  label,
-  layout,
-  cursor,
+/**
+ * The two cells that show a relative time, each its own leaf on the
+ * one-second clock, memoized on the instants it is measured from: the tick
+ * re-renders these and nothing else in the row.
+ */
+const AgeCell = memo(function AgeCell({ since, color }: { since: Date | undefined; color: string | undefined }) {
+  const now = useNow()
+  const measured = clocks({ since } as Row, now)
+  return (
+    <Text color={color ?? "$fg-muted"} wrap="truncate">
+      {measured.ageMs === undefined ? "" : mediaDuration(measured.ageMs)}
+    </Text>
+  )
+})
+
+const RuntimeCell = memo(function RuntimeCell({
+  startedAt,
+  endedAt,
+  color,
 }: {
+  startedAt: Date | undefined
+  endedAt: Date | undefined
+  color: string | undefined
+}) {
+  const now = useNow()
+  const measured = clocks({ startedAt, endedAt } as Row, now)
+  return (
+    <Text color={color ?? "$fg-muted"} wrap="truncate">
+      {measured.runtimeMs === undefined ? " " : mediaDuration(measured.runtimeMs)}
+    </Text>
+  )
+})
+
+/** Whether two rows would paint the same, so a round that changed nothing about a row repaints nothing. */
+function sameRow(left: ListRowProps, right: ListRowProps): boolean {
+  const a = left.item.row
+  const b = right.item.row
+  return (
+    left.cursor === right.cursor &&
+    left.label === right.label &&
+    left.item.run?.id === right.item.run?.id &&
+    left.previous?.run?.id === right.previous?.run?.id &&
+    left.previous?.row.run === right.previous?.row.run &&
+    left.previous?.row.head === right.previous?.row.head &&
+    a.branch === b.branch &&
+    a.head === b.head &&
+    a.state === b.state &&
+    a.run === b.run &&
+    a.subject === b.subject &&
+    a.reason === b.reason &&
+    a.submitter === b.submitter &&
+    a.live?.check === b.live?.check &&
+    a.at?.getTime() === b.at?.getTime() &&
+    a.since?.getTime() === b.since?.getTime() &&
+    a.startedAt?.getTime() === b.startedAt?.getTime() &&
+    a.endedAt?.getTime() === b.endedAt?.getTime() &&
+    Object.entries(left.layout).every(([key, value]) => right.layout[key as keyof ListLayout] === value)
+  )
+}
+
+type ListRowProps = Readonly<{
   item: WatchRow
   previous: WatchRow | undefined
   label: string
   layout: ListLayout
   cursor: boolean
-}) {
-  const now = useNow()
+}>
+
+/** One row of the table. Reads no clock itself: its two time cells do. */
+export const ListRow = memo(function ListRow({ item, previous, label, layout, cursor }: ListRowProps) {
   const { row } = item
   const forced = cursor ? "$fg-on-selected" : undefined
   const color = stateColor(row)
   const cell = runCell(item, label, previous)
   const suffix = changesSuffix(row)
-  const measured = clocks(row, now)
   return (
     <Box backgroundColor={cursor ? "$bg-selected" : undefined} minWidth={0} width="100%">
       <Cells layout={layout}>
         {{
-          age: (
-            <Text color={forced ?? "$fg-muted"} wrap="truncate">
-              {measured.ageMs === undefined ? "" : mediaDuration(measured.ageMs)}
-            </Text>
-          ),
+          age: <AgeCell since={row.since} color={forced} />,
           by: (
             <Text color={forced ?? "$fg-muted"} wrap="truncate">
               {row.submitter ?? "-"}
@@ -247,11 +297,7 @@ export function ListRow({
               </Box>
             </Box>
           ),
-          duration: (
-            <Text color={forced ?? "$fg-muted"} wrap="truncate">
-              {measured.runtimeMs === undefined ? " " : mediaDuration(measured.runtimeMs)}
-            </Text>
-          ),
+          duration: <RuntimeCell startedAt={row.startedAt} endedAt={row.endedAt} color={forced} />,
           run:
             cell.kind === "none" ? (
               <Text color={forced ?? "$fg-muted"} wrap="truncate">
@@ -286,7 +332,7 @@ export function ListRow({
       </Cells>
     </Box>
   )
-}
+}, sameRow)
 
 /** The seven cells in their one geometry, consumed by header and rows alike. */
 function Cells({

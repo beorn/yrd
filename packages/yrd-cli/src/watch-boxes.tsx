@@ -16,7 +16,7 @@
  */
 
 import { Box, Pulse, Text } from "silvery"
-import { useNow } from "./watch-clock.ts"
+import { useMinute, useNow } from "./watch-clock.ts"
 import { boundedHangingLines, clock, mediaDuration, runShortName } from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { runnerHealth, type RunnerFacts, type RunnerHealth } from "./watch-runner.ts"
@@ -189,8 +189,9 @@ export function StatsBox({
   /** Why there are no decisions to count, when there are none: the journal sentence. */
   absent?: string
 }) {
-  const now = useNow()
-  const buckets = statsBuckets(decisions, now, statsHoursFor(columns))
+  // Hour buckets move on the minute at most; nothing here needs the seconds.
+  const minute = useMinute()
+  const buckets = statsBuckets(decisions, minute, statsHoursFor(columns))
   const periods = buckets.filter((bucket) => bucket.kind === "period")
   const hours = buckets.filter((bucket) => bucket.kind === "hour")
   const cell = (bucket: StatsBucket, text: string, color: string | undefined, bold = false) => (

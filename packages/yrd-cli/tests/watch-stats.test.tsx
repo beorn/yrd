@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
 import type { Journals } from "@yrd/queue-core"
 import { StatsBox, statsHoursFor } from "../src/watch-boxes.tsx"
-import { NowContext } from "../src/watch-clock.ts"
+import { MinuteContext, NowContext } from "../src/watch-clock.ts"
 import { countCell, decisionsOf, isDuplicateMerge, statsBuckets, type RunDecision } from "../src/watch-stats.ts"
 
 // A local instant: 14:30 on a Thursday, so yesterday and a midnight both fall inside 24 hours.
@@ -100,7 +100,9 @@ describe("the STATS box", () => {
   async function paint(decisions: readonly RunDecision[], cols: number, absent?: string): Promise<string> {
     const app = render(
       <NowContext.Provider value={NOW}>
+        <MinuteContext.Provider value={NOW}>
         <StatsBox decisions={decisions} columns={cols - 2} {...(absent === undefined ? {} : { absent })} />
+      </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols, rows: 12 },
     )

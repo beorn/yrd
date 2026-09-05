@@ -24,7 +24,7 @@ import {
   type ChangeDetail,
   type CheckPanel,
 } from "../src/watch-detail.tsx"
-import { NowContext } from "../src/watch-clock.ts"
+import { MinuteContext, NowContext } from "../src/watch-clock.ts"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
 import { watchRowKey, type WatchRow } from "../src/watch-rows.ts"
 
@@ -108,7 +108,9 @@ async function settle(app: ReturnType<typeof render>): Promise<void> {
 
 /** A box rendered on its own still reads the test's clock, not the wall's. */
 function at(element: React.ReactElement): React.ReactElement {
-  return <NowContext.Provider value={NOW}>{element}</NowContext.Provider>
+  return <NowContext.Provider value={NOW}>
+        <MinuteContext.Provider value={NOW}>{element}</MinuteContext.Provider>
+      </NowContext.Provider>
 }
 
 /** One frame of the pane, painted into a headless terminal and read back as text. */

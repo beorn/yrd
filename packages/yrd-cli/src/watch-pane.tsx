@@ -45,7 +45,7 @@ import {
   type ListViewHandle,
 } from "silvery"
 import type { Row } from "@yrd/queue-core"
-import { NowProvider, useNow } from "./watch-clock.ts"
+import { NowProvider, useMinute } from "./watch-clock.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
   BUCKETS,
@@ -470,9 +470,11 @@ function Table({
   active: boolean
   onCursor: (index: number) => void
 }) {
-  const now = useNow()
+  // Column widths depend on how long a duration prints, which changes on the
+  // minute at most; the seconds belong to the cells, not to the table.
+  const minute = useMinute()
   const { columns } = useWindowSize()
-  const layout = listLayout(rows, label, columns, now)
+  const layout = listLayout(rows, label, columns, minute)
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <ListHeader layout={layout} />

@@ -16,7 +16,7 @@ import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
 import { runId } from "@yrd/queue-core"
 import { RunnerBox } from "../src/watch-boxes.tsx"
-import { NowContext } from "../src/watch-clock.ts"
+import { MinuteContext, NowContext } from "../src/watch-clock.ts"
 import { SILENT_AFTER_MS, readRunnerFacts, runnerHealth, type RunnerFacts } from "../src/watch-runner.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
@@ -98,6 +98,7 @@ describe("the RUNNER box", () => {
   async function paint(facts: RunnerFacts, inLine: number, pause?: string): Promise<string> {
     const app = render(
       <NowContext.Provider value={NOW}>
+        <MinuteContext.Provider value={NOW}>
         <RunnerBox
           facts={facts}
           label="main"
@@ -106,6 +107,7 @@ describe("the RUNNER box", () => {
           live={false}
           {...(pause === undefined ? {} : { pause })}
         />
+      </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols: 72, rows: 12 },
     )
@@ -175,6 +177,7 @@ describe("the RUNNER box", () => {
   it("wraps a long command with a hanging indent bounded to three rows, so the rails under it survive (item 29)", async () => {
     const app = render(
       <NowContext.Provider value={NOW}>
+        <MinuteContext.Provider value={NOW}>
         <RunnerBox
           facts={latest({ alive: true, pid: 4242 })}
           label="a-very-long-queue-label-indeed-and-then-some-more-of-it"
@@ -182,6 +185,7 @@ describe("the RUNNER box", () => {
           columns={30}
           live={false}
         />
+      </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols: 32, rows: 14 },
     )

@@ -41,7 +41,7 @@ import { Box, MarkdownView, Pulse, ScrollArea, Tab, TabList, TabPanel, Tabs, Tex
 import type { ChangeRecord, CheckView, Row } from "@yrd/queue-core"
 import { clocks } from "@yrd/queue-core"
 import { diffSummary, historyEntries, metadataGroups, metadataKeyWidth, type ChangeCommits } from "./watch-change.ts"
-import { useNow } from "./watch-clock.ts"
+import { useMinute, useNow } from "./watch-clock.ts"
 import { CHECK_COLOR, CHECK_GLYPH, clock, mediaDuration, stateColor, stateGlyph } from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { explanationLine, headlineOf, runTitle, timingRows, type WatchRun, type WatchStep } from "./watch-run.ts"
@@ -191,13 +191,11 @@ export function RunStatusBox({
   live?: boolean
   joinedRun?: boolean
 }) {
-  const now = useNow()
   const { row } = run
   const color = stateColor(row)
   const headline = headlineOf(row, joinedRun)
   const working = row.live !== undefined
   const explanation = explanationLine(row)
-  const timing = timingRows(row, clocks(row, now))
   return (
     <TitledBox {...(runTitle(run) === undefined ? {} : { titleRight: runTitle(run) })} borderColor={color}>
       <MarkerRow
@@ -224,15 +222,26 @@ export function RunStatusBox({
           </Text>
         </MarkerRow>
       )}
+      <TimingRows row={row} />
+      {run.steps.map((step) => (
+        <StepLine key={`${step.name}@${step.state}`} step={step} live={live} />
+      ))}
+    </TitledBox>
+  )
+}
+
+/** The clocks rows, the one part of the status box that moves every second: its own leaf on the second clock. */
+function TimingRows({ row }: { row: Row }) {
+  const now = useNow()
+  const timing = timingRows(row, clocks(row, now))
+  return (
+    <>
       {timing.map((line) => (
         <MarkerRow key={line}>
           <Text wrap="truncate">{line}</Text>
         </MarkerRow>
       ))}
-      {run.steps.map((step) => (
-        <StepLine key={`${step.name}@${step.state}`} step={step} live={live} />
-      ))}
-    </TitledBox>
+    </>
   )
 }
 
@@ -313,7 +322,8 @@ function ChangeBox({
   diff: DiffText | undefined
   onToggleDiff: (() => void) | undefined
 }) {
-  const now = useNow()
+  // History and metadata print `ago` to the minute; the seconds are noise here.
+  const now = useMinute()
   const { row } = detail
   const history = detail.records === undefined ? undefined : historyEntries(detail.records)
   const groups = metadataGroups(row, now, {
