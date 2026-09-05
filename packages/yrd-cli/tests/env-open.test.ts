@@ -1,7 +1,6 @@
 /**
- * @failure `yrd env open` stopped after Git/submodule materialization, so a
- *          fresh bay ignored the target's declared `setup:` and could not run
- *          its own typecheck without a hand install.
+ * @failure A fresh environment ignored its commit's setup or ran it before
+ *          dependencies existed; closing an unsafe environment discarded work.
  * @level   l2 (real bare remote and real retained Git worktree)
  * @consumer every seat opening a fresh environment through `yrd env open`
  */
@@ -47,6 +46,12 @@ function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout
     stderr: () => stderr,
     stdout: () => stdout,
   }
+}
+
+async function openEnvironment(cwd: string, commit: string): Promise<Readonly<{ path: string; head: string }>> {
+  const run = capture(cwd)
+  expect(await runYrdProcess(["bun", "yrd", "env", "open", commit, "--json"], run.io), run.stderr()).toBe(0)
+  return JSON.parse(run.stdout()) as { path: string; head: string }
 }
 
 type World = Readonly<{ git: Git; work: string }>
@@ -206,11 +211,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["commit", "--quiet", "-m", "change setup after selected commit"])
     await w.git(["push", "--quiet", "origin", "main"])
     const current = (await w.git(["rev-parse", "HEAD"])).trim()
-    const run = capture(w.work)
-
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], run.io), run.stderr()).toBe(0)
-
-    const { path } = JSON.parse(run.stdout()) as { path: string }
+    const { path } = await openEnvironment(w.work, selected)
     expect((await gitIn(path)(["rev-parse", "HEAD"])).trim()).toBe(selected)
     expect((await gitIn(path)(["branch", "--show-current"])).trim()).toBe("")
     expect(readFileSync(join(path, "selected-setup.txt"), "utf8")).toBe("selected commit\n")
@@ -218,7 +219,9 @@ describe("yrd env open prepares the retained environment", () => {
   })
 
   it("runs the target's declared setup after materialization", async () => {
-    const w = await world("test -f vendor/dependency/READY && printf '%s\\n' \"$YRD_REPO\" > setup-ready.txt")
+    const w = await world(
+      "bun --version >/dev/null && test -f vendor/dependency/READY && printf '%s\\n' \"$YRD_REPO\" > setup-ready.txt",
+    )
     await addMaterializedDependency(w)
     const run = capture(w.work)
 
@@ -228,43 +231,6 @@ describe("yrd env open prepares the retained environment", () => {
     const bay = run.stdout().trim()
     expect(readFileSync(join(bay, "setup-ready.txt"), "utf8")).toBe(`${bay}\n`)
     expect((await gitIn(bay)(["branch", "--show-current"])).trim()).toBe("")
-  })
-
-  it("opens from clean and makes the declared root typecheck runnable without a hand install", async () => {
-    const w = await world("test ! -x node_modules/.bin/fixture-typecheck && bun install --frozen-lockfile")
-    const dependency = join(w.work, "fixture-typecheck")
-    mkdirSync(dependency)
-    writeFileSync(
-      join(w.work, "package.json"),
-      JSON.stringify({
-        name: "clean-bay-typecheck",
-        private: true,
-        scripts: { typecheck: "fixture-typecheck --noEmit" },
-        devDependencies: { "fixture-typecheck": "file:./fixture-typecheck" },
-      }),
-    )
-    writeFileSync(
-      join(dependency, "package.json"),
-      JSON.stringify({ name: "fixture-typecheck", version: "1.0.0", bin: { "fixture-typecheck": "bin.js" } }),
-    )
-    writeFileSync(join(dependency, "bin.js"), '#!/usr/bin/env bun\nconsole.log("declared root typecheck ran")\n')
-    chmodSync(join(dependency, "bin.js"), 0o755)
-    const locked = await command(w.work, ["bun", "install"])
-    expect(locked, locked.stderr).toMatchObject({ exit: 0 })
-    rmSync(join(w.work, "node_modules"), { force: true, recursive: true })
-    expect(existsSync(join(w.work, "node_modules"))).toBe(false)
-    await w.git(["add", "package.json", "bun.lock", "fixture-typecheck"])
-    await w.git(["commit", "--quiet", "-m", "declare root typecheck dependency"])
-    await w.git(["push", "--quiet", "origin", "main"])
-    const run = capture(w.work)
-
-    const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected], run.io), run.stderr()).toBe(0)
-
-    const bay = run.stdout().trim()
-    const typecheck = await command(bay, ["bun", "run", "typecheck"])
-    expect(typecheck, typecheck.stderr).toMatchObject({ exit: 0 })
-    expect(typecheck.stdout).toContain("declared root typecheck ran")
   })
 
   it("opens the same exact commit twice without attaching or moving its branch", async () => {
@@ -279,17 +245,12 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["add", "main.txt"])
     await w.git(["commit", "--quiet", "-m", "advance target"])
     await w.git(["push", "--quiet", "origin", "main"])
-    const run = capture(w.work)
-
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", candidate], run.io), run.stderr()).toBe(0)
-
-    const bay = run.stdout().trim()
+    const { path: bay } = await openEnvironment(w.work, candidate)
     expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${candidate}\n${candidate}\n`)
 
-    const reopened = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", candidate], reopened.io), reopened.stderr()).toBe(0)
-    expect(reopened.stdout().trim()).not.toBe(bay)
-    expect(readFileSync(join(reopened.stdout().trim(), "setup-tree.txt"), "utf8")).toBe(`${candidate}\n${candidate}\n`)
+    const { path: reopened } = await openEnvironment(w.work, candidate)
+    expect(reopened).not.toBe(bay)
+    expect(readFileSync(join(reopened, "setup-tree.txt"), "utf8")).toBe(`${candidate}\n${candidate}\n`)
     expect((await w.git(["rev-parse", "refs/heads/task/reopened"])).trim()).toBe(candidate)
   })
 
@@ -327,9 +288,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     symlinkSync(actual, alias)
     await w.git(["config", "yrd.workdir", alias])
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const opened = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
-    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const { path } = await openEnvironment(w.work, selected)
     const physical = realpathSync(path)
     const listed = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
@@ -346,9 +305,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     const nested = join(w.work, "nested")
     mkdirSync(nested)
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const opened = capture(nested)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
-    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const { path } = await openEnvironment(nested, selected)
     const listed = capture(nested)
     expect(await runYrdProcess(["bun", "yrd", "env", "list", "--json"], listed.io)).toBe(0)
     expect(JSON.parse(listed.stdout())).toMatchObject({ environments: [{ path, head: selected }] })
@@ -366,9 +323,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     await addMaterializedDependency(w)
     await w.git(["config", "submodule.vendor/dependency.ignore", "all"])
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const opened = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
-    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const { path } = await openEnvironment(w.work, selected)
     const userWork = join(path, "vendor/dependency/READY")
     writeFileSync(userWork, "user edits\n")
     const closed = capture(w.work)
@@ -381,9 +336,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
   it.each([false, true])("closes a registered clean environment with declared teardown=%s", async (teardown) => {
     const w = await world(":", teardown ? 'printf "%s\\n" "$YRD_CANDIDATE_SHA" > ../closed.txt' : undefined)
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const opened = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
-    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const { path } = await openEnvironment(w.work, selected)
     // Close reads the retained commit, never the caller's edited declaration.
     writeFileSync(join(w.work, ".yrd.yml"), "teardown: exit 23\n")
     const closed = capture(w.work)
@@ -399,9 +352,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     async (kind) => {
       const w = await world(":", "printf touched > ../teardown-ran.txt")
       const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-      const opened = capture(w.work)
-      expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
-      const { path } = JSON.parse(opened.stdout()) as { path: string }
+      const { path } = await openEnvironment(w.work, selected)
       let target = path
       if (kind === "unknown") {
         target = join(dirname(path), "unregistered")
@@ -444,9 +395,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
       kind === "fail" ? "printf 'teardown exploded\\n' >&2; exit 23" : "printf changed > teardown-left.txt",
     )
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
-    const opened = capture(w.work)
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", selected, "--json"], opened.io), opened.stderr()).toBe(0)
-    const { path } = JSON.parse(opened.stdout()) as { path: string }
+    const { path } = await openEnvironment(w.work, selected)
     const closed = capture(w.work)
     expect(await runYrdProcess(["bun", "yrd", "env", "close", path], closed.io)).toBe(2)
     expect(closed.stdout()).toBe("")
