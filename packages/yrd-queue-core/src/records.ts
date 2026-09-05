@@ -166,19 +166,20 @@ export async function readRecords(git: Git, from: string): Promise<readonly Chan
     const [sha, at, block, body] = row.split("\x00")
     if (sha === undefined || at === undefined || block === undefined || body === undefined) continue
     const parsed = recordFrom(sha, at, body, block)
-    // The tip is the first record this reads, and the one check that these
-    // records are in the format this code understands happens on it, once. It
-    // comes BEFORE the walk's own ending below, because a captured tip that is not
-    // a record at all is the very case that check is about.
+    // The captured tip must be a record, even when it names the genesis.
+    // Only an older commit can terminate the history below.
     if (records.length === 0) {
       const where = parsed === undefined ? `history from ${from}` : `${changeOf(parsed, from)} history from ${from}`
       records.push(tipRecord(parsed, sha, where))
       continue
     }
-    // The first-parent walk ends at the genesis, which carries no `Record:`
-    // trailer. That is where this change's history ends.
-    if (parsed === undefined) break
-    records.push(parsed)
+    // Only the canonical genesis ends the walk. An unreadable older record
+    // is not an ending: accepting it would silently hide the earlier history.
+    if (parsed === undefined) {
+      const genesisSha = (await git(["hash-object", "-t", "commit", "--stdin"], GENESIS_OBJECT)).trim()
+      if (sha === genesisSha) break
+    }
+    records.push(tipRecord(parsed, sha, `history from ${from}`))
   }
   return records.reverse()
 }

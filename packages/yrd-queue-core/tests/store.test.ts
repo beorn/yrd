@@ -157,6 +157,32 @@ describe("a change's records are its commits", () => {
     )
   })
 
+  it("refuses malformed intermediate records instead of treating them as genesis", async () => {
+    const { git, head } = await repository()
+    const change = { branch: "task/one", head }
+    const opened = await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    const tree = (await git(["rev-parse", `${opened}^{tree}`])).trim()
+    const malformed = (
+      await git(["commit-tree", tree, "-p", opened, "-m", `yrd: genesis\n\nRecord: future\nChange: task/one@${head}\n`])
+    ).trim()
+    // The tip itself is valid: tip-only validation misses the broken history
+    // behind it. A genesis-like subject must not hide the real opened record.
+    const checked = (
+      await git([
+        "commit-tree",
+        tree,
+        "-p",
+        malformed,
+        "-m",
+        `checks passed\n\nRecord: checked\nChange: task/one@${head}\n`,
+      ])
+    ).trim()
+
+    await expect(readRecords(git, checked)).rejects.toThrow(
+      `history from ${checked} at ${malformed.slice(0, 12)} carries no valid Record:`,
+    )
+  })
+
   it("refuses a record without its Change trailer, naming the commit", async () => {
     const { git, head } = await repository()
     const ref = changeRef("main", { branch: "task/nameless", head })
@@ -335,7 +361,7 @@ describe("the state is derived, and ancestry wins over any record", () => {
         ],
       })),
       {
-        error: /Evidence: is not an absolute path/u,
+        error: /is not an absolute path/u,
         name: "relative Evidence",
         trailers: [...required, ["Evidence", "checks/q-one.log"] as const],
       },
