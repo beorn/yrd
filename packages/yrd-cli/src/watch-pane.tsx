@@ -22,6 +22,15 @@
  * read by the leaves that format a relative time, so a tick re-renders those
  * cells and nothing else.
  *
+ * A round that fails does not end the watch. The queue is read through a
+ * shared refs store that other commands fetch into at the same time, and one
+ * such collision (`cannot lock ref … is at X but expected Y`) took the pane
+ * down 32 minutes into a soak on 2026-09-05. The retired pane said a failed
+ * read in its footer and retried; this one does the same: the table keeps the
+ * last reading, a warning line names the failure and the reading's time, and
+ * the next round tries again. A failed detail read is said in the detail pane
+ * the same way. Both are loud; neither is fatal.
+ *
  * Keys: `q` leaves · `Enter`/`Space` opens the change · `Escape` closes it ·
  * `End` follows the newest rows · `←`/`→` move between the detail's tabs ·
  * `v` folds the diff · `o r d f` show one status bucket, `O R D F` toggle one,
@@ -46,6 +55,7 @@ import {
 } from "silvery"
 import type { Row } from "@yrd/queue-core"
 import { NowProvider, useMinute } from "./watch-clock.ts"
+import { clock, firstLine } from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
   BUCKETS,
@@ -157,6 +167,8 @@ export function WatchPane({
 }) {
   const [shown, setShown] = useState(snapshot)
   const [failure, setFailure] = useState<Error | undefined>(undefined)
+  const [readFailure, setReadFailure] = useState<ReadFailure | undefined>(undefined)
+  const [detailFailure, setDetailFailure] = useState<(ReadFailure & { key: string }) | undefined>(undefined)
   const [cursor, setCursor] = useState(0)
   const [opened, setOpened] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
@@ -189,7 +201,15 @@ export function WatchPane({
         while (!scope.signal.aborted) {
           await scope.sleep(intervalMs)
           if (scope.signal.aborted) return
-          await refresh()
+          try {
+            await refresh()
+            setReadFailure(undefined)
+          } catch (error: unknown) {
+            if (scope.signal.aborted) return
+            // Said, not fatal: the table keeps the last reading, the footer
+            // names what failed and when, and the next round tries again.
+            setReadFailure({ at: new Date(), message: firstLine(error) })
+          }
         }
       })().catch((error: unknown) => {
         if (scope.signal.aborted) return
@@ -230,9 +250,11 @@ export function WatchPane({
             ...was.filter((entry) => entry.key !== selectedKey),
           ].slice(0, HELD_DETAILS),
         )
+        setDetailFailure((was) => (was?.key === selectedKey ? undefined : was))
       } catch (error: unknown) {
         if (cancelled) return
-        setFailure(error instanceof Error ? error : new Error(String(error)))
+        // Said in the detail pane, not fatal; the next round reads again.
+        setDetailFailure({ at: new Date(), key: selectedKey, message: firstLine(error) })
       }
     })()
     return () => {
@@ -347,18 +369,29 @@ export function WatchPane({
 
   const detail = heldDetail?.detail
   const detailPane = (
-    <WatchDetail
-      detail={detail}
-      joinedRun={selected?.run !== undefined}
-      live={live}
-      {...(tab === undefined ? {} : { selected: tab })}
-      onSelect={setTab}
-      diffOpen={diffOpen}
-      {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
-      onToggleDiff={() => {
-        setDiffOpen((was) => !was)
-      }}
-    />
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+      {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
+        <Text bold color="$fg-warning" wrap="truncate">
+          {readFailureLine(
+            "this change's read",
+            detailFailure,
+            heldDetail === undefined ? "" : "; the detail shown is the last good read",
+          )}
+        </Text>
+      )}
+      <WatchDetail
+        detail={detail}
+        joinedRun={selected?.run !== undefined}
+        live={live}
+        {...(tab === undefined ? {} : { selected: tab })}
+        onSelect={setTab}
+        diffOpen={diffOpen}
+        {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
+        onToggleDiff={() => {
+          setDiffOpen((was) => !was)
+        }}
+      />
+    </Box>
   )
   // The width the list pane gets: the whole terminal, or its share of a split.
   const listColumns = opened && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) - DIVIDER_SIZE : columns
@@ -436,6 +469,19 @@ export function WatchPane({
           </Text>
         )}
         {body}
+        {/* The loudest bottom-row fact, never hidden: a read that failed, with
+            the time of the reading the table still shows. */}
+        {readFailure === undefined ? null : (
+          <Box height={1} flexShrink={0}>
+            <Text bold color="$fg-warning" wrap="truncate">
+              {readFailureLine(
+                "the queue read",
+                readFailure,
+                `; the table is the ${clock(shown.at, { seconds: true })} reading`,
+              )}
+            </Text>
+          </Box>
+        )}
         <Box height={1} flexShrink={0}>
           <Text color="$fg-muted" wrap="truncate">
             {atEnd ? "" : "End follows again · "}
@@ -452,6 +498,20 @@ export function WatchPane({
       </Box>
     </NowProvider>
   )
+}
+
+/** One read that failed: when, and the first line of why. */
+type ReadFailure = Readonly<{ at: Date; message: string }>
+
+/**
+ * The warning line for a failed read, most important first so a narrow screen
+ * keeps it: what failed and when, that it retries, what is still on screen,
+ * then why. A git failure's why is its stderr, not the command line that ran
+ * (`<command> in <dir> exited N: <stderr>` is the core's GitExit format).
+ */
+function readFailureLine(what: string, failure: ReadFailure, still = ""): string {
+  const why = failure.message.replace(/^.* exited \d+: /u, "")
+  return `⚠︎ ${what} failed at ${clock(failure.at, { seconds: true })}, retrying${still} — ${why}`
 }
 
 /** The table: header, then the virtualized rows with a date separator between days. */

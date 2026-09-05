@@ -13,7 +13,7 @@
 
 import type React from "react"
 import { describe, expect, it, vi } from "vitest"
-import { render } from "silvery/test"
+import { bufferToText, render } from "silvery/test"
 import type { ChangeRecord, Row } from "@yrd/queue-core"
 import { WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
 import {
@@ -25,6 +25,7 @@ import {
   type CheckPanel,
 } from "../src/watch-detail.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
+import { clock } from "../src/watch-format.ts"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
 import { watchRowKey, type WatchRow } from "../src/watch-rows.ts"
 
@@ -561,5 +562,108 @@ describe("the status box's step keys", () => {
 
     expect(text.match(/✓ setup 0:01/gu)).toHaveLength(2)
     expect(text).toContain("◉ affected-tests")
+  })
+})
+
+/** A loader the test answers by hand: each call is one pending round to resolve or reject. */
+function gatedLoader() {
+  const rounds: Array<{ resolve: (next: WatchSnapshot) => void; reject: (why: Error) => void }> = []
+  const load = vi.fn(
+    () =>
+      new Promise<WatchSnapshot>((resolve, reject) => {
+        rounds.push({ resolve, reject })
+      }),
+  )
+  return { load, rounds }
+}
+
+/**
+ * The committed tree as text, rendered on demand: a state set from the pane's
+ * own loop commits on React's schedule, and the headless terminal paints a
+ * commit only when driven, so `app.text` can lag it.
+ */
+function current(app: ReturnType<typeof render>): string {
+  return bufferToText(app.freshRender())
+}
+
+const LOCK_RACE = new Error(
+  "git fetch --quiet --no-tags --prune origin +refs/yrd/changes/*:refs/yrd/changes/* in /repo exited 1: error: cannot lock ref 'refs/yrd/changes/task/one@abcdef01': is at 3f0dceac but expected 40dc7828",
+)
+
+describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision took the pane down)", () => {
+  it("a round that fails is said in the footer with the reading still shown, the loop goes on, and a good round clears it", async () => {
+    const { load, rounds } = gatedLoader()
+    const app = render(<WatchPane snapshot={snapshot()} load={load} intervalMs={10} live />, { cols: 200, rows: 40 })
+    await vi.waitFor(() => {
+      expect(rounds).toHaveLength(1)
+    })
+    rounds[0]?.reject(LOCK_RACE)
+    // The loop went on to the next round instead of ending the watch.
+    await vi.waitFor(() => {
+      expect(rounds).toHaveLength(2)
+    })
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("⚠︎ the queue read failed at ")
+    })
+    const text = current(app)
+    expect(text).toContain(
+      `retrying; the table is the ${clock(NOW, { seconds: true })} reading — error: cannot lock ref`,
+    )
+    // Never the command line that ran: the why is git's own sentence.
+    expect(text).not.toContain("git fetch --quiet")
+    // The table still shows the last reading.
+    expect(text).toContain("task/one")
+    expect(text).toContain("1 of 1 change(s)")
+
+    const later = new Date(NOW.getTime() + 60_000)
+    rounds[1]?.resolve(
+      snapshot({
+        at: later,
+        rows: [
+          { row: failedRow() },
+          { row: row({ branch: "task/fresh", head: "1234567890abcdef1234567890abcdef12345678" }) },
+        ],
+      }),
+    )
+    // The new reading is on screen (the list's virtual window grows on the
+    // next paint, so the count is the fact to read here) and the warning is gone.
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("2 of 2 change(s)")
+    })
+    expect(current(app)).not.toContain("⚠︎ the queue read failed")
+    app.unmount()
+  })
+
+  it("a detail that fails to read is said in the detail pane, not fatal, and the next round reads it again", async () => {
+    const open = vi
+      .fn<(item: WatchRow) => Promise<ChangeDetail>>()
+      .mockRejectedValueOnce(
+        new Error("git log abcdef0123456789 in /repo exited 128: fatal: bad object abcdef0123456789"),
+      )
+      .mockImplementation(async (item) => detailOf(item))
+    const { load, rounds } = gatedLoader()
+    const app = render(<WatchPane snapshot={snapshot()} load={load} open={open} intervalMs={10} live />, {
+      cols: 200,
+      rows: 40,
+    })
+    await app.waitForLayoutStable()
+    app.press("Enter")
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("⚠︎ this change's read failed at ")
+    })
+    const text = current(app)
+    expect(text).toContain("retrying — fatal: bad object abcdef0123456789")
+    expect(text).toContain("no change selected")
+    // A good round re-runs the read; the warning goes and the detail comes.
+    await vi.waitFor(() => {
+      expect(rounds.length).toBeGreaterThan(0)
+    })
+    rounds.at(-1)?.resolve(snapshot({ at: new Date(NOW.getTime() + 60_000) }))
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("✓ typecheck 1:02")
+    })
+    expect(current(app)).not.toContain("this change's read failed")
+    expect(open).toHaveBeenCalledTimes(2)
+    app.unmount()
   })
 })

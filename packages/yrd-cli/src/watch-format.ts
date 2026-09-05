@@ -155,6 +155,12 @@ export function mediaDuration(milliseconds: number): string {
 }
 
 /** A local wall-clock time, `HH:MM` or `HH:MM:SS`, for the absolute half of every time on screen. */
+/** The first line of what went wrong, for a sentence on screen: an error's message, else the value as text. */
+export function firstLine(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error)
+  return text.split("\n")[0] ?? text
+}
+
 export function clock(at: Date, options: Readonly<{ seconds?: boolean }> = {}): string {
   const two = (value: number): string => String(value).padStart(2, "0")
   const base = `${two(at.getHours())}:${two(at.getMinutes())}`

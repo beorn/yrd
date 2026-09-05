@@ -69,7 +69,7 @@ import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
-import { CHECK_GLYPH, clock, mediaDuration } from "./watch-format.ts"
+import { CHECK_GLYPH, clock, firstLine, mediaDuration } from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOf, type RunDecision } from "./watch-stats.ts"
 import { readGarageDeclaration } from "./garage.ts"
@@ -1002,12 +1002,6 @@ async function headFacts(
       gitAbsent: `git could not read ${row.head.slice(0, 12)} here (${firstLine(error)}): the body, the commits and the diff are not shown`,
     }
   }
-}
-
-/** The first line of what went wrong, for a sentence on screen. */
-function firstLine(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error)
-  return text.split("\n")[0] ?? text
 }
 
 /** How much of a diff the fold holds: the head of it, so a generated-file change never becomes the pane's memory. */
