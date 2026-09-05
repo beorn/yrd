@@ -31,8 +31,15 @@
  * the next round tries again. A failed detail read is said in the detail pane
  * the same way. Both are loud; neither is fatal.
  *
+ * The cursor is a ROW, not an index (the retired pane's fixed-row mode): once
+ * the operator moves off the top or opens a change, the cursor follows that
+ * row's identity (`watchRowKey`) through every re-sort, so an open detail never
+ * swaps to whatever row the table moved into its place. At the top with nothing
+ * opened it follows the newest row. A row that left the table is said in a
+ * warning line, and the cursor stays on its neighbour.
+ *
  * Keys: `q` leaves · `Enter`/`Space` opens the change · `Escape` closes it ·
- * `End` follows the newest rows · `←`/`→` move between the detail's tabs ·
+ * `Home` follows the newest rows again · `←`/`→` move between the detail's tabs ·
  * `v` folds the diff · `o r d f` show one status bucket, `O R D F` toggle one,
  * `a` shows everything · `1`–`9` toggle a queue's pill · `?` this help. The
  * cancel key is NOT ported: a running change is stopped by moving its branch
@@ -55,7 +62,7 @@ import {
 } from "silvery"
 import type { Row } from "@yrd/queue-core"
 import { NowProvider, useMinute } from "./watch-clock.ts"
-import { clock, firstLine } from "./watch-format.ts"
+import { clock, firstLine, runShortName } from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
   BUCKETS,
@@ -126,7 +133,7 @@ const HELP = [
   "q            leave the watch",
   "Enter/Space  open the change",
   "Escape       close it, or this help",
-  "End          follow the newest rows",
+  "Home         follow the newest rows again",
   "←/→          move between the tabs",
   "v            fold the diff open or shut",
   "o r d f      show one status; O R D F toggle",
@@ -173,7 +180,8 @@ export function WatchPane({
   const [opened, setOpened] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [tab, setTab] = useState<string | undefined>(undefined)
-  const [atEnd, setAtEnd] = useState(true)
+  /** The row the cursor is on, by identity; undefined at the top, following the newest. */
+  const [cursorRow, setCursorRow] = useState<WatchRow | undefined>(undefined)
   const [buckets, setBuckets] = useState<ReadonlySet<StatusBucket>>(new Set(BUCKETS))
   const [visibleQueues, setVisibleQueues] = useState<ReadonlySet<string> | undefined>(undefined)
   const [held, setHeld] = useState<readonly HeldDetail[]>([])
@@ -227,7 +235,16 @@ export function WatchPane({
       (visibleQueues === undefined || shown.queues.length === 0 || visibleQueues.has(shown.queues[0]?.label ?? "")),
   )
   const allOn = buckets.size === BUCKETS.length && visibleQueues === undefined
-  const selected = visible[Math.min(cursor, Math.max(0, visible.length - 1))]
+  // Where the cursor's row is NOW; when it left the table, the cursor stays
+  // where it was (its neighbour) and the row that left is named below.
+  const cursorKey = cursorRow === undefined ? undefined : watchRowKey(cursorRow)
+  const keyed = cursorKey === undefined ? -1 : visible.findIndex((item) => watchRowKey(item) === cursorKey)
+  const at = keyed >= 0 ? keyed : Math.min(cursor, Math.max(0, visible.length - 1))
+  const vanished = cursorKey !== undefined && keyed < 0 && visible.length > 0 ? cursorRow : undefined
+  useEffect(() => {
+    if (keyed >= 0 && keyed !== cursor) setCursor(keyed)
+  }, [keyed, cursor])
+  const selected = visible[at]
   const selectedKey = selected === undefined ? undefined : watchRowKey(selected)
   const label = shown.queues[0]?.label ?? shown.queue
 
@@ -286,9 +303,13 @@ export function WatchPane({
     }
   }, [diffOpen, loadDiff, selected, selectedKey, diffs])
 
+  const toTop = (): void => {
+    setCursor(0)
+    setCursorRow(undefined)
+  }
   const selectOnly = (bucket: StatusBucket): void => {
     setBuckets(new Set([bucket]))
-    setCursor(0)
+    toTop()
   }
   const toggleBucket = (bucket: StatusBucket): void => {
     setBuckets((was) => {
@@ -297,7 +318,7 @@ export function WatchPane({
       else next.add(bucket)
       return next
     })
-    setCursor(0)
+    toTop()
   }
   const showAll = (): void => {
     setBuckets(new Set(BUCKETS))
@@ -311,7 +332,7 @@ export function WatchPane({
       else next.add(queueLabel)
       return next.size === every.size ? undefined : next
     })
-    setCursor(0)
+    toTop()
   }
 
   useInput((input, key) => {
@@ -325,17 +346,14 @@ export function WatchPane({
       return undefined
     }
     if (character === "q") return "exit"
-    if (key.end === true) {
-      listRef.current?.scrollToBottom()
-      setAtEnd(true)
-      return undefined
-    }
     if (key.escape === true) {
       setOpened(false)
       return undefined
     }
     if (key.return === true || (character === " " && key.ctrl !== true && key.meta !== true)) {
       setOpened(true)
+      // The opened change stays under the cursor whatever the table does.
+      setCursorRow(selected)
       // A newly opened change lands on ITS newest output, not on whatever tab
       // the previous change happened to leave behind.
       setTab(undefined)
@@ -401,12 +419,13 @@ export function WatchPane({
       <Table
         rows={visible}
         label={label}
-        cursor={cursor}
+        cursor={at}
         listRef={listRef}
         active={!opened || tier !== "full"}
         onCursor={(index) => {
           setCursor(index)
-          setAtEnd(false)
+          // The top row is "the newest", followed as a position; any other row is followed as itself.
+          setCursorRow(index === 0 ? undefined : visible[index])
         }}
       />
       {shown.runner === undefined ? null : (
@@ -482,9 +501,18 @@ export function WatchPane({
             </Text>
           </Box>
         )}
+        {vanished === undefined ? null : (
+          <Box height={1} flexShrink={0}>
+            <Text bold color="$fg-warning" wrap="truncate">
+              {`⚠︎ the row under the cursor left the table: ${vanished.row.branch}@${vanished.row.head.slice(0, 12)}${
+                vanished.run === undefined ? "" : ` ${runShortName(label, vanished.run.id)}`
+              }; the cursor stays on its neighbour, Home follows the newest again`}
+            </Text>
+          </Box>
+        )}
         <Box height={1} flexShrink={0}>
           <Text color="$fg-muted" wrap="truncate">
-            {atEnd ? "" : "End follows again · "}
+            {cursorRow === undefined ? "" : "Home follows the newest again · "}
             {String(visible.length)} of {String(shown.rows.length)} change(s) · ? for help · q leaves
           </Text>
         </Box>

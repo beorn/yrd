@@ -667,3 +667,112 @@ describe("a read that fails (the 2026-09-05 soak: a shared-refs fetch collision 
     app.unmount()
   })
 })
+
+describe("the cursor is a row, not an index (the retired pane's fixed-row mode)", () => {
+  const a = row({ branch: "task/a", head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", subject: "the first" })
+  const b = row({ branch: "task/b", head: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", subject: "the second" })
+  const c = row({ branch: "task/c", head: "cccccccccccccccccccccccccccccccccccccccc", subject: "the third" })
+  const fresh = row({ branch: "task/fresh", head: "dddddddddddddddddddddddddddddddddddddddd", subject: "the newest" })
+
+  it("an opened change stays under the cursor when a newer row lands above it", async () => {
+    const { load, rounds } = gatedLoader()
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [{ row: a }, { row: b }, { row: c }] })}
+        load={load}
+        open={opener()}
+        intervalMs={10}
+        live
+      />,
+      { cols: 200, rows: 40 },
+    )
+    await app.waitForLayoutStable()
+    app.press("ArrowDown")
+    await app.waitForLayoutStable()
+    app.press("Enter")
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("· task/b@bbbbbbbbbbbb the second")
+    })
+    expect(current(app)).toContain("Home follows the newest again")
+    await vi.waitFor(() => {
+      expect(rounds.length).toBeGreaterThan(0)
+    })
+    rounds
+      .at(-1)
+      ?.resolve(
+        snapshot({ at: new Date(NOW.getTime() + 60_000), rows: [{ row: fresh }, { row: a }, { row: b }, { row: c }] }),
+      )
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("4 of 4 change(s)")
+    })
+    // Still task/b, not whatever the table moved into row 1.
+    expect(current(app)).toContain("· task/b@bbbbbbbbbbbb the second")
+    expect(current(app)).not.toContain("· task/a@")
+    app.unmount()
+  })
+
+  it("a row that left the table is said, and the cursor stays on its neighbour", async () => {
+    const { load, rounds } = gatedLoader()
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [{ row: a }, { row: b }, { row: c }] })}
+        load={load}
+        open={opener()}
+        intervalMs={10}
+        live
+      />,
+      { cols: 200, rows: 40 },
+    )
+    await app.waitForLayoutStable()
+    app.press("ArrowDown")
+    await app.waitForLayoutStable()
+    app.press("Enter")
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("· task/b@bbbbbbbbbbbb the second")
+    })
+    await vi.waitFor(() => {
+      expect(rounds.length).toBeGreaterThan(0)
+    })
+    rounds.at(-1)?.resolve(snapshot({ at: new Date(NOW.getTime() + 60_000), rows: [{ row: a }, { row: c }] }))
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("⚠︎ the row under the cursor left the table: task/b@bbbbbbbbbbbb")
+    })
+    const text = current(app)
+    expect(text).toContain("the cursor stays on its neighbour, Home follows the newest again")
+    // The neighbour at the same index is under the cursor now, and its detail is what the pane reads.
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("· task/c@cccccccccccc the third")
+    })
+    app.unmount()
+  })
+
+  it("at the top with nothing opened, the cursor follows the newest row", async () => {
+    const { load, rounds } = gatedLoader()
+    const app = render(
+      <WatchPane
+        snapshot={snapshot({ rows: [{ row: a }, { row: b }] })}
+        load={load}
+        open={opener()}
+        intervalMs={10}
+        live
+      />,
+      { cols: 200, rows: 40 },
+    )
+    await app.waitForLayoutStable()
+    expect(current(app)).not.toContain("Home follows the newest again")
+    await vi.waitFor(() => {
+      expect(rounds.length).toBeGreaterThan(0)
+    })
+    rounds
+      .at(-1)
+      ?.resolve(snapshot({ at: new Date(NOW.getTime() + 60_000), rows: [{ row: fresh }, { row: a }, { row: b }] }))
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("3 of 3 change(s)")
+    })
+    app.press("Enter")
+    await vi.waitFor(() => {
+      expect(current(app)).toContain("· task/fresh@dddddddddddd the newest")
+    })
+    app.unmount()
+  })
+})
