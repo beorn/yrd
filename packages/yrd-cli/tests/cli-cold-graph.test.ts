@@ -103,12 +103,19 @@ describe("the graph walker itself", () => {
     expect(graph.packages).toEqual(["react"])
   })
 
-  it("walks the real program: the command modules and the row formatting are reachable from cli.ts", () => {
-    const graph = staticGraph(join(SRC, "cli.ts"))
-    const names = graph.modules.map((file) => file.slice(SRC.length + 1))
-    expect(names).toContain("queue-core-commands.ts")
-    expect(names).toContain("watch-rows.ts")
-    expect(graph.packages).toContain("@yrd/queue-core")
+  it("walks the real program: the environment commands are static from cli.ts, the queue commands are one dynamic import away", () => {
+    const fromCli = staticGraph(join(SRC, "cli.ts"))
+    const cliNames = fromCli.modules.map((file) => file.slice(SRC.length + 1))
+    expect(cliNames).toContain("env-commands.ts")
+    // The queue module (and the runtime identity fence it loads) is reached lazily, so `--help` and
+    // `--version` never read git: the walker must not see it from cli.ts, and the source must import() it.
+    expect(cliNames).not.toContain("queue-core-commands.ts")
+    expect(readFileSync(join(SRC, "cli.ts"), "utf8")).toContain('await import("./queue-core-commands.ts")')
+    const fromQueue = staticGraph(join(SRC, "queue-core-commands.ts"))
+    const queueNames = fromQueue.modules.map((file) => file.slice(SRC.length + 1))
+    expect(queueNames).toContain("watch-rows.ts")
+    expect(queueNames).toContain("queue-stats.ts")
+    expect(fromQueue.packages).toContain("@yrd/queue-core")
   })
 })
 

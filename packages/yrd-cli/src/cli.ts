@@ -26,7 +26,7 @@
  */
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
-import { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
+import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { fdWriters } from "./stdout-fd.ts"
 import { listEnvironments, openEnvironment } from "./env-commands.ts"
 import {
@@ -50,6 +50,13 @@ type GlobalOptions = YrdObservabilityFlags
 
 type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean }>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string }>
+
+// Only queue actions load the runtime identity fence. Help and --version must
+// not perform its Git reads (version owns its own bounded source diagnostic).
+const coreQueueCommand: typeof import("./queue-core-commands.ts").coreQueueCommand = async (...args) => {
+  const queue = await import("./queue-core-commands.ts")
+  return queue.coreQueueCommand(...args)
+}
 
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
