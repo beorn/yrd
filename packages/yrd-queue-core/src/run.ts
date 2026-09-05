@@ -963,7 +963,7 @@ async function candidateFailure(
       ],
     })
   }
-  if (detail.phase === "prove-gitlink-on-main") {
+  if (detail.code === "component-main-moved" || detail.code === "component-pin-unreadable") {
     await worktree.remove()
     const reason = detail.message.replace(/\s+/gu, " ").trim()
     return run.steps.end(run, entry, "failed", {
@@ -1158,7 +1158,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         head,
         kind: "change",
         reason: remoteNow.target !== run.targetSha ? "target-moved" : "branch-moved",
-        saw: remoteNow.target !== run.targetSha ? remoteNow.target ?? "gone" : remoteNow.branch ?? "gone",
+        saw: remoteNow.target !== run.targetSha ? (remoteNow.target ?? "gone") : (remoteNow.branch ?? "gone"),
       })
       return "checked"
     }

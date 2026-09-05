@@ -49,11 +49,12 @@
   "devDependencies": {
     "@types/bun": "^1.3.14",
     "@types/react": "^19.2.0",
+    "git-super": "^0.1.0",
     "typescript": "^6.0.3",
     "vitest": "4.1.9"
   },
   "overrides": {
     "loggily": "github:beorn/loggily#d235700204414687adf6fc1449e73de10419656e",
-    "git-super": "github:beorn/git-super#a35a8dc05190785cfcbe937cf420dd85d234b529"
+    "git-super": "github:beorn/git-super#caee71f11bb2c1248eeeba32e927185ff1d1c816"
   }
 }

@@ -133,12 +133,21 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     expect(opened.target, run.report).toBe("main")
     expect(opened.at, run.report).toEqual(expect.any(String))
 
-    // change — one per change seen, with what the queue run did with it.
+    // change — the decision row plus the landing-push diagnostic, both for
+    // the one change seen. The diagnostic is observational and must not be
+    // mistaken for a second decision.
     const changes = ofKind(records, "change")
-    expect(changes, run.report).toHaveLength(1)
-    expect(changes[0]?.branch, run.report).toBe(branch)
-    expect(changes[0]?.head, run.report).toBe(headSha)
-    expect(changes[0]?.decision, run.report).toBe("merged")
+    expect(changes, run.report).toHaveLength(2)
+    const decision = changes.find((record) => record.decision === "merged")
+    const landingPush = changes.find((record) => record.reason === "landing-push")
+    expect(decision, run.report).toBeDefined()
+    expect(landingPush, run.report).toBeDefined()
+    expect(decision?.branch, run.report).toBe(branch)
+    expect(decision?.head, run.report).toBe(headSha)
+    expect(decision?.decision, run.report).toBe("merged")
+    expect(landingPush?.branch, run.report).toBe(branch)
+    expect(landingPush?.head, run.report).toBe(headSha)
+    expect(landingPush?.decision, run.report).toBe("checked")
 
     // check — the start row, then the end row with duration; the check's own
     // log on both.

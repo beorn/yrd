@@ -164,7 +164,8 @@ async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
   await cg(["checkout", "--quiet", "-b", "main"])
   cpSync(resolve(import.meta.dirname, "../src"), join(componentWork, "packages/yrd-cli/src"), { recursive: true })
   writeFileSync(join(componentWork, "lib.txt"), "a\n")
-  await cg(["add", "lib.txt", "packages"])
+  writeFileSync(join(componentWork, ".yrd.yml"), "landing: product\n")
+  await cg(["add", "lib.txt", "packages", ".yrd.yml"])
   await cg(["commit", "--quiet", "-m", "a"])
   const a = (await cg(["rev-parse", "HEAD"])).trim()
   await cg(["push", "--quiet", "origin", "main"])
@@ -301,6 +302,9 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     })
     expect(records(service)[1]).toMatchObject({ exitCode: 0, merged: ["task/one"] })
     expect(records(service)[2]).toMatchObject({ exitCode: 0, merged: ["task/two"] })
+    // Landing uses its frozen URL, not the mutable origin alias. Observe the
+    // actual remote instead of depending on a push updating this tracking ref.
+    await w.git(["fetch", "--quiet", "origin", "main"])
     for (const name of ["one", "two"]) {
       expect((await w.git(["show", `origin/main:${name}.txt`])).trim()).toBe(name)
       const head = heads.get(name)
@@ -310,9 +314,9 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       await w.git(["fetch", "--quiet", "origin", `+${ref}:${ref}`])
       const tip = (await w.git(["rev-parse", "--verify", `${ref}^{commit}`])).trim()
       const history = await readRecords(w.git, tip)
-      expect(history.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "merged", "sent"])
-      expect(trailer(history[4]!, "State")).toBe("merged")
-      const merge = trailer(history[2]!, "Merge")
+      expect(history.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "merged", "sent"])
+      expect(trailer(history.at(-1)!, "State")).toBe("merged")
+      const merge = trailer(history.find((record) => record.kind === "merged")!, "Merge")
       expect(merge).toMatch(/^[0-9a-f]{40}$/u)
       await w.git(["merge-base", "--is-ancestor", merge!, "origin/main"])
       const warning = rows.find((row) => row.level === "warn" && row.message.startsWith(`${ref}:`))
@@ -560,6 +564,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         command: "up",
         intervalSeconds: 0,
         afterRound: async () => {
+          await w.git(["fetch", "--quiet", "origin", "main"])
           await w.git(["merge", "--ff-only", "origin/main"])
           await gitIn(join(w.work, "component"))(["checkout", "--quiet", w.b])
         },

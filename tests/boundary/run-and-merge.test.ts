@@ -135,7 +135,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const one = await queueRunOnce(repo)
 
     expect(one.exitCode, one.report).toBe(0)
-    const afterOne = await targetTip(repo)
+    const afterOne = await refreshTarget(repo)
     expect(await firstParentDistance(repo, before, afterOne), one.report).toBe(1)
     expect(await parentsOf(repo, afterOne), one.report).toEqual([before, first.headSha])
     expect(await mergedIntoTarget(repo, second.headSha), one.report).toBe(false)
@@ -143,7 +143,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const two = await queueRunOnce(repo)
 
     expect(two.exitCode, two.report).toBe(0)
-    const afterTwo = await targetTip(repo)
+    const afterTwo = await refreshTarget(repo)
     expect(await firstParentDistance(repo, afterOne, afterTwo), two.report).toBe(1)
     expect(await parentsOf(repo, afterTwo), two.report).toEqual([afterOne, second.headSha])
     expect(await checkAttempts(log), one.report).toBeGreaterThan(0)
@@ -255,7 +255,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     // Nothing failed and nothing is stuck: one head landed, and the other name
     // is that same landed head.
     expect(run.exitCode, run.report).toBe(0)
-    const after = await targetTip(repo)
+    const after = await refreshTarget(repo)
     expect(await firstParentDistance(repo, before, after), run.report).toBe(1)
     expect(await mergedIntoTarget(repo, one.headSha), run.report).toBe(true)
     expect(await checkAttempts(log), run.report).toBeGreaterThan(0)
@@ -283,7 +283,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     // the first in line lands.
     const one = await queueRunOnce(repo)
     expect(one.exitCode, one.report).toBe(0)
-    const afterOne = await targetTip(repo)
+    const afterOne = await refreshTarget(repo)
     expect(await parentsOf(repo, afterOne), one.report).toEqual([before, first.headSha])
     const judgedOnce = (await checkLines(log)).length
 

@@ -294,14 +294,22 @@ async function runBeforeLanding(options: QueueRunOptions, before: () => Promise<
   const runner = createProcess({ cwd: options.repo, env: gitEnvironment(options.env ?? process.env) })
   let raced = false
   try {
-    return await queueRun({ ...options, process: { ...runner, async run(request) {
-      if (!raced && request.argv.includes("super") && request.argv.includes("push")) {
-        raced = true
-        await before()
-      }
-      return runner.run(request)
-    } } })
-  } finally { await runner.close() }
+    return await queueRun({
+      ...options,
+      process: {
+        ...runner,
+        async run(request) {
+          if (!raced && request.argv.includes("super") && request.argv.includes("push")) {
+            raced = true
+            await before()
+          }
+          return runner.run(request)
+        },
+      },
+    })
+  } finally {
+    await runner.close()
+  }
 }
 
 /** One program the queue ran, as it recorded itself: the name it goes by, then its `key=value` fields. */
@@ -982,9 +990,11 @@ describe("a queue run", () => {
     const attempted: string[] = []
     const competing: string[] = []
     const git: Git = async (args, input) => {
-      const intended = args[0] === "push" ? args.find((arg) => arg.endsWith(`:${ref}`))?.slice(0, -`:${ref}`.length) : undefined
+      const intended =
+        args[0] === "push" ? args.find((arg) => arg.endsWith(`:${ref}`))?.slice(0, -`:${ref}`.length) : undefined
       const recordPush =
-        intended !== undefined && (await readRecord(w.git, intended)).kind === "sent" &&
+        intended !== undefined &&
+        (await readRecord(w.git, intended)).kind === "sent" &&
         args[0] === "push" &&
         !args.includes("--atomic") &&
         args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))
@@ -1221,8 +1231,13 @@ describe("a queue run", () => {
     let expected = ""
     let moved: string | undefined
     const git: Git = async (args, input) => {
-      const intended = args[0] === "push" ? args.find((arg) => arg.endsWith(`:${ref}`))?.slice(0, -`:${ref}`.length) : undefined
-      if (moved === undefined && intended !== undefined && trailer(await readRecord(w.git, intended), "Merge") !== undefined) {
+      const intended =
+        args[0] === "push" ? args.find((arg) => arg.endsWith(`:${ref}`))?.slice(0, -`:${ref}`.length) : undefined
+      if (
+        moved === undefined &&
+        intended !== undefined &&
+        trailer(await readRecord(w.git, intended), "Merge") !== undefined
+      ) {
         expected = (await rival(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
         await rival(["fetch", "--quiet", "origin", `${ref}:${ref}`])
         moved = await appendRecord(rival, "main", {
@@ -1439,13 +1454,13 @@ describe("a queue run", () => {
     let targetBeforePush = ""
     let changeBeforePush = ""
     const outcome = await runBeforeLanding(await w.options({ exit: 0 }), async () => {
-        targetBeforePush = await remoteTarget(w)
-        changeBeforePush = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
-        paused = await writePause(rival, "origin", "main", {
-          by: "operator",
-          kind: "paused",
-          reason: "stop before merge",
-        })
+      targetBeforePush = await remoteTarget(w)
+      changeBeforePush = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
+      paused = await writePause(rival, "origin", "main", {
+        by: "operator",
+        kind: "paused",
+        reason: "stop before merge",
+      })
     })
 
     expect(paused).toBeDefined()
@@ -1567,7 +1582,15 @@ describe("a queue run", () => {
     ).toEqual([{ delivered: true, id: merged.sha, to: "recovering" }])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     records = await readRecords(w.git, (await refAt(w.git, ref))!)
-    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "sent", "sent", "sent"])
+    expect(records.map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+      "checked",
+      "merged",
+      "sent",
+      "sent",
+      "sent",
+    ])
     expect(records.at(-1)?.trailers).toEqual(
       expect.arrayContaining([
         ["To", "recovering"],

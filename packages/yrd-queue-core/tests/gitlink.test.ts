@@ -1,8 +1,8 @@
 /**
- * Settling at submit and merge: git-super raises every held-back gitlink to its
- * component's newest main. An authored pin main does not carry waits without
- * ending the change or blocking the next entry; an object no remote can supply
- * is the submitter's failed change, never a queue-owned stuck.
+ * Product landing settles only authored pins: ahead lands child-first, behind
+ * raises, divergent refuses the author, and untouched takes the target's pin.
+ * External pins stay as written. An object no remote can supply is the
+ * submitter's failed change, never a queue-owned stuck.
  *
  * Measured 2026-09-02 on the old core: a root gitlink pointed at a branch
  * commit forked on the gitlink, and every later change was judged against a
@@ -21,7 +21,6 @@ import {
   changeRef,
   checksOf,
   gitIn,
-  incidentFrom,
   list,
   queueRun,
   pauseRef,
@@ -163,8 +162,9 @@ async function gitlinkAroundQueue(w: World, sha: string): Promise<string> {
 /** A change that touches a file and no gitlink, submitted. */
 async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
-  writeFileSync(join(w.work, `${branch.replace(/\//gu, "-")}.txt`), `${branch}\n`)
-  await w.git(["add", "."])
+  const file = `${branch.replace(/\//gu, "-")}.txt`
+  writeFileSync(join(w.work, file), `${branch}\n`)
+  await w.git(["add", file])
   await w.git(["commit", "--quiet", "-m", `${branch}: a file, no gitlink`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
@@ -228,14 +228,57 @@ describe("settling gitlinks", () => {
     )
     chmodSync(hook, 0o755)
 
-    const outcome = await queueRun(await w.options({
-      run: 'test "$(cat component/lib.txt)" = four && test "$(cat consumer.txt)" = four',
-      on: ["submit", "merge"],
-    }))
+    const outcome = await queueRun(
+      await w.options({
+        run: 'test "$(cat component/lib.txt)" = four && test "$(cat consumer.txt)" = four',
+        on: ["submit", "merge"],
+      }),
+    )
 
-    expect(outcome, readFileSync(outcome.log, "utf8")).toMatchObject({ exitCode: 0, merged: ["task/product"], failed: [], stuck: [] })
+    expect(outcome, readFileSync(outcome.log, "utf8")).toMatchObject({
+      exitCode: 0,
+      merged: ["task/product"],
+      failed: [],
+      stuck: [],
+    })
     expect(await remoteTip(component, "refs/heads/main")).toBe(ahead)
     expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(ahead)
+  })
+
+  // A root gitlink cannot retain its component objects. Existing successful
+  // landing tests leave a published source ref available through intent CAS.
+  it("refuses a source that loses remote reachability before the landing intent", async () => {
+    const w = await world()
+    const componentWork = join(w.work, "..", "component-work")
+    const componentRemote = join(w.work, "..", "component.git")
+    const component = gitIn(componentWork)
+    await component(["checkout", "--quiet", "-b", "ahead", "main"])
+    writeFileSync(join(componentWork, "lib.txt"), "four\n")
+    await component(["commit", "--quiet", "-am", "four"])
+    const ahead = (await component(["rev-parse", "HEAD"])).trim()
+    await component(["push", "--quiet", "origin", "ahead"])
+    const head = await submitGitlink(w, "task/unretained", ahead)
+    const target = await remoteTip(w.git, "refs/heads/main")
+
+    const outcome = await queueRun(
+      await w.options({
+        on: ["merge"],
+        run: `git --git-dir='${componentRemote}' update-ref -d refs/heads/ahead`,
+      }),
+    )
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/unretained"] })
+    expect((await component(["ls-remote", "--refs", "origin", "refs/heads/ahead"])).trim()).toBe("")
+    expect(await remoteTip(component, "refs/heads/main")).toBe(w.main)
+    expect(await remoteTip(w.git, "refs/heads/main")).toBe(target)
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/unretained", head })),
+    )
+    expect(records.some((record) => trailer(record, "Merge") !== undefined)).toBe(false)
+    expect(readFileSync(outcome.log, "utf8")).toContain(
+      `landing source ${ahead} is not reachable at ${componentRemote}`,
+    )
   })
 
   // M8.5 K2: a checked intent must retain and resume its frozen M after a
@@ -244,102 +287,120 @@ describe("settling gitlinks", () => {
   it.each([
     ["recovers the identical frozen merge from a fresh clone", false],
     ["reports every push row and makes no write after a third OID diverges", true],
-  ] as const)("K2 %s", async (_name, diverge) => {
-    const w = await world()
-    const componentWork = join(w.work, "..", "component-work")
-    const component = gitIn(componentWork)
-    await component(["checkout", "--quiet", "-b", "ahead", "main"])
-    writeFileSync(join(componentWork, "lib.txt"), "four\n")
-    await component(["commit", "--quiet", "-am", "four"])
-    const ahead = (await component(["rev-parse", "HEAD"])).trim()
-    await component(["push", "--quiet", "origin", "ahead"])
-    const head = await submitGitlink(w, "task/k2", ahead, "four")
-    const checkMarker = join(w.work, "..", "k2-checks.log")
-    const queueBin = join(process.cwd(), "packages", "yrd-queue-core", "node_modules", ".bin")
-    const env = { ...process.env, PATH: `${queueBin}:${process.env.PATH ?? ""}` }
-    const options = { ...(await w.options({ on: ["submit", "merge"], run: `printf check >> '${checkMarker}'` })), env }
-    const event = join(w.work, "..", "k2-component-pushed.pgid")
-    const hook = join(w.work, "..", "component.git", "hooks", "post-receive")
-    writeFileSync(hook, `#!/bin/sh\nps -o pgid= -p $$ | tr -d ' ' > '${event}'\nwhile :; do sleep 1; done\n`)
-    chmodSync(hook, 0o755)
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        "-e",
-        `import { queueRun } from ${JSON.stringify(join(process.cwd(), "packages/yrd-queue-core/src/run.ts"))}; await queueRun(JSON.parse(process.env.YRD_K2_OPTIONS ?? ""))`,
-      ],
-      { cwd: w.work, env: { ...env, YRD_K2_OPTIONS: JSON.stringify(options) }, stderr: "pipe", stdout: "ignore" },
-    )
-    await vi.waitFor(
-      () => expect(readFileSync(event, "utf8").trim()).toMatch(/^[1-9][0-9]*$/u),
-      { interval: 10, timeout: 5_000 },
-    )
-    const group = Number(readFileSync(event, "utf8").trim())
-    if (!Number.isSafeInteger(group) || group <= 0) throw new Error(`component hook wrote invalid process group ${String(group)}`)
-    process.kill(child.pid, "SIGKILL")
-    process.kill(-group, "SIGKILL")
-    await child.exited
-    writeFileSync(hook, "#!/bin/sh\nexit 0\n")
-    chmodSync(hook, 0o755)
+  ] as const)(
+    "K2 %s",
+    async (_name, diverge) => {
+      const w = await world()
+      const componentWork = join(w.work, "..", "component-work")
+      const component = gitIn(componentWork)
+      await component(["checkout", "--quiet", "-b", "ahead", "main"])
+      writeFileSync(join(componentWork, "lib.txt"), "four\n")
+      await component(["commit", "--quiet", "-am", "four"])
+      const ahead = (await component(["rev-parse", "HEAD"])).trim()
+      await component(["push", "--quiet", "origin", "ahead"])
+      const head = await submitGitlink(w, "task/k2", ahead, "four")
+      const checkMarker = join(w.work, "..", "k2-checks.log")
+      const queueBin = join(process.cwd(), "packages", "yrd-queue-core", "node_modules", ".bin")
+      const env = { ...process.env, PATH: `${queueBin}:${process.env.PATH ?? ""}` }
+      const options = {
+        ...(await w.options({ on: ["submit", "merge"], run: `printf check >> '${checkMarker}'` })),
+        env,
+      }
+      const event = join(w.work, "..", "k2-component-pushed.pgid")
+      const hook = join(w.work, "..", "component.git", "hooks", "post-receive")
+      writeFileSync(hook, `#!/bin/sh\nps -o pgid= -p $$ | tr -d ' ' > '${event}'\nwhile :; do sleep 1; done\n`)
+      chmodSync(hook, 0o755)
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          "-e",
+          `import { queueRun } from ${JSON.stringify(join(process.cwd(), "packages/yrd-queue-core/src/run.ts"))}; await queueRun(JSON.parse(process.env.YRD_K2_OPTIONS ?? ""))`,
+        ],
+        { cwd: w.work, env: { ...env, YRD_K2_OPTIONS: JSON.stringify(options) }, stderr: "pipe", stdout: "ignore" },
+      )
+      await vi.waitFor(() => expect(readFileSync(event, "utf8").trim()).toMatch(/^[1-9][0-9]*$/u), {
+        interval: 10,
+        timeout: 5_000,
+      })
+      const group = Number(readFileSync(event, "utf8").trim())
+      if (!Number.isSafeInteger(group) || group <= 0) {
+        throw new Error(`component hook wrote invalid process group ${String(group)}`)
+      }
+      process.kill(child.pid, "SIGKILL")
+      process.kill(-group, "SIGKILL")
+      await child.exited
+      writeFileSync(hook, "#!/bin/sh\nexit 0\n")
+      chmodSync(hook, 0o755)
 
-    expect(await remoteTip(component, "refs/heads/main")).toBe(ahead)
-    const ref = changeRef("main", { branch: "task/k2", head })
-    const intent = (await readRecords(w.git, await remoteTip(w.git, ref))).at(-1)!
-    expect(intent.kind).toBe("checked")
-    const frozen = trailer(intent, "Merge")
-    if (frozen === undefined) throw new Error("the SIGKILL left no frozen Merge: intent")
-    const checksBefore = readFileSync(checkMarker, "utf8")
-    rmSync(options.workdir, { force: true, recursive: true })
-    mkdirSync(options.workdir, { recursive: true })
-
-    if (diverge) {
-      await component(["checkout", "--quiet", "--detach", w.main])
-      writeFileSync(join(componentWork, "lib.txt"), "third\n")
-      await component(["commit", "--quiet", "-am", "third, divergent from ahead"])
-      const third = (await component(["rev-parse", "HEAD"])).trim()
-      await component(["push", "--quiet", "origin", "HEAD:refs/heads/third"])
-      await gitIn(join(w.work, "..", "component.git"))(["update-ref", "refs/heads/main", third])
-    }
-
-    const recovery = join(w.work, "..", diverge ? "k2-divergent-recovery" : "k2-recovery")
-    await w.git(["clone", "--quiet", join(w.work, "..", "remote.git"), recovery])
-    const fresh = gitIn(recovery)
-    await fresh(["config", "user.email", "queue@yrd.test"])
-    await fresh(["config", "user.name", "yrd"])
-    const before = {
-      change: await remoteTip(fresh, ref),
-      component: await remoteTip(component, "refs/heads/main"),
-      root: await remoteTip(fresh, "refs/heads/main"),
-    }
-    const outcome = await queueRun({ ...options, repo: recovery, targetSha: before.root })
-
-    expect(readFileSync(checkMarker, "utf8")).toBe(checksBefore)
-    if (!diverge) {
-      expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/k2"], stuck: [] })
-      expect(await remoteTip(fresh, "refs/heads/main")).toBe(frozen)
       expect(await remoteTip(component, "refs/heads/main")).toBe(ahead)
-      return
-    }
+      const ref = changeRef("main", { branch: "task/k2", head })
+      const intent = (await readRecords(w.git, await remoteTip(w.git, ref))).at(-1)!
+      expect(intent.kind).toBe("checked")
+      const frozen = trailer(intent, "Merge")
+      if (frozen === undefined) throw new Error("the SIGKILL left no frozen Merge: intent")
+      const checksBefore = readFileSync(checkMarker, "utf8")
+      // Recovery must use only the frozen object IDs, not either submitted source
+      // branch. Remove both source refs after the intent is durable.
+      const remoteRoot = gitIn(join(w.work, "..", "remote.git"))
+      await remoteRoot(["update-ref", "-d", "refs/heads/task/k2"])
+      expect((await w.git(["ls-remote", "--refs", "origin", "refs/heads/task/k2"])).trim()).toBe("")
+      await component(["push", "--quiet", "--delete", "origin", "ahead"])
+      expect((await component(["ls-remote", "--refs", "origin", "refs/heads/ahead"])).trim()).toBe("")
+      rmSync(options.workdir, { force: true, recursive: true })
+      mkdirSync(options.workdir, { recursive: true })
 
-    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/k2"] })
-    expect({
-      change: await remoteTip(fresh, ref),
-      component: await remoteTip(component, "refs/heads/main"),
-      root: await remoteTip(fresh, "refs/heads/main"),
-    }).toEqual(before)
-    const push = readFileSync(outcome.log, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
-      .find((row) => row.kind === "change" && row.reason === "landing-push")
-    const repositories = (JSON.parse(String(push?.diagnosis)) as { repositories: { refs: { destination: string; state: string }[] }[] }).repositories
-    expect(repositories.flatMap((repository) => repository.refs).map((row) => [row.destination, row.state])).toEqual([
-      ["refs/heads/main", "failed"],
-      ["refs/heads/main", "not-run"],
-      [ref, "not-run"],
-      [pauseRef("main"), "not-run"],
-    ])
-  }, 30_000)
+      if (diverge) {
+        await component(["checkout", "--quiet", "--detach", w.main])
+        writeFileSync(join(componentWork, "lib.txt"), "third\n")
+        await component(["commit", "--quiet", "-am", "third, divergent from ahead"])
+        const third = (await component(["rev-parse", "HEAD"])).trim()
+        await component(["push", "--quiet", "origin", "HEAD:refs/heads/third"])
+        await gitIn(join(w.work, "..", "component.git"))(["update-ref", "refs/heads/main", third])
+      }
+
+      const recovery = join(w.work, "..", diverge ? "k2-divergent-recovery" : "k2-recovery")
+      await w.git(["clone", "--quiet", join(w.work, "..", "remote.git"), recovery])
+      const fresh = gitIn(recovery)
+      await fresh(["config", "user.email", "queue@yrd.test"])
+      await fresh(["config", "user.name", "yrd"])
+      const before = {
+        change: await remoteTip(fresh, ref),
+        component: await remoteTip(component, "refs/heads/main"),
+        root: await remoteTip(fresh, "refs/heads/main"),
+      }
+      const outcome = await queueRun({ ...options, repo: recovery, targetSha: before.root })
+
+      expect(readFileSync(checkMarker, "utf8")).toBe(checksBefore)
+      if (!diverge) {
+        expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/k2"], stuck: [] })
+        expect(await remoteTip(fresh, "refs/heads/main")).toBe(frozen)
+        expect(await remoteTip(component, "refs/heads/main")).toBe(ahead)
+        return
+      }
+
+      expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/k2"] })
+      expect({
+        change: await remoteTip(fresh, ref),
+        component: await remoteTip(component, "refs/heads/main"),
+        root: await remoteTip(fresh, "refs/heads/main"),
+      }).toEqual(before)
+      const push = readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((row) => row.kind === "change" && row.reason === "landing-push")
+      const repositories = (
+        JSON.parse(String(push?.diagnosis)) as { repositories: { refs: { destination: string; state: string }[] }[] }
+      ).repositories
+      expect(repositories.flatMap((repository) => repository.refs).map((row) => [row.destination, row.state])).toEqual([
+        ["refs/heads/main", "failed"],
+        ["refs/heads/main", "not-run"],
+        [ref, "not-run"],
+        [pauseRef("main"), "not-run"],
+      ])
+    },
+    30_000,
+  )
 
   // M8.5 K3: an external release pin is deliberately as-written, unlike the
   // product landing rows exercised above.
@@ -356,40 +417,91 @@ describe("settling gitlinks", () => {
     expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(w.offMain)
   })
 
-  it("an off-main gitlink waits in place while the next change proceeds", async () => {
+  // M8.5 policy comes from the fetched protected main, never the authored
+  // checkout. Existing K1/K3 fixtures have identical policy on both commits.
+  it.each(["product", "external"] as const)("uses protected %s mode despite the authored config", async (mode) => {
+    const w = await world(mode)
+    const componentWork = join(w.work, "..", "component-work")
+    const component = gitIn(componentWork)
+    await component(["checkout", "--quiet", "-b", "different-policy", "main"])
+    writeFileSync(join(componentWork, ".yrd.yml"), `landing: ${mode === "product" ? "external" : "product"}\n`)
+    await component(["commit", "--quiet", "-am", "author a different landing policy"])
+    const authored = (await component(["rev-parse", "HEAD"])).trim()
+    await component(["push", "--quiet", "origin", "different-policy"])
+    const head = await submitGitlink(w, "task/protected-policy", authored)
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/protected-policy"], stuck: [] })
+    expect(await remoteTip(component, "refs/heads/main")).toBe(mode === "product" ? authored : w.main)
+    expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(authored)
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/protected-policy", head })),
+    )
+    const intent = records.find((record) => record.kind === "checked" && trailer(record, "Merge") !== undefined)!
+    const policy = intent.trailers
+      .filter(([key]) => key === "Config")
+      .map(([, value]) => value)
+      .find((value) => value.includes('"repository":"component"'))
+    expect(JSON.parse(policy ?? "null")).toMatchObject({ landing: mode, target: w.main })
+  })
+
+  // A required protected declaration must fail before submit checks or a
+  // landing intent, not silently inherit a mode from the authored pin.
+  it("refuses missing protected landing mode before submit checks or landing intent", async () => {
+    const w = await world()
+    const componentWork = join(w.work, "..", "component-work")
+    const component = gitIn(componentWork)
+    writeFileSync(join(componentWork, ".yrd.yml"), "{}\n")
+    await component(["commit", "--quiet", "-am", "remove protected landing declaration"])
+    await component(["push", "--quiet", "origin", "main"])
+    const protectedMain = await remoteTip(component, "refs/heads/main")
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const head = await submitFile(w, "task/missing-policy")
+    const marker = join(w.work, "..", "missing-policy-check")
+
+    const outcome = await queueRun(await w.options({ on: ["submit"], run: `touch '${marker}'` }))
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/missing-policy"] })
+    expect(existsSync(marker)).toBe(false)
+    expect(await remoteTip(w.git, "refs/heads/main")).toBe(target)
+    expect(await remoteTip(component, "refs/heads/main")).toBe(protectedMain)
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/missing-policy", head })),
+    )
+    expect(records.some((record) => trailer(record, "Merge") !== undefined)).toBe(false)
+    expect(readFileSync(outcome.log, "utf8")).toContain(`protected main ${protectedMain} must declare landing`)
+  })
+
+  it("a divergent authored pin fails its author while the next change proceeds, then a rebased submission lands", async () => {
     const w = await world()
     const head = await submitGitlink(w, "task/off", w.offMain)
     await submitFile(w, "task/next")
 
     const outcome = await queueRun(await w.options())
 
-    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/next"], stuck: [] })
-    const waitingRecords = await readRecords(
-      w.git,
-      await remoteTip(w.git, changeRef("main", { branch: "task/off", head })),
-    )
-    expect(waitingRecords.map((record) => record.kind)).toEqual(["opened", "opened"])
-    expect(trailer(waitingRecords.at(-1)!, "Code")).toBe("gitlink-off-main")
-    expect(trailer(waitingRecords.at(-1)!, "Evidence")).toBe(outcome.log)
-    expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("main")
-    expect(trailer(waitingRecords.at(-1)!, "Owner")).toBeUndefined()
-    const waitingQueue = await readQueue(w.git, "origin", "main", await remoteTip(w.git, "refs/heads/main"))
-    expect(waitingQueue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("queued")
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/off"], merged: ["task/next"], stuck: [] })
+    const records = await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/off", head })))
+    expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
+    const failed = records.find((record) => record.kind === "failed")!
+    expect(trailer(failed, "Fault")).toBe("submitter")
+    expect(trailer(failed, "Reason")).toContain(w.offMain)
+    expect(trailer(failed, "Remedy")).toContain("Rebase")
+    expect(trailer(failed, "Remedy")).toContain(w.main)
+    expect(records.some((record) => trailer(record, "Merge") !== undefined)).toBe(false)
+    const queue = await readQueue(w.git, "origin", "main", await remoteTip(w.git, "refs/heads/main"))
+    expect(queue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("failed")
     const journals = readJournals(dirname(outcome.log))
-    const incident = incidentFrom(waitingRecords.at(-1)!)
-    const waitingRow = list(waitingQueue.changes, { journals }).find((row) => row.head === head)
-    expect(waitingRow).toMatchObject({
-      incident,
-      position: 1,
-      state: "queued",
-    })
-    const shown = watchRows(list(waitingQueue.changes, { journals }), { journals }).find(
-      (row) => row.row.head === head,
-    )!
-    expect(shown.run?.incident).toEqual(incident)
-    expect(shown.row.incident).toEqual(incident)
-    expect(waitingRow?.result).toContain(w.offMain)
-    expect(readFileSync(outcome.log, "utf8")).toContain("gitlink-off-main")
+    const failedRow = list(queue.changes, { journals }).find((row) => row.head === head)
+    expect(failedRow).toMatchObject({ state: "failed" })
+    expect(failedRow?.position).toBeUndefined()
+    const shown = watchRows(list(queue.changes, { journals }), { journals }).find((row) => row.row.head === head)!
+    expect(shown.row.state).toBe("failed")
+    expect(readFileSync(outcome.log, "utf8")).toContain(w.offMain)
+    const component = gitIn(join(w.work, "..", "component-work"))
+    expect(await remoteTip(component, "refs/heads/main")).toBe(w.main)
 
     const repeated = await queueRun(await w.options())
     expect(repeated).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
@@ -397,25 +509,31 @@ describe("settling gitlinks", () => {
       (await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/off", head })))).map(
         (record) => record.kind,
       ),
-    ).toEqual(["opened", "opened"])
+    ).toEqual(["opened", "failed", "sent"])
 
     const componentWork = join(w.work, "..", "component-work")
-    const component = gitIn(componentWork)
     await component(["checkout", "--quiet", "main"])
-    await component(["merge", "--quiet", "--no-ff", "-s", "ours", "-m", "land feature", "feature"])
-    await component(["push", "--quiet", "origin", "main"])
-    const componentMain = (await component(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(componentWork, "rebased-feature.txt"), "feature based on current main\n")
+    await component(["add", "rebased-feature.txt"])
+    await component(["commit", "--quiet", "-m", "feature rebased onto component main"])
+    const rebased = (await component(["rev-parse", "HEAD"])).trim()
+    await component(["push", "--quiet", "origin", `${rebased}:refs/heads/rebased`])
+    const replacement = await submitGitlink(w, "task/rebased", rebased)
 
     const retried = await queueRun(await w.options())
 
-    expect(retried).toMatchObject({ exitCode: 0, failed: [], merged: ["task/off"], stuck: [] })
+    expect(retried).toMatchObject({ exitCode: 0, failed: [], merged: ["task/rebased"], stuck: [] })
     expect(
-      (await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/off", head })))).map(
-        (record) => record.kind,
-      ),
-    ).toEqual(["opened", "opened", "checked", "merged", "sent"])
-    expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(componentMain)
-  })
+      (
+        await readRecords(
+          w.git,
+          await remoteTip(w.git, changeRef("main", { branch: "task/rebased", head: replacement })),
+        )
+      ).map((record) => record.kind),
+    ).toEqual(["opened", "checked", "checked", "merged", "sent"])
+    expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(rebased)
+    expect(await remoteTip(component, "refs/heads/main")).toBe(rebased)
+  }, 15_000)
 
   it("a held-back authored pin merges raised and keeps the submitted Change identity", async () => {
     const w = await world()
@@ -466,8 +584,8 @@ describe("settling gitlinks", () => {
     ).toEqual(["opened", "checked", "checked", "merged", "sent"])
   })
 
-  /** An anomaly already on root main is not the candidate's authorship, but every merge that passes over it must expose it. */
-  it("an untouched off-main target pin stays put and is reported in the run log", async () => {
+  /** M8.5: untouched pins belong to the target, not this change's settlements. */
+  it("an untouched off-main target pin stays put without a settlement row", async () => {
     const w = await world()
     await gitlinkAroundQueue(w, w.offMain)
     await submitFile(w, "task/pass-over-off-main")
@@ -477,22 +595,13 @@ describe("settling gitlinks", () => {
     expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/pass-over-off-main"] })
     const target = await remoteTip(w.git, "refs/heads/main")
     expect(await gitlinkAt(w, target)).toBe(w.offMain)
-    expect(await w.git(["show", "-s", "--format=%(trailers:key=Settled,valueonly)", target])).toContain(
-      `component@${w.offMain} left-off-main component-main@${w.main}`,
-    )
+    expect((await w.git(["show", "-s", "--format=%(trailers:key=Settled,valueonly)", target])).trim()).toBe("")
     const settle = readFileSync(outcome.log, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
       .filter((record) => record.kind === "settle")
-    expect(settle).toContainEqual(
-      expect.objectContaining({
-        from: w.offMain,
-        path: "component",
-        state: "left-off-main",
-        to: w.main,
-      }),
-    )
+    expect(settle).toEqual([])
   })
 
   it("an unfetchable candidate gitlink fails the submitter and the next change proceeds", async () => {
@@ -571,6 +680,62 @@ describe("settling gitlinks", () => {
         reason: external.message,
       }),
     ])
+  })
+
+  // A non-0/1 ancestry proof is a GitSuper operational fault, not the
+  // divergent authored-pin result (`component-main-moved`) it would have
+  // proved. The normal divergent-pin case did not exercise this boundary.
+  it("keeps an unreadable gitlink ancestry proof queue-owned and preserves its raw detail", async () => {
+    const w = await world()
+    const head = await submitGitlink(w, "task/ancestry-unreadable", w.offMain)
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const detail = {
+      code: "git-failed",
+      message: "git merge-base failed while proving the component pin",
+      phase: "prove-gitlink-on-main",
+    }
+    await using real = createProcess({ cwd: w.work })
+    const observing: Process = {
+      ...real,
+      async run(request) {
+        if (request.argv.includes("super") && request.argv.includes("merge")) {
+          return {
+            durationMs: 0,
+            exitCode: 2,
+            signal: null,
+            stderr: "",
+            stdout: JSON.stringify({ detail, gitlinks: [], partial: false, state: "failed" }),
+            timedOut: false,
+          }
+        }
+        return real.run(request)
+      },
+    }
+
+    const outcome = await queueRun({ ...(await w.options()), process: observing })
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/ancestry-unreadable"] })
+    expect(await remoteTip(w.git, "refs/heads/main")).toBe(target)
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/ancestry-unreadable", head })),
+    )
+    expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
+    expect(trailer(records[1]!, "Via")).toContain("git-failed")
+    expect(trailer(records[1]!, "Via")).toContain("prove-gitlink-on-main")
+    const evidence = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(evidence).toContainEqual(
+      expect.objectContaining({
+        branch: "task/ancestry-unreadable",
+        code: "yrd-merge-unresolved",
+        diagnosisCode: detail.code,
+        phase: detail.phase,
+        reason: detail.message,
+      }),
+    )
   })
 
   it("a candidate failure introduced by raising component main is queue-owned stuck", async () => {

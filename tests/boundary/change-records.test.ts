@@ -40,6 +40,7 @@ import {
   readChange,
   refs,
   removeTemporaryRoots,
+  refreshTarget,
   submitFromBay,
   submitOneCommit,
   targetTip,
@@ -200,7 +201,7 @@ describe("a change and its records", { timeout: 120_000 }, () => {
     // the merge the WORKING clone carries refs/yrd/candidates/<sha> and
     // refs/yrd/root-merged/<Change-Id>/<run>; the shared repository, where the
     // plan puts the store, still carries no refs/yrd/** at all.
-    it("a merged change reads opened, checked, merged, sent, and the merged record names the merge commit", async () => {
+    it("a merged change retains its checked landing intent, and the merged record names that exact commit", async () => {
       const { boundary, change } = await submitted({ exit: 0, hooks: true }, "green")
 
       const run = await queueRunOnce(boundary.repo)
@@ -209,11 +210,15 @@ describe("a change and its records", { timeout: 120_000 }, () => {
       const read = await readRecords(boundary, change)
       const report = `${runSummary(run)}\n${read.report}`
       expect(read.exists, report).toBe(true)
-      expect(read.kinds, report).toEqual(["opened", "checked", "merged", "sent"])
+      expect(read.kinds, report).toEqual(["opened", "checked", "checked", "merged", "sent"])
 
-      const merged = read.records[2]
+      const intent = read.records.find((record) => record.kind === "checked" && record.trailers.has("Merge"))
+      if (intent === undefined) throw new Error(report)
+      expect(intent.parents, report).toEqual([read.records[1]?.sha, intent.trailers.get("Merge")?.[0]])
+
+      const merged = read.records.find((record) => record.kind === "merged")
       if (merged === undefined) throw new Error(report)
-      expect(merged.trailers.get("Merge")?.[0] ?? "", report).toBe(await targetTip(boundary.repo))
+      expect(merged.trailers.get("Merge")?.[0] ?? "", report).toBe(await refreshTarget(boundary.repo))
     })
 
     // today: red — no change ref. A failure leaves no record a git reader can
@@ -255,14 +260,15 @@ describe("a change and its records", { timeout: 120_000 }, () => {
       if (stuck === undefined) throw new Error(report)
       expect(stuck.trailers.get("Fault"), report).toBeUndefined()
       expect(stuck.trailers.get("Reason"), report).toBeUndefined()
-      for (const field of ["Code", "Subject", "Via", "Evidence", "Next", "Owner"]) {
+      // Operator diagnostic ruling (plan 2026-09-04 / STATE 7040b93f1e):
+      // ownership is routing, never inferred by a queue incident.
+      expect(stuck.trailers.get("Owner"), report).toBeUndefined()
+      for (const field of ["Code", "Subject", "Via", "Evidence", "Next"]) {
         expect(stuck.trailers.get(field)?.[0] ?? "", `${field}: missing\n${report}`).not.toBe("")
       }
     })
 
-    // today: red — no change ref, so no parent chain and no merge commit to
-    // keep off it.
-    it("every record after the first has one parent, the record before it, and the merge commit is never a parent", async () => {
+    it("keeps the first-parent record chain, with the tested merge retained only by its checked intent", async () => {
       const { boundary, change } = await submitted({ exit: 0, hooks: true }, "chain")
 
       const run = await queueRunOnce(boundary.repo)
@@ -273,16 +279,20 @@ describe("a change and its records", { timeout: 120_000 }, () => {
 
       for (const [index, record] of read.records.entries()) {
         if (index === 0) continue
-        expect(record.parents, `${report}\nrecord ${String(index)} (${record.kind})`).toEqual([
-          read.records[index - 1]?.sha,
-        ])
+        const expected = [read.records[index - 1]?.sha]
+        if (record.kind === "checked" && record.trailers.has("Merge")) {
+          expected.push(record.trailers.get("Merge")?.[0])
+        }
+        expect(record.parents, `${report}\nrecord ${String(index)} (${record.kind})`).toEqual(expected)
       }
 
-      // The merge commit is on the target. Dragging it onto the change ref
-      // would drag the whole project history with it.
-      const mergeCommit = await targetTip(boundary.repo)
+      // Only the durable intent retains M; it remains outside the record
+      // chain's first-parent traversal.
+      const mergeCommit = await refreshTarget(boundary.repo)
       expect(
-        read.records.flatMap((record) => record.parents),
+        read.records
+          .filter((record) => !(record.kind === "checked" && record.trailers.has("Merge")))
+          .flatMap((record) => record.parents),
         report,
       ).not.toContain(mergeCommit)
     })

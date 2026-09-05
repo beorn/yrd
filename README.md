@@ -185,9 +185,10 @@ Yrd needs Bun and Git. The queue runs as one process on one machine, as the user
 ```console
 $ bun install --frozen-lockfile
 $ bun run typecheck
-$ bun fix
 $ bun run test packages/yrd-cli/tests/env-open.test.ts   # focused Vitest coverage
 $ bun run check                                        # typecheck and the default test suite
 ```
+
+Run tests through `bun run test`: it runs Vitest under Bun and puts this workspace's locked `git-super` binary on PATH. Running Vitest through Node, or selecting a different global `git-super`, does not test the declared runtime. Formatting and linting use the containing superproject's scoped checks; this package has no `fix` script.
 
 Yrd is developed inside a larger superproject that runs it on itself, and the plan kept there records the design and its rulings; this file describes what is built.
