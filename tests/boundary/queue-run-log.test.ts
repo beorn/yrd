@@ -17,8 +17,8 @@
  * the `log` field of its `--json` result. No new environment variable and no
  * new flag: `queue list` has to print a log path per change anyway, so the
  * queue run must own the naming, and one field on the object it already prints
- * is the whole mechanism. `logOfQueueRun` below is the single place that reads
- * it, so naming it some other way costs one edit here.
+ * is the whole mechanism. `logOfQueueRun` in fixture.ts is the shared reader;
+ * naming it some other way costs one edit there.
  *
  * THE FIELDS. Every record is one JSON object on one line. `kind` says which
  * record it is; `run` is the queue run every record belongs to. Six kinds:
@@ -62,49 +62,15 @@ import { basename, dirname } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   boundaryRepository,
+  type LogRecord,
   type QueueRunResult,
+  logOfQueueRun,
   queueRunOnce,
   removeTemporaryRoots,
   submitOneCommit,
 } from "./fixture.ts"
 
 afterEach(removeTemporaryRoots)
-
-/** One record of the queue run's log. */
-type LogRecord = Readonly<Record<string, unknown>> & { kind: unknown }
-
-/**
- * The queue run's log, as it named it. The ONE place that knows how a queue run
- * says where its log went: change this function and every case below follows.
- */
-async function logOfQueueRun(run: QueueRunResult): Promise<{ path: string; records: readonly LogRecord[] }> {
-  let reported: unknown
-  try {
-    reported = (JSON.parse(run.stdout) as { log?: unknown }).log
-  } catch {
-    throw new Error(`the queue run's --json result did not parse, so it named no log\n${run.report}`)
-  }
-  if (typeof reported !== "string" || reported === "") {
-    throw new Error(`the queue run named no log: its --json result has no 'log' field\n${run.report}`)
-  }
-  const text = await readFile(reported, "utf8")
-  const records = text
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line, index) => {
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(line)
-      } catch {
-        throw new Error(`line ${String(index + 1)} of ${reported} is not JSON: ${line}`)
-      }
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        throw new Error(`line ${String(index + 1)} of ${reported} is not a JSON object: ${line}`)
-      }
-      return parsed as LogRecord
-    })
-  return { path: reported, records }
-}
 
 /** Every record of one kind. */
 function ofKind(records: readonly LogRecord[], kind: string): readonly LogRecord[] {
@@ -198,7 +164,10 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       expect(result.branch, run.report).toBe(branch)
       expect(result.head, run.report).toBe(headSha)
     }
-    expect(results.some((result) => result.result === "pass"), run.report).toBe(true)
+    expect(
+      results.some((result) => result.result === "pass"),
+      run.report,
+    ).toBe(true)
 
     // merge — the merge commit and the tip it put on the target.
     const merged = theOne(records, "merge")
@@ -255,7 +224,9 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
     // names the log the end row names.
     const key = (record: LogRecord): string => `${String(record.phase)}/${String(record.name)}`
     for (const end of ends) {
-      const before = checks.slice(0, checks.indexOf(end)).filter((record) => key(record) === key(end) && record.end === undefined)
+      const before = checks
+        .slice(0, checks.indexOf(end))
+        .filter((record) => key(record) === key(end) && record.end === undefined)
       expect(before.length, `${run.report}\nno start row before ${key(end)}`).toBe(1)
       expect(before[0]?.log, run.report).toBe(end.log)
     }

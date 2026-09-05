@@ -235,6 +235,19 @@ describe("a queue is the selected origin branch carrying config", () => {
     await expect(coreQueueCommand(repo, run.io, { command: "list" }, { queue: "main" })).rejects.toThrow(
       /\.yrd\.yml at origin\/main does not parse/u,
     )
+
+    // The up action must forward both the addressed clone and selected branch.
+    // An unusable caller origin makes borrowing that checkout observable.
+    const git = gitIn(repo)
+    const remote = (await git(["remote", "get-url", "origin"])).trim()
+    await git(["push", "--quiet", "origin", "HEAD:refs/heads/release/uri"])
+    await git(["config", "yrd.workdir", join(dirname(repo), "state")])
+    await git(["remote", "set-url", "origin", join(dirname(repo), "missing.git")])
+    const service = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "up", "--queue", `${remote}#release/uri`, "--json"], service.io),
+    ).toBe(2)
+    expect(service.stderr()).toContain(".yrd.yml at origin/release/uri does not parse")
   })
 
   it("refuses a selected branch with no config and names that branch", async () => {

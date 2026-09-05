@@ -5,8 +5,7 @@
  * Everything here is black box on purpose. A test built on this fixture may
  * look at the queue run's exit code, at the refs the repositories carry
  * afterwards, at the tip of the target, and at where the CLI says each change
- * stands — nothing else. No journal reads, no internals, no log parsing
- * except to print on failure.
+ * stands, and the JSONL log the round publishes — no private state reads.
  *
  * The throwaway-repository shape is the one `packages/yrd-cli/tests/
  * bay-submit-selected.test.ts` proves end to end: a bare shared repository
@@ -15,7 +14,7 @@
  * queue lands on is the shared repository's `main`, never the local ref, so
  * every assertion about the target reads `origin/main`.
  */
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { changeRef } from "../../packages/yrd-queue-core/src/index.ts"
@@ -215,6 +214,42 @@ export type QueueRunResult = Readonly<{
   /** Everything a failing assertion should print, as one blob. */
   report: string
 }>
+
+/** One record of the queue run's log. */
+export type LogRecord = Readonly<Record<string, unknown>> & { kind: unknown }
+
+/**
+ * The queue run's log, as it named it. The ONE place that knows how a queue run
+ * says where its log went: change this function and every consumer follows.
+ */
+export async function logOfQueueRun(run: QueueRunResult): Promise<{ path: string; records: readonly LogRecord[] }> {
+  let reported: unknown
+  try {
+    reported = (JSON.parse(run.stdout) as { log?: unknown }).log
+  } catch {
+    throw new Error(`the queue run's --json result did not parse, so it named no log\n${run.report}`)
+  }
+  if (typeof reported !== "string" || reported === "") {
+    throw new Error(`the queue run named no log: its --json result has no 'log' field\n${run.report}`)
+  }
+  const text = await readFile(reported, "utf8")
+  const records = text
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line, index) => {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        throw new Error(`line ${String(index + 1)} of ${reported} is not JSON: ${line}`)
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error(`line ${String(index + 1)} of ${reported} is not a JSON object: ${line}`)
+      }
+      return parsed as LogRecord
+    })
+  return { path: reported, records }
+}
 
 /** One `yrd queue run --once`, end to end. */
 export async function queueRunOnce(repo: string): Promise<QueueRunResult> {
