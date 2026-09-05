@@ -14,9 +14,11 @@
  */
 
 import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname, join, relative, sep } from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
+import { adaptProcessGit, createProcess, gitFailure } from "@yrd/process"
 import {
   directMergeCommits,
   activePause,
@@ -70,6 +72,28 @@ import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
+// Observe this module's checkout when it loads, before declaration fetching or
+// any later queue call. A later disk HEAD is projection state, not loaded code.
+const sourceDirectory = dirname(fileURLToPath(import.meta.url))
+const sourceAtLoad = await (async () => {
+  await using process = createProcess()
+  const source = adaptProcessGit(process, { timeoutMs: 5000 })
+  try {
+    const [checkout, head] = await Promise.all([
+      source.run({ repo: sourceDirectory, args: ["rev-parse", "--show-toplevel"] }),
+      source.run({ repo: sourceDirectory, args: ["rev-parse", "--verify", "HEAD^{commit}"] }),
+    ])
+    for (const result of [checkout, head]) {
+      if (result.code !== 0 || result.timedOut || result.signal || result.failure) {
+        throw new Error(`source Git in ${sourceDirectory}: ${gitFailure(result, 5000)}`)
+      }
+    }
+    return { checkout: checkout.stdout.trim(), sha: head.stdout.trim() }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
+})()
+
 export type CoreQueueCommand =
   | Readonly<{ command: "submit"; branch?: string; submitter: string; issue?: string; dryRun?: boolean }>
   | Readonly<{ command: "pause"; by: string; reason: string }>
@@ -80,9 +104,9 @@ export type CoreQueueCommand =
       intervalSeconds?: number
       stop?: AbortSignal
       /**
-       * The gitlink: the gitlink at the target that carries the commit this yrd
-       * runs from. Absent, both are found from this module's own checkout at
-       * start; a test names them to move a gitlink without running from one.
+       * The gitlink carrying this yrd. Absent, its physical path and the
+       * checkout observed at module load are used, even if the target moved
+       * ahead. A test can name them without running from a component checkout.
        */
       gitlink?: Readonly<{ path: string; sha: string }>
       /** Awaited after each round, before the gitlink is read; a test mutates the world or stops the service here. */
@@ -315,7 +339,66 @@ export async function coreQueueCommand(
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
-      const gitlink = request.gitlink ?? (await gitlinkOf(git, targetRef, log))
+      const gitlink: Readonly<{ path: string; sha: string; checkout?: string }> | undefined =
+        request.gitlink ?? (await gitlinkOf(git, targetRef, log))
+      // A relaunch can beat the checkout updater. Do not run an old round or
+      // spend the supervisor's restart budget repeatedly loading the old pin.
+      const reload = async (target: string): Promise<YrdCliExitCode | undefined> => {
+        if (gitlink === undefined) return undefined
+        let now = await gitlinkAt(git, target, gitlink.path)
+        if (now === gitlink.sha) return undefined
+        let announced: string | undefined
+        for (;;) {
+          if (now === undefined) {
+            return stuck(
+              `runtime gitlink ${gitlink.path} is absent at ${targetRef}; restore it before restarting this service`,
+            )
+          }
+          // An explicitly supplied gitlink has no physical checkout to await.
+          if (gitlink.checkout === undefined) break
+          const projected = await gitlinkAt(git, "HEAD", gitlink.path)
+          const checkout = (await gitIn(gitlink.checkout)(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
+          if (projected === now && checkout === now) break
+          const state = `${now}:${projected}:${checkout}`
+          if (state !== announced) {
+            const waiting = `waiting for checkout ${gitlink.path}: loaded ${gitlink.sha.slice(0, 12)}, target ${now.slice(0, 12)}, local pin ${projected?.slice(0, 12) ?? "absent"}, checkout ${checkout.slice(0, 12)}; no queue round will run until the checkout updater materializes the target`
+            log?.info?.(waiting)
+            emit(
+              io,
+              options.json,
+              {
+                reason: "waiting-for-checkout",
+                gitlink: gitlink.path,
+                from: gitlink.sha,
+                to: now,
+                projected,
+                checkout,
+                message: waiting,
+              },
+              waiting,
+            )
+            announced = state
+          }
+          if (stopped()) return 0
+          try {
+            await delay(1000, undefined, { signal: request.stop })
+          } catch (error) {
+            if (stopped()) return 0
+            throw error
+          }
+          await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
+          now = await gitlinkAt(git, targetRef, gitlink.path)
+        }
+        const moved = `gitlink moved from ${gitlink.sha.slice(0, 12)} to ${now.slice(0, 12)}: exiting for relaunch`
+        log?.info?.(moved, { from: gitlink.sha, gitlink: gitlink.path, to: now })
+        emit(
+          io,
+          options.json,
+          { exitCode: 0, from: gitlink.sha, gitlink: gitlink.path, reason: "gitlink-moved", to: now },
+          moved,
+        )
+        return 0
+      }
       let current = config
       for (let round = 1; ; round += 1) {
         // The declaration again, as the target holds it now: a correct edit at
@@ -331,25 +414,15 @@ export async function coreQueueCommand(
           }
           if (why !== undefined) return stuck(why)
         }
+        const before = await reload(targetRef)
+        if (before !== undefined) return before
         const outcome = await oneRound(current)
         if (outcome === undefined || outcome.exitCode === 2) return 2
         await request.afterRound?.(outcome)
         // The gitlink, at the target as this round left it: the round that merged
         // the change moving this yrd's own gitlink is the last one this code runs.
-        if (gitlink !== undefined) {
-          const now = await gitlinkAt(git, outcome.target, gitlink.path)
-          if (now !== gitlink.sha) {
-            const moved = `gitlink moved from ${gitlink.sha.slice(0, 12)} to ${now === undefined ? "no gitlink" : now.slice(0, 12)}: exiting for relaunch`
-            log?.info?.(moved, { from: gitlink.sha, gitlink: gitlink.path, to: now })
-            emit(
-              io,
-              options.json,
-              { exitCode: 0, from: gitlink.sha, gitlink: gitlink.path, reason: "gitlink-moved", to: now },
-              moved,
-            )
-            return 0
-          }
-        }
+        const after = await reload(outcome.target)
+        if (after !== undefined) return after
         if (stopped()) return 0
         await new Promise((resolve) => {
           setTimeout(resolve, interval)
@@ -738,32 +811,47 @@ async function targetAt(git: Git, config: QueueConfig): Promise<string> {
 }
 
 /**
- * The gitlink the service runs from: the gitlink at the target that carries the
- * very commit this yrd's code runs from, found once at start. Off — said once,
- * at info — when this yrd runs from no git checkout, or when the target carries
- * no gitlink at its commit; then no round can see the gitlink move, and the
- * relaunch onto a new gitlink is a person's again.
+ * Identify the embedded runtime by checkout PATH, never by target SHA equality:
+ * the target may already record the new pin while this module still runs the
+ * old one. An external/standalone installation is explicitly outside this fence.
  */
 async function gitlinkOf(
   git: Git,
   targetRef: string,
   log: ConditionalLogger | undefined,
-): Promise<Readonly<{ path: string; sha: string }> | undefined> {
-  let running: string
-  try {
-    running = (await gitIn(dirname(fileURLToPath(import.meta.url)))(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
-  } catch (error) {
+): Promise<Readonly<{ path: string; sha: string; checkout: string }> | undefined> {
+  const source = sourceAtLoad
+  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+  if ("error" in source) {
+    const location = relative(root, sourceDirectory).split(sep).join("/")
+    if (location !== ".." && !location.startsWith("../")) {
+      throw new Error(
+        `cannot identify embedded runtime at ${sourceDirectory} inside queue checkout ${root}: ${source.error}; repair the source checkout before restarting`,
+      )
+    }
     log?.info?.("the gitlink exit is off: this yrd runs from no git checkout", {
-      error: error instanceof Error ? error.message : String(error),
+      error: source.error,
     })
     return undefined
   }
-  const recorded = gitlinks(await git(["ls-tree", "-r", "-z", targetRef])).find((row) => row.sha === running)
-  if (recorded === undefined) {
-    log?.info?.(`the gitlink exit is off: the target carries no gitlink at this yrd's commit ${running.slice(0, 12)}`)
+  const path = relative(root, source.checkout).split(sep).join("/")
+  if (path === "" || path === ".." || path.startsWith("../")) {
+    log?.info?.(
+      `the gitlink exit is off: runtime checkout ${source.checkout} is not embedded in queue checkout ${root}`,
+    )
     return undefined
   }
-  return recorded
+  const recorded = await gitlinkAt(git, targetRef, path)
+  const local = await gitlinkAt(git, "HEAD", path)
+  if (recorded === undefined && local === undefined) {
+    throw new Error(
+      `runtime checkout ${source.checkout} is inside queue checkout ${root}, but neither ${targetRef} nor HEAD records a gitlink at ${path}`,
+    )
+  }
+  log?.info?.(
+    `runtime checkout ${path} observed at module load: ${source.sha}; target ${targetRef} records ${recorded ?? "no gitlink"}`,
+  )
+  return { path, sha: source.sha, checkout: source.checkout }
 }
 
 /** The gitlink at `path` in `commit`, or undefined when there is none there. */
