@@ -98,7 +98,7 @@ describe("yrd queue stats through the process entry", () => {
     // One change, queued: in line, no verdict yet.
     expect(lines[2]).toMatch(/^queue\s+1\s+1\s+0\s+0\s+0\s+0\s+1\s+0\s+1\s+0\s+0\s+—\s+—$/u)
     expect(lines[3]).toMatch(/^@dev\/10\s+1\b/u)
-    expect(ran.stdout).toContain("pushed, never submitted: 1 (oldest 0:0")
+    expect(ran.stdout).toContain("pushed, never submitted: 1 (oldest tip committed 0:0")
   })
 
   it("--json is the documented document: queue name, window, total, groups, pushed refs; --by branch groups by branch", async () => {
@@ -119,7 +119,12 @@ describe("yrd queue stats through the process entry", () => {
         decisions: Record<string, number>
       }
       groups: readonly { key: string; rows: number }[]
-      pushedNeverSubmitted: { count: number; ageUnknown: number; refs: readonly { branch: string; ageMs?: number }[] }
+      pushedNeverSubmitted: {
+        ageBasis: string
+        count: number
+        ageUnknown: number
+        refs: readonly { branch: string; commitAgeMs?: number }[]
+      }
     }
     expect(document.queue).toMatch(/remote\.git#main$/u)
     expect(document.defaultWindow).toBe(false)
@@ -135,9 +140,11 @@ describe("yrd queue stats through the process entry", () => {
       unclassified: 0,
     })
     expect(document.groups).toEqual([expect.objectContaining({ key: "task/one", rows: 1 })])
+    expect(document.pushedNeverSubmitted.ageBasis).toBe("tip committer date")
     expect(document.pushedNeverSubmitted.count).toBe(1)
     expect(document.pushedNeverSubmitted.ageUnknown).toBe(0)
     expect(document.pushedNeverSubmitted.refs[0]?.branch).toBe("task/pushed-only")
+    expect(typeof document.pushedNeverSubmitted.refs[0]?.commitAgeMs).toBe("number")
   })
 
   it("--since takes a commit this repository has, and refuses what it cannot read, naming the forms", async () => {

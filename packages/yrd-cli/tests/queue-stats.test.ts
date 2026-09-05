@@ -387,7 +387,9 @@ describe("the window and the pushed refs", () => {
     ]
     const stats = queueStats(COMPACT, refs, { now: NOW, since: parseSince("1d", NOW)?.at })
     expect(stats.pushedNeverSubmitted.count).toBe(2)
-    expect(stats.pushedNeverSubmitted.oldestAgeMs).toBe(5 * 3_600_000)
+    expect(stats.pushedNeverSubmitted.ageBasis).toBe("tip committer date")
+    expect(stats.pushedNeverSubmitted.oldestCommitAgeMs).toBe(5 * 3_600_000)
+    expect(stats.pushedNeverSubmitted.refs[0]?.commitAgeMs).toBe(5 * 3_600_000)
     expect(stats.pushedNeverSubmitted.ageUnknown).toBe(1)
     expect(stats.pushedNeverSubmitted.refs.map((ref) => ref.branch)).toEqual([
       "task/pushed-only",
@@ -396,7 +398,7 @@ describe("the window and the pushed refs", () => {
     ])
     const text = formatQueueStats(stats, "q")
     expect(text).toContain(
-      "pushed, never submitted: 2 (oldest 5h00m ago); 1 more whose tip is not fetched here, age unknown",
+      "pushed, never submitted: 2 (oldest tip committed 5h00m ago; ages are tip committer dates, not push times); 1 more whose tip is not fetched here, age unknown",
     )
   })
 })

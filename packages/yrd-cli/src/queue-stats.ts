@@ -31,6 +31,9 @@
  *   a push without a `yrd submit` (plan E2) — restricted to the window by the
  *   tip's committer date when the commit is here, and counted apart as
  *   `ageUnknown` when it is not (a tip nobody fetched has no date to read).
+ *   Every age is a COMMIT age (`ageBasis`): git records no push time, so a
+ *   commit age is a lower bound on how long the push has waited, never the
+ *   waiting time itself.
  * - latency: per merged change (its last merged row), from the change's
  *   `since` (opened) to that row's `at` (merged); median and p90 over them.
  * - the window: a row is inside when its decision (`at`) is at or after
@@ -118,14 +121,19 @@ export type StatsGroup = Readonly<{
   latency: LatencyStats
 }>
 
+/** What every age here is measured from: git records no push time, so the tip's committer date stands in. */
+export const PUSH_AGE_BASIS = "tip committer date"
+
 export type PushedNeverSubmitted = Readonly<{
+  /** The basis of every age in this object — {@link PUSH_AGE_BASIS} — said in the document, not assumed by the reader. */
+  ageBasis: typeof PUSH_AGE_BASIS
   count: number
-  /** The oldest tip in the window, as an age at `now`, in ms. */
-  oldestAgeMs?: number
+  /** The oldest tip in the window: `now` minus its committer date, in ms. Not a waiting time since the push. */
+  oldestCommitAgeMs?: number
   /** Branches at the remote with no change ref whose tip could not be dated here. */
   ageUnknown: number
   /** Oldest first; complete, so `--json` to a file is the whole answer. */
-  refs: readonly Readonly<{ branch: string; head: string; ageMs?: number }>[]
+  refs: readonly Readonly<{ branch: string; head: string; commitAgeMs?: number }>[]
 }>
 
 export type QueueStats = Readonly<{
@@ -239,16 +247,17 @@ function pushedNeverSubmitted(refs: readonly PushedRef[], options: QueueStatsOpt
   const dated = never.filter((ref) => ref.committedAt !== undefined && inWindow(ref.committedAt, options.since))
   const listed = dated
     .map((ref) => ({
-      ageMs: options.now.getTime() - (ref.committedAt?.getTime() ?? options.now.getTime()),
       branch: ref.branch,
+      commitAgeMs: options.now.getTime() - (ref.committedAt?.getTime() ?? options.now.getTime()),
       head: ref.head,
     }))
-    .sort((a, b) => b.ageMs - a.ageMs)
+    .sort((a, b) => b.commitAgeMs - a.commitAgeMs)
   const undated = never.filter((ref) => ref.committedAt === undefined)
   return {
+    ageBasis: PUSH_AGE_BASIS,
     ageUnknown: undated.length,
     count: listed.length,
-    ...(listed[0] === undefined ? {} : { oldestAgeMs: listed[0].ageMs }),
+    ...(listed[0] === undefined ? {} : { oldestCommitAgeMs: listed[0].commitAgeMs }),
     refs: [...listed, ...undated.map((ref) => ({ branch: ref.branch, head: ref.head }))],
   }
 }
@@ -382,7 +391,9 @@ export function formatQueueStats(stats: QueueStats, queue: string): string {
   const pushed = stats.pushedNeverSubmitted
   const pushedLine =
     `pushed, never submitted: ${String(pushed.count)}` +
-    (pushed.oldestAgeMs === undefined ? "" : ` (oldest ${duration(pushed.oldestAgeMs)} ago)`) +
+    (pushed.oldestCommitAgeMs === undefined
+      ? ""
+      : ` (oldest tip committed ${duration(pushed.oldestCommitAgeMs)} ago; ages are ${pushed.ageBasis}s, not push times)`) +
     (pushed.ageUnknown === 0 ? "" : `; ${String(pushed.ageUnknown)} more whose tip is not fetched here, age unknown`)
   return [
     `${queue} · stats at ${stats.at.toISOString()} · ${window} · by ${stats.by}`,
