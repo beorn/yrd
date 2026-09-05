@@ -36,7 +36,8 @@ yrd queue run                                                     one queue run
 yrd queue up [--interval <seconds>]                               queue runs on a loop, every 15 seconds by default; run this under your supervisor
 yrd queue pause <reason> [--notify <seat>]                        stop checking and merging; the service keeps the queue visible
 yrd queue resume [reason] [--notify <seat>]                       resume on the next service interval
-yrd queue list                                                    every change in line, its state, position, last result and log
+yrd queue list [filter...] [--latest] [--watch]                   every change in line, its state, position, last result and log; `yrd list` is the same command
+yrd watch [filter...]                                             `yrd queue list --watch`: on a terminal, the pane
 yrd queue show <branch>                                           that branch's changes, newest first, each check's result and log
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD
 yrd env open|list                                                 a checkout of one branch to work in

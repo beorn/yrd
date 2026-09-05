@@ -3,8 +3,9 @@
  * § The final design, Commands).
  *
  * The command surface is `yrd queue submit|run|up|pause|resume|list|show`,
- * `yrd check`, `yrd env open|list`, with `yrd submit` as the alias of the one
- * used most and `yrd bay` as `env`'s until flag day's word is retired. Every
+ * `yrd check`, `yrd env open|list`, with `yrd submit` and `yrd list` as the
+ * aliases of the two used most, `yrd watch` as `queue list --watch`, and
+ * `yrd bay` as `env`'s until flag day's word is retired. Every
  * queue command is `@yrd/queue-core` through `coreQueueCommand`; nothing here
  * holds queue state, and nothing here parses `.yrd.yml` past the one line
  * that selects the core.
@@ -71,6 +72,13 @@ function buildProgram(
   const program = new CliCommand(name)
     .description("yrd (shipyard) — agentic software delivery")
     .showSuggestionAfterError()
+    // Set before any subcommand exists: a subcommand copies the output
+    // configuration at its creation, so one set afterwards leaves `yrd queue
+    // list --help` writing past `io` to the process's own stdout.
+    .configureOutput({
+      writeErr: (text) => io.stderr(text),
+      writeOut: (text) => io.stdout(text),
+    })
   program.helpCommand(false)
   program.exitOverride()
   program.version(YRD_VERSION, "-V, --version")
@@ -204,26 +212,35 @@ function buildProgram(
       .option("--latest", "one row per change; the default keeps every run that touched it")
       .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")
       .option("--interval <seconds>", "seconds between refreshes while watching (default 5)", int)
-  listOptions(
-    queue
-      .command("list [filter...]")
-      .description("every change in line, then the failed and the merged; filters are case-insensitive OR terms")
-      .option("--watch", "refresh until the selected change ends, exiting with its code as yrd check does"),
-  ).action(async (filters, options) => {
+  const LIST_DESCRIPTION = "every change in line, then the failed and the merged; filters are case-insensitive OR terms"
+  const WATCH_FLAG_HELP = "refresh until the selected change ends, exiting with its code as yrd check does"
+  const queueList = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
     const { interval, json, latest, watch } = options as {
       interval?: number
       json?: boolean
       latest?: boolean
       watch?: boolean
     }
-    const taken = await coreQueueCommand(
-      cwd(),
-      io,
-      listRequest((filters as string[] | undefined) ?? [], { interval, latest, watch }),
-      { json, env, interactive: interactiveHere(), log: log() },
-    )
+    const taken = await coreQueueCommand(cwd(), io, listRequest(filters ?? [], { interval, latest, watch }), {
+      json,
+      env,
+      interactive: interactiveHere(),
+      log: log(),
+    })
     setExit(taken)
-  })
+  }
+  listOptions(
+    queue.command("list [filter...]").description(LIST_DESCRIPTION).option("--watch", WATCH_FLAG_HELP),
+  ).action(async (filters, options) => queueList(filters as string[] | undefined, options))
+  // `yrd list` is `yrd queue list` (the operator's spelling, 2026-09-04),
+  // registered the way `yrd submit` is: the same action, the same options, one
+  // alias visible in `--help`. `yrd queue list` stays the canonical form.
+  listOptions(
+    program
+      .command("list [filter...]")
+      .description(`${LIST_DESCRIPTION} (the same as ${name} queue list)`)
+      .option("--watch", WATCH_FLAG_HELP),
+  ).action(async (filters, options) => queueList(filters as string[] | undefined, options))
   queue
     .command("show <branch>")
     .description("the branch's changes, each check's result and log")
@@ -350,6 +367,7 @@ function buildProgram(
 function addExamples(program: CliCommand, name: string): void {
   program.addHelpSection("Aliases:", [
     [`${name} submit`, `${name} queue submit`],
+    [`${name} list`, `${name} queue list`],
     [`${name} bay`, `${name} env (today's word)`],
   ])
   program.addHelpSection("Examples:", [
@@ -392,10 +410,6 @@ export async function runYrdProcess(argv: readonly string[], io: YrdCliIO): Prom
   }
   let logger: ReturnType<typeof createYrdLogger> | undefined
   const program = buildProgram(name, io, env, setExit, () => logger)
-  program.configureOutput({
-    writeOut: (text) => io.stdout(text),
-    writeErr: (text) => io.stderr(text),
-  })
   try {
     // The logger is built from the globals BEFORE any action runs, so the
     // queue's log-record stream is rendered at the level the invocation asked for
