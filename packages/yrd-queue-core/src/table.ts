@@ -26,7 +26,7 @@
 import { endedKind, mergedByRun, trailer, trailers, type ChangeRecord } from "./records.ts"
 import { readCheckTrailer } from "./check.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
-import { journalKey, type Journals, type JournalRun } from "./log.ts"
+import { journalKey, type Journals, type JournalRun, type LogRecord } from "./log.ts"
 import { incidentFrom, incidentLine, type Incident } from "./incident.ts"
 import type { Git } from "./records.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
@@ -47,6 +47,8 @@ export type Row = Readonly<{
   log?: string
   /** The complete queue-owned incident stored on a stuck record. */
   incident?: Incident
+  /** Original ref-write warnings from this row's journal run; never change state. */
+  diagnostics?: readonly LogRecord[]
   issue?: string
   submitter?: string
   /** Why: `replaced`, `deleted`, a check's code, or for a `direct` row the one line about that commit. */
@@ -144,6 +146,7 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
     merge: run.merge,
     reason: run.incident?.code ?? run.reason,
     incident: run.incident,
+    diagnostics: run.diagnostics,
     result,
     log: check?.log,
     run: run.id,
@@ -321,6 +324,7 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
     ...(incident === undefined ? {} : { incident }),
     ...(subject === undefined ? {} : { subject }),
     ...(run === undefined ? {} : { run }),
+    ...(latest?.diagnostics === undefined ? {} : { diagnostics: latest.diagnostics }),
     ...(startedAt === undefined ? {} : { startedAt }),
     // Ended is what the RECORD says ended it. A change read merged from
     // ancestry alone, or failed because its branch moved under it, ended

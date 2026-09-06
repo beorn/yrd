@@ -9,7 +9,47 @@
  */
 
 import { homedir } from "node:os"
-import { runStartedAt, type CheckView, type Row } from "@yrd/queue-core"
+import { runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
+
+/** Full recorded warnings, shared by plain output and the selected change detail. */
+export function diagnosticLines(
+  row: Pick<Row, "branch" | "head" | "diagnostics">,
+  journal?: JournalRun,
+): readonly string[] {
+  return (row.diagnostics ?? []).flatMap((record) => {
+    const usable = (value: unknown): value is string => typeof value === "string" && value.trim() !== ""
+    const text = usable(record.text) ? record.text : undefined
+    const inspect = usable(record.inspect) ? record.inspect : undefined
+    const next = usable(record.next) ? record.next : undefined
+    const commands =
+      inspect === next
+        ? [["inspect", inspect]]
+        : [
+            ["inspect", inspect],
+            ["next", next],
+          ]
+    const missing = [
+      text === undefined ? "missing usable text" : undefined,
+      inspect === undefined && next === undefined ? "missing usable inspect/next" : undefined,
+    ].filter((part) => part !== undefined)
+    return [
+      `${row.branch}@${row.head} run ${record.run}: ⚠ ref-write warning (${String(record.reason)})${usable(record.ref) ? ` — ${record.ref}` : ""}`,
+      ...(journal !== undefined && journal.decision === undefined ? ["no run decision recorded"] : []),
+      ...(text === undefined ? [] : [text]),
+      ...commands.flatMap(([name, command]) =>
+        command === undefined
+          ? []
+          : text?.includes(command) === true
+            ? inspect !== undefined && next !== undefined && inspect !== next
+              ? [`${name}: recorded in text above`]
+              : []
+            : [`${name}: ${command}`],
+      ),
+      ...missing,
+      ...(missing.length === 0 ? [] : [`raw diagnostic: ${JSON.stringify(record)}`]),
+    ]
+  })
+}
 
 /** The one glyph per state — the retired watch's, kept because the operator already reads them. */
 export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {

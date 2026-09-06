@@ -11,11 +11,12 @@
  *           reading the live table
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { gitIn, submit, type Git } from "@yrd/queue-core"
+import { gitIn, readJournals, submit, type Git, type LogRecord } from "@yrd/queue-core"
+import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import type { ChangeDetail } from "../src/watch-detail.tsx"
@@ -128,6 +129,24 @@ describe("yrd watch, the ending's exit code", () => {
     const w = await world()
     await change(w, "task/good", true)
     await drain(w)
+    // 24202: a successful real run can receive a bookkeeping warning afterwards.
+    // Existing exit assertions alone missed warnings lost by every human view.
+    const journal = [...readJournals(join(w.workdir, "logs")).runs.values()][0]?.[0]
+    if (journal === undefined) throw new Error("merged test run has no journal")
+    const diagnostic: LogRecord = {
+      kind: "change",
+      run: journal.id,
+      at: new Date(journal.at.getTime() + 1000).toISOString(),
+      branch: journal.branch,
+      head: journal.head,
+      decision: "merged",
+      reason: "change-ref-taken",
+      ref: "refs/changes/task/good",
+      text: "bookkeeping write refused: " + "full evidence\n".repeat(80) + "last evidence line",
+      next: "git show refs/changes/task/good",
+      error: "remote ref moved",
+    }
+    appendFileSync(join(w.workdir, "logs", `${journal.id}.jsonl`), `${JSON.stringify(diagnostic)}\n`)
     const run = capture(w.work)
 
     const exit = await coreQueueCommand(
@@ -140,12 +159,68 @@ describe("yrd watch, the ending's exit code", () => {
     expect(exit, run.stdout()).toBe(0)
     expect(run.stdout()).toContain("task/good")
     expect(run.stdout()).toContain("merged")
+    expect(run.stdout()).toContain(diagnostic.text)
+    expect(run.stdout()).toContain(diagnostic.next)
+    for (const request of [
+      { command: "list" as const, terms: ["task/good"] },
+      { command: "list" as const, latest: true, terms: ["task/good"] },
+      { command: "show" as const, branch: "task/good" },
+    ]) {
+      const human = capture(w.work)
+      expect(await coreQueueCommand(w.work, human.io, request, { workdir: w.workdir })).toBe(0)
+      expect(human.stdout()).toContain("merged")
+      expect(human.stdout()).toContain(diagnostic.text)
+      expect(human.stdout()).toContain(diagnostic.next)
+      const json = capture(w.work)
+      expect(await coreQueueCommand(w.work, json.io, request, { json: true, workdir: w.workdir })).toBe(0)
+      const data = JSON.parse(json.stdout()) as { changes: { diagnostics?: LogRecord[] }[] }
+      expect(data.changes[0]?.diagnostics).toEqual([diagnostic])
+    }
     // A printed round is a log, and a log's rounds carry the instant they were
     // printed: the retired watch's `updated HH:MM:SS`, under the queue's name (item 30).
     const lines = run.stdout().split("\n")
     const stamp = lines.findIndex((line) => /^updated \d\d:\d\d:\d\d$/u.test(line))
     expect(stamp).toBeGreaterThan(0)
     expect(lines[stamp - 1]).toMatch(/#main$/u)
+    // A later warning-only run does not change Git's merged state or invent its own decision.
+    const only = openLog(join(w.workdir, "logs"), () => new Date(journal.at.getTime() + 2000))
+    const header = readFileSync(join(w.workdir, "logs", `${journal.id}.jsonl`), "utf8").split("\n")[0]
+    if (header === undefined) throw new Error("merged test run has no header")
+    only.write(JSON.parse(header) as LogRecord)
+    only.write({
+      ...diagnostic,
+      reason: "change-ref-contended",
+      text: "another write was refused",
+      next: undefined,
+      inspect: "git show the-new-ref",
+    })
+    for (const request of [
+      { command: "list" as const, latest: true, terms: ["task/good"] },
+      { command: "show" as const, branch: "task/good" },
+    ]) {
+      const human = capture(w.work)
+      expect(await coreQueueCommand(w.work, human.io, request, { workdir: w.workdir })).toBe(0)
+      expect(human.stdout()).toContain("merged")
+      expect(human.stdout()).toContain("no run decision recorded")
+    }
+    for (const latest of [false, true]) {
+      const interactive = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          interactive.io,
+          { command: "list", terms: ["task/good"], watch: true, latest },
+          { interactive: true, workdir: w.workdir },
+        ),
+      ).toBe(0)
+      const snapshot = renderedSnapshot()
+      if (snapshot === undefined) throw new Error("interactive watch did not render")
+      const details = await renderedDetails(snapshot)
+      const detail = details.find((entry) => entry.journal?.id === only.id)
+      expect(detail?.journal?.decision).toBeUndefined()
+      expect(detail?.journal?.diagnostics).toBe(detail?.row.diagnostics)
+      expect(detail?.row.state).toBe("merged")
+    }
   })
 
   it("exits 1 for a change the queue failed, so a seat can script on it", async () => {
@@ -375,8 +450,14 @@ describe("what a watch says it looked at", () => {
       .split("\n")
       .filter((line) => line.includes("task/history"))
     expect(historyLines, plain.stdout()).toHaveLength(2)
-    expect(historyLines.some((line) => line.includes(`err=${String(original.reason)}`)), plain.stdout()).toBe(true)
-    expect(historyLines.some((line) => line.includes("failed verify")), plain.stdout()).toBe(true)
+    expect(
+      historyLines.some((line) => line.includes(`err=${String(original.reason)}`)),
+      plain.stdout(),
+    ).toBe(true)
+    expect(
+      historyLines.some((line) => line.includes("failed verify")),
+      plain.stdout(),
+    ).toBe(true)
     expect(plain.stdout()).toContain(runShortName("main", secondId))
 
     rendered.snapshot = undefined

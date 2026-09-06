@@ -189,6 +189,104 @@ describe("a run's journal, read back", () => {
     expect(() => readJournals(dir)).toThrow("incomplete incident")
   })
 
+  // 24202: CI's parse-only regressions above do not prove retention, attempted
+  // vs recorded decisions, or the completion clock. Exercise the whole lifecycle.
+  it.each([
+    ["change-ref-taken", "next", "sent"],
+    ["change-ref-contended", "inspect", "merged"],
+  ] as const)("retains %s/%s diagnostics without adopting attempted %s decisions", (reason, field, decision) => {
+    const first = new Date("2026-09-06T04:00:00.000Z")
+    let at = first
+    const dir = join(scratch("diagnostics"), "logs")
+    const log = openLog(dir, () => at)
+    const change = { branch: "task/one", head: "abc123" }
+    const diagnostic = {
+      ...change,
+      kind: "change" as const,
+      reason,
+      decision,
+      [field]: "git log --oneline --left-right intended...remote",
+      text: "ref write failed: remote advanced",
+      intended: "intended",
+      remote: "remote",
+    }
+    log.write(diagnostic)
+    const only = readJournals(dir, { now: at }).runs.get(journalKey(change.branch, change.head))?.[0]
+    expect(only?.decision).toBeUndefined()
+    expect(only?.diagnostics).toEqual([{ ...diagnostic, at: first.toISOString(), run: log.id }])
+    expect(
+      watchRows([{ ...change, state: "merged" }], {
+        journals: readJournals(dir, { now: at }),
+      })[0]?.row.endedAt,
+    ).toBeUndefined()
+
+    at = new Date(first.getTime() + 1000)
+    log.write({ ...change, kind: "change", decision: "merged", reason: "already on the target" })
+    log.write({ ...change, kind: "merge", commit: "landed" })
+    const ended = at
+    at = new Date(first.getTime() + 2000)
+    log.write(diagnostic)
+    const journals = readJournals(dir, { now: at })
+    const run = journals.runs.get(journalKey(change.branch, change.head))?.[0]
+    expect(run).toMatchObject({ decision: "merged", reason: "already on the target", merge: "landed", at: ended })
+    expect(run?.incident).toBeUndefined()
+    expect(run?.diagnostics).toEqual([
+      { ...diagnostic, at: first.toISOString(), run: log.id },
+      { ...diagnostic, at: at.toISOString(), run: log.id },
+    ])
+    const row = watchRows([{ ...change, state: "merged" }], { journals })[0]?.row
+    expect(row).toMatchObject({ state: "merged", result: "pass", endedAt: ended, diagnostics: run?.diagnostics })
+  })
+
+  // A reserved reason currently bypasses incident validation entirely.
+  it.each(["code", "subject", "via", "evidence", "owner"])(
+    "does not let a race reason hide partial incident %s",
+    (field) => {
+      const { dir } = journalDir([
+        {
+          branch: "task/one",
+          head: "abc123",
+          kind: "change",
+          decision: "stuck",
+          reason: "change-ref-taken",
+          next: "inspect the failure",
+          [field]: "present",
+        },
+      ])
+      expect(() => readJournals(dir)).toThrow("incomplete incident")
+      // The authority-field rule must hold even when no decision string was recorded.
+      const undecided = journalDir([
+        { branch: "task/one", head: "abc123", kind: "change", reason: "change-ref-taken", [field]: "present" },
+      ])
+      expect(() => readJournals(undecided.dir)).toThrow("incomplete incident")
+    },
+  )
+
+  it("validates a complete incident even when its reason is reserved for ref-write diagnostics", () => {
+    const incident = {
+      code: "check-failed",
+      subject: "task/one",
+      via: "test",
+      evidence: "/checks/test.log",
+      next: "inspect the log",
+      owner: "operator",
+    }
+    const record = {
+      ...incident,
+      branch: "task/one",
+      head: "abc123",
+      kind: "change",
+      decision: "stuck",
+      reason: "change-ref-contended",
+    }
+    const { dir } = journalDir([record])
+    const run = readJournals(dir).runs.get(journalKey(record.branch, record.head))?.[0]
+    expect(run?.incident).toEqual(incident)
+    expect(run?.diagnostics).toBeUndefined()
+    const malformed = journalDir([{ ...record, evidence: "relative-path" }])
+    expect(() => readJournals(malformed.dir)).toThrow("not an absolute path")
+  })
+
   it("an abandoned older run is unmeasured after a newer run, while the newest unended run stays live", () => {
     // A single decided-run fixture misses a process that died before writing
     // its decision. Serialization makes a subsequent run proof it is no longer live.

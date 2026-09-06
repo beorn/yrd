@@ -486,6 +486,54 @@ describe("which tab a reader lands on", () => {
 })
 
 describe("the pane's keys and the detail's identity", () => {
+  it("refreshes an ended detail when a warning arrives without moving its completion time", async () => {
+    // 24202: the ended-detail cache keyed only tipAt, so late diagnostics stayed hidden.
+    const initial = row({ state: "merged", run: RUN_ID, at: NOW, endedAt: NOW, result: "pass" })
+    const open = opener([])
+    const { load, rounds } = gatedLoader()
+    const app = render(
+      <WatchPane snapshot={snapshot({ rows: [{ row: initial }] })} load={load} open={open} intervalMs={10} live />,
+      { cols: 200, rows: 50 },
+    )
+    try {
+      await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1))
+      await settle(app)
+      const diagnostic = {
+        kind: "change" as const,
+        run: RUN_ID,
+        at: new Date(NOW.getTime() + 1000).toISOString(),
+        reason: "change-ref-taken",
+        text: "remote ref changed after the merge",
+        next: "git show refs/changes/task/one",
+      }
+      await vi.waitFor(() => expect(rounds.length).toBeGreaterThan(0))
+      rounds
+        .at(-1)
+        ?.resolve(
+          snapshot({ at: new Date(NOW.getTime() + 2000), rows: [{ row: { ...initial, diagnostics: [diagnostic] } }] }),
+        )
+      await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2))
+      await settle(app)
+      expect(current(app)).toContain(diagnostic.text)
+      expect(current(app)).toContain(diagnostic.next)
+      expect(current(app)).toContain("passed, merged")
+      // A fresh journal read returns new objects even when its records did not change.
+      await vi.waitFor(() => expect(rounds.length).toBeGreaterThan(1))
+      rounds
+        .at(-1)
+        ?.resolve(
+          snapshot({
+            at: new Date(NOW.getTime() + 3000),
+            rows: [{ row: { ...initial, diagnostics: [{ ...diagnostic }] } }],
+          }),
+        )
+      await settle(app)
+      expect(open).toHaveBeenCalledTimes(2)
+    } finally {
+      app.unmount()
+    }
+  })
+
   it.each([120, 220])(
     "opens the selected historical run's own detail when two rows have the same head at %i columns",
     async (cols) => {

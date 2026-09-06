@@ -21,6 +21,8 @@ import {
   readQueue,
   show,
   submit,
+  journalKey,
+  watchRows,
 } from "../src/index.ts"
 import type { Git } from "../src/index.ts"
 
@@ -246,12 +248,45 @@ describe("the table is the queue read rendered", () => {
     const one = await submitCommit(w, "task/one", "one.txt")
     await new Promise((resolve) => setTimeout(resolve, 1100))
     const two = await submitCommit(w, "task/two", "two.txt")
-    const rows = list((await readQueue(w.git, "origin", "main")).changes)
+    const entries = (await readQueue(w.git, "origin", "main")).changes
+    const rows = list(entries)
     expect(rows.map((row) => [row.branch, row.position, row.state, row.issue])).toEqual([
       ["task/one", 1, "queued", "@i/1/one.txt"],
       ["task/two", 2, "queued", "@i/1/two.txt"],
     ])
     expect(rows.map((row) => row.head)).toEqual([one, two])
+
+    // 24202: the latest-change join and per-run spread are separate surfaces.
+    // Reuse this real queue read to prove warnings neither vanish nor leak.
+    const at = new Date()
+    const diagnostic = {
+      kind: "change" as const,
+      at: at.toISOString(),
+      run: "new",
+      reason: "change-ref-taken",
+      text: "ref write failed",
+    }
+    const run = { branch: "task/one", head: one, at, startedAt: at, checks: [] }
+    const journals = {
+      dir: "/journal-fixture",
+      runs: new Map([
+        [
+          journalKey(run.branch, run.head),
+          [
+            { ...run, id: "new", diagnostics: [diagnostic] },
+            { ...run, id: "old" },
+          ],
+        ],
+      ]),
+    }
+    const joined = list(entries, { journals })
+    expect(joined[0]?.diagnostics).toEqual([diagnostic])
+    expect(joined[1]?.diagnostics).toBeUndefined()
+    expect(show(entries, run.branch, { journals })[0]?.row.diagnostics).toEqual([diagnostic])
+    expect(watchRows(joined, { journals, latest: true })[0]?.row.diagnostics).toEqual([diagnostic])
+    const split = watchRows(joined, { journals })
+    expect(split[0]?.row.diagnostics).toEqual([diagnostic])
+    expect(split[1]?.row.diagnostics).toBeUndefined()
   })
 
   it("lists a commit the target gained around the queue as its own row, as recent as it was committed (E5)", async () => {

@@ -251,6 +251,7 @@ function sameRow(left: ListRowProps, right: ListRowProps): boolean {
     a.run === b.run &&
     a.subject === b.subject &&
     a.reason === b.reason &&
+    a.diagnostics === b.diagnostics &&
     a.submitter === b.submitter &&
     a.live?.check === b.live?.check &&
     a.at?.getTime() === b.at?.getTime() &&
@@ -303,6 +304,11 @@ export const ListRow = memo(function ListRow({ item, previous, label, layout, cu
           ),
           changes: (
             <Box flexDirection="row" minWidth={0} overflow="hidden">
+              {(row.diagnostics?.length ?? 0) === 0 ? null : (
+                <Text color={forced ?? "$fg-warning"} flexShrink={0}>
+                  ⚠{" "}
+                </Text>
+              )}
               <Text color={forced} flexShrink={0}>
                 {row.branch}
               </Text>

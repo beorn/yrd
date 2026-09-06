@@ -54,7 +54,7 @@ import {
 import { queueName, readConfig, targetName, type Target } from "./config.ts"
 import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
 import { incidentTrailers, type Incident } from "./incident.ts"
-import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
+import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
@@ -1467,14 +1467,14 @@ export async function writeRecord(run: Run, write: WriteRecord): Promise<string 
         intended: record,
         kind: "change" as const,
         inspect,
-        reason: "change-ref-taken",
+        reason: CHANGE_REF_DIAGNOSTICS.taken,
         ref,
         relation,
         remote: now,
         text: `${ref}: remote ${now}, intended ${record} (${relation})${relationError === undefined ? "" : `; ancestry read failed: ${relationError}`}; inspect: ${inspect}`,
       }
       run.log.write(diagnostic)
-      if (attempt === 1) run.log.write({ ...diagnostic, reason: "change-ref-contended" })
+      if (attempt === 1) run.log.write({ ...diagnostic, reason: CHANGE_REF_DIAGNOSTICS.contended })
     }
   }
   return undefined

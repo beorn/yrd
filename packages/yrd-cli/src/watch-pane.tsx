@@ -257,11 +257,16 @@ export function WatchPane({
   const label = shown.queues[0]?.label ?? shown.queue
 
   // The detail for the row under the cursor, read only while the detail is
-  // open, re-read every round while the change moves, held once it ended.
+  // open, re-read while the change moves or gains a warning, otherwise held once it ended.
   const heldDetail = held.find((entry) => entry.key === selectedKey)
   const moving = selected !== undefined && (selected.row.position !== undefined || selected.row.live !== undefined)
   const stale =
-    selected !== undefined && (heldDetail === undefined || moving || heldDetail.tipAt !== selected.row.at?.getTime())
+    selected !== undefined &&
+    (heldDetail === undefined ||
+      moving ||
+      heldDetail.tipAt !== selected.row.at?.getTime() ||
+      // Journal reads allocate fresh objects; compare records, not their allocation identity.
+      JSON.stringify(heldDetail.detail.row.diagnostics) !== JSON.stringify(selected.row.diagnostics))
   useEffect(() => {
     if (!opened || open === undefined || selected === undefined || selectedKey === undefined || !stale) return
     let cancelled = false

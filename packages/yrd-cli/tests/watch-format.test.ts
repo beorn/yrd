@@ -13,11 +13,72 @@ import { runId } from "@yrd/queue-core"
 import {
   boundedHangingLines,
   clock,
+  diagnosticLines,
   friendlyPath,
   mediaDuration,
   runShortName,
   stateGlyph,
 } from "../src/watch-format.ts"
+
+describe("ref-write diagnostic lines", () => {
+  it("names an absent decision only when the run journal was actually read", () => {
+    const diagnostic = {
+      kind: "change" as const,
+      run: "q-one",
+      at: "2026-09-06T04:00:00Z",
+      reason: "change-ref-contended",
+      text: "ref write failed",
+      inspect: "git show the-ref",
+    }
+    const row = { branch: "task/one", head: "abcd", diagnostics: [diagnostic] }
+    const journal = {
+      id: "q-one",
+      branch: row.branch,
+      head: row.head,
+      startedAt: new Date(diagnostic.at),
+      at: new Date(diagnostic.at),
+      checks: [],
+      diagnostics: row.diagnostics,
+    }
+    expect(diagnosticLines(row).join("\n")).not.toContain("no run decision recorded")
+    expect(diagnosticLines(row, journal).join("\n")).toContain("no run decision recorded")
+    expect(diagnosticLines(row, { ...journal, decision: "merged" }).join("\n")).not.toContain(
+      "no run decision recorded",
+    )
+  })
+
+  it("keeps full text and differing inspection fields, and names missing evidence", () => {
+    // 24202: raw retention alone cannot prove that the human sees the recorded facts.
+    const diagnostic = {
+      kind: "change" as const,
+      run: "q-one",
+      at: "2026-09-06T04:00:00Z",
+      reason: "change-ref-taken",
+      ref: "refs/changes/task/one",
+      text: "ref moved; " + "evidence ".repeat(200),
+      next: "git show old-ref",
+      inspect: "git show new-ref",
+    }
+    const row = { branch: "task/one", head: "abcd", diagnostics: [diagnostic] }
+    const lines = diagnosticLines(row).join("\n")
+    expect(lines).toContain(diagnostic.ref)
+    expect(lines).toContain(diagnostic.text)
+    expect(lines).toContain("next: git show old-ref")
+    expect(lines).toContain("inspect: git show new-ref")
+    const embedded = diagnosticLines({
+      ...row,
+      diagnostics: [{ ...diagnostic, text: "Inspect git show old-ref", inspect: undefined }],
+    }).join("\n")
+    expect(embedded.match(/git show old-ref/gu)).toHaveLength(1)
+    const degraded = diagnosticLines({
+      ...row,
+      diagnostics: [{ ...diagnostic, text: " ", next: undefined, inspect: undefined }],
+    }).join("\n")
+    expect(degraded).toContain("missing usable text")
+    expect(degraded).toContain("missing usable inspect/next")
+    expect(degraded).toContain(JSON.stringify({ ...diagnostic, text: " ", next: undefined, inspect: undefined }))
+  })
+})
 
 describe("the one glyph table", () => {
   it("overlays the working glyph on any state while a check runs, and keeps the state's glyph otherwise", () => {

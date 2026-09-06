@@ -54,6 +54,48 @@ async function paint(snapshot: WatchSnapshot, columns = 120): Promise<string> {
 }
 
 describe("the printed page's frame", () => {
+  it("shows a newly arrived ref-write warning without changing the successful row", async () => {
+    // 24202: unchanged terminal fields used to make ListRow's memo hide this arrival.
+    const initial = row({ run: RUN_ID, result: "pass", endedAt: NOW })
+    const app = render(
+      <ListingPage snapshot={snapshot({ rows: [{ row: initial }] })} options={{ columns: 120, color: false }} />,
+      { cols: 120, rows: 40 },
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).not.toContain("⚠")
+      app.rerender(
+        <ListingPage
+          snapshot={snapshot({
+            rows: [
+              {
+                row: {
+                  ...initial,
+                  diagnostics: [
+                    {
+                      kind: "change",
+                      run: RUN_ID,
+                      at: NOW.toISOString(),
+                      reason: "change-ref-taken",
+                      text: "ref write refused",
+                      inspect: "git show refs/changes/example",
+                    },
+                  ],
+                },
+              },
+            ],
+          })}
+          options={{ columns: 120, color: false }}
+        />,
+      )
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("⚠")
+      expect(app.text).toContain("merged")
+    } finally {
+      app.unmount()
+    }
+  })
+
   const pause = "paused by @chief: the host is down"
   const runner = {
     journalDir: "/w/logs",

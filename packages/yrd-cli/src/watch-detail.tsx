@@ -38,11 +38,19 @@
 
 import { hyperlink } from "@silvery/ansi"
 import { Box, MarkdownView, Pulse, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
-import type { ChangeRecord, CheckView, Row } from "@yrd/queue-core"
+import type { ChangeRecord, CheckView, JournalRun, Row } from "@yrd/queue-core"
 import { clocks } from "@yrd/queue-core"
 import { diffSummary, historyEntries, metadataGroups, metadataKeyWidth, type ChangeCommits } from "./watch-change.ts"
 import { useMinute, useNow } from "./watch-clock.ts"
-import { CHECK_COLOR, CHECK_GLYPH, clock, mediaDuration, stateColor, stateGlyph } from "./watch-format.ts"
+import {
+  CHECK_COLOR,
+  CHECK_GLYPH,
+  clock,
+  diagnosticLines,
+  mediaDuration,
+  stateColor,
+  stateGlyph,
+} from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { explanationLine, headlineOf, runTitle, timingRows, type WatchRun, type WatchStep } from "./watch-run.ts"
 
@@ -67,6 +75,8 @@ export type DiffText = Readonly<{
 
 export type ChangeDetail = Readonly<{
   row: Row
+  /** The same journal object joined to this row; absent when no journal was read. */
+  journal?: JournalRun
   /** The run this detail is about, as the status box and the RUN column draw it. */
   run: WatchRun
   checks: readonly CheckPanel[]
@@ -152,7 +162,7 @@ export function WatchDetail({
       >
         <TabList flexWrap="wrap">
           <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
-            <Text bold={tab === CHANGES_TAB}>Changes</Text>
+            <Text bold={tab === CHANGES_TAB}>Changes{(row.diagnostics?.length ?? 0) === 0 ? "" : " ⚠"}</Text>
           </Tab>
           {detail.checks.map((check, at) => (
             <Tab key={String(at)} value={String(at)}>
@@ -167,6 +177,11 @@ export function WatchDetail({
         </TabList>
         <TabPanel key={CHANGES_TAB} value={CHANGES_TAB}>
           <ScrollArea>
+            {(row.diagnostics?.length ?? 0) === 0 ? null : (
+              <Text color="$fg-warning" wrap="wrap">
+                {diagnosticLines(row, detail.journal).join("\n")}
+              </Text>
+            )}
             <ChangeBox detail={detail} diffOpen={diffOpen} diff={diff} onToggleDiff={onToggleDiff} />
           </ScrollArea>
         </TabPanel>

@@ -34,6 +34,12 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { incidentTrailers, type Incident } from "./incident.ts"
 
+/** Ref-write diagnostics emitted by run.ts's refused bookkeeping-write path. */
+export const CHANGE_REF_DIAGNOSTICS = {
+  taken: "change-ref-taken",
+  contended: "change-ref-contended",
+} as const
+
 /**
  * A run's own id: the instant it started, then a random tail, so two runs never
  * write one path however close together they start.
@@ -160,11 +166,13 @@ export type JournalRun = Readonly<{
   decision?: string
   reason?: string
   incident?: Incident
+  /** Original ref-write warnings; they are not decisions or queue incidents. */
+  diagnostics?: readonly LogRecord[]
   /** The target recorded in this run's header; never borrowed from a later run. */
   base?: string
   /** The merge commit this run recorded, if it recorded one. */
   merge?: string
-  /** When this run last wrote about the change. */
+  /** Last non-diagnostic record, or the first diagnostic when there is no other record. */
   at: Date
 }>
 
@@ -273,6 +281,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       decision?: string
       reason?: string
       incident?: Incident
+      diagnostics?: LogRecord[]
       merge?: string
       at: Date
     }
@@ -290,19 +299,28 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     if (typeof branch !== "string" || typeof head !== "string") continue
     const at = new Date(record.at)
     if (Number.isNaN(at.getTime())) continue
-    const change = held(branch, head, at)
-    if (record.kind === "change" && typeof record.decision === "string") {
-      const reason = typeof record.reason === "string" ? record.reason : undefined
-      const changeRefDiagnostic = reason === "change-ref-taken" || reason === "change-ref-contended"
-      // These records describe a refused bookkeeping write, not a new queue
-      // decision. Legacy diagnostics used the incident-named `next` field, so
-      // recognize them before incident validation and retain an earlier result.
-      if (!changeRefDiagnostic || change.decision === undefined) {
+    const reason = typeof record.reason === "string" ? record.reason : undefined
+    const { code, subject, via, evidence, next, owner } = record
+    const diagnostic =
+      record.kind === "change" &&
+      Object.values(CHANGE_REF_DIAGNOSTICS).some((value) => value === reason) &&
+      [code, subject, via, evidence, owner].every((value) => value === undefined)
+    // Legacy `next` and current `inspect` are both diagnostic fields here.
+    // Any incident authority field above instead takes normal validation.
+    // A warning must not advance an existing run's completion clock; a run
+    // containing only warnings gets its first instant, never a decision.
+    const prior = byChange.get(journalKey(branch, head))
+    const change = held(branch, head, diagnostic && prior !== undefined ? prior.at : at)
+    if (diagnostic) {
+      ;(change.diagnostics ??= []).push(record)
+      continue
+    }
+    if (record.kind === "change") {
+      if (typeof record.decision === "string") {
         change.decision = record.decision
         change.reason = reason
       }
-      const { code, subject, via, evidence, next, owner } = record
-      if (!changeRefDiagnostic && [code, subject, via, evidence, next, owner].some((value) => value !== undefined)) {
+      if ([code, subject, via, evidence, next, owner].some((value) => value !== undefined)) {
         if (
           typeof code !== "string" ||
           typeof subject !== "string" ||
@@ -376,6 +394,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       ...(change.decision === undefined ? {} : { decision: change.decision }),
       ...(change.reason === undefined ? {} : { reason: change.reason }),
       ...(change.incident === undefined ? {} : { incident: change.incident }),
+      ...(change.diagnostics === undefined ? {} : { diagnostics: change.diagnostics }),
       ...(change.merge === undefined ? {} : { merge: change.merge }),
       ...(typeof base === "string" ? { base } : {}),
       head: change.head,

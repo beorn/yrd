@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url"
 import type { ConditionalLogger } from "loggily"
 import { adaptProcessGit, createProcess, gitFailure } from "@yrd/process"
 import {
+  CHANGE_REF_DIAGNOSTICS,
   directMergeCommits,
   activePause,
   changeName,
@@ -31,6 +32,7 @@ import {
   gitIn,
   hintsIn,
   incidentLines,
+  journalKey,
   list,
   queueName,
   queueRun,
@@ -56,6 +58,7 @@ import {
   type CheckSpec,
   type CheckView,
   type Journals,
+  type JournalRun,
   type Git,
   type LogRecord,
   type QueueConfig,
@@ -70,7 +73,7 @@ import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
-import { CHECK_GLYPH, clock, firstLine, mediaDuration } from "./watch-format.ts"
+import { CHECK_GLYPH, clock, diagnosticLines, firstLine, mediaDuration } from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
@@ -480,6 +483,7 @@ export async function coreQueueCommand(
           decisions: readonly RunDecision[]
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
           entries: QueueEntries
+          journals: Journals
         }>
       > => {
         const { queue, journals, all } = await readListing(git, config, workdir)
@@ -501,6 +505,7 @@ export async function coreQueueCommand(
             pause: pause ?? null,
           },
           entries: queue.changes,
+          journals,
           queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
@@ -524,7 +529,7 @@ export async function coreQueueCommand(
       const page = async (one: Awaited<ReturnType<typeof round>>): Promise<string> => {
         const { printListing } = await import("./watch-print.tsx")
         const single = one.rows.length === 1 ? one.rows[0] : undefined
-        return printListing(snapshotOf(one), {
+        const listing = await printListing(snapshotOf(one), {
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
@@ -536,6 +541,10 @@ export async function coreQueueCommand(
                 ),
               }),
         })
+        // Append after the bounded terminal render: recorded warnings must never be clipped by its height.
+        return [listing, ...one.rows.flatMap((item) => diagnosticLines(item.row, journalFor(item, one.journals)))].join(
+          "\n",
+        )
       }
 
       if (request.watch !== true) {
@@ -564,16 +573,18 @@ export async function coreQueueCommand(
         // The queue read the LAST round made: a detail opened between rounds
         // reads the same tips the table shows, never a fresher or staler one.
         let entries: QueueEntries = first.entries
+        let journals = first.journals
         const app = await run(
           createElement(WatchPane, {
             intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
             load: async () => {
               const next = await round()
               entries = next.entries
+              journals = next.journals
               return snapshotOf(next)
             },
             loadDiff: (item) => readDiff(git, config, item),
-            open: (item) => openDetail(git, config, entries, item, config.target.branch),
+            open: (item) => openDetail(git, config, entries, item, config.target.branch, journalFor(item, journals)),
             onEnding:
               request.terms === undefined || request.terms.length === 0
                 ? undefined
@@ -815,6 +826,7 @@ export async function coreQueueCommand(
                     : rowLine({ row: { ...change.row, reason: undefined, result: undefined } })
                 return [
                   headline,
+                  ...diagnosticLines(change.row, journalFor({ row: change.row }, journals)),
                   ...(change.row.incident === undefined
                     ? []
                     : incidentLines(change.row.incident).map((line) => `  ${line}`)),
@@ -953,7 +965,7 @@ function renderer(root: ConditionalLogger | undefined): (record: LogRecord) => v
       byKind.set(record.kind, log)
     }
     const { kind, run: _run, at: _at, ...rest } = record
-    if (kind === "change" && (rest.reason === "change-ref-taken" || rest.reason === "change-ref-contended")) {
+    if (kind === "change" && Object.values(CHANGE_REF_DIAGNOSTICS).some((reason) => reason === rest.reason)) {
       log.warn?.(summarize(kind, rest), rest)
       return
     }
@@ -1070,6 +1082,7 @@ async function openDetail(
   entries: QueueEntries,
   item: WatchRow,
   label: string,
+  journal?: JournalRun,
 ): Promise<ChangeDetail> {
   const { row } = item
   const own = entries.filter((entry) => entry.change.branch === row.branch && entry.change.head === row.head)
@@ -1092,6 +1105,7 @@ async function openDetail(
   return {
     checks,
     row,
+    ...(journal === undefined ? {} : { journal }),
     run: runOf(row, label, views, item.run?.id ?? row.run),
     ...(histories.length === 0 ? {} : { records }),
     ...about,
@@ -1237,6 +1251,13 @@ function endingCode(rows: readonly WatchRow[]): YrdCliExitCode | undefined {
 /** The URL a remote NAME stands for, which is what the queue calls itself to a stranger (config.ts). */
 async function remoteUrl(git: Git, remote: string): Promise<string> {
   return (await git(["remote", "get-url", remote])).trim()
+}
+
+/** Preserve the run selected by this row's join, including the collapsed latest lens. */
+function journalFor(item: WatchRow, journals: Journals): JournalRun | undefined {
+  return (
+    item.run ?? journals.runs.get(journalKey(item.row.branch, item.row.head))?.find((run) => run.id === item.row.run)
+  )
 }
 
 /**
