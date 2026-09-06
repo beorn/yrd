@@ -85,7 +85,12 @@ export async function readComponentTarget(git: Git, repository: string, remote: 
   const target = await remoteRef(git, remote, "refs/heads/main", true)
   if (target === undefined) throw new Error(`${repository} at ${remote} returned no required protected main`)
   await fetchCapturedObjects(git, remote, [target])
-  const config = await readConfig(git, target, { remote, branch: "main" })
+  const config = await readConfig(git, target, { remote, branch: "main" }).catch((error: unknown) => {
+    throw new Error(
+      `${repository} .yrd.yml at protected main ${target}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  })
   if (config?.landing === undefined) {
     throw new Error(
       `${repository} .yrd.yml at protected main ${target} must declare landing: product or external before the queue can judge it`,

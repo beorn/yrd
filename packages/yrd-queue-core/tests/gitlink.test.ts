@@ -468,49 +468,55 @@ describe("settling gitlinks", () => {
 
   // A required protected declaration is a direct-reader authority failure,
   // before any candidate record, check, or push can happen.
-  it("stops the whole run on missing protected landing mode before candidate work", async () => {
-    const w = await world()
-    const componentWork = join(w.work, "..", "component-work")
-    const component = gitIn(componentWork)
-    writeFileSync(join(componentWork, ".yrd.yml"), "{}\n")
-    await component(["commit", "--quiet", "-am", "remove protected landing declaration"])
-    await component(["push", "--quiet", "origin", "main"])
-    const protectedMain = await remoteTip(component, "refs/heads/main")
-    const target = await remoteTip(w.git, "refs/heads/main")
-    const head = await submitFile(w, "task/missing-policy")
-    const ref = changeRef("main", { branch: "task/missing-policy", head })
-    const opened = await remoteTip(w.git, ref)
-    const marker = join(w.work, "..", "missing-policy-check")
-    const failure = `component .yrd.yml at protected main ${protectedMain} must declare landing: product or external before the queue can judge it`
+  it.each(["missing", "invalid"] as const)(
+    "stops the whole run on %s protected landing mode before candidate work",
+    async (kind) => {
+      const w = await world()
+      const componentWork = join(w.work, "..", "component-work")
+      const component = gitIn(componentWork)
+      writeFileSync(join(componentWork, ".yrd.yml"), kind === "missing" ? "{}\n" : "landing: none\n")
+      await component(["commit", "--quiet", "-am", `${kind} protected landing declaration`])
+      await component(["push", "--quiet", "origin", "main"])
+      const protectedMain = await remoteTip(component, "refs/heads/main")
+      const target = await remoteTip(w.git, "refs/heads/main")
+      const head = await submitFile(w, `task/${kind}-policy`)
+      const ref = changeRef("main", { branch: `task/${kind}-policy`, head })
+      const opened = await remoteTip(w.git, ref)
+      const marker = join(w.work, "..", `${kind}-policy-check`)
+      const failure =
+        kind === "missing"
+          ? `component .yrd.yml at protected main ${protectedMain} must declare landing: product or external before the queue can judge it`
+          : `component .yrd.yml at protected main ${protectedMain}: .yrd.yml landing: must be product or external`
 
-    const outcome = await queueRun(await w.options({ on: ["submit"], run: `touch '${marker}'` }))
+      const outcome = await queueRun(await w.options({ on: ["submit"], run: `touch '${marker}'` }))
 
-    expect(outcome).toMatchObject({
-      directMerges: [],
-      exitCode: 2,
-      failed: [],
-      merged: [],
-      stopped: { ring: "direct", says: failure, what: { reason: "direct-read-failed" } },
-      stuck: [],
-    })
-    expect(existsSync(marker)).toBe(false)
-    expect(await remoteTip(w.git, "refs/heads/main")).toBe(target)
-    expect(await remoteTip(component, "refs/heads/main")).toBe(protectedMain)
-    expect(await remoteTip(w.git, ref)).toBe(opened)
-    const records = await readRecords(w.git, opened)
-    expect(records.map((record) => record.kind)).toEqual(["opened"])
-    expect(
-      records.some((record) => trailer(record, "Check") !== undefined || trailer(record, "Merge") !== undefined),
-    ).toBe(false)
-    const journal = readFileSync(outcome.log, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
-    expect(journal.filter((record) => record.kind === "change" && record.head === head)).toEqual([])
-    expect(journal).toContainEqual(
-      expect.objectContaining({ exit: 2, kind: "result", reason: "direct-read-failed", text: failure }),
-    )
-  })
+      expect(outcome).toMatchObject({
+        directMerges: [],
+        exitCode: 2,
+        failed: [],
+        merged: [],
+        stopped: { ring: "direct", says: failure, what: { reason: "direct-read-failed" } },
+        stuck: [],
+      })
+      expect(existsSync(marker)).toBe(false)
+      expect(await remoteTip(w.git, "refs/heads/main")).toBe(target)
+      expect(await remoteTip(component, "refs/heads/main")).toBe(protectedMain)
+      expect(await remoteTip(w.git, ref)).toBe(opened)
+      const records = await readRecords(w.git, opened)
+      expect(records.map((record) => record.kind)).toEqual(["opened"])
+      expect(
+        records.some((record) => trailer(record, "Check") !== undefined || trailer(record, "Merge") !== undefined),
+      ).toBe(false)
+      const journal = readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+      expect(journal.filter((record) => record.kind === "change" && record.head === head)).toEqual([])
+      expect(journal).toContainEqual(
+        expect.objectContaining({ exit: 2, kind: "result", reason: "direct-read-failed", text: failure }),
+      )
+    },
+  )
 
   it("a divergent authored pin fails its author while the next change proceeds, then a rebased submission lands", async () => {
     const w = await world()
