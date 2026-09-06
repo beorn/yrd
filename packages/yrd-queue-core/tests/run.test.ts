@@ -521,9 +521,16 @@ describe("a queue run", () => {
     mkdirSync(hooksPath, { recursive: true })
     writeFileSync(unexpected, "must not run\n")
 
-    await expect(queueRun(await w.options({ exit: 0 }))).rejects.toThrow(
-      `queue-owned hooks path ${hooksPath} is not empty (unexpected-hook); remove the named entries, then run yrd queue run`,
-    )
+    const options = await w.options({ exit: 0 })
+    const calls: string[][] = []
+    const git: Git = async (args, input) => {
+      calls.push([...args])
+      return w.git(args, input)
+    }
+    await expect(queueRun({ ...options, git })).rejects.toMatchObject({
+      message: `queue-owned hooks path ${hooksPath} is not empty (unexpected-hook); remove the named entries, then retry the command that started this queue`,
+    })
+    expect(calls).toEqual([])
   })
 
   it("pass: the change is checked, merged, the target moves by one merge commit, and the submitter is told to close their bead", async () => {

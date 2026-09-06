@@ -246,7 +246,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const hooks = readdirSync(hooksPath).sort()
   if (hooks.length > 0) {
     throw new Error(
-      `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries, then run yrd queue run`,
+      `queue-owned hooks path ${hooksPath} is not empty (${hooks.join(", ")}); remove the named entries, then retry the command that started this queue`,
     )
   }
   const targetSha = options.targetSha
@@ -511,7 +511,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
         "stuck",
         stuckWrite(run, {
           code: "yrd-setup-unusable",
-          next: "repair the queue setup, then run yrd queue run",
+          next: `repair the queue setup, then run yrd queue run --queue ${Bun.$.escape(run.name)}`,
           subject: `the queue could not prepare a worktree for ${entry.change.branch}: ${message}`,
           via: SETUP,
         }),
@@ -523,7 +523,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
       "stuck",
       stuckWrite(run, {
         code: "yrd-queue-crash",
-        next: "repair the queue fault, then run yrd queue run",
+        next: `repair the queue fault, then run yrd queue run --queue ${Bun.$.escape(run.name)}`,
         subject: `the queue crashed judging ${entry.change.branch}: ${message}`,
         via: "queue run",
       }),
@@ -587,7 +587,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
         "stuck",
         stuckWrite(run, {
           code: "yrd-check-unresolved",
-          next: `repair ${stuckOne.name} or its queue environment, then run yrd queue run`,
+          next: `repair ${stuckOne.name} or its queue environment, then run yrd queue run --queue ${Bun.$.escape(run.name)}`,
           subject: `the queue could not judge ${branch}: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
           trailers: checkTrailers(results),
           via: `${stuckOne.name} during submit`,
@@ -927,7 +927,9 @@ async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): P
     subject,
     via: `git-super merge (${detail.code}, ${detail.phase}) in yrd queue ${run.name} [${run.log.id}]`,
     evidence: run.log.path,
-    next: detail.next ?? "push the named component commit to its main, then run yrd queue run",
+    next:
+      detail.next ??
+      `push the named component commit to its main, then run yrd queue run --queue ${Bun.$.escape(run.name)}`,
   }
   const tip = tipOf(entry.change)
   const sameWait =
@@ -988,7 +990,7 @@ async function candidateFailure(
     ...stuckWrite(run, {
       code: "yrd-merge-unresolved",
       detail: detail.message,
-      next: detail.next ?? "repair the queue fault, then run yrd queue run",
+      next: detail.next ?? `repair the queue fault, then run yrd queue run --queue ${Bun.$.escape(run.name)}`,
       subject: detail.message,
       via: `git-super merge (${detail.code}, ${detail.phase}) at ${worktree.path}`,
       worktree: worktree.path,
@@ -1018,7 +1020,7 @@ async function attributedFailure(
         "stuck",
         stuckWrite(run, {
           code: "yrd-check-unresolved",
-          next: `repair ${unresolved.name} or its queue environment, then run yrd queue run`,
+          next: `repair ${unresolved.name} or its queue environment, then run yrd queue run --queue ${Bun.$.escape(run.name)}`,
           subject:
             `the queue could not judge the settled base for ${entry.change.branch}: ${unresolved.name} ${unresolved.why ?? ""}`.trim(),
           trailers: checkTrailers(baseResults),
@@ -1035,7 +1037,7 @@ async function attributedFailure(
       "stuck",
       stuckWrite(run, {
         code: "yrd-submodule-main-regression",
-        next: `fix or revert ${pins} on component main, then run yrd queue run`,
+        next: `fix or revert ${pins} on component main, then run yrd queue run --queue ${Bun.$.escape(run.name)}`,
         subject: `${pins} breaks the root at the settled base`,
         trailers: checkTrailers(baseResults),
         via: `the settled base alone failed ${baseFailure.name}; the candidate's own content was absent`,
@@ -1148,7 +1150,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         "stuck",
         stuckWrite(run, {
           code: "yrd-check-unresolved",
-          next: `repair ${stuckOne.name} or its queue environment, then run yrd queue run`,
+          next: `repair ${stuckOne.name} or its queue environment, then run yrd queue run --queue ${Bun.$.escape(run.name)}`,
           subject: `the queue could not judge ${branch} at merge: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
           trailers: checkTrailers(results),
           via: `${stuckOne.name} during merge`,
