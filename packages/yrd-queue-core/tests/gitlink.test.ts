@@ -1006,6 +1006,46 @@ describe("settling gitlinks", () => {
     ])
   })
 
+  // Persistent readers must observe new protected tips without checking out a
+  // component or moving the caller's refs. Accounting-only cases cannot catch
+  // a fresh checkout on every read, even when its verdict is correct.
+  it("reuses component stores across direct reads without worktrees or shared ref writes", async () => {
+    const w = await world()
+    const target = await remoteTip(w.git, "refs/heads/main")
+    const entries = (await readQueue(w.git, "origin", "main", target)).changes
+    const componentGit = gitIn(join(w.work, "component"))
+    const refs = ["for-each-ref", "--format=%(refname)%00%(objectname)"]
+    const before = await componentGit(refs)
+    const fetchHead = (await componentGit(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
+    writeFileSync(fetchHead, "caller-owned component fetch evidence\n")
+    const operations: string[][] = []
+    await using real = createProcess({ cwd: w.work })
+    const observing: Process = {
+      ...real,
+      async run(request) {
+        operations.push([...request.argv])
+        return real.run(request)
+      },
+    }
+    const git = gitIn(w.work, observing)
+    const context = {
+      process: observing,
+      remote: "origin",
+      repo: w.work,
+      workdir: join(w.work, "..", "direct-read"),
+    }
+    const firstTip = await advanceComponent(w, "first observed component tip")
+    const first = await directMergeCommits(git, "main", target, entries, context)
+    const secondTip = await advanceComponent(w, "second observed component tip")
+    const second = await directMergeCommits(git, "main", target, entries, context)
+
+    expect(first.map(({ commit }) => commit)).toEqual([firstTip])
+    expect(second.map(({ commit }) => commit)).toEqual([secondTip])
+    expect(operations.filter((argv) => argv.includes("worktree"))).toEqual([])
+    expect(await componentGit(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned component fetch evidence\n")
+  })
+
   it.each([
     ["a new change ref", async (w: World, direct: string) => submitFile(w, `task/direct-read-${direct.slice(0, 8)}`)],
     ["a moved root", async (w: World, direct: string) => gitlinkAroundQueue(w, direct)],
