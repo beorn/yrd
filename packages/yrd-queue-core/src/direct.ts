@@ -58,7 +58,7 @@ import {
   type ChangeRecord,
   type Git,
 } from "./records.ts"
-import { gitEnvironment, gitIn, gitlinkRows } from "./git.ts"
+import { GitExit, gitEnvironment, gitIn, gitlinkRows } from "./git.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueueRefs, type QueueRead } from "./remote.ts"
 import { tipOf } from "./state.ts"
@@ -97,6 +97,14 @@ export class DirectReadChanged extends Error {
   }
 }
 
+/** A transient direct-reader transport failure has no verdict this pass. */
+export class DirectReadUnavailable extends Error {
+  constructor(error: GitExit) {
+    super(error.message, { cause: error })
+    this.name = "DirectReadUnavailable"
+  }
+}
+
 /**
  * Root direct commits and unexplained product component tips, read once for
  * run and list/watch. Component ownership comes from protected policy, not the
@@ -109,9 +117,16 @@ export async function directMergeCommits(
   entries: QueueRead,
   context: DirectReadContext,
 ): Promise<readonly DirectMerge[]> {
-  const root = await rootDirectCommits(git, target, targetSha, entries)
-  const components = await componentDirectCommits(git, target, targetSha, entries, context)
-  return [...root, ...components]
+  try {
+    const root = await rootDirectCommits(git, target, targetSha, entries)
+    const components = await componentDirectCommits(git, target, targetSha, entries, context)
+    return [...root, ...components]
+  } catch (error) {
+    if (error instanceof GitExit && (error.args[0] === "fetch" || error.args[0] === "ls-remote")) {
+      throw new DirectReadUnavailable(error)
+    }
+    throw error
+  }
 }
 
 async function rootDirectCommits(

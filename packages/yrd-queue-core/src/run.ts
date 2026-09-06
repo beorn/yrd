@@ -61,7 +61,7 @@ import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
 import { incidentTrailers, type Incident, type IncidentCode } from "./incident.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import type { PauseRecord } from "./pause.ts"
-import { DirectReadChanged, directMergeCommits, type DirectMerge } from "./direct.ts"
+import { DirectReadChanged, DirectReadUnavailable, directMergeCommits, type DirectMerge } from "./direct.ts"
 import { readComponentTarget } from "./components.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
@@ -330,16 +330,18 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
   // Did something go around the queue? Read before any record is written, so a
   // direct that merged a submitted head is reported before the catch-up below
-  // accounts for it (E5). Nothing stops for it: the run judges every change on
-  // the base it read.
+  // accounts for it (E5). A complete reading does not stop the run; a changed
+  // or unavailable reading has no verdict, so this pass stops before candidate
+  // work begins.
   let directMerges: readonly string[]
   try {
     directMerges = await reportDirectMerges(run, entries)
   } catch (error) {
     const changed = error instanceof DirectReadChanged
-    const reason = changed ? "direct-read-changed" : "direct-read-failed"
+    const unavailable = error instanceof DirectReadUnavailable
+    const reason = changed ? "direct-read-changed" : unavailable ? "direct-read-unavailable" : "direct-read-failed"
     const text = error instanceof Error ? error.message : String(error)
-    const exit = changed ? 0 : 2
+    const exit = changed || unavailable ? 0 : 2
     run.log.write({ kind: "result", reason, text, exit })
     return finish(
       run,

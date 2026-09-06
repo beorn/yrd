@@ -1045,6 +1045,90 @@ describe("settling gitlinks", () => {
     )
   })
 
+  // The direct reader is a pre-verdict observation. A transport outage while
+  // reading protected component state or its final queue fence asks the next
+  // pass to read again; it must not turn an unjudged change into a failure.
+  it.each(["fetch", "fence ls-remote"] as const)(
+    "stops cleanly when direct component %s is temporarily unavailable",
+    async (kind) => {
+      const w = await world()
+      const head = await submitFile(w, `task/direct-${kind.replaceAll(" ", "-")}`)
+      const ref = changeRef("main", { branch: `task/direct-${kind.replaceAll(" ", "-")}`, head })
+      const opened = await remoteTip(w.git, ref)
+      const target = await remoteTip(w.git, "refs/heads/main")
+      const protectedMain = await remoteTip(gitIn(join(w.work, "..", "component-work")), "refs/heads/main")
+      const marker = join(w.work, "..", `direct-${kind.replaceAll(" ", "-")}-check`)
+      const detail = `simulated direct ${kind} transport outage`
+      let componentMainRead = false
+      let failure: string | undefined
+      await using real = createProcess({ cwd: w.work })
+      const observing: Process = {
+        ...real,
+        async run(request) {
+          const componentFetch =
+            request.argv[0] === "git" &&
+            request.argv[1] === "fetch" &&
+            request.argv.includes("--no-tags") &&
+            request.argv.includes("+refs/heads/main:refs/remotes/origin/main")
+          const queueFence =
+            componentMainRead &&
+            request.argv[0] === "git" &&
+            request.argv[1] === "ls-remote" &&
+            request.argv[2] === "--refs" &&
+            request.argv[3] === "origin"
+          if ((kind === "fetch" && componentFetch) || (kind === "fence ls-remote" && queueFence)) {
+            failure = `git ${request.argv.slice(1).join(" ")} in ${request.cwd ?? w.work} exited 128: ${detail}`
+            return {
+              durationMs: 0,
+              exitCode: 128,
+              signal: null,
+              stderr: detail,
+              stdout: "",
+              timedOut: false,
+            }
+          }
+          const result = await real.run(request)
+          if (
+            request.argv[0] === "git" &&
+            request.argv[1] === "rev-parse" &&
+            request.argv[2] === "refs/remotes/origin/main^{commit}"
+          ) {
+            componentMainRead = true
+          }
+          return result
+        },
+      }
+
+      const outcome = await queueRun({
+        ...(await w.options({ on: ["submit"], run: `touch '${marker}'` })),
+        process: observing,
+      })
+
+      if (failure === undefined) throw new Error(`did not intercept direct ${kind}`)
+      expect(outcome).toMatchObject({
+        directMerges: [],
+        exitCode: 0,
+        failed: [],
+        merged: [],
+        stopped: { ring: "direct", says: failure, what: { reason: "direct-read-unavailable" } },
+        stuck: [],
+      })
+      expect(existsSync(marker)).toBe(false)
+      expect(await remoteTip(w.git, "refs/heads/main")).toBe(target)
+      expect(await remoteTip(gitIn(join(w.work, "..", "component-work")), "refs/heads/main")).toBe(protectedMain)
+      expect(await remoteTip(w.git, ref)).toBe(opened)
+      expect((await readRecords(w.git, opened)).map((record) => record.kind)).toEqual(["opened"])
+      const records = readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+      expect(records.filter((record) => record.kind === "change" && record.head === head)).toEqual([])
+      expect(records).toContainEqual(
+        expect.objectContaining({ exit: 0, kind: "result", reason: "direct-read-unavailable", text: failure }),
+      )
+    },
+  )
+
   it("a gitlink the reference checkout never fetched is materialized from the component's remote, and the change merges", async () => {
     const w = await world()
     // The component's main moves on in its own clone and the reference

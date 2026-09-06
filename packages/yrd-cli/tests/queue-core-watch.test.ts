@@ -16,7 +16,16 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createLogger, type Event } from "loggily"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { DirectReadChanged, directMergeCommits, gitIn, queueRun, submit, type Git } from "@yrd/queue-core"
+import {
+  DirectReadChanged,
+  DirectReadUnavailable,
+  directMergeCommits,
+  gitIn,
+  queueRun,
+  submit,
+  type Git,
+} from "@yrd/queue-core"
+import { GitExit } from "../../yrd-queue-core/src/git.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
@@ -63,6 +72,12 @@ function capture(cwd: string): Capture {
     stdout: () => stdout,
     stdoutWrites: () => stdoutWrites,
   }
+}
+
+function directReadUnavailable(cwd: string): DirectReadUnavailable {
+  return new DirectReadUnavailable(
+    new GitExit(["fetch", "--quiet", "component"], cwd, 128, "fatal: Could not resolve host: component.example"),
+  )
 }
 
 type World = Readonly<{ git: Git; work: string; workdir: string }>
@@ -249,10 +264,21 @@ describe("yrd watch, the ending's exit code", () => {
     expect(human.stdout()).toContain("paused by @chief")
     expect(human.stdout()).toContain("preserve the captured pause")
 
-    rendered.snapshot = undefined
-    vi.mocked(directMergeCommits).mockRejectedValueOnce(
-      new DirectReadChanged("origin/main changed while component mains were read"),
+    const unavailable = directReadUnavailable(w.work)
+    vi.mocked(directMergeCommits).mockRejectedValueOnce(unavailable)
+    const transient = capture(w.work)
+    expect(await coreQueueCommand(w.work, transient.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
+      0,
     )
+    const stopped = JSON.parse(transient.stdout()) as Record<string, unknown>
+    expect(stopped).toMatchObject({
+      pause: { by: "@chief", kind: "paused", reason: "preserve the captured pause" },
+      stopped: { ring: "direct", says: unavailable.message, what: { reason: "direct-read-unavailable" } },
+    })
+    expect(stopped).not.toHaveProperty("changes")
+
+    rendered.snapshot = undefined
+    vi.mocked(directMergeCommits).mockRejectedValueOnce(unavailable)
     await coreQueueCommand(
       w.work,
       capture(w.work).io,
@@ -261,7 +287,7 @@ describe("yrd watch, the ending's exit code", () => {
     )
     expect(renderedSnapshot()).toMatchObject({
       pause: expect.stringContaining("paused by @chief"),
-      readNotice: "origin/main changed while component mains were read; read the queue again",
+      readNotice: unavailable.message,
       rows: [],
     })
   })
@@ -345,6 +371,25 @@ describe("yrd watch, the ending's exit code", () => {
     expect(rounds[0]).not.toHaveProperty("changes")
     expect(rounds[1]).not.toHaveProperty("stopped")
     expect(rounds[1]?.changes).toEqual([expect.objectContaining({ branch: "task/good", state: "merged" })])
+
+    const unavailable = directReadUnavailable(w.work)
+    vi.mocked(directMergeCommits).mockRejectedValueOnce(unavailable)
+    const transient = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        transient.io,
+        { command: "list", intervalSeconds: 1, terms: ["task/good"], watch: true },
+        { json: true, workdir: w.workdir },
+      ),
+    ).toBe(0)
+    const unavailableRounds = transient.stdoutWrites().map((output) => JSON.parse(output) as Record<string, unknown>)
+    expect(unavailableRounds[0]).toMatchObject({
+      stopped: { ring: "direct", says: unavailable.message, what: { reason: "direct-read-unavailable" } },
+    })
+    expect(unavailableRounds[0]).not.toHaveProperty("changes")
+    expect(unavailableRounds[1]).not.toHaveProperty("stopped")
+    expect(unavailableRounds[1]?.changes).toEqual([expect.objectContaining({ branch: "task/good", state: "merged" })])
   })
 
   it("keeps refreshing with no selector, because there is no ending to run to, and stops on the signal", async () => {

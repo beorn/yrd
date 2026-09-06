@@ -22,6 +22,7 @@ import { adaptProcessGit, createProcess, gitFailure } from "@yrd/process"
 import {
   directMergeCommits,
   DirectReadChanged,
+  DirectReadUnavailable,
   changeName,
   checksOf,
   claimWorktrees,
@@ -484,7 +485,8 @@ export async function coreQueueCommand(
             workdir,
           })
         } catch (error) {
-          if (!(error instanceof DirectReadChanged)) throw error
+          if (!(error instanceof DirectReadChanged || error instanceof DirectReadUnavailable)) throw error
+          const reason = error instanceof DirectReadUnavailable ? "direct-read-unavailable" : "direct-read-changed"
           const name = queueName(config.target, await remoteUrl(git, config.target.remote))
           return {
             data: {
@@ -493,7 +495,7 @@ export async function coreQueueCommand(
               stopped: {
                 ring: "direct",
                 says: error.message,
-                what: { reason: "direct-read-changed" },
+                what: { reason },
               },
             },
             detail: new Map(),
