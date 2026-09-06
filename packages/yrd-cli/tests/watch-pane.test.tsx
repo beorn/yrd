@@ -117,14 +117,19 @@ describe("the top line", () => {
     expect(text).not.toContain("task/one")
   })
 
-  it("does not complete for a refusal, then completes on the next successful timer read", async () => {
+  it("awaits a slow refusal without overlapping reads, then completes on the next successful timer read", async () => {
     let loads = 0
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
     const completedAt: number[] = []
     const refused = snapshot({
       readNotice: "origin/main changed while component mains were read; read the queue again",
     })
     const load = async () => {
       loads += 1
+      if (loads === 1) await held
       return loads === 1 ? refused : snapshot()
     }
     const onEnding = () => {
@@ -141,6 +146,17 @@ describe("the top line", () => {
       expect(app.text).not.toContain("task/one")
       expect(app.text).not.toContain("change(s)")
 
+      // Immediate fixture reads could not prove the timer awaits a slow load.
+      await act(async () => {
+        await vi.waitFor(() => expect(loads).toBe(1))
+        await new Promise((resolve) => {
+          setTimeout(resolve, 160)
+        })
+      })
+      expect(loads).toBe(1)
+      expect(completedAt).toEqual([])
+      release?.()
+
       await act(async () => {
         await vi.waitFor(() => expect(completedAt).toEqual([2]))
         app.rerender(pane())
@@ -151,6 +167,7 @@ describe("the top line", () => {
       expect(app.text).toContain("1 change(s)")
     } finally {
       await act(async () => {
+        release?.()
         app.unmount()
       })
     }

@@ -392,19 +392,42 @@ describe("yrd watch, the ending's exit code", () => {
     expect(unavailableRounds[1]?.changes).toEqual([expect.objectContaining({ branch: "task/good", state: "merged" })])
   })
 
-  it("keeps refreshing with no selector, because there is no ending to run to, and stops on the signal", async () => {
+  it("awaits a slow read without accumulating refreshes, then stops on the signal", async () => {
     const w = await world()
     await change(w, "task/good", true)
     const run = capture(w.work)
     const stop = new AbortController()
-    stop.abort()
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const reader = vi.mocked(directMergeCommits)
+    const before = reader.mock.calls.length
+    reader.mockImplementationOnce(async () => {
+      await held
+      return []
+    })
 
-    const exit = await coreQueueCommand(
+    const watching = coreQueueCommand(
       w.work,
       run.io,
       { command: "list", intervalSeconds: 1, stop: stop.signal, watch: true },
       { workdir: w.workdir },
     )
+    try {
+      await vi.waitFor(() => expect(reader.mock.calls.length).toBe(before + 1))
+      // A pre-aborted watch never proved what happens across refresh deadlines.
+      // Hold the actual reader boundary across two one-second intervals.
+      await new Promise((resolve) => {
+        setTimeout(resolve, 2100)
+      })
+      expect(reader.mock.calls.length).toBe(before + 1)
+      expect(run.stdout()).toBe("")
+    } finally {
+      stop.abort()
+      release?.()
+    }
+    const exit = await watching
 
     expect(exit, run.stdout()).toBe(0)
     expect(run.stdout()).toContain("task/good")
