@@ -57,7 +57,7 @@ import {
   type ChangeRecord,
 } from "./records.ts"
 import { queueName, readConfig, type Target } from "./config.ts"
-import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
+import { gitEnvironment, gitIn, gitSuperExecution as executeGitSuper, mergeBase, refAt } from "./git.ts"
 import { incidentTrailers, type Incident, type IncidentCode } from "./incident.ts"
 import { openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import type { PauseRecord } from "./pause.ts"
@@ -774,8 +774,10 @@ async function componentPolicy(run: Run, entry: QueueEntry, target: Worktree, ph
       if (tree === undefined) throw new Error(`${row.path} has no materialized authored tree for its landing policy`)
       const path = join(tree.path, row.path)
       const cg = gitIn(path, run.options.process)
+      const remote = (await cg(["remote", "get-url", "origin"])).trim()
+      if (remote === "") throw new Error(`${row.path} origin remote has no URL`)
       inputs.push({
-        ...(await readComponentTarget(cg, row.path)),
+        ...(await readComponentTarget(cg, row.path, remote)),
         authored: authored.has(row.path),
         pin: row.target,
       })
@@ -825,36 +827,12 @@ async function gitSuperExecution(
   argv: readonly string[],
   stdin?: string,
 ): Promise<Readonly<{ exitCode: number; stdout: string; stderr: string }>> {
-  const owned = run.options.process === undefined
-  const process =
-    run.options.process ?? createProcess({ cwd, env: gitEnvironment(run.options.env ?? globalThis.process.env) })
-  try {
-    const execution = await process.run({
-      argv: ["git", "-c", `core.hooksPath=${run.hooksPath}`, "super", "--json", ...argv],
-      cwd,
-      env: gitEnvironment(run.options.env ?? globalThis.process.env),
-      ...(stdin === undefined ? {} : { stdin }),
-    })
-    if (
-      execution.timedOut ||
-      execution.stalled === true ||
-      execution.signal !== null ||
-      execution.sweepFailure !== undefined ||
-      execution.escapedDescendant === true
-    ) {
-      throw new Error(
-        `git-super ${argv[0] ?? "command"} did not settle normally: exit=${String(execution.exitCode)} signal=${execution.signal ?? "none"} timedOut=${String(execution.timedOut)} stalled=${String(execution.stalled === true)}${execution.sweepFailure === undefined ? "" : `; ${execution.sweepFailure}`}`,
-      )
-    }
-    if (execution.outputTruncation !== undefined) {
-      throw new Error(
-        `git-super ${argv[0] ?? "command"} output was truncated: ${JSON.stringify(execution.outputTruncation)}`,
-      )
-    }
-    return execution
-  } finally {
-    if (owned) await process.close()
-  }
+  return executeGitSuper(cwd, argv, {
+    process: run.options.process,
+    env: run.options.env,
+    hooksPath: run.hooksPath,
+    ...(stdin === undefined ? {} : { stdin }),
+  })
 }
 
 function readSuperMergeResult(value: unknown): SuperMergeResult {

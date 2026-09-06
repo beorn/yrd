@@ -15,7 +15,7 @@
  */
 
 import { hostname } from "node:os"
-import { createProcess, type Process } from "@yrd/process"
+import { createProcess, type Process, type ProcessResult } from "@yrd/process"
 import type { Git } from "./records.ts"
 
 /**
@@ -41,6 +41,91 @@ export function gitIn(cwd: string, process?: Process): Git {
     }
     return result.stdout
   }
+}
+
+/** The shared git-super command boundary, retaining both streams and exit.
+ * Queue callers bind their hooks path; read-only callers need no queue state.
+ * Result interpretation belongs to the command's caller, not this transport. */
+export async function gitSuperExecution(
+  cwd: string,
+  argv: readonly string[],
+  options: Readonly<{ process?: Process; env?: NodeJS.ProcessEnv; hooksPath?: string; stdin?: string }> = {},
+): Promise<ProcessResult> {
+  const owned = options.process === undefined
+  const env = gitEnvironment(options.env ?? globalThis.process.env)
+  const process = options.process ?? createProcess({ cwd, env })
+  try {
+    const execution = await process.run({
+      argv: [
+        "git",
+        ...(options.hooksPath === undefined ? [] : ["-c", `core.hooksPath=${options.hooksPath}`]),
+        "super",
+        "--json",
+        ...argv,
+      ],
+      cwd,
+      env,
+      ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+    })
+    if (
+      execution.timedOut ||
+      execution.stalled === true ||
+      execution.signal !== null ||
+      execution.sweepFailure !== undefined ||
+      execution.escapedDescendant === true
+    ) {
+      throw new Error(
+        `git-super ${argv[0] ?? "command"} in ${cwd} did not settle normally: exit=${String(execution.exitCode)} signal=${execution.signal ?? "none"} timedOut=${String(execution.timedOut)} stalled=${String(execution.stalled === true)}${execution.sweepFailure === undefined ? "" : `; ${execution.sweepFailure}`}`,
+        { cause: execution },
+      )
+    }
+    if (execution.outputTruncation !== undefined) {
+      throw new Error(
+        `git-super ${argv[0] ?? "command"} in ${cwd} output was truncated: ${JSON.stringify(execution.outputTruncation)}`,
+        { cause: execution },
+      )
+    }
+    return execution
+  } finally {
+    if (owned) await process.close()
+  }
+}
+
+/** Capture one exact advertised ref. Required absence is Git's exit 2;
+ * optional absence is undefined. Neither form tolerates malformed rows. */
+export async function remoteRef(git: Git, remote: string, ref: string, required = false): Promise<string | undefined> {
+  const rows = (await git(["ls-remote", ...(required ? ["--exit-code"] : []), "--refs", remote, ref]))
+    .split("\n")
+    .map((row) => row.trim())
+    .filter(Boolean)
+  if (rows.length === 0 && !required) return undefined
+  if (rows.length !== 1) throw new Error(`${remote} answered with ${String(rows.length)} values for ${ref}`)
+  const columns = (rows[0] ?? "").split(/\s+/u)
+  const [sha, advertisedRef] = columns
+  if (
+    columns.length !== 2 ||
+    advertisedRef !== ref ||
+    sha === undefined ||
+    !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(sha)
+  ) {
+    throw new Error(`${remote} returned an unreadable ${ref} advertisement: ${rows[0]}`)
+  }
+  return sha
+}
+
+/** Fetch captured objects without moving refs, writing FETCH_HEAD or recursing.
+ * Keep Git's normal prune grace while these unreferenced objects are in use. */
+export async function fetchCapturedObjects(git: Git, remote: string, objects: readonly string[]): Promise<void> {
+  await git([
+    "fetch",
+    "--quiet",
+    "--no-tags",
+    "--no-recurse-submodules",
+    "--no-write-fetch-head",
+    "--refmap=",
+    remote,
+    ...objects,
+  ])
 }
 
 /**
@@ -107,7 +192,11 @@ export class GitExit extends Error {
  * its commit; a `rev:path` names a blob already and git refuses a peel on it,
  * so it is asked for as written.
  */
-export async function refAt(git: Git, ref: string, kind: "commit" | "blob" | "tree" = "commit"): Promise<string | undefined> {
+export async function refAt(
+  git: Git,
+  ref: string,
+  kind: "commit" | "blob" | "tree" = "commit",
+): Promise<string | undefined> {
   try {
     const name = kind === "commit" ? `${ref}^{commit}` : ref
     const out = (await git(["rev-parse", "--verify", "--quiet", name])).trim()
@@ -179,8 +268,9 @@ export async function gitlinkRows(
     const [colonOldMode, newMode, , newSha] = (fields[at] ?? "").split(" ")
     const oldMode = colonOldMode?.replace(/^:/u, "")
     const path = fields[at + 1]
-    if (oldMode === undefined || newMode === undefined || newSha === undefined || path === undefined || path === "")
+    if (oldMode === undefined || newMode === undefined || newSha === undefined || path === undefined || path === "") {
       continue
+    }
     if (oldMode !== "160000" && newMode !== "160000") continue
     rows.push({ newMode, oldMode, path, sha: newSha })
   }

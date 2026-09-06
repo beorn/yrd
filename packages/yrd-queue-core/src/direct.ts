@@ -45,10 +45,7 @@
  * are never authority; external components remain exempt.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
-import { join } from "node:path"
-import { adaptProcessGit, createProcess, type Process } from "@yrd/process"
-import { readCommitSubmodules } from "git-super/commit-graph"
+import { createProcess, type Process } from "@yrd/process"
 import {
   endedKind,
   isLandingIntent,
@@ -62,9 +59,9 @@ import { GitExit, gitEnvironment, gitIn, gitlinkRows } from "./git.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { readQueueRefs, type QueueRead } from "./remote.ts"
 import { tipOf } from "./state.ts"
-import { readComponentTarget } from "./components.ts"
+import { prepareComponents, readComponentTarget } from "./components.ts"
 import { queueName } from "./config.ts"
-import { claimWorktrees, freshWorktree, type PlumbingLog, type Worktree } from "./worktree.ts"
+import type { PlumbingLog } from "./worktree.ts"
 
 export type DirectMerge = Readonly<{
   /** The branch it moved: the queue's target, or `<component path>/main`. */
@@ -197,27 +194,26 @@ async function componentDirectCommits(
   entries: QueueRead,
   context: DirectReadContext,
 ): Promise<readonly DirectMerge[]> {
+  // Plain repositories need only Git. Native tree modes establish absence;
+  // any gitlink, including one without .gitmodules, still goes to Git Super
+  // for descriptor validation rather than disappearing as an empty result.
+  const modes = await git(["ls-tree", "-r", "--format=%(objectmode)", targetSha])
+  if (!modes.split("\n").includes("160000")) return []
   const owned = context.process === undefined
   const process = context.process ?? createProcess({ cwd: context.repo, env: gitEnvironment(globalThis.process.env) })
-  let tree: Worktree | undefined
-  let directory: string | undefined
   try {
-    const modules = await readCommitSubmodules(adaptProcessGit(process), context.repo, targetSha)
+    const modules = await prepareComponents(context.repo, targetSha, context.remote, process)
     if (modules.length === 0) return []
-    const worktrees = join(context.workdir, "worktrees")
-    mkdirSync(worktrees, { recursive: true })
-    directory = mkdtempSync(join(worktrees, "direct-"))
-    claimWorktrees(directory)
-    tree = await freshWorktree(git, context.repo, targetSha, join(directory, "target"), context.plumbing)
+    context.plumbing?.trace?.("prepared component stores", { commit: targetSha, components: modules })
     const updates = entries.flatMap((entry) => {
       const tip = tipOf(entry.change)
       return isLandingIntent(tip) ? landingUpdates(tip) : []
     })
     const found: DirectMerge[] = []
     for (const module of modules) {
-      const componentGit = gitIn(join(tree.path, module.path), context.process)
-      const component = await readComponentTarget(componentGit, module.path)
-      if (component.landing === "external" || component.target === module.target) continue
+      const componentGit = gitIn(module.gitdir, process)
+      const component = await readComponentTarget(componentGit, module.path, module.url)
+      if (component.landing === "external" || component.target === module.gitlink) continue
       const identity = queueName({ remote: component.remote, branch: "main" }, component.remote)
       const explained = updates.some(
         (row) =>
@@ -251,7 +247,7 @@ async function componentDirectCommits(
         parents,
         subject,
         target: `${module.path}/main`,
-        why: `its protected tip is neither root pin ${module.target} nor the exact source of a current landing intent`,
+        why: `its protected tip is neither root pin ${module.gitlink} nor the exact source of a current landing intent`,
       })
     }
     // An intent can be published after the caller captured the queue and
@@ -270,12 +266,7 @@ async function componentDirectCommits(
     }
     return found
   } finally {
-    try {
-      if (tree !== undefined) await tree.remove()
-      if (directory !== undefined) rmSync(directory, { recursive: true, force: true })
-    } finally {
-      if (owned) await process.close()
-    }
+    if (owned) await process.close()
   }
 }
 

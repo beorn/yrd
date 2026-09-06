@@ -18,7 +18,7 @@
  */
 
 import { changeOf, readRecords, recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
-import { GitExit, isAncestor } from "./git.ts"
+import { fetchCapturedObjects, GitExit, isAncestor } from "./git.ts"
 import { parsePause, type PauseRecord } from "./pause.ts"
 import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
@@ -89,16 +89,7 @@ export async function readQueue(
   // Empty refmaps and no FETCH_HEAD are what make concurrent readers observers
   // rather than writers. The target makes this list non-empty.
   try {
-    await git([
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      "--no-recurse-submodules",
-      "--no-write-fetch-head",
-      "--refmap=",
-      remote,
-      ...objectIds,
-    ])
+    await fetchCapturedObjects(git, remote, [...objectIds])
   } catch (error) {
     const detail = error instanceof GitExit ? error.detail : error instanceof Error ? error.message : String(error)
     throw new CapturedQueueObjectsUnavailable(remote, target, targetSha, detail, error)

@@ -8,6 +8,7 @@
 
 import { ABSENT, RECORD_FORMAT, commitTrailers, type Git } from "./records.ts"
 import { pauseRef } from "./refs.ts"
+import { fetchCapturedObjects, remoteRef } from "./git.ts"
 
 export type PauseKind = "paused" | "resumed"
 
@@ -73,11 +74,11 @@ export async function requireResumed(git: Git, remote: string, queue: string): P
  */
 export async function readPause(git: Git, remote: string, queue: string): Promise<PauseRecord | undefined> {
   const ref = pauseRef(queue)
-  const advertised = await pauseTip(git, remote, ref)
+  const advertised = await remoteRef(git, remote, ref)
   if (advertised === undefined) return undefined
   // These objects have no local ref: retain Git's prune grace while readers
   // use them, never gc --prune=now in a workdir with an active reading.
-  await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, advertised])
+  await fetchCapturedObjects(git, remote, [advertised])
   return parsePause(git, advertised, `${remote} ${ref}`)
 }
 
@@ -124,20 +125,6 @@ export async function pauseFence(
 export function pauseLine(record: PauseRecord): string {
   const since = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "long" }).format(record.at)
   return `${record.kind} by ${record.by} since ${since}: ${record.reason}`
-}
-
-async function pauseTip(git: Git, remote: string, ref: string): Promise<string | undefined> {
-  const rows = (await git(["ls-remote", "--refs", remote, ref]))
-    .split("\n")
-    .map((row) => row.trim())
-    .filter(Boolean)
-  if (rows.length === 0) return undefined
-  if (rows.length !== 1) throw new Error(`${remote} answered with ${String(rows.length)} values for ${ref}`)
-  const [sha, advertisedRef] = (rows[0] ?? "").split(/\s+/u)
-  if (advertisedRef !== ref || sha === undefined || !/^[0-9a-f]+$/u.test(sha)) {
-    throw new Error(`${remote} returned an unreadable ${ref} advertisement: ${rows[0]}`)
-  }
-  return sha
 }
 
 /** Decode an already-fetched pause object captured by a reader or writer. */
