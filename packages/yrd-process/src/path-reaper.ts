@@ -408,6 +408,7 @@ async function observeProcessIdentity(
     }
   } catch (error) {
     if (processEntryUnavailability(error) === "exited") return { exited: true }
+    // silent-fallback-allow: identity is optional decoration; pid, denied sources, and incomplete coverage remain in the refusal.
     return {}
   }
 }

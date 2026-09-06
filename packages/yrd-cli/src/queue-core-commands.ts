@@ -259,6 +259,7 @@ export async function coreQueueCommand(
       outcome = await queueRun(runOptions(repo, declared, workdir, options.env, options.log))
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
+      // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the service return exit 2.
       return undefined
     }
     emit(io, options.json, outcome, describeRun(outcome))
@@ -1343,14 +1344,20 @@ async function readListing(
   return { all, journals, queue }
 }
 
-/** A commit's committer instant, when this repository has it; undefined for anything git cannot resolve to a commit. */
+/** A commit's committer instant; undefined only when the name is absent, while unreadable or malformed commits throw. */
 async function instantOfCommit(git: Git, text: string): Promise<Date | undefined> {
-  try {
-    const seconds = (await git(["log", "-1", "--format=%ct", `${text}^{commit}`, "--"])).trim()
-    return seconds === "" ? undefined : new Date(Number(seconds) * 1000)
-  } catch {
-    return undefined
+  const commit = await refAt(git, text)
+  if (commit === undefined) return undefined
+  const seconds = (await git(["log", "-1", "--format=%ct", commit, "--"])).trim()
+  if (!/^\d+$/u.test(seconds)) {
+    throw new Error(`commit ${commit}: git returned invalid committer timestamp ${JSON.stringify(seconds)}`)
   }
+  const milliseconds = Number(seconds) * 1000
+  const instant = new Date(milliseconds)
+  if (!Number.isSafeInteger(milliseconds) || Number.isNaN(instant.getTime())) {
+    throw new Error(`commit ${commit}: git returned invalid committer timestamp ${JSON.stringify(seconds)}`)
+  }
+  return instant
 }
 
 /**

@@ -198,7 +198,7 @@ export async function submitFromBay(repo: string, bayPath: string): Promise<Subm
     id = opened.opened
     branch = opened.branch
   } catch {
-    // Not JSON — the exit code and the text are the evidence.
+    // silent-fallback-allow: non-JSON test output leaves id/branch absent; exit code and full stdout/stderr remain in report.
   }
   return { exitCode, stdout: submitted.stdout(), stderr: submitted.stderr(), id, branch, report }
 }

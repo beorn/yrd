@@ -23,7 +23,14 @@ const NOW = new Date("2026-09-03T12:00:00.000Z")
 
 /** A workdir with one run journal started `ageMs` ago, its header record, and optionally a `.pid` file. */
 function workdirWith(
-  options: Readonly<{ ageMs: number; pid?: number; header?: boolean; lastWriteAgoMs?: number }>,
+  options: Readonly<{
+    ageMs: number
+    pid?: number
+    pidDirectory?: boolean
+    pidText?: string
+    header?: boolean | string
+    lastWriteAgoMs?: number
+  }>,
 ): string {
   const workdir = mkdtempSync(join(tmpdir(), "yrd-watch-runner-"))
   const logs = join(workdir, "logs")
@@ -31,15 +38,19 @@ function workdirWith(
   const id = runId(new Date(NOW.getTime() - options.ageMs))
   const path = join(logs, `${id}.jsonl`)
   const header =
-    options.header === false
-      ? "not a record\n"
-      : `${JSON.stringify({ at: NOW.toISOString(), checks: ["typecheck", "test"], gitlink: "3c285a41af46".padEnd(40, "0"), kind: "run", queue: "main", run: id, target: "main" })}\n`
+    typeof options.header === "string"
+      ? options.header
+      : options.header === false
+        ? "not a record\n"
+        : `${JSON.stringify({ at: NOW.toISOString(), checks: ["typecheck", "test"], gitlink: "3c285a41af46".padEnd(40, "0"), kind: "run", queue: "main", run: id, target: "main" })}\n`
   writeFileSync(path, header)
   const lastWrite = new Date(NOW.getTime() - (options.lastWriteAgoMs ?? 0))
   utimesSync(path, lastWrite, lastWrite)
-  if (options.pid !== undefined) {
+  if (options.pid !== undefined || options.pidText !== undefined || options.pidDirectory === true) {
     mkdirSync(join(workdir, "worktrees", id), { recursive: true })
-    writeFileSync(join(workdir, "worktrees", id, ".pid"), `${String(options.pid)}\n`)
+    const pidPath = join(workdir, "worktrees", id, ".pid")
+    if (options.pidDirectory === true) mkdirSync(pidPath)
+    else writeFileSync(pidPath, options.pidText ?? `${String(options.pid)}\n`)
   }
   return workdir
 }
@@ -65,13 +76,37 @@ describe("readRunnerFacts", () => {
     expect(latest.gitlink?.startsWith("3c285a41af46")).toBe(true)
   })
 
-  it("reads a dead pid as not alive and a journal without a header record as a run with no header", () => {
+  it("reads a dead pid as not alive", () => {
     // 2147483647 is the largest pid Linux can hand out and is not ours.
     const dead = readRunnerFacts(workdirWith({ ageMs: 60_000, pid: 2_147_483_647 }))
     expect(dead.latest?.alive).toBe(false)
-    const headless = readRunnerFacts(workdirWith({ ageMs: 60_000, header: false }))
-    expect(headless.latest?.target).toBeUndefined()
-    expect(headless.latest?.alive).toBe(false)
+  })
+
+  it.each([
+    ["invalid JSON", "not a record\n"],
+    ["an empty record", "\n"],
+    ["the wrong record kind", `${JSON.stringify({ kind: "message" })}\n`],
+  ])("refuses a required run journal whose first record is %s", (_case, header) => {
+    const workdir = workdirWith({ ageMs: 60_000, header })
+    expect(() => readRunnerFacts(workdir)).toThrow(/run journal .* first record/u)
+  })
+
+  it("refuses a newest run journal that cannot be read", () => {
+    const workdir = mkdtempSync(join(tmpdir(), "yrd-watch-runner-"))
+    const logs = join(workdir, "logs")
+    mkdirSync(logs)
+    const path = join(logs, `${runId(new Date(NOW.getTime() - 60_000))}.jsonl`)
+    mkdirSync(path)
+
+    expect(() => readRunnerFacts(workdir)).toThrow(`run journal ${path}`)
+  })
+
+  it("refuses malformed and unreadable run pid files instead of calling the runner idle", () => {
+    const malformed = workdirWith({ ageMs: 60_000, pidText: "42junk\n" })
+    expect(() => readRunnerFacts(malformed)).toThrow(/run pid file .* positive safe integer/u)
+
+    const unreadable = workdirWith({ ageMs: 60_000, pidDirectory: true })
+    expect(() => readRunnerFacts(unreadable)).toThrow(/run pid file .* cannot be read/u)
   })
 })
 

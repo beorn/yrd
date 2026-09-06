@@ -174,4 +174,20 @@ describe("yrd queue stats through the process entry", () => {
     expect(badBy.exitCode).toBe(2)
     expect(badBy.stderr).toContain("--by takes submitter or branch, not author")
   })
+
+  it("fails loudly when a resolved --since commit has an invalid timestamp", async () => {
+    const work = await queueWithOneChangeAndOnePush()
+    const git = gitIn(work)
+    const tree = (await git(["rev-parse", "main^{tree}"])).trim()
+    const malformed = (
+      await git(
+        ["hash-object", "--literally", "-t", "commit", "-w", "--stdin"],
+        `tree ${tree}\nauthor yrd <queue@yrd.test> 0 +0000\ncommitter yrd <queue@yrd.test> nope +0000\n\ninvalid time\n`,
+      )
+    ).trim()
+
+    const invalid = await yrd(work, "queue", "stats", "--since", malformed)
+    expect(invalid.exitCode, invalid.report).toBe(2)
+    expect(invalid.stderr).toContain(`commit ${malformed}: git returned invalid committer timestamp`)
+  })
 })

@@ -96,19 +96,25 @@ function firstRecord(path: string): Pick<RunnerRun, "target" | "gitlink" | "queu
   try {
     const text = readFileSync(path, "utf8")
     line = text.slice(0, text.indexOf("\n") === -1 ? text.length : text.indexOf("\n"))
-  } catch {
-    return {}
+  } catch (error) {
+    throw new Error(`run journal ${path}: required first record cannot be read: ${errorDetail(error)}`, {
+      cause: error,
+    })
   }
-  if (line.trim() === "") return {}
+  if (line.trim() === "") throw new Error(`run journal ${path}: first record is empty`)
   let parsed: unknown
   try {
     parsed = JSON.parse(line)
-  } catch {
-    return {}
+  } catch (error) {
+    throw new Error(`run journal ${path}: first record is not JSON: ${errorDetail(error)}`, { cause: error })
   }
-  if (typeof parsed !== "object" || parsed === null) return {}
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(`run journal ${path}: first record must be a run object`)
+  }
   const record = parsed as Record<string, unknown>
-  if (record.kind !== "run") return {}
+  if (record.kind !== "run") {
+    throw new Error(`run journal ${path}: first record must have kind "run", got ${JSON.stringify(record.kind)}`)
+  }
   return {
     ...(typeof record.target === "string" ? { target: record.target } : {}),
     ...(typeof record.gitlink === "string" ? { gitlink: record.gitlink } : {}),
@@ -120,12 +126,29 @@ function firstRecord(path: string): Pick<RunnerRun, "target" | "gitlink" | "queu
 }
 
 function readPid(path: string): number | undefined {
+  let text: string
   try {
-    const pid = Number.parseInt(readFileSync(path, "utf8").trim(), 10)
-    return Number.isInteger(pid) && pid > 0 ? pid : undefined
-  } catch {
-    return undefined
+    text = readFileSync(path, "utf8").trim()
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      // silent-fallback-allow: the run may remove its pid file after existsSync; absence means no live run while every other read failure throws.
+      return undefined
+    }
+    throw new Error(`run pid file ${path}: cannot be read: ${errorDetail(error)}`, { cause: error })
   }
+  const pid = Number(text)
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error(`run pid file ${path}: expected a positive safe integer, got ${JSON.stringify(text)}`)
+  }
+  return pid
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined
+}
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function running(pid: number): boolean {
