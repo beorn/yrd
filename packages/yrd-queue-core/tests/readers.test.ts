@@ -140,6 +140,55 @@ describe("a run's journal, read back", () => {
     expect(views[0]?.result).toBeUndefined()
   })
 
+  it.each(["change-ref-taken", "change-ref-contended"] as const)(
+    "keeps a merged decision when a legacy %s sent-record race diagnostic follows it",
+    (reason) => {
+      const at = new Date("2026-09-03T20:00:00.000Z")
+      const branch = "task/one"
+      const head = "abc123"
+      const { dir } = journalDir(
+        [
+          { branch, decision: "merged", head, kind: "change" },
+          {
+            branch,
+            decision: "sent",
+            head,
+            intended: "record123",
+            kind: "change",
+            next: "git log --oneline --left-right record123...remote456",
+            reason,
+            ref: "refs/yrd/changes/task/one@abc123",
+            relation: "behind",
+            remote: "remote456",
+            text: "the sent-record lease raced",
+          },
+          { branch, head, kind: "message", says: "merged", text: "merged task/one" },
+        ],
+        at,
+      )
+
+      const read = () => readJournals(dir)
+      expect(read).not.toThrow()
+      const runs = read().runs.get(journalKey(branch, head))
+      expect(runs?.[0]?.decision).toBe("merged")
+      expect(runs?.[0]?.reason).toBeUndefined()
+    },
+  )
+
+  it("still refuses a partial incident outside a change-ref race diagnostic", () => {
+    const { dir } = journalDir([
+      {
+        branch: "task/one",
+        decision: "stuck",
+        head: "abc123",
+        kind: "change",
+        next: "repair the queue",
+      },
+    ])
+
+    expect(() => readJournals(dir)).toThrow("incomplete incident")
+  })
+
   it("an abandoned older run is unmeasured after a newer run, while the newest unended run stays live", () => {
     // A single decided-run fixture misses a process that died before writing
     // its decision. Serialization makes a subsequent run proof it is no longer live.

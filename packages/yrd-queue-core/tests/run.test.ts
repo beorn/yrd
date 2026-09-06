@@ -611,12 +611,13 @@ describe("a queue run", () => {
         }),
       )
       const diagnostic = logRecords(outcome).findLast((record) => record.reason === "change-ref-taken")
+      expect(diagnostic).not.toHaveProperty("next")
       expect(diagnostic?.text).toBe(
-        `${ref}: remote ${concurrent}, intended ${intended} (${relation})${relation === "unknown" ? "; ancestry read failed: diagnostic ancestry read unavailable" : ""}; inspect: ${String(diagnostic?.next)}`,
+        `${ref}: remote ${concurrent}, intended ${intended} (${relation})${relation === "unknown" ? "; ancestry read failed: diagnostic ancestry read unavailable" : ""}; inspect: ${String(diagnostic?.inspect)}`,
       )
       // The diagnostic's read is executable in the emitting state, using the
       // exact fetched objects even though the remote ref has moved again.
-      const read = spawnSync("sh", ["-c", String(diagnostic?.next)], { encoding: "utf8" })
+      const read = spawnSync("sh", ["-c", String(diagnostic?.inspect)], { encoding: "utf8" })
       expect(read.status, read.stderr).toBe(0)
       if (relation === "ahead") expect(read.stdout).toMatch(/^</mu)
       else expect(read.stdout).toMatch(/^>/mu)

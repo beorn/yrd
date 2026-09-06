@@ -292,10 +292,17 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     if (Number.isNaN(at.getTime())) continue
     const change = held(branch, head, at)
     if (record.kind === "change" && typeof record.decision === "string") {
-      change.decision = record.decision
-      change.reason = typeof record.reason === "string" ? record.reason : undefined
+      const reason = typeof record.reason === "string" ? record.reason : undefined
+      const changeRefDiagnostic = reason === "change-ref-taken" || reason === "change-ref-contended"
+      // These records describe a refused bookkeeping write, not a new queue
+      // decision. Legacy diagnostics used the incident-named `next` field, so
+      // recognize them before incident validation and retain an earlier result.
+      if (!changeRefDiagnostic || change.decision === undefined) {
+        change.decision = record.decision
+        change.reason = reason
+      }
       const { code, subject, via, evidence, next, owner } = record
-      if ([code, subject, via, evidence, next, owner].some((value) => value !== undefined)) {
+      if (!changeRefDiagnostic && [code, subject, via, evidence, next, owner].some((value) => value !== undefined)) {
         if (
           typeof code !== "string" ||
           typeof subject !== "string" ||

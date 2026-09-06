@@ -1458,7 +1458,7 @@ export async function writeRecord(run: Run, write: WriteRecord): Promise<string 
       }
       // Both objects exist here now. After Git's prune window the intended
       // object can disappear; the stored OIDs remain the durable evidence.
-      const next = `git -C '${run.options.repo.replaceAll("'", "'\\''")}' log --oneline --left-right ${record}...${now}`
+      const inspect = `git -C '${run.options.repo.replaceAll("'", "'\\''")}' log --oneline --left-right ${record}...${now}`
       const diagnostic = {
         branch: write.change.branch,
         decision: write.kind,
@@ -1466,12 +1466,12 @@ export async function writeRecord(run: Run, write: WriteRecord): Promise<string 
         head: write.change.head,
         intended: record,
         kind: "change" as const,
-        next,
+        inspect,
         reason: "change-ref-taken",
         ref,
         relation,
         remote: now,
-        text: `${ref}: remote ${now}, intended ${record} (${relation})${relationError === undefined ? "" : `; ancestry read failed: ${relationError}`}; inspect: ${next}`,
+        text: `${ref}: remote ${now}, intended ${record} (${relation})${relationError === undefined ? "" : `; ancestry read failed: ${relationError}`}; inspect: ${inspect}`,
       }
       run.log.write(diagnostic)
       if (attempt === 1) run.log.write({ ...diagnostic, reason: "change-ref-contended" })
