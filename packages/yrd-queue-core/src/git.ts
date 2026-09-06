@@ -75,13 +75,13 @@ export async function gitSuperExecution(
       execution.escapedDescendant === true
     ) {
       throw new Error(
-        `git-super ${argv[0] ?? "command"} in ${cwd} did not settle normally: exit=${String(execution.exitCode)} signal=${execution.signal ?? "none"} timedOut=${String(execution.timedOut)} stalled=${String(execution.stalled === true)}${execution.sweepFailure === undefined ? "" : `; ${execution.sweepFailure}`}`,
+        `git-super ${argv.join(" ")} in ${cwd} did not settle normally: exit=${String(execution.exitCode)} signal=${execution.signal ?? "none"} timedOut=${String(execution.timedOut)} stalled=${String(execution.stalled === true)}${execution.sweepFailure === undefined ? "" : `; ${execution.sweepFailure}`}`,
         { cause: execution },
       )
     }
     if (execution.outputTruncation !== undefined) {
       throw new Error(
-        `git-super ${argv[0] ?? "command"} in ${cwd} output was truncated: ${JSON.stringify(execution.outputTruncation)}`,
+        `git-super ${argv.join(" ")} in ${cwd} output was truncated: ${JSON.stringify(execution.outputTruncation)}`,
         { cause: execution },
       )
     }

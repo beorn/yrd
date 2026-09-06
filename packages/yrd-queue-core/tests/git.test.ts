@@ -3,13 +3,62 @@ import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { createProcess, type Process, type ProcessResult } from "@yrd/process"
 import { gitIn } from "../src/git.ts"
+import { prepareComponents } from "../src/components.ts"
 
 function temporaryRoot(name: string): string {
   return mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), `yrd-git-runner-${name}-`))
 }
 
 describe("the git runner", () => {
+  // These are process-protocol failures, not a fake Git store. A successful
+  // real-repository journey cannot prove what survives a broken CLI result.
+  it.each([
+    { name: "nonzero exit", exitCode: 2, stdout: '{"state":"failed"}', timedOut: false },
+    { name: "malformed JSON", exitCode: 0, stdout: '{"state":', timedOut: false },
+    { name: "timeout", exitCode: 0, stdout: '{"state":"unchanged"}', timedOut: true },
+  ])("retains the command identity and both raw streams after $name during component preparation", async (fault) => {
+    const root = temporaryRoot("prepare-protocol")
+    const commit = "a".repeat(40)
+    const response: ProcessResult = {
+      durationMs: 1,
+      exitCode: fault.exitCode,
+      signal: null,
+      stderr: "component preparation diagnostic",
+      stdout: fault.stdout,
+      stalled: false,
+      timedOut: fault.timedOut,
+    }
+    await using real = createProcess({ cwd: root })
+    const failing: Process = {
+      ...real,
+      async run(request) {
+        expect(request.argv).toEqual([
+          "git",
+          "super",
+          "--json",
+          "--repo",
+          root,
+          "submodule",
+          "prepare",
+          commit,
+          "--remote",
+          "origin",
+        ])
+        return response
+      },
+    }
+
+    const preparation = prepareComponents(root, commit, "origin", failing)
+
+    await expect(preparation).rejects.toMatchObject({
+      cause: response,
+      message: expect.stringContaining("submodule prepare"),
+    })
+    await expect(preparation).rejects.toThrow(root)
+  })
+
   it("never recurses a fetch or a push into submodules, whatever the repository's config says", async () => {
     // A superproject with one submodule whose remote is unreachable, under
     // `submodule.recurse=true` as the root's checkout has it. A plain fetch
@@ -38,7 +87,17 @@ describe("the git runner", () => {
     // the submodule's remote does not have. Under `submodule.recurse=true` a
     // plain push recurses on demand into the submodule, whose remote is
     // unreachable, and fails; the runner's push does not recurse.
-    plain(join(main, "sub"), ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "sub moved"])
+    plain(join(main, "sub"), [
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "sub moved",
+    ])
     plain(main, ["add", "sub"])
     plain(main, ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "main moves the gitlink"])
     const pushControl = plain(main, ["push", "-q", "origin", "main:refs/heads/control"])

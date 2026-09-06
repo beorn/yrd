@@ -34,6 +34,7 @@ import {
   watchRows,
 } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
+import { readComponentTarget, type ComponentTarget } from "../src/components.ts"
 
 const roots: string[] = []
 
@@ -1046,6 +1047,42 @@ describe("settling gitlinks", () => {
     expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned component fetch evidence\n")
   })
 
+  // The queue-ref race proof does not cover component policy. The first
+  // reader is paused after its real advertisement while a second observes a
+  // newer policy; each must finish on its own captured object, not shared refs.
+  it("interleaved component readers preserve captured policy, refs and FETCH_HEAD despite a stale origin", async () => {
+    const w = await world()
+    const repository = join(w.work, "component")
+    const remote = join(w.work, "..", "component.git")
+    await using process = createProcess({ cwd: repository })
+    const git = gitIn(repository, process)
+    await git(["remote", "set-url", "origin", join(w.work, "..", "not-the-captured-remote")])
+    const refs = ["for-each-ref", "--format=%(refname)%00%(objectname)"]
+    const before = await git(refs)
+    const fetchHead = (await git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
+    writeFileSync(fetchHead, "caller-owned component fetch evidence\n")
+    const firstTip = await advanceComponent(w, "first reader captures product policy")
+    let second: ComponentTarget | undefined
+    let secondTip: string | undefined
+    const interleaved: Git = async (args, input) => {
+      const result = await git(args, input)
+      if (args[0] === "ls-remote") {
+        writeFileSync(join(w.work, "..", "component-work", ".yrd.yml"), "landing: external\n")
+        secondTip = await advanceComponent(w, "second reader captures external policy")
+        second = await readComponentTarget(git, "component", remote)
+      }
+      return result
+    }
+
+    const first = await readComponentTarget(interleaved, "component", remote)
+
+    expect(first).toMatchObject({ landing: "product", remote, repository: "component", target: firstTip })
+    expect(second).toMatchObject({ landing: "external", remote, repository: "component", target: secondTip })
+    expect(secondTip).not.toBe(firstTip)
+    expect(await git(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned component fetch evidence\n")
+  })
+
   it.each([
     ["a new change ref", async (w: World, direct: string) => submitFile(w, `task/direct-read-${direct.slice(0, 8)}`)],
     ["a moved root", async (w: World, direct: string) => gitlinkAroundQueue(w, direct)],
@@ -1108,8 +1145,8 @@ describe("settling gitlinks", () => {
           const componentFetch =
             request.argv[0] === "git" &&
             request.argv[1] === "fetch" &&
-            request.argv.includes("--no-tags") &&
-            request.argv.includes("+refs/heads/main:refs/remotes/origin/main")
+            request.argv.includes("--no-write-fetch-head") &&
+            request.argv.includes(protectedMain)
           const queueFence =
             componentMainRead &&
             request.argv[0] === "git" &&
@@ -1130,8 +1167,8 @@ describe("settling gitlinks", () => {
           const result = await real.run(request)
           if (
             request.argv[0] === "git" &&
-            request.argv[1] === "rev-parse" &&
-            request.argv[2] === "refs/remotes/origin/main^{commit}"
+            request.argv[1] === "show" &&
+            request.argv[2] === `${protectedMain}:.yrd.yml`
           ) {
             componentMainRead = true
           }
