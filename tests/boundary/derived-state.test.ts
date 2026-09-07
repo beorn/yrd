@@ -345,35 +345,14 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
       ],
     })
     const red = await submitOneCommit(repo, "red")
-    const green = await submitOneCommit(repo, "green")
     const outcome = await queueRunOnce(repo)
     expect(outcome.exitCode, outcome.report).toBe(1)
-    const next = await queueRunOnce(repo)
-    expect(next.exitCode, next.report).toBe(0)
 
-    // Default history is separately broken: historical-run-rows-use-latest-result pairs old rows with the latest result.
-    const { rows, result } = await changesListed(repo, true)
-    const failed = rowFor(rows, red.branch, result.report)
-    const passed = rowFor(rows, green.branch, result.report)
-    expect(stateOf(failed, result.report)).toBe("failed")
-    expect(stateOf(passed, result.report)).toBe("merged")
-    expect(String(failed.result), result.report).toContain("fail")
-    expect(failed.log, result.report).not.toBe(passed.log)
-    for (const [row, change, verdict] of [
-      [failed, red, "FAIL"],
-      [passed, green, "PASS"],
-    ] as const) {
-      expect(typeof row.log, result.report).toBe("string")
-      expect(String(row.log), result.report).toContain(`${change.branch}@${change.headSha}`)
-      expect(typeof row.run, result.report).toBe("string")
-      expect(String(row.log), result.report).toContain(String(row.run))
-      await expect(readFile(String(row.log), "utf8"), result.report).resolves.toBe(
-        `${verdict} ${change === red ? "red" : "green"}\n`,
-      )
-    }
+    const first = await changesListed(repo, true)
+    const failed = rowFor(first.rows, red.branch, first.result.report)
 
-    // Retrying the SAME head needs another run directory, not another name
-    // for this change. Collapse to change-only and wx refuses this run.
+    // Retry the SAME head before another change advances main. A stale submit
+    // now refuses, while this case requires two run directories for one head.
     const retry = await submitFromBay(repo, red.bayPath)
     expect(retry.exitCode, retry.report).toBe(0)
     const retried = await queueRunOnce(repo)
@@ -384,9 +363,31 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     expect(redAgain.log).not.toBe(failed.log)
     expect(redAgain.run).not.toBe(failed.run)
     expect(String(redAgain.log)).toContain(String(redAgain.run))
-    await expect(readFile(String(redAgain.log), "utf8")).resolves.toBe("FAIL red\n")
-    await expect(readFile(String(failed.log), "utf8")).resolves.toBe("FAIL red\n")
-    await expect(readFile(String(passed.log), "utf8")).resolves.toBe("PASS green\n")
+
+    const green = await submitOneCommit(repo, "green")
+    const next = await queueRunOnce(repo)
+    expect(next.exitCode, next.report).toBe(0)
+
+    // Default history is separately broken: historical-run-rows-use-latest-result pairs old rows with the latest result.
+    const { rows, result } = await changesListed(repo, true)
+    const passed = rowFor(rows, green.branch, result.report)
+    expect(stateOf(failed, result.report)).toBe("failed")
+    expect(stateOf(passed, result.report)).toBe("merged")
+    expect(String(failed.result), result.report).toContain("fail")
+    expect(failed.log, result.report).not.toBe(passed.log)
+    for (const [row, change, verdict] of [
+      [failed, red, "FAIL"],
+      [redAgain, red, "FAIL"],
+      [passed, green, "PASS"],
+    ] as const) {
+      expect(typeof row.log, result.report).toBe("string")
+      expect(String(row.log), result.report).toContain(`${change.branch}@${change.headSha}`)
+      expect(typeof row.run, result.report).toBe("string")
+      expect(String(row.log), result.report).toContain(String(row.run))
+      await expect(readFile(String(row.log), "utf8"), result.report).resolves.toBe(
+        `${verdict} ${change === red ? "red" : "green"}\n`,
+      )
+    }
   })
 
   it("merged rows go below the changes in line", async () => {
