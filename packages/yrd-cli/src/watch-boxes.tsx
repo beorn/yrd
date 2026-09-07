@@ -296,7 +296,9 @@ export function StatsBox({
       {STATS_ROWS.map((row) =>
         line(row.key, row.label, (bucket) => countCell(bucket, row.key), STATS_ROW_COLOR[row.key]),
       )}
-      {timeRows ? line("time", "TIME", () => "", "$fg-muted", true) : null}
+      {/* The heading names the statistic: these rows are medians, not means or sums,
+          and a reader cannot tell which from the numbers alone. Fits STATS_LABEL_WIDTH. */}
+      {timeRows ? line("time", "MEDIAN", () => "", "$fg-muted", true) : null}
       {timeRows
         ? STATS_TIME_ROWS.map((row) => line(row.key, row.label, (bucket) => timeCell(bucket, row.key), "$fg-muted"))
         : null}
