@@ -118,7 +118,7 @@ describe("`yrd list` is `yrd queue list`", () => {
     expect(aliasHelp.stdout).toContain("[filter...]")
   })
 
-  it("is listed as an alias in `yrd --help`, with `yrd queue list` as the canonical spelling", async () => {
+  it("teaches aliases, the author workflow, and both submission spellings in help", async () => {
     const work = await queueWithOneChange()
 
     const help = await yrd(work, "--help")
@@ -127,5 +127,46 @@ describe("`yrd list` is `yrd queue list`", () => {
     expect(aliases).toMatch(/yrd list\s+yrd queue list/u)
     // The examples keep teaching the canonical form.
     expect(help.stdout).toContain("$ yrd queue list")
+
+    // 24166: successful help parsing can stay green after its workflow or
+    // submit explanation disappears. Assert the explanations at the CLI seam.
+    expect(help.stdout).toContain("Workflow:")
+    const workflow = help.stdout.slice(help.stdout.indexOf("Workflow:"), help.stdout.indexOf("Aliases:"))
+    expect([...workflow.matchAll(/^\s+([1-5])\.\s+/gmu)].map((match) => match[1])).toEqual(["1", "2", "3", "4", "5"])
+    const workflowText = workflow.replace(/\s+/gu, " ")
+    for (const meaning of [
+      "git fetch",
+      "git rebase",
+      "Verify and commit",
+      "git super",
+      "does not queue",
+      "yrd submit",
+    ]) {
+      expect(workflowText).toContain(meaning)
+    }
+
+    for (const spelling of [["submit"], ["queue", "submit"]]) {
+      const submitted = await yrd(work, ...spelling, "--help")
+      expect(submitted.exitCode, submitted.report).toBe(0)
+      expect(submitted.stdout).toContain("On submit:")
+      const steps = submitted.stdout.slice(
+        submitted.stdout.indexOf("On submit:"),
+        submitted.stdout.indexOf("Before submitting:"),
+      )
+      expect([...steps.matchAll(/^\s+([1-5])\.\s+/gmu)].map((match) => match[1])).toEqual(["1", "2", "3", "4", "5"])
+      const explanation = steps.replace(/\s+/gu, " ")
+      for (const meaning of [
+        "without pulling or integrating",
+        "stale branches by default",
+        "--rebase",
+        "never auto-stashes or updates other branch refs",
+        "exact resulting commit after any rebase",
+        "atomically push",
+        "leases",
+        "queued; checks and the merge run later",
+      ]) {
+        expect(explanation, submitted.report).toContain(meaning)
+      }
+    }
   })
 })

@@ -2,7 +2,7 @@
 
 Yrd is a merge queue that lives inside a Git repository. A queue runs on a branch, `main` for most repositories. A change is another branch, submitted to that queue.
 
-- **Submit a branch, get a result.** You push a branch and submit it. The queue checks it in a fresh checkout, merges it into the queue branch, and tells you what happened.
+- **Submit a branch, get a result.** You commit your changes on a branch and submit it. The queue checks it in a fresh checkout, merges it into the queue branch, and tells you what happened.
 - **No server, no database, no web page.** Everything the queue knows is a commit on a ref in the repository, under `refs/yrd/changes/`. Any clone that fetches those refs reads the whole state with plain `git log`.
 - **One process, one machine.** By rule it is the only writer of the queue branch. A direct merge is detected and reported, not prevented.
 - **Superprojects.** Yrd also queues a repository of repositories held together by submodules, which no other merge queue we know of does. See [Superprojects](#superprojects).
@@ -46,9 +46,23 @@ yrd env open|list                                                 a checkout of 
 
 Every command takes `--json`. `yrd submit` refuses the queue branch itself: it is not a change. While paused, submit and dry-run refuse with who paused the queue, when, why, and the resume command; already-submitted changes keep their place. `yrd queue up` continues ticking and does no checking or merging until resume. `yrd check` checks out HEAD afresh, so uncommitted changes are not seen.
 
-Submit first checks that the change contains the target's current tip. A stale branch is refused with its merge base and the expected target commit, before any record or ref is written. Rebase it yourself, or run `yrd submit --rebase` from that branch with a clean worktree and index, including untracked files. Conflicts remain for you to resolve with Git; no change opens until you finish and submit again. A head already contained by the target has nothing new to submit.
+**Your workflow.** Once your changes are committed, work from your own branch. These examples use `fix-login` and the default target, `origin#main`; substitute your branch and configured target.
 
-`--dry-run` uses the same checks. With `--rebase`, it describes the required rewrite without performing it or predicting the resulting commit. These checks capture a target commit at one instant; the queue revalidates at merge.
+1. **Update your branch.** From a clean checkout of `fix-login`, run `git fetch origin main`, then `git rebase FETCH_HEAD`. Resolve any conflicts with Git before continuing.
+2. **Verify and commit.** Run your project's checks against the updated branch and commit any follow-up changes. Use `git super status` and `git super diff` to inspect changes across submodule boundaries in a superproject.
+3. **Publish if useful.** `git push origin HEAD:refs/heads/fix-login` shares or preserves the branch. In a superproject, use `git super push` with the same explicit remote and refspec. Publishing is optional: a push alone leaves the branch outside the queue.
+4. **Submit explicitly.** Run `yrd submit fix-login --notify <who>`. Submit publishes the branch itself and opens the change for that exact commit.
+5. **Follow the result.** Use `yrd queue list` and `yrd queue show fix-login` to see checks, the merge, or a failure's log path. Read that file on the machine running the queue. After a fix, commit and submit again; the same head is a retry, and a new head is a new change.
+
+**What submit does, in order:**
+
+1. Refuses the queue branch and a paused queue, reads the local branch head, then reads and fetches the configured target's advertised commit. Fetch obtains the commit objects without pulling or integrating them into your branch.
+2. Checks shared history and whether your branch contains that target commit. It refuses a head already contained by the target or, by default, a stale branch.
+3. With explicit `--rebase`, rebases a stale branch onto that captured target. This requires the named branch checked out here, a clean worktree and index including untracked files, and no active Git operation. It never auto-stashes or updates other branch refs. A conflict stops submission before a change opens; resolve it with Git and submit again.
+4. Creates the opened record for the exact resulting commit after any requested rebase, then publishes that commit as the branch head together with the record in one atomic push. Both refs use leases against the remote values just observed; a concurrent ref change refuses the whole push.
+5. Returns the submitted change. The queue runs checks and merges later, revalidating against the target at merge time. Successful submission means queued, not merged.
+
+`--dry-run` performs the admission checks without pushing or opening a change. Combined with `--rebase`, it describes the required rewrite without performing it or predicting the resulting commit. Submission captures a target commit at one instant; it does not reserve the target.
 
 ## The config, `.yrd.yml`
 

@@ -61,6 +61,23 @@ const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_EN
 const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
 const DRY_RUN_HELP = "print the change this would open and push nothing"
 
+const SUBMIT_HELP: [string, string][] = [
+  [
+    "1. Inspect",
+    "read this branch and fetch the configured target's advertised commit objects without pulling or integrating; refuse the target branch or a paused queue",
+  ],
+  ["2. Validate", "require shared history and the captured target in this branch; refuse stale branches by default"],
+  [
+    "3. Rebase if requested",
+    "--rebase updates a stale, clean, checked-out branch; it never auto-stashes or updates other branch refs; conflicts stop before a change opens",
+  ],
+  [
+    "4. Publish",
+    "record the exact resulting commit after any rebase; atomically push that commit as the branch head and its opened record with leases against observed remote refs",
+  ],
+  ["5. Return", "the change is queued; checks and the merge run later, and the queue revalidates at merge"],
+]
+
 export function resolveSubmitter(declared: string | undefined, env: NodeJS.ProcessEnv): string {
   const named = declared?.trim()
   if (named !== undefined && named !== "") return named
@@ -120,6 +137,11 @@ function buildProgram(
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
     .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
+    .addHelpSection("On submit:", SUBMIT_HELP)
+    .addHelpSection(
+      "Before submitting:",
+      "Commit your changes and update your own branch with Git. A separate git push or git super push is optional and does not queue a change. --dry-run previews admission; --dry-run --rebase describes the rewrite without making it.",
+    )
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
     .command("pause <reason>")
@@ -364,6 +386,11 @@ function buildProgram(
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
     .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
+    .addHelpSection("On submit:", SUBMIT_HELP)
+    .addHelpSection(
+      "Before submitting:",
+      "Commit your changes and update your own branch with Git. A separate git push or git super push is optional and does not queue a change. --dry-run previews admission; --dry-run --rebase describes the rewrite without making it.",
+    )
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
 
   program
@@ -402,6 +429,19 @@ function buildProgram(
 }
 
 function addExamples(program: CliCommand, name: string): void {
+  program.addHelpSection("Workflow:", [
+    [
+      "1. Update your branch",
+      "from a clean branch: git fetch origin main, then git rebase FETCH_HEAD; substitute your configured target",
+    ],
+    [
+      "2. Verify and commit",
+      "run your checks; use git super status and git super diff to inspect changes across submodules",
+    ],
+    ["3. Publish if useful", "git push or git super push shares the branch; a push alone does not queue it"],
+    [`4. ${name} submit [branch]`, "publish the branch and open its change; defaults to the current branch"],
+    [`5. ${name} queue show <branch>`, "follow checks and the merge, or find the failure log path"],
+  ])
   program.addHelpSection("Aliases:", [
     [`${name} submit`, `${name} queue submit`],
     [`${name} list`, `${name} queue list`],
