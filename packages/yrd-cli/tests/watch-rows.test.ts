@@ -136,6 +136,24 @@ describe("the filter terms", () => {
     expect(filterRows(rows, ["parser", "conflict"]).map((entry) => entry.row.branch)).toEqual(["task/one", "task/two"])
   })
 
+  it("matches the change's STATE, the field the payload itself emits", () => {
+    expect(filterRows(rows, ["merged"]).map((entry) => entry.row.branch)).toEqual(["task/three"])
+  })
+
+  it("a state name selects by state, not only the row whose BRANCH happens to say so", () => {
+    // The live specimen: `merged` returned exactly ONE row, matched on branch
+    // text, while several hundred rows whose own state field read merged were
+    // excluded. An empty result invites suspicion; one plausible row invites
+    // belief (a-state-name-filters-to-zero-rows-and-exit-zero).
+    const withTwin = watchRows([
+      row({ branch: "task/three", head: "c".repeat(40), state: "merged" }),
+      row({ branch: "task/merged-ball-conditional-close", head: "d".repeat(40), state: "queued" }),
+    ])
+    const matched = filterRows(withTwin, ["merged"]).map((entry) => entry.row.branch)
+    expect(matched).toContain("task/three")
+    expect(matched).toContain("task/merged-ball-conditional-close")
+  })
+
   it("with no terms is no filter, never no rows", () => {
     expect(filterRows(rows, [])).toHaveLength(3)
     expect(filterRows(rows, ["  "])).toHaveLength(3)
