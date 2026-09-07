@@ -1324,6 +1324,11 @@ function endingOf(row: Row): "checked" | "merged" | "failed" | "stuck" | "open" 
 function checkLines(check: CheckView): readonly string[] {
   const exit = check.result?.exit === undefined ? "" : ` exit=${check.result.exit}`
   const ms = check.result?.ms === undefined ? "" : ` ${mediaDuration(check.result.ms)}`
+  // A running journal names the eventual artifact before runCheck writes it.
+  // Reuse the watch's availability reading so show does not advertise it early.
+  const log =
+    (check.state === "running" ? readOutput(check).why : undefined) ??
+    (check.log === undefined ? undefined : `log ${check.log}`)
   const state =
     check.state === "not-run"
       ? " NOT RUN"
@@ -1338,7 +1343,7 @@ function checkLines(check: CheckView): readonly string[] {
     // (S2.21). A check the declaration no longer names has no command to show,
     // and says that rather than showing an empty one.
     check.spec === undefined ? "      (the declaration does not name this check)" : `      $ ${check.spec.run}`,
-    ...(check.log === undefined ? [] : [`      log ${check.log}`]),
+    ...(log === undefined ? [] : [`      ${log}`]),
   ]
 }
 
