@@ -62,7 +62,11 @@ describe("a queue is a branch whose commit carries a declaration that parses", (
   })
 
   it("no declaration here refuses, naming the command and where it looked", async () => {
-    const root = declaringNothing()
+    // Accepted: a child without a declaration cannot borrow its parent's queue.
+    // The former parentless fixture proved absence but not this boundary.
+    const parent = declaring("target: origin#main\n")
+    const root = join(parent, "child")
+    mkdirSync(join(root, ".git"), { recursive: true })
     const run = capture()
 
     const exit = await coreQueueCommand(root, run.io, { command: "list" })

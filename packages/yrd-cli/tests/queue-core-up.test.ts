@@ -449,6 +449,67 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
     expect(await w.git(["ls-remote", "--refs", "origin", "refs/yrd/changes/*"])).toBe(beforeRetry)
   })
 
+  // Accepted: a legacy protected declaration and its absent successor cannot
+  // open a submission; malformed LOCAL hints still diagnose and reach a valid
+  // protected queue. Existing service rereads and parser-only tests miss this
+  // command admission boundary and its no-write guarantee.
+  it.each(["legacy protected declaration", "absent protected successor", "valid queue with malformed local hints"])(
+    "protected declaration governs submission: %s",
+    async (scenario) => {
+      const w = await world()
+      const valid = scenario === "valid queue with malformed local hints"
+      // Gitomic's captured 14-byte declaration, unchanged from its old blob.
+      const legacy = "landing: none\n"
+      if (!valid) await redeclare(w, legacy)
+      if (scenario === "absent protected successor") await undeclare(w)
+
+      // Descend from the current target so freshness cannot explain refusal.
+      const branch = "task/declaration"
+      await w.git(["checkout", "--quiet", "-b", branch, "main"])
+      writeFileSync(join(w.work, ".yrd.yml"), valid ? "target: origin#main\nchecks: [{\n" : legacy)
+      writeFileSync(join(w.work, "change.txt"), "candidate\n")
+      await w.git(["add", ".yrd.yml", "change.txt"])
+      await w.git(["commit", "--quiet", "-m", "candidate declaration"])
+      const head = (await w.git(["rev-parse", "HEAD"])).trim()
+      const beforeRemote = await w.git(["ls-remote", "--refs", "origin"])
+      const beforeLocal = await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/changes/"])
+      const run = capture(w.work)
+      const attempt = coreQueueCommand(
+        w.work,
+        run.io,
+        { branch, command: "submit", submitter: "@dev/3" },
+        { json: true, workdir: w.workdir },
+      )
+
+      if (valid) {
+        await expect(attempt).resolves.toBe(0)
+        expect(run.stderr()).toContain(join(w.work, ".yrd.yml"))
+        expect(run.stderr()).toContain("does not parse")
+        expect(run.stderr()).toContain("origin/main")
+        expect(records(run)[0]).toMatchObject({ head })
+        const history = await readRecords(w.git, { branch, head })
+        expect(history.map((record) => record.kind)).toEqual(["opened"])
+        expect(trailer(history[0]!, "Target")).toBe("origin#main")
+        expect(await w.git(["ls-remote", "--refs", "origin", changeRef({ branch, head })])).toContain(
+          changeRef({ branch, head }),
+        )
+      } else {
+        if (scenario === "legacy protected declaration") {
+          await expect(attempt).rejects.toThrow(/\.yrd\.yml: unknown key landing/u)
+        } else {
+          await expect(attempt).resolves.toBe(2)
+          expect(run.stderr()).toContain("submit needs a queue")
+          expect(run.stderr()).toContain("origin/main carries no .yrd.yml")
+        }
+        expect(records(run)).toEqual([])
+        expect(await w.git(["ls-remote", "--refs", "origin"])).toBe(beforeRemote)
+        expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/changes/"])).toBe(
+          beforeLocal,
+        )
+      }
+    },
+  )
+
   it("reads the target's declaration again every round: a key the target's edit mistyped ends it stuck, naming the key", async () => {
     const w = await world()
     const run = capture(w.work)
