@@ -171,6 +171,43 @@ function fakeRunner(
 }
 
 describe("createProcess — explicit output-progress lease (21057)", () => {
+  test("extra stdio traffic does not renew the ordinary output lease", async () => {
+    const runner = fakeRunner([{ afterMs: 0, text: "started\n" }], null)
+    let timer: ReturnType<typeof setInterval> | undefined
+    let stop = () => {}
+    const spawn: Spawn = (...args) => ({
+      ...runner.spawn(...args),
+      extraStdio: {
+        readable: () =>
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              timer = setInterval(() => controller.enqueue(new Uint8Array([1])), 5)
+              stop = () => {
+                clearInterval(timer)
+                controller.close()
+              }
+            },
+          }),
+        write: async (input) => input.byteLength,
+        close: () => stop(),
+      },
+    })
+    await using proc = createProcess({ inject: { spawn }, killGraceMs: 10 })
+    try {
+      const result = await proc.run({
+        argv: ["fake-test"],
+        noProgressTimeoutMs: 25,
+        postExitDrainGraceMs: 10,
+        extraStdio: { input: new Uint8Array([1]), maxBytes: 1024 },
+      })
+      expect(result).toMatchObject({ stalled: true, lastProgressBytes: 8, stdout: "started\n" })
+      expect(result.extraStdio?.totalBytes).toBeGreaterThan(1)
+      expect(result.extraStdio?.eof).toBe(false)
+    } finally {
+      clearInterval(timer)
+    }
+  })
+
   test("advancing output renews the lease", async () => {
     const runner = fakeRunner(
       [

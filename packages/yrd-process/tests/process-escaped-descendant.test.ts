@@ -25,6 +25,7 @@ afterEach(() => {
  * modelling a setsid descendant the group sweep cannot reach.
  */
 function escapingSpawn(opts: {
+  heldStream?: "stdout" | "extra"
   /** When the DIRECT child's `exited` resolves; null = it never settles. */
   exitAfterMs: number | null
   exitCode?: number
@@ -40,6 +41,9 @@ function escapingSpawn(opts: {
   const spawn: Spawn = () => {
     let closeStdout = () => {}
     const stdout = new ReadableStream<Uint8Array>({
+      // A descriptor's cancel acknowledgement can hang too; drain abandonment
+      // must not replace its bounded read with an unbounded cleanup wait.
+      cancel: () => (opts.heldStream === "extra" ? new Promise<void>(() => {}) : undefined),
       start(controller) {
         let closed = false
         closeStdout = () => {
@@ -67,8 +71,17 @@ function escapingSpawn(opts: {
     })
     return {
       pid: 424_242,
-      stdout,
+      stdout: opts.heldStream === "extra" ? new Blob([]).stream() : stdout,
       stderr,
+      ...(opts.heldStream === "extra"
+        ? {
+            extraStdio: {
+              readable: () => stdout,
+              write: async (input: Uint8Array) => input.byteLength,
+              close() {},
+            },
+          }
+        : {}),
       exited,
       signalCode: null,
       kill(signal = "SIGTERM") {
@@ -87,35 +100,50 @@ async function withHangGuard<T>(promise: Promise<T>, ms: number): Promise<T | ty
 }
 
 describe("createProcess — escaped-descendant post-exit drain grace (queue-wedge watchdog)", () => {
-  test("the DIRECT child exits but a descendant holds stdout open: run() force-fails at the grace, never wedges", async () => {
-    // Direct child exits at 20ms WITHOUT closing stdout; kill() (no group
-    // settlement under an injected spawn) cannot reach the escaped holder — so
-    // the ONLY thing that lets run() return is the post-exit drain grace.
-    const runner = escapingSpawn({
-      exitAfterMs: 20,
-      exitCode: 0,
-      closeStdoutOnExit: false,
-      closeStdoutOnKill: false,
-      settleExitOnKill: false,
-      chunks: [{ afterMs: 0, text: "started\n" }],
-    })
-    await using proc = createProcess({ inject: { spawn: runner.spawn }, killGraceMs: 20 })
+  test.each(["stdout", "extra"] as const)(
+    "the DIRECT child exits but a descendant holds %s open: run() force-fails at the grace, never wedges",
+    async (heldStream) => {
+      // Direct child exits at 20ms WITHOUT closing stdout; kill() (no group
+      // settlement under an injected spawn) cannot reach the escaped holder — so
+      // the ONLY thing that lets run() return is the post-exit drain grace.
+      const runner = escapingSpawn({
+        heldStream,
+        exitAfterMs: 20,
+        exitCode: 0,
+        closeStdoutOnExit: false,
+        closeStdoutOnKill: false,
+        settleExitOnKill: false,
+        chunks: [{ afterMs: 0, text: "started\n" }],
+      })
+      await using proc = createProcess({ inject: { spawn: runner.spawn }, killGraceMs: 20 })
 
-    const race = await withHangGuard(proc.run({ argv: ["fake-test"], postExitDrainGraceMs: 100 }), 5_000)
+      const race = await withHangGuard(
+        proc.run({
+          argv: ["fake-test"],
+          postExitDrainGraceMs: 100,
+          ...(heldStream === "extra" ? { extraStdio: { input: new Uint8Array([1]), maxBytes: 32 } } : {}),
+        }),
+        5_000,
+      )
 
-    // Without the fix, Promise.all([capture, capture, exited]) awaits an EOF the
-    // escaped holder never sends: run() stays pending and this is HUNG.
-    expect(race).not.toBe(HUNG)
-    if (race === HUNG) return
-    expect(race.escapedDescendant).toBe(true)
-    expect(race.stalled).toBe(true)
-    expect(race.verdict).toBe("STALLED")
-    expect(race.exitCode).toBe(0)
-    // Partial output captured before the pipe was abandoned is retained.
-    expect(race.stdout).toBe("started\n")
-    // Best-effort sweep of the leaked in-group descendants was attempted.
-    expect(runner.kills).toContain("SIGKILL")
-  })
+      // Without the fix, Promise.all([capture, capture, exited]) awaits an EOF the
+      // escaped holder never sends: run() stays pending and this is HUNG.
+      expect(race).not.toBe(HUNG)
+      if (race === HUNG) return
+      expect(race.escapedDescendant).toBe(true)
+      expect(race.stalled).toBe(true)
+      expect(race.verdict).toBe("STALLED")
+      expect(race.exitCode).toBe(0)
+      // Partial output captured before the pipe was abandoned is retained.
+      expect(race.stdout).toBe(heldStream === "stdout" ? "started\n" : "")
+      if (heldStream === "extra") {
+        expect(race.extraStdio).toMatchObject({ bytes: new TextEncoder().encode("started\n"), eof: false })
+        expect(race.extraStdio?.failure).toMatch(/drain.*abandoned/u)
+      }
+      // Best-effort sweep of the leaked in-group descendants was attempted.
+      expect(runner.kills).toContain("SIGKILL")
+    },
+  )
 
   test("returns within the grace, not after a long child lifetime", async () => {
     const runner = escapingSpawn({

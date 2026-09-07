@@ -17,6 +17,127 @@ function bytes(value: string): ReadableStream<Uint8Array> {
 }
 
 describe("Process", () => {
+  // Ordinary output tests never exercise the separately owned duplex descriptor.
+  it.each([0, 30])("keeps extra stdio bytes separate through EOF and a %ims later exit", async (delay) => {
+    const observed = { stdout: [] as Uint8Array[], stderr: [] as Uint8Array[], extra: [] as Uint8Array[] }
+    await using runner = createProcess({ inject: { log: silentLog } })
+    const result = await runner.run({
+      argv: [
+        process.execPath,
+        "-e",
+        `
+        import { closeSync, writeSync } from 'node:fs'
+        if (Buffer.from(await Bun.stdin.bytes()).toString('hex') !== '0700fc') throw new Error('changed ordinary stdin')
+        const reader = Bun.file(3).stream().getReader()
+        const chunks = []
+        let length = 0
+        while (length < 4) {
+          const next = await reader.read()
+          if (next.done) throw new Error('incomplete greeting')
+          chunks.push(next.value); length += next.value.byteLength
+        }
+        reader.releaseLock()
+        if (Buffer.concat(chunks).toString('hex') !== '0100ff0a') throw new Error('changed greeting')
+        writeSync(1, new Uint8Array([111, 0, 255]))
+        writeSync(2, new Uint8Array([101, 0, 254]))
+        writeSync(3, new Uint8Array([9, 0]))
+        writeSync(3, new Uint8Array([254, 10]))
+        closeSync(3)
+        await Bun.sleep(${delay})
+        writeSync(1, new Uint8Array([10]))
+        process.exitCode = 7
+      `,
+      ],
+      timeoutMs: 2_000,
+      stdin: new Uint8Array([7, 0, 252]),
+      onOutput: ({ stream, chunk }) => observed[stream].push(chunk.slice()),
+      extraStdio: {
+        input: new Uint8Array([1, 0, 255, 10]),
+        maxBytes: 4,
+        onData: (chunk) => observed.extra.push(chunk.slice()),
+      },
+    })
+    expect(result).toMatchObject({ exitCode: 7, timedOut: false, stalled: false, lastProgressBytes: 7 })
+    expect(result.extraStdio).toEqual({
+      bytes: new Uint8Array([9, 0, 254, 10]),
+      totalBytes: 4,
+      eof: true,
+      inputBytesWritten: 4,
+    })
+    expect(Buffer.concat(observed.stdout).toString("hex")).toBe("6f00ff0a")
+    expect(Buffer.concat(observed.stderr).toString("hex")).toBe("6500fe")
+    expect(Buffer.concat(observed.extra).toString("hex")).toBe("0900fe0a")
+  })
+
+  it.each(["missing", "short-write", "read-error", "overflow", "write-pending"] as const)(
+    "settles extra stdio %s without losing its available evidence",
+    async (fault) => {
+      const exited = Promise.withResolvers<number>()
+      const kills: NodeJS.Signals[] = []
+      const close = vi.fn()
+      let reads = 0
+      const spawn: Spawn = () => ({
+        pid: 4242,
+        stdout: bytes("ordinary"),
+        stderr: bytes("diagnostic"),
+        exited: fault === "write-pending" ? Promise.resolve(0) : exited.promise,
+        signalCode: null,
+        kill(signal = "SIGTERM") {
+          kills.push(signal as NodeJS.Signals)
+          exited.resolve(143)
+        },
+        ...(fault === "missing"
+          ? {}
+          : {
+              extraStdio: {
+                readable: () =>
+                  new ReadableStream<Uint8Array>({
+                    pull(controller) {
+                      if (reads++ === 0) {
+                        controller.enqueue(new Uint8Array(fault === "overflow" ? [1, 2, 3, 4, 5] : [1, 2]))
+                      } else if (fault === "read-error") controller.error(new Error("descriptor read failed"))
+                      else controller.close()
+                    },
+                  }),
+                write: async (input: Uint8Array) =>
+                  fault === "write-pending"
+                    ? new Promise<number>(() => {})
+                    : fault === "short-write"
+                      ? 1
+                      : input.byteLength,
+                close,
+              },
+            }),
+      })
+      await using runner = createProcess({ inject: { spawn, log: silentLog }, killGraceMs: 10 })
+      const result = await runner.run({
+        argv: ["worker"],
+        timeoutMs: 100,
+        postExitDrainGraceMs: 10,
+        extraStdio: { input: new Uint8Array([1, 2]), maxBytes: 4 },
+      })
+      expect(kills).toEqual([fault === "write-pending" ? "SIGKILL" : "SIGTERM"])
+      expect(result).toMatchObject({ stdout: "ordinary", stderr: "diagnostic", timedOut: false })
+      expect(result.extraStdio?.failure).toMatch(
+        {
+          missing: /requested.*descriptor 3.*missing/u,
+          "short-write": /wrote 1 of 2/u,
+          "read-error": /descriptor read failed/u,
+          overflow: /exceeded.*4/u,
+          "write-pending": /input write.*abandoned/u,
+        }[fault],
+      )
+      if (fault === "overflow") {
+        expect(result.extraStdio).toMatchObject({ bytes: new Uint8Array([1, 2, 3, 4]), totalBytes: 5 })
+      }
+      if (fault === "read-error") {
+        expect(result.extraStdio).toMatchObject({ bytes: new Uint8Array([1, 2]), totalBytes: 2, eof: false })
+      }
+      if (fault === "short-write") expect(result.extraStdio?.inputBytesWritten).toBe(1)
+      expect(close).toHaveBeenCalledTimes(fault === "missing" ? 0 : 1)
+    },
+  )
+
   it("resolves bare executables from the environment supplied to the child", async () => {
     const bin = await mkdtemp(join(tmpdir(), "yrd-process-path-"))
     try {
