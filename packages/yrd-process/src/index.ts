@@ -1,7 +1,7 @@
 import { createScope, type Scope } from "@silvery/scope"
 import { createFailure } from "./failure.ts"
 import { createLogger, type ConditionalLogger } from "loggily"
-import { accessSync, closeSync, constants, statSync, write, writeSync } from "node:fs"
+import { accessSync, constants, statSync, write, writeSync } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
 export {
   FailureEventSchema,
@@ -38,6 +38,9 @@ export type ProcessRequest = Readonly<{
    * child before the error is propagated. */
   onStart?: (pid: number) => void
   onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void
+  /** Expose the existing bounded capture's exact raw head and tail alongside
+   * its decoded display text, without another capture or byte budget. */
+  captureRawOutput?: true
   /** One optional duplex byte stream on child descriptor 3. Its traffic is
    * separate from ordinary output and never renews the output-progress lease. */
   extraStdio?: Readonly<{
@@ -79,11 +82,23 @@ export type OutputTruncation = Readonly<{
   limitBytes: number
 }>
 
+type RawOutputSnapshot = Readonly<{
+  /** Starts at byte 0, without UTF-8 boundary trimming. */
+  head: Uint8Array
+  /** Ends at totalBytes; bytes between head and tail may have been dropped. */
+  tail: Uint8Array
+  /** Bytes observed, not a claim that the process or its streams settled. */
+  totalBytes: number
+}>
+
 type ProcessResultBase = Readonly<{
   exitCode: number
   signal: NodeJS.Signals | null
   stdout: string
   stderr: string
+  /** Present only when requested. A head/tail length sum below totalBytes
+   * declares a gap; process settlement metadata still governs completeness. */
+  rawOutput?: Readonly<{ stdout: RawOutputSnapshot; stderr: RawOutputSnapshot }>
   extraStdio?: Readonly<{
     /** Exact received prefix, never decoded or annotated. */
     bytes: Uint8Array
@@ -521,6 +536,7 @@ export function createProcess(
         // an EOF that is never coming, returning the bytes captured so far.
         const drainAbort = new AbortController()
         const truncations: { stdout?: OutputTruncation; stderr?: OutputTruncation } = {}
+        const rawField = rawOutputField(request.captureRawOutput)
         const capture = async (stream: ReadableStream<Uint8Array>, name: "stdout" | "stderr"): Promise<string> => {
           try {
             const read = await readBounded(
@@ -537,7 +553,9 @@ export function createProcess(
                   error: String(error),
                 })
               },
+              request.captureRawOutput,
             )
+            if (rawField.rawOutput !== undefined && read.raw !== undefined) rawField.rawOutput[name] = read.raw
             if (read.truncation !== undefined) {
               // Recorded per stream rather than pushed to a shared array: the
               // two captures race inside Promise.all, and a verdict reader
@@ -647,6 +665,7 @@ export function createProcess(
           signal: child.signalCode,
           stdout,
           stderr,
+          ...rawField,
           ...(extraResult === undefined ? {} : { extraStdio: extraResult }),
           durationMs: Math.max(0, now() - started),
           timedOut,
@@ -719,7 +738,18 @@ export function createProcess(
 
 const ABANDONED = Symbol("drain-abandoned")
 
-type BoundedRead = Readonly<{ text: string; truncation?: OutputTruncation }>
+type BoundedRead = Readonly<{ text: string; truncation?: OutputTruncation; raw?: RawOutputSnapshot }>
+
+/** Keep the optional result field absent unless capture was requested. */
+function rawOutputField(capture = false): { rawOutput?: { stdout: RawOutputSnapshot; stderr: RawOutputSnapshot } } {
+  if (!capture) return {}
+  return {
+    rawOutput: {
+      stdout: { head: new Uint8Array(), tail: new Uint8Array(), totalBytes: 0 },
+      stderr: { head: new Uint8Array(), tail: new Uint8Array(), totalBytes: 0 },
+    },
+  }
+}
 
 /**
  * A retained head and a retained tail, plus the count of everything dropped
@@ -782,13 +812,23 @@ class OutputWindow {
    * buffer exactly as it did before truncation existed — no seam, no notice,
    * and no multi-byte code point split across the join.
    */
-  finish(name: "stdout" | "stderr"): BoundedRead {
+  finish(name: "stdout" | "stderr", captureRawOutput = false): BoundedRead {
     const decoder = new TextDecoder()
+    const raw = captureRawOutput
+      ? {
+          head: Buffer.concat(this.#head, this.#headSize),
+          tail: Buffer.concat(this.#tail, this.#tailSize),
+          totalBytes: this.#total,
+        }
+      : undefined
     if (this.#total <= this.#limit) {
-      return { text: decoder.decode(Buffer.concat([...this.#head, ...this.#tail], this.#total)) }
+      return {
+        text: decoder.decode(Buffer.concat([...this.#head, ...this.#tail], this.#total)),
+        ...(raw === undefined ? {} : { raw }),
+      }
     }
-    const head = withoutPartialTrailingCodePoint(Buffer.concat(this.#head, this.#headSize))
-    const tail = withoutPartialLeadingCodePoint(Buffer.concat(this.#tail, this.#tailSize))
+    const head = withoutPartialTrailingCodePoint(raw?.head ?? Buffer.concat(this.#head, this.#headSize))
+    const tail = withoutPartialLeadingCodePoint(raw?.tail ?? Buffer.concat(this.#tail, this.#tailSize))
     const truncation: OutputTruncation = {
       stream: name,
       totalBytes: this.#total,
@@ -801,15 +841,15 @@ class OutputWindow {
     return {
       text: decoder.decode(head) + truncationNotice(truncation) + decoder.decode(tail),
       truncation,
+      ...(raw === undefined ? {} : { raw }),
     }
   }
 }
 
 /**
  * The drop notice, in the returned text where a reader of a check verdict
- * cannot miss it. It names what was dropped, how much, why, and where the
- * complete stream still is — a truncation that only a structured field records
- * is a silent one to every human consumer of stdout.
+ * cannot miss it. It names what was dropped and the conditions under which
+ * the caller could have retained it elsewhere; capture does not prove storage.
  */
 function truncationNotice(truncation: OutputTruncation): string {
   const { stream, droppedBytes, totalBytes, limitBytes, keptBytes } = truncation
@@ -817,8 +857,8 @@ function truncationNotice(truncation: OutputTruncation): string {
     `\n\n[yrd: ${stream} truncated — ${droppedBytes} bytes dropped here. ` +
     `The command wrote ${totalBytes} bytes, past the ${limitBytes}-byte capture limit, ` +
     `so only ${keptBytes} bytes are kept — a head and a tail — and the middle is gone. ` +
-    `Yrd still streamed every byte to this run's output observer; the queue persists that as the step's ` +
-    `${stream}.log artievent, which is where the dropped middle can be read.]\n\n`
+    `Every received byte is delivered when an output observer is configured. ` +
+    `Complete durable evidence exists only if the caller saved and completed a raw-output sink.]\n\n`
   )
 }
 
@@ -974,6 +1014,7 @@ async function readBounded(
   onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void = () => {},
   abandon: AbortSignal | undefined,
   onCancelError: (error: unknown) => void,
+  captureRawOutput = false,
 ): Promise<BoundedRead> {
   const window = new OutputWindow(limit)
   await drainBytes(
@@ -987,7 +1028,7 @@ async function readBounded(
     onCancelError,
     abandon,
   )
-  return window.finish(name)
+  return window.finish(name, captureRawOutput)
 }
 
 /** One drain owner for ordinary text capture and the optional raw descriptor. */
@@ -1067,7 +1108,12 @@ function spawnProcess(argv: readonly string[], options: SpawnOptions): Spawned {
             else resolve(count)
           })
         }),
-      close: () => closeSync(descriptor()),
+      // Bun 1.3.14 owns pipe fds through Subprocess finalization. getStdio()
+      // does not transfer ownership; closing here lets that finalizer close a
+      // later command's reused fd. Bun.file(fd).stream() owns a duplicate which
+      // the shared drain cancels. The original remains open until Bun GC.
+      // This adapter cannot release it deterministically on Bun 1.3.14.
+      close: () => {},
     },
   }
 }

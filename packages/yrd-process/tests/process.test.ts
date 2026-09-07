@@ -17,6 +17,86 @@ function bytes(value: string): ReadableStream<Uint8Array> {
 }
 
 describe("Process", () => {
+  // An invalid control frame aborts the same Process signal. Its descriptor
+  // cleanup must never reach a reused descriptor in the next actual child.
+  it("settles an aborted extra descriptor before later real commands reuse its resources", async () => {
+    await using runner = createProcess({ killGraceMs: 20, postKillReapGraceMs: 100, inject: { log: silentLog } })
+    for (let turn = 0; turn < 4; turn += 1) {
+      const abort = new AbortController()
+      const result = await runner.run({
+        argv: [
+          process.execPath,
+          "-e",
+          `import { writeSync } from "node:fs";
+          const reader = Bun.file(3).stream().getReader();
+          const input = await reader.read();
+          if (input.done || input.value[0] !== 1) throw new Error("missing greeting");
+          reader.releaseLock();
+          writeSync(3, new Uint8Array([255, 10]));
+          await Bun.sleep(5000);`,
+        ],
+        timeoutMs: 1_000,
+        signal: abort.signal,
+        extraStdio: { input: new Uint8Array([1]), maxBytes: 4, onData: () => abort.abort() },
+      })
+      expect(result.extraStdio, `aborted invocation ${turn}`).toMatchObject({
+        bytes: new Uint8Array([255, 10]),
+        totalBytes: 2,
+        eof: true,
+        inputBytesWritten: 1,
+      })
+      expect(result.extraStdio?.failure, `aborted invocation ${turn}`).toBeUndefined()
+      const next = await runner.run({
+        argv: [process.execPath, "-e", 'process.stdout.write("next"); process.stderr.write("diagnostic")'],
+        timeoutMs: 1_000,
+        postExitDrainGraceMs: 100,
+        // Collect the prior native subprocess while descriptors are live again.
+        onStart: () => Bun.gc(true),
+      })
+      expect(next, `following invocation ${turn}`).toMatchObject({
+        exitCode: 0,
+        stdout: "next",
+        stderr: "diagnostic",
+        timedOut: false,
+        stalled: false,
+      })
+    }
+  })
+
+  // Raw evidence must survive invalid UTF-8 and retain exact offsets under the
+  // existing capture budget; decoded text and observer-only tests cannot prove it.
+  it.each([4, 16])("retains requested raw stream segments under a %i-byte budget", async (limit) => {
+    const stdout = new Uint8Array([97, 255, 0, 254, 98, 10])
+    const stderr = new Uint8Array([99, 128, 100, 10])
+    await using runner = createProcess({ maxOutputBytes: limit, inject: { log: silentLog } })
+    const result = await runner.run({
+      argv: [
+        process.execPath,
+        "-e",
+        "import { writeSync } from 'node:fs'; writeSync(1, new Uint8Array([97,255,0,254,98,10])); writeSync(2, new Uint8Array([99,128,100,10])); process.exitCode = 7",
+      ],
+      timeoutMs: 2_000,
+      captureRawOutput: true,
+    })
+    expect(result).toMatchObject({ exitCode: 7, timedOut: false, stalled: false })
+    for (const [stream, original] of [
+      ["stdout", stdout],
+      ["stderr", stderr],
+    ] as const) {
+      const raw = result.rawOutput?.[stream]
+      expect(raw).toBeDefined()
+      expect(raw?.totalBytes).toBe(original.byteLength)
+      const headSize = Math.min(original.byteLength, limit / 2)
+      const tailSize = Math.min(original.byteLength - headSize, limit / 2)
+      expect(Array.from(raw?.head ?? [])).toEqual(Array.from(original.subarray(0, headSize)))
+      expect(Array.from(raw?.tail ?? [])).toEqual(Array.from(original.subarray(original.byteLength - tailSize)))
+      expect((raw?.totalBytes ?? 0) - (raw?.head.byteLength ?? 0) - (raw?.tail.byteLength ?? 0)).toBe(
+        Math.max(0, original.byteLength - limit),
+      )
+    }
+    expect(result.stderr).toContain("\uFFFD")
+  })
+
   // Ordinary output tests never exercise the separately owned duplex descriptor.
   it.each([0, 30])("keeps extra stdio bytes separate through EOF and a %ims later exit", async (delay) => {
     const observed = { stdout: [] as Uint8Array[], stderr: [] as Uint8Array[], extra: [] as Uint8Array[] }
@@ -386,6 +466,10 @@ describe("Process", () => {
 
     const { stdout } = await process.run({ argv: ["noisy"] })
 
+    expect(stdout).toContain("when an output observer is configured")
+    expect(stdout).toContain("only if the caller saved and completed a raw-output sink")
+    expect(stdout).not.toContain("artievent")
+
     // The arithmetic is checked against the bytes actually returned, not against
     // a number the notice asserts about itself: a drop notice that can disagree
     // with its own text is the silent truncation this whole change exists to
@@ -462,6 +546,7 @@ describe("Process", () => {
 
     expect(result.stdout).toBe("exactly-32-bytes-of-plain-output")
     expect(result.outputTruncation).toBeUndefined()
+    expect(result).not.toHaveProperty("rawOutput")
   })
 
   it("hands every dropped byte to the output observer so the full stream survives elsewhere", async () => {
@@ -483,8 +568,8 @@ describe("Process", () => {
       },
     })
 
-    // What makes the notice's promise true: the queue's artievent writer holds
-    // the complete stdout.log even though this capture kept 20 bytes.
+    // Callback delivery is measured here. Persistence belongs to the caller
+    // and is not proved by merely supplying an observer.
     expect(observed).toBe(400)
     expect(result.outputTruncation?.[0]?.droppedBytes).toBe(380)
   })
@@ -503,7 +588,7 @@ describe("Process", () => {
     })
     await using process = createProcess({ maxOutputBytes: 40, inject: { spawn, log: silentLog } })
 
-    const result = await process.run({ argv: ["unicode"] })
+    const result = await process.run({ argv: ["unicode"], captureRawOutput: true })
 
     expect(result.stdout).not.toContain("\uFFFD")
     const truncation = result.outputTruncation?.[0]
@@ -512,6 +597,10 @@ describe("Process", () => {
     // arithmetic still closes exactly.
     expect((truncation?.keptBytes as number) + (truncation?.droppedBytes as number)).toBe(300)
     expect(truncation?.keptBytes).toBeLessThan(40)
+    const original = new TextEncoder().encode("→".repeat(100))
+    expect(Array.from(result.rawOutput?.stdout.head ?? [])).toEqual(Array.from(original.subarray(0, 20)))
+    expect(Array.from(result.rawOutput?.stdout.tail ?? [])).toEqual(Array.from(original.subarray(280)))
+    expect(result.rawOutput?.stdout.totalBytes).toBe(300)
   })
 
   it("escalates timed-out children from SIGTERM to SIGKILL after the grace period", async () => {
