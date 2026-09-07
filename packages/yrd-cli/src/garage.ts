@@ -26,8 +26,7 @@
  * NOT PUSHED. The mechanic's repository is the truth; yrd never pushes this
  * ref anywhere, and nothing fetches it.
  */
-import { spawnSync } from "node:child_process"
-import { cleanGitEnvironment } from "@yrd/process"
+import { refAt, type Git } from "@yrd/queue-core"
 
 /** The one ref. A garage is open exactly when it exists. */
 export const GARAGE_REF = "refs/yrd/garage"
@@ -72,30 +71,6 @@ export function garageServiceRefusal(garage: GarageDeclaration): string {
   return `garage: ${garage.reason}; the service stays down until the garage closes`
 }
 
-type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
-
-function git(repo: string, args: readonly string[], stdin?: string): GitResult {
-  const result = spawnSync("git", ["-C", repo, ...args], {
-    encoding: "utf8",
-    env: cleanGitEnvironment(process.env),
-    ...(stdin === undefined ? {} : { input: stdin }),
-  })
-  if (result.error !== undefined && result.error !== null) {
-    throw new Error(`yrd: could not run git in '${repo}': ${result.error.message}`, { cause: result.error })
-  }
-  return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" }
-}
-
-function required(repo: string, args: readonly string[], stdin?: string): string {
-  const result = git(repo, args, stdin)
-  if (result.code !== 0) {
-    throw new Error(
-      `yrd: git ${args.join(" ")} exited ${String(result.code)} in '${repo}': ${result.stderr.trim() || result.stdout.trim()}`,
-    )
-  }
-  return result.stdout
-}
-
 /**
  * The garage as the ref records it, or undefined when no garage is open.
  *
@@ -104,9 +79,9 @@ function required(repo: string, args: readonly string[], stdin?: string): string
  * failure and never a quiet "no garage" — a declaration nobody can read is not
  * the same record as no declaration (NO SILENT ERRORS).
  */
-export function readGarageDeclaration(repo: string): GarageDeclaration | undefined {
-  if (garageRefCommit(repo) === undefined) return undefined
-  const shown = required(repo, ["show", "--no-patch", `--format=%aI%n%B`, GARAGE_REF])
+export async function readGarageDeclaration(repo: string, git: Git): Promise<GarageDeclaration | undefined> {
+  if ((await garageRefCommit(repo, git)) === undefined) return undefined
+  const shown = await git(["show", "--no-patch", `--format=%aI%n%B`, GARAGE_REF])
   const [since, ...body] = shown.split("\n")
   const message = body.join("\n")
   const subject = message.split("\n")[0] ?? ""
@@ -145,37 +120,29 @@ function trailer(message: string, key: string): string | undefined {
  * two mechanics opening at once cannot both win; the read above it is what lets
  * the loser be told whose garage it already is.
  */
-export function openGarage(
+export async function openGarage(
   repo: string,
   input: Readonly<{ reason: string; by: string }>,
-): Readonly<{ garage: GarageDeclaration; commit: string }> {
+  git: Git,
+): Promise<Readonly<{ garage: GarageDeclaration; commit: string }>> {
   const reason = input.reason.trim()
   if (reason === "") throw new Error("yrd: a garage needs a reason; pass --reason '<why the service is off>'")
   if (reason.includes("\n")) throw new Error("yrd: a garage reason is one line")
   const message = `${GARAGE_SUBJECT_PREFIX}${reason}\n\n${GARAGE_OPENED_BY_TRAILER}: ${input.by}\n`
   // `mktree` with nothing on stdin is the empty tree in this repository's own
   // object format, so this works in a sha256 repository too.
-  const tree = required(repo, ["mktree"], "").trim()
-  const commit = required(repo, ["commit-tree", tree, "-m", message]).trim()
-  const created = git(repo, ["update-ref", "--create-reflog", GARAGE_REF, commit, ""])
-  if (created.code !== 0) {
-    throw new Error(
-      `yrd: could not create ${GARAGE_REF} in '${repo}': ${created.stderr.trim() || created.stdout.trim()}`,
-    )
-  }
-  const garage = readGarageDeclaration(repo)
+  const tree = (await git(["mktree"], "")).trim()
+  const commit = (await git(["commit-tree", tree, "-m", message])).trim()
+  // Native `create` verifies absence without an empty argv word.
+  await git(["update-ref", "--create-reflog", "--stdin"], `create ${GARAGE_REF} ${commit}\n`)
+  const garage = await readGarageDeclaration(repo, git)
   if (garage === undefined) throw new Error(`yrd: ${GARAGE_REF} was written but does not read back in '${repo}'`)
   return { garage, commit }
 }
 
 /** Close the garage: delete the ref. The commit stays in the object store. */
-export function closeGarage(repo: string, at: string): void {
-  const deleted = git(repo, ["update-ref", "-d", GARAGE_REF, at])
-  if (deleted.code !== 0) {
-    throw new Error(
-      `yrd: could not delete ${GARAGE_REF} in '${repo}': ${deleted.stderr.trim() || deleted.stdout.trim()}`,
-    )
-  }
+export async function closeGarage(_repo: string, at: string, git: Git): Promise<void> {
+  await git(["update-ref", "-d", GARAGE_REF, at])
 }
 
 /**
@@ -183,30 +150,10 @@ export function closeGarage(repo: string, at: string): void {
  * read every other function here starts from, and what `closeGarage` compares
  * against.
  *
- * THREE ANSWERS, NOT TWO, and the middle one is the whole care taken here.
- *
- * - Exit 1 with nothing on stdout is git's "no such ref": the ordinary closed
- *   garage, and the only cheap path.
- * - A repository whose ref store cannot be read is a FAULT and throws. It must
- *   never become "the garage is closed", because that answer starts a service a
- *   mechanic has in pieces — the one thing this ref exists to prevent.
- * - A path that is no repository at all has no garage to have, and says so.
- *   That is safe here and nowhere near a silent fallback: a non-repository can
- *   never start the service either, since the host refuses to discover a
- *   repository there a moment later. The projection and the run log ask about
- *   whatever cwd they were handed, so this is the answer they need; the ref
- *   read itself stays loud for every repository that exists.
+ * The core owns absence: only a clean missing-ref result means closed.
+ * An unreadable ref, failed invocation or non-repository path throws before
+ * the service starts. The bound Git retains the invocation and its evidence.
  */
-export function garageRefCommit(repo: string): string | undefined {
-  const ref = git(repo, ["rev-parse", "--verify", "--quiet", GARAGE_REF])
-  const sha = ref.stdout.trim()
-  if (ref.code === 1 && sha === "") return undefined
-  if (ref.code !== 0) {
-    if (git(repo, ["rev-parse", "--git-dir"]).code !== 0) return undefined
-    throw new Error(
-      `yrd: could not read ${GARAGE_REF} in '${repo}': git rev-parse exited ${String(ref.code)}: ${ref.stderr.trim()}`,
-    )
-  }
-  if (sha === "") throw new Error(`yrd: git resolved ${GARAGE_REF} in '${repo}' to nothing`)
-  return sha
+export async function garageRefCommit(_repo: string, git: Git): Promise<string | undefined> {
+  return refAt(git, GARAGE_REF)
 }

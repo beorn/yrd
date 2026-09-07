@@ -26,13 +26,13 @@
  */
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
+import { gitIn, resolveGitSelection } from "@yrd/queue-core"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { listEnvironments, openEnvironment } from "./env-commands.ts"
 import {
   closeGarage,
   garageRefCommit,
   garageSeat,
-  garageServiceRefusal,
   garageStatusLine,
   openGarage,
   readGarageDeclaration,
@@ -173,16 +173,6 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => {
       const { interval, json } = options as { interval?: number; json?: boolean }
-      // The garage stops the SERVICE, and this is the last moment before it
-      // becomes one. `queue run` — one round, run now — goes through untouched,
-      // because that is what a garage is FOR; it stamps the reason on its own
-      // record instead.
-      const garage = readGarageDeclaration(cwd())
-      if (garage !== undefined) {
-        io.stderr(`${garageServiceRefusal(garage)}\n`)
-        setExit(2)
-        return
-      }
       const taken = await coreQueueCommand(
         cwd(),
         io,
@@ -324,31 +314,33 @@ function buildProgram(
     .command("open")
     .description("open the garage; the service stays down until it closes")
     .requiredOption("--reason <text>", "why the service is off")
-    .action((options) => {
+    .action(async (options) => {
       const repo = cwd()
-      const standing = readGarageDeclaration(repo)
+      const git = gitIn(repo, undefined, await resolveGitSelection(repo, { env }), { env })
+      const standing = await readGarageDeclaration(repo, git)
       if (standing !== undefined) {
         io.stderr(`yrd: the garage is already open — ${garageStatusLine(standing)}\n`)
         setExit(2)
         return
       }
       const { reason } = options as { reason: string }
-      const { garage: opened } = openGarage(repo, { by: garageSeat(env), reason })
+      const { garage: opened } = await openGarage(repo, { by: garageSeat(env), reason }, git)
       io.stdout(`${garageStatusLine(opened)}\n`)
     })
   garage
     .command("close")
     .description("close the garage; the service may start again")
-    .action(() => {
+    .action(async () => {
       const repo = cwd()
-      const standing = readGarageDeclaration(repo)
-      const at = garageRefCommit(repo)
+      const git = gitIn(repo, undefined, await resolveGitSelection(repo, { env }), { env })
+      const standing = await readGarageDeclaration(repo, git)
+      const at = await garageRefCommit(repo, git)
       if (standing === undefined || at === undefined) {
         io.stderr("yrd: no garage is open here\n")
         setExit(2)
         return
       }
-      closeGarage(repo, at)
+      await closeGarage(repo, at, git)
       io.stdout(`the garage is closed (it was ${standing.reason})\n`)
     })
 

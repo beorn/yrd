@@ -45,6 +45,7 @@ import {
   targetName,
   refAt,
   resolveRemote,
+  resolveGitSelection,
   runCheck,
   show,
   inspectSubmit,
@@ -61,6 +62,7 @@ import {
   type Journals,
   type JournalRun,
   type Git,
+  type GitSelection,
   type LogRecord,
   type QueueConfig,
   type QueueRunOutcome,
@@ -85,7 +87,7 @@ import {
   type SinceOrigin,
   type StatsBy,
 } from "./queue-stats.ts"
-import { readGarageDeclaration } from "./garage.ts"
+import { garageServiceRefusal, readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
@@ -192,10 +194,23 @@ export async function coreQueueCommand(
     env?: NodeJS.ProcessEnv
     workdir?: string
     log?: ConditionalLogger
+    /** Fixed for this command/service, including the first garage read. */
+    selection?: GitSelection
     /** A terminal with a keyboard on the other end: the watch draws its pane instead of printing rounds. */
     interactive?: boolean
   }> = {},
 ): Promise<YrdCliExitCode> {
+  const selection = options.selection ?? (await resolveGitSelection(repo, { env: options.env }))
+  let git = gitIn(repo, undefined, selection, { env: options.env })
+  // The garage stops the service before declaration/remote reads or workdir
+  // creation. A mechanic's explicit round records its garage instead.
+  if (request.command === "up") {
+    const garage = await readGarageDeclaration(repo, git)
+    if (garage !== undefined) {
+      io.stderr(`${garageServiceRefusal(garage)}\n`)
+      return 2
+    }
+  }
   /** No `.yrd.yml` where the command stands: nothing here says which queue this repository belongs to. */
   const noDeclarationHere = (): YrdCliExitCode => {
     io.stderr(
@@ -226,7 +241,7 @@ export async function coreQueueCommand(
       `yrd: ${hints.problem}; it hints nothing, so this asks origin/main, which must carry the declaration itself\n`,
     )
   }
-  const git = gitIn(here.root)
+  if (here.root !== repo) git = gitIn(here.root, undefined, selection, { env: options.env })
   const log = options.log?.child("queue")
   // The declaration here only hints where the queue is (`target:`); the
   // declaration AT that target is the authority for every judgement. A branch
@@ -274,7 +289,7 @@ export async function coreQueueCommand(
   const oneRound = async (declared: QueueConfig): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
-      outcome = await queueRun(runOptions(repo, declared, workdir, options.env, options.log))
+      outcome = await queueRun(await runOptions(here.root, declared, workdir, git, selection, options.env, options.log))
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
       // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the service return exit 2.
@@ -387,7 +402,13 @@ export async function coreQueueCommand(
           // An explicitly supplied gitlink has no physical checkout to await.
           if (gitlink.checkout === undefined) break
           const projected = await gitlinkAt(git, "HEAD", gitlink.path)
-          const checkout = (await gitIn(gitlink.checkout)(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
+          const checkout = (
+            await gitIn(gitlink.checkout, undefined, selection, { env: options.env })([
+              "rev-parse",
+              "--verify",
+              "HEAD^{commit}",
+            ])
+          ).trim()
           if (projected === now && checkout === now) break
           const state = `${now}:${projected}:${checkout}`
           if (state !== announced) {
@@ -695,8 +716,10 @@ export async function coreQueueCommand(
       claimWorktrees(worktrees)
       // Prepared exactly as a queue run prepares one: materialized, the
       // declaration's setup run once, and told the same three values.
-      const prepared = await prepareWorktree(git, repo, head, join(worktrees, "check", head.slice(0, 12)), {
+      const prepared = await prepareWorktree(git, here.root, head, join(worktrees, "check", head.slice(0, 12)), {
         env: options.env,
+        selection,
+        gitOptions: { env: options.env },
         plumbing: options.log?.child("worktree"),
         ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
         targetSha: await targetAt(git, config),
@@ -918,20 +941,23 @@ function gitlinks(listing: string): readonly Readonly<{ path: string; sha: strin
   return rows
 }
 
-function runOptions(
+async function runOptions(
   repo: string,
   config: QueueConfig,
   workdir: string,
+  git: Git,
+  selection: GitSelection,
   env?: NodeJS.ProcessEnv,
   log?: ConditionalLogger,
 ) {
   // A round made while the garage is open says so on its own record, so a
   // reader of the log can tell the mechanic's rounds from the service's.
-  const garage = readGarageDeclaration(repo)
+  const garage = await readGarageDeclaration(repo, git)
   return {
     checks: config.checks,
     configBlob: config.blob,
     env,
+    selection,
     ...(garage === undefined ? {} : { garage: garage.reason }),
     notify: config.notify,
     // git-super narrates which submodule it borrowed and how long each phase

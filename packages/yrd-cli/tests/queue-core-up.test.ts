@@ -19,10 +19,11 @@ import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } fr
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { appendRecord, changeRef, gitIn, readRecords, submit, trailer, type Git } from "@yrd/queue-core"
+import { appendRecord, changeRef, gitIn, readRecords, readRunLog, submit, trailer, type Git } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { installSelectedGit } from "./support/selected-git.ts"
 
 // A component at a local path: git refuses file transport for submodule clones
 // unless every git in the chain is told. Every git runner below and the
@@ -268,6 +269,10 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
       ),
     ).toBe(0)
 
+    // T1: the service fixes one executable for its lifetime. Native-only
+    // rounds could not expose a fresh selection or a lost rebinding later.
+    const selected = await installSelectedGit(w.work)
+    const selectedCallsAfterRound: number[] = []
     const stop = new AbortController()
     let rounds = 0
     const service = capture(w.work)
@@ -282,6 +287,7 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
           stop: stop.signal,
           afterRound: async () => {
             rounds += 1
+            selectedCallsAfterRound.push(selected.readCalls().filter((call) => call.marker === "up-rounds").length)
             if (rounds === 1) {
               await coreQueueCommand(
                 w.work,
@@ -289,13 +295,18 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
                 { by: "@chief", command: "resume", reason: "repair landed" },
                 { workdir: w.workdir },
               )
+              await w.git(["config", "yrd.git", JSON.stringify({ executable: "git", contract: "native" })])
             } else if (rounds === 3) {
               stop.abort()
             }
           },
         },
         {
-          env: { ...process.env, PATH: `${gitSuperBin}:${process.env.PATH ?? ""}` },
+          env: {
+            ...process.env,
+            PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
+            YRD_SELECTED_TEST_MARKER: "up-rounds",
+          },
           json: true,
           log,
           workdir: w.workdir,
@@ -310,6 +321,23 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
     })
     expect(records(service)[1]).toMatchObject({ exitCode: 0, merged: ["task/one"] })
     expect(records(service)[2]).toMatchObject({ exitCode: 0, merged: ["task/two"] })
+    expect(selectedCallsAfterRound[0]).toBeGreaterThan(0)
+    for (let index = 1; index < selectedCallsAfterRound.length; index += 1) {
+      expect(selectedCallsAfterRound[index]).toBeGreaterThan(selectedCallsAfterRound[index - 1]!)
+    }
+    for (const round of records(service)) {
+      const invocations = readRunLog(join(w.workdir, "logs"), String(round.run)).filter((row) => row.kind === "git")
+      expect(invocations.length).toBeGreaterThan(0)
+      for (const invocation of invocations) {
+        expect(invocation).toMatchObject({
+          executable: selected.executable,
+          contract: "native",
+          scope: "local",
+          origin: "file:.git/config",
+          complete: true,
+        })
+      }
+    }
     for (const name of ["one", "two"]) {
       expect((await w.git(["show", `origin/main:${name}.txt`])).trim()).toBe(name)
       const head = heads.get(name)
@@ -326,7 +354,8 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
       const warning = rows.find((row) => row.level === "warn" && row.message.startsWith(`${ref}:`))
       expect(warning?.message).toMatch(/remote [0-9a-f]{40}, intended [0-9a-f]{40} \(diverged\); inspect: git -C /u)
     }
-  })
+    // Three rounds launch the real selected executable for every Git call.
+  }, 15_000)
 
   it("pause is visible, refuses live and dry-run submit, and resume admits the same branch", async () => {
     const w = await world()
@@ -535,6 +564,9 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
 
   it.each(["stop", "project", "already projected"])("runs no stale round during checkout lag (%s)", async (ending) => {
     const w = await gitlinkWorld()
+    // T1 includes the component checkout poll. Watching only queue outcomes
+    // left its separate gitIn call free to lose the executable and environment.
+    const selected = await installSelectedGit(w.work)
     // The recorded target moves first; the process still loads a from its checkout.
     await w.git(["update-index", "--cacheinfo", "160000", w.b, "component"])
     await w.git(["commit", "--quiet", "-m", "target records b before local projection"])
@@ -563,7 +595,12 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
           stop.abort()
         },
       },
-      { json: true, log, workdir: w.workdir },
+      {
+        env: { ...process.env, YRD_SELECTED_TEST_MARKER: "reload-poll" },
+        json: true,
+        log,
+        workdir: w.workdir,
+      },
     )
     try {
       if (ending !== "already projected") {
@@ -578,6 +615,13 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
       await service
     }
     expect(rounds).toBe(0)
+    const checkoutReads = selected
+      .readCalls()
+      .filter(
+        (call) => call.cwd === join(w.work, "component") && call.args.join(" ") === "rev-parse --verify HEAD^{commit}",
+      )
+    expect(checkoutReads.length).toBeGreaterThan(0)
+    expect(checkoutReads.every((call) => call.marker === "reload-poll")).toBe(true)
     expect(rows.some((row) => row.message.startsWith("the gitlink exit is off"))).toBe(false)
     expect(run.stdout()).toContain(w.a)
     expect(run.stdout()).toContain(w.b)

@@ -20,6 +20,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, type Git } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { installSelectedGit } from "./support/selected-git.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -103,6 +104,8 @@ describe("the queue workdir is git configuration, never a declaration key", () =
 describe("yrd check judges HEAD, never the invoking tree", () => {
   it("passes over an UNCOMMITTED error the invoking tree carries", async () => {
     const w = await world()
+    // T1: preparation must keep the invoking command's selection in its fresh tree.
+    const selected = await installSelectedGit(w.work)
     // The error exists only in the working tree. No worktree of HEAD can
     // contain it, so a command that builds one passes; a command that reads
     // the invoking tree fails. That difference is the whole test.
@@ -112,6 +115,9 @@ describe("yrd check judges HEAD, never the invoking tree", () => {
     const { exit, out } = await check(w)
     expect(out).toContain("no-marker pass")
     expect(exit).toBe(0)
+    const treeCalls = selected.readCalls().filter(({ cwd }) => cwd.startsWith(join(w.workdir, "worktrees")))
+    expect(treeCalls.some(({ args }) => args[0] === "rev-parse" && args.includes("HEAD"))).toBe(true)
+    expect(treeCalls.some(({ args }) => args[0] === "merge-base")).toBe(true)
   })
 
   it("POSITIVE CONTROL: fails when the error is COMMITTED", async () => {

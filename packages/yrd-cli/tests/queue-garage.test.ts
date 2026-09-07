@@ -17,12 +17,14 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { gitIn, resolveGitSelection } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
-import { GARAGE_REF } from "../src/garage.ts"
+import { closeGarage, GARAGE_REF, openGarage } from "../src/garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
+import { installSelectedGit } from "./support/selected-git.ts"
 
 const roots: string[] = []
 
@@ -93,6 +95,8 @@ async function yrd(repo: string, ...args: string[]): Promise<Ran> {
 describe("the garage is a declaration in git", () => {
   it("opens, is readable with plain git, and closes", async () => {
     const repo = await repository()
+    // T1: the native-only lifecycle cannot detect a garage bypassing yrd.git.
+    const selected = await installSelectedGit(repo)
 
     const opened = await yrd(repo, "queue", "garage", "open", "--reason", "rebuilding the core")
     expect(opened.exitCode, opened.report).toBe(0)
@@ -108,6 +112,15 @@ describe("the garage is a declaration in git", () => {
     expect(closed.exitCode, closed.report).toBe(0)
     expect(existsSync(join(repo, ".git", "refs", "yrd", "garage"))).toBe(false)
     await expect(git(repo, "rev-parse", "--verify", GARAGE_REF)).rejects.toThrow()
+    const calls = selected.readCalls()
+    expect(calls[0]).toMatchObject({ cwd: repo, args: ["rev-parse", "--verify", "--quiet", `${GARAGE_REF}^{commit}`] })
+    expect(calls.some(({ args }) => args[0] === "mktree")).toBe(true)
+    expect(calls.some(({ args }) => args[0] === "commit-tree")).toBe(true)
+    expect(calls.filter(({ args }) => args[0] === "show")).toHaveLength(2)
+    expect(calls.filter(({ args }) => args[0] === "update-ref").map(({ args }) => args)).toEqual([
+      ["update-ref", "--create-reflog", "--stdin"],
+      ["update-ref", "-d", GARAGE_REF, expect.stringMatching(/^[0-9a-f]{40,64}$/u)],
+    ])
   })
 
   it("refuses a second open and names whose garage it already is", async () => {
@@ -120,6 +133,15 @@ describe("the garage is a declaration in git", () => {
     expect(second.stderr).toContain("rebuilding the core")
     // The second reason never becomes the record.
     expect(await git(repo, "log", "-1", "--format=%s", GARAGE_REF)).toBe("garage: rebuilding the core")
+    // The CLI pre-read is advisory; the writes themselves must retain CAS.
+    const selected = gitIn(repo, undefined, await resolveGitSelection(repo))
+    const at = await git(repo, "rev-parse", GARAGE_REF)
+    await expect(async () =>
+      openGarage(repo, { reason: "racing mechanic", by: "operator" }, selected),
+    ).rejects.toThrow()
+    const stale = await git(repo, "rev-parse", "HEAD")
+    await expect(async () => closeGarage(repo, stale, selected)).rejects.toThrow()
+    expect(await git(repo, "rev-parse", GARAGE_REF)).toBe(at)
   })
 
   it("refuses a close when no garage is open", async () => {
@@ -150,6 +172,8 @@ describe("the garage is a declaration in git", () => {
     const tree = await git(repo, "mktree")
     const commit = await git(repo, "commit-tree", tree, "-m", "garage: rebuilding the core\n\nOpened-By: @cto\n")
     await git(repo, "update-ref", GARAGE_REF, commit)
+    // T1: the very first garage read must use the command's selected Git.
+    const selected = await installSelectedGit(repo)
     expect(existsSync(join(repo, ".git", "yrd-core")), "yrd has written nothing here yet").toBe(false)
 
     // `queue up` is the service — one round on a loop — and the only spelling
@@ -159,7 +183,38 @@ describe("the garage is a declaration in git", () => {
     expect(service.exitCode, service.report).toBe(2)
     expect(service.stderr.trimEnd()).toBe("garage: rebuilding the core; the service stays down until the garage closes")
     expect(service.stdout).toBe("")
+    expect(selected.readCalls().map(({ cwd, args }) => ({ cwd, args }))).toEqual([
+      { cwd: repo, args: ["rev-parse", "--verify", "--quiet", `${GARAGE_REF}^{commit}`] },
+      { cwd: repo, args: ["show", "--no-patch", "--format=%aI%n%B", GARAGE_REF] },
+    ])
     // The refusal happens before the queue's own directory is made.
     expect(existsSync(join(repo, ".git", "yrd-core")), service.report).toBe(false)
   })
+
+  // The ordinary open-garage refusal cannot prove faults never become "closed".
+  it.each(["empty resolution", "read failure", "malformed declaration", "protocol failure", "not a repository"])(
+    "refuses %s before service work",
+    async (fault) => {
+      const repo = await repository()
+      const selected = await installSelectedGit(repo)
+      if (fault === "empty resolution") {
+        const empty = Bun.which("true")
+        expect(empty).not.toBeNull()
+        await git(repo, "config", "yrd.git", JSON.stringify({ executable: empty, contract: "native" }))
+      } else if (fault === "protocol failure") {
+        await git(repo, "config", "yrd.git", JSON.stringify({ executable: selected.executable, contract: "root-v1" }))
+      } else if (fault !== "not a repository") {
+        await git(repo, "update-ref", GARAGE_REF, "HEAD")
+        if (fault === "read failure") await writeFile(join(repo, ".git", "refs", "yrd", "garage"), "broken\n")
+      }
+      const service = await yrd(fault === "not a repository" ? dirname(repo) : repo, "queue", "up")
+      expect(service.exitCode, service.report).toBe(2)
+      expect(service.stderr).toContain(GARAGE_REF)
+      if (fault === "empty resolution") expect(service.stderr).toContain("empty output")
+      expect(service.stdout).toBe("")
+      expect(existsSync(join(repo, ".git", "yrd")), service.report).toBe(false)
+      expect(existsSync(join(repo, ".git", "yrd-core")), service.report).toBe(false)
+      expect(selected.readCalls().some(({ args }) => args[0] === "fetch")).toBe(false)
+    },
+  )
 })
