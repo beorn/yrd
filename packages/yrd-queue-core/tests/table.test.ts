@@ -6,6 +6,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
+import { createProcess } from "@yrd/process"
+import { gitEnvironment } from "../src/git.ts"
 import {
   appendRecord,
   changeRef,
@@ -343,61 +345,92 @@ describe("the table is the queue read rendered", () => {
     ])
   })
 
-  it("shows checks from every record after a checked change is merged and sent", async () => {
-    const w = await world("target: origin#main\n")
-    const head = await submitCommit(w, "task/one", "one.txt")
-    const change = { branch: "task/one", head }
-    const base = (await w.git(["rev-parse", "main"])).trim()
-    await appendRecord(w.git, {
-      change,
-      kind: "checked",
-      subject: "on-submit checks passed",
-      target: "origin#main",
-      trailers: [
+  it.each(["merged", "failed", "stuck"] as const)(
+    "keeps check history and the actual %s time across later notifications",
+    async (kind) => {
+      const w = await world("target: origin#main\n")
+      const head = await submitCommit(w, "task/one", "one.txt")
+      const change = { branch: "task/one", head }
+      const base = (await w.git(["rev-parse", "main"])).trim()
+      await appendRecord(w.git, {
+        change,
+        kind: "checked",
+        subject: "on-submit checks passed",
+        target: "origin#main",
+        trailers: [
+          ["Base", base],
+          ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
+          ["Check", "manifest-co-change exit=0 ms=13 log=/tmp/manifest.log"],
+          ["Check", "substrate-pair exit=0 ms=14 log=/tmp/substrate.log"],
+        ],
+      })
+      // A real notification has its own commit time. Distinct Git instants
+      // expose timestamp provenance without sleeping or mutating global env.
+      const endedAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 60_000)
+      const sentAt = new Date(endedAt.getTime() + 60_000)
+      const gitAt = (at: Date): Git =>
+        gitIn(w.work, createProcess({ env: { ...gitEnvironment(process.env), GIT_COMMITTER_DATE: at.toISOString() } }))
+      const lastCheck = `affected-tests exit=${kind === "failed" ? 1 : 0} ms=15 log=/tmp/affected.log`
+      const endingTrailers: (readonly [string, string])[] = [
         ["Base", base],
-        ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
-        ["Check", "manifest-co-change exit=0 ms=13 log=/tmp/manifest.log"],
-        ["Check", "substrate-pair exit=0 ms=14 log=/tmp/substrate.log"],
-      ],
-    })
-    await appendRecord(w.git, {
-      change,
-      kind: "merged",
-      subject: "merged task/one into main",
-      target: "origin#main",
-      trailers: [
-        ["Base", base],
-        ["Merge", base],
-        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
-      ],
-    })
-    await appendRecord(w.git, {
-      change,
-      kind: "sent",
-      subject: "sent merge notice",
-      target: "origin#main",
-      trailers: [
-        ["State", "merged"],
-        ["Base", base],
-        ["Merge", base],
-        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
-      ],
-    })
-    await w.git(["push", "--quiet", "origin", `${changeRef(change)}:${changeRef(change)}`])
+        ["Check", lastCheck],
+      ]
+      if (kind === "merged") endingTrailers.push(["Merge", base])
+      if (kind === "stuck") {
+        endingTrailers.push(
+          ["Code", "ref-write"],
+          ["Subject", "target"],
+          ["Via", "push"],
+          ["Evidence", "/tmp/push.log"],
+          ["Next", "inspect the target"],
+          ["Owner", "queue owner"],
+        )
+      }
+      const ending = { change, kind, subject: `${kind} task/one`, target: "origin#main", trailers: endingTrailers }
+      if (kind === "failed") {
+        await appendRecord(gitAt(new Date(endedAt.getTime() - 30_000)), ending)
+        await appendRecord(w.git, { change, kind: "checked", subject: "retry checked", target: "origin#main" })
+        await w.git(["push", "--quiet", "origin", `${changeRef(change)}:${changeRef(change)}`])
+        const retry = await readHistories(w.git, (await readQueue(w.git, "origin", "main")).changes, "origin")
+        expect(show(retry, change.branch)[0]?.row.endedAt).toBeUndefined()
+      }
+      await appendRecord(gitAt(endedAt), ending)
+      await w.git(["push", "--quiet", "origin", `${changeRef(change)}:${changeRef(change)}`])
+      const direct = list((await readQueue(w.git, "origin", "main")).changes, { now: sentAt })[0]
+      expect(direct?.endedAt).toEqual(endedAt)
+      await appendRecord(gitAt(sentAt), {
+        change,
+        kind: "sent",
+        subject: "sent ending notice",
+        target: "origin#main",
+        trailers: [["State", kind], ...endingTrailers],
+      })
+      await w.git(["push", "--quiet", "origin", `${changeRef(change)}:${changeRef(change)}`])
 
-    const queue = await readQueue(w.git, "origin", "main")
-    const entry = queue.changes[0]
-    if (entry === undefined) throw new Error("submitted change missing from the queue read")
-    const shown = show(await readHistories(w.git, [entry], "origin"), change.branch)
-
-    expect(shown[0]?.checks).toEqual([
-      "typecheck exit=0 ms=12 log=/tmp/typecheck.log",
-      "manifest-co-change exit=0 ms=13 log=/tmp/manifest.log",
-      "substrate-pair exit=0 ms=14 log=/tmp/substrate.log",
-      "affected-tests exit=0 ms=15 log=/tmp/affected.log",
-      "affected-tests exit=0 ms=15 log=/tmp/affected.log",
-    ])
-  })
+      const queue = await readQueue(w.git, "origin", "main")
+      const entry = queue.changes[0]
+      if (entry === undefined) throw new Error("submitted change missing from the queue read")
+      const summary = list(queue.changes, { now: sentAt })[0]
+      expect(summary?.at).toEqual(sentAt)
+      expect(summary?.endedAt).toBeUndefined()
+      expect(summary?.state).toBe(direct?.state)
+      expect(summary?.next).toEqual(direct?.next)
+      const hydrated = await readHistories(w.git, [entry], "origin")
+      const shown = show(hydrated, change.branch)
+      expect(shown[0]?.row.endedAt).toEqual(endedAt)
+      expect(list(hydrated, { now: sentAt })[0]?.endedAt).toEqual(endedAt)
+      expect(shown[0]?.row.state).toBe(summary?.state)
+      expect(shown[0]?.row.next).toEqual(summary?.next)
+      expect(shown[0]?.checks).toEqual([
+        "typecheck exit=0 ms=12 log=/tmp/typecheck.log",
+        "manifest-co-change exit=0 ms=13 log=/tmp/manifest.log",
+        "substrate-pair exit=0 ms=14 log=/tmp/substrate.log",
+        ...(kind === "failed" ? [lastCheck] : []),
+        lastCheck,
+        lastCheck,
+      ])
+    },
+  )
 })
 
 describe("a packed Check: trailer", () => {

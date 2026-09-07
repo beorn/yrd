@@ -55,7 +55,7 @@ export type Row = Readonly<{
   reason?: string
   /** When the change was opened, from its first record's `Opened:`. */
   since?: Date
-  /** When the change's last record was written: an ended change is as recent as its ending. A direct merge is as recent as its commit. */
+  /** When the change's last record was written; a notification has its own instant. A direct merge uses its commit time. */
   at?: Date
   /** The merge commit on the target, full sha, from the merged record's `Merge:` (carried by the sent record too); absent until merged. */
   merge?: string
@@ -75,7 +75,7 @@ export type Row = Readonly<{
   run?: string
   /** When checking began — the journal's first check-start for this change, or the tip's own instant when the tip IS the checked record. */
   startedAt?: Date
-  /** When the change ended; absent while it is queued or checked, and absent for an ending git read rather than a record (`replaced`, `deleted`, a direct ancestor). */
+  /** When the actual ending record was written; absent when only its sent notice was read, while queued or checked, or for an ending git read (`replaced`, `deleted`, a direct ancestor). */
   endedAt?: Date
   /**
    * The check running on this change RIGHT NOW, from the run journal. An
@@ -284,6 +284,10 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
   const lastCheck = packed === undefined ? undefined : readCheckTrailer(packed)
   const opened = trailer(tip, "Opened")
   const ended = endedKind(tip)
+  const endedAt =
+    ended === "merged" || ended === "failed" || ended === "stuck"
+      ? entry.change.records.findLast((record) => record.kind === ended)?.at
+      : undefined
   const submitter = trailer(tip, "Submitter")
   const runs = options.journals?.runs.get(journalKey(entry.change.branch, entry.change.head)) ?? []
   const latest = runs[0]
@@ -329,7 +333,9 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
     // Ended is what the RECORD says ended it. A change read merged from
     // ancestry alone, or failed because its branch moved under it, ended
     // outside the records and has no instant to name: absent, not the tip's.
-    ...(ended === "merged" || ended === "failed" || ended === "stuck" ? { endedAt: tip.at } : {}),
+    // A sent record inherits state, not the ending instant. A tip-only read
+    // cannot name that instant; hydrated history finds the actual ending.
+    ...(endedAt === undefined ? {} : { endedAt }),
     ...(live === undefined || running === undefined
       ? {}
       : {
