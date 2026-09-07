@@ -491,6 +491,8 @@ async function prepare(
   const about = { branch: entry.change.branch, head: entry.change.head, name: SETUP, phase }
   return prepareWorktree(run.git, run.options.repo, commit, path, {
     env: run.options.env,
+    selection: run.options.selection,
+    gitOptions: gitInvocationOptions(run.options, run.log),
     plumbing: run.options.plumbing,
     process: run.options.process,
     record: ({ result, start, end: ended }) => record(run, { ...about, end: ended, start }, result),
@@ -984,7 +986,13 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     // The merge moved this worktree's HEAD, so what a check judges here is
     // read now and not at prepare time: the candidate is the merge commit,
     // and its merge base with the target is the target itself.
-    const merged = await checkedTree(worktree.path, run.targetSha, run.options.process)
+    const merged = await checkedTree(
+      worktree.path,
+      run.targetSha,
+      run.options.process,
+      run.options.selection,
+      gitInvocationOptions(run.options, run.log),
+    )
     const results = await runPhase(run, entry, "merge", worktree.path, merged)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {

@@ -27,7 +27,7 @@ import { materializeSubmodulesFromLocalWorktreeParallel } from "git-super/submod
 import type { Process } from "@yrd/process"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import type { Git } from "./records.ts"
-import { gitIn, mergeBase } from "./git.ts"
+import { gitIn, mergeBase, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
 /** The logger git-super narrates to; the queue hands one over only at trace. */
 export type PlumbingLog = NonNullable<Parameters<typeof materializeSubmodulesFromLocalWorktreeParallel>[0]["log"]>
@@ -244,6 +244,9 @@ export type RunSetup = Readonly<{
 }>
 
 export type PrepareWorktree = Readonly<{
+  /** The command's fixed selection and invocation evidence, also for tree facts. */
+  selection?: GitSelection
+  gitOptions?: GitInvocationOptions
   /** The target every base is measured against: `YRD_BASE_SHA` is the merge base of it and the worktree's HEAD. */
   targetSha: string
   /** Run once in the fresh worktree, after materialization and before any check. Absent, nothing runs. */
@@ -274,8 +277,14 @@ export type PreparedWorktree = Worktree & Readonly<{ tree: CheckedTree }>
  * that shares no history with the target throws: a base that is not an
  * ancestor of the candidate is a lie a check would compute a diff from.
  */
-export async function checkedTree(worktree: string, targetSha: string, process?: Process): Promise<CheckedTree> {
-  const wt = gitIn(worktree, process)
+export async function checkedTree(
+  worktree: string,
+  targetSha: string,
+  process?: Process,
+  selection?: GitSelection,
+  options: GitInvocationOptions = {},
+): Promise<CheckedTree> {
+  const wt = gitIn(worktree, process, selection, options)
   const candidate = (await wt(["rev-parse", "HEAD"])).trim()
   const base = await mergeBase(wt, candidate, targetSha)
   if (base === undefined) {
@@ -357,7 +366,10 @@ export async function prepareWorktree(
 ): Promise<PreparedWorktree> {
   const worktree = await freshWorktree(git, repo, commit, path, options.plumbing)
   try {
-    const tree = await checkedTree(worktree.path, options.targetSha, options.process)
+    const tree = await checkedTree(worktree.path, options.targetSha, options.process, options.selection, {
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...options.gitOptions,
+    })
     const prepared: PreparedWorktree = { ...worktree, tree }
     const setup = options.setup
     if (setup !== undefined) {
