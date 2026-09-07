@@ -371,6 +371,13 @@ describe("a change's state, derived", { timeout: 180_000 }, () => {
     // Default history is separately broken: historical-run-rows-use-latest-result pairs old rows with the latest result.
     const { rows, result } = await changesListed(repo, true)
     const passed = rowFor(rows, green.branch, result.report)
+    const retainedFailure = rowFor(rows, red.branch, result.report)
+    expect(stateOf(retainedFailure, result.report)).toBe("failed")
+    expect(retainedFailure, result.report).toMatchObject({
+      log: redAgain.log,
+      run: redAgain.run,
+      result: redAgain.result,
+    })
     expect(stateOf(failed, result.report)).toBe("failed")
     expect(stateOf(passed, result.report)).toBe("merged")
     expect(String(failed.result), result.report).toContain("fail")
