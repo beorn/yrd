@@ -15,15 +15,13 @@ describe("Yrd Hab runner declarations", () => {
       "yrd-service": {
         command: "bun tools/yrd-runtime.mjs yrd queue up --interval 120",
         env: { TRIBE_NAME: "@yrd-service", YRD_HABITANT_RSS_CAP_MB: "24576" },
-        // Exit 2 (the queue is stuck) stays down for its garage; everything the
-        // loop ends on purpose — a signal, and a gitlink that moved under it — is a
-        // 0, because hab reads every non-zero exit as a crash and spends a
-        // restart budget on it. `always` is what then brings it back on the new
-        // gitlink: a clean ending is not relaunched under `on-failure` (@cto,
-        // 2026-09-03).
+        // The queue relaunches only after an ending the loop chose: 0 for a
+        // clean round/pin recycle, or 1 for a candidate failure. Exit 2 is
+        // stuck, and any signal is an unplanned host-level interruption; both
+        // stay down and page @ci instead of repeating an unmeasured fault.
         // No health probe: the loop's process and journal are its liveness (M7).
-        restart: "always",
-        permanentExitCodes: [2],
+        restart: "on-codes",
+        relaunchExitCodes: [0, 1],
         owner: "@ci",
       },
     })

@@ -56,33 +56,12 @@ export default {
         // No health probe (M7, 2026-09-03): the loop's own process is its
         // liveness, its journal shows a running check, and a probe shelling
         // the CLI every tick was noise with a second opinion.
-        // The loop has two endings it chooses: 2 (stuck — it stays down until
-        // the garage fixes the queue) and 0, which now covers both a signal and
-        // a moved gitlink, read at the target after every round and taken at a
-        // round boundary with nothing in flight. `source-stale` (11) and the
-        // stale installed plan (13) were the incumbent resident's
-        // self-supervision and went with it at M6 with `habitant-exit.ts`.
-        //
-        // A gitlink move exits 0, and under `on-failure` a clean ending is not
-        // relaunched, so the policy is `always`. The one permanent exit is 2,
-        // stuck. Ruled by @cto 2026-09-03.
-        //
-        // Was `restart: "never"` (andon ruling, operator 2026-09-01: a crashed
-        // runner stays exited and pages once). Under that value the entire
-        // exit taxonomy was INERT: 13 fired twice on 2026-09-02 alone, once at
-        // 08:06 and once before 08:42, each time as a merge changed the step
-        // definitions under a serving runner, and each time the queue stayed
-        // down until a person ran `hab up`. The gitlink advances cost the same
-        // ritual — stop the resident, advance the gitlink, start it again —
-        // between 2m43s and ~40 minutes each, on the fleet's critical path.
-        // Operator ruling 2026-09-02: "why isn't yrd fully automatic now? that
-        // is critical path and should be driven hard."
-        //
-        // Exit 2 means the queue is stuck and needs its garage, so relaunching
-        // repeats the same fault: it is the one permanent exit. Retired exits
-        // 16/17/18 are not part of this runner's permanent-exit policy.
-        restart: "always" as const,
-        permanentExitCodes: [2],
+        // The loop relaunches only after an ending it chose: 0 for a clean
+        // round/pin recycle, or 1 for a candidate failure. Exit 2 is stuck.
+        // Signal decision: any signal observed by Hab is an unplanned host-level
+        // interruption, so it stays down and pages @ci with every unlisted code.
+        restart: "on-codes" as const,
+        relaunchExitCodes: [0, 1],
         // Wired 2026-09-01: `HabServiceDefinition.owner` (ag/packages/hab-config,
         // src/index.ts) now lists "owner" in `SERVICE_KEYS`, and a resident with
         // `restart: "never"` and no owner is a WARNING there, not the FATAL
