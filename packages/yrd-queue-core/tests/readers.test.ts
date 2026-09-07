@@ -374,11 +374,19 @@ describe("the clocks", () => {
     expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000, runtimeMs: 15 * 60 * 1000, waitMs: 30 * 60 * 1000 })
   })
 
-  it("keeps counting the runtime of a change that has not ended", () => {
-    const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state: "checked" }
+  it.each(["queued", "checked"] as const)("keeps counting the runtime of a %s change", (state) => {
+    const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state }
 
     expect(clocks(row, now).runtimeMs).toBe(30 * 60 * 1000)
   })
+
+  it.each(["merged", "failed", "stuck", "direct"] as const)(
+    "leaves runtime unknown for a %s change with no recorded ending time",
+    (state) => {
+      const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state }
+      expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+    },
+  )
 
   it("leaves wait and runtime ABSENT when nothing recorded that checking began, rather than answering zero", () => {
     const row: Row = { branch: "task/one", head: "abc", since, state: "queued" }

@@ -233,7 +233,7 @@ export type Clocks = Readonly<{
   ageMs?: number
   /** How long it waited before checking began. */
   waitMs?: number
-  /** How long checking has run, or ran: still counting while it is open. */
+  /** How long checking has run, or ran; unknown when an ending has no recorded instant. */
   runtimeMs?: number
 }>
 
@@ -243,8 +243,11 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
     row.since === undefined || row.startedAt === undefined
       ? undefined
       : Math.max(0, row.startedAt.getTime() - row.since.getTime())
+  const until = row.endedAt ?? (row.state === "queued" || row.state === "checked" ? now : undefined)
   const runtimeMs =
-    row.startedAt === undefined ? undefined : Math.max(0, (row.endedAt ?? now).getTime() - row.startedAt.getTime())
+    row.startedAt === undefined || until === undefined
+      ? undefined
+      : Math.max(0, until.getTime() - row.startedAt.getTime())
   return {
     ...(ageMs === undefined ? {} : { ageMs }),
     ...(waitMs === undefined ? {} : { waitMs }),
