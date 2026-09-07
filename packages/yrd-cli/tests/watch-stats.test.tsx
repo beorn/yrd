@@ -255,13 +255,13 @@ describe("the STATS box", () => {
       "FAILS",
       "STUCK",
       "RUNS",
-      "TIME",
+      "MEDIAN",
       "TOTAL",
       "QUEUING",
       "RUNNING",
       "RETRIES",
     ].map((label) => lines.findIndex((line) => line.includes(label)))
-    // In order, every row present, DUP directly above FAILS, the TIME rows under the counts.
+    // In order, every row present, DUP directly above FAILS, the median rows under the counts.
     expect(
       rows.every((index) => index >= 0),
       text,
@@ -290,5 +290,21 @@ describe("the STATS box", () => {
     const text = await paint([], 100)
     expect(text).toContain("MERGES")
     expect(text).not.toContain("no run journal")
+  })
+
+  // The retired box headed these rows AVG TIME, which said which statistic they were.
+  // They are medians now, so a bare TIME would leave a reader unable to tell a median
+  // from a mean or a sum from the numbers alone — the one display fact this heading carries.
+  it("heads the median rows with the statistic's name, and the label never widens the box", async () => {
+    const text = await paint([decision(0.5, "merged"), decision(2, "merged", "r2", true)], 120)
+    const lines = text.split("\n")
+    const heading = lines.find((line) => /(?:^|\s)MEDIAN(?:\s|$)/u.test(line))
+    expect(heading, text).toBeDefined()
+    const header = lines.find((line) => line.includes("YSTRDAY"))
+    expect(header, text).toBeDefined()
+    // Same column rules as every other row: MEDIAN fits STATS_LABEL_WIDTH, so the
+    // period and hour columns land exactly where the header puts them.
+    const bars = (line: string): number[] => [...line].flatMap((glyph, index) => (glyph === "│" ? [index] : []))
+    expect(bars(heading!)).toEqual(bars(header!))
   })
 })
