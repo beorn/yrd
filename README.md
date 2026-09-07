@@ -31,7 +31,7 @@ Yrd is a merge queue that lives inside a Git repository. A queue runs on a branc
 ## Commands
 
 ```
-yrd submit [branch] [--notify <who>] [--issue <id>] [--dry-run]   push the branch (the current one when none is named) and open its change; same head again is a retry
+yrd submit [branch] [--notify <who>] [--issue <id>] [--dry-run] [--rebase]   push the branch (the current one when none is named) and open its change; same head again is a retry
 yrd queue run                                                     one queue run
 yrd queue up [--interval <seconds>]                               queue runs on a loop, every 15 seconds by default; run this under your supervisor
 yrd queue pause <reason> [--notify <seat>]                        stop checking and merging; the service keeps the queue visible
@@ -46,6 +46,10 @@ yrd env open|list                                                 a checkout of 
 
 Every command takes `--json`. `yrd submit` refuses the queue branch itself: it is not a change. While paused, submit and dry-run refuse with who paused the queue, when, why, and the resume command; already-submitted changes keep their place. `yrd queue up` continues ticking and does no checking or merging until resume. `yrd check` checks out HEAD afresh, so uncommitted changes are not seen.
 
+Submit first checks that the change contains the target's current tip. A stale branch is refused with its merge base and the expected target commit, before any record or ref is written. Rebase it yourself, or run `yrd submit --rebase` from that branch with a clean worktree and index, including untracked files. Conflicts remain for you to resolve with Git; no change opens until you finish and submit again. A head already contained by the target has nothing new to submit.
+
+`--dry-run` uses the same checks. With `--rebase`, it describes the required rewrite without performing it or predicting the resulting commit. These checks capture a target commit at one instant; the queue revalidates at merge.
+
 ## The config, `.yrd.yml`
 
 The queue's config is a file on the queue branch. It is read from that branch on every queue run, never from the change, so a branch cannot change the checks that judge it. The smallest config that does something:
@@ -59,19 +63,19 @@ checks:
 Everything the file can say:
 
 ```yml
-target: origin#main     # the queue branch and the remote it lives on: <remote>#<branch>; this is the default
-setup: bun install --frozen-lockfile      # runs once in every fresh checkout the queue makes, before any check
+target: origin#main # the queue branch and the remote it lives on: <remote>#<branch>; this is the default
+setup: bun install --frozen-lockfile # runs once in every fresh checkout the queue makes, before any check
 checks:
-  - typecheck:                            # each check is one mapping of its name to its settings
+  - typecheck: # each check is one mapping of its name to its settings
       run: bun run typecheck
-      on: [submit, merge]                 # when it runs: submit = on the change alone, merge = on its merge with the queue branch; default: merge
-      timeoutMs: 1800000                  # default: 30 minutes
-      scripts: [tools/typecheck.ts]       # restored from the queue branch before the check runs, so a change cannot edit its own judge
+      on: [submit, merge] # when it runs: submit = on the change alone, merge = on its merge with the queue branch; default: merge
+      timeoutMs: 1800000 # default: 30 minutes
+      scripts: [tools/typecheck.ts] # restored from the queue branch before the check runs, so a change cannot edit its own judge
       environmentPassthrough: [GITHUB_TOKEN]
-notify:                                   # the same shape as checks: a name, when it runs, what runs
+notify: # the same shape as checks: a name, when it runs, what runs
   - submitter:
-      on: [merged, failed]                # default: all four endings
-      run: bun tools/yrd-notify.ts        # gets the record as one JSON object on stdin
+      on: [merged, failed] # default: all four endings
+      run: bun tools/yrd-notify.ts # gets the record as one JSON object on stdin
   - supervisor:
       on: [stuck, merged-direct]
       run: bun tools/yrd-notify.ts --to @cto
@@ -99,7 +103,7 @@ The submitter and the queue share only the remote. The submitter pushes a branch
 
 ## How a change moves
 
-1. **Submit.** One atomic push of the branch and of the change's first record. The branch is pushed with `--force-with-lease`, so a push that would overwrite another submitter's head is refused, loudly.
+1. **Submit.** After the freshness check, one atomic push of the branch and of the change's first record. The branch is pushed with `--force-with-lease`, so a push that would overwrite another submitter's head is refused, loudly.
 2. **Check.** The next queue run takes every queued change, oldest first, into a fresh checkout of its head. Two built-in checks run first: the change shares history with the queue branch, and every gitlink it moved points at a commit on that submodule's `main`. Then the `on: submit` checks run.
 3. **Merge.** The first checked change in line is merged with the queue branch in a fresh checkout. A third built-in check runs there: the `.yrd.yml` of the merged tree still parses, so no change can merge a config the next run cannot read. Then the `on: merge` checks run. A pass moves the queue branch to one merge commit (`--no-ff`, so the merge is visible in history) that names the change and the queue run in its trailers (`Change: <branch>@<sha>`, `Merged-By: yrd queue github.com/beorn/hh#main [<run id>]`), committed as `yrd-service`. One change merges per run; the rest are checked again at the new queue branch on the next run. Merging several checked changes as one tested batch, and splitting a failed batch to find the culprit, is planned and not built.
 4. **Decide whose fault a failure is.** A check runs once. If its command exits non-zero, the change failed and it is the submitter's: they read the log, and if the failure was the queue's environment rather than their change, they submit the same head again. The queue never reruns a check to decide. Stuck is different: a crash, a missing script, a check past its time limit, a check that exits 2, a submodule's remote that cannot be asked. Stuck stops the queue.
@@ -131,24 +135,24 @@ Every check writes one line in the queue run's log when it starts and one when i
 
 ## Exit codes
 
-| Exit | Meaning |
-|---|---|
-| 0 | the run ended with nothing failed or stuck; the `yrd queue up` loop also ends with 0 when the gitlink of Yrd itself moved, so a supervisor set to restart it starts the new version |
-| 1 | at least one change ended failed in this run and was sent back |
-| 2 | stuck: the queue cannot go on until someone repairs it; a supervisor should leave it down |
+| Exit | Meaning                                                                                                                                                                             |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | the run ended with nothing failed or stuck; the `yrd queue up` loop also ends with 0 when the gitlink of Yrd itself moved, so a supervisor set to restart it starts the new version |
+| 1    | at least one change ended failed in this run and was sent back                                                                                                                      |
+| 2    | stuck: the queue cannot go on until someone repairs it; a supervisor should leave it down                                                                                           |
 
 The command exits from one place in the code. It also exits 2 when the command itself cannot run: no queue here, or a config it cannot read. A signal, or an error nobody caught, is stuck.
 
 ## Compared with other systems
 
-| | What is tested | What merges | Where the state lives | Superproject |
-|---|---|---|---|---|
-| **Yrd** | the merge of the queue branch and the change, in a fresh checkout | that same merge commit | commits on refs in the repository; no server | gitlinks checked and materialized |
-| **GitHub merge queue** | several queued pull requests merged together and tested as one | that group's result | GitHub | none: the tree merges, gitlinks unread |
-| **GitLab merge trains** | a pipeline per position in the train | GitLab's merge | GitLab | none |
-| **Gerrit** | the patch set | per submit strategy; rebase or cherry-pick can mint a sha nobody tested | git refs on the Gerrit server | gitlinks can be updated after a merge, not checked before it |
-| **Zuul** | a test merge of the whole train ahead, before the forge merges | whatever the forge then merges | the forge plus ZooKeeper | many repositories per change, named in its project config, not gitlinks |
-| **bors-ng** | a staging merge of the batch | the exact staging sha, fast-forwarded | its own database | none |
+|                         | What is tested                                                    | What merges                                                             | Where the state lives                        | Superproject                                                            |
+| ----------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------------------------- |
+| **Yrd**                 | the merge of the queue branch and the change, in a fresh checkout | that same merge commit                                                  | commits on refs in the repository; no server | gitlinks checked and materialized                                       |
+| **GitHub merge queue**  | several queued pull requests merged together and tested as one    | that group's result                                                     | GitHub                                       | none: the tree merges, gitlinks unread                                  |
+| **GitLab merge trains** | a pipeline per position in the train                              | GitLab's merge                                                          | GitLab                                       | none                                                                    |
+| **Gerrit**              | the patch set                                                     | per submit strategy; rebase or cherry-pick can mint a sha nobody tested | git refs on the Gerrit server                | gitlinks can be updated after a merge, not checked before it            |
+| **Zuul**                | a test merge of the whole train ahead, before the forge merges    | whatever the forge then merges                                          | the forge plus ZooKeeper                     | many repositories per change, named in its project config, not gitlinks |
+| **bors-ng**             | a staging merge of the batch                                      | the exact staging sha, fast-forwarded                                   | its own database                             | none                                                                    |
 
 In both directions:
 
@@ -161,12 +165,12 @@ The common thread: every system above answers "what exactly did we test, and is 
 
 ## Packages
 
-| Package | What it is |
-|---|---|
-| `packages/yrd-queue-core` | the queue: submit, the queue read, the queue run, checks, records |
-| `packages/yrd-cli` | the commands |
-| `packages/yrd-process` | running commands and Git: checkouts, time limits, and reading which processes still hold a path |
-| `packages/yrd-bay` | `yrd env`: a checkout of one branch for a person or an agent to work in |
+| Package                   | What it is                                                                                      |
+| ------------------------- | ----------------------------------------------------------------------------------------------- |
+| `packages/yrd-queue-core` | the queue: submit, the queue read, the queue run, checks, records                               |
+| `packages/yrd-cli`        | the commands                                                                                    |
+| `packages/yrd-process`    | running commands and Git: checkouts, time limits, and reading which processes still hold a path |
+| `packages/yrd-bay`        | `yrd env`: a checkout of one branch for a person or an agent to work in                         |
 
 `tests/boundary` proves the queue from the outside, as a user would see it: real repositories, real pushes, real checks in their own checkouts.
 

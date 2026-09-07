@@ -47,12 +47,13 @@ import {
   resolveRemote,
   runCheck,
   show,
-  refuseTarget,
+  inspectSubmit,
+  freshnessLine,
+  readRemoteCommit,
   submit,
   issueOf,
   QueuePaused,
   QueueNotPaused,
-  requireResumed,
   writePause,
   type CheckResult,
   type CheckSpec,
@@ -111,7 +112,14 @@ const sourceAtLoad = await (async () => {
 })()
 
 export type CoreQueueCommand =
-  | Readonly<{ command: "submit"; branch?: string; submitter: string; issue?: string; dryRun?: boolean }>
+  | Readonly<{
+      command: "submit"
+      branch?: string
+      submitter: string
+      issue?: string
+      dryRun?: boolean
+      rebase?: boolean
+    }>
   | Readonly<{ command: "pause"; by: string; reason: string }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
   | Readonly<{ command: "run" }>
@@ -234,8 +242,15 @@ export async function coreQueueCommand(
   // one-shot command; the service reads again before every round, so an edit at
   // the target takes effect on the next round.
   const declaration = async (): Promise<QueueConfig | undefined> => {
-    await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
-    const declared = await readConfig(git, targetRef)
+    let declarationCommit = targetRef
+    if (request.command === "submit") {
+      const captured = await readRemoteCommit(git, hinted, `refs/heads/${hintedTarget}`)
+      if (captured === undefined) throw new Error(`${targetRef} has no advertised target branch`)
+      declarationCommit = captured
+    } else {
+      await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
+    }
+    const declared = await readConfig(git, declarationCommit)
     if (declared === undefined) return undefined
     // The declared remote may be a URL; `resolveRemote` turns it into the name
     // this repository knows it by, adding `yrd` when it has none.
@@ -290,50 +305,47 @@ export async function coreQueueCommand(
     }
     case "submit": {
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
-      // The preview refuses exactly what the action refuses, first.
-      refuseTarget(branch, config.target.branch)
-      if (request.dryRun === true) {
-        try {
-          await requireResumed(git, config.target.remote)
-        } catch (error) {
-          if (error instanceof QueuePaused) {
-            io.stderr(`yrd: ${error.message}\n`)
-            return 1
-          }
-          throw error
-        }
+      const submission = {
+        branch,
+        submitter: request.submitter,
+        target: config.target,
+        ...(request.issue === undefined ? {} : { issue: request.issue }),
+        ...(request.rebase === true ? { rebase: true } : {}),
       }
-      // A dry run says what it would open and touches nothing: no push, no
-      // record, no ref anywhere. The wrapper used to take `--dry-run` on its own
-      // surface and pass the core an ordinary submit, so a dry run opened a
-      // real change: one submit, two opened records, 2026-09-03. The
-      // flag belongs to the command that pushes, or to no command at all.
-      if (request.dryRun === true) {
-        const head = (await git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim()
-        const issue = await issueOf(git, branch, head, request.issue)
+      try {
+        if (request.dryRun === true) {
+          const inspected = await inspectSubmit(git, config.target.remote, submission)
+          const { head, targetHead, rebaseRequired } = inspected
+          const issue = await issueOf(git, branch, head, request.issue)
+          emit(
+            io,
+            options.json,
+            {
+              ...(rebaseRequired
+                ? { branch, headBeforeRebase: head, rebaseRequired }
+                : { change: changeName({ branch, head }) }),
+              dryRun: true,
+              submitter: request.submitter,
+              target: targetName(config.target),
+              targetHead,
+              freshness: freshnessLine(targetHead),
+              ...(issue === undefined ? {} : { issue }),
+            },
+            (rebaseRequired
+              ? `would rebase ${branch} at ${head} onto ${targetHead}, then open its new head (unknown until rebase)`
+              : `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}`) +
+              `${issue === undefined ? "" : ` (issue ${issue})`}; nothing was pushed; ${freshnessLine(targetHead)}`,
+          )
+          return 0
+        }
+        const submitted = await submit(git, config.target.remote, submission)
         emit(
           io,
           options.json,
-          {
-            change: changeName({ branch, head }),
-            dryRun: true,
-            submitter: request.submitter,
-            target: targetName(config.target),
-            ...(issue === undefined ? {} : { issue }),
-          },
-          `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}` +
-            `${issue === undefined ? "" : ` (issue ${issue})`}; nothing was pushed`,
+          submitted,
+          `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}; ${freshnessLine(submitted.targetHead)}`,
         )
         return 0
-      }
-      let submitted
-      try {
-        submitted = await submit(git, config.target.remote, {
-          branch,
-          submitter: request.submitter,
-          target: config.target,
-          ...(request.issue === undefined ? {} : { issue: request.issue }),
-        })
       } catch (error) {
         if (error instanceof QueuePaused) {
           io.stderr(`yrd: ${error.message}\n`)
@@ -341,13 +353,6 @@ export async function coreQueueCommand(
         }
         throw error
       }
-      emit(
-        io,
-        options.json,
-        submitted,
-        `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}`,
-      )
-      return 0
     }
     case "run": {
       const outcome = await oneRound(config)

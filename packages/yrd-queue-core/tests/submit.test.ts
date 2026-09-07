@@ -6,7 +6,7 @@
  * the remote is the one store and what it holds is the only truth.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -15,6 +15,7 @@ import {
   changeRef,
   gitIn,
   inLine,
+  inspectSubmit,
   parseChangeName,
   parseChangeRef,
   readRecords,
@@ -100,6 +101,163 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     expect(await w.git(["ls-remote", "--refs", "origin"])).toBe(beforeRemote)
     expect(readFileSync(fetchHead, "utf8")).toBe("the submitter's previous fetch\n")
     expect(await refAt(w.git, `refs/heads/task/stale`)).toBe(head)
+  })
+
+  // Explicit rewrite acceptance: preview leaves the world intact, and the
+  // action opens and pushes the rebased OID. The old atomic-submit cases never
+  // move main or rewrite a commit.
+  it("previews a rebase without predicting its head, then opens only the rebased head", async () => {
+    const w = await world()
+    const before = await branchWithCommit(w, "task/rebase", "change.txt")
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "target advanced"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const target = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "task/rebase"])
+    const request = {
+      branch: "task/rebase",
+      submitter: "@dev/3",
+      target: { remote: "origin", branch: "main" },
+      rebase: true,
+    }
+    const beforeRefs = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
+    expect(await inspectSubmit(w.git, "origin", request)).toMatchObject({
+      head: before,
+      targetHead: target,
+      rebaseRequired: true,
+    })
+    expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(beforeRefs)
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+
+    const opened = await submit(w.git, "origin", request)
+    expect(opened.head).not.toBe(before)
+    expect(opened.targetHead).toBe(target)
+    await w.git(["merge-base", "--is-ancestor", target, opened.head])
+    expect(await refAt(gitIn(w.remote), "refs/heads/task/rebase")).toBe(opened.head)
+    expect(await refAt(w.git, "HEAD")).toBe(opened.head)
+    expect(await refAt(gitIn(w.remote), changeRef({ branch: request.branch, head: before }))).toBeUndefined()
+    expect(
+      (await readRecords(w.git, { branch: request.branch, head: opened.head })).map((record) => record.kind),
+    ).toEqual(["opened"])
+  })
+
+  // Preview and action must enforce the same opt-in worktree prerequisites,
+  // even when the branch is fresh. Ordinary submit accepts a named branch
+  // without checking it out, so those existing cases do not prove this gate.
+  it.each(["untracked", "index", "worktree", "other branch", "detached", "operation"])(
+    "refuses --rebase for %s in both preview and action",
+    async (kind) => {
+      const w = await world()
+      const head = await branchWithCommit(w, "task/rebase", "change.txt")
+      await w.git(["checkout", "--quiet", "task/rebase"])
+      if (kind === "untracked") writeFileSync(join(w.work, "untracked.txt"), "keep me")
+      if (kind === "index" || kind === "worktree") {
+        writeFileSync(join(w.work, "change.txt"), "uncommitted")
+        if (kind === "index") await w.git(["add", "change.txt"])
+      }
+      if (kind === "other branch") await w.git(["checkout", "--quiet", "main"])
+      if (kind === "detached") await w.git(["checkout", "--quiet", "--detach", head])
+      if (kind === "operation") mkdirSync(join(w.work, ".git", "rebase-merge"))
+      const request = {
+        branch: "task/rebase",
+        submitter: "@dev/3",
+        target: { remote: "origin", branch: "main" },
+        rebase: true,
+      }
+      for (const call of [inspectSubmit, submit]) {
+        await expect(call(w.git, "origin", request)).rejects.toThrow("--rebase")
+      }
+      expect(await refAt(w.git, "refs/heads/task/rebase")).toBe(head)
+      expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+    },
+  )
+
+  it("leaves rebase conflicts for the author with no opened record", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/conflict", "target.txt")
+    writeFileSync(join(w.work, "target.txt"), "different target edit\n")
+    await w.git(["commit", "--quiet", "-am", "target edit"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "task/conflict"])
+    await expect(
+      submit(w.git, "origin", {
+        branch: "task/conflict",
+        submitter: "@dev/3",
+        target: { remote: "origin", branch: "main" },
+        rebase: true,
+      }),
+    ).rejects.toThrow("git rebase --continue")
+    expect((await w.git(["status", "--porcelain"])).trim()).toContain("UU target.txt")
+    expect(await refAt(w.git, "refs/heads/task/conflict")).toBe(head)
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+    expect(await w.git(["for-each-ref", "refs/yrd/changes/"])).toBe("")
+  })
+
+  it.each([false, true])("a contained head offers no rebase cure (opt-in %s)", async (rebase) => {
+    const w = await world()
+    await w.git(["branch", "task/contained", w.target])
+    const attempt = submit(w.git, "origin", {
+      branch: "task/contained",
+      submitter: "@dev/3",
+      target: { remote: "origin", branch: "main" },
+      rebase,
+    })
+    await expect(attempt).rejects.toThrow("nothing new to submit")
+    await expect(attempt).rejects.not.toThrow("--rebase")
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+  })
+
+  it("refuses unrelated history without treating Git failures as a missing base", async () => {
+    const w = await world()
+    const tree = (await w.git(["rev-parse", "HEAD^{tree}"])).trim()
+    const orphan = (await w.git(["commit-tree", tree, "-m", "unrelated history"])).trim()
+    await w.git(["branch", "task/unrelated", orphan])
+    await expect(
+      submit(w.git, "origin", {
+        branch: "task/unrelated",
+        submitter: "@dev/3",
+        target: { remote: "origin", branch: "main" },
+      }),
+    ).rejects.toThrow(`found no merge base, expected ${w.target}`)
+    const broken: Git = (args, input) =>
+      args[0] === "merge-base" ? w.git(["merge-base", "missing-object", w.target]) : w.git(args, input)
+    await expect(
+      inspectSubmit(broken, "origin", {
+        branch: "task/unrelated",
+        submitter: "@dev/3",
+        target: { remote: "origin", branch: "main" },
+      }),
+    ).rejects.toThrow("missing-object")
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+  })
+
+  // A branch-name push used to race the OID named by the record; target motion
+  // is separately permitted because freshness is only an observation.
+  it("pushes the captured head when the local branch and remote target move after inspection", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/race", "change.txt")
+    const tree = (await w.git(["rev-parse", `${head}^{tree}`])).trim()
+    const later = (await w.git(["commit-tree", tree, "-p", head, "-m", "later local commit"])).trim()
+    const targetTree = (await w.git(["rev-parse", `${w.target}^{tree}`])).trim()
+    const targetLater = (await w.git(["commit-tree", targetTree, "-p", w.target, "-m", "later target"])).trim()
+    let raced = false
+    const racing: Git = async (args, input) => {
+      if (!raced && args[0] === "ls-remote" && args.some((arg) => arg.startsWith("refs/yrd/changes/"))) {
+        raced = true
+        await w.git(["update-ref", "refs/heads/task/race", later])
+        await w.git(["push", "--quiet", "origin", `${targetLater}:refs/heads/main`])
+      }
+      return w.git(args, input)
+    }
+    const opened = await submit(racing, "origin", {
+      branch: "task/race",
+      submitter: "@dev/3",
+      target: { remote: "origin", branch: "main" },
+    })
+    expect(raced).toBe(true)
+    expect(opened).toMatchObject({ head, targetHead: w.target })
+    expect(await refAt(gitIn(w.remote), "refs/heads/task/race")).toBe(head)
+    expect(await refAt(gitIn(w.remote), "refs/heads/main")).toBe(targetLater)
+    expect(await refAt(w.git, "refs/heads/task/race")).toBe(later)
   })
 
   it("lands both refs at the remote, and the opened record names who, where and what", async () => {

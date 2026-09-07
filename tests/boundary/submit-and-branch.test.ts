@@ -94,6 +94,54 @@ describe("the submit path", { timeout: 120_000 }, () => {
     }
   })
 
+  // The public opt-in must reach both aliases. Core tests cannot catch an
+  // unforwarded CLI flag or a preview that promises an invented change OID.
+  it.each([
+    { label: "submit", argv: ["submit"] },
+    { label: "queue submit", argv: ["queue", "submit"] },
+  ])("$label previews an explicit rebase and opens only its resulting head", async ({ argv }) => {
+    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const branch = "24099-rebase"
+    const head = await commitOnBranch(repo, branch)
+    const peer = await secondWorkingRepo(origin, "other", "other@example.invalid")
+    await git(peer, "checkout", "-q", "-b", "main", "origin/main")
+    await git(peer, "commit", "--allow-empty", "-qm", "target moved")
+    await git(peer, "push", "-q", "origin", "main")
+    const target = await refSha(origin, "refs/heads/main")
+    await git(repo, "checkout", "-q", branch)
+    const beforeLocal = await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    const beforeRemote = await refs(origin)
+    const dry = await runYrd(repo, ...argv, branch, "--rebase", "--dry-run", "--json")
+    expect(dry.exitCode, dry.report).toBe(0)
+    expect(JSON.parse(dry.stdout)).toMatchObject({
+      branch,
+      headBeforeRebase: head,
+      targetHead: target,
+      rebaseRequired: true,
+      dryRun: true,
+    })
+    expect(JSON.parse(dry.stdout)).not.toHaveProperty("change")
+    expect(await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeLocal)
+    expect(await refs(origin)).toEqual(beforeRemote)
+    await writeFile(join(repo, "untracked.txt"), "keep this work")
+    for (const flags of [["--dry-run"], []]) {
+      const refused = await runYrd(repo, ...argv, branch, "--rebase", ...flags)
+      expect(refused.exitCode, refused.report).not.toBe(0)
+      expect(refused.report).toContain("clean worktree")
+    }
+    await git(repo, "add", "untracked.txt")
+    await git(repo, "commit", "-qm", "preserve untracked work")
+    const opened = await runYrd(repo, ...argv, branch, "--rebase", "--json")
+    expect(opened.exitCode, opened.report).toBe(0)
+    const actual = await refSha(repo, `refs/heads/${branch}`)
+    if (actual === undefined) throw new Error(`submitted branch ${branch} is missing from ${repo}`)
+    expect(actual).not.toBe(head)
+    expect(JSON.parse(opened.stdout)).toMatchObject({ head: actual, targetHead: target })
+    expect(await refSha(origin, `refs/heads/${branch}`)).toBe(actual)
+    expect(await refExists(origin, changeRef({ branch, head: actual }))).toBe(true)
+    expect(await refExists(origin, changeRef({ branch, head }))).toBe(false)
+  })
+
   // today: red — `queue submit` exits 0 but pushes `<branch>:refs/yrd/submit/
   // <branch>` to the `origin` remote. The yrd remote gets no branch, and no
   // ref under `refs/yrd/changes/` is ever written.

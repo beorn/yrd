@@ -69,6 +69,36 @@ describe("the queue pause is one leased record ref at the remote", () => {
     )
   })
 
+  // Read-only admission must parse the advertised snapshot, even if a new
+  // pause arrives before its object fetch. The writer-race test covers only
+  // the push lease and cannot prove which pause a reader inspected.
+  it("reads the captured advertisement when the pause changes before fetch", async () => {
+    const w = await world()
+    const paused = await writePause(w.git, "origin", { by: "operator", kind: "paused", reason: "inspecting" })
+    let moved = false
+    const racing: Git = async (args, input) => {
+      const result = await w.other(args, input)
+      if (!moved && args[0] === "ls-remote") {
+        moved = true
+        await writePause(w.git, "origin", { by: "operator", kind: "resumed", reason: "ready now" })
+      }
+      return result
+    }
+    expect(await readPause(racing, "origin")).toEqual(paused)
+    expect(await w.other(["for-each-ref", PAUSE_REF])).toBe("")
+    expect(await readPause(w.other, "origin")).toMatchObject({ kind: "resumed" })
+  })
+
+  it("names the advertised pause and queue when its object fetch fails", async () => {
+    const w = await world()
+    const paused = await writePause(w.git, "origin", { by: "operator", kind: "paused", reason: "inspecting" })
+    const broken: Git = (args, input) =>
+      args[0] === "fetch" ? w.other(["fetch", "missing-queue-remote"]) : w.other(args, input)
+    const attempt = readPause(broken, "origin")
+    await expect(attempt).rejects.toThrow(`origin advertised ${PAUSE_REF} at ${paused.sha}`)
+    await expect(attempt).rejects.toThrow("missing-queue-remote")
+  })
+
   it("refuses the second writer when two records race from one observed tip", async () => {
     const w = await world()
     await writePause(w.git, "origin", { by: "@chief", kind: "paused", reason: "investigating" })
@@ -102,7 +132,11 @@ describe("the queue pause is one leased record ref at the remote", () => {
     const w = await world()
     const tree = (await w.git(["mktree"], "")).trim()
     const ambiguous = (
-      await w.git(["commit-tree", tree, "-m", "ambiguous state\n\nRecord: paused\nRecord: resumed\nPaused-By: @chief\n",
+      await w.git([
+        "commit-tree",
+        tree,
+        "-m",
+        "ambiguous state\n\nRecord: paused\nRecord: resumed\nPaused-By: @chief\n",
       ])
     ).trim()
     await w.git(["push", "--quiet", "origin", `${ambiguous}:${PAUSE_REF}`])

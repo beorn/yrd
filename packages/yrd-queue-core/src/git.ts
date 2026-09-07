@@ -107,7 +107,11 @@ export class GitExit extends Error {
  * its commit; a `rev:path` names a blob already and git refuses a peel on it,
  * so it is asked for as written.
  */
-export async function refAt(git: Git, ref: string, kind: "commit" | "blob" | "tree" = "commit"): Promise<string | undefined> {
+export async function refAt(
+  git: Git,
+  ref: string,
+  kind: "commit" | "blob" | "tree" = "commit",
+): Promise<string | undefined> {
   try {
     const name = kind === "commit" ? `${ref}^{commit}` : ref
     const out = (await git(["rev-parse", "--verify", "--quiet", name])).trim()
@@ -116,6 +120,28 @@ export async function refAt(git: Git, ref: string, kind: "commit" | "blob" | "tr
     if (isExit(error, 1)) return undefined
     throw error
   }
+}
+
+/** Capture one advertised commit without changing refs or FETCH_HEAD. */
+export async function readRemoteCommit(git: Git, remote: string, ref: string): Promise<string | undefined> {
+  const rows = (await git(["ls-remote", "--refs", remote, ref]))
+    .split("\n")
+    .map((row) => row.trim())
+    .filter(Boolean)
+  if (rows.length === 0) return undefined
+  if (rows.length !== 1) throw new Error(`${remote} answered with ${String(rows.length)} values for ${ref}`)
+  const [sha, name] = (rows[0] ?? "").split(/\s+/u)
+  if (name !== ref || sha === undefined || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(sha)) {
+    throw new Error(`${remote} returned an unreadable ${ref} advertisement: ${rows[0]}`)
+  }
+  try {
+    await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, sha])
+  } catch (cause) {
+    throw new Error(`${remote} advertised ${ref} at ${sha}, but fetching that commit failed: ${String(cause)}`, {
+      cause,
+    })
+  }
+  return sha
 }
 
 /** Whether `sha` is an ancestor of `of`. */
@@ -179,8 +205,9 @@ export async function gitlinkRows(
     const [colonOldMode, newMode, , newSha] = (fields[at] ?? "").split(" ")
     const oldMode = colonOldMode?.replace(/^:/u, "")
     const path = fields[at + 1]
-    if (oldMode === undefined || newMode === undefined || newSha === undefined || path === undefined || path === "")
+    if (oldMode === undefined || newMode === undefined || newSha === undefined || path === undefined || path === "") {
       continue
+    }
     if (oldMode !== "160000" && newMode !== "160000") continue
     rows.push({ newMode, oldMode, path, sha: newSha })
   }

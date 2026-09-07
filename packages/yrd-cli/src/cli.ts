@@ -47,7 +47,7 @@ const DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER"
 
 type GlobalOptions = YrdObservabilityFlags
 
-type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean }>
+type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean; rebase?: boolean }>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string }>
 
 // Only queue actions load the runtime identity fence. Help and --version must
@@ -104,6 +104,7 @@ function buildProgram(
         ...(branch === undefined ? {} : { branch }),
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.dryRun === true ? { dryRun: true } : {}),
+        ...(options.rebase === true ? { rebase: true } : {}),
       },
       { json: options.json, env, log: log() },
     )
@@ -118,6 +119,7 @@ function buildProgram(
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
+    .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
     .command("pause <reason>")
@@ -361,6 +363,7 @@ function buildProgram(
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
+    .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
 
   program

@@ -7,7 +7,7 @@
  */
 
 import { ABSENT, RECORD_FORMAT, commitTrailers, type Git } from "./records.ts"
-import { refAt } from "./git.ts"
+import { readRemoteCommit } from "./git.ts"
 
 export const PAUSE_REF = "refs/yrd/pause"
 
@@ -71,14 +71,8 @@ export async function requireResumed(git: Git, remote: string): Promise<void> {
  * queue on a guess.
  */
 export async function readPause(git: Git, remote: string): Promise<PauseRecord | undefined> {
-  const advertised = await pauseTip(git, remote)
-  if (advertised === undefined) return undefined
-  await git(["fetch", "--quiet", "--no-tags", remote, `+${PAUSE_REF}:${PAUSE_REF}`])
-  const fetched = await refAt(git, PAUSE_REF)
-  if (fetched === undefined) {
-    throw new Error(`${remote} advertised ${PAUSE_REF} at ${advertised}, but the fetch left no readable ref`)
-  }
-  return parsePause(git, fetched, `${remote} ${PAUSE_REF}`)
+  const captured = await readRemoteCommit(git, remote, PAUSE_REF)
+  return captured === undefined ? undefined : parsePause(git, captured, `${remote} ${PAUSE_REF}`)
 }
 
 /** Append one paused or resumed record under a lease on the remote tip. */
@@ -124,20 +118,6 @@ export async function resumedFence(
 export function pauseLine(record: PauseRecord): string {
   const since = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "long" }).format(record.at)
   return `${record.kind} by ${record.by} since ${since}: ${record.reason}`
-}
-
-async function pauseTip(git: Git, remote: string): Promise<string | undefined> {
-  const rows = (await git(["ls-remote", "--refs", remote, PAUSE_REF]))
-    .split("\n")
-    .map((row) => row.trim())
-    .filter(Boolean)
-  if (rows.length === 0) return undefined
-  if (rows.length !== 1) throw new Error(`${remote} answered with ${String(rows.length)} values for ${PAUSE_REF}`)
-  const [sha, ref] = (rows[0] ?? "").split(/\s+/u)
-  if (ref !== PAUSE_REF || sha === undefined || !/^[0-9a-f]+$/u.test(sha)) {
-    throw new Error(`${remote} returned an unreadable ${PAUSE_REF} advertisement: ${rows[0]}`)
-  }
-  return sha
 }
 
 async function parsePause(git: Git, sha: string, where: string): Promise<PauseRecord> {
