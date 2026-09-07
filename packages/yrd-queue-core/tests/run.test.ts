@@ -41,6 +41,7 @@ import {
   writePause,
 } from "../src/index.ts"
 import type { ChangeRecord, CheckedTree, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
+import { resolveGitSelection } from "../src/git.ts"
 
 const roots: string[] = []
 // The real queue child needs GitSuper even when the worker's PATH is sealed.
@@ -441,9 +442,11 @@ describe("a queue run", () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const secondHead = await submitCommit(w, "task/two", "two.txt")
+    const selection = await resolveGitSelection(w.work)
 
     const outcome = await queueRun({
       ...w.options({ exit: 0 }),
+      selection,
       checks: [
         { name: "verify", on: ["submit", "merge"], run: "if test -f one.txt; then cat one.txt; else cat two.txt; fi" },
       ],
@@ -496,6 +499,21 @@ describe("a queue run", () => {
         .filter(Boolean)
         .map((line) => (JSON.parse(line) as { kind: string }).kind),
     ).toEqual(expect.arrayContaining(["run", "change", "check", "result", "merge", "message"]))
+    // Addendum 2/T1: every ordinary run invocation is linked before the run
+    // summarizes it, including successful calls rebound to a worktree.
+    const invocations = logRecords(outcome).filter((record) => record.kind === "git")
+    expect(invocations.length).toBeGreaterThan(0)
+    expect(invocations.some((record) => record.cwd !== w.work)).toBe(true)
+    for (const invocation of invocations) {
+      expect(invocation).toMatchObject({ executable: selection.executable, contract: "native", complete: true })
+      const evidence = JSON.parse(readFileSync(String(invocation.evidence), "utf8")) as {
+        selection: typeof selection
+        artifacts: { stdout: string; stderr: string }
+      }
+      expect(evidence.selection).toEqual(selection)
+      expect(existsSync(evidence.artifacts.stdout)).toBe(true)
+      expect(existsSync(evidence.artifacts.stderr)).toBe(true)
+    }
   })
 
   it.each([

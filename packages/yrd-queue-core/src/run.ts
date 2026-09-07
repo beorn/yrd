@@ -52,7 +52,15 @@ import {
   type WriteRecord,
 } from "./records.ts"
 import { queueName, readConfig, targetName, type Target } from "./config.ts"
-import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
+import {
+  GitExit,
+  gitEnvironment,
+  gitIn,
+  mergeBase,
+  refAt,
+  type GitInvocationOptions,
+  type GitSelection,
+} from "./git.ts"
 import { incidentTrailers, type Incident } from "./incident.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
@@ -74,6 +82,8 @@ import {
 } from "./worktree.ts"
 
 export type QueueRunOptions = Readonly<{
+  /** The declaration resolved once by the command/service entry. */
+  selection?: GitSelection
   /** The working repository the run reads and writes through. */
   repo: string
   /** The branch the queue lands on, at the remote holding it: `<remote>#<branch>`. */
@@ -220,9 +230,17 @@ export class QueueAuthorityUnreadable extends Error {
   }
 }
 
+function gitInvocationOptions(options: QueueRunOptions, log: QueueRunLog): GitInvocationOptions {
+  return {
+    ...(options.env === undefined ? {} : { env: options.env }),
+    openOutput: log.openGitOutput,
+    onInvocation: log.writeGitInvocation,
+  }
+}
+
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
-  const git = options.git ?? gitIn(options.repo, options.process)
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
+  const git = options.git ?? gitIn(options.repo, options.process, options.selection, gitInvocationOptions(options, log))
   const hooksPath = join(options.workdir, "hooks-disabled")
   mkdirSync(hooksPath, { recursive: true })
   const hooks = readdirSync(hooksPath).sort()
@@ -449,6 +467,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
         next: "repair the queue fault, then run yrd queue run",
         subject: `the queue crashed judging ${entry.change.branch}: ${message}`,
         via: "queue run",
+        ...(error instanceof GitExit ? { detail: error.detail } : {}),
       }),
     )
   }
@@ -874,12 +893,22 @@ async function prepareSettledBase(
   )
   let commit = run.targetSha
   try {
-    const wt = gitIn(composing.path, run.options.process)
+    const wt = gitIn(
+      composing.path,
+      run.options.process,
+      run.options.selection,
+      gitInvocationOptions(run.options, run.log),
+    )
     for (const raise of raises) {
       const row = await wt(["ls-tree", "-z", run.targetSha, "--", raise.path])
       const target = /^160000 commit ([0-9a-f]{40,64})\t/u.exec(row)?.[1]
       if (target === undefined || target === raise.to) continue
-      const component = gitIn(join(composing.path, raise.path), run.options.process)
+      const component = gitIn(
+        join(composing.path, raise.path),
+        run.options.process,
+        run.options.selection,
+        gitInvocationOptions(run.options, run.log),
+      )
       await component(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
       await superGitlinkWrite(run, composing.path, raise.path, raise.to)
     }
@@ -931,7 +960,12 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
   const { mergeCommit, settled, worktree } = composed
   try {
-    const wt = gitIn(worktree.path, run.options.process)
+    const wt = gitIn(
+      worktree.path,
+      run.options.process,
+      run.options.selection,
+      gitInvocationOptions(run.options, run.log),
+    )
     // The built-in check at merge (ruling D2): the merged tree's own declaration
     // reads, so no change can land a `.yrd.yml` that breaks the next queue run.
     let unreadable: string | undefined
@@ -1201,7 +1235,7 @@ export function short(branch: string, head: string): string {
 async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<void> {
   const scripts = spec.scripts ?? []
   if (scripts.length === 0) return
-  const wt = gitIn(cwd, run.options.process)
+  const wt = gitIn(cwd, run.options.process, run.options.selection, gitInvocationOptions(run.options, run.log))
   for (const path of scripts) {
     if (
       (await refAt(run.git, `${run.targetSha}:${path}`, "blob")) === undefined &&

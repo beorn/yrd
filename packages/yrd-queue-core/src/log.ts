@@ -30,9 +30,19 @@
  * never write one file and a run that built nothing still has its own log.
  */
 
-import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs"
+import {
+  appendFileSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs"
 import { join } from "node:path"
 import { incidentTrailers, type Incident } from "./incident.ts"
+import type { GitInvocation, GitInvocationOptions, GitOutputSink } from "./git.ts"
 
 /** Ref-write diagnostics emitted by run.ts's refused bookkeeping-write path. */
 export const CHANGE_REF_DIAGNOSTICS = {
@@ -64,6 +74,7 @@ export const LOG_KINDS = [
   "message",
   "merged-direct",
   "reap",
+  "git",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]
@@ -90,6 +101,8 @@ export type QueueRunLog = Readonly<{
   /** The file every record of this run is appended to. */
   path: string
   write(record: LogWrite): void
+  openGitOutput: NonNullable<GitInvocationOptions["openOutput"]>
+  writeGitInvocation(invocation: GitInvocation): void
 }>
 
 /**
@@ -105,14 +118,114 @@ export function openLog(
   mkdirSync(directory, { recursive: true })
   const id = runId(now())
   const path = join(directory, `${id}.jsonl`)
+  const gitDirectory = join(directory, id, "git")
+  let invocationCount = 0
+  const write = (record: LogWrite): void => {
+    const kind: LogKind = record.kind
+    const full: LogRecord = { ...record, at: now().toISOString(), kind, run: id }
+    appendFileSync(path, `${JSON.stringify(full)}\n`)
+    render?.(full)
+  }
   return {
     id,
     path,
-    write(record) {
-      const kind: LogKind = record.kind
-      const full: LogRecord = { ...record, at: now().toISOString(), kind, run: id }
-      appendFileSync(path, `${JSON.stringify(full)}\n`)
-      render?.(full)
+    write,
+    openGitOutput() {
+      mkdirSync(gitDirectory, { recursive: true })
+      const stem = join(gitDirectory, String(++invocationCount))
+      return openGitOutput(`${stem}.stdout.bin`, `${stem}.stderr.bin`)
+    },
+    writeGitInvocation(invocation) {
+      mkdirSync(gitDirectory, { recursive: true })
+      const evidence =
+        invocation.artifacts === undefined
+          ? join(gitDirectory, `${++invocationCount}.failed.json`)
+          : `${invocation.artifacts.stdout}.json`
+      const result = invocation.result
+      // Ordinary bytes are in the raw files. Keep loss/settlement metadata and
+      // the exact bounded control bytes beside them, never in a parsed child row.
+      const metadata = {
+        ...invocation,
+        result:
+          result === undefined
+            ? undefined
+            : {
+                ...result,
+                stdout: undefined,
+                stderr: undefined,
+                rawOutput: undefined,
+                extraStdio:
+                  result.extraStdio === undefined
+                    ? undefined
+                    : {
+                        ...result.extraStdio,
+                        bytes: undefined,
+                        bytesBase64: Buffer.from(result.extraStdio.bytes).toString("base64"),
+                      },
+              },
+      }
+      writeFileSync(evidence, `${JSON.stringify(metadata)}\n`, { flag: "wx" })
+      write({
+        kind: "git",
+        cwd: invocation.cwd,
+        args: invocation.args,
+        evidence,
+        executable: invocation.selection?.executable ?? "git",
+        contract: invocation.selection?.contract ?? "native",
+        scope: invocation.selection?.scope,
+        origin: invocation.selection?.origin,
+        exit: result?.exitCode,
+        complete: invocation.artifacts?.complete ?? false,
+        failure: invocation.failure,
+        refusal: invocation.protocol?.refusal?.kind,
+      })
+    },
+  }
+}
+
+/** Run-owned raw artifacts; Process is still the only stream reader. */
+function openGitOutput(stdout: string, stderr: string): GitOutputSink {
+  const out = openSync(stdout, "wx")
+  let err: number
+  try {
+    err = openSync(stderr, "wx")
+  } catch (error) {
+    try {
+      closeSync(out)
+    } catch (closeError) {
+      throw new AggregateError([error, closeError], `could not open raw Git output ${stderr} or close ${stdout}`)
+    }
+    throw error
+  }
+  let closed = false
+  return {
+    stdout,
+    stderr,
+    onOutput({ stream, chunk }) {
+      if (closed) throw new Error(`raw Git output ${stream} is already closed`)
+      const fd = stream === "stdout" ? out : err
+      let at = 0
+      while (at < chunk.byteLength) {
+        const wrote = writeSync(fd, chunk, at, chunk.byteLength - at)
+        if (wrote === 0) throw new Error(`raw Git output ${stream} made no write progress`)
+        at += wrote
+      }
+    },
+    close() {
+      if (closed) return
+      closed = true
+      const errors: unknown[] = []
+      try {
+        closeSync(out)
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        closeSync(err)
+      } catch (error) {
+        errors.push(error)
+      }
+      if (errors.length > 0) throw new AggregateError(errors, `could not close raw Git output ${stdout}, ${stderr}`)
     },
   }
 }
