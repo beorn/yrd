@@ -552,6 +552,14 @@ export async function coreQueueCommand(
 
       if (request.watch !== true) {
         const one = await round()
+        // A selection that found nothing is a RESULT, and it is owed on both
+        // paths. The watch already refused it; the one-shot list returned a
+        // successful empty, and `--json` — the path whose consumer cannot see
+        // a page or a scope line — was the silent one.
+        if (selectedNothing(request.terms, one.rows)) {
+          io.stderr(missedSelector(request.terms ?? [], one.queue, one.entries.length))
+          return 2
+        }
         if (options.json === true) emit(io, true, one.data, "")
         else io.stdout(`${await page(one)}\n`)
         return 0
@@ -565,7 +573,7 @@ export async function coreQueueCommand(
       if (options.interactive === true && options.json !== true) {
         const first = await round()
         if (selectedNothing(request.terms, first.rows)) {
-          io.stderr(missedSelector(request.terms ?? [], first.queue, first.rows.length))
+          io.stderr(missedSelector(request.terms ?? [], first.queue, first.entries.length))
           return 2
         }
         const { WatchPane } = await import("./watch-pane.tsx")
@@ -616,7 +624,7 @@ export async function coreQueueCommand(
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.
         if (first && selectedNothing(request.terms, one.rows)) {
-          io.stderr(missedSelector(request.terms ?? [], one.queue, one.rows.length))
+          io.stderr(missedSelector(request.terms ?? [], one.queue, one.entries.length))
           return 2
         }
         first = false
@@ -1059,11 +1067,19 @@ function selectedNothing(terms: readonly string[] | undefined, rows: readonly Wa
   return terms !== undefined && terms.length > 0 && rows.length === 0
 }
 
-/** What was asked for, where it was looked for, and what the read leaves out. */
-function missedSelector(terms: readonly string[], queue: string, matched: number): string {
+/**
+ * What was asked for, where it was looked for, WHAT IT WAS COMPARED AGAINST,
+ * and what the read leaves out.
+ *
+ * Naming the fields is the load-bearing part: a reader whose state name found
+ * nothing cannot tell an empty queue from a term that was never compared to
+ * the field they meant, and both look like a correct answer.
+ */
+function missedSelector(terms: readonly string[], queue: string, read: number): string {
   return (
-    `yrd: nothing in ${queue} matches ${terms.join(" or ")}. The queue read holds ${String(matched)} ` +
-    "matching change(s); ended changes older than seven days are not read.\n"
+    `yrd: nothing in ${queue} matches ${terms.join(" or ")}. A term is compared to a change's ` +
+    `branch, subject, run, result, reason and state; the queue read holds ${String(read)} change(s), ` +
+    "and ended changes older than seven days are not read.\n"
   )
 }
 

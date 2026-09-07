@@ -151,3 +151,38 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(Object.keys(row!)).toEqual(expect.arrayContaining(["branch", "head", "state", "since", "subject"]))
   })
 })
+
+/**
+ * @failure A filter term that selects nothing returns a successful empty, and a
+ *          STATE name selects on branch/subject text instead of state — so it
+ *          answers with a coincidence and exits 0
+ *          (a-state-name-filters-to-zero-rows-and-exit-zero).
+ */
+describe("a filter that finds nothing says so, and a state name means the state", () => {
+  it("a term matching no row exits non-zero and says what it searched, instead of a confident empty", async () => {
+    const cwd = await queueWithOneChange()
+    const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "nonsensetoken")
+
+    expect(ran.exitCode, ran.report).not.toBe(0)
+    expect(stripAnsi(ran.stderr), ran.report).toContain("nonsensetoken")
+  })
+
+  it("--json is not exempt: the machine path was the silent one, and a consumer cannot see a page", async () => {
+    const cwd = await queueWithOneChange()
+    const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "nonsensetoken")
+
+    expect(ran.exitCode, ran.report).not.toBe(0)
+    expect(stripAnsi(ran.stderr), ran.report).toContain("nonsensetoken")
+  })
+
+  it("a state name selects by STATE: `queued` finds the queued change rather than nothing", async () => {
+    const cwd = await queueWithOneChange()
+    const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "queued")
+
+    expect(ran.exitCode, ran.report).toBe(0)
+    const document = JSON.parse(ran.stdout) as Record<string, unknown>
+    const changes = document["changes"] as readonly Record<string, unknown>[]
+    expect(changes, ran.report).toHaveLength(1)
+    expect(changes[0]).toMatchObject({ branch: "task/one", state: "queued" })
+  })
+})

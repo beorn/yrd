@@ -77,8 +77,17 @@ async function queueWithOneChange(): Promise<string> {
   return work
 }
 
-/** The `--json` reading with the one field that names the moment it was taken removed, so two readings compare. */
+/**
+ * The `--json` reading with the one field that names the moment it was taken
+ * removed, so two readings compare.
+ *
+ * A selection that matched nothing prints NO document and exits 2, so there is
+ * nothing to strip — the raw text is the reading, and comparing it is still
+ * the parity this file is about. Parsing unconditionally would make the alias
+ * test fail on a refusal the alias and the command share.
+ */
 function timeless(json: string): unknown {
+  if (json.trim() === "") return json
   const parsed = JSON.parse(json) as Record<string, unknown>
   const { journal: _journal, ...rest } = parsed
   return rest
@@ -105,6 +114,11 @@ describe("`yrd list` is `yrd queue list`", () => {
     const alias = await yrd(work, "list", "--latest", "--json", "no-such-branch")
     expect(alias.exitCode, alias.report).toBe(canonical.exitCode)
     expect(timeless(alias.stdout)).toEqual(timeless(canonical.stdout))
+    // The REFUSAL is part of the shared surface too: a selection matching
+    // nothing exits 2 and says so on stderr, and the alias must say it the
+    // same way or the two have grown apart where it matters most.
+    expect(alias.stderr, alias.report).toBe(canonical.stderr)
+    expect(alias.exitCode, alias.report).toBe(2)
 
     // One option table, read from the help of each: the alias can never grow apart from the command.
     const flagsOf = (help: string): string[] =>
