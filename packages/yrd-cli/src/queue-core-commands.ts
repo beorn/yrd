@@ -357,12 +357,10 @@ export async function coreQueueCommand(
       // The service: the same round on a loop, what hab runs. It has ONE
       // permanent exit, 2: a round is stuck, or the target's declaration can no
       // longer be read or is no longer there at all, and the queue stays down
-      // until a person fixes it. Everything else it does on purpose — a signal,
-      // and a gitlink that moved under it — exits 0, because hab classifies every
-      // non-zero exit as a crash (ag hab-core, exit-classification.ts), backs
-      // off, and counts it against a three-per-600-s budget: three gitlink advances
-      // in ten minutes would have stopped the queue for the one condition whose
-      // whole cure is the relaunch.
+      // until a person fixes it. Everything else it does on purpose — an explicit
+      // AbortSignal stop request or a gitlink moving under it — exits 0, which is
+      // on Hab's relaunch allowlist. A process signal bypasses this return path and
+      // stays terminal under the service's `restart: "on-codes"` declaration.
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true

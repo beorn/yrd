@@ -521,9 +521,9 @@ await appendRecord(git, { change, kind: "merged", subject: "another observer rec
       { json: true, workdir: w.workdir },
     )
 
-    // Zero, not 18: hab reads every non-zero exit as a crash and spends a
-    // restart budget on it, and a gitlink advance is the one thing the service is
-    // MEANT to end for.
+    // Zero, not 18: Hab relaunches after allowlisted exits 0 and 1, and a gitlink
+    // advance is the one thing the service is MEANT to end for. Exit 2 and process
+    // signals stay terminal.
     expect(exit, run.stdout()).toBe(0)
     const written = records(run)
     expect(written).toHaveLength(2)

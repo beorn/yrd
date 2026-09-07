@@ -12,9 +12,10 @@
 /**
  * Every code a Yrd command may exit with (plan § Commands): 0 pass, 1 fail,
  * 2 stuck. A gitlink that moved under `queue up` is a 0 like any other intended
- * ending: hab reads every non-zero exit as a crash and spends a restart budget
- * on it, and the relaunch onto the new gitlink is the cure, not the fault. The
- * incumbent resident's lifecycle codes (3, 10 to 18) went with it at M6.
+ * ending: Hab relaunches the runner after allowlisted exits 0 and 1, while exit
+ * 2 and every signal stay terminal. Relaunching onto the new gitlink is the cure,
+ * not the fault. The incumbent resident's lifecycle codes (3, 10 to 18) went
+ * with it at M6.
  */
 export type YrdCliExitCode = 0 | 1 | 2
 

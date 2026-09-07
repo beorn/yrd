@@ -9,12 +9,12 @@ export type YrdQueueRunnerDeclaration = Readonly<{
   repository: Readonly<{ name: string; path: string }>
   queue: Readonly<{ base: string }>
   /**
-   * The tribe seat Hab pages when this runner's restart budget exhausts —
+   * The tribe seat Hab pages when this runner reaches a terminal ending —
    * `HabServiceDefinition.owner` in ag/packages/hab-config.
    *
-   * Required, not optional, and that is the point. Under `restart: "never"` a
-   * crashed runner stays exited and pages ONCE; an undeclared owner resolves to
-   * the fleet-wide default, so "nobody chose" and "we chose the default" become
+   * Required, not optional, and that is the point. Under `restart: "on-codes"`
+   * a signal or unlisted exit stays down and pages ONCE; an undeclared owner
+   * resolves to the fleet-wide default, so "nobody chose" and "we chose the default" become
    * the same declaration. A runner nobody is named for is a runner that stays
    * down while its page arrives as news to a seat that cannot act on it.
    */
@@ -62,12 +62,10 @@ export default {
         // interruption, so it stays down and pages @ci with every unlisted code.
         restart: "on-codes" as const,
         relaunchExitCodes: [0, 1],
-        // Wired 2026-09-01: `HabServiceDefinition.owner` (ag/packages/hab-config,
-        // src/index.ts) now lists "owner" in `SERVICE_KEYS`, and a resident with
-        // `restart: "never"` and no owner is a WARNING there, not the FATAL
-        // config diagnostic it used to be. Spreading the registry row's owner
-        // here is what makes the andon page reach @cto instead of falling back
-        // to the fleet-wide @chief default.
+        // `HabServiceDefinition.owner` is a recognized service key in
+        // ag/packages/hab-config. Spreading the registry row's owner here makes
+        // a terminal-ending andon page reach @ci instead of falling back to the
+        // fleet-wide @chief default.
         owner,
       },
     ]),
