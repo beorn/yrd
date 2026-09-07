@@ -366,8 +366,8 @@ export async function coreQueueCommand(
       const stopped = (): boolean => request.stop?.aborted === true
       const gitlink: Readonly<{ path: string; sha: string; checkout?: string }> | undefined =
         request.gitlink ?? (await gitlinkOf(git, targetRef, log))
-      // A relaunch can beat the checkout updater. Do not run an old round or
-      // spend the supervisor's restart budget repeatedly loading the old pin.
+      // A relaunch can beat the checkout updater. Do not run an old round;
+      // wait for the local checkout to materialize the target pin.
       const reload = async (target: string): Promise<YrdCliExitCode | undefined> => {
         if (gitlink === undefined) return undefined
         let now = await gitlinkAt(git, target, gitlink.path)
