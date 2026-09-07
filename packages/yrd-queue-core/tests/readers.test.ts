@@ -305,6 +305,7 @@ describe("a run's journal, read back", () => {
     const current: Row = { branch: check.branch, head: check.head, state: "failed" }
     const newestUnended = watchRows([current], { journals: readJournals(dir, { now: later }) })[0]!
     expect(newestUnended.row.live?.run).toBe(oldId)
+    expect(clocks(newestUnended.row, later).runtimeMs).toBe(60 * 60 * 1000)
     const log = openLog(dir, () => later)
     log.write({ ...check, log: "/w/new/test.log", start: later.toISOString() })
     log.write({ ...check, kind: "result", result: "fail", exit: "1" })
@@ -313,6 +314,7 @@ describe("a run's journal, read back", () => {
     expect(rows.map(({ row }) => row.run)).toEqual([log.id, oldId])
     const old = rows[1]!
     expect(old.row.live).toBeUndefined()
+    expect(clocks(old.row, later).runtimeMs).toBeUndefined()
     const views = checksOf(
       [],
       "failed",

@@ -243,7 +243,8 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
     row.since === undefined || row.startedAt === undefined
       ? undefined
       : Math.max(0, row.startedAt.getTime() - row.since.getTime())
-  const until = row.endedAt ?? (row.state === "queued" || row.state === "checked" ? now : undefined)
+  const until =
+    row.endedAt ?? (row.live !== undefined || row.state === "queued" || row.state === "checked" ? now : undefined)
   const runtimeMs =
     row.startedAt === undefined || until === undefined
       ? undefined

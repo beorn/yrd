@@ -202,7 +202,7 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
 
 /**
  * The two cells that show a relative time, each its own leaf on the
- * one-second clock, memoized on the instants it is measured from: the tick
+ * one-second clock, memoized on the row facts it is measured from: the tick
  * re-renders these and nothing else in the row.
  */
 const AgeCell = memo(function AgeCell({ since, color }: { since: Date | undefined; color: string | undefined }) {
@@ -215,17 +215,9 @@ const AgeCell = memo(function AgeCell({ since, color }: { since: Date | undefine
   )
 })
 
-const RuntimeCell = memo(function RuntimeCell({
-  startedAt,
-  endedAt,
-  color,
-}: {
-  startedAt: Date | undefined
-  endedAt: Date | undefined
-  color: string | undefined
-}) {
+const RuntimeCell = memo(function RuntimeCell({ row, color }: { row: Row; color: string | undefined }) {
   const now = useNow()
-  const measured = clocks({ startedAt, endedAt } as Row, now)
+  const measured = clocks(row, now)
   return (
     <Text color={color ?? "$fg-muted"} wrap="truncate">
       {measured.runtimeMs === undefined ? " " : mediaDuration(measured.runtimeMs)}
@@ -326,7 +318,7 @@ export const ListRow = memo(function ListRow({ item, previous, label, layout, cu
               </Box>
             </Box>
           ),
-          duration: <RuntimeCell startedAt={row.startedAt} endedAt={row.endedAt} color={forced} />,
+          duration: <RuntimeCell row={row} color={forced} />,
           run:
             cell.kind === "none" ? (
               <Text color={forced ?? "$fg-muted"} wrap="truncate">

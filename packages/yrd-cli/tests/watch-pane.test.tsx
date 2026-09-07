@@ -247,14 +247,31 @@ describe("the table (items 3, 28, 38)", () => {
   })
 
   it("filters by status bucket with o r d f, and a shows everything again (items 9, 32)", async () => {
+    const startedAt = new Date(NOW.getTime() - 90_000)
     const rows: WatchRow[] = [
-      { row: row({ branch: "task/queued", state: "queued" }) },
+      { row: row({ branch: "task/queued", startedAt, state: "queued" }) },
       { row: failedRow() },
-      { row: row({ branch: "task/merged", head: "1".repeat(40), merge: "2".repeat(40), state: "merged" }) },
+      { row: row({ branch: "task/merged", head: "1".repeat(40), merge: "2".repeat(40), startedAt, state: "merged" }) },
     ]
     const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} />, { cols: 120, rows: 40 })
     await app.waitForLayoutStable()
     expect(app.text).toContain("3 of 3 change(s)")
+    // Runtime needs the row's lifecycle: a terminal row with no recorded ending stays unknown.
+    const lines = app.text.split("\n")
+    const runtimeColumn = lines.find((line) => line.includes("RUNTIME"))!.indexOf("RUNTIME")
+    expect(runtimeColumn).toBeGreaterThan(0)
+    expect(
+      lines
+        .find((line) => line.includes("task/merged"))
+        ?.slice(runtimeColumn)
+        .trim(),
+    ).toBe("")
+    expect(
+      lines
+        .find((line) => line.includes("task/queued"))
+        ?.slice(runtimeColumn)
+        .trim(),
+    ).toBe("1:30")
 
     app.press("f")
     await app.waitForLayoutStable()
@@ -271,6 +288,19 @@ describe("the table (items 3, 28, 38)", () => {
     app.press("a")
     await app.waitForLayoutStable()
     expect(app.text).toContain("3 of 3 change(s)")
+    const restored = app.text.split("\n")
+    expect(
+      restored
+        .find((line) => line.includes("task/queued"))
+        ?.slice(runtimeColumn)
+        .trim(),
+    ).toBe("1:30")
+    expect(
+      restored
+        .find((line) => line.includes("task/merged"))
+        ?.slice(runtimeColumn)
+        .trim(),
+    ).toBe("")
     app.unmount()
   })
 
@@ -519,14 +549,12 @@ describe("the pane's keys and the detail's identity", () => {
       expect(current(app)).toContain("passed, merged")
       // A fresh journal read returns new objects even when its records did not change.
       await vi.waitFor(() => expect(rounds.length).toBeGreaterThan(1))
-      rounds
-        .at(-1)
-        ?.resolve(
-          snapshot({
-            at: new Date(NOW.getTime() + 3000),
-            rows: [{ row: { ...initial, diagnostics: [{ ...diagnostic }] } }],
-          }),
-        )
+      rounds.at(-1)?.resolve(
+        snapshot({
+          at: new Date(NOW.getTime() + 3000),
+          rows: [{ row: { ...initial, diagnostics: [{ ...diagnostic }] } }],
+        }),
+      )
       await settle(app)
       expect(open).toHaveBeenCalledTimes(2)
     } finally {
