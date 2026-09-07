@@ -30,9 +30,20 @@ export { watchRows, watchRowKey, type WatchRow, type WatchRowOptions } from "@yr
 export function matchesTerm(row: WatchRow, term: string): boolean {
   const wanted = term.trim().toLocaleLowerCase()
   if (wanted === "") return true
-  return [row.row.branch, row.row.subject, row.run?.id ?? row.row.run, row.row.result, row.row.reason].some(
-    (field) => field?.toLocaleLowerCase().includes(wanted) === true,
-  )
+  // `state` is in this list because the payload EMITS it: a reader who sees
+  // `state: merged` in the JSON and types `merged` is asking the only question
+  // the word can mean. Without it the term fell through to branch and subject
+  // text, so a state name matched whatever happened to contain it — one row on
+  // a branch called `task/merged-…` while every genuinely merged change was
+  // excluded (a-state-name-filters-to-zero-rows-and-exit-zero).
+  return [
+    row.row.branch,
+    row.row.subject,
+    row.run?.id ?? row.row.run,
+    row.row.result,
+    row.row.reason,
+    row.row.state,
+  ].some((field) => field?.toLocaleLowerCase().includes(wanted) === true)
 }
 
 /** Every row matching ANY of the terms; no terms is no filter, not no rows. */

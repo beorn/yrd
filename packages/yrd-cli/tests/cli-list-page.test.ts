@@ -151,3 +151,97 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(Object.keys(row!)).toEqual(expect.arrayContaining(["branch", "head", "state", "since", "subject"]))
   })
 })
+
+/**
+ * @failure A term that IS a state name was compared to branch, subject, run,
+ *          result and reason but never to STATE — the field the payload itself
+ *          emits. On the live queue `merged` returned exactly ONE row, matched
+ *          on the branch `task/merged-ball-conditional-close`, while several
+ *          hundred rows whose state field read merged were excluded, out of 247
+ *          (a-state-name-filters-to-zero-rows-and-exit-zero).
+ * @consumer a reader who saw `state: merged` in the JSON and typed `merged`
+ */
+describe("a state name means the state", () => {
+  it("selects by STATE: `queued` finds the queued change rather than a coincidence", async () => {
+    const cwd = await queueWithOneChange()
+    const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "queued")
+
+    expect(ran.exitCode, ran.report).toBe(0)
+    const document = JSON.parse(ran.stdout) as Record<string, unknown>
+    const changes = document["changes"] as readonly Record<string, unknown>[]
+    expect(changes, ran.report).toHaveLength(1)
+    expect(changes[0]).toMatchObject({ branch: "task/one", state: "queued" })
+  })
+})
+
+/**
+ * @failure `--status <state>` was removed from every `yrd list` renderer by the
+ *          flag day (1f638504), which deleted `queue-list-json-filter.test.ts`
+ *          — the regression test that pinned it — in the same commit, so
+ *          nothing went red. What it dropped was RULED and landed:
+ *          @yrd/core/21096-cli-ux/22301, closed 2026-07-28 at fe9ded50ed. Its
+ *          specimen was the opposite of an empty answer — the flag was IGNORED
+ *          under `--json` and the reader got all 669 retained runs, 14 MB,
+ *          while the same command without `--json` showed one row.
+ * @consumer anyone who scripted `yrd list --status`, and every reader of 22301
+ *
+ * These are that test's own assertions, read out of the deleted file rather
+ * than remembered — the exit-0 empty-payload one included, which is the promise
+ * that every command emits a parseable document even when the selection is
+ * empty.
+ */
+describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/22301)", () => {
+  it("answers byte for byte what the positional term answers, on the command and on its alias", async () => {
+    const work = await queueWithOneChange()
+    const positional = await yrd(work, { color: false, columns: 120 }, "queue", "list", "queued")
+    const flagged = await yrd(work, { color: false, columns: 120 }, "queue", "list", "--status", "queued")
+    const aliased = await yrd(work, { color: false, columns: 120 }, "list", "--status", "queued")
+
+    expect(positional.exitCode, positional.report).toBe(0)
+    // One predicate, two spellings: not "both succeed", but the same document.
+    expect(flagged.stdout, flagged.report).toBe(positional.stdout)
+    expect(flagged.exitCode, flagged.report).toBe(positional.exitCode)
+    expect(aliased.stdout, aliased.report).toBe(positional.stdout)
+  })
+
+  it("filters the JSON PAYLOAD, not only the rendered rows — the defect 22301 closed", async () => {
+    const work = await queueWithOneChange()
+    const unfiltered = await yrd(work, { color: false, columns: 120 }, "list", "--json")
+    const filtered = await yrd(work, { color: false, columns: 120 }, "list", "--json", "--status", "queued")
+
+    expect(filtered.exitCode, filtered.report).toBe(0)
+    const branchesIn = (ran: Ran): readonly string[] =>
+      ((JSON.parse(ran.stdout) as Record<string, unknown>)["changes"] as readonly Record<string, unknown>[]).map(
+        (change) => String(change["branch"]),
+      )
+    // The unfiltered listing still carries the change (the original's first
+    // assertion), and the filtered payload selects it by its state.
+    expect(branchesIn(unfiltered), unfiltered.report).toContain("task/one")
+    expect(branchesIn(filtered), filtered.report).toEqual(["task/one"])
+  })
+
+  it("gives a state with no rows the same valid empty document and exit 0 on both spellings", async () => {
+    const work = await queueWithOneChange()
+    const positional = await yrd(work, { color: false, columns: 120 }, "list", "--json", "merged")
+    const flagged = await yrd(work, { color: false, columns: 120 }, "list", "--json", "--status", "merged")
+    const documentOf = (ran: Ran): Record<string, unknown> => JSON.parse(ran.stdout) as Record<string, unknown>
+
+    // EXIT 0 BY DEFAULT is the owning bead's ruling (@chief, 2026-09-07): a
+    // filter term matching zero rows is user input producing an empty result,
+    // not an invariant violation, and the README taxonomy reserves 2 for stuck.
+    // An opt-in `--require-match` returning 1 belongs to that bead, not here.
+    expect(positional.exitCode, positional.report).toBe(0)
+    expect(flagged.exitCode, flagged.report).toBe(positional.exitCode)
+    // The promise `--json` keeps for every consumer: a parseable document, the
+    // empty selection included. This is the assertion that reported the last
+    // breakage of it, so it is made on BOTH spellings rather than one.
+    expect(Object.keys(documentOf(flagged)).sort()).toEqual(["changes", "journal", "pause"])
+    expect(documentOf(flagged)["changes"], flagged.report).toEqual([])
+    expect(documentOf(positional)["changes"], positional.report).toEqual([])
+    // And 22301's own specimen, the other way round: a non-matching state must
+    // never answer with the queue it did not select.
+    expect(flagged.stdout, flagged.report).not.toContain("task/one")
+    expect(flagged.stdout, flagged.report).toBe(positional.stdout)
+    expect(stripAnsi(flagged.stderr), flagged.report).toBe(stripAnsi(positional.stderr))
+  })
+})
