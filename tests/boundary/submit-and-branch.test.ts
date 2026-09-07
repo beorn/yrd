@@ -24,6 +24,8 @@
  * `--force-with-lease` of the submit path is allowed to refuse the branch-name
  * collision the plan says is "never prevented".
  */
+import { readFile, writeFile } from "node:fs/promises"
+import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   addYrdRemote,
@@ -53,6 +55,45 @@ import {
 afterEach(removeTemporaryRoots)
 
 describe("the submit path", { timeout: 120_000 }, () => {
+  // The core refusal alone misses writes in CLI config discovery and the
+  // resumed pause lookup. Both submit spellings must preserve the full trace.
+  it.each([
+    { label: "submit", argv: ["submit"] },
+    { label: "queue submit", argv: ["queue", "submit"] },
+  ])("$label and its dry run refuse a stale base without changing any local or remote ref", async ({ argv }) => {
+    const { repo, origin } = await boundaryRepository({ exit: 0 })
+    const branch = "24099-stale"
+    const head = await commitOnBranch(repo, branch)
+    const beforeBase = await targetTip(repo)
+    const peer = await secondWorkingRepo(origin, "other", "other@example.invalid")
+    await git(peer, "checkout", "-q", "-b", "main", "origin/main")
+    await git(peer, "commit", "--allow-empty", "-qm", "target moved")
+    await git(peer, "push", "-q", "origin", "main")
+    const target = await refSha(origin, "refs/heads/main")
+    const paused = await runYrd(peer, "queue", "pause", "preflight fixture")
+    expect(paused.exitCode, paused.report).toBe(0)
+    const resumed = await runYrd(peer, "queue", "resume", "ready")
+    expect(resumed.exitCode, resumed.report).toBe(0)
+    const fetchHead = join(repo, ".git", "FETCH_HEAD")
+    await writeFile(fetchHead, "the caller's previous fetch\n")
+    const beforeLocal = await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    const beforeRemote = await git(origin, "for-each-ref", "--format=%(refname) %(objectname)")
+
+    for (const flags of [["--dry-run"], []]) {
+      const result = await runYrd(repo, ...argv, branch, ...flags)
+      expect(result.exitCode, result.report).not.toBe(0)
+      expect(result.report).toContain(beforeBase)
+      expect(result.report).toContain(target)
+      expect(result.report).toContain("--rebase")
+      expect(result.report).toContain("the queue revalidates at merge")
+      expect(result.stdout, result.report).toBe("")
+      expect(await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeLocal)
+      expect(await git(origin, "for-each-ref", "--format=%(refname) %(objectname)")).toBe(beforeRemote)
+      expect(await readFile(fetchHead, "utf8")).toBe("the caller's previous fetch\n")
+      expect(await refSha(repo, `refs/heads/${branch}`)).toBe(head)
+    }
+  })
+
   // today: red — `queue submit` exits 0 but pushes `<branch>:refs/yrd/submit/
   // <branch>` to the `origin` remote. The yrd remote gets no branch, and no
   // ref under `refs/yrd/changes/` is ever written.
@@ -258,8 +299,12 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(await refExists(origin, changeRef({ branch: branch, head: head1 })), second.report).toBe(true)
     expect(await refExists(origin, changeRef({ branch: branch, head: head2 })), second.report).toBe(true)
     // Loud is this: each change says who put that head there.
-    expect((await recordMessages(origin, changeRef({ branch: branch, head: head1 }))).at(-1) ?? "").toContain("ada@example.invalid")
-    expect((await recordMessages(origin, changeRef({ branch: branch, head: head2 }))).at(-1) ?? "").toContain("bo@example.invalid")
+    expect((await recordMessages(origin, changeRef({ branch: branch, head: head1 }))).at(-1) ?? "").toContain(
+      "ada@example.invalid",
+    )
+    expect((await recordMessages(origin, changeRef({ branch: branch, head: head2 }))).at(-1) ?? "").toContain(
+      "bo@example.invalid",
+    )
   })
 
   /**
