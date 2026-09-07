@@ -206,31 +206,44 @@ function buildProgram(
    */
   const listRequest = (
     filters: readonly string[],
-    options: Readonly<{ latest?: boolean; watch?: boolean; interval?: number }>,
-  ): CoreQueueCommand => ({
-    command: "list",
-    ...(filters.length === 0 ? {} : { terms: filters }),
-    ...(options.latest === true ? { latest: true } : {}),
-    ...(options.watch === true ? { watch: true } : {}),
-    ...(options.interval === undefined ? {} : { intervalSeconds: options.interval }),
-  })
+    options: Readonly<{ latest?: boolean; watch?: boolean; interval?: number; status?: string }>,
+  ): CoreQueueCommand => {
+    // `--status` is a SPELLING of a filter term, never a second filter path.
+    // @yrd/core/21096-cli-ux/22301 landed the rule that the flag and the rows
+    // must answer one question — it was ignored under `--json`, which emitted
+    // every retained run — and the flag was then dropped with the old surface
+    // (1f638504) along with the test that pinned it. One predicate is what
+    // keeps the rule true without a second thing to keep in step: `--status
+    // merged` IS `list merged`, matched against the state field by
+    // `matchesTerm` like every other term.
+    const terms = options.status === undefined ? filters : [...filters, options.status]
+    return {
+      command: "list",
+      ...(terms.length === 0 ? {} : { terms }),
+      ...(options.latest === true ? { latest: true } : {}),
+      ...(options.watch === true ? { watch: true } : {}),
+      ...(options.interval === undefined ? {} : { intervalSeconds: options.interval }),
+    }
+  }
   const listOptions = <T extends { option: (flags: string, description: string, parser?: unknown) => T }>(
     command: T,
   ): T =>
     command
       .option("--latest", "one row per change; the default keeps every run that touched it")
+      .option("--status <state>", "select by state: exactly the same as giving <state> as a filter term")
       .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")
       .option("--interval <seconds>", "seconds between refreshes while watching (default 5)", int)
   const LIST_DESCRIPTION = "every change in line, then the failed and the merged; filters are case-insensitive OR terms"
   const WATCH_FLAG_HELP = "refresh until the selected change ends, exiting with its code as yrd check does"
   const queueList = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
-    const { interval, json, latest, watch } = options as {
+    const { interval, json, latest, status, watch } = options as {
       interval?: number
       json?: boolean
       latest?: boolean
+      status?: string
       watch?: boolean
     }
-    const taken = await coreQueueCommand(cwd(), io, listRequest(filters ?? [], { interval, latest, watch }), {
+    const taken = await coreQueueCommand(cwd(), io, listRequest(filters ?? [], { interval, latest, status, watch }), {
       json,
       env,
       interactive: interactiveHere(),
@@ -307,11 +320,16 @@ function buildProgram(
           "the run id, the RUNNER and STATS boxes and the check clocks are absent and the watch says where it looked.",
       ),
   ).action(async (filters, options) => {
-    const { interval, json, latest } = options as { interval?: number; json?: boolean; latest?: boolean }
+    const { interval, json, latest, status } = options as {
+      interval?: number
+      json?: boolean
+      latest?: boolean
+      status?: string
+    }
     const taken = await coreQueueCommand(
       cwd(),
       io,
-      listRequest((filters as string[] | undefined) ?? [], { interval, latest, watch: true }),
+      listRequest((filters as string[] | undefined) ?? [], { interval, latest, status, watch: true }),
       { json, env, interactive: interactiveHere(), log: log() },
     )
     setExit(taken)

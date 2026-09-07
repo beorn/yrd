@@ -127,7 +127,7 @@ describe("`yrd list` is `yrd queue list`", () => {
     const aliasHelp = await yrd(work, "list", "--help")
     expect(canonicalHelp.exitCode, canonicalHelp.report).toBe(0)
     expect(aliasHelp.exitCode, aliasHelp.report).toBe(0)
-    expect(flagsOf(aliasHelp.stdout)).toEqual(["--interval", "--json", "--latest", "--watch"])
+    expect(flagsOf(aliasHelp.stdout)).toEqual(["--interval", "--json", "--latest", "--status", "--watch"])
     expect(flagsOf(aliasHelp.stdout)).toEqual(flagsOf(canonicalHelp.stdout))
     expect(aliasHelp.stdout).toContain("[filter...]")
   })

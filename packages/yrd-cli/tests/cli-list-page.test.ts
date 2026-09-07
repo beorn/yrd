@@ -186,3 +186,69 @@ describe("a filter that finds nothing says so, and a state name means the state"
     expect(changes[0]).toMatchObject({ branch: "task/one", state: "queued" })
   })
 })
+
+/**
+ * @failure `--status <state>` was removed from every `yrd list` renderer by the
+ *          flag day (1f638504), which deleted `queue-list-json-filter.test.ts`
+ *          — the regression test that pinned it — in the same commit, so
+ *          nothing went red. The behaviour it pinned was RULED and landed:
+ *          @yrd/core/21096-cli-ux/22301, closed 2026-07-28 at fe9ded50ed,
+ *          after `--status running --json` emitted all 669 retained runs
+ *          (14 MB) while the same command without `--json` showed one row.
+ * @consumer anyone who scripted `yrd list --status`, and every reader of the
+ *           22301 contract
+ *
+ * These are that test's own assertions, read out of the deleted file rather
+ * than remembered, carried onto the surface that replaced it. ONE of them is
+ * deliberately not carried: it asserted exit 0 with an empty payload for a
+ * state that matches nothing, and a selection that matched nothing now refuses
+ * (a-state-name-filters-to-zero-rows-and-exit-zero, ruled separately). What
+ * 22301 was actually protecting — that the flag is not IGNORED under `--json`,
+ * leaving the reader the whole queue — is asserted below in the form that
+ * surface can express.
+ */
+describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/22301)", () => {
+  it("answers byte for byte what the positional term answers, on the command and on its alias", async () => {
+    const work = await queueWithOneChange()
+    const positional = await yrd(work, { color: false, columns: 120 }, "queue", "list", "queued")
+    const flagged = await yrd(work, { color: false, columns: 120 }, "queue", "list", "--status", "queued")
+    const aliased = await yrd(work, { color: false, columns: 120 }, "list", "--status", "queued")
+
+    expect(positional.exitCode, positional.report).toBe(0)
+    // One predicate, two spellings: not "both succeed", but the same document.
+    expect(flagged.stdout, flagged.report).toBe(positional.stdout)
+    expect(flagged.exitCode, flagged.report).toBe(positional.exitCode)
+    expect(aliased.stdout, aliased.report).toBe(positional.stdout)
+  })
+
+  it("filters the JSON PAYLOAD, not only the rendered rows — the defect 22301 closed", async () => {
+    const work = await queueWithOneChange()
+    const unfiltered = await yrd(work, { color: false, columns: 120 }, "list", "--json")
+    const filtered = await yrd(work, { color: false, columns: 120 }, "list", "--json", "--status", "queued")
+
+    expect(filtered.exitCode, filtered.report).toBe(0)
+    const branchesIn = (ran: Ran): readonly string[] =>
+      ((JSON.parse(ran.stdout) as Record<string, unknown>)["changes"] as readonly Record<string, unknown>[]).map(
+        (change) => String(change["branch"]),
+      )
+    // The unfiltered listing still carries the change (the original's first
+    // assertion), and the filtered payload selects it by its state.
+    expect(branchesIn(unfiltered), unfiltered.report).toContain("task/one")
+    expect(branchesIn(filtered), filtered.report).toEqual(["task/one"])
+  })
+
+  it("never answers a non-matching state with the whole queue, and refuses exactly as the positional term does", async () => {
+    const work = await queueWithOneChange()
+    const positional = await yrd(work, { color: false, columns: 120 }, "list", "--json", "merged")
+    const flagged = await yrd(work, { color: false, columns: 120 }, "list", "--json", "--status", "merged")
+
+    // 22301's specimen was the opposite of an empty: the flag was ignored and
+    // the reader got every row. So the assertion that matters is that the one
+    // queued change is NOT in the answer, whatever shape the answer takes.
+    expect(flagged.stdout, flagged.report).not.toContain("task/one")
+    expect(flagged.exitCode, flagged.report).not.toBe(0)
+    // And the two spellings disagree nowhere, refusals included.
+    expect(flagged.exitCode, flagged.report).toBe(positional.exitCode)
+    expect(stripAnsi(flagged.stderr), flagged.report).toBe(stripAnsi(positional.stderr))
+  })
+})
