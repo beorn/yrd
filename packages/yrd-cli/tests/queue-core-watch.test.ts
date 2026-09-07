@@ -125,6 +125,42 @@ async function drain(w: World): Promise<void> {
 }
 
 describe("yrd watch, the ending's exit code", () => {
+  it("says whether a running check's log is not written, empty, or readable in plain show", async () => {
+    // 24212: preserving the journal's path alone advertised future output as
+    // readable now. Exercise the CLI while the check has no ending record.
+    const w = await world()
+    const branch = "task/running"
+    await change(w, branch, true)
+    const head = (await w.git(["rev-parse", branch])).trim()
+    const base = (await w.git(["rev-parse", "main"])).trim()
+    const log = join(w.workdir, "verify.log")
+    const journal = openLog(join(w.workdir, "logs"))
+    journal.write({ base, checks: ["verify"], kind: "run", queue: "test", target: "main" })
+    journal.write({
+      branch,
+      head,
+      kind: "check",
+      log,
+      name: "verify",
+      phase: "submit",
+      start: new Date().toISOString(),
+    })
+
+    for (const [body, expected] of [
+      [undefined, `running; nothing written yet at ${log}`],
+      ["", `the log at ${log} is empty`],
+      ["first output\n", `      log ${log}`],
+    ] as const) {
+      if (body !== undefined) writeFileSync(log, body)
+      const shown = capture(w.work)
+      expect(await coreQueueCommand(w.work, shown.io, { command: "show", branch }, { workdir: w.workdir })).toBe(0)
+      expect(shown.stdout()).toContain("verify running")
+      expect(shown.stdout()).toContain(expected)
+      if (body === undefined || body === "") expect(shown.stdout()).not.toContain(`      log ${log}\n`)
+      else expect(shown.stdout()).not.toContain("nothing written yet")
+    }
+  })
+
   it("exits 0 for a change the queue merged", async () => {
     const w = await world()
     await change(w, "task/good", true)
