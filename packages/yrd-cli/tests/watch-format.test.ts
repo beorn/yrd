@@ -47,6 +47,12 @@ describe("ref-write diagnostic lines", () => {
     )
   })
 
+  /**
+   * @failure Sparse or whitespace-only legacy warnings become raw JSON or hide
+   *          missing evidence; recorded explanations and inspection fields disappear.
+   * @level l0 (diagnosticLines called directly with records, no rendering or I/O)
+   * @consumer the operator reading ref-write warnings in list, show and watch details
+   */
   it("keeps full text and differing inspection fields, and names missing evidence", () => {
     // 24202: raw retention alone cannot prove that the human sees the recorded facts.
     const diagnostic = {
@@ -70,13 +76,33 @@ describe("ref-write diagnostic lines", () => {
       diagnostics: [{ ...diagnostic, text: "Inspect git show old-ref", inspect: undefined }],
     }).join("\n")
     expect(embedded.match(/git show old-ref/gu)).toHaveLength(1)
-    const degraded = diagnosticLines({
+    // Older ref-write records stored the warning identity, but no explanation or command.
+    for (const text of [undefined, " "]) {
+      const legacy = {
+        kind: "change" as const,
+        run: "q-old",
+        at: "2026-09-05T04:00:00Z",
+        decision: "sent",
+        reason: "change-ref-taken",
+        remote: "origin",
+        text,
+      }
+      const degraded = diagnosticLines({ ...row, diagnostics: [legacy] })
+      expect(degraded).toHaveLength(2)
+      expect(degraded[0]).toContain("task/one@abcd run q-old")
+      expect(degraded[0]).toContain("ref-write warning (change-ref-taken)")
+      expect(degraded[1]).toBe(
+        "The record has no explanation or inspection command (remote: origin). Inspect the stored fields with `yrd list --json`.",
+      )
+      expect(degraded.join("\n")).not.toContain(JSON.stringify(legacy))
+    }
+    const withoutCommand = diagnosticLines({
       ...row,
-      diagnostics: [{ ...diagnostic, text: " ", next: undefined, inspect: undefined }],
+      diagnostics: [{ ...diagnostic, next: undefined, inspect: undefined }],
     }).join("\n")
-    expect(degraded).toContain("missing usable text")
-    expect(degraded).toContain("missing usable inspect/next")
-    expect(degraded).toContain(JSON.stringify({ ...diagnostic, text: " ", next: undefined, inspect: undefined }))
+    expect(withoutCommand).toContain(diagnostic.text)
+    expect(withoutCommand).toContain("The record has no inspection command.")
+    expect(withoutCommand).not.toContain("no explanation")
   })
 })
 

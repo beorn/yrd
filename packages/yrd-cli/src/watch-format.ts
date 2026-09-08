@@ -29,8 +29,8 @@ export function diagnosticLines(
             ["next", next],
           ]
     const missing = [
-      text === undefined ? "missing usable text" : undefined,
-      inspect === undefined && next === undefined ? "missing usable inspect/next" : undefined,
+      text === undefined ? "explanation" : undefined,
+      inspect === undefined && next === undefined ? "inspection command" : undefined,
     ].filter((part) => part !== undefined)
     return [
       `${row.branch}@${row.head} run ${record.run}: ⚠ ref-write warning (${String(record.reason)})${usable(record.ref) ? ` — ${record.ref}` : ""}`,
@@ -45,8 +45,11 @@ export function diagnosticLines(
               : []
             : [`${name}: ${command}`],
       ),
-      ...missing,
-      ...(missing.length === 0 ? [] : [`raw diagnostic: ${JSON.stringify(record)}`]),
+      ...(missing.length === 0
+        ? []
+        : [
+            `The record has no ${missing.join(" or ")}${usable(record.remote) ? ` (remote: ${record.remote})` : ""}. Inspect the stored fields with \`yrd list --json\`.`,
+          ]),
     ]
   })
 }
