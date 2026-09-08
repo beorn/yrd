@@ -788,6 +788,7 @@ export async function coreQueueCommand(
                   name: change.row.live.check,
                   ...(change.row.live.log === undefined ? {} : { log: change.row.live.log }),
                 },
+            journalFor({ row: change.row }, journals)?.checks,
           ),
           ...(declared.note === undefined ? {} : { note: declared.note }),
         })

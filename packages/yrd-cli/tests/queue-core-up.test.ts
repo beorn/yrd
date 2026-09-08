@@ -19,7 +19,7 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlin
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { appendRecord, changeRef, gitIn, readRecords, submit, trailer, type Git } from "@yrd/queue-core"
+import { appendRecord, changeRef, gitIn, readRecords, runId, submit, trailer, type Git } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -898,6 +898,79 @@ describe("yrd queue list, the table", () => {
 })
 
 describe("yrd queue show, one change's evidence", () => {
+  it("shows the current running check without relabeling an older unresolved result as passed", async () => {
+    // Reader tests supplied measured checks directly; this proves that the CLI
+    // selects the current journal instead of combining all historical trailers.
+    const w = await world()
+    await redeclare(w, "checks:\n  - affected-tests:\n      run: test\n")
+    const base = (await w.git(["rev-parse", "main"])).trim()
+    const branch = "task/retry"
+    await w.git(["checkout", "--quiet", "-b", branch, "main"])
+    writeFileSync(join(w.work, "retry.txt"), "retry\n")
+    await w.git(["add", "retry.txt"])
+    await w.git(["commit", "--quiet", "-m", "retry"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    const change = { branch, head }
+    await submit(w.git, "origin", {
+      branch,
+      submitter: "@dev/3",
+      target: { branch: "main", remote: "origin" },
+    })
+    await appendRecord(w.git, "main", {
+      change,
+      kind: "stuck",
+      subject: "old run could not judge",
+      trailers: [
+        ["Base", base],
+        ["Check", "affected-tests exit=3 ms=5 log=/old/affected.log"],
+      ],
+    })
+    await appendRecord(w.git, "main", {
+      change,
+      kind: "checked",
+      subject: "new on-submit checks passed",
+      trailers: [["Base", base]],
+    })
+    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
+    const at = new Date().toISOString()
+    const run = runId(new Date(at))
+    const dir = join(w.workdir, "logs")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, `${run}.jsonl`),
+      [
+        { kind: "run", base, queue: "q", target: "main", checks: ["affected-tests"] },
+        { kind: "check", ...change, name: "affected-tests", phase: "merge", start: at, log: "/new/affected.log" },
+      ]
+        .map((record) => JSON.stringify({ ...record, at, run }))
+        .join("\n") + "\n",
+    )
+    const output = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        output.io,
+        { command: "show", branch },
+        {
+          json: true,
+          workdir: w.workdir,
+        },
+      ),
+    ).toBe(0)
+    const shown = records(output)[0] as { changes: { run: string; checks: unknown[] }[] }
+    expect(shown.changes[0]?.run).toBe(run)
+    expect(shown.changes[0]?.checks).toEqual([
+      {
+        name: "affected-tests",
+        phase: "merge",
+        state: "running",
+        log: "/new/affected.log",
+        spec: { name: "affected-tests", run: "test" },
+      },
+    ])
+  })
+
   it("hydrates the checked-to-sent history and leaves a genuinely missing check not run", async () => {
     const w = await world()
     await redeclare(
