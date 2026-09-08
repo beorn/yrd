@@ -551,45 +551,72 @@ describe("settling gitlinks", () => {
     expect(phases).toEqual(["submit", "base"])
   })
 
-  it("a candidate-only failure stays the submitter's when the settled base is green", async () => {
-    const w = await world()
-    await advanceComponent(w, "healthy component main")
-    const head = await submitFile(w, "task/candidate-red")
+  /** Actual receipt rows trigger comparison even when every raised path is absent or an ordinary file in the base. */
+  it.each(["existing-gitlink", "new-path", "ordinary-file"] as const)(
+    "a candidate-only failure stays the submitter's with a green %s comparator",
+    async (baseEntry) => {
+      const w = await world()
+      let head: string
+      if (baseEntry === "existing-gitlink") {
+        await advanceComponent(w, "healthy component main")
+        head = await submitFile(w, "task/candidate-red")
+      } else {
+        if (baseEntry === "ordinary-file") {
+          writeFileSync(join(w.work, "new-component"), "base-owned ordinary file\n")
+          await w.git(["add", "new-component"])
+          await w.git(["commit", "--quiet", "-m", "base has an ordinary file"])
+          await w.git(["push", "--quiet", "origin", "main"])
+        }
+        await w.git(["checkout", "--quiet", "-b", "task/candidate-red", "main"])
+        if (baseEntry === "ordinary-file") await w.git(["rm", "--quiet", "new-component"])
+        await w.git(["submodule", "add", "--quiet", "https://git-super.test/owned/component.git", "new-component"])
+        await gitIn(join(w.work, "new-component"))(["checkout", "--quiet", w.onMain])
+        writeFileSync(join(w.work, "task-candidate-red.txt"), "authored failure\n")
+        await w.git(["add", ".gitmodules", "new-component", "task-candidate-red.txt"])
+        await w.git(["commit", "--quiet", "-m", "candidate adds a held-back component"])
+        head = (await w.git(["rev-parse", "HEAD"])).trim()
+        await submit(w.git, "origin", {
+          branch: "task/candidate-red",
+          submitter: "@dev/2",
+          target: { branch: "main", remote: "origin" },
+        })
+      }
 
-    const outcome = await queueRun(
-      await w.options({
-        on: ["submit"],
-        run: "if test -f task-candidate-red.txt; then echo CANDIDATE_FAIL; exit 1; else echo BASE_PASS; fi",
-      }),
-    )
+      const outcome = await queueRun(
+        await w.options({
+          on: ["submit"],
+          run: "if test -f task-candidate-red.txt || test -d new-component; then echo CANDIDATE_FAIL; exit 1; else echo BASE_PASS; fi",
+        }),
+      )
 
-    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/candidate-red"], merged: [], stuck: [] })
-    const records = await readRecords(
-      w.git,
-      await remoteTip(w.git, changeRef("main", { branch: "task/candidate-red", head })),
-    )
-    expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
-    expect(trailer(records.find((record) => record.kind === "failed")!, "Fault")).toBe("submitter")
-    const phases = readFileSync(outcome.log, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
-      .filter((record) => record.kind === "result" && record.name === "component-check")
-      .map((record) => record.phase)
-    expect(phases).toEqual(["submit", "base"])
-    // The read-side must not relabel the green comparator as the candidate's
-    // deciding artifact, nor collapse its two measured phase occurrences.
-    const journals = readJournals(dirname(outcome.log))
-    const queue = await readQueue(w.git, "origin", "main", outcome.target)
-    const shown = watchRows(list(queue.changes, { journals }), { journals }).find((row) => row.row.head === head)!
-    expect(shown.row.result).toBe("fail component-check")
-    expect(readFileSync(shown.row.log!, "utf8")).toBe("CANDIDATE_FAIL\n")
-    const detail = checksOf([], "failed", [], shown.run?.running, shown.run?.checks)
-    expect(detail.map((check) => [check.phase, check.state, readFileSync(check.log!, "utf8")])).toEqual([
-      ["submit", "failed", "CANDIDATE_FAIL\n"],
-      ["base", "passed", "BASE_PASS\n"],
-    ])
-  })
+      expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/candidate-red"], merged: [], stuck: [] })
+      const records = await readRecords(
+        w.git,
+        await remoteTip(w.git, changeRef("main", { branch: "task/candidate-red", head })),
+      )
+      expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
+      expect(trailer(records.find((record) => record.kind === "failed")!, "Fault")).toBe("submitter")
+      const phases = readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((record) => record.kind === "result" && record.name === "component-check")
+        .map((record) => record.phase)
+      expect(phases).toEqual(["submit", "base"])
+      // The read-side must not relabel the green comparator as the candidate's
+      // deciding artifact, nor collapse its two measured phase occurrences.
+      const journals = readJournals(dirname(outcome.log))
+      const queue = await readQueue(w.git, "origin", "main", outcome.target)
+      const shown = watchRows(list(queue.changes, { journals }), { journals }).find((row) => row.row.head === head)!
+      expect(shown.row.result).toBe("fail component-check")
+      expect(readFileSync(shown.row.log!, "utf8")).toBe("CANDIDATE_FAIL\n")
+      const detail = checksOf([], "failed", [], shown.run?.running, shown.run?.checks)
+      expect(detail.map((check) => [check.phase, check.state, readFileSync(check.log!, "utf8")])).toEqual([
+        ["submit", "failed", "CANDIDATE_FAIL\n"],
+        ["base", "passed", "BASE_PASS\n"],
+      ])
+    },
+  )
 
   it("a gitlink moved on the target around the queue is reported with its path, and no component is asked about it (E5)", async () => {
     const w = await world()
