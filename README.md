@@ -106,10 +106,10 @@ A key the queue does not read is refused, never ignored. Queue identity is not c
 
 Each queue owns `refs/yrd/<encoded-queue>/<branch>@<sha>` and `refs/yrd/<encoded-queue>/pause`, on the remote and in clones that fetch them. Encoding keeps the queue branch in one component: `release/stable` becomes `release%2Fstable`.
 
-For queue-owner and reader commands, the host root is `git config yrd.workdir`, otherwise `$XDG_STATE_HOME/yrd` (default `~/.local/state/yrd`). Under it, the queue directory is `<host>/<repository-path>#<encoded-queue>`; an absolute local repository uses `local/<absolute-path-without-leading-slash>#<encoded-queue>` instead. Detached retained environments live under `<git-common-dir>/yrd/environments` or the configured `yrd.workdir`; standalone branch environments remain under `.bays`. Both are listed and closed through the same Git registry. Each queue address gets its own clone and artifacts:
+For queue-owner and reader commands, the host root is `git config yrd.workdir`, otherwise `$XDG_STATE_HOME/yrd` (default `~/.local/state/yrd`). Under it, the queue directory is `<host>/<repository-path>%23<encoded-queue>`; an absolute local repository uses `local/<absolute-path-without-leading-slash>%23<encoded-queue>` instead. Detached retained environments live under `<git-common-dir>/yrd/environments` or the configured `yrd.workdir`; standalone branch environments remain under `.bays`. Both are listed and closed through the same Git registry. Each queue address gets its own clone and artifacts:
 
 ```
-<host root>/github.com/beorn/hh#main/
+<host root>/github.com/beorn/hh%23main/
   repo/                                             the queue-owned clone; .yrd.yml is read from the queue branch
   worktrees/<run id>/[compose/]<phase>/<sha>/        temporary composition and check worktrees
   checks/<change>/<run id>/<phase>/<name>.log        retained check logs

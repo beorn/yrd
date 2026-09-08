@@ -88,12 +88,12 @@ export function parseQueueAddress(operand: string): QueueAddress {
   return Object.freeze({ canonical, host, kind: "remote", path, queue, transport: `https://${host}/${path}.git` })
 }
 
-/** The directory whose children are this queue's repo, checkouts, logs and tmp. */
+/** Physical paths encode the address separator: URL-based module loaders treat a literal # as a fragment. */
 export function queueRoot(workdir: string, address: QueueAddress): string {
   const queue = encodeQueueComponent(address.queue)
-  if (address.kind === "remote") return join(workdir, address.host, `${address.path}#${queue}`)
+  if (address.kind === "remote") return join(workdir, address.host, `${address.path}%23${queue}`)
   const path = address.repository.startsWith(sep) ? address.repository.slice(sep.length) : address.repository
-  return join(workdir, "local", `${path}#${queue}`)
+  return join(workdir, "local", `${path}%23${queue}`)
 }
 
 /** The queue-owned clone. */

@@ -41,7 +41,7 @@ describe("a queue's canonical address", () => {
       transport: `https://forge.example:${port}/team/repo.git`,
     })
     expect(queueDirectory("/state/yrd", address)).toBe(
-      join("/state/yrd", `forge.example:${port}`, "team", "repo#main", "repo"),
+      join("/state/yrd", `forge.example:${port}`, "team", "repo%23main", "repo"),
     )
     expect(queueDirectory("/state/yrd", address)).not.toBe(
       queueDirectory("/state/yrd", parseQueueAddress("forge.example/team/repo#main")),
@@ -57,16 +57,16 @@ describe("a queue's canonical address", () => {
     expect(() => parseQueueAddress(operand)).toThrow("backslashes, tabs or newlines")
   })
 
-  it("keeps repository path directories readable and encodes the queue as one final segment", () => {
+  it("encodes the physical separator and queue without changing the canonical address", () => {
     const workdir = "/state/yrd"
     const main = parseQueueAddress("beorn/hh#main")
     const release = parseQueueAddress("beorn/hh#release/1.x")
     const percent = parseQueueAddress("beorn/hh#release%2F1.x")
 
-    expect(queueRoot(workdir, main)).toBe(join(workdir, "github.com", "beorn", "hh#main"))
-    expect(queueDirectory(workdir, main)).toBe(join(workdir, "github.com", "beorn", "hh#main", "repo"))
-    expect(queueDirectory(workdir, release)).toBe(join(workdir, "github.com", "beorn", "hh#release%2F1.x", "repo"))
-    expect(queueDirectory(workdir, percent)).toBe(join(workdir, "github.com", "beorn", "hh#release%252F1.x", "repo"))
+    expect(queueRoot(workdir, main)).toBe(join(workdir, "github.com", "beorn", "hh%23main"))
+    expect(queueDirectory(workdir, main)).toBe(join(workdir, "github.com", "beorn", "hh%23main", "repo"))
+    expect(queueDirectory(workdir, release)).toBe(join(workdir, "github.com", "beorn", "hh%23release%2F1.x", "repo"))
+    expect(queueDirectory(workdir, percent)).toBe(join(workdir, "github.com", "beorn", "hh%23release%252F1.x", "repo"))
     expect(queueDirectory(workdir, release)).not.toBe(queueDirectory(workdir, main))
   })
 
@@ -79,7 +79,7 @@ describe("a queue's canonical address", () => {
       repository: "/tmp/remote.git",
       transport: "/tmp/remote.git",
     })
-    expect(queueDirectory("/state/yrd", address)).toBe("/state/yrd/local/tmp/remote.git#main/repo")
+    expect(queueDirectory("/state/yrd", address)).toBe("/state/yrd/local/tmp/remote.git%23main/repo")
   })
 
   it.each(["beorn/hh", "beorn/hh#", "#main", "beorn/hh#main#other", "https:///forge.example:8443/team/repo.git#main"])(
