@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { configValue, gitIn, queueName } from "@yrd/queue-core"
 import { parseQueueAddress, queueDirectory, queueRoot, type QueueAddress } from "./address.ts"
 import { repositoryHere } from "./declaration.ts"
@@ -25,7 +25,7 @@ export async function originHead(git: ReturnType<typeof gitIn>, remote = "origin
 
 async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
   const declared = await configValue(gitIn(cwd), "yrd.workdir")
-  if (declared !== undefined) return declared
+  if (declared !== undefined) return resolve(repositoryHere(cwd) ?? cwd, declared)
   return join(env.XDG_STATE_HOME ?? join(env.HOME ?? homedir(), ".local", "state"), "yrd")
 }
 
@@ -59,16 +59,19 @@ export async function resolveQueueLocation(
     )
   }
   const git = gitIn(inside ?? cwd)
-  const addressed = value !== undefined &&
+  const addressed =
+    value !== undefined &&
     (value.includes("#") || value.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value))
   let address: QueueAddress
   if (inside !== undefined && !addressed) {
-    const queue = value ?? await originHead(git)
+    const queue = value ?? (await originHead(git))
     const transport = (await git(["remote", "get-url", "origin"])).trim()
     address = parseQueueAddress(queueName({ branch: queue, remote: "origin" }, transport))
   } else {
     if (value === undefined || !addressed) {
-      throw new Error(`queue command at ${cwd} needs a repository; run inside a clone or pass --queue <repo>#<queue>, for example --queue beorn/hh#main`)
+      throw new Error(
+        `queue command at ${cwd} needs a repository; run inside a clone or pass --queue <repo>#<queue>, for example --queue beorn/hh#main`,
+      )
     }
     let selected = value
     if (!selected.includes("#")) selected = `${selected}#${await originHead(git, selected)}`
@@ -83,7 +86,13 @@ export async function resolveQueueLocation(
   const host = await hostWorkdir(cwd, env)
   const workdir = queueRoot(host, address)
   if (context !== "queue" && inside !== undefined) {
-    return { address, queue: address.queue, repo: inside, remote: context === "submit" && addressed ? address.transport : undefined, workdir }
+    return {
+      address,
+      queue: address.queue,
+      repo: inside,
+      remote: context === "submit" && addressed ? address.transport : undefined,
+      workdir,
+    }
   }
   return { address, queue: address.queue, repo: await ensureOwnedClone(host, address), workdir }
 }

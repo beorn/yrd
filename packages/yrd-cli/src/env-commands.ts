@@ -18,7 +18,19 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace } from "@yrd/bay"
-import { checkedTree, freshWorktree, registeredWorktrees, runCheck, gitIn, readConfig, refAt, runId, runSetup, SetupFailed, type Git } from "@yrd/queue-core"
+import {
+  checkedTree,
+  freshWorktree,
+  registeredWorktrees,
+  runCheck,
+  gitIn,
+  readConfig,
+  refAt,
+  runId,
+  runSetup,
+  SetupFailed,
+  type Git,
+} from "@yrd/queue-core"
 import { createProcess } from "@yrd/process"
 import { repositoryHere as findRepository } from "./declaration.ts"
 import { originHead } from "./queue-location.ts"
@@ -41,7 +53,8 @@ export type EnvRow = Readonly<{ name: string; path: string; branch?: string; hea
 function requireRepository(io: YrdCliIO): string {
   const cwd = io.cwd ?? process.cwd()
   const root = findRepository(cwd)
-  if (root === undefined) throw new Error(`yrd env needs a repository: no Git clone contains ${cwd}; run it inside a clone`)
+  if (root === undefined)
+    {throw new Error(`yrd env needs a repository: no Git clone contains ${cwd}; run it inside a clone`)}
   return root
 }
 
@@ -72,14 +85,20 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     throw new Error(`yrd env open needs an exact commit object ID, not '${commit}'; resolve it with git rev-parse HEAD`)
   }
   const target = commit === undefined ? await originHead(gitIn(root)) : "HEAD"
-  const name = (options.bay ?? options.issue ?? (commit === undefined ? `env-${Date.now().toString(36)}` : `${commit.slice(0, 12)}-${runId()}`)).trim()
+  const name = (
+    options.bay ??
+    options.issue ??
+    (commit === undefined ? `env-${Date.now().toString(36)}` : `${commit.slice(0, 12)}-${runId()}`)
+  ).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
   const branch = commit === undefined ? `task/${name}` : undefined
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process)
-  const base = commit ?? await resolveBaseSha(git, target)
-  if (commit !== undefined && await refAt(git, commit) !== commit) {
-    throw new Error(`yrd env open: commit ${commit} is not a commit object in ${root}; fetch that commit before opening it`)
+  const base = commit ?? (await resolveBaseSha(git, target))
+  if (commit !== undefined && (await refAt(git, commit)) !== commit) {
+    throw new Error(
+      `yrd env open: commit ${commit} is not a commit object in ${root}; fetch that commit before opening it`,
+    )
   }
   const config = await readConfig(git, base, { remote: "origin", branch: target })
   let provisioned: { path: string; headSha: string; baseSha: string }
@@ -93,7 +112,8 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   } else {
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
     const result = await workspace.provision({ bay: name, name, branch, base })
-    if (result.conclusion !== "success") throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
+    if (result.conclusion !== "success")
+      {throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)}
     provisioned = result.output
   }
   const { path, headSha, baseSha } = provisioned
@@ -123,7 +143,9 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   if (options.json === true) {
     io.stdout(`${JSON.stringify({ base: baseSha, branch, head: headSha, name, path })}\n`)
   } else {
-    io.stderr(`${name} ${branch === undefined ? "detached" : `on ${branch}`} at ${headSha.slice(0, 12)}, cut from ${target} ${baseSha.slice(0, 12)}\n`)
+    io.stderr(
+      `${name} ${branch === undefined ? "detached" : `on ${branch}`} at ${headSha.slice(0, 12)}, cut from ${target} ${baseSha.slice(0, 12)}\n`,
+    )
     io.stdout(`${path}\n`)
   }
   return 0
@@ -138,7 +160,12 @@ export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): P
   const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
   const rows: EnvRow[] = (await registeredWorktrees(gitIn(root, process)))
     .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
-    .map(({ path, head, branch }) => ({ name: basename(path), path, ...(head === undefined ? {} : { head }), ...(branch === undefined ? {} : { branch }) }))
+    .map(({ path, head, branch }) => ({
+      name: basename(path),
+      path,
+      ...(head === undefined ? {} : { head }),
+      ...(branch === undefined ? {} : { branch }),
+    }))
   if (options.json === true) {
     io.stdout(`${JSON.stringify({ environments: rows })}\n`)
     return 0
@@ -174,7 +201,7 @@ export async function closeEnvironment(
     path = realpathSync(requested)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR")
-      throw error
+      {throw error}
     throw new Error(
       `environment ${requested} is not registered at an existing path; inspect git worktree list before retrying`,
       { cause: error },
@@ -182,17 +209,18 @@ export async function closeEnvironment(
   }
   const registered = (await registeredWorktrees(git)).find((entry) => resolve(entry.path) === path)
   if (registered === undefined)
-    throw new Error(`environment ${requested} is not registered in ${root}; inspect git worktree list`)
+    {throw new Error(`environment ${requested} is not registered in ${root}; inspect git worktree list`)}
   const contained = roots.some((directory) => {
     if (!existsSync(directory)) return false
     const within = relative(realpathSync(directory), path)
     return within !== "" && within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within)
   })
-  if (!contained) throw new Error(`environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was removed`)
+  if (!contained)
+    {throw new Error(`environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was removed. Retire a worktree outside these roots with your repository's own worktree cleanup (git worktree remove), not yrd env close`)}
   if (registered.locked !== undefined)
-    throw new Error(
+    {throw new Error(
       `environment ${path} is locked${registered.locked === "" ? "" : `: ${registered.locked}`}; resolve its owner before closing it`,
-    )
+    )}
   const treeGit = gitIn(path, process)
   await requireClean(treeGit, path)
   const commit = (await treeGit(["rev-parse", "HEAD"])).trim()

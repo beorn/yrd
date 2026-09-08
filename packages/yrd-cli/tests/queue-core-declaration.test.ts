@@ -5,7 +5,7 @@
  * @level l2 (`coreQueueCommand` against a real remote and clone)
  * @consumer Every queue command.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -96,7 +96,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     const fetchHead = (await git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
     writeFileSync(fetchHead, "another command's fetch result\n")
     const operand = mode === "default" ? [] : ["--queue", "release/1.x"]
-    const paused = capture(repo)
+    await git(["config", "yrd.workdir", "relative-state"])
+    const nested = join(repo, "nested")
+    mkdirSync(nested)
+    const paused = capture(nested)
     expect(
       await runYrdProcess(
         ["bun", "yrd", "queue", "pause", ...operand, "--reason", "checking release", "--notify", "@dev/3", "--json"],
@@ -105,6 +108,8 @@ describe("a queue is the selected origin branch carrying config", () => {
       paused.stderr(),
     ).toBe(0)
     expect(JSON.parse(paused.stdout())).toMatchObject({ kind: "paused", reason: "checking release" })
+    const owned = join(repo, "relative-state", "local", `${join(dirname(repo), "remote.git").slice(1)}#release%2F1.x`, "repo")
+    expect(existsSync(owned)).toBe(true)
     expect(await git(refs)).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
     expect(await yrdRefs()).toEqual(expectedYrdRefs)

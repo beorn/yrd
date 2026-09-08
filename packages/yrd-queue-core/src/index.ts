@@ -71,13 +71,5 @@ export type { Clocks, ListOptions, Row, WatchRow, WatchRowOptions } from "./tabl
 export { readHistories, readQueue, resolveRemote } from "./remote.ts"
 export { directMergeCommits, directMergeLine } from "./direct.ts"
 export { refuseTarget, inspectSubmit, freshnessLine, submit, issueOf } from "./submit.ts"
-export {
-  QueuePaused,
-  QueueNotPaused,
-  activePause,
-  pauseLine,
-  readPause,
-  requireResumed,
-  writePause,
-} from "./pause.ts"
+export { QueuePaused, QueueNotPaused, activePause, pauseLine, readPause, requireResumed, writePause } from "./pause.ts"
 export type { PauseRecord, PauseKind, WritePause } from "./pause.ts"

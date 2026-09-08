@@ -503,9 +503,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         }
         expect(records(run)).toEqual([])
         expect(await w.git(["ls-remote", "--refs", "origin"])).toBe(beforeRemote)
-        expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/main/"])).toBe(
-          beforeLocal,
-        )
+        expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/main/"])).toBe(beforeLocal)
       }
     },
   )

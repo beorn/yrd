@@ -296,7 +296,14 @@ describe("the state is derived, and ancestry wins over any record", () => {
       kind: "opened",
       subject: "submitted",
     })
-    const incident = { code: "yrd-check-unresolved", subject: "the queue could not judge this change", via: "verify during merge", evidence: "/tmp/q-one.jsonl", next: "repair verify, then run yrd queue run", owner: "the queue operator" } as const
+    const incident = {
+      code: "yrd-check-unresolved",
+      subject: "the queue could not judge this change",
+      via: "verify during merge",
+      evidence: "/tmp/q-one.jsonl",
+      next: "repair verify, then run yrd queue run",
+      owner: "the queue operator",
+    } as const
     const stuck = await appendRecord(git, "main", {
       change: { branch: "task/one", head },
       kind: "stuck",

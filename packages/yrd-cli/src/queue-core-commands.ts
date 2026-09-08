@@ -225,7 +225,10 @@ export async function coreQueueCommand(
     try {
       declared = await readConfig(git, oid, target)
     } catch (error) {
-      throw new Error(`the declaration at ${targetLabel} cannot be read: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+      throw new Error(
+        `the declaration at ${targetLabel} cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      )
     }
     if (declared === undefined) return undefined
     return { config: declared, oid }

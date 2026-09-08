@@ -117,7 +117,7 @@ For queue-owner and reader commands, the host root is `git config yrd.workdir`, 
   tmp/                                              TMPDIR for checks
 ```
 
-Unaddressed commands and all submissions use the current repository and `git config yrd.workdir`, otherwise `<git-common-dir>/yrd`. Retained environments live at `<workdir>/environments/<sha-prefix>-<run id>/`; their setup and teardown logs and temp files live under `<workdir>/logs/environments/<name>/`.
+`yrd check` and retained-environment commands use the current repository and `git config yrd.workdir`, otherwise `<git-common-dir>/yrd`. Relative configured paths resolve from the repository root. Retained environments live at `<workdir>/environments/<sha-prefix>-<run id>/`; their setup and teardown logs and temp files live under `<workdir>/logs/environments/<name>/`.
 
 The submitter and the queue share only the selected remote. The submitter pushes a branch and the change's first record there; the queue fetches it into its own clone, works in fresh checkouts, and pushes merges back. It never reads a submitter's clone, so the two can be on different machines.
 

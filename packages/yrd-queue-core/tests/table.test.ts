@@ -236,7 +236,12 @@ describe("the table is the queue read rendered", () => {
         await appendRecord(gitAt(new Date(endedAt.getTime() - 30_000)), "main", ending)
         await appendRecord(w.git, "main", { change, kind: "checked", subject: "retry checked" })
         await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
-        const retry = await readHistories(w.git, (await readQueue(w.git, "origin", "main", w.target)).changes, "origin", "main")
+        const retry = await readHistories(
+          w.git,
+          (await readQueue(w.git, "origin", "main", w.target)).changes,
+          "origin",
+          "main",
+        )
         expect(show(retry, change.branch)[0]?.row.endedAt).toBeUndefined()
       }
       await appendRecord(gitAt(endedAt), "main", ending)

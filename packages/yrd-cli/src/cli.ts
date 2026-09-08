@@ -39,7 +39,14 @@ const DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER"
 
 type GlobalOptions = YrdObservabilityFlags
 
-type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean; rebase?: boolean; queue?: string }>
+type SubmitOptions = Readonly<{
+  json?: boolean
+  notify?: string
+  issue?: string
+  dryRun?: boolean
+  rebase?: boolean
+  queue?: string
+}>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string }>
 
 // Only queue actions load the runtime identity fence. Help and --version must
@@ -275,14 +282,19 @@ function buildProgram(
       queue?: string
     }
     const location = await resolveQueueLocation(cwd(), queue, env, "reader")
-    const taken = await coreQueueCommand(location.repo, io, listRequest(filters ?? [], { interval, latest, status, watch }), {
-      queue: location.queue,
-      workdir: location.workdir,
-      json,
-      env,
-      interactive: interactiveHere(),
-      log: log(),
-    })
+    const taken = await coreQueueCommand(
+      location.repo,
+      io,
+      listRequest(filters ?? [], { interval, latest, status, watch }),
+      {
+        queue: location.queue,
+        workdir: location.workdir,
+        json,
+        env,
+        interactive: interactiveHere(),
+        log: log(),
+      },
+    )
     setExit(taken)
   }
   listOptions(
@@ -398,7 +410,14 @@ function buildProgram(
     .option("--bay <name>", "name the environment")
     .option("--issue <ref>", "the issue this environment is for")
     .option("--json", "emit stable JSON")
-    .action(async (commit, options) => setExit(await openEnvironment({ ...options, ...(commit === undefined ? {} : { commit }) } as Parameters<typeof openEnvironment>[0], io)))
+    .action(async (commit, options) =>
+      setExit(
+        await openEnvironment(
+          { ...options, ...(commit === undefined ? {} : { commit }) } as Parameters<typeof openEnvironment>[0],
+          io,
+        ),
+      ),
+    )
   env_
     .command("list", { isDefault: true })
     .description("the environments this repository holds")

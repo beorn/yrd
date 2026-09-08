@@ -222,7 +222,7 @@ export async function registeredWorktrees(git: Git): Promise<readonly Registered
     } else if (field.startsWith("HEAD ")) current.head = field.slice("HEAD ".length)
     else if (field.startsWith("branch ")) current.branch = field.slice("branch ".length).replace(/^refs\/heads\//u, "")
     else if (field === "locked" || field.startsWith("locked "))
-      current.locked = field.slice("locked".length).trimStart()
+      {current.locked = field.slice("locked".length).trimStart()}
   }
   take()
   return rows
@@ -430,7 +430,7 @@ function materializedWorktree(value: unknown, path: string, commit: string): boo
     result.commit !== commit ||
     result.gitmodules !== true
   )
-    return false
+    {return false}
   if (
     !Array.isArray(result.repositories) ||
     result.repositories.length === 0 ||
@@ -445,7 +445,7 @@ function materializedWorktree(value: unknown, path: string, commit: string): boo
       )
     })
   )
-    return false
+    {return false}
   if (typeof result.gitlinks !== "object" || result.gitlinks === null) return false
   const counts = result.gitlinks as Record<string, unknown>
   const { considered, borrowed, fetched, absent } = counts
@@ -454,6 +454,6 @@ function materializedWorktree(value: unknown, path: string, commit: string): boo
       (count) => typeof count === "number" && Number.isSafeInteger(count) && count >= 0,
     )
   )
-    return false
+    {return false}
   return considered === (borrowed as number) + (fetched as number) + (absent as number)
 }

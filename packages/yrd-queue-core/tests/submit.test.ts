@@ -140,9 +140,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     expect(await refAt(gitIn(w.remote), "refs/heads/task/rebase")).toBe(opened.head)
     expect(await refAt(w.git, "HEAD")).toBe(opened.head)
     expect(await refAt(gitIn(w.remote), changeRef("main", { branch: request.branch, head: before }))).toBeUndefined()
-    expect(
-      (await readRecords(w.git, opened.opened)).map((record) => record.kind),
-    ).toEqual(["opened"])
+    expect((await readRecords(w.git, opened.opened)).map((record) => record.kind)).toEqual(["opened"])
   })
 
   // Preview and action must enforce the same opt-in worktree prerequisites,
