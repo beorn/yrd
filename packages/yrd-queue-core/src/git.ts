@@ -15,8 +15,169 @@
  */
 
 import { hostname } from "node:os"
-import { createProcess, type Process } from "@yrd/process"
+import { randomUUID } from "node:crypto"
+import { accessSync, constants, statSync } from "node:fs"
+import { isAbsolute } from "node:path"
+import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import type { Git } from "./records.ts"
+
+export type GitSelection = Readonly<{
+  executable: string
+  contract: "native" | "root-v1"
+  scope: "default" | "system" | "global" | "local" | "worktree"
+  origin: string
+}>
+
+// Uniform invocation bounds. The 15-component measurement owns any revision;
+// expiry reports uncertainty and never establishes that a mutation had no effect.
+const GIT_READINESS_MS = 5_000
+const GIT_ROOT_INVOCATION_MS = 5 * 60_000
+const GIT_CONTROL_BYTES = 64 * 1024
+
+type GitRefusal = Readonly<{ kind: "waiting" | "rejected" | "unjudged"; message: string }>
+export type GitInvocation = Readonly<{
+  args: readonly string[]
+  cwd: string
+  selection?: GitSelection
+  result?: ProcessResult
+  protocol?: Readonly<{ token: string; ready: boolean; refusal?: GitRefusal }>
+  /** An invocation defect, distinct from an ordinary nonzero Git exit. */
+  failure?: string
+  artifacts?: Readonly<{ stdout: string; stderr: string; complete: boolean }>
+}>
+
+export type GitOutputSink = Readonly<{
+  stdout: string
+  stderr: string
+  onOutput: NonNullable<ProcessRequest["onOutput"]>
+  /** Close both streams, reporting write/close failures. */
+  close(): void
+}>
+
+export type GitInvocationOptions = Readonly<{
+  env?: NodeJS.ProcessEnv
+  signal?: AbortSignal
+  timeoutMs?: number
+  openOutput?: (invocation: Pick<GitInvocation, "args" | "cwd" | "selection">) => GitOutputSink
+  onInvocation?: (invocation: GitInvocation) => void
+}>
+
+export type GitRunner = Git &
+  Readonly<{
+    /** Bounded evidence for the latest settled call, including successful stderr.
+     * Run owners use onInvocation to retain every call in their existing log. */
+    lastInvocation: GitInvocation | undefined
+  }>
+
+/** One machine declaration, resolved before owning-repository operations. */
+export async function resolveGitSelection(
+  cwd: string,
+  options: Readonly<{ process?: Pick<Process, "run">; env?: NodeJS.ProcessEnv }> = {},
+): Promise<GitSelection> {
+  const env = gitEnvironment(options.env ?? globalThis.process.env)
+  if (options.process === undefined) {
+    await using process = createProcess({ cwd, env })
+    return await resolveGitSelection(cwd, { ...options, process })
+  }
+  const problem = (message: string, origin = "native Git file scopes") =>
+    new Error(`yrd: yrd.git in ${cwd} (${origin}): ${message}`)
+  let result: Awaited<ReturnType<Process["run"]>>
+  try {
+    result = await options.process.run({
+      argv: ["git", "config", "--null", "--show-scope", "--show-origin", "--get-all", "yrd.git"],
+      cwd,
+      env,
+      timeoutMs: GIT_READINESS_MS,
+    })
+  } catch (error) {
+    throw problem(`cannot read the declaration: ${String(error)}`)
+  }
+  if (
+    result.signal !== null ||
+    result.timedOut ||
+    result.stalled ||
+    result.sweepFailure !== undefined ||
+    result.escapedDescendant ||
+    (result.outputTruncation?.length ?? 0) > 0
+  ) {
+    throw problem(`native config read did not settle completely: ${JSON.stringify(result)}`)
+  }
+  if (result.exitCode === 1 && result.stdout === "" && result.stderr === "") {
+    return Object.freeze({
+      executable: selectedExecutable("git", env, problem),
+      contract: "native",
+      scope: "default",
+      origin: "yrd.git absent",
+    })
+  }
+  if (result.exitCode !== 0) {
+    throw problem(
+      `cannot read the declaration: native config exited ${result.exitCode}: ${result.stderr || result.stdout}`,
+    )
+  }
+  const fields = result.stdout.split("\0")
+  if (fields.pop() !== "" || fields.length === 0 || fields.length % 3 !== 0) {
+    throw problem("native Git returned malformed scope/origin/value fields")
+  }
+  let selected:
+    | Readonly<{ scope: Exclude<GitSelection["scope"], "default">; origin: string; value: string }>
+    | undefined
+  for (let at = 0; at < fields.length; at += 3) {
+    const [scope, origin, value] = fields.slice(at, at + 3)
+    if (scope === "command") {
+      throw problem("command-scope selection is not permitted; declare this value in a Git configuration file", origin)
+    }
+    if (
+      (scope !== "system" && scope !== "global" && scope !== "local" && scope !== "worktree") ||
+      origin === undefined ||
+      value === undefined
+    ) {
+      throw problem(`unsupported configuration scope ${String(scope)}`, origin)
+    }
+    selected = { scope, origin, value }
+  }
+  if (selected === undefined) throw problem("native Git returned no declaration after a successful query")
+  const { scope, origin, value } = selected
+  if (value === "") throw problem("a present value is empty", origin)
+  let declaration: unknown
+  try {
+    declaration = JSON.parse(value)
+  } catch (error) {
+    throw problem(`expected a JSON executable/contract declaration: ${String(error)}`, origin)
+  }
+  if (
+    typeof declaration !== "object" ||
+    declaration === null ||
+    Array.isArray(declaration) ||
+    Object.keys(declaration).length !== 2 ||
+    !("executable" in declaration) ||
+    typeof declaration.executable !== "string" ||
+    !("contract" in declaration) ||
+    (declaration.contract !== "native" && declaration.contract !== "root-v1")
+  ) {
+    throw problem("expected exactly executable and contract, with contract native or root-v1", origin)
+  }
+  const executable = selectedExecutable(declaration.executable, env, (message) => problem(message, origin))
+  return Object.freeze({ executable, contract: declaration.contract, scope, origin })
+}
+
+function selectedExecutable(command: string, env: NodeJS.ProcessEnv, problem: (message: string) => Error): string {
+  if (command === "" || /[\0\r\n]/u.test(command) || (!isAbsolute(command) && /[\s/\\]/u.test(command))) {
+    throw problem("executable must be one absolute path or bare command name")
+  }
+  const resolved = resolveExecutable(
+    command,
+    Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+  )
+  try {
+    if (!isAbsolute(resolved)) throw new Error("not found on the selected environment's PATH")
+    accessSync(resolved, constants.X_OK)
+    if (!statSync(resolved).isFile()) throw new Error("not a regular executable file")
+  } catch (error) {
+    throw problem(`executable ${JSON.stringify(command)} is unavailable: ${String(error)}`)
+  }
+  return resolved
+}
 
 /**
  * A git runner rooted at one repository. Non-zero exits throw, loudly.
@@ -32,14 +193,235 @@ import type { Git } from "./records.ts"
  * materialization (worktree.ts), never from a fetch; a moved gitlink is judged
  * by the built-in check at queue time, never pushed by the submit.
  */
-export function gitIn(cwd: string, process?: Process): Git {
-  const runner = process ?? createProcess({ cwd, env: gitEnvironment(globalThis.process.env) })
-  return async (args: readonly string[], input?: string): Promise<string> => {
-    const result = await runner.run({ argv: ["git", ...args], cwd, ...(input === undefined ? {} : { stdin: input }) })
-    if (result.exitCode !== 0) {
-      throw new GitExit(args, cwd, result.exitCode, result.stderr.trim() || result.stdout.trim())
+export function gitIn(
+  cwd: string,
+  process?: Pick<Process, "run">,
+  selection?: GitSelection,
+  options: GitInvocationOptions = {},
+): GitRunner {
+  const env = options.env === undefined ? undefined : gitEnvironment(options.env)
+  const runner = process ?? createProcess({ cwd, env: env ?? gitEnvironment(globalThis.process.env) })
+  let lastInvocation: GitInvocation | undefined
+  const git: Git = async (originalArgs, input) => {
+    const args = Object.freeze([...originalArgs])
+    let evidence = await invokeGit(
+      runner,
+      { args, cwd, ...(selection === undefined ? {} : { selection }) },
+      options,
+      env,
+      input,
+    )
+    lastInvocation = evidence
+    try {
+      options.onInvocation?.(evidence)
+    } catch (error) {
+      // Publication is not allowed to replace the settled invocation with an
+      // unrelated filesystem error. Do not retry a possibly partial record.
+      const artifacts = evidence.artifacts
+      const publicationFailure = `Git evidence publication failed: ${String(error)}${artifacts === undefined ? "" : `; raw stdout: ${artifacts.stdout}; raw stderr: ${artifacts.stderr}`}`
+      evidence = { ...evidence, failure: [evidence.failure, publicationFailure].filter(Boolean).join("; ") }
+      lastInvocation = evidence
+    }
+    const result = evidence.result
+    const refusal = evidence.protocol?.refusal
+    if (evidence.failure !== undefined || refusal !== undefined || result === undefined || result.exitCode !== 0) {
+      const detail =
+        evidence.failure ??
+        refusal?.message ??
+        (result?.stderr.trim() || result?.stdout.trim() || "Git invocation returned no result")
+      throw new GitExit(args, cwd, result?.exitCode ?? -1, detail, evidence)
     }
     return result.stdout
+  }
+  return Object.defineProperty(git, "lastInvocation", { get: () => lastInvocation }) as GitRunner
+}
+
+async function invokeGit(
+  runner: Pick<Process, "run">,
+  invocation: Pick<GitInvocation, "args" | "cwd" | "selection">,
+  options: GitInvocationOptions,
+  env: NodeJS.ProcessEnv | undefined,
+  input: string | undefined,
+): Promise<GitInvocation> {
+  const { args, cwd, selection } = invocation
+  const abort = new AbortController()
+  const protocol = selection?.contract === "root-v1" ? new GitProtocol(abort) : undefined
+  const timeoutMs =
+    protocol === undefined
+      ? options.timeoutMs
+      : Math.min(options.timeoutMs ?? GIT_ROOT_INVOCATION_MS, GIT_ROOT_INVOCATION_MS)
+  let output: GitOutputSink | undefined
+  let closed = false
+  let result: ProcessResult | undefined
+  let failure: string | undefined
+  try {
+    output = options.openOutput?.(invocation)
+    result = await runner.run({
+      argv: [selection?.executable ?? "git", ...(protocol === undefined ? [] : ["--protocol-fd=3"]), ...args],
+      cwd,
+      captureRawOutput: true,
+      ...(env === undefined ? {} : { env }),
+      ...(input === undefined ? {} : { stdin: input }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      signal: options.signal === undefined ? abort.signal : AbortSignal.any([abort.signal, options.signal]),
+      ...(output === undefined ? {} : { onOutput: output.onOutput }),
+      ...(protocol === undefined ? {} : { onStart: () => protocol.start(), extraStdio: protocol.port }),
+    })
+    failure = protocol?.finish(result) ?? incompleteGitResult(result)
+  } catch (error) {
+    failure = `Git invocation failed: ${String(error)}`
+  } finally {
+    protocol?.clearDeadline()
+    try {
+      output?.close()
+      closed = true
+    } catch (error) {
+      failure = [failure, `raw Git output could not be closed: ${String(error)}`].filter(Boolean).join("; ")
+    }
+  }
+  return {
+    ...invocation,
+    ...(result === undefined ? {} : { result }),
+    ...(protocol === undefined ? {} : { protocol: protocol.value }),
+    ...(failure === undefined ? {} : { failure }),
+    ...(output === undefined
+      ? {}
+      : {
+          artifacts: {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            complete: closed && result !== undefined && incompleteGitResult(result, false) === undefined,
+          },
+        }),
+  }
+}
+
+function incompleteGitResult(result: ProcessResult, requireCompleteCapture = true): string | undefined {
+  if (
+    result.signal !== null ||
+    result.timedOut ||
+    result.stalled ||
+    result.sweepFailure !== undefined ||
+    result.escapedDescendant
+  ) {
+    return `Git process did not settle completely: signal=${String(result.signal)}, timedOut=${String(result.timedOut)}, stalled=${String(result.stalled ?? false)}, escapedDescendant=${String(result.escapedDescendant ?? false)}, sweepFailure=${String(result.sweepFailure ?? "none")}`
+  }
+  if (requireCompleteCapture && (result.outputTruncation?.length ?? 0) > 0) {
+    return "Git output capture is incomplete; raw evidence records the retained bytes and any gap"
+  }
+  return undefined
+}
+
+/** The one incremental parser owns early readiness and final frame validation.
+ * Raw control bytes remain with Process; this only retains the current line. */
+class GitProtocol {
+  readonly token = randomUUID()
+  readonly greeting = new TextEncoder().encode(`${JSON.stringify({ version: 1, token: this.token })}\n`)
+  readonly decoder = new TextDecoder("utf-8", { fatal: true })
+  ready = false
+  refusal: GitRefusal | undefined
+  failure: string | undefined
+  pending = ""
+  received = 0
+  deadline: ReturnType<typeof setTimeout> | undefined
+  readonly port: NonNullable<ProcessRequest["extraStdio"]>
+
+  constructor(readonly abort: AbortController) {
+    this.port = { input: this.greeting, maxBytes: GIT_CONTROL_BYTES, onData: (chunk) => this.read(chunk) }
+  }
+
+  get value(): NonNullable<GitInvocation["protocol"]> {
+    return { token: this.token, ready: this.ready, ...(this.refusal === undefined ? {} : { refusal: this.refusal }) }
+  }
+
+  start(): void {
+    this.deadline = setTimeout(
+      () => this.fail(`missing ready after ${GIT_READINESS_MS} ms; mutation effects are unknown`),
+      GIT_READINESS_MS,
+    )
+  }
+
+  clearDeadline(): void {
+    clearTimeout(this.deadline)
+    this.deadline = undefined
+  }
+
+  fail(message: string): void {
+    this.failure ??= `Git protocol: ${message}`
+    this.clearDeadline()
+    this.abort.abort()
+  }
+
+  read(chunk: Uint8Array): void {
+    if (this.failure !== undefined) return
+    this.received += chunk.byteLength
+    if (this.received > GIT_CONTROL_BYTES) {
+      this.fail(`control exceeded ${GIT_CONTROL_BYTES} bytes`)
+      return
+    }
+    try {
+      this.pending += this.decoder.decode(chunk, { stream: true })
+      let end: number
+      while ((end = this.pending.indexOf("\n")) >= 0) {
+        const line = this.pending.slice(0, end)
+        this.pending = this.pending.slice(end + 1)
+        this.frame(JSON.parse(line))
+      }
+    } catch (error) {
+      this.fail(`invalid UTF-8/JSON frame: ${String(error)}`)
+    }
+  }
+
+  frame(row: unknown): void {
+    if (typeof row !== "object" || row === null || Array.isArray(row)) throw new Error("expected frame fields")
+    if (!("version" in row) || row.version !== 1 || !("token" in row) || row.token !== this.token) {
+      throw new Error("version/token mismatch")
+    }
+    if ("ready" in row) {
+      if (Object.keys(row).length !== 3 || row.ready !== true) throw new Error("invalid ready fields")
+      if (this.ready) throw new Error("duplicate ready")
+      this.ready = true
+      this.clearDeadline()
+      return
+    }
+    if (!this.ready) throw new Error("refusal before ready")
+    if (this.refusal !== undefined) throw new Error("duplicate refusal")
+    if (
+      !("refusal" in row) ||
+      (row.refusal !== "waiting" && row.refusal !== "rejected" && row.refusal !== "unjudged")
+    ) {
+      throw new Error("unknown refusal")
+    }
+    if (Object.keys(row).length !== 4 || !("message" in row) || typeof row.message !== "string") {
+      throw new Error("invalid refusal fields")
+    }
+    this.refusal = { kind: row.refusal, message: row.message }
+  }
+
+  finish(result: ProcessResult): string | undefined {
+    this.clearDeadline()
+    if (this.failure !== undefined) return this.failure
+    try {
+      this.pending += this.decoder.decode()
+    } catch (error) {
+      return `Git protocol: incomplete UTF-8: ${String(error)}`
+    }
+    if (this.pending !== "") return "Git protocol: incomplete frame"
+    if (!this.ready) return "Git protocol: missing ready; mutation effects are unknown"
+    const port = result.extraStdio
+    if (
+      port === undefined ||
+      port.failure !== undefined ||
+      !port.eof ||
+      port.inputBytesWritten !== this.greeting.length ||
+      port.bytes.length !== port.totalBytes
+    ) {
+      return `Git protocol: control stream did not settle completely: ${port?.failure ?? "missing endpoint, EOF, greeting bytes or complete capture"}`
+    }
+    const incomplete = incompleteGitResult(result)
+    if (incomplete !== undefined) return incomplete
+    if (this.refusal !== undefined && result.exitCode === 0) return "Git protocol: refusal with exit 0"
+    return undefined
   }
 }
 
@@ -96,6 +478,7 @@ export class GitExit extends Error {
     readonly exitCode: number,
     /** What git itself said: its stderr, or its stdout when stderr was empty. */
     readonly detail: string,
+    readonly evidence?: GitInvocation,
   ) {
     super(`git ${args.join(" ")} in ${cwd} exited ${exitCode}: ${detail}`)
     this.name = "GitExit"
@@ -185,7 +568,12 @@ export async function mergeBase(git: Git, left: string, right: string): Promise<
 }
 
 function isExit(error: unknown, code: number): boolean {
-  return error instanceof GitExit && error.exitCode === code
+  return (
+    error instanceof GitExit &&
+    error.exitCode === code &&
+    error.evidence?.failure === undefined &&
+    error.evidence?.protocol?.refusal === undefined
+  )
 }
 
 /**

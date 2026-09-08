@@ -929,7 +929,7 @@ function runOptions(
 
 /**
  * The human line is a rendering of the log record, and the CLI's own logger is the
- * one place it is rendered: one debug row per log record (warn for refused
+ * one place it is rendered: one debug row per queue decision (trace for Git evidence, warn for refused
  * change-record writes), named by the log record's kind,
  * at the level the invocation resolved (`--log-level`, `LOG_LEVEL`, `-v`),
  * never a second format and never a second reading of the environment. No
@@ -950,6 +950,10 @@ function renderer(root: ConditionalLogger | undefined): (record: LogRecord) => v
     const { kind, run: _run, at: _at, ...rest } = record
     if (kind === "change" && Object.values(CHANGE_REF_DIAGNOSTICS).some((reason) => reason === rest.reason)) {
       log.warn?.(summarize(kind, rest), rest)
+      return
+    }
+    if (kind === "git") {
+      log.trace?.(summarize(kind, rest), rest)
       return
     }
     // A conditional logger has no debug method below its level: nothing to render.

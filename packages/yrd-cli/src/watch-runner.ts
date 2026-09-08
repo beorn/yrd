@@ -32,7 +32,7 @@ export type RunnerRun = Readonly<{
   startedAt: Date
   /** The instant the journal was last appended to: the file's mtime. */
   lastWriteAt: Date
-  /** What the run's own header record said, when the first line was one. */
+  /** What the run's own header record said, after any initial Git evidence. */
   target?: string
   gitlink?: string
   queue?: string
@@ -52,7 +52,7 @@ export type RunnerFacts = Readonly<{
   latest?: RunnerRun
 }>
 
-/** Read what the runner box shows. Nothing here writes; one readdir, one stat, one first line, one pid probe. */
+/** Read what the runner box shows. Nothing here writes; one readdir, one stat, one header read, one pid probe. */
 export function readRunnerFacts(workdir: string): RunnerFacts {
   const journalDir = join(workdir, "logs")
   let names: readonly string[]
@@ -74,7 +74,7 @@ export function readRunnerFacts(workdir: string): RunnerFacts {
   }
   const path = join(journalDir, `${id}.jsonl`)
   const lastWriteAt = statSync(path).mtime
-  const header = firstRecord(path)
+  const header = readRunHeader(path)
   const pidPath = join(workdir, "worktrees", id, RUN_PID)
   const pid = existsSync(pidPath) ? readPid(pidPath) : undefined
   return {
@@ -90,39 +90,50 @@ export function readRunnerFacts(workdir: string): RunnerFacts {
   }
 }
 
-/** The run's own header record, from the first line of its journal: target, gitlink, queue, checks. */
-function firstRecord(path: string): Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks"> {
-  let line: string
+/** Read the run header after any Git evidence written while resolving its queue. */
+function readRunHeader(path: string): Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks"> {
+  let text: string
   try {
-    const text = readFileSync(path, "utf8")
-    line = text.slice(0, text.indexOf("\n") === -1 ? text.length : text.indexOf("\n"))
+    text = readFileSync(path, "utf8")
   } catch (error) {
-    throw new Error(`run journal ${path}: required first record cannot be read: ${errorDetail(error)}`, {
+    throw new Error(`run journal ${path}: required run header cannot be read: ${errorDetail(error)}`, {
       cause: error,
     })
   }
-  if (line.trim() === "") throw new Error(`run journal ${path}: first record is empty`)
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(line)
-  } catch (error) {
-    throw new Error(`run journal ${path}: first record is not JSON: ${errorDetail(error)}`, { cause: error })
+  const lines = text.split("\n")
+  if (lines.at(-1) === "") lines.pop()
+  for (const [index, line] of lines.entries()) {
+    const where = `run journal ${path}: record ${index + 1} before the run header`
+    if (line.trim() === "") throw new Error(`${where} is empty`)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch (error) {
+      throw new Error(`${where} is not JSON: ${errorDetail(error)}`, { cause: error })
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new Error(`${where} must be a run or Git object`)
+    }
+    const record = parsed as Record<string, unknown>
+    if (record.kind === "git") {
+      if (typeof record.run !== "string" || typeof record.at !== "string" || typeof record.evidence !== "string") {
+        throw new Error(`${where}: Git evidence requires run, at and evidence strings`)
+      }
+      continue
+    }
+    if (record.kind !== "run") {
+      throw new Error(`${where} must have kind "run" or "git", got ${JSON.stringify(record.kind)}`)
+    }
+    return {
+      ...(typeof record.target === "string" ? { target: record.target } : {}),
+      ...(typeof record.gitlink === "string" ? { gitlink: record.gitlink } : {}),
+      ...(typeof record.queue === "string" ? { queue: record.queue } : {}),
+      ...(Array.isArray(record.checks) && record.checks.every((check) => typeof check === "string")
+        ? { checks: record.checks as string[] }
+        : {}),
+    }
   }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error(`run journal ${path}: first record must be a run object`)
-  }
-  const record = parsed as Record<string, unknown>
-  if (record.kind !== "run") {
-    throw new Error(`run journal ${path}: first record must have kind "run", got ${JSON.stringify(record.kind)}`)
-  }
-  return {
-    ...(typeof record.target === "string" ? { target: record.target } : {}),
-    ...(typeof record.gitlink === "string" ? { gitlink: record.gitlink } : {}),
-    ...(typeof record.queue === "string" ? { queue: record.queue } : {}),
-    ...(Array.isArray(record.checks) && record.checks.every((check) => typeof check === "string")
-      ? { checks: record.checks as string[] }
-      : {}),
-  }
+  throw new Error(`run journal ${path}: required run header was not found`)
 }
 
 function readPid(path: string): number | undefined {

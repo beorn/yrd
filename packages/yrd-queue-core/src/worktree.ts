@@ -26,7 +26,7 @@ import { join, relative, resolve, sep } from "node:path"
 import type { Process } from "@yrd/process"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import type { Git } from "./records.ts"
-import { gitIn, mergeBase } from "./git.ts"
+import { gitIn, mergeBase, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
 /** The logger git-super narrates to; the queue hands one over only at trace. */
 export type PlumbingLog = Readonly<{ trace?: (message: string, detail: Readonly<Record<string, unknown>>) => void }>
@@ -221,8 +221,9 @@ export async function registeredWorktrees(git: Git): Promise<readonly Registered
       current.path = field.slice("worktree ".length)
     } else if (field.startsWith("HEAD ")) current.head = field.slice("HEAD ".length)
     else if (field.startsWith("branch ")) current.branch = field.slice("branch ".length).replace(/^refs\/heads\//u, "")
-    else if (field === "locked" || field.startsWith("locked "))
-      {current.locked = field.slice("locked".length).trimStart()}
+    else if (field === "locked" || field.startsWith("locked ")) {
+      current.locked = field.slice("locked".length).trimStart()
+    }
   }
   take()
   return rows
@@ -276,6 +277,9 @@ export type RunSetup = Readonly<{
 }>
 
 export type PrepareWorktree = Readonly<{
+  /** The command's fixed selection and invocation evidence, also for tree facts. */
+  selection?: GitSelection
+  gitOptions?: GitInvocationOptions
   /** The target every base is measured against: `YRD_BASE_SHA` is the merge base of it and the worktree's HEAD. */
   targetSha: string
   /** Run once in the fresh worktree, after materialization and before any check. Absent, nothing runs. */
@@ -306,8 +310,14 @@ export type PreparedWorktree = Worktree & Readonly<{ tree: CheckedTree }>
  * that shares no history with the target throws: a base that is not an
  * ancestor of the candidate is a lie a check would compute a diff from.
  */
-export async function checkedTree(worktree: string, targetSha: string, process?: Process): Promise<CheckedTree> {
-  const wt = gitIn(worktree, process)
+export async function checkedTree(
+  worktree: string,
+  targetSha: string,
+  process?: Process,
+  selection?: GitSelection,
+  options: GitInvocationOptions = {},
+): Promise<CheckedTree> {
+  const wt = gitIn(worktree, process, selection, options)
   const candidate = (await wt(["rev-parse", "HEAD"])).trim()
   const base = await mergeBase(wt, candidate, targetSha)
   if (base === undefined) {
@@ -389,7 +399,10 @@ export async function prepareWorktree(
 ): Promise<PreparedWorktree> {
   const worktree = await freshWorktree(git, repo, commit, path, options.plumbing)
   try {
-    const tree = await checkedTree(worktree.path, options.targetSha, options.process)
+    const tree = await checkedTree(worktree.path, options.targetSha, options.process, options.selection, {
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...options.gitOptions,
+    })
     const prepared: PreparedWorktree = { ...worktree, tree }
     const setup = options.setup
     if (setup !== undefined) {
@@ -429,8 +442,9 @@ function materializedWorktree(value: unknown, path: string, commit: string): boo
     result.requested !== commit ||
     result.commit !== commit ||
     result.gitmodules !== true
-  )
-    {return false}
+  ) {
+    return false
+  }
   if (
     !Array.isArray(result.repositories) ||
     result.repositories.length === 0 ||
@@ -444,8 +458,9 @@ function materializedWorktree(value: unknown, path: string, commit: string): boo
         repository.refs.length === 0
       )
     })
-  )
-    {return false}
+  ) {
+    return false
+  }
   if (typeof result.gitlinks !== "object" || result.gitlinks === null) return false
   const counts = result.gitlinks as Record<string, unknown>
   const { considered, borrowed, fetched, absent } = counts
@@ -453,7 +468,8 @@ function materializedWorktree(value: unknown, path: string, commit: string): boo
     ![considered, borrowed, fetched, absent].every(
       (count) => typeof count === "number" && Number.isSafeInteger(count) && count >= 0,
     )
-  )
-    {return false}
+  ) {
+    return false
+  }
   return considered === (borrowed as number) + (fetched as number) + (absent as number)
 }

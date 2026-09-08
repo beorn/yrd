@@ -395,18 +395,34 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
   })
 
   describe("a queue run with nothing submitted", () => {
-    /** Nothing happened, so the log says only that the queue run looked. */
-    it("writes exactly the run line", async () => {
+    /** The run records that it looked, with evidence for the Git reads that established it. */
+    it("writes one run header and retains the Git evidence for an empty queue", async () => {
       const { repo } = await boundaryRepository({ exit: 0, hooks: true })
 
       const run = await queueRunOnce(repo)
       const { records } = await logOfQueueRun(run)
 
-      // An honest zero: one record, saying the queue run ran and what it read
+      // An honest zero: one run record, saying the queue run ran and what it read
       // the queue from. "I found nothing" and "I never looked" must not be the
       // same bytes.
-      expect(records, run.report).toHaveLength(1)
-      expect(records[0]?.kind, run.report).toBe("run")
+      expect(
+        records.filter((record) => record.kind !== "git"),
+        run.report,
+      ).toEqual([theOne(records, "run")])
+      const invocations = ofKind(records, "git")
+      expect(invocations.length, run.report).toBeGreaterThan(0)
+      for (const record of invocations) {
+        expect(record.executable, run.report).toBe("git")
+        expect(record.contract, run.report).toBe("native")
+        expect(record.complete, run.report).toBe(true)
+        if (typeof record.evidence !== "string") throw new Error("Git record is missing its evidence path")
+        const evidence = JSON.parse(await readFile(record.evidence, "utf8"))
+        expect(evidence, run.report).toMatchObject({
+          args: record.args,
+          cwd: record.cwd,
+          result: { exitCode: record.exit },
+        })
+      }
     })
 
     /**

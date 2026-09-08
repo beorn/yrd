@@ -15,7 +15,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
-import { gitIn, readJournals, submit, type Git, type LogRecord } from "@yrd/queue-core"
+import { gitIn, readJournals, readRunLog, submit, type Git, type LogRecord } from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -243,9 +243,9 @@ describe("yrd watch, the ending's exit code", () => {
     expect(lines[stamp - 1]).toMatch(/#main$/u)
     // A later warning-only run does not change Git's merged state or invent its own decision.
     const only = openLog(join(w.workdir, "logs"), () => new Date(journal.at.getTime() + 2000))
-    const header = readFileSync(join(w.workdir, "logs", `${journal.id}.jsonl`), "utf8").split("\n")[0]
+    const header = readRunLog(join(w.workdir, "logs"), journal.id).find((record) => record.kind === "run")
     if (header === undefined) throw new Error("merged test run has no header")
-    only.write(JSON.parse(header) as LogRecord)
+    only.write(header)
     only.write({
       ...diagnostic,
       reason: "change-ref-contended",

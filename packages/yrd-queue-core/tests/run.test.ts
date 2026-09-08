@@ -46,6 +46,7 @@ import {
   writePause,
 } from "../src/index.ts"
 import type { ChangeRecord, CheckedTree, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
+import { resolveGitSelection } from "../src/git.ts"
 
 const roots: string[] = []
 // The real queue child needs GitSuper even when the worker's PATH is sealed.
@@ -509,11 +510,17 @@ describe("a queue run", () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const secondHead = await submitCommit(w, "task/two", "two.txt")
+    const selection = await resolveGitSelection(w.work)
 
     const outcome = await queueRun({
       ...(await w.options({ exit: 0 })),
+      selection,
       checks: [
-        { name: "verify", on: ["submit", "merge"], run: "if test -f one.txt; then cat one.txt; else cat two.txt; fi" },
+        {
+          name: "verify",
+          on: ["submit", "merge"],
+          run: 'if test -f one.txt; then cat one.txt; else cat two.txt; fi; printf "%s\\n" "$YRD_CANDIDATE_SHA"',
+        },
       ],
     })
 
@@ -527,8 +534,10 @@ describe("a queue run", () => {
     expect(oneLog).not.toBe(twoLog)
     expect(oneLog).toContain(changeName({ branch: "task/one", head }))
     expect(twoLog).toContain(changeName({ branch: "task/two", head: secondHead }))
-    expect(readFileSync(oneLog, "utf8")).toBe("one.txt\n")
-    expect(readFileSync(twoLog, "utf8")).toBe("two.txt\n")
+    const oneOutput = readFileSync(oneLog, "utf8").trim().split("\n")
+    const twoOutput = readFileSync(twoLog, "utf8").trim().split("\n")
+    expect(oneOutput).toEqual(["one.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
+    expect(twoOutput).toEqual(["two.txt", expect.stringMatching(/^[0-9a-f]{40}$/u)])
     const after = await remoteTarget(w)
     expect(after).not.toBe(w.target)
     await w.git(["fetch", "--quiet", "origin", "main"])
@@ -564,6 +573,56 @@ describe("a queue run", () => {
         .filter(Boolean)
         .map((line) => (JSON.parse(line) as { kind: string }).kind),
     ).toEqual(expect.arrayContaining(["run", "change", "check", "result", "merge", "message"]))
+    // Addendum 2/T1: every ordinary run invocation is linked before the run
+    // summarizes it, including successful calls rebound to a worktree.
+    const runRecords = logRecords(outcome)
+    const invocations = runRecords.filter((record) => record.kind === "git")
+    expect(invocations.length).toBeGreaterThan(0)
+    expect(invocations.some((record) => record.cwd !== w.work)).toBe(true)
+    const checkedHeads: string[] = []
+    const checkedBases: string[] = []
+    for (const invocation of invocations) {
+      expect(invocation).toMatchObject({ executable: selection.executable, contract: "native", complete: true })
+      const evidence = JSON.parse(readFileSync(String(invocation.evidence), "utf8")) as {
+        selection: typeof selection
+        artifacts: { stdout: string; stderr: string }
+      }
+      expect(evidence.selection).toEqual(selection)
+      expect(existsSync(evidence.artifacts.stdout)).toBe(true)
+      expect(existsSync(evidence.artifacts.stderr)).toBe(true)
+      if (
+        invocation.cwd !== w.work &&
+        Array.isArray(invocation.args) &&
+        invocation.args.join(" ") === "rev-parse HEAD"
+      ) {
+        checkedHeads.push(readFileSync(evidence.artifacts.stdout, "utf8").trim())
+      }
+      if (invocation.cwd !== w.work && Array.isArray(invocation.args) && invocation.args[0] === "merge-base") {
+        expect(readFileSync(evidence.artifacts.stdout, "utf8").trim()).toBe(w.target)
+        checkedBases.push(String(invocation.args[1]))
+      }
+    }
+    // D1/T1: worktree facts that identify each checked commit must retain the
+    // same selection/evidence. Other rebound calls alone missed this escape.
+    const judged = new Set([oneOutput[1], twoOutput[1], after])
+    expect(new Set(checkedHeads)).toEqual(judged)
+    expect(new Set(checkedBases)).toEqual(judged)
+    // The final re-read must be evidenced after preparation too: its candidate
+    // can equal the prepared commit, so a set of OIDs cannot prove this boundary.
+    const mergeCheck = runRecords.findIndex(
+      (record) => record.kind === "check" && record.phase === "merge" && record.end === undefined,
+    )
+    expect(mergeCheck).toBeGreaterThan(0)
+    const beforeMergeCheck = runRecords
+      .slice(0, mergeCheck)
+      .filter((record) => record.kind === "git")
+      .slice(-2)
+    expect(beforeMergeCheck.map((record) => record.args)).toEqual([
+      ["rev-parse", "HEAD"],
+      ["merge-base", after, w.target],
+    ])
+    expect(beforeMergeCheck[0]?.cwd).toBe(beforeMergeCheck[1]?.cwd)
+    expect(beforeMergeCheck[0]?.cwd).not.toBe(w.work)
   })
 
   it.each([

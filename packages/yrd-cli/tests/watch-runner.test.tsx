@@ -29,6 +29,7 @@ function workdirWith(
     pidDirectory?: boolean
     pidText?: string
     header?: boolean | string
+    gitBeforeHeader?: boolean
     lastWriteAgoMs?: number
   }>,
 ): string {
@@ -43,7 +44,10 @@ function workdirWith(
       : options.header === false
         ? "not a record\n"
         : `${JSON.stringify({ at: NOW.toISOString(), checks: ["typecheck", "test"], gitlink: "3c285a41af46".padEnd(40, "0"), kind: "run", queue: "main", run: id, target: "main" })}\n`
-  writeFileSync(path, header)
+  const prefix = options.gitBeforeHeader
+    ? `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: join(logs, id, "git", "1.stdout.bin.json") })}\n`
+    : ""
+  writeFileSync(path, `${prefix}${header}`)
   const lastWrite = new Date(NOW.getTime() - (options.lastWriteAgoMs ?? 0))
   utimesSync(path, lastWrite, lastWrite)
   if (options.pid !== undefined || options.pidText !== undefined || options.pidDirectory === true) {
@@ -63,18 +67,23 @@ describe("readRunnerFacts", () => {
     expect(readRunnerFacts(empty).absent).toContain("holds no run journal")
   })
 
-  it("reads the newest run: its instant from the name, the header record, the last write, and whether its process lives", () => {
-    const facts = readRunnerFacts(workdirWith({ ageMs: 60_000, pid: process.pid, lastWriteAgoMs: 5_000 }))
-    const latest = facts.latest
-    if (latest === undefined) throw new Error("no run read")
-    expect(latest.alive).toBe(true)
-    expect(latest.pid).toBe(process.pid)
-    expect(latest.startedAt.getTime()).toBe(NOW.getTime() - 60_000)
-    expect(Math.abs(latest.lastWriteAt.getTime() - (NOW.getTime() - 5_000))).toBeLessThan(1_500)
-    expect(latest.target).toBe("main")
-    expect(latest.checks).toEqual(["typecheck", "test"])
-    expect(latest.gitlink?.startsWith("3c285a41af46")).toBe(true)
-  })
+  it.each([false, true])(
+    "reads the newest run, including its header after Git evidence: prefix=%s",
+    (gitBeforeHeader) => {
+      const facts = readRunnerFacts(
+        workdirWith({ ageMs: 60_000, pid: process.pid, lastWriteAgoMs: 5_000, gitBeforeHeader }),
+      )
+      const latest = facts.latest
+      if (latest === undefined) throw new Error("no run read")
+      expect(latest.alive).toBe(true)
+      expect(latest.pid).toBe(process.pid)
+      expect(latest.startedAt.getTime()).toBe(NOW.getTime() - 60_000)
+      expect(Math.abs(latest.lastWriteAt.getTime() - (NOW.getTime() - 5_000))).toBeLessThan(1_500)
+      expect(latest.target).toBe("main")
+      expect(latest.checks).toEqual(["typecheck", "test"])
+      expect(latest.gitlink?.startsWith("3c285a41af46")).toBe(true)
+    },
+  )
 
   it("reads a dead pid as not alive", () => {
     // 2147483647 is the largest pid Linux can hand out and is not ours.
@@ -86,9 +95,14 @@ describe("readRunnerFacts", () => {
     ["invalid JSON", "not a record\n"],
     ["an empty record", "\n"],
     ["the wrong record kind", `${JSON.stringify({ kind: "message" })}\n`],
-  ])("refuses a required run journal whose first record is %s", (_case, header) => {
+    ["an incomplete Git record", `${JSON.stringify({ kind: "git" })}\n`],
+    [
+      "Git evidence without a run header",
+      `${JSON.stringify({ kind: "git", run: "q-test", at: NOW.toISOString(), evidence: "/logs/git/1.json" })}\n`,
+    ],
+  ])("refuses a required run journal with %s", (_case, header) => {
     const workdir = workdirWith({ ageMs: 60_000, header })
-    expect(() => readRunnerFacts(workdir)).toThrow(/run journal .* first record/u)
+    expect(() => readRunnerFacts(workdir)).toThrow(/run journal .* (record|header)/u)
   })
 
   it("refuses a newest run journal that cannot be read", () => {
