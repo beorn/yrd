@@ -14,6 +14,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
+import { readCellRow } from "@silvery/test"
 import { runId } from "@yrd/queue-core"
 import { RunnerBox } from "../src/watch-boxes.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
@@ -234,5 +235,96 @@ describe("the RUNNER box", () => {
     expect(lines.slice(command, command + 3).join("\n")).toContain("…")
     expect(app.text).toContain("progress")
     app.unmount()
+  })
+})
+
+describe("the RUNNER box's LOGICAL colour before quantisation — this does NOT settle spec item 13", () => {
+  // WHAT THIS PINS, and equally what it does not.
+  //
+  // Spec item 27 (watch-redesign.md) makes the RUNNER box state-conditional:
+  // while running, the `$ …` command line carries the box's emphasis and ALL
+  // other box text is muted. This asserts exactly that distinction exists —
+  // that the command row and the rails beneath it are given DIFFERENT colours
+  // while running, and the SAME colour when they are not.
+  //
+  // IT DOES NOT SETTLE ITEM 13, which asks for BLUE specifically at the
+  // operator's terminal. The cell buffer holds the LOGICAL token colour before
+  // any quantisation, so this proves what the component ASSIGNS, never what a
+  // terminal DISPLAYS. Item 13 needs a capture whose palette is proven first;
+  // it is NOT MEASURED (@cto 0399b1d0, re-affirmed after @chief voided
+  // a1170dcd on 2026-09-08).
+  //
+  // WHY IT EXISTS: nothing tested this. Every other test in this file reads
+  // `app.text`, which cannot see colour, so the one contract the operator's
+  // spec is most specific about was the one contract nothing checked. That
+  // absence is what let an INSTRUMENT defect masquerade as a component defect
+  // for a day: a recording taken at 16 colours showed every RUNNER row in the
+  // same grey, and the box was reported as having no emphasis at all. It has
+  // emphasis; the capture could not carry it.
+  //
+  // Deliberately relative, never a literal RGB: the values are the active
+  // theme's, and a test that hard-codes them fails on a theme change rather
+  // than on a regression.
+  // Same fixture the painted-box tests use; redeclared because that one is
+  // scoped to its own describe.
+  const latest = (over: Partial<NonNullable<RunnerFacts["latest"]>>): RunnerFacts => ({
+    journalDir: "/w/logs",
+    latest: {
+      alive: false,
+      checks: ["typecheck", "test"],
+      gitlink: "3c285a41af46".padEnd(40, "0"),
+      id: "q-20260903T115800000Z-0badf00d",
+      lastWriteAt: new Date(NOW.getTime() - 2_000),
+      startedAt: new Date(NOW.getTime() - 120_000),
+      target: "main",
+      ...over,
+    },
+  })
+
+  async function runnerRowColours(facts: RunnerFacts): Promise<{ command: string; rails: string[] }> {
+    const app = render(
+      <NowContext.Provider value={NOW}>
+        <MinuteContext.Provider value={NOW}>
+          <RunnerBox facts={facts} label="main" inLine={1} columns={70} live={false} />
+        </MinuteContext.Provider>
+      </NowContext.Provider>,
+      { cols: 72, rows: 12 },
+    )
+    await app.waitForLayoutStable()
+    // The box's own text rows, in order, ignoring the border glyphs: the first
+    // is the command line, the rest are the informational rails.
+    const rows: string[] = []
+    for (let y = 0; y < 12; y += 1) {
+      const cells = readCellRow(app.term.buffer, y).filter((cell) => /[A-Za-z]/u.test(cell.char))
+      if (cells.length === 0) continue
+      const text = cells.map((cell) => cell.char).join("")
+      if (text.startsWith("RUNNER")) continue
+      rows.push(JSON.stringify(cells[0]!.fg))
+    }
+    app.unmount()
+    const [command, ...rails] = rows
+    if (command === undefined || rails.length === 0)
+      {throw new Error(`expected a command row and rails, read ${rows.length}`)}
+    return { command, rails }
+  }
+
+  it("gives the running command line a DIFFERENT colour from every muted rail (item 27)", async () => {
+    const { command, rails } = await runnerRowColours(latest({ alive: true, pid: 4242 }))
+
+    for (const rail of rails) {
+      expect(rail, "every informational rail is muted, and the command line must not be").not.toBe(command)
+    }
+    // The rails agree with each other, so "different" above is about the
+    // command line and not about the rails disagreeing among themselves.
+    expect(new Set(rails).size, "the muted rails all carry one colour").toBe(1)
+  })
+
+  it("CONTROL: with no run executing the command line is muted like the rails, so the test above measures the RUNNING state", async () => {
+    // Without this the first test would pass against a box that simply paints
+    // its first row differently at all times, which is not what item 27 asks
+    // for and would not be state-conditional at all.
+    const { command, rails } = await runnerRowColours(latest({}))
+
+    expect(command, "idle: the command line carries no emphasis over its rails").toBe(rails[0])
   })
 })
