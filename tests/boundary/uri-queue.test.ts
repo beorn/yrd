@@ -34,13 +34,16 @@ describe("a queue started by address on a host with no checkout", () => {
     await git(author, "config", "user.name", "queue author")
     await git(author, "config", "user.email", "author@example.invalid")
     await git(author, "checkout", "--quiet", "-b", "main")
-    writeFileSync(join(author, ".yrd.yml"), "{}\n")
-    await git(author, "add", ".yrd.yml")
+    const delivered = join(root, "delivered.jsonl")
+    writeFileSync(join(author, "notify.sh"), `test -f .ready || exit 41\ncat >> '${delivered}'\n`)
+    writeFileSync(join(author, ".yrd.yml"), 'setup: "printf ready > .ready"\nnotify: [{first: {on: [merged], run: "sh notify.sh"}}, {second: {on: [merged], run: "sh notify.sh"}}]\n')
+    await git(author, "add", ".yrd.yml", "notify.sh")
     await git(author, "commit", "--quiet", "-m", "declare main queue")
     await git(author, "push", "--quiet", "origin", "main")
     await git(author, "checkout", "--quiet", "-b", "task/uri")
     writeFileSync(join(author, "change.txt"), "from uri\n")
-    await git(author, "add", "change.txt")
+    writeFileSync(join(author, "notify.sh"), "exit 42\n")
+    await git(author, "add", "change.txt", "notify.sh")
     await git(author, "commit", "--quiet", "-m", "change from uri")
 
     const submit = Bun.spawn(
@@ -120,6 +123,11 @@ describe("a queue started by address on a host with no checkout", () => {
       exitCode: 0,
       merged: ["task/uri"],
     })
+    const receipts = readFileSync(delivered, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+    expect(receipts).toHaveLength(2)
+    expect(receipts.every((record) => record.record === "merged")).toBe(true)
+    expect(existsSync(join(owned, "notify.sh"))).toBe(false)
+    expect((await git(owned, "worktree", "list", "--porcelain")).match(/^worktree /gmu)).toHaveLength(1)
     const target = await git(remote, "rev-parse", "refs/heads/main")
     expect((await git(remote, "rev-list", "--parents", "-n", "1", target)).split(" ")).toHaveLength(3)
   }, 120_000)

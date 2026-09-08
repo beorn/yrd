@@ -19,7 +19,9 @@
  * written again.
  */
 
-import { createProcess, shellCommand } from "@yrd/process"
+import { join } from "node:path"
+import { createProcess, shellCommand, type Process } from "@yrd/process"
+import { prepareWorktree } from "./worktree.ts"
 import { readCheckTrailer } from "./check.ts"
 import type { Ending, Notifier } from "./config.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
@@ -357,24 +359,54 @@ async function deliver(
   entry: Notifier,
   record: NotifyRecord,
 ): Promise<Readonly<{ delivery: Delivery; failure?: string }>> {
-  const command = entry.run
-  const runner = run.options.process ?? createProcess({ cwd: run.options.repo })
-  const result = await runner.run({
-    argv: shellCommand(command),
-    cwd: run.options.repo,
-    env: run.options.env,
-    stdin: `${JSON.stringify(record)}\n`,
-    timeoutMs: 60_000,
-  })
-  if (result.exitCode === 0) return { delivery: "sent" }
-  return {
-    delivery: "failed",
-    failure:
-      `the notify entry ${entry.name} exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`.replace(
-        /\s+/gu,
-        " ",
-      ),
+  try {
+    const { cwd, runner } = await notificationEnvironment(run)
+    const result = await runner.run({
+      argv: shellCommand(entry.run),
+      cwd,
+      env: run.options.env,
+      stdin: `${JSON.stringify(record)}\n`,
+      timeoutMs: 60_000,
+    })
+    if (result.exitCode === 0) return { delivery: "sent" }
+    return {
+      delivery: "failed",
+      failure: `the notify entry ${entry.name} in ${cwd} exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`.replace(/\s+/gu, " "),
+    }
+  } catch (error) {
+    return {
+      delivery: "failed",
+      failure: `the notify entry ${entry.name} at queue commit ${run.targetSha} could not run: ${error instanceof Error ? error.message : String(error)}`,
+    }
   }
+}
+
+/** Every notification in a run uses one prepared, captured-base checkout. */
+const notificationEnvironments = new WeakMap<Run, Promise<Readonly<{ cwd: string; runner: Process }>>>()
+
+function notificationEnvironment(run: Run): Promise<Readonly<{ cwd: string; runner: Process }>> {
+  let prepared = notificationEnvironments.get(run)
+  if (prepared === undefined) {
+    prepared = (async () => {
+      const runner = run.options.process ?? run.resources.use(createProcess({ cwd: run.options.repo }))
+      const path = join(run.worktrees, "notify")
+      const tree = await prepareWorktree(run.git, run.options.repo, run.targetSha, path, {
+        targetSha: run.targetSha,
+        process: runner,
+        env: run.options.env,
+        plumbing: run.options.plumbing,
+        ...(run.options.setup === undefined ? {} : {
+          setup: { run: run.options.setup, logDir: join(run.options.workdir, "checks", "notify", run.log.id), tmpdir: join(run.tmpdir, "notify", run.log.id) },
+          starting: ({ start, log }) => run.log.write({ kind: "check", check: "setup", phase: "notify", start, log }),
+          record: ({ start, end, result }) => run.log.write({ kind: "check", check: "setup", phase: "notify", start, end, log: result.log, result: result.result, ms: result.ms }),
+        }),
+      })
+      run.resources.defer(() => tree.remove())
+      return { cwd: tree.path, runner }
+    })()
+    notificationEnvironments.set(run, prepared)
+  }
+  return prepared
 }
 
 /** An ended record's result, as its sent record carries it forward. */

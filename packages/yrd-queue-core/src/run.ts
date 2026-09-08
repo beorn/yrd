@@ -111,6 +111,8 @@ export type QueueRunOutcome = Readonly<{
 /** Everything one run's steps share. */
 export type Run = Readonly<{
   options: QueueRunOptions
+  /** Resources borrowed by rings, released on every return or throw. */
+  resources: AsyncDisposableStack
   git: Git
   log: QueueRunLog
   /** The temp root every program this run starts gets as `TMPDIR`: `<workdir>/tmp`. */
@@ -223,6 +225,7 @@ export class QueueAuthorityUnreadable extends Error {
 }
 
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
+  await using resources = new AsyncDisposableStack()
   const git = options.git ?? gitIn(options.repo, options.process)
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
   const hooksPath = join(options.workdir, "hooks-disabled")
@@ -263,6 +266,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const queue = await read()
   let stopped: Stopped | undefined
   const run: Run = {
+    resources,
     git,
     hooksPath,
     log,
