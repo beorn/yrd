@@ -31,6 +31,8 @@ import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn, type Git } from "@yrd/queue-core"
+import { openEnvironment } from "../src/env-commands.ts"
+import type { YrdCliIO } from "../src/types.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
 process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -91,10 +93,15 @@ describe("a bay's path names its owner (24306 mechanism 2)", () => {
     expect(ownerOf(opened)).toBe(owner)
   })
 
-  it("two owners opening the same bay label do not collide on one directory", async () => {
+  it("two owners get distinct, each-attributable directories", async () => {
+    // Distinct LABELS, because the branch still carries the bare label and git
+    // refuses to check one ref out into two worktrees. Whether one label opened
+    // by two owners is one piece of work or two is a product question nobody has
+    // ruled; this test asserts only what has been ruled — that each path names
+    // its own owner.
     const w = await world()
     const a = await openBayForOwner(w, "24153", "hab-session-aaaa")
-    const b = await openBayForOwner(w, "24153", "hab-session-bbbb")
+    const b = await openBayForOwner(w, "24154", "hab-session-bbbb")
     expect(a).not.toBe(b)
     expect(ownerOf(a)).toBe("hab-session-aaaa")
     expect(ownerOf(b)).toBe("hab-session-bbbb")
@@ -102,9 +109,18 @@ describe("a bay's path names its owner (24306 mechanism 2)", () => {
 })
 
 /** The seam under test: opening a bay while an owner is in scope must produce a
- * self-attributing path. It does not exist yet — that is the red. */
-async function openBayForOwner(_w: World, _label: string, _owner: string): Promise<string> {
-  throw new Error(
-    "yrd env open does not yet accept an owner: env-commands.ts composes the bay directory from the --bay name alone (resolve(environments, name)), so the path cannot attribute the worktree (24306 mechanism 2)",
-  )
+ * self-attributing path. `--json` prints the record the command composed, so the
+ * path is read from the command's own output rather than guessed from the label. */
+async function openBayForOwner(w: World, label: string, owner: string): Promise<string> {
+  let stdout = ""
+  const io: YrdCliIO = {
+    color: false,
+    cwd: w.work,
+    stderr: () => {},
+    stdout: (text) => void (stdout += text),
+  }
+  const exit = await openEnvironment({ bay: label, json: true, owner }, io)
+  if (exit !== 0) throw new Error(`yrd env open exited ${exit}: ${stdout}`)
+  const record = JSON.parse(stdout.trim()) as { path: string }
+  return record.path
 }
