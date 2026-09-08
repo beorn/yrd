@@ -156,6 +156,12 @@ type GitlinkWorld = World &
 async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-gitlink-"))
   roots.push(root)
+  // Ownership comes from hosted identities; Git transports these fixture URLs locally.
+  process.env.GIT_CONFIG_COUNT = "3"
+  process.env.GIT_CONFIG_KEY_1 = `url.${join(root, "component.git")}.insteadOf`
+  process.env.GIT_CONFIG_VALUE_1 = "https://git-super.test/owned/component.git"
+  process.env.GIT_CONFIG_KEY_2 = `url.${join(root, "remote.git")}.insteadOf`
+  process.env.GIT_CONFIG_VALUE_2 = "https://git-super.test/owned/root.git"
   const seed = gitIn(root)
 
   const component = join(root, "component.git")
@@ -164,6 +170,7 @@ async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
   await seed(["clone", "--quiet", component, componentWork])
   const cg = gitIn(componentWork)
   await identity(cg)
+  await cg(["remote", "set-url", "origin", "https://git-super.test/owned/component.git"])
   await cg(["checkout", "--quiet", "-b", "main"])
   cpSync(resolve(import.meta.dirname, "../src"), join(componentWork, "packages/yrd-cli/src"), { recursive: true })
   writeFileSync(join(componentWork, "lib.txt"), "a\n")
@@ -178,10 +185,11 @@ async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
   await seed(["clone", "--quiet", remote, work])
   const git = gitIn(work)
   await identity(git)
+  await git(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
   await git(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(work, ".yrd.yml"), DECLARATION)
   // The root records the component at its main as it stands now: `a`.
-  await git(["submodule", "add", "--quiet", component, "component"])
+  await git(["submodule", "add", "--quiet", "https://git-super.test/owned/component.git", "component"])
   await git(["add", ".yrd.yml", ".gitmodules", "component"])
   await git(["commit", "--quiet", "-m", "main, with the component at a"])
   await git(["push", "--quiet", "origin", "main"])
@@ -641,8 +649,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     // Zero, not 18: Hab relaunches after allowlisted exits 0 and 1, and a gitlink
     // advance is the one thing the service is MEANT to end for. Exit 2 and process
     // signals stay terminal.
-    expect(exit, run.stdout()).toBe(0)
     const written = records(run)
+    const logPath = written[0]?.log
+    const runLog = typeof logPath === "string" ? readFileSync(logPath, "utf8") : "No queue log was reported"
+    expect(exit, `${run.stdout()}\n${run.stderr()}\n${runLog}`).toBe(0)
     expect(written).toHaveLength(2)
     expect(written[0]).toMatchObject({ exitCode: 0, merged: ["task/gitlink"] })
     expect(written[1]).toEqual({ exitCode: 0, from: w.a, gitlink: "component", reason: "gitlink-moved", to: w.b })
