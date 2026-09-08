@@ -269,7 +269,11 @@ export async function cleanupRootChanges(git: Git, rootChanges: RootChanges, dur
   if (rootChanges.receipt === undefined) return
   const current = await readRootChanges(git, rootChanges.merge)
   if (current === undefined) return
-  if (current.receipt?.oid !== rootChanges.receipt.oid || current.encoded !== rootChanges.encoded) {
+  if (
+    current.receipt?.ref !== rootChanges.receipt.ref ||
+    current.receipt.oid !== rootChanges.receipt.oid ||
+    current.encoded !== rootChanges.encoded
+  ) {
     throw new Error(`Root-Changes cleanup: ${rootChanges.receipt.ref} changed; preserve its unexpected value`)
   }
   await git(["update-ref", "-d", rootChanges.receipt.ref, rootChanges.receipt.oid])
@@ -278,6 +282,7 @@ export async function cleanupRootChanges(git: Git, rootChanges: RootChanges, dur
 async function recordRootChanges(
   git: Git,
   trailers: readonly (readonly [string, string])[],
+  record?: Pick<ChangeRecord, "kind" | "sha">,
 ): Promise<RootChanges | undefined> {
   const values = trailers.filter(([name]) => name.toLowerCase() === "root-changes").map(([, value]) => value)
   if (values.length === 0) return undefined
@@ -287,7 +292,14 @@ async function recordRootChanges(
   if (values.length !== 1 || merges.length !== 1 || merge === undefined || copied === undefined) {
     throw new Error("Root-Changes record requires exactly one Root-Changes: and one Merge: trailer")
   }
-  return readRootChanges(git, merge, copied)
+  const rootChanges = await readRootChanges(git, merge, copied)
+  if (record?.kind === "checked") {
+    const parents = (await git(["show", "-s", "--format=%P", record.sha])).trim().split(" ")
+    if (parents.length !== 2 || parents[1] !== merge) {
+      throw new Error(`Root-Changes checked record ${record.sha} must retain Merge ${merge} as its second parent`)
+    }
+  }
+  return rootChanges
 }
 
 /**
@@ -323,7 +335,7 @@ export async function readRecord(git: Git, sha: string): Promise<ChangeRecord> {
       ? undefined
       : recordFrom(id.trim(), at, body, block)
   if (record === undefined) throw new Error(`${sha.slice(0, 12)} is not a record; a change's ref holds only records`)
-  await recordRootChanges(git, record.trailers)
+  await recordRootChanges(git, record.trailers, record)
   return record
 }
 
@@ -358,7 +370,7 @@ export async function readRecords(git: Git, from: string): Promise<readonly Chan
     if (parsed === undefined) break
     records.push(parsed)
   }
-  for (const record of records) await recordRootChanges(git, record.trailers)
+  for (const record of records) await recordRootChanges(git, record.trailers, record)
   return records.reverse()
 }
 

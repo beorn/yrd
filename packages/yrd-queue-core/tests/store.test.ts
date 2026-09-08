@@ -302,6 +302,18 @@ describe("a change's records are its commits", () => {
       ])
     ).trim()
     await expect(readRecord(git, badRecord)).rejects.toThrow("canonical base64")
+    const unretained = (
+      await git([
+        "commit-tree",
+        tree,
+        "-p",
+        head,
+        "-m",
+        `unretained\n\nRecord: checked\nChange: task/one@${head}\nMerge: ${merge}\nRoot-Changes: ${encoded}\n`,
+      ])
+    ).trim()
+    await expect(readRecord(git, unretained)).rejects.toThrow("as its second parent")
+    await expect(readRecords(git, unretained)).rejects.toThrow("as its second parent")
   })
 
   it.each([
