@@ -451,7 +451,8 @@ describe("settling gitlinks", () => {
         const result = await real.run(request)
         if (result.exitCode === 0 && request.argv.includes("merge") && request.argv.includes("super")) {
           stripped = true
-          return { ...result, stdout: JSON.stringify({ ...JSON.parse(result.stdout), gitlinks: [] }) }
+          const merge = JSON.parse(result.stdout) as Record<string, unknown>
+          return { ...result, stdout: JSON.stringify({ ...merge, gitlinks: [] }) }
         }
         return result
       },
