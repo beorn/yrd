@@ -589,7 +589,12 @@ describe("settling gitlinks", () => {
         }),
       )
 
-      expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/candidate-red"], merged: [], stuck: [] })
+      expect(outcome, readFileSync(outcome.log, "utf8")).toMatchObject({
+        exitCode: 1,
+        failed: ["task/candidate-red"],
+        merged: [],
+        stuck: [],
+      })
       const records = await readRecords(
         w.git,
         await remoteTip(w.git, changeRef("main", { branch: "task/candidate-red", head })),
