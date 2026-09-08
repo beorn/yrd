@@ -59,7 +59,7 @@ function incidentOf(record: ChangeRecord | undefined): Readonly<Record<(typeof I
   if (record === undefined) throw new Error("no incident record")
   const incident = Object.fromEntries(INCIDENT_FIELDS.map((field) => [field, trailer(record, field)]))
   for (const field of INCIDENT_FIELDS) expect(incident[field], `${field}: must be present and non-empty`).toBeTruthy()
-  expect(trailer(record, "Owner")).toBeUndefined()
+  expect(trailer(record, "Owner")).toBe("the queue operator")
   return incident as Record<(typeof INCIDENT_FIELDS)[number], string>
 }
 

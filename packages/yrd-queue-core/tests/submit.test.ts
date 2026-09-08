@@ -246,7 +246,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     const targetLater = (await w.git(["commit-tree", targetTree, "-p", w.target, "-m", "later target"])).trim()
     let raced = false
     const racing: Git = async (args, input) => {
-      if (!raced && args[0] === "ls-remote" && args.some((arg) => arg.startsWith("refs/yrd/main/"))) {
+      if (!raced && args[0] === "ls-remote" && args.includes(changeRef("main", { branch: "task/race", head }))) {
         raced = true
         await w.git(["update-ref", "refs/heads/task/race", later])
         await w.git(["push", "--quiet", "origin", `${targetLater}:refs/heads/main`])

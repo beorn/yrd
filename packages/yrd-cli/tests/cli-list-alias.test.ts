@@ -59,7 +59,7 @@ async function queueWithOneChange(): Promise<string> {
   await git(["config", "user.email", "queue@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), "target: origin#main\nchecks:\n  - verify:\n      run: test -f pass.txt\n")
+  writeFileSync(join(work, ".yrd.yml"), "checks:\n  - verify:\n      run: test -f pass.txt\n")
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "main declares the queue"])
   await git(["push", "--quiet", "origin", "main"])

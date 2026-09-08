@@ -3,7 +3,7 @@
 Yrd is a merge queue that lives inside a Git repository. A queue runs on a branch, `main` for most repositories. A change is another branch, submitted to that queue.
 
 - **Submit a branch, get a result.** You commit your changes on a branch and submit it. The queue checks it in a fresh checkout, merges it into the queue branch, and tells you what happened.
-- **No server, no database, no web page.** Everything the queue knows is a commit on a ref in the repository, under `refs/yrd/changes/`. Any clone that fetches those refs reads the whole state with plain `git log`.
+- **No server, no database, no web page.** Everything the queue knows is a commit on a ref in the repository, under `refs/yrd/<encoded-queue>/`. Any clone that fetches those refs reads the whole state with plain `git log`.
 - **One process, one machine.** By rule it is the only writer of the queue branch. A direct merge is detected and reported, not prevented.
 - **Superprojects.** Yrd also queues a repository of repositories held together by submodules, which no other merge queue we know of does. See [Superprojects](#superprojects).
 
@@ -34,23 +34,23 @@ Yrd is a merge queue that lives inside a Git repository. A queue runs on a branc
 yrd submit [branch] [--notify <who>] [--issue <id>] [--dry-run] [--rebase]   push the branch (the current one when none is named) and open its change; same head again is a retry
 yrd queue run                                                     one queue run
 yrd queue up [--interval <seconds>]                               queue runs on a loop, every 15 seconds by default; run this under your supervisor
-yrd queue pause <reason> [--notify <seat>]                        stop checking and merging; the service keeps the queue visible
-yrd queue resume [reason] [--notify <seat>]                       resume on the next service interval
+yrd queue pause --reason <text> [--notify <seat>]                        stop checking and merging; the service keeps the queue visible
+yrd queue resume [--reason <text>] [--notify <seat>]                       resume on the next service interval
 yrd queue list [filter...] [--latest] [--watch]                   the watch's page, once: the queue pills, one row per run per change in the state's colour, the RUNNER box; plain when piped; `yrd list` is the same command
 yrd watch [filter...]                                             `yrd queue list --watch`: on a terminal, the live pane — keyboard and mouse (click selects, wheel scrolls, drag copies), detail on Enter, STATS below
 yrd queue stats [--since 3h|<time>|<sha>] [--by submitter|branch] merged, failed, same-head retries, re-pushed branches, refs pushed and never submitted, opened→merged latency
 yrd queue show <branch>                                           that branch's changes, newest first, each check's result and log
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD
-yrd env open <commit>                                             retain an exact commit detached; print its path
+yrd env open [commit]                                             retain an exact commit detached, or open/adopt a branch; print its path
 yrd env list                                                      list this repository's retained environments
 yrd env close <path>                                              run teardown and remove a clean, unlocked environment without force
 ```
 
-Queue commands and `yrd submit` take `--queue <value>`, never a positional queue. Inside a clone, a branch selects that queue at `origin`; omission reads the remote's `HEAD`. An address such as `beorn/hh#main`, `https://github.com/beorn/hh.git#main`, or `/absolute/repo#main` selects a repository and queue together. `queue run`, `up`, `pause` and `resume` accept an address outside a clone and use a queue-owned clone. Submit, list, show and watch still require a clone; addressed submit keeps the author's checkout and sends to the selected repository.
+Queue commands and `yrd submit` take `--queue <value>`, never a positional queue. Inside a clone, a branch selects that queue at `origin`; omission reads the remote's `HEAD`. An address such as `beorn/hh#main`, `https://github.com/beorn/hh.git#main`, or `/absolute/repo#main` selects a repository and queue together. `queue run`, `up`, `pause` and `resume` accept an address outside a clone and always use a queue-owned clone, including when invoked inside another clone. Submit, list, show and watch still require a clone; addressed submit keeps the author's checkout and sends to the selected repository.
 
 Every command takes `--json`. `yrd submit` refuses the queue branch itself: it is not a change. While paused, submit and dry-run refuse with who paused the queue, when, why, and the resume command; already-submitted changes keep their place. `yrd queue up` stays visible but does no automatic checking or merging until resume. An explicit `yrd queue run` is permitted while paused and leaves the pause in place. `yrd check` checks out HEAD afresh, so uncommitted changes are not seen.
 
-`yrd env open` requires a full commit object ID already present locally, not a branch or abbreviated SHA. It materializes that commit's submodules and runs its declared setup; setup failure preserves the environment for inspection. Close reads teardown from the environment's current commit and refuses dirty, locked, unregistered or out-of-root paths. Failed teardown also preserves the environment.
+With a commit operand, `yrd env open` requires a full commit object ID already present locally. Without it, `--bay <name>` or `--issue <ref>` opens or adopts `task/<name>` using Git worktree registration; an occupied branch refuses and names its holder. It materializes that commit's submodules and runs its declared setup; setup failure preserves the environment for inspection. Close reads teardown from the environment's current commit and refuses dirty, locked, unregistered or out-of-root paths. Failed teardown also preserves the environment.
 
 **Your workflow.** Once your changes are committed, work from your own branch. These examples use `fix-login` and the default target, `origin#main`; substitute your branch and configured target.
 
@@ -83,7 +83,6 @@ checks:
 Everything the file can say:
 
 ```yml
-target: origin#main # the queue branch and the remote it lives on: <remote>#<branch>; this is the default
 setup: bun install --frozen-lockfile # runs once in every fresh checkout the queue makes, before any check
 checks:
   - typecheck: # each check is one mapping of its name to its settings
@@ -107,7 +106,7 @@ A key the queue does not read is refused, never ignored. Queue identity is not c
 
 Each queue owns `refs/yrd/<encoded-queue>/<branch>@<sha>` and `refs/yrd/<encoded-queue>/pause`, on the remote and in clones that fetch them. Encoding keeps the queue branch in one component: `release/stable` becomes `release%2Fstable`.
 
-For addressed queue-owner and reader commands, the host root is `git config yrd.workdir`, otherwise `$XDG_STATE_HOME/yrd` (default `~/.local/state/yrd`). Under it, the queue directory is `<host>/<repository-path>#<encoded-queue>`; an absolute local repository uses `local/<absolute-path-without-leading-slash>#<encoded-queue>` instead. Each address gets its own clone and artifacts:
+For queue-owner and reader commands, the host root is `git config yrd.workdir`, otherwise `$XDG_STATE_HOME/yrd` (default `~/.local/state/yrd`). Under it, the queue directory is `<host>/<repository-path>#<encoded-queue>`; an absolute local repository uses `local/<absolute-path-without-leading-slash>#<encoded-queue>` instead. Detached retained environments live under `<git-common-dir>/yrd/environments` or the configured `yrd.workdir`; standalone branch environments remain under `.bays`. Both are listed and closed through the same Git registry. Each queue address gets its own clone and artifacts:
 
 ```
 <host root>/github.com/beorn/hh#main/

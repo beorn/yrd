@@ -27,7 +27,7 @@
 
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
-import { listEnvironments, openEnvironment } from "./env-commands.ts"
+import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { resolveQueueLocation } from "./queue-location.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
@@ -393,17 +393,23 @@ function buildProgram(
   const env_ = program.command("env").alias("bay").description("an environment for one branch")
   env_.helpCommand(false)
   env_
-    .command("open")
-    .description("open an environment for one branch and keep it; prints its path")
+    .command("open [commit]")
+    .description("retain an exact commit detached, or open/adopt a branch; prints its path")
     .option("--bay <name>", "name the environment")
     .option("--issue <ref>", "the issue this environment is for")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await openEnvironment(options as Parameters<typeof openEnvironment>[0], io)))
+    .action(async (commit, options) => setExit(await openEnvironment({ ...options, ...(commit === undefined ? {} : { commit }) } as Parameters<typeof openEnvironment>[0], io)))
   env_
     .command("list", { isDefault: true })
     .description("the environments this repository holds")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await listEnvironments(options as Parameters<typeof listEnvironments>[0], io)))
+
+  env_
+    .command("close <path>")
+    .description("run teardown and remove a clean, unlocked retained environment without force")
+    .option("--json", "emit stable JSON")
+    .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
 
   addExamples(program, name)
   return program

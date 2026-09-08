@@ -15,17 +15,18 @@
  * have the worktree, the environment is not there.
  */
 
-import { existsSync, readFileSync } from "node:fs"
-import { basename, join, resolve } from "node:path"
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace } from "@yrd/bay"
-import { checkedTree, gitIn, readConfig, refAt, runId, runSetup, SetupFailed, type Git } from "@yrd/queue-core"
+import { checkedTree, freshWorktree, registeredWorktrees, runCheck, gitIn, readConfig, refAt, runId, runSetup, SetupFailed, type Git } from "@yrd/queue-core"
 import { createProcess } from "@yrd/process"
 import { repositoryHere as findRepository } from "./declaration.ts"
 import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
-export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean }>
+export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string }>
+export type EnvCloseOptions = Readonly<{ json?: boolean }>
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
 /** One environment as git holds it: a worktree under the bays root. */
@@ -37,10 +38,11 @@ export type EnvRow = Readonly<{ name: string; path: string; branch?: string; hea
  * guessing `main` when the repository never said so is the silent default
  * this whole design refuses.
  */
-async function repositoryHere(io: YrdCliIO): Promise<Readonly<{ root: string; target: string }>> {
-  const root = findRepository(io.cwd ?? process.cwd())
-  if (root === undefined) throw new Error("yrd env needs a repository; run inside a clone")
-  return { root, target: await originHead(gitIn(root)) }
+function requireRepository(io: YrdCliIO): string {
+  const cwd = io.cwd ?? process.cwd()
+  const root = findRepository(cwd)
+  if (root === undefined) throw new Error(`yrd env needs a repository: no Git clone contains ${cwd}; run it inside a clone`)
+  return root
 }
 
 function baysRootOf(repo: string): string {
@@ -64,25 +66,37 @@ async function resolveBaseSha(git: Git, target: string): Promise<string> {
  * path on stdout, which is what a caller `cd`s into.
  */
 export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const { root, target } = await repositoryHere(io)
-  const name = (options.bay ?? options.issue ?? `env-${Date.now().toString(36)}`).trim()
+  const root = requireRepository(io)
+  const commit = options.commit
+  if (commit !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit)) {
+    throw new Error(`yrd env open needs an exact commit object ID, not '${commit}'; resolve it with git rev-parse HEAD`)
+  }
+  const target = commit === undefined ? await originHead(gitIn(root)) : "HEAD"
+  const name = (options.bay ?? options.issue ?? (commit === undefined ? `env-${Date.now().toString(36)}` : `${commit.slice(0, 12)}-${runId()}`)).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
-  const branch = `task/${name}`
+  const branch = commit === undefined ? `task/${name}` : undefined
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process)
-  const base = await resolveBaseSha(git, target)
-  const config = await readConfig(git, base, { remote: "origin", branch: target })
-  const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
-  const provisioned = await workspace.provision({
-    bay: name,
-    name,
-    branch,
-    base,
-  })
-  if (provisioned.conclusion !== "success") {
-    throw new Error(`yrd: could not open environment '${name}': ${provisioned.error.message}`)
+  const base = commit ?? await resolveBaseSha(git, target)
+  if (commit !== undefined && await refAt(git, commit) !== commit) {
+    throw new Error(`yrd env open: commit ${commit} is not a commit object in ${root}; fetch that commit before opening it`)
   }
-  const { path, headSha, baseSha } = provisioned.output
+  const config = await readConfig(git, base, { remote: "origin", branch: target })
+  let provisioned: { path: string; headSha: string; baseSha: string }
+  if (branch === undefined) {
+    const environments = join(resolve(root, await workdirOf(git)), "environments")
+    const path = resolve(environments, name)
+    if (!path.startsWith(`${environments}/`)) throw new Error(`environment name '${name}' escapes ${environments}`)
+    mkdirSync(environments, { recursive: true })
+    await freshWorktree(git, root, base, path)
+    provisioned = { path, headSha: base, baseSha: base }
+  } else {
+    const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
+    const result = await workspace.provision({ bay: name, name, branch, base })
+    if (result.conclusion !== "success") throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
+    provisioned = result.output
+  }
+  const { path, headSha, baseSha } = provisioned
   const setup = config?.setup
   if (setup !== undefined) {
     const artifacts = join(await workdirOf(git), "environments", name, runId())
@@ -109,7 +123,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   if (options.json === true) {
     io.stdout(`${JSON.stringify({ base: baseSha, branch, head: headSha, name, path })}\n`)
   } else {
-    io.stderr(`${name} on ${branch} at ${headSha.slice(0, 12)}, cut from ${target} ${baseSha.slice(0, 12)}\n`)
+    io.stderr(`${name} ${branch === undefined ? "detached" : `on ${branch}`} at ${headSha.slice(0, 12)}, cut from ${target} ${baseSha.slice(0, 12)}\n`)
     io.stdout(`${path}\n`)
   }
   return 0
@@ -117,50 +131,91 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
 
 /** `yrd env list` — the environments this repository holds, as git holds them. */
 export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const { root } = await repositoryHere(io)
+  const root = requireRepository(io)
   const baysRoot = baysRootOf(root)
   await using process = createProcess({ cwd: root })
-  // `-z` because a worktree path may contain a newline, and the newline form
-  // would then split one entry into two unreadable ones.
-  const listed = await process.run({ argv: ["git", "worktree", "list", "--porcelain", "-z"], cwd: root })
-  if (listed.exitCode !== 0) {
-    throw new Error(`yrd: git worktree list exited ${String(listed.exitCode)}: ${listed.stderr.trim()}`)
-  }
-  const under = `${resolve(baysRoot)}/`
-  const rows: EnvRow[] = []
-  let current: { path?: string; head?: string; branch?: string } = {}
-  const take = (): void => {
-    const { path, head, branch } = current
-    current = {}
-    if (path === undefined || !path.startsWith(under)) return
-    rows.push({
-      name: basename(path),
-      path,
-      ...(branch === undefined ? {} : { branch }),
-      ...(head === undefined ? {} : { head }),
-    })
-  }
-  for (const line of listed.stdout.split("\0")) {
-    if (line.startsWith("worktree ")) {
-      take()
-      current.path = line.slice("worktree ".length).trim()
-    } else if (line.startsWith("HEAD ")) current.head = line.slice("HEAD ".length).trim()
-    else if (line.startsWith("branch ")) {
-      current.branch = line
-        .slice("branch ".length)
-        .trim()
-        .replace(/^refs\/heads\//u, "")
-    }
-  }
-  take()
+  const roots = [baysRoot, join(resolve(root, await workdirOf(gitIn(root, process))), "environments")]
+  const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
+  const rows: EnvRow[] = (await registeredWorktrees(gitIn(root, process)))
+    .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
+    .map(({ path, head, branch }) => ({ name: basename(path), path, ...(head === undefined ? {} : { head }), ...(branch === undefined ? {} : { branch }) }))
   if (options.json === true) {
     io.stdout(`${JSON.stringify({ environments: rows })}\n`)
     return 0
   }
   if (rows.length === 0) {
-    io.stdout(`no environments under ${baysRoot}${existsSync(baysRoot) ? "" : " (it does not exist)"}\n`)
+    io.stdout(`no registered environments under ${roots.join(" or ")}; worktrees elsewhere excluded\n`)
     return 0
   }
   io.stdout(`${rows.map((row) => `${row.name}  ${row.branch ?? "(detached)"}  ${row.path}`).join("\n")}\n`)
+  return 0
+}
+
+/** Refuse before running user teardown; a dirty tree is work, not garbage. */
+async function requireClean(git: Git, path: string): Promise<void> {
+  const dirty = await git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"])
+  if (dirty !== "") throw new Error(`environment ${path} is dirty; preserve or commit its changes before yrd env close`)
+}
+
+/** Retained environments use Git's non-force removal, never queue reaping. */
+export async function closeEnvironment(
+  operand: string,
+  options: EnvCloseOptions,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const root = requireRepository(io)
+  await using process = createProcess({ cwd: root })
+  const git = gitIn(root, process)
+  const workdir = resolve(root, await workdirOf(git))
+  const roots = [baysRootOf(root), join(workdir, "environments")]
+  const requested = resolve(io.cwd ?? globalThis.process.cwd(), operand)
+  let path: string
+  try {
+    path = realpathSync(requested)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR")
+      throw error
+    throw new Error(
+      `environment ${requested} is not registered at an existing path; inspect git worktree list before retrying`,
+      { cause: error },
+    )
+  }
+  const registered = (await registeredWorktrees(git)).find((entry) => resolve(entry.path) === path)
+  if (registered === undefined)
+    throw new Error(`environment ${requested} is not registered in ${root}; inspect git worktree list`)
+  const contained = roots.some((directory) => {
+    if (!existsSync(directory)) return false
+    const within = relative(realpathSync(directory), path)
+    return within !== "" && within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within)
+  })
+  if (!contained) throw new Error(`environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was removed`)
+  if (registered.locked !== undefined)
+    throw new Error(
+      `environment ${path} is locked${registered.locked === "" ? "" : `: ${registered.locked}`}; resolve its owner before closing it`,
+    )
+  const treeGit = gitIn(path, process)
+  await requireClean(treeGit, path)
+  const commit = (await treeGit(["rev-parse", "HEAD"])).trim()
+  const config = await readConfig(treeGit, commit, { branch: "HEAD", remote: "origin" })
+  if (config?.teardown !== undefined) {
+    const artifacts = join(workdir, "logs", "environments", basename(path), runId())
+    const result = await runCheck({
+      cwd: path,
+      process,
+      tree: { base: commit, candidate: commit },
+      spec: { name: "teardown", run: config.teardown },
+      logDir: join(artifacts, "logs"),
+      tmpdir: join(artifacts, "tmp"),
+    })
+    if (result.result !== "pass") {
+      const output = readFileSync(result.log, "utf8").trim() || "(teardown produced no output)"
+      throw new Error(
+        `environment teardown ${result.result} in preserved environment ${path}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}\ncommand: ${config.teardown}\n${output}\nlog ${result.log}`,
+      )
+    }
+    await requireClean(treeGit, path)
+  }
+  await git(["worktree", "remove", path])
+  io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
   return 0
 }

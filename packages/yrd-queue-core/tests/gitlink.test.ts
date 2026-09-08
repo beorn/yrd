@@ -218,7 +218,7 @@ describe("settling gitlinks", () => {
     expect(trailer(waitingRecords.at(-1)!, "Code")).toBe("gitlink-off-main")
     expect(trailer(waitingRecords.at(-1)!, "Evidence")).toBe(outcome.log)
     expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("main")
-    expect(trailer(waitingRecords.at(-1)!, "Owner")).toBeUndefined()
+    expect(trailer(waitingRecords.at(-1)!, "Owner")).toBe("the queue operator")
     const waitingQueue = await readQueue(w.git, "origin", "main", await remoteTip(w.git, "refs/heads/main"))
     expect(waitingQueue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("queued")
     const waitingRow = list(waitingQueue.changes).find((row) => row.head === head)
@@ -381,7 +381,7 @@ describe("settling gitlinks", () => {
     const outcome = await queueRun({ ...(await w.options()), process: observing })
 
     expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/unreadable-main"] })
-    expect(external).toMatchObject({ code: "component-main-unreadable", phase: "read-component-main" })
+    expect(external).toMatchObject({ code: "git-failed", phase: "resolve-submodule-branch" })
     const records = await readRecords(
       w.git,
       await remoteTip(w.git, changeRef("main", { branch: "task/unreadable-main", head })),
@@ -390,11 +390,11 @@ describe("settling gitlinks", () => {
     const stuck = records[1]!
     expect(trailer(stuck, "Code")).toBe("yrd-merge-unresolved")
     expect(trailer(stuck, "Subject")).toContain("component")
-    expect(trailer(stuck, "Via")).toContain("component-main-unreadable")
-    expect(trailer(stuck, "Via")).toContain("read-component-main")
+    expect(trailer(stuck, "Via")).toContain("git-failed")
+    expect(trailer(stuck, "Via")).toContain("resolve-submodule-branch")
     expect(trailer(stuck, "Evidence")).toBe(outcome.log)
-    expect(trailer(stuck, "Owner")).toBeUndefined()
-    expect(trailer(records[2]!, "Owner")).toBeUndefined()
+    expect(trailer(stuck, "Owner")).toBe("the queue operator")
+    expect(trailer(records[2]!, "Owner")).toBe("the queue operator")
     if (external === undefined) throw new Error("git-super returned no failure detail")
     const evidence = readFileSync(outcome.log, "utf8")
       .split("\n")
@@ -436,7 +436,7 @@ describe("settling gitlinks", () => {
       records
         .filter((record) => record.kind === "stuck" || record.kind === "sent")
         .map((record) => trailer(record, "Owner")),
-    ).toEqual([undefined, undefined])
+    ).toEqual(["the queue operator", "the queue operator"])
     expect(trailer(stuck!, "Fault")).toBeUndefined()
     const phases = readFileSync(outcome.log, "utf8")
       .split("\n")

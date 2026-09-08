@@ -1,6 +1,6 @@
 export { runYrdExecutable, runYrdProcess, resolveSubmitter } from "./cli.ts"
 export { coreQueueCommand, type CoreQueueCommand } from "./queue-core-commands.ts"
-export { listEnvironments, openEnvironment, type EnvRow } from "./env-commands.ts"
+export { closeEnvironment, listEnvironments, openEnvironment, type EnvRow } from "./env-commands.ts"
 export { declarationHere } from "./declaration.ts"
 export { YRD_VERSION, formatYrdRuntimeVersion } from "./version.ts"
 export type { YrdCliExitCode, YrdCliIO } from "./types.ts"

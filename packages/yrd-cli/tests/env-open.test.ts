@@ -67,7 +67,7 @@ async function world(setup: string): Promise<World> {
   await git(["config", "user.email", "env-open@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), `target: origin#main\nsetup: ${JSON.stringify(setup)}\n`)
+  writeFileSync(join(work, ".yrd.yml"), `setup: ${JSON.stringify(setup)}\n`)
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "declare environment setup"])
   await git(["push", "--quiet", "origin", "main"])
