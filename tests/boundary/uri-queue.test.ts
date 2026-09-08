@@ -6,7 +6,7 @@
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 import { parseQueueAddress, queueDirectory } from "../../packages/yrd-cli/src/address.ts"
@@ -14,6 +14,7 @@ import { git } from "./fixture.ts"
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..")
 const roots: string[] = []
+const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
 
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
@@ -84,7 +85,8 @@ describe("a queue started by address on a host with no checkout", () => {
           cwd: outside,
           env: {
             ...process.env,
-            GIT_CONFIG_COUNT: "1",
+            PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
+        GIT_CONFIG_COUNT: "1",
             GIT_CONFIG_KEY_0: "yrd.workdir",
             GIT_CONFIG_VALUE_0: workdir,
           },
@@ -105,6 +107,7 @@ describe("a queue started by address on a host with no checkout", () => {
       timeout: 15_000,
       env: {
         ...process.env,
+        PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "yrd.workdir",
         GIT_CONFIG_VALUE_0: workdir,
