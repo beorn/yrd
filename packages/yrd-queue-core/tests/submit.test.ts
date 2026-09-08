@@ -86,8 +86,8 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     await w.git(["commit", "--quiet", "--allow-empty", "-m", "target advanced"])
     await w.git(["push", "--quiet", "origin", "main"])
     const target = (await w.git(["rev-parse", "HEAD"])).trim()
-    await writePause(w.git, "origin", { by: "operator", kind: "paused", reason: "investigating" })
-    await writePause(w.git, "origin", { by: "operator", kind: "resumed", reason: "ready" })
+    await writePause(w.git, "origin", "main", { by: "operator", kind: "paused", reason: "investigating" })
+    await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "ready" })
     const fetchHead = join(w.work, ".git", "FETCH_HEAD")
     writeFileSync(fetchHead, "the submitter's previous fetch\n")
     const beforeLocal = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
@@ -295,7 +295,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
   it("at an unchanged head is a retry: a second opened record, one change", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/one", "one.txt")
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
@@ -324,7 +324,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
   it("a new head is a new change beside the old one", async () => {
     const w = await world()
     const first = await branchWithCommit(w, "task/one", "one.txt")
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
@@ -335,7 +335,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     await w.git(["commit", "--quiet", "-m", "two"])
     const second = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
@@ -424,7 +424,7 @@ describe("the queue read is every submitted change at the remote", () => {
     // Nothing is lost: the branch stands at the remote until its author says so.
     expect(await remoteRefs(w)).toContain("refs/heads/task/bare")
 
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/bare",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
@@ -454,13 +454,13 @@ describe("the queue read is every submitted change at the remote", () => {
       Array.from({ length: 199 }, (_, index) => `create refs/heads/bulk/${index + 1} ${bulk}\n`).join(""),
     )
     await branchWithCommit(w, "task/one", "one.txt")
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
     })
     await branchWithCommit(w, "task/two", "two.txt")
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/two",
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
@@ -490,7 +490,7 @@ describe("the queue read is every submitted change at the remote", () => {
   it("a deleted branch ignores stale local refs, and pause comes from the same captured reading (E3)", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/gone", "gone.txt")
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/gone",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
@@ -597,7 +597,7 @@ describe("the queue read is every submitted change at the remote", () => {
   it("orders by the first opened record, and a superseded head reads failed, replaced", async () => {
     const w = await world()
     const one = await branchWithCommit(w, "task/one", "one.txt")
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
@@ -605,7 +605,7 @@ describe("the queue read is every submitted change at the remote", () => {
     // A different clock tick between the two, so the order is not a tie.
     await new Promise((resolve) => setTimeout(resolve, 1100))
     await branchWithCommit(w, "task/two", "two.txt")
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/two",
       submitter: "@dev/3",
       target: { branch: "main", remote: "origin" },
@@ -617,7 +617,7 @@ describe("the queue read is every submitted change at the remote", () => {
     await w.git(["commit", "--quiet", "-am", "one, amended"])
     const oneAgain = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
@@ -640,7 +640,7 @@ describe("the queue read is every submitted change at the remote", () => {
   it("a head already on the target reads merged, whatever its records say", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/one", "one.txt")
-    const submitted = await submit(w.git, "origin", {
+    await submit(w.git, "origin", {
       branch: "task/one",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },

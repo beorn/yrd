@@ -296,7 +296,7 @@ describe("the state is derived, and ancestry wins over any record", () => {
       kind: "opened",
       subject: "submitted",
     })
-    const incident = { code: "yrd-check-unresolved", subject: "the queue could not judge this change" } as const
+    const incident = { code: "yrd-check-unresolved", subject: "the queue could not judge this change", via: "verify during merge", evidence: "/tmp/q-one.jsonl", next: "repair verify, then run yrd queue run", owner: "the queue operator" } as const
     const stuck = await appendRecord(git, "main", {
       change: { branch: "task/one", head },
       kind: "stuck",
@@ -314,47 +314,21 @@ describe("the state is derived, and ancestry wins over any record", () => {
     })
   })
 
-  it("requires one code and subject, and validates only context that was supplied", async () => {
+  it("refuses a partial stuck incident instead of silently inventing missing evidence", async () => {
+    // A list/show reader must get the complete durable cause from the record;
+    // existing state tests only prove the happy path with all six fields.
     const { git, head } = await repository()
-    const required = [
-      ["Code", "yrd-check-unresolved"],
-      ["Subject", "the queue could not judge this change"],
-    ] as const
-    const cases = [
-      { error: /0 Code: trailers/u, name: "missing Code", trailers: required.slice(1) },
-      { error: /0 Subject: trailers/u, name: "missing Subject", trailers: required.slice(0, 1) },
-      { error: /2 Code: trailers/u, name: "duplicate Code", trailers: [required[0], ...required] },
-      { error: /2 Subject: trailers/u, name: "duplicate Subject", trailers: [...required, required[1]] },
-      ...(["Via", "Evidence", "Next"] as const).map((name) => ({
-        error: new RegExp(`2 ${name}: trailers`, "u"),
-        name: `duplicate ${name}`,
-        trailers: [
-          ...required,
-          [name, name === "Evidence" ? "/tmp/q-one.jsonl" : "detail"] as const,
-          [name, "again"] as const,
-        ],
-      })),
-      {
-        error: /Evidence: is not an absolute path/u,
-        name: "relative Evidence",
-        trailers: [...required, ["Evidence", "checks/q-one.log"] as const],
-      },
-    ] as const
+    const stuck = await appendRecord(git, "main", {
+      change: { branch: "task/one", head },
+      kind: "stuck",
+      subject: "the queue could not judge this change",
+      trailers: [["Code", "yrd-check-unresolved"]],
+    })
 
-    for (const invalid of cases) {
-      const stuck = await appendRecord(git, "main", {
-        change: { branch: "task/one", head },
-        kind: "stuck",
-        subject: invalid.name,
-        trailers: invalid.trailers,
-      })
-      const records = await readRecords(git, stuck)
-      expect(
-        () =>
-          readChange({ branch: "task/one", branchHead: head, records: written(records), head, headOnTarget: false }),
-        invalid.name,
-      ).toThrow(invalid.error)
-    }
+    const records = await readRecords(git, stuck)
+    expect(() =>
+      readChange({ branch: "task/one", branchHead: head, records: written(records), head, headOnTarget: false }),
+    ).toThrow(/carries 0 Subject: trailers; a queue incident needs exactly one non-empty value/u)
   })
 })
 

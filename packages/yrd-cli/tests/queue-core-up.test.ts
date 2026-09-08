@@ -485,15 +485,13 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
       if (valid) {
         await expect(attempt).resolves.toBe(0)
-        expect(run.stderr()).toContain(join(w.work, ".yrd.yml"))
-        expect(run.stderr()).toContain("does not parse")
-        expect(run.stderr()).toContain("origin/main")
+        expect(run.stderr()).toBe("")
         expect(records(run)[0]).toMatchObject({ head })
-        const history = await readRecords(w.git, { branch, head })
+        const history = await readRecords(w.git, (records(run)[0] as { opened: string }).opened)
         expect(history.map((record) => record.kind)).toEqual(["opened"])
-        expect(trailer(history[0]!, "Target")).toBe("origin#main")
-        expect(await w.git(["ls-remote", "--refs", "origin", changeRef({ branch, head })])).toContain(
-          changeRef({ branch, head }),
+        expect(trailer(history[0]!, "Target")).toBeUndefined()
+        expect(await w.git(["ls-remote", "--refs", "origin", changeRef("main", { branch, head })])).toContain(
+          changeRef("main", { branch, head }),
         )
       } else {
         if (scenario === "legacy protected declaration") {

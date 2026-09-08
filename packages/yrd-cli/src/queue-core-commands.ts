@@ -1063,7 +1063,7 @@ async function openDetail(
 ): Promise<ChangeDetail> {
   const { row } = item
   const own = entries.filter((entry) => entry.change.branch === row.branch && entry.change.head === row.head)
-  const histories = own.length === 0 ? [] : await readHistories(git, own, config.target.remote)
+  const histories = own.length === 0 ? [] : await readHistories(git, own, config.target.remote, config.target.branch)
   const shown = histories.flatMap((entry) => show([entry], entry.change.branch))
   const packed = shown.flatMap((change) => change.checks)
   const records = shown.flatMap((change) => change.records)
@@ -1338,7 +1338,7 @@ async function readListing(
   const queue = await readQueue(git, config.target.remote, config.target.branch, targetOid)
   const journals = readJournals(join(workdir, "logs"))
   const all = list(queue.changes, {
-    directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
+    directMerges: await directMergeCommits(git, config.target.branch, targetOid, queue.changes),
     journals,
     subjects: await subjects(
       git,

@@ -82,6 +82,7 @@ describe("the rows a watch shows", () => {
         via: "later",
         evidence: "/later",
         next: "repair",
+        owner: "operator",
       },
       live: { run: "later", check: "later", phase: "merge", since: now },
       next: { owner: "submitter", because: "fix the change" },
@@ -188,7 +189,7 @@ describe("the one row renderer", () => {
 })
 
 describe("the notice", () => {
-  it("keeps ordinary ownership and renders incident advice without inventing an owner", () => {
+  it("owns the state, the cause and whose move it is, in one line", () => {
     const line = noticeLine(
       row({
         next: { because: "it failed (test), and only the author can move it", owner: "@dev/2" },
@@ -200,33 +201,6 @@ describe("the notice", () => {
     expect(line).toContain("failed")
     expect(line).toContain("test")
     expect(line).toContain("next: @dev/2")
-
-    const advice = "repair the queue environment, then run yrd queue run"
-    const code = "yrd-historical-unknown"
-    const subject = "the queue could not judge task/one after its captured configuration disappeared"
-    const advised = row({
-      incident: { code, subject, next: advice },
-      reason: code,
-      state: "stuck",
-    })
-    const advisedNotice = watchNotice(advised)
-    expect(advisedNotice.next).toBe(advice)
-    if (advisedNotice.cause === undefined) throw new Error("the incident notice omitted its cause")
-    expect(advisedNotice.cause).toContain(subject)
-    expect(advisedNotice.cause).toContain(code)
-    expect(advisedNotice.cause.indexOf(subject)).toBeLessThan(advisedNotice.cause.indexOf(code))
-    expect(noticeLine(advised)).toContain(`next: ${advice}`)
-    expect(noticeLine(advised)).not.toContain("owner")
-
-    const withoutAdvice = row({
-      incident: { code, subject },
-      next: { because: "this generic fallback must be ignored", owner: "wrong owner" },
-      reason: code,
-      state: "stuck",
-    })
-    expect(watchNotice(withoutAdvice).next).toBeUndefined()
-    expect(noticeLine(withoutAdvice)).not.toContain("next:")
-    expect(noticeLine(withoutAdvice)).not.toContain("wrong owner")
   })
 
   it("says a change is queued AND that a check is running on it, because both are true", () => {

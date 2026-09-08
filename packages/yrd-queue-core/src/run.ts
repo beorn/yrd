@@ -762,6 +762,7 @@ async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): P
     subject,
     via: `git-super merge (${detail.code}, ${detail.phase}) in yrd queue ${run.name} [${run.log.id}]`,
     evidence: run.log.path,
+    owner: "the queue operator",
     next: detail.next ?? "push the named component commit to its main, then run yrd queue run",
   }
   const tip = tipOf(entry.change)
@@ -823,7 +824,8 @@ async function candidateFailure(
     ...stuckWrite(run, {
       code: "yrd-merge-unresolved",
       detail: detail.message,
-      next: detail.next ?? "repair the queue fault, then run yrd queue run",
+      owner: "the queue operator",
+    next: detail.next ?? "repair the queue fault, then run yrd queue run",
       subject: detail.message,
       via: `git-super merge (${detail.code}, ${detail.phase}) at ${worktree.path}`,
       worktree: worktree.path,
@@ -1436,6 +1438,7 @@ function stuckWrite(
     via: `${cause.via} in yrd queue ${run.name} [${run.log.id}]`,
     evidence: run.log.path,
     next: cause.next,
+    owner: "the queue operator",
   }
   return {
     subject,

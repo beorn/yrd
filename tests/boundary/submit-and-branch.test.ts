@@ -138,8 +138,8 @@ describe("the submit path", { timeout: 120_000 }, () => {
     expect(actual).not.toBe(head)
     expect(JSON.parse(opened.stdout)).toMatchObject({ head: actual, targetHead: target })
     expect(await refSha(origin, `refs/heads/${branch}`)).toBe(actual)
-    expect(await refExists(origin, changeRef({ branch, head: actual }))).toBe(true)
-    expect(await refExists(origin, changeRef({ branch, head }))).toBe(false)
+    expect(await refExists(origin, changeRef("main", { branch, head: actual }))).toBe(true)
+    expect(await refExists(origin, changeRef("main", { branch, head }))).toBe(false)
   })
 
   // today: red — `queue submit` exits 0 but pushes `<branch>:refs/yrd/submit/

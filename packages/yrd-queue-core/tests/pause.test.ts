@@ -91,27 +91,27 @@ describe("the queue pause is one leased record ref at the remote", () => {
   // the push lease and cannot prove which pause a reader inspected.
   it("reads the captured advertisement when the pause changes before fetch", async () => {
     const w = await world()
-    const paused = await writePause(w.git, "origin", { by: "operator", kind: "paused", reason: "inspecting" })
+    const paused = await writePause(w.git, "origin", "main", { by: "operator", kind: "paused", reason: "inspecting" })
     let moved = false
     const racing: Git = async (args, input) => {
       const result = await w.other(args, input)
       if (!moved && args[0] === "ls-remote") {
         moved = true
-        await writePause(w.git, "origin", { by: "operator", kind: "resumed", reason: "ready now" })
+        await writePause(w.git, "origin", "main", { by: "operator", kind: "resumed", reason: "ready now" })
       }
       return result
     }
-    expect(await readPause(racing, "origin")).toEqual(paused)
+    expect(await readPause(racing, "origin", "main")).toEqual(paused)
     expect(await w.other(["for-each-ref", PAUSE_REF])).toBe("")
-    expect(await readPause(w.other, "origin")).toMatchObject({ kind: "resumed" })
+    expect(await readPause(w.other, "origin", "main")).toMatchObject({ kind: "resumed" })
   })
 
   it("names the advertised pause and queue when its object fetch fails", async () => {
     const w = await world()
-    const paused = await writePause(w.git, "origin", { by: "operator", kind: "paused", reason: "inspecting" })
+    const paused = await writePause(w.git, "origin", "main", { by: "operator", kind: "paused", reason: "inspecting" })
     const broken: Git = (args, input) =>
       args[0] === "fetch" ? w.other(["fetch", "missing-queue-remote"]) : w.other(args, input)
-    const attempt = readPause(broken, "origin")
+    const attempt = readPause(broken, "origin", "main")
     await expect(attempt).rejects.toThrow(`origin advertised ${PAUSE_REF} at ${paused.sha}`)
     await expect(attempt).rejects.toThrow("missing-queue-remote")
   })

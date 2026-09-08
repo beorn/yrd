@@ -16,7 +16,7 @@
  * new state added to the core is a compile error here, which is the point.
  */
 
-import { clocks, type Row } from "@yrd/queue-core"
+import { incidentLine, clocks, type Row } from "@yrd/queue-core"
 import { mediaDuration, stateGlyph } from "./watch-format.ts"
 
 export type Notice = Readonly<{

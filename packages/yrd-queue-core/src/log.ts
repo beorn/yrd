@@ -32,7 +32,7 @@
 
 import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { assertIncident, type Incident } from "./incident.ts"
+import { incidentTrailers, type Incident } from "./incident.ts"
 
 /** Ref-write diagnostics emitted by run.ts's refused bookkeeping-write path. */
 export const CHANGE_REF_DIAGNOSTICS = {
@@ -324,20 +324,16 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
         if (
           typeof code !== "string" ||
           typeof subject !== "string" ||
-          (via !== undefined && typeof via !== "string") ||
-          (evidence !== undefined && typeof evidence !== "string") ||
-          (next !== undefined && typeof next !== "string")
+          typeof via !== "string" ||
+          typeof evidence !== "string" ||
+          typeof next !== "string" ||
+          typeof owner !== "string"
         ) {
           throw new Error(`run journal ${id} has an incomplete incident for ${journalKey(branch, head)}`)
         }
-        const incident = {
-          code,
-          subject,
-          ...(via === undefined ? {} : { via }),
-          ...(evidence === undefined ? {} : { evidence }),
-          ...(next === undefined ? {} : { next }),
-        }
-        assertIncident(incident, `run journal ${id} incident for ${journalKey(branch, head)}`)
+        const incident = { code, subject, via, evidence, next, owner }
+        // Reuse the writer's validator: malformed incident values must throw on read too.
+        incidentTrailers(incident)
         change.incident = incident
       }
     }
