@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace } from "@yrd/bay"
-import { registrationNameForOwner } from "git-super"
+import { ownerFromRegistrationName, registrationNameForOwner } from "git-super"
 import {
   checkedTree,
   freshWorktree,
@@ -64,6 +64,37 @@ function requireRepository(io: YrdCliIO): string {
     throw new Error(`yrd env needs a repository: no Git clone contains ${cwd}; run it inside a clone`)
   }
   return root
+}
+
+/**
+ * The owner already holding `label`, read from git's own registry.
+ *
+ * @chief ruled on 2026-09-08 that one label is one branch is one piece of work,
+ * so a second owner opening a held label is refused rather than allowed to
+ * collide. Git refuses the collision on its own -- it will not check one branch
+ * out into two worktrees -- but it refuses as an error about a ref, which never
+ * says who holds the label or what to do next.
+ *
+ * The holder is derived by ROUND-TRIPPING through the primitive: parse the owner
+ * out of a registered name, recompose that owner with the requested label, and
+ * compare. That way the `~` separator stays entirely inside git-super and this
+ * package never learns it -- the whole point of putting the primitive there.
+ */
+async function holderOfLabel(
+  git: Git,
+  roots: readonly string[],
+  label: string,
+  owner: string,
+): Promise<{ owner: string; path: string } | undefined> {
+  const prefixes = roots.map((root) => `${existsSync(root) ? realpathSync(root) : resolve(root)}/`)
+  for (const entry of await registeredWorktrees(git)) {
+    if (!prefixes.some((prefix) => entry.path.startsWith(prefix))) continue
+    const held = ownerFromRegistrationName(basename(entry.path))
+    if (held === undefined || held === owner) continue
+    if (registrationNameForOwner(held, label) !== basename(entry.path)) continue
+    return { owner: held, path: entry.path }
+  }
+  return undefined
 }
 
 function baysRootOf(repo: string): string {
@@ -121,14 +152,25 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
    * REGISTRATION-name contract (a path segment), not a ref-name contract, and
    * this is the boundary of it.
    *
-   * That leaves two owners of the same label sharing one branch, which git then
-   * refuses to check out twice. That refusal is correct until someone rules
-   * whether one label opened by two owners is one piece of work or two; it is a
-   * product question, not a naming one, so it is not settled here.
+   * Two owners of the same label would share one branch, which git refuses to
+   * check out twice. That product question is now RULED (@chief, 2026-09-08):
+   * one label is one branch is one piece of work, so the second owner is
+   * refused above, by name, before git has to refuse it by ref.
    */
   const branch = commit === undefined ? `task/${name}` : undefined
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process)
+  if (options.owner !== undefined) {
+    const roots = [baysRootOf(root), join(resolve(root, await workdirOf(git)), "environments")]
+    const holder = await holderOfLabel(git, roots, name, options.owner)
+    if (holder !== undefined) {
+      throw new Error(
+        `yrd env open: label '${name}' is already held by owner '${holder.owner}' at ${holder.path}, ` +
+          `because one label is one branch is one piece of work (@chief, 2026-09-08). ` +
+          `Open a different label, or take this one over from '${holder.owner}'.`,
+      )
+    }
+  }
   const base = commit ?? (await resolveBaseSha(git, target))
   if (commit !== undefined && (await refAt(git, commit)) !== commit) {
     throw new Error(

@@ -95,16 +95,47 @@ describe("a bay's path names its owner (24306 mechanism 2)", () => {
 
   it("two owners get distinct, each-attributable directories", async () => {
     // Distinct LABELS, because the branch still carries the bare label and git
-    // refuses to check one ref out into two worktrees. Whether one label opened
-    // by two owners is one piece of work or two is a product question nobody has
-    // ruled; this test asserts only what has been ruled — that each path names
-    // its own owner.
+    // refuses to check one ref out into two worktrees. What happens when the
+    // labels are the SAME is no longer open — see the next test.
     const w = await world()
     const a = await openBayForOwner(w, "24153", "hab-session-aaaa")
     const b = await openBayForOwner(w, "24154", "hab-session-bbbb")
     expect(a).not.toBe(b)
     expect(ownerOf(a)).toBe("hab-session-aaaa")
     expect(ownerOf(b)).toBe("hab-session-bbbb")
+  })
+
+  it("a second owner opening a held label is refused, and the refusal names the holder", async () => {
+    // @chief's ruling, 2026-09-08: one label is one branch is one piece of work.
+    //
+    // This assertion is deliberately on the refusal's OWN phrase. A second open
+    // already fails without any guard -- git will not check `task/24153` out
+    // into two worktrees -- and git's message quotes the first worktree's path,
+    // which contains both the label and the holder's id. So asserting only that
+    // the error mentions "hab-session-aaaa" passes with nothing implemented at
+    // all. Matching a string that ANY failure would produce is not a test.
+    const w = await world()
+    const held = await openBayForOwner(w, "24153", "hab-session-aaaa")
+    expect(ownerOf(held)).toBe("hab-session-aaaa")
+
+    const second = openBayForOwner(w, "24153", "hab-session-bbbb")
+    await expect(second).rejects.toThrow(/one label is one branch is one piece of work/)
+    // ...and having established it is OUR refusal, that it names the holder --
+    // the entire difference between a refusal and an obstacle.
+    await expect(second).rejects.toThrow(/hab-session-aaaa/)
+  })
+
+  it("the second-owner refusal does not misfire on the owner that already holds the label", async () => {
+    // The guard is about a SECOND owner, not about reopening. A reopen by the
+    // SAME owner fails today for an unrelated reason (the bay directory exists),
+    // and that is not what this test pins: it pins that the owner is never told
+    // someone else holds a label it holds itself. Asserting idempotence here
+    // would encode my assumption rather than the ruling.
+    const w = await world()
+    await openBayForOwner(w, "24153", "hab-session-aaaa")
+    const again = openBayForOwner(w, "24153", "hab-session-aaaa")
+    await expect(again).rejects.toThrow()
+    await expect(again).rejects.not.toThrow(/one label is one branch is one piece of work/)
   })
 })
 
