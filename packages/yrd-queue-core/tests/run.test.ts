@@ -2001,7 +2001,8 @@ describe("the target's setup", () => {
     expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
     expect(incidentOf(records[1])).toMatchObject({ Code: "yrd-setup-unusable" })
     expect(logRecords(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
-      { exit: "missing", result: "stuck", whose: "queue" },
+      { exit: "missing", result: "stuck", whose: "queue", phase: "submit" },
+      { exit: "missing", result: "stuck", whose: "queue", phase: "notify" },
     ])
   })
 })

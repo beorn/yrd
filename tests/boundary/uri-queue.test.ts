@@ -118,10 +118,10 @@ describe("a queue started by address on a host with no checkout", () => {
       proc.exited,
     ])
 
-    expect(exitCode, stderr).toBe(0)
+    const result = JSON.parse(stdout) as { exitCode: number; merged: string[]; log: string }
+    expect(exitCode, `${stderr}\n${stdout}\n${readFileSync(result.log, "utf8")}`).toBe(0)
     const owned = queueDirectory(workdir, parseQueueAddress(address))
     expect(existsSync(owned)).toBe(true)
-    const result = JSON.parse(stdout) as { exitCode: number; merged: string[]; log: string }
     expect(result, `${stderr}\n${readFileSync(result.log, "utf8")}`).toMatchObject({
       exitCode: 0,
       merged: ["task/uri"],
