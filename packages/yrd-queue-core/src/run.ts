@@ -48,6 +48,7 @@ import {
   mergedBy,
   trailer,
   readRootChanges,
+  cleanupRootChanges,
   type RootChanges,
   type Git,
   type WriteRecord,
@@ -1065,6 +1066,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       tip: mergeCommit,
     })
     run.log.write({ branch, decision: "merged", head, kind: "change" })
+    if (rootChanges !== undefined) await cleanupRootChanges(run.git, rootChanges, mergedRecord)
     await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
     return "merged"
   } finally {

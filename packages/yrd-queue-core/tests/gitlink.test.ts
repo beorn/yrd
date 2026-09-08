@@ -267,8 +267,36 @@ describe("settling gitlinks", () => {
   it("a held-back authored pin merges raised and keeps the submitted Change identity", async () => {
     const w = await world()
     const head = await submitGitlink(w, "task/on", w.onMain)
-
-    const outcome = await queueRun(await w.options())
+    // Existing merge results cannot prove the cleanup ordering: observe real
+    // producer bytes and require the remote terminal record before deletion.
+    const produced = new Map<string, string>()
+    let cleaned = false
+    await using real = createProcess({ cwd: w.work })
+    const observing: Process = {
+      ...real,
+      async run(request) {
+        const deletion = request.argv.indexOf("update-ref")
+        const ref = request.argv[deletion + 2]
+        if (deletion >= 0 && request.argv[deletion + 1] === "-d" && ref?.startsWith("refs/git-super/receipts/")) {
+          const merge = ref.slice("refs/git-super/receipts/".length)
+          expect(await remoteTip(w.git, "refs/heads/main")).toBe(merge)
+          const record = (
+            await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/on", head })))
+          ).find((row) => row.kind === "merged")
+          expect(record).toBeDefined()
+          expect(trailer(record!, "Root-Changes")).toBe(produced.get(merge))
+          cleaned = true
+        }
+        const result = await real.run(request)
+        if (result.exitCode === 0 && request.argv.includes("merge") && request.argv.includes("super")) {
+          const merge = (JSON.parse(result.stdout) as { commit: string }).commit
+          const bytes = await w.git(["show", `refs/git-super/receipts/${merge}:receipt.json`])
+          produced.set(merge, Buffer.from(bytes, "utf8").toString("base64"))
+        }
+        return result
+      },
+    }
+    const outcome = await queueRun({ ...(await w.options()), process: observing })
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/on"])
@@ -291,11 +319,11 @@ describe("settling gitlinks", () => {
     const merged = records.find((record) => record.kind === "merged")
     expect(merged).toBeDefined()
     const receiptRef = `refs/git-super/receipts/${target}`
-    const bytes = await w.git(["show", `${receiptRef}:receipt.json`])
-    const copied = Buffer.from(bytes, "utf8").toString("base64")
+    const copied = produced.get(target)
+    expect(copied).toBeDefined()
     expect(trailer(merged!, "Root-Changes")).toBe(copied)
-    const receipt = (await w.git(["rev-parse", receiptRef])).trim()
-    await w.git(["update-ref", "-d", receiptRef, receipt])
+    expect(cleaned).toBe(true)
+    expect((await w.git(["for-each-ref", "--format=%(refname)", receiptRef])).trim()).toBe("")
     expect(
       trailer((await readRecords(w.git, recordTip)).find((record) => record.kind === "merged")!, "Root-Changes"),
     ).toBe(copied)
