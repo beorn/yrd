@@ -155,7 +155,7 @@ describe("a queue is the selected origin branch carrying config", () => {
       expect(await runYrdProcess(["bun", "yrd", "queue", verb, ...selector, ...reason, "--json"], run.io)).toBe(2)
       expect(run.stderr()).toContain("inside a clone or pass --queue <repo>#<queue>")
     }
-    const operand = "https://github.com/beorn/hh.git"
+    const operand = "https://forge.example/team/repo.git#"
     const malformed = capture(outside)
     expect(
       await runYrdProcess(["bun", "yrd", "queue", verb, "--queue", operand, ...reason, "--json"], malformed.io),

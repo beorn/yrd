@@ -194,7 +194,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     expect((await w.git(["status", "--porcelain"])).trim()).toContain("UU target.txt")
     expect(await refAt(w.git, "refs/heads/task/conflict")).toBe(head)
     expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
-    expect(await w.git(["for-each-ref", "refs/yrd/changes/"])).toBe("")
+    expect(await w.git(["for-each-ref", "refs/yrd/main/"])).toBe("")
   })
 
   it.each([false, true])("a contained head offers no rebase cure (opt-in %s)", async (rebase) => {
@@ -246,7 +246,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     const targetLater = (await w.git(["commit-tree", targetTree, "-p", w.target, "-m", "later target"])).trim()
     let raced = false
     const racing: Git = async (args, input) => {
-      if (!raced && args[0] === "ls-remote" && args.some((arg) => arg.startsWith("refs/yrd/changes/"))) {
+      if (!raced && args[0] === "ls-remote" && args.some((arg) => arg.startsWith("refs/yrd/main/"))) {
         raced = true
         await w.git(["update-ref", "refs/heads/task/race", later])
         await w.git(["push", "--quiet", "origin", `${targetLater}:refs/heads/main`])
@@ -398,6 +398,7 @@ describe("a change is named <branch>@<sha>, and that name is the last part of it
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
     })
+    await w.git(["push", "--quiet", "origin", `${w.target}:refs/heads/release/1.x`])
     await submit(w.git, "origin", {
       branch: "task/shared",
       submitter: "@dev/2",
