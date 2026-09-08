@@ -494,6 +494,134 @@ describe("a queue run", () => {
     ).toEqual(["opened", "checked"])
   })
 
+  // The protocol fixtures below cannot prove the actual producer accepts
+  // Yrd's captured advertisement or that its opaque notice reaches notify.
+  it("observes a real selected GitSuper child tip through an idle queue and its notifier", async () => {
+    const w = await world()
+    const child = join(w.workdir, "child")
+    mkdirSync(w.workdir, { recursive: true })
+    await w.git(["init", "--quiet", "--initial-branch=main", child])
+    const childGit = gitIn(child)
+    await childGit(["config", "user.email", "queue@yrd.test"])
+    await childGit(["config", "user.name", "yrd"])
+    writeFileSync(join(child, "child.txt"), "before\n")
+    await childGit(["add", "."])
+    await childGit(["commit", "--quiet", "-m", "child before"])
+    const pin = (await childGit(["rev-parse", "HEAD"])).trim()
+    const rootUrl = "https://example.test/acme/product.git"
+    const childUrl = "https://example.test/acme/child.git"
+    const config = join(w.workdir, "gitconfig")
+    await w.git(["config", "--file", config, `url.${w.remote}.insteadOf`, rootUrl])
+    await w.git(["config", "--file", config, `url.${child}.insteadOf`, childUrl])
+    await w.git(["config", "--file", config, "protocol.file.allow", "always"])
+    for (const [key, value] of [
+      ["path", "packages/child"],
+      ["url", childUrl],
+      ["branch", "main"],
+    ] as const) {
+      await w.git(["config", "-f", ".gitmodules", `submodule.child.${key}`, value])
+    }
+    await w.git(["add", ".gitmodules"])
+    await w.git(["update-index", "--add", "--cacheinfo", `160000,${pin},packages/child`])
+    await w.git(["commit", "--quiet", "-m", "declare the product child"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const targetSha = (await w.git(["rev-parse", "HEAD"])).trim()
+    const base = await w.options({ exit: 0 })
+    await w.git(["remote", "set-url", "origin", rootUrl])
+    writeFileSync(join(child, "child.txt"), "after\n")
+    await childGit(["commit", "--quiet", "-am", "child bypassed the queue"])
+    const tip = (await childGit(["rev-parse", "HEAD"])).trim()
+    const outcome = await queueRun({
+      ...base,
+      targetSha,
+      env: { ...base.env, GIT_CONFIG_GLOBAL: config, GIT_CONFIG_NOSYSTEM: "1" },
+      selection: { executable: join(gitSuperBin, "git-super"), contract: "root-v1", scope: "local", origin: "fixture" },
+      notify: [{ name: "observer", on: ["observed"], run: w.notifier }],
+    })
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.observation).toMatchObject({ contract: "root-v1", outcome: "observed" })
+    expect(outcome.observation.notices).toHaveLength(1)
+    expect(outcome.observation.notices[0]?.text).toContain(tip)
+    expect(outcome.observation.notices[0]?.text).toContain("packages/child")
+    expect(JSON.parse(readFileSync(w.notifyLog, "utf8"))).toEqual({
+      record: "observed",
+      notice: outcome.observation.notices[0],
+    })
+    expect((await childGit(["rev-parse", "HEAD"])).trim()).toBe(tip)
+    expect((await w.git(["rev-parse", "HEAD"])).trim()).toBe(targetSha)
+  })
+
+  // D1: an idle or paused run still observes; stale/unavailable observations
+  // end before candidate work, and generic notices use their own opt-in payload.
+  it.each([
+    ["observed", 0],
+    ["changed-during-read", 3],
+    ["unavailable-transport", 4],
+    ["invalid", 2],
+  ] as const)("settles %s observation once before candidate work, including paused runs", async (outcome, exit) => {
+    const w = await world()
+    const notices = outcome === "observed" ? [{ id: "opaque-id", text: "producer explanation" }] : []
+    const envelope = { version: 1, outcome, message: "selected root observation", notices }
+    await using runner = createProcess({ cwd: w.work })
+    let calls = 0
+    const observed = {
+      ...runner,
+      run: async (request: Parameters<typeof runner.run>[0]) => {
+        if (request.argv.slice(1).join(" ") !== "super observe --protocol=1") return runner.run(request)
+        calls++
+        expect(request.extraStdio).toBeUndefined()
+        return runner.run({
+          ...request,
+          argv: [
+            process.execPath,
+            "-e",
+            `process.stdout.write(${JSON.stringify(JSON.stringify(envelope))});process.exit(${exit})`,
+          ],
+        })
+      },
+    }
+    const options = {
+      ...(await w.options({ exit: 0 })),
+      process: observed,
+      git: w.git,
+      selection: {
+        executable: join(gitSuperBin, "git-super"),
+        contract: "root-v1" as const,
+        scope: "local" as const,
+        origin: "fixture",
+      },
+      notify: [{ name: "observer", on: ["observed" as const], run: w.notifier }],
+    }
+    const idle = await queueRun(options)
+    expect(idle.exitCode).toBe(outcome === "invalid" ? 2 : 0)
+    expect(idle.observation).toEqual({ contract: "root-v1", ...envelope })
+    expect(calls).toBe(1)
+    const head = await submitCommit(w, "task/one", "one.txt")
+    if (outcome === "observed")
+      {await writePause(w.git, "origin", "main", { kind: "paused", by: "operator", reason: "observation only" })}
+    const next = await queueRun(options)
+    expect(calls).toBe(2)
+    expect(next.exitCode).toBe(outcome === "invalid" ? 2 : 0)
+    expect(await remoteTarget(w)).toBe(w.target)
+    const ref = changeRef("main", { branch: "task/one", head })
+    const tip = (await w.git(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0]!
+    expect((await readRecords(w.git, tip)).map(({ kind }) => kind)).toEqual(["opened"])
+    const logs = logRecords(next)
+    expect(logs.some((row) => row.kind === "observation" && row.message === envelope.message)).toBe(true)
+    if (outcome === "observed") {
+      expect(
+        readFileSync(w.notifyLog, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+      ).toEqual([
+        { record: "observed", notice: notices[0] },
+        { record: "observed", notice: notices[0] },
+      ])
+      expect(logs.some((row) => row.kind === "message" && row.id === "opaque-id" && row.delivered === true)).toBe(true)
+    } else expect(existsSync(w.notifyLog)).toBe(false)
+  })
+
   it("refuses a queue-owned hooks path that is not empty", async () => {
     const w = await world()
     const hooksPath = join(w.workdir, "hooks-disabled")

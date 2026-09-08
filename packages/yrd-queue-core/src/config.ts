@@ -87,7 +87,8 @@ const TARGET_GRAMMAR = "must be <remote>#<branch>, e.g. origin#main"
 const NOTIFY_SHAPE = "notify: [- <name>: {on: [merged, failed], run: <command>}]"
 
 /** The endings the queue can notify about; it has no others to run a command on. */
-export const ENDINGS = ["merged", "failed", "stuck", "merged-direct"] as const
+export const ENDINGS = ["merged", "failed", "stuck", "merged-direct", "observed"] as const
+const DEFAULT_ENDINGS = ["merged", "failed", "stuck", "merged-direct"] as const
 
 export type Ending = (typeof ENDINGS)[number]
 
@@ -240,7 +241,7 @@ function namedCommands(
 function readNotify(value: unknown): readonly Notifier[] {
   return namedCommands(value, "notify", ENDINGS, []).map((entry) => ({
     name: entry.name,
-    on: (entry.on ?? ENDINGS) as readonly Ending[],
+    on: (entry.on ?? DEFAULT_ENDINGS) as readonly Ending[],
     run: entry.run,
   }))
 }

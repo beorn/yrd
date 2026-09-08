@@ -39,6 +39,7 @@ import {
   readJournals,
   readHistories,
   readQueue,
+  remoteUrl,
   runId,
   subjects,
   targetName,
@@ -60,6 +61,8 @@ import {
   type Journals,
   type JournalRun,
   type Git,
+  type GitRunner,
+  type GitObservation,
   type GitSelection,
   type LogRecord,
   type QueueConfig,
@@ -469,6 +472,7 @@ export async function coreQueueCommand(
       ): Promise<
         Readonly<{
           rows: readonly WatchRow[]
+          observation: GitObservation
           data: unknown
           queue: string
           queues: readonly WatchQueue[]
@@ -485,7 +489,7 @@ export async function coreQueueCommand(
           journals: Journals
         }>
       > => {
-        const { queue, journals, all } = await readListing(git, declared.config, workdir, declared.oid)
+        const { queue, journals, all, observation } = await readListing(git, declared.config, workdir, declared.oid)
         const rows = filterRows(
           watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
           request.terms ?? [],
@@ -498,7 +502,9 @@ export async function coreQueueCommand(
             ? undefined
             : `${String(rows.length)} of ${String(all.length)} change(s) match ${request.terms.join(" or ")}`
         return {
+          observation,
           data: {
+            observation,
             changes: rows.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
@@ -550,7 +556,7 @@ export async function coreQueueCommand(
         const one = await round(captured)
         if (options.json === true) emit(io, true, one.data, "")
         else io.stdout(`${await page(one)}\n`)
-        return 0
+        return one.observation.contract === "root-v1" && one.observation.outcome === "invalid" ? 2 : 0
       }
 
       // A terminal with a keyboard on the other end gets the pane. It is
@@ -560,6 +566,10 @@ export async function coreQueueCommand(
       // with it.
       if (options.interactive === true && options.json !== true) {
         const first = await round(captured)
+        if (first.observation.contract === "root-v1" && first.observation.outcome === "invalid") {
+          io.stderr(`${first.observation.message}\n`)
+          return 2
+        }
         if (selectedNothing(request.terms, first.rows)) {
           io.stderr(missedSelector(request.terms ?? [], first.queue, first.rows.length))
           return 2
@@ -580,6 +590,11 @@ export async function coreQueueCommand(
               const refreshed = await declaration()
               if (refreshed === undefined) throw new Error(`${targetLabel} no longer carries a .yrd.yml`)
               const next = await round(refreshed)
+              if (next.observation.contract === "root-v1" && next.observation.outcome === "invalid") {
+                ending = 2
+                app.unmount()
+                io.stderr(`${next.observation.message}\n`)
+              }
               entries = next.entries
               journals = next.journals
               return snapshotOf(next)
@@ -627,6 +642,7 @@ export async function coreQueueCommand(
         if (io.color === true) io.stdout("\u001b[H\u001b[2J")
         if (options.json === true) emit(io, true, one.data, "")
         else io.stdout(`${stampRound(await page(one), one.queue, new Date())}\n`)
+        if (one.observation.contract === "root-v1" && one.observation.outcome === "invalid") return 2
         if (selected) {
           const ending = endingCode(one.rows)
           if (ending !== undefined) return ending
@@ -1006,6 +1022,8 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `reaped the worktree ${String(rest.path)} of the run ${String(rest.of)}: ${String(rest.why)}`
     case "pause":
       return `${String(rest.state)} by ${String(rest.by)} since ${String(rest.since)}: ${String(rest.reason)}`
+    case "observation":
+      return String(rest.text ?? rest.message)
     case "merged-direct":
       return directMergeLine({
         commit: String(rest.commit),
@@ -1027,6 +1045,7 @@ function describeRun(
     directMerges: readonly string[]
     log: string
     stopped?: Readonly<{ says: string }>
+    observation: GitObservation
   }>,
 ): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
@@ -1038,6 +1057,8 @@ function describeRun(
       ? `${String(outcome.directMerges.length)} ${outcome.directMerges.length === 1 ? "commit" : "commits"} around the queue at ${outcome.directMerges.map((sha) => sha.slice(0, 12)).join(", ")}`
       : undefined,
     outcome.stopped === undefined ? undefined : `${outcome.stopped.says}; no merge was made`,
+    outcome.observation.message,
+    ...outcome.observation.notices.map((notice) => notice.text),
   ].filter((part): part is string => part !== undefined)
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")} (log ${outcome.log})`
 }
@@ -1185,12 +1206,14 @@ function snapshotOf(
     queues: readonly WatchQueue[]
     pause?: string
     journalAbsent?: string
+    observation: GitObservation
     runner: RunnerFacts
     decisions: readonly RunDecision[]
   }>,
 ): WatchSnapshot {
   return {
     at: new Date(),
+    observation: round.observation,
     decisions: round.decisions,
     queue: round.queue,
     queues: round.queues,
@@ -1249,9 +1272,6 @@ function endingCode(rows: readonly WatchRow[]): YrdCliExitCode | undefined {
 }
 
 /** The URL a remote NAME stands for, which is what the queue calls itself to a stranger (config.ts). */
-async function remoteUrl(git: Git, remote: string): Promise<string> {
-  return (await git(["remote", "get-url", remote])).trim()
-}
 
 /** Preserve the run selected by this row's join, including the collapsed latest lens. */
 function journalFor(item: WatchRow, journals: Journals): JournalRun | undefined {
@@ -1353,12 +1373,28 @@ function checkLines(check: CheckView): readonly string[] {
  * running. Nothing here derives a state: `list()` does, once, for everyone.
  */
 async function readListing(
-  git: Git,
+  git: GitRunner,
   config: QueueConfig,
   workdir: string,
   targetOid: string,
-): Promise<Readonly<{ queue: Awaited<ReturnType<typeof readQueue>>; journals: Journals; all: readonly Row[] }>> {
+): Promise<
+  Readonly<{
+    queue: Awaited<ReturnType<typeof readQueue>>
+    journals: Journals
+    all: readonly Row[]
+    observation: GitObservation
+  }>
+> {
   const queue = await readQueue(git, config.target.remote, config.target.branch, targetOid)
+  const observation = await git.observe({
+    version: 1,
+    root: {
+      remote: await remoteUrl(git, config.target.remote),
+      targetRef: `refs/heads/${config.target.branch}`,
+      targetOid,
+    },
+    ...queue.observation,
+  })
   const journals = readJournals(join(workdir, "logs"))
   const all = list(queue.changes, {
     directMerges: await directMergeCommits(git, config.target.branch, targetOid, queue.changes),
@@ -1368,7 +1404,7 @@ async function readListing(
       queue.changes.map((entry) => entry.change.head),
     ),
   })
-  return { all, journals, queue }
+  return { all, journals, queue, observation }
 }
 
 /** A commit's committer instant; undefined only when the name is absent, while unreadable or malformed commits throw. */

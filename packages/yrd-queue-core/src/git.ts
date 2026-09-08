@@ -20,6 +20,7 @@ import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { createProcess, resolveExecutable, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import type { Git } from "./records.ts"
+import type { QueueObservation } from "./remote.ts"
 
 export type GitSelection = Readonly<{
   executable: string
@@ -34,6 +35,23 @@ const GIT_READINESS_MS = 5_000
 const GIT_ROOT_INVOCATION_MS = 5 * 60_000
 const GIT_CONTROL_BYTES = 64 * 1024
 
+export type GitObservationInput = QueueObservation &
+  Readonly<{
+    version: 1
+    root: Readonly<{ remote: string; targetRef: string; targetOid: string }>
+  }>
+
+export type ObservationNotice = Readonly<{ id: string; text: string }>
+export type GitObservation =
+  | Readonly<{ contract: "native"; message: string; notices: readonly [] }>
+  | Readonly<{
+      contract: "root-v1"
+      version: 1
+      outcome: "observed" | "changed-during-read" | "unavailable-transport" | "invalid"
+      message: string
+      notices: readonly ObservationNotice[]
+    }>
+
 type GitRefusal = Readonly<{ kind: "waiting" | "rejected" | "unjudged"; message: string }>
 export type GitInvocation = Readonly<{
   args: readonly string[]
@@ -43,6 +61,7 @@ export type GitInvocation = Readonly<{
   protocol?: Readonly<{ token: string; ready: boolean; refusal?: GitRefusal }>
   /** An invocation defect, distinct from an ordinary nonzero Git exit. */
   failure?: string
+  observation?: GitObservation
   artifacts?: Readonly<{ stdout: string; stderr: string; complete: boolean }>
 }>
 
@@ -67,6 +86,8 @@ export type GitRunner = Git &
     /** Bounded evidence for the latest settled call, including successful stderr.
      * Run owners use onInvocation to retain every call in their existing log. */
     lastInvocation: GitInvocation | undefined
+    /** One declared observation, through this runner's fixed executable and Process owner. */
+    observe(input: GitObservationInput): Promise<GitObservation>
   }>
 
 /** One machine declaration, resolved before owning-repository operations. */
@@ -202,7 +223,7 @@ export function gitIn(
   const env = options.env === undefined ? undefined : gitEnvironment(options.env)
   const runner = process ?? createProcess({ cwd, env: env ?? gitEnvironment(globalThis.process.env) })
   let lastInvocation: GitInvocation | undefined
-  const git: Git = async (originalArgs, input) => {
+  const invoke = async (originalArgs: readonly string[], input?: string, observation = false) => {
     const args = Object.freeze([...originalArgs])
     let evidence = await invokeGit(
       runner,
@@ -210,7 +231,15 @@ export function gitIn(
       options,
       env,
       input,
+      observation,
     )
+    if (observation && evidence.failure === undefined) {
+      try {
+        evidence = { ...evidence, observation: readObservation(evidence) }
+      } catch (error) {
+        evidence = { ...evidence, failure: `Git observation: ${String(error)}` }
+      }
+    }
     lastInvocation = evidence
     try {
       options.onInvocation?.(evidence)
@@ -222,6 +251,11 @@ export function gitIn(
       evidence = { ...evidence, failure: [evidence.failure, publicationFailure].filter(Boolean).join("; ") }
       lastInvocation = evidence
     }
+    return evidence
+  }
+  const git: Git = async (originalArgs, input) => {
+    const evidence = await invoke(originalArgs, input)
+    const { args } = evidence
     const result = evidence.result
     const refusal = evidence.protocol?.refusal
     if (evidence.failure !== undefined || refusal !== undefined || result === undefined || result.exitCode !== 0) {
@@ -233,7 +267,31 @@ export function gitIn(
     }
     return result.stdout
   }
-  return Object.defineProperty(git, "lastInvocation", { get: () => lastInvocation }) as GitRunner
+  return Object.defineProperties(git, {
+    lastInvocation: { get: () => lastInvocation },
+    observe: {
+      value: async (input: GitObservationInput): Promise<GitObservation> => {
+        if (selection?.contract !== "root-v1") {
+          return {
+            contract: "native",
+            message: `Child observation is not configured for ${input.root.remote}#${input.root.targetRef}; native Git observes the root queue only.`,
+            notices: [],
+          }
+        }
+        const evidence = await invoke(["super", "observe", "--protocol=1"], JSON.stringify(input), true)
+        if (evidence.failure !== undefined || evidence.observation === undefined) {
+          throw new GitExit(
+            evidence.args,
+            cwd,
+            evidence.result?.exitCode ?? -1,
+            evidence.failure ?? "Git observation returned no result",
+            evidence,
+          )
+        }
+        return evidence.observation
+      },
+    },
+  }) as GitRunner
 }
 
 async function invokeGit(
@@ -242,12 +300,13 @@ async function invokeGit(
   options: GitInvocationOptions,
   env: NodeJS.ProcessEnv | undefined,
   input: string | undefined,
+  observation = false,
 ): Promise<GitInvocation> {
   const { args, cwd, selection } = invocation
   const abort = new AbortController()
-  const protocol = selection?.contract === "root-v1" ? new GitProtocol(abort) : undefined
+  const protocol = selection?.contract === "root-v1" && !observation ? new GitProtocol(abort) : undefined
   const timeoutMs =
-    protocol === undefined
+    selection?.contract !== "root-v1"
       ? options.timeoutMs
       : Math.min(options.timeoutMs ?? GIT_ROOT_INVOCATION_MS, GIT_ROOT_INVOCATION_MS)
   let output: GitOutputSink | undefined
@@ -310,6 +369,74 @@ function incompleteGitResult(result: ProcessResult, requireCompleteCapture = tru
     return "Git output capture is incomplete; raw evidence records the retained bytes and any gap"
   }
   return undefined
+}
+
+/** Strictly decode the complete captured stdout; raw stderr remains opaque evidence. */
+function readObservation(invocation: GitInvocation): GitObservation {
+  const result = invocation.result
+  const output = result?.rawOutput?.stdout
+  if (result === undefined || output === undefined || output.head.length + output.tail.length !== output.totalBytes) {
+    throw new Error("complete raw stdout is required")
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true })
+  const value: unknown = JSON.parse(decoder.decode(output.head, { stream: true }) + decoder.decode(output.tail))
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 4 ||
+    !("version" in value) ||
+    value.version !== 1 ||
+    !("outcome" in value) ||
+    !("message" in value) ||
+    typeof value.message !== "string" ||
+    value.message.trim() === "" ||
+    !("notices" in value) ||
+    !Array.isArray(value.notices)
+  )
+    {throw new Error("expected exactly version 1, outcome, a nonempty message and notices")}
+  const outcome = value.outcome
+  const exit =
+    outcome === "observed"
+      ? 0
+      : outcome === "changed-during-read"
+        ? 3
+        : outcome === "unavailable-transport"
+          ? 4
+          : outcome === "invalid"
+            ? 2
+            : undefined
+  if (exit === undefined || result.exitCode !== exit) {
+    throw new Error(`outcome ${String(outcome)} does not match exit ${result.exitCode}`)
+  }
+  if (outcome !== "observed" && value.notices.length !== 0) throw new Error("non-observed outcome carries notices")
+  const notices: ObservationNotice[] = []
+  const ids = new Set<string>()
+  for (const notice of value.notices as unknown[]) {
+    if (
+      typeof notice !== "object" ||
+      notice === null ||
+      Array.isArray(notice) ||
+      Object.keys(notice).length !== 2 ||
+      !("id" in notice) ||
+      typeof notice.id !== "string" ||
+      notice.id.trim() === "" ||
+      !("text" in notice) ||
+      typeof notice.text !== "string" ||
+      notice.text.trim() === "" ||
+      ids.has(notice.id)
+    )
+      {throw new Error("notice requires exactly a unique nonempty id and complete text")}
+    ids.add(notice.id)
+    notices.push({ id: notice.id, text: notice.text })
+  }
+  return {
+    contract: "root-v1",
+    version: 1,
+    outcome: outcome as Extract<GitObservation, { contract: "root-v1" }>["outcome"],
+    message: value.message,
+    notices,
+  }
 }
 
 /** The one incremental parser owns early readiness and final frame validation.

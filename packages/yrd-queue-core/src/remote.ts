@@ -17,10 +17,10 @@
  * (E3; measured 2026-09-02: fetching 7,387 branches cost 17 s a round).
  */
 
-import { changeOf, readRecords, recordFrom, tipRecord, type ChangeRecord, type Git } from "./records.ts"
-import { GitExit, isAncestor } from "./git.ts"
+import { changeOf, readRecords, recordFrom, tipRecord, trailer, type ChangeRecord, type Git } from "./records.ts"
+import { GitExit, isAncestor, configValue } from "./git.ts"
 import { parsePause, type PauseRecord } from "./pause.ts"
-import { changeName, parseChangeRef, pauseRef, type Change } from "./refs.ts"
+import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
 
 /** One change as the queue read sees it. */
@@ -32,6 +32,12 @@ export type QueueEntry = Readonly<{
 
 /** What one reading of the remote yields: every change, and where each stands. */
 export type QueueRead = readonly QueueEntry[]
+
+/** Root-only witnesses from the same advertisement as the queue records. */
+export type QueueObservation = Readonly<{
+  checked: readonly Readonly<{ mergeOid: string; recordRef: string; recordOid: string }>[]
+  fence: Readonly<{ prefixes: readonly string[]; refs: readonly Readonly<{ ref: string; oid: string }>[] }>
+}>
 
 /** One captured queue reading whose exact-object fetch failed. */
 export class CapturedQueueObjectsUnavailable extends Error {
@@ -67,18 +73,26 @@ export async function readQueue(
   remote: string,
   target: string,
   targetSha: string,
-): Promise<Readonly<{ changes: QueueRead; pause: PauseRecord | undefined }>> {
+): Promise<Readonly<{ changes: QueueRead; pause: PauseRecord | undefined; observation: QueueObservation }>> {
   const pause = pauseRef(target)
   // Where every branch and every change stands at the remote, in one reading.
   // Every later operation uses these captured object ids, never a tracking or
   // queue ref that another reader or writer can move underneath it.
   const rows = (await git(["ls-remote", "--refs", remote])).split("\n")
   const heads = new Map<string, string>()
+  const advertised = new Map<string, string>()
+  const prefixes = ["refs/heads/", `${queueRefPrefix(target)}/`]
   const changeRefs: Array<Readonly<{ change: Change; oid: string; ref: string }>> = []
   let pauseSha: string | undefined
   for (const row of rows) {
-    const [sha, ref] = row.trim().split(/\s+/u)
-    if (sha === undefined || ref === undefined) continue
+    if (row === "") continue
+    const match = /^([0-9a-f]{40}(?:[0-9a-f]{24})?)\t(refs\/[^\s]+)$/u.exec(row)
+    const sha = match?.[1]
+    const ref = match?.[2]
+    if (sha === undefined || ref === undefined || advertised.has(ref)) {
+      throw new Error(`${remote}#${target}: invalid or duplicate advertised ref ${JSON.stringify(row)}`)
+    }
+    advertised.set(ref, sha)
     if (ref === `refs/heads/${target}`) {
       continue
     } else if (ref.startsWith("refs/heads/")) {
@@ -128,13 +142,26 @@ export async function readQueue(
   const capturedPause = pauseSha === undefined ? undefined : await parsePause(git, pauseSha, `${remote} ${pause}`)
 
   const entries: QueueEntry[] = []
-  for (const { change: submitted, ref } of changeRefs) {
+  const checked: Array<QueueObservation["checked"][number]> = []
+  for (const { change: submitted, ref, oid } of changeRefs) {
     const branchHead = heads.get(submitted.branch)
     const tip = tips.get(ref)
     // The ls-remote listed this change and the fetch was to bring it: a change
     // gone between the two readings is two moments, not one reading, and is loud.
     if (tip === undefined) {
       throw new Error(`${ref} was at ${remote} but not here after the fetch; read the queue again`)
+    }
+    if (tip.sha !== oid || advertised.get(ref) !== tip.sha) {
+      throw new Error(`${remote}#${target}: record ${ref}@${tip.sha} does not match its captured advertisement ${oid}`)
+    }
+    if (tip.kind === "checked") {
+      const merge = trailer(tip, "Merge")
+      if (merge !== undefined) {
+        if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(merge)) {
+          throw new Error(`${ref}@${tip.sha}: checked Merge must name a full object ID`)
+        }
+        checked.push({ mergeOid: merge, recordRef: ref, recordOid: tip.sha })
+      }
     }
     let isHeadOnTarget = headOnTarget.get(submitted.head)
     if (isHeadOnTarget === undefined) {
@@ -150,7 +177,19 @@ export async function readQueue(
     }
     entries.push({ change, reading: readChange(change) })
   }
-  return { changes: entries, pause: capturedPause }
+  return {
+    changes: entries,
+    pause: capturedPause,
+    observation: {
+      checked,
+      fence: {
+        prefixes,
+        refs: [...advertised]
+          .filter(([ref]) => prefixes.some((prefix) => ref.startsWith(prefix)))
+          .map(([ref, oid]) => ({ ref, oid })),
+      },
+    },
+  }
 }
 
 /**
@@ -213,6 +252,17 @@ export async function remoteNames(git: Git): Promise<readonly string[]> {
     .split("\n")
     .map((name) => name.trim())
     .filter((name) => name !== "")
+}
+
+/** The declared transport address, before Git's transport-only URL rewriting. */
+export async function remoteUrl(git: Git, remote: string): Promise<string> {
+  if (!(await remoteNames(git)).includes(remote)) {
+    if (remote.includes(":") || remote.includes("/")) return remote
+    throw new Error(`queue remote ${remote}: no configured remote or transport address`)
+  }
+  const url = await configValue(git, `remote.${remote}.url`)
+  if (url === undefined) throw new Error(`queue remote ${remote}: expected remote.${remote}.url is missing or empty`)
+  return url
 }
 
 const YRD = "yrd"

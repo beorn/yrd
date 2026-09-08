@@ -70,6 +70,14 @@ export function ListStack({
           {...(snapshot.pause === undefined ? {} : { pause: snapshot.pause })}
         />
       )}
+      {snapshot.observation === undefined ? null : (
+        <Box flexDirection="column" flexShrink={0}>
+          <Text>{snapshot.observation.message}</Text>
+          {snapshot.observation.notices.map((notice) => (
+            <Text key={notice.id}>{notice.text}</Text>
+          ))}
+        </Box>
+      )}
       {children}
       {pills}
       {stats}

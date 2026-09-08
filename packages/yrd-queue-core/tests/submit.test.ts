@@ -11,6 +11,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import {
+  appendRecord,
   changeName,
   changeRef,
   gitIn,
@@ -480,6 +481,12 @@ describe("the queue read is every submitted change at the remote", () => {
 
     expect(first.changes.map((entry) => entry.change.branch).sort()).toEqual(["task/one", "task/two"])
     expect(second).toEqual(first)
+    // D1: observation fences the entire selected advertisement, including
+    // unrelated heads, without fetching their objects into the caller.
+    expect(first.observation.checked).toEqual([])
+    expect(first.observation.fence.prefixes).toEqual(["refs/heads/", `${queueRefPrefix("main")}/`])
+    expect(first.observation.fence.refs.filter(({ ref }) => ref.startsWith("refs/heads/bulk/"))).toHaveLength(200)
+    expect(first.observation.fence.refs).toContainEqual({ ref: "refs/heads/main", oid: w.target })
     expect(await w.git(refs)).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
     // Never fetched means not here at all: the bulk commit's object never arrived.
@@ -519,10 +526,55 @@ describe("the queue read is every submitted change at the remote", () => {
     expect(gone?.reading).toEqual({ reason: "deleted", state: "failed" })
     expect(resumed).toBe(true)
     expect(reading.pause).toEqual(paused)
+    expect(reading.observation.fence.refs).toContainEqual({ ref: pauseRef("main"), oid: paused.sha })
     expect((await readPause(w.git, "origin", "main"))?.kind).toBe("resumed")
     expect(await refAt(w.git, "refs/remotes/origin/task/gone")).toBe(head)
     expect(await w.git(refs)).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("caller-owned fetch evidence\n")
+  })
+
+  // D1: only a current checked Merge is an observation witness; unknown
+  // selected ref names still fence it. Existing E3 cases have no Merge intent.
+  it("binds checked observation witnesses to the captured refs and retires terminal intents", async () => {
+    const w = await world()
+    const head = await branchWithCommit(w, "task/one", "one.txt")
+    const change = { branch: "task/one", head }
+    await submit(w.git, "origin", { ...change, submitter: "@dev/3", target: { remote: "origin", branch: "main" } })
+    const ref = changeRef("main", change)
+    const tree = (await w.git(["rev-parse", `${head}^{tree}`])).trim()
+    const merge = (await w.git(["commit-tree", tree, "-p", w.target, "-p", head, "-m", "candidate"])).trim()
+    const checked = await appendRecord(w.git, "main", {
+      change,
+      kind: "checked",
+      subject: "checked",
+      trailers: [["Merge", merge]],
+    })
+    await w.git(["push", "--quiet", "origin", `${ref}:${ref}`])
+    const unknown = `${queueRefPrefix("main")}/unknown-observation-fence`
+    const excluded = `${queueRefPrefix("elsewhere")}/unknown-observation-fence`
+    await gitIn(w.remote)(["update-ref", unknown, w.target])
+    await gitIn(w.remote)(["update-ref", excluded, w.target])
+    const first = await readQueue(w.git, "origin", "main", w.target)
+    expect(first.observation.checked).toEqual([{ mergeOid: merge, recordRef: ref, recordOid: checked }])
+    expect(first.observation.fence.refs).toContainEqual({ ref, oid: checked })
+    expect(first.observation.fence.refs).toContainEqual({ ref: unknown, oid: w.target })
+    expect(first.observation.fence.refs.some(({ ref }) => ref === excluded)).toBe(false)
+    await appendRecord(w.git, "main", { change, kind: "failed", subject: "retired" })
+    await w.git(["push", "--quiet", "origin", `${ref}:${ref}`])
+    expect((await readQueue(w.git, "origin", "main", w.target)).observation.checked).toEqual([])
+  })
+
+  // D1: a duplicate or malformed advertisement is not a validated reading.
+  it.each(["duplicate", "malformed"])("refuses a %s captured advertisement before fetching", async (kind) => {
+    const w = await world()
+    let fetched = false
+    const git: Git = async (args, input) => {
+      if (args[0] === "fetch") fetched = true
+      const result = await w.git(args, input)
+      return args[0] === "ls-remote" ? `${result}${kind === "duplicate" ? result : "broken refs/heads/main\n"}` : result
+    }
+    await expect(readQueue(git, "origin", "main", w.target)).rejects.toThrow(/invalid or duplicate advertised ref/u)
+    expect(fetched).toBe(false)
   })
 
   it("a captured queue object the server no longer serves refuses the reading with a retry remedy", async () => {

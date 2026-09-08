@@ -58,6 +58,8 @@ import {
   GitExit,
   gitEnvironment,
   gitIn,
+  type GitObservation,
+  type ObservationNotice,
   mergeBase,
   refAt,
   type GitInvocationOptions,
@@ -69,7 +71,7 @@ import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } fro
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
-import { CapturedQueueObjectsUnavailable, readQueue, type QueueEntry, type QueueRead } from "./remote.ts"
+import { CapturedQueueObjectsUnavailable, readQueue, remoteUrl, type QueueEntry, type QueueRead } from "./remote.ts"
 import { inLine, tipOf } from "./state.ts"
 import {
   checkedTree,
@@ -112,6 +114,7 @@ export type QueueRunOptions = Readonly<{
   RingOptions
 
 export type QueueRunOutcome = Readonly<{
+  observation: GitObservation
   exitCode: 0 | 1 | 2
   log: string
   run: string
@@ -131,6 +134,7 @@ export type QueueRunOutcome = Readonly<{
 
 /** Everything one run's steps share. */
 export type Run = Readonly<{
+  observation: GitObservation
   options: QueueRunOptions
   /** Resources borrowed by rings, released on every return or throw. */
   resources: AsyncDisposableStack
@@ -232,6 +236,7 @@ export type Steps = Readonly<{
   ) => Promise<void>
   /** The same, for a commit that went around the queue: there is no change to end. */
   direct: (run: Run, commit: DirectMerge) => Promise<void>
+  observed: (run: Run, notice: ObservationNotice) => Promise<void>
 }>
 
 /** One ring of the onion: the same bundle, with the members it owns wrapped. */
@@ -256,7 +261,8 @@ function gitInvocationOptions(options: QueueRunOptions, log: QueueRunLog): GitIn
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   await using resources = new AsyncDisposableStack()
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
-  const git = options.git ?? gitIn(options.repo, options.process, options.selection, gitInvocationOptions(options, log))
+  const selected = gitIn(options.repo, options.process, options.selection, gitInvocationOptions(options, log))
+  const git = options.git ?? selected
   const hooksPath = join(options.workdir, "hooks-disabled")
   mkdirSync(hooksPath, { recursive: true })
   const hooks = readdirSync(hooksPath).sort()
@@ -293,13 +299,35 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     }
   }
   const queue = await read()
+  const url = await remoteUrl(git, options.target.remote)
+  const name = queueName(options.target, url)
+  // The run row: the gitlink (the target's commit) and the config blob the checks
+  // were read from. Each change CONSIDERED writes its own row with its decision
+  // when the run has made one; a change that ended in an earlier run is history,
+  // and this run claims nothing about it.
+  log.write({
+    base: targetSha,
+    checks: options.checks.map((check) => check.name),
+    config: options.configBlob,
+    kind: "run",
+    gitlink: targetSha,
+    queue: name,
+    target: options.target.branch,
+  })
+
+  const observation = await selected.observe({
+    version: 1,
+    root: { remote: url, targetRef: `refs/heads/${options.target.branch}`, targetOid: targetSha },
+    ...queue.observation,
+  })
   let stopped: Stopped | undefined
   const run: Run = {
+    observation,
     resources,
     git,
     hooksPath,
     log,
-    name: queueName(options.target, await remoteUrl(git, options.target.remote)),
+    name,
     options,
     pause: queue.pause,
     queue: queue.changes,
@@ -321,19 +349,20 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const stuck: string[] = []
 
   const entries = queue.changes
-  // The run row: the gitlink (the target's commit) and the config blob the checks
-  // were read from. Each change CONSIDERED writes its own row with its decision
-  // when the run has made one; a change that ended in an earlier run is history,
-  // and this run claims nothing about it.
+
   log.write({
-    base: targetSha,
-    checks: options.checks.map((check) => check.name),
-    config: options.configBlob,
-    kind: "run",
-    gitlink: targetSha,
-    queue: run.name,
-    target: options.target.branch,
+    kind: "observation",
+    contract: observation.contract,
+    ...(observation.contract === "native" ? {} : { outcome: observation.outcome }),
+    message: observation.message,
   })
+  if (observation.contract === "root-v1" && observation.outcome !== "observed") {
+    return finish(run, observation.outcome === "invalid" ? 2 : 0, { directMerges: [], failed, merged, stuck })
+  }
+  for (const notice of observation.notices) {
+    log.write({ kind: "observation", id: notice.id, text: notice.text })
+    await run.steps.observed(run, notice)
+  }
 
   // The worktrees of runs that are no longer alive, taken down before this run
   // makes any of its own: a killed run removes nothing, so its worktrees stay
@@ -396,7 +425,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
  * wraps in order. Every one of them is reached through `Run.steps` and never by
  * name, so a ring that wraps one sees every call to it.
  */
-const BASE: Steps = { bookkeep, direct, end, ended, judge, land, open, prepare, push }
+const BASE: Steps = { bookkeep, direct, observed, end, ended, judge, land, open, prepare, push }
 
 /** A checked change whose checked record names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
@@ -468,6 +497,7 @@ async function ended(): Promise<void> {}
 
 /** The same, for a commit that went around the queue. */
 async function direct(): Promise<void> {}
+async function observed(): Promise<void> {}
 
 /**
  * There is exactly one exit site (§ The queue run): a crash while judging a
@@ -1581,13 +1611,6 @@ async function fetchRemoteChange(run: Run, ref: string): Promise<string> {
  * remote — the declaration may name a URL outright, and `resolveRemote` has
  * already made it a name by the time a run sees it.
  */
-async function remoteUrl(git: Git, remote: string): Promise<string> {
-  try {
-    return (await git(["remote", "get-url", remote])).trim()
-  } catch {
-    return remote
-  }
-}
 
 /** Where the target and one branch stand at the remote right now. */
 async function remoteHeads(
@@ -1629,6 +1652,7 @@ function finish(
   // for the mechanic; a later process reaps it after the repair.
   if (exitCode !== 2) rmSync(run.worktrees, { force: true, recursive: true })
   return {
+    observation: run.observation,
     base: run.targetSha,
     config: run.options.configBlob,
     exitCode,

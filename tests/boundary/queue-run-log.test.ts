@@ -408,7 +408,11 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       expect(
         records.filter((record) => record.kind !== "git"),
         run.report,
-      ).toEqual([theOne(records, "run")])
+      ).toEqual([theOne(records, "run"), theOne(records, "observation")])
+      expect(theOne(records, "observation"), run.report).toMatchObject({
+        contract: "native",
+        message: expect.stringContaining("native Git observes the root queue only"),
+      })
       const invocations = ofKind(records, "git")
       expect(invocations.length, run.report).toBeGreaterThan(0)
       for (const record of invocations) {

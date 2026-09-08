@@ -23,6 +23,7 @@ import { join } from "node:path"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { prepareWorktree } from "./worktree.ts"
 import { readCheckTrailer } from "./check.ts"
+import type { ObservationNotice } from "./git.ts"
 import type { Ending, Notifier } from "./config.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
 import { INCIDENT_TRAILERS } from "./incident.ts"
@@ -59,6 +60,22 @@ export const withNotify: Ring = (steps) => ({
   ended: async (run, entry, kind, endedRecord, appendTip) => {
     await steps.ended(run, entry, kind, endedRecord, appendTip)
     await told(run, entry, kind, endedRecord, appendTip)
+  },
+
+  observed: async (run, notice) => {
+    await steps.observed(run, notice)
+    for (const { name, delivery, failure } of await notifyAll(run, "observed", { record: "observed", notice })) {
+      run.log.write({
+        kind: "message",
+        says: "observed",
+        id: notice.id,
+        text: notice.text,
+        to: name,
+        delivery,
+        delivered: delivery === "sent",
+        ...(failure === undefined ? {} : { error: failure }),
+      })
+    }
   },
 
   direct: async (run, commit) => {
@@ -263,16 +280,18 @@ async function told(
  * the identity of a message is its change and its record — a resend after a
  * crash hands over the same object.
  */
-export type NotifyRecord = Readonly<{
-  record: Ending
-  change: string
-  submitter?: string
-  issue?: string
-  merge?: string
-  reason?: string
-  log?: string
-  failures?: number
-}>
+export type NotifyRecord =
+  | Readonly<{ record: "observed"; notice: ObservationNotice }>
+  | Readonly<{
+      record: Exclude<Ending, "observed">
+      change: string
+      submitter?: string
+      issue?: string
+      merge?: string
+      reason?: string
+      log?: string
+      failures?: number
+    }>
 
 /** Why a change ended, as its record says it: the check for a fail, the sentence for a stuck. */
 function reasonFor(kind: "failed" | "stuck", ended: ChangeRecord): string {

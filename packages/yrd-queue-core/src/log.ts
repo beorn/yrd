@@ -75,6 +75,7 @@ export const LOG_KINDS = [
   "merged-direct",
   "reap",
   "git",
+  "observation",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]

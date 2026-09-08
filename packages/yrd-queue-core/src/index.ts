@@ -48,7 +48,16 @@ export { incidentFrom, incidentLine, incidentLines, incidentTrailers } from "./i
 export type { Incident } from "./incident.ts"
 export { inLine, nextOwner, readChange, tipOf } from "./state.ts"
 export type { NextOwner } from "./state.ts"
-export { configValue, gitIn, readRemoteCommit, refAt, resolveGitSelection, type GitSelection } from "./git.ts"
+export {
+  configValue,
+  gitIn,
+  readRemoteCommit,
+  refAt,
+  resolveGitSelection,
+  type GitSelection,
+  type GitRunner,
+  type GitObservation,
+} from "./git.ts"
 export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck } from "./check.ts"
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
 export { CHANGE_REF_DIAGNOSTICS, journalKey, readJournals, readRunLog, runId, runStartedAt } from "./log.ts"
@@ -73,3 +82,5 @@ export { directMergeCommits, directMergeLine } from "./direct.ts"
 export { refuseTarget, inspectSubmit, freshnessLine, submit, issueOf } from "./submit.ts"
 export { QueuePaused, QueueNotPaused, activePause, pauseLine, readPause, requireResumed, writePause } from "./pause.ts"
 export type { PauseRecord, PauseKind, WritePause } from "./pause.ts"
+
+export { remoteUrl } from "./remote.ts"

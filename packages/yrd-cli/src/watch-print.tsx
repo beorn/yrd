@@ -94,7 +94,16 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
 /** The page as text: ANSI when `color`, plain otherwise; every row present, none scrolled away. */
 export async function printListing(snapshot: WatchSnapshot, options: ListingPrintOptions): Promise<string> {
   // Tall enough for every row, its separators, the boxes and their borders: nothing is virtualized here.
-  const height = snapshot.rows.length * 2 + 40
+  const observationLines =
+    snapshot.observation === undefined
+      ? []
+      : [snapshot.observation.message, ...snapshot.observation.notices.map((notice) => notice.text)]
+  const height =
+    snapshot.rows.length * 2 +
+    40 +
+    observationLines
+      .flatMap((text) => text.split("\n"))
+      .reduce((lines, text) => lines + Math.ceil(text.length / Math.max(38, options.columns - 2)) + 1, 0)
   const text = await renderString(<ListingPage snapshot={snapshot} options={options} />, {
     height,
     plain: !options.color,

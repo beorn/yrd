@@ -405,6 +405,95 @@ describe("the git runner", () => {
     expect(await selected(["config", "--get", "probe.authority"])).toBe("  kept configuration\nsecond line  \n")
   })
 
+  // D1: the observer has a separate stdin/stdout protocol on the SAME
+  // selected executable. Ordinary Git/refusal tests cannot prove this path.
+  it.each([
+    ["observed", 0, [{ id: "opaque-id", text: "complete producer notice" }]],
+    ["changed-during-read", 3, []],
+    ["unavailable-transport", 4, []],
+    ["invalid", 2, []],
+  ] as const)("observes once with a matching %s envelope and complete raw evidence", async (outcome, exit, notices) => {
+    const root = temporaryRoot("observation")
+    const input = {
+      version: 1 as const,
+      root: { remote: "https://example.test/owner/root", targetRef: "refs/heads/main", targetOid: "a".repeat(40) },
+      checked: [],
+      fence: { prefixes: ["refs/yrd/main/"], refs: [] },
+    }
+    const envelope = { version: 1, outcome, message: "Captured root and selected repositories examined", notices }
+    const executable = protocolExecutable(
+      root,
+      `
+      if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(["super", "observe", "--protocol=1"])) throw new Error("wrong observer argv");
+      if (JSON.stringify(JSON.parse(await Bun.stdin.text())) !== ${JSON.stringify(JSON.stringify(input))}) throw new Error("wrong root input");
+      writeSync(1, ${JSON.stringify(JSON.stringify(envelope))});
+      writeSync(2, Buffer.from([0, 255, 10]));
+      process.exit(${exit});
+    `,
+      true,
+    )
+    await using process = createProcess({ cwd: root })
+    let calls = 0
+    const runner = {
+      run: async (request: Parameters<typeof process.run>[0]) => {
+        calls++
+        expect(request.extraStdio).toBeUndefined()
+        expect(request.timeoutMs).toBe(300_000)
+        return process.run(request)
+      },
+    }
+    const log = openLog(join(root, "logs"))
+    const git = gitIn(
+      root,
+      runner,
+      { executable, contract: "root-v1", scope: "local", origin: "fixture" },
+      {
+        openOutput: log.openGitOutput,
+        onInvocation: log.writeGitInvocation,
+      },
+    )
+    expect(await git.observe(input)).toEqual({ contract: "root-v1", ...envelope })
+    expect(calls).toBe(1)
+    expect(git.lastInvocation?.protocol).toBeUndefined()
+    expect(git.lastInvocation?.artifacts?.complete).toBe(true)
+    expect([...readFileSync(git.lastInvocation!.artifacts!.stderr)]).toEqual([0, 255, 10])
+    const absent = gitIn(root, runner, { executable, contract: "native", scope: "local", origin: "fixture" })
+    expect(await absent.observe(input)).toMatchObject({ contract: "native", notices: [] })
+    expect(calls).toBe(1)
+  })
+
+  it.each([
+    ["mismatched exit", '{"version":1,"outcome":"observed","message":"examined","notices":[]}', 3],
+    [
+      "notices on failure",
+      '{"version":1,"outcome":"invalid","message":"failed","notices":[{"id":"stale","text":"discard"}]}',
+      2,
+    ],
+    ["unknown field", '{"version":1,"outcome":"observed","message":"examined","notices":[],"child":"hidden"}', 0],
+    ["blank explanation", '{"version":1,"outcome":"observed","message":"","notices":[]}', 0],
+    ["unknown version", '{"version":2,"outcome":"observed","message":"examined","notices":[]}', 0],
+    ["invalid UTF-8", "\u00ff", 0],
+  ])("keeps %s observer output invalid with its raw evidence", async (_name, stdout, exit) => {
+    const root = temporaryRoot("invalid-observation")
+    const bytes = stdout === "\u00ff" ? [255] : [...new TextEncoder().encode(stdout)]
+    const executable = protocolExecutable(
+      root,
+      `writeSync(1, Buffer.from(${JSON.stringify(bytes)})); process.exit(${exit});`,
+      true,
+    )
+    const git = gitIn(root, undefined, { executable, contract: "root-v1", scope: "local", origin: "fixture" })
+    await expect(
+      git.observe({
+        version: 1,
+        root: { remote: "r", targetRef: "refs/heads/main", targetOid: "a".repeat(40) },
+        checked: [],
+        fence: { prefixes: [], refs: [] },
+      }),
+    ).rejects.toThrow(/observation/u)
+    expect(git.lastInvocation?.failure).toContain("observation")
+    expect(git.lastInvocation?.result?.rawOutput?.stdout.totalBytes).toBe(bytes.length)
+  })
+
   it("never recurses a fetch or a push into submodules, whatever the repository's config says", async () => {
     // A superproject with one submodule whose remote is unreachable, under
     // `submodule.recurse=true` as the root's checkout has it. A plain fetch
@@ -465,11 +554,16 @@ describe("the git runner", () => {
 })
 
 /** A selected executable testing the transport, not a substitute Git store. */
-function protocolExecutable(root: string, body: string): string {
+function protocolExecutable(root: string, body: string, observation = false): string {
   const path = join(root, "selected-producer")
   writeFileSync(
     path,
-    `#!/usr/bin/env bun
+    observation
+      ? `#!/usr/bin/env bun
+import {writeSync} from "node:fs";
+${body}
+`
+      : `#!/usr/bin/env bun
 import {writeSync,closeSync} from "node:fs";
 if (process.argv[2] !== "--protocol-fd=3") { process.stderr.write("protocol option absent"); process.exit(91); }
 const reader = Bun.file(3).stream().getReader();

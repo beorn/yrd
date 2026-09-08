@@ -11,9 +11,9 @@
  *           reading the live table
  */
 
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { gitIn, readJournals, readRunLog, submit, type Git, type LogRecord } from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
@@ -24,8 +24,20 @@ import { runShortName } from "../src/watch-format.ts"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
 import type { WatchRow } from "../src/watch-rows.ts"
 
-type PaneProps = Readonly<{ snapshot: WatchSnapshot; open?: (row: WatchRow) => Promise<ChangeDetail> }>
-const rendered: { snapshot: WatchSnapshot | undefined; open: PaneProps["open"] } = vi.hoisted(() => ({
+type PaneProps = Readonly<{
+  snapshot: WatchSnapshot
+  open?: (row: WatchRow) => Promise<ChangeDetail>
+  load?: () => Promise<WatchSnapshot>
+}>
+const rendered: {
+  snapshot: WatchSnapshot | undefined
+  open: PaneProps["open"]
+  load: PaneProps["load"]
+  onWait?: () => Promise<void>
+  unmount: ReturnType<typeof vi.fn>
+} = vi.hoisted(() => ({
+  load: undefined,
+  unmount: vi.fn(),
   open: undefined,
   snapshot: undefined,
 }))
@@ -33,7 +45,13 @@ vi.mock("silvery/runtime", () => ({
   run: async (element: Readonly<{ props: PaneProps }>) => {
     rendered.snapshot = element.props.snapshot
     rendered.open = element.props.open
-    return { waitUntilExit: async () => {} }
+    rendered.load = element.props.load
+    return {
+      unmount: rendered.unmount,
+      waitUntilExit: async () => {
+        await rendered.onWait?.()
+      },
+    }
   },
 }))
 
@@ -125,6 +143,98 @@ async function drain(w: World): Promise<void> {
 }
 
 describe("yrd watch, the ending's exit code", () => {
+  // The producer owns its protocol; ordinary Git calls still use the real
+  // selected executable. These defects cross run creation and the watch lifecycle.
+  it("a malformed observation cannot poison the next watch with a headerless run journal", async () => {
+    const w = await world()
+    const executable = join(w.workdir, "malformed-observer.sh")
+    const selected = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin/git-super")
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+if [ "$1" = super ] && [ "$2" = observe ]; then printf 'malformed'; exit 0; fi
+exec '${selected.replaceAll("'", "'\\''")}' "$@"
+`,
+    )
+    chmodSync(executable, 0o755)
+    const ran = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        ran.io,
+        { command: "run" },
+        {
+          json: true,
+          workdir: w.workdir,
+          selection: { executable, contract: "root-v1", scope: "local", origin: "fixture" },
+        },
+      ),
+    ).toBe(2)
+    expect(ran.stdout()).toContain("observation")
+    const watched = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        watched.io,
+        { command: "list" },
+        {
+          workdir: w.workdir,
+        },
+      ),
+    ).toBe(0)
+    expect(watched.stdout()).toContain("main")
+  })
+
+  it("an invalid observation on a later interactive refresh ends the watch with exit 2", async () => {
+    const w = await world()
+    const executable = join(w.workdir, "changing-observer.sh")
+    const selected = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin/git-super")
+    const state = join(w.workdir, "observed")
+    const first = JSON.stringify({ version: 1, outcome: "observed", message: "fixture first read", notices: [] })
+    const next = JSON.stringify({
+      version: 1,
+      outcome: "invalid",
+      message: "fixture observation is invalid",
+      notices: [],
+    })
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+if [ "$1" = super ] && [ "$2" = observe ]; then
+  if [ -f '${state}' ]; then printf '%s' '${next}'; exit 2; fi
+  touch '${state}'; printf '%s' '${first}'; exit 0
+fi
+exec '${selected.replaceAll("'", "'\\''")}' "$@"
+`,
+    )
+    chmodSync(executable, 0o755)
+    rendered.unmount.mockClear()
+    rendered.onWait = async () => {
+      expect(rendered.snapshot?.observation).toMatchObject({ outcome: "observed" })
+      if (rendered.load === undefined) throw new Error("the watch did not supply its refresh loader")
+      await rendered.load()
+      expect(rendered.unmount).toHaveBeenCalledTimes(1)
+    }
+    const watched = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          watched.io,
+          { command: "list", watch: true },
+          {
+            interactive: true,
+            workdir: w.workdir,
+            selection: { executable, contract: "root-v1", scope: "local", origin: "fixture" },
+          },
+        ),
+      ).toBe(2)
+      expect(watched.stderr()).toContain("fixture observation is invalid")
+    } finally {
+      rendered.onWait = undefined
+    }
+  })
+
   it("says whether a running check's log is not written, empty, or readable in plain show", async () => {
     // 24212: preserving the journal's path alone advertised future output as
     // readable now. Exercise the CLI while the check has no ending record.

@@ -34,6 +34,9 @@ describe("the queue declaration grammar", () => {
         "  - supervisor:",
         "      on: stuck",
         "      run: bun tools/notify.ts --to supervisor",
+        "  - observer:",
+        "      on: observed",
+        "      run: bun tools/observe.ts",
         "  - everyone:",
         "      run: bun tools/notify.ts --to everyone",
         "",
@@ -64,6 +67,7 @@ describe("the queue declaration grammar", () => {
       notify: [
         { name: "submitter", on: ["merged", "failed"], run: "bun tools/notify.ts --to submitter" },
         { name: "supervisor", on: ["stuck"], run: "bun tools/notify.ts --to supervisor" },
+        { name: "observer", on: ["observed"], run: "bun tools/observe.ts" },
         {
           name: "everyone",
           on: ["merged", "failed", "stuck", "merged-direct"],

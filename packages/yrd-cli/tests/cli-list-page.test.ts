@@ -88,6 +88,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     const plain = await yrd(work, { color: false }, "list")
     expect(plain.exitCode, plain.report).toBe(0)
     expect(plain.stdout, plain.report).not.toContain(ESC)
+    expect(plain.stdout, plain.report).toContain("Child observation is not configured")
     const lines = plain.stdout.split("\n")
     // The queue's name first, then the identity pills, then (past the journal
     // notice a machine that runs no queue prints, G5) the header the pane draws.
@@ -144,7 +145,8 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(colored.stdout).toBe(plain.stdout)
     expect(plain.stdout).not.toContain(ESC)
     const document = JSON.parse(plain.stdout) as Record<string, unknown>
-    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "pause"])
+    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "pause"])
+    expect((document as { observation: unknown }).observation).toMatchObject({ contract: "native", notices: [] })
     const [row] = document["changes"] as readonly Record<string, unknown>[]
     expect(row).toMatchObject({ branch: "task/one", position: 1, state: "queued", submitter: "@dev/10" })
     // The bare-line era's row fields, all still there under their names.
@@ -235,7 +237,7 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     // The promise `--json` keeps for every consumer: a parseable document, the
     // empty selection included. This is the assertion that reported the last
     // breakage of it, so it is made on BOTH spellings rather than one.
-    expect(Object.keys(documentOf(flagged)).sort()).toEqual(["changes", "journal", "pause"])
+    expect(Object.keys(documentOf(flagged)).sort()).toEqual(["changes", "journal", "observation", "pause"])
     expect(documentOf(flagged)["changes"], flagged.report).toEqual([])
     expect(documentOf(positional)["changes"], positional.report).toEqual([])
     // And 22301's own specimen, the other way round: a non-matching state must

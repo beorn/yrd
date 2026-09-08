@@ -60,7 +60,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import type { Row } from "@yrd/queue-core"
+import type { GitObservation, Row } from "@yrd/queue-core"
 import { NowProvider, useMinute } from "./watch-clock.ts"
 import { clock, firstLine, runShortName } from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
@@ -84,6 +84,8 @@ import type { RunDecision } from "./watch-stats.ts"
 
 /** Everything one reading of the queue put on screen. The pane renders it and reads nothing itself. */
 export type WatchSnapshot = Readonly<{
+  /** Current generic observation; no result survives a failed refresh. */
+  observation?: GitObservation
   /** The queue's own name, as a stranger would spell it (`github.com/beorn/hh#main`). */
   queue: string
   /** The queues on this screen: pre-M8 exactly one. */
@@ -224,6 +226,7 @@ export function WatchPane({
             if (scope.signal.aborted) return
             // Said, not fatal: the table keeps the last reading, the footer
             // names what failed and when, and the next round tries again.
+            setShown(({ observation: _stale, ...current }) => current)
             setReadFailure({ at: new Date(), message: firstLine(error) })
           }
         }
