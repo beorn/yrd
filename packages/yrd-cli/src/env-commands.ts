@@ -53,8 +53,9 @@ export type EnvRow = Readonly<{ name: string; path: string; branch?: string; hea
 function requireRepository(io: YrdCliIO): string {
   const cwd = io.cwd ?? process.cwd()
   const root = findRepository(cwd)
-  if (root === undefined)
-    {throw new Error(`yrd env needs a repository: no Git clone contains ${cwd}; run it inside a clone`)}
+  if (root === undefined) {
+    throw new Error(`yrd env needs a repository: no Git clone contains ${cwd}; run it inside a clone`)
+  }
   return root
 }
 
@@ -112,8 +113,9 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   } else {
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
     const result = await workspace.provision({ bay: name, name, branch, base })
-    if (result.conclusion !== "success")
-      {throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)}
+    if (result.conclusion !== "success") {
+      throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
+    }
     provisioned = result.output
   }
   const { path, headSha, baseSha } = provisioned
@@ -200,27 +202,33 @@ export async function closeEnvironment(
   try {
     path = realpathSync(requested)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR")
-      {throw error}
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR") {
+      throw error
+    }
     throw new Error(
       `environment ${requested} is not registered at an existing path; inspect git worktree list before retrying`,
       { cause: error },
     )
   }
   const registered = (await registeredWorktrees(git)).find((entry) => resolve(entry.path) === path)
-  if (registered === undefined)
-    {throw new Error(`environment ${requested} is not registered in ${root}; inspect git worktree list`)}
+  if (registered === undefined) {
+    throw new Error(`environment ${requested} is not registered in ${root}; inspect git worktree list`)
+  }
   const contained = roots.some((directory) => {
     if (!existsSync(directory)) return false
     const within = relative(realpathSync(directory), path)
     return within !== "" && within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within)
   })
-  if (!contained)
-    {throw new Error(`environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was removed. Retire a worktree outside these roots with your repository's own worktree cleanup (git worktree remove), not yrd env close`)}
-  if (registered.locked !== undefined)
-    {throw new Error(
+  if (!contained) {
+    throw new Error(
+      `environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was removed. Retire a worktree outside these roots with your repository's own worktree cleanup (git worktree remove), not yrd env close`,
+    )
+  }
+  if (registered.locked !== undefined) {
+    throw new Error(
       `environment ${path} is locked${registered.locked === "" ? "" : `: ${registered.locked}`}; resolve its owner before closing it`,
-    )}
+    )
+  }
   const treeGit = gitIn(path, process)
   await requireClean(treeGit, path)
   const commit = (await treeGit(["rev-parse", "HEAD"])).trim()

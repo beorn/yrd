@@ -108,7 +108,13 @@ describe("a queue is the selected origin branch carrying config", () => {
       paused.stderr(),
     ).toBe(0)
     expect(JSON.parse(paused.stdout())).toMatchObject({ kind: "paused", reason: "checking release" })
-    const owned = join(repo, "relative-state", "local", `${join(dirname(repo), "remote.git").slice(1)}#release%2F1.x`, "repo")
+    const owned = join(
+      repo,
+      "relative-state",
+      "local",
+      `${join(dirname(repo), "remote.git").slice(1)}#release%2F1.x`,
+      "repo",
+    )
     expect(existsSync(owned)).toBe(true)
     expect(await git(refs)).toBe(before)
     expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
