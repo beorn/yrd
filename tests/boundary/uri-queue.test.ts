@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 import { parseQueueAddress, queueDirectory } from "../../packages/yrd-cli/src/address.ts"
 import { git } from "./fixture.ts"
+import { installSelectedGit } from "../../packages/yrd-cli/tests/support/selected-git.ts"
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..")
 const roots: string[] = []
@@ -50,6 +51,22 @@ describe("a queue started by address on a host with no checkout", () => {
     await git(author, "add", "change.txt", "notify.sh")
     await git(author, "commit", "--quiet", "-m", "change from uri")
 
+    // T1: the selected executable must own URI resolution and clone creation,
+    // before the queue core runs. Native-only outcomes missed that early escape.
+    const selected = await installSelectedGit(author)
+    const selectionConfig = join(root, "selected.gitconfig")
+    await git(
+      root,
+      "config",
+      "--file",
+      selectionConfig,
+      "yrd.git",
+      JSON.stringify({ executable: selected.executable, contract: "native" }),
+    )
+
+    await git(root, "config", "--file", selectionConfig, "user.name", "URI Queue Test")
+    await git(root, "config", "--file", selectionConfig, "user.email", "uri-queue@example.invalid")
+
     const submit = Bun.spawn(
       ["bun", join(REPO_ROOT, "bin/yrd.ts"), "submit", "task/uri", "--queue", "main", "--notify", "@dev/3", "--json"],
       {
@@ -86,6 +103,7 @@ describe("a queue started by address on a host with no checkout", () => {
           env: {
             ...process.env,
             PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
+            GIT_CONFIG_GLOBAL: selectionConfig,
             GIT_CONFIG_COUNT: "1",
             GIT_CONFIG_KEY_0: "yrd.workdir",
             GIT_CONFIG_VALUE_0: workdir,
@@ -108,6 +126,7 @@ describe("a queue started by address on a host with no checkout", () => {
       env: {
         ...process.env,
         PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
+        GIT_CONFIG_GLOBAL: selectionConfig,
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "yrd.workdir",
         GIT_CONFIG_VALUE_0: workdir,
@@ -125,6 +144,10 @@ describe("a queue started by address on a host with no checkout", () => {
     expect(exitCode, `${stderr}\n${stdout}\n${readFileSync(result.log, "utf8")}`).toBe(0)
     const owned = queueDirectory(workdir, parseQueueAddress(address))
     expect(existsSync(owned)).toBe(true)
+    const selectedCalls = selected.readCalls()
+    expect(selectedCalls.some(({ cwd, args }) => cwd === dirname(owned) && args[0] === "clone")).toBe(true)
+    expect(selectedCalls.some(({ cwd, args }) => cwd === owned && args[0] === "remote")).toBe(true)
+    expect(selectedCalls.some(({ cwd, args }) => cwd === author && args[0] === "push")).toBe(true)
     expect(result, `${stderr}\n${readFileSync(result.log, "utf8")}`).toMatchObject({
       exitCode: 0,
       merged: ["task/uri"],

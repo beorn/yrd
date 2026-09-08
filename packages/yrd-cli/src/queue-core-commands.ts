@@ -33,6 +33,7 @@ import {
   journalKey,
   list,
   queueName,
+  resolveGitSelection,
   queueRun,
   readConfig,
   readJournals,
@@ -59,6 +60,7 @@ import {
   type Journals,
   type JournalRun,
   type Git,
+  type GitSelection,
   type LogRecord,
   type QueueConfig,
   type QueueRunOutcome,
@@ -193,6 +195,8 @@ export async function coreQueueCommand(
     /** Explicit submission destination; the author checkout remains the source. */
     remote?: string
     log?: ConditionalLogger
+    /** Fixed from the command's first queue read through every service round. */
+    selection?: GitSelection
     /** A terminal with a keyboard on the other end: the watch draws its pane instead of printing rounds. */
     interactive?: boolean
   }> = {},
@@ -205,7 +209,8 @@ export async function coreQueueCommand(
     )
     return 2
   }
-  const git = gitIn(repo)
+  const selection = options.selection ?? (await resolveGitSelection(repo, { env: options.env }))
+  const git = gitIn(repo, undefined, selection, { env: options.env })
   const log = options.log?.child("queue")
   const remote = options.remote ?? "origin"
   const queue = options.queue ?? (await originHead(git))
@@ -253,7 +258,7 @@ export async function coreQueueCommand(
     let outcome: QueueRunOutcome
     try {
       outcome = await queueRun({
-        ...runOptions(repo, declared, workdir, options.env, options.log),
+        ...runOptions(repo, declared, workdir, selection, options.env, options.log),
         foreground: request.command === "run",
       })
     } catch (error) {
@@ -368,7 +373,13 @@ export async function coreQueueCommand(
           // An explicitly supplied gitlink has no physical checkout to await.
           if (gitlink.checkout === undefined) break
           const projected = await gitlinkAt(git, "HEAD", gitlink.path)
-          const checkout = (await gitIn(gitlink.checkout)(["rev-parse", "--verify", "HEAD^{commit}"])).trim()
+          const checkout = (
+            await gitIn(gitlink.checkout, undefined, selection, { env: options.env })([
+              "rev-parse",
+              "--verify",
+              "HEAD^{commit}",
+            ])
+          ).trim()
           if (projected === now && checkout === now) break
           const state = `${now}:${projected}:${checkout}`
           if (state !== announced) {
@@ -688,6 +699,8 @@ export async function coreQueueCommand(
       // declaration's setup run once, and told the same three values.
       const prepared = await prepareWorktree(git, repo, head, join(worktrees, "check", head.slice(0, 12)), {
         env: options.env,
+        selection,
+        gitOptions: { env: options.env },
         plumbing: options.log?.child("worktree"),
         ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
         targetSha: captured.oid,
@@ -904,6 +917,7 @@ function runOptions(
   repo: string,
   declared: Readonly<{ config: QueueConfig; oid: string }>,
   workdir: string,
+  selection: GitSelection,
   env?: NodeJS.ProcessEnv,
   log?: ConditionalLogger,
 ) {
@@ -912,6 +926,7 @@ function runOptions(
     checks: config.checks,
     configBlob: config.blob,
     env,
+    selection,
     notify: config.notify,
     // git-super narrates which submodule it borrowed and how long each phase
     // took; that is trace-level plumbing, so it gets a logger only at trace.

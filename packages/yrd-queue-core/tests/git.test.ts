@@ -133,20 +133,27 @@ describe("the git runner", () => {
 
   // D3/T2/T3: the native exit tests have no separate descriptor and cannot
   // distinguish a semantic refusal or malformed protocol from native exit 1.
+  // A successful ref read with no object is also an error, never absence;
+  // only a clean exit 1 with both streams empty establishes absence. The
+  // diagnostic-output row previously hid a corrupt ref behind the same exit.
   it.each([
-    ["success", 0, undefined],
-    ["native failure", 1, undefined],
-    ["waiting", 1, "waiting"],
-    ["rejected", 1, "rejected"],
-    ["unjudged", 1, "unjudged"],
-  ] as const)("retains invocation evidence for a selected producer: %s", async (_name, exit, refusal) => {
+    ["success", 0, undefined, false],
+    ["empty ref", 0, undefined, true],
+    ["native absence", 1, undefined, true],
+    ["native failure", 1, undefined, false],
+    ["waiting", 1, "waiting", false],
+    ["rejected", 1, "rejected", false],
+    ["unjudged", 1, "unjudged", false],
+  ] as const)("retains invocation evidence for a selected producer: %s", async (_name, exit, refusal, empty) => {
     const root = temporaryRoot("protocol-result")
+    const stdout = empty ? [] : [111, 117, 116, 0, 255, 10]
+    const stderr = empty ? [] : [101, 114, 114, 0, 254, 10]
     const executable = protocolExecutable(
       root,
       `
       frame({version:1, token, ready:true});
-      writeSync(1, Buffer.from([111,117,116,0,255,10]));
-      writeSync(2, Buffer.from([101,114,114,0,254,10]));
+      writeSync(1, Buffer.from(${JSON.stringify(stdout)}));
+      writeSync(2, Buffer.from(${JSON.stringify(stderr)}));
       ${refusal === undefined ? "" : `frame({version:1, token, refusal:${JSON.stringify(refusal)}, message:"  complete\\nhuman text  "});`}
       closeSync(3); process.exit(${exit});
     `,
@@ -154,11 +161,11 @@ describe("the git runner", () => {
     await using runner = createProcess({ cwd: root })
     const git = gitIn(root, runner, { executable, contract: "root-v1", scope: "local", origin: "file:.git/config" })
     const outcome = await git(["status"], "ordinary input").catch((error: unknown) => error)
-    if (exit === 0) expect(outcome).toBe("out\0�\n")
+    if (exit === 0) expect(outcome).toBe(empty ? "" : "out\0�\n")
     else expect(outcome).toBeInstanceOf(gitRunner.GitExit)
     const evidence = git.lastInvocation
-    expect(Array.from(evidence?.result?.rawOutput?.stdout.head ?? [])).toEqual([111, 117, 116, 0, 255, 10])
-    expect(Array.from(evidence?.result?.rawOutput?.stderr.head ?? [])).toEqual([101, 114, 114, 0, 254, 10])
+    expect(Array.from(evidence?.result?.rawOutput?.stdout.head ?? [])).toEqual(stdout)
+    expect(Array.from(evidence?.result?.rawOutput?.stderr.head ?? [])).toEqual(stderr)
     expect(evidence?.protocol).toMatchObject({ ready: true })
     expect(evidence?.failure).toBeUndefined()
     expect(evidence?.protocol?.refusal?.kind).toBe(refusal)
@@ -166,9 +173,17 @@ describe("the git runner", () => {
     expect(evidence?.selection?.executable).toBe(executable)
     expect(evidence?.result?.extraStdio?.eof).toBe(true)
     if (outcome instanceof gitRunner.GitExit) expect(outcome.evidence).toBe(evidence)
-    // A clean native exit 1 remains absence; generic refusals must reach the caller.
-    if (refusal === undefined && exit === 1) await expect(gitRunner.refAt(git, "missing")).resolves.toBeUndefined()
+    // Diagnostics and generic refusals must reach the caller, even with exit 1.
+    if (refusal === undefined && exit === 1) {
+      if (empty) await expect(gitRunner.refAt(git, "missing")).resolves.toBeUndefined()
+      else await expect(gitRunner.refAt(git, "missing")).rejects.toThrow(/err/u)
+    }
     if (refusal !== undefined) await expect(gitRunner.refAt(git, "missing")).rejects.toThrow(/complete\nhuman text/u)
+    if (empty && exit === 0) {
+      await expect(gitRunner.refAt(git, "refs/heads/missing")).rejects.toThrow(
+        /rev-parse --verify --quiet refs\/heads\/missing\^\{commit\}.*empty/u,
+      )
+    }
   })
 
   it.each([

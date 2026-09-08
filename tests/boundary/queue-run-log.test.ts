@@ -412,8 +412,12 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
       const invocations = ofKind(records, "git")
       expect(invocations.length, run.report).toBeGreaterThan(0)
       for (const record of invocations) {
-        expect(record.executable, run.report).toBe("git")
-        expect(record.contract, run.report).toBe("native")
+        expect(record, run.report).toMatchObject({
+          executable: Bun.which("git"),
+          contract: "native",
+          scope: "default",
+          origin: "yrd.git absent",
+        })
         expect(record.complete, run.report).toBe(true)
         if (typeof record.evidence !== "string") throw new Error("Git record is missing its evidence path")
         const evidence = JSON.parse(await readFile(record.evidence, "utf8"))
@@ -421,6 +425,12 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
           args: record.args,
           cwd: record.cwd,
           result: { exitCode: record.exit },
+          selection: {
+            executable: record.executable,
+            contract: record.contract,
+            scope: record.scope,
+            origin: record.origin,
+          },
         })
       }
     })

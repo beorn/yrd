@@ -22,6 +22,10 @@ async function run(
       GIT_DIR: "/definitely/not/the/yrd/git-dir",
       GIT_PREFIX: "caller/prefix/that/must/not-leak/",
       NODE_ENV: "production",
+      // Version owns source metadata only: queue selection would reject this.
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "yrd.git",
+      GIT_CONFIG_VALUE_0: "malformed selection",
       ...environment,
     },
     stdout: "pipe",
@@ -54,7 +58,14 @@ describe("version CLI", () => {
     `
     const result = spawnSync(process.execPath, ["-e", script], {
       cwd: tmpdir(),
-      env: { ...process.env, NO_COLOR: "1" },
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+        // Help and parse errors must not enter queue selection either.
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "yrd.git",
+        GIT_CONFIG_VALUE_0: "malformed selection",
+      },
       encoding: "utf8",
       timeout: 8_000,
       maxBuffer: 4 * size,

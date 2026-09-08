@@ -128,6 +128,7 @@ function buildProgram(
         json: options.json,
         env,
         log: log(),
+        selection: location.selection,
         queue: location.queue,
         workdir: location.workdir,
         remote: location.remote,
@@ -167,7 +168,14 @@ function buildProgram(
           location.repo,
           io,
           { by: resolveSubmitter(declared.notify, env), command: "pause", reason: declared.reason },
-          { json: declared.json, env, log: log(), queue: location.queue, workdir: location.workdir },
+          {
+            json: declared.json,
+            env,
+            log: log(),
+            selection: location.selection,
+            queue: location.queue,
+            workdir: location.workdir,
+          },
         ),
       )
     })
@@ -190,7 +198,14 @@ function buildProgram(
             command: "resume",
             ...(declared.reason === undefined ? {} : { reason: declared.reason }),
           },
-          { json: declared.json, env, log: log(), queue: location.queue, workdir: location.workdir },
+          {
+            json: declared.json,
+            env,
+            log: log(),
+            selection: location.selection,
+            queue: location.queue,
+            workdir: location.workdir,
+          },
         ),
       )
     })
@@ -206,7 +221,7 @@ function buildProgram(
         location.repo,
         io,
         { command: "run" },
-        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
+        { json, env, log: log(), selection: location.selection, queue: location.queue, workdir: location.workdir },
       )
       setExit(taken)
     })
@@ -223,7 +238,7 @@ function buildProgram(
         location.repo,
         io,
         { command: "up", ...(interval === undefined ? {} : { intervalSeconds: interval }) },
-        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
+        { json, env, log: log(), selection: location.selection, queue: location.queue, workdir: location.workdir },
       )
       setExit(taken)
     })
@@ -287,6 +302,7 @@ function buildProgram(
       io,
       listRequest(filters ?? [], { interval, latest, status, watch }),
       {
+        selection: location.selection,
         queue: location.queue,
         workdir: location.workdir,
         json,
@@ -334,7 +350,7 @@ function buildProgram(
         location.repo,
         io,
         { command: "stats", ...(since === undefined ? {} : { since }), ...(by === undefined ? {} : { by }) },
-        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
+        { json, env, log: log(), selection: location.selection, queue: location.queue, workdir: location.workdir },
       )
       setExit(taken)
     })
@@ -350,7 +366,7 @@ function buildProgram(
         location.repo,
         io,
         { branch: branch as string, command: "show" },
-        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
+        { json, env, log: log(), selection: location.selection, queue: location.queue, workdir: location.workdir },
       )
       setExit(taken)
     })

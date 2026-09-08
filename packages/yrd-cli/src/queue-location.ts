@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { configValue, gitIn, queueName } from "@yrd/queue-core"
+import { configValue, gitIn, queueName, resolveGitSelection, type GitSelection } from "@yrd/queue-core"
 import { parseQueueAddress, queueDirectory, queueRoot, type QueueAddress } from "./address.ts"
 import { repositoryHere } from "./declaration.ts"
 
@@ -9,6 +9,8 @@ export type QueueLocation = Readonly<{
   repo: string
   queue: string | undefined
   workdir: string
+  /** One immutable selection, resolved before address reads and retained by the queue command. */
+  selection: GitSelection
   /** Submission retains its author checkout and sends to this transport. */
   remote?: string
   address?: QueueAddress
@@ -23,19 +25,32 @@ export async function originHead(git: ReturnType<typeof gitIn>, remote = "origin
   return branch
 }
 
-async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
-  const declared = await configValue(gitIn(cwd), "yrd.workdir")
+async function hostWorkdir(cwd: string, env: NodeJS.ProcessEnv, git: ReturnType<typeof gitIn>): Promise<string> {
+  const declared = await configValue(git, "yrd.workdir")
   if (declared !== undefined) return resolve(repositoryHere(cwd) ?? cwd, declared)
   return join(env.XDG_STATE_HOME ?? join(env.HOME ?? homedir(), ".local", "state"), "yrd")
 }
 
-async function ensureOwnedClone(root: string, address: QueueAddress): Promise<string> {
+async function ensureOwnedClone(
+  root: string,
+  address: QueueAddress,
+  selection: GitSelection,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
   const repo = queueDirectory(root, address)
   if (!existsSync(repo)) {
     mkdirSync(dirname(repo), { recursive: true })
-    await gitIn(dirname(repo))(["clone", "--quiet", "--origin", "origin", "--no-checkout", address.transport, repo])
+    await gitIn(dirname(repo), undefined, selection, { env })([
+      "clone",
+      "--quiet",
+      "--origin",
+      "origin",
+      "--no-checkout",
+      address.transport,
+      repo,
+    ])
   }
-  const git = gitIn(repo)
+  const git = gitIn(repo, undefined, selection, { env })
   const actual = (await git(["remote", "get-url", "origin"])).trim()
   if (actual !== address.transport) {
     throw new Error(
@@ -58,7 +73,8 @@ export async function resolveQueueLocation(
       `${context === "submit" ? "submit" : "queue list/show/watch"} at ${cwd} needs a repository; run inside a clone${context === "submit" ? " containing the branch to submit" : " or the queue-owned clone"}`,
     )
   }
-  const git = gitIn(inside ?? cwd)
+  const selection = await resolveGitSelection(cwd, { env })
+  const git = gitIn(inside ?? cwd, undefined, selection, { env })
   const addressed =
     value !== undefined &&
     (value.includes("#") || value.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value))
@@ -83,16 +99,23 @@ export async function resolveQueueLocation(
     }
     address = parseQueueAddress(selected)
   }
-  const host = await hostWorkdir(cwd, env)
+  const host = await hostWorkdir(cwd, env, git)
   const workdir = queueRoot(host, address)
   if (context !== "queue" && inside !== undefined) {
     return {
       address,
+      selection,
       queue: address.queue,
       repo: inside,
       remote: context === "submit" && addressed ? address.transport : undefined,
       workdir,
     }
   }
-  return { address, queue: address.queue, repo: await ensureOwnedClone(host, address), workdir }
+  return {
+    address,
+    selection,
+    queue: address.queue,
+    repo: await ensureOwnedClone(host, address, selection, env),
+    workdir,
+  }
 }

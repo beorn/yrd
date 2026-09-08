@@ -498,9 +498,11 @@ export async function refAt(
   try {
     const name = kind === "commit" ? `${ref}^{commit}` : ref
     const out = (await git(["rev-parse", "--verify", "--quiet", name])).trim()
-    return out === "" ? undefined : out
+    if (out === "") throw new Error(`git rev-parse --verify --quiet ${name} succeeded with empty output`)
+    return out
   } catch (error) {
-    if (isExit(error, 1)) return undefined
+    const result = error instanceof GitExit ? error.evidence?.result : undefined
+    if (isExit(error, 1) && result?.stdout === "" && result.stderr === "") return undefined
     throw error
   }
 }
