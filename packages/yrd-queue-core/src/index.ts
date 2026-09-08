@@ -22,7 +22,16 @@
  * their path, not this one.
  */
 
-export { CHANGES, changeName, changeRef, parseChangeName, parseChangeRef, refOfChange } from "./refs.ts"
+export {
+  changeName,
+  changeRef,
+  encodeQueueComponent,
+  parseChangeName,
+  parseChangeRef,
+  pauseRef,
+  queueRefPrefix,
+  refOfChange,
+} from "./refs.ts"
 export type { Change } from "./refs.ts"
 export {
   appendRecord,
@@ -44,7 +53,15 @@ export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck } from
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
 export { CHANGE_REF_DIAGNOSTICS, journalKey, readJournals, readRunLog, runId, runStartedAt } from "./log.ts"
 export type { JournalCheck, JournalRun, Journals, LogRecord } from "./log.ts"
-export { checkedTree, claimWorktrees, prepareWorktree, runSetup, SetupFailed } from "./worktree.ts"
+export {
+  checkedTree,
+  claimWorktrees,
+  freshWorktree,
+  prepareWorktree,
+  registeredWorktrees,
+  runSetup,
+  SetupFailed,
+} from "./worktree.ts"
 export { queueRun } from "./run.ts"
 export type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
 export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
@@ -55,7 +72,6 @@ export { readHistories, readQueue, resolveRemote } from "./remote.ts"
 export { directMergeCommits, directMergeLine } from "./direct.ts"
 export { refuseTarget, inspectSubmit, freshnessLine, submit, issueOf } from "./submit.ts"
 export {
-  PAUSE_REF,
   QueuePaused,
   QueueNotPaused,
   activePause,

@@ -9,7 +9,7 @@
 import { ABSENT, RECORD_FORMAT, commitTrailers, type Git } from "./records.ts"
 import { readRemoteCommit } from "./git.ts"
 
-export const PAUSE_REF = "refs/yrd/pause"
+import { pauseRef } from "./refs.ts"
 
 export type PauseKind = "paused" | "resumed"
 
@@ -27,8 +27,8 @@ export type WritePause = Readonly<{
   by: string
 }>
 
-/** The resumed record and expected tip one atomic merge push must carry. */
-export type ResumedFence = Readonly<{
+/** The state-preserving record and expected tip one atomic merge push must carry. */
+export type PauseFence = Readonly<{
   sha: string
   expected: string
   previous?: PauseRecord
@@ -38,8 +38,11 @@ export type ResumedFence = Readonly<{
 export class QueuePaused extends Error {
   readonly pause: PauseRecord
 
-  constructor(pause: PauseRecord) {
-    super(`${pauseLine(pause)}; run 'yrd queue resume [reason]' to admit and merge work again`)
+  constructor(pause: PauseRecord, remote: string, queue: string) {
+    const selector = (remote === "origin" ? queue : `${remote}#${queue}`).replaceAll("'", "'\\''")
+    super(
+      `${pauseLine(pause)}; run yrd queue resume --queue '${selector}' --reason '<text>' to admit and merge work again`,
+    )
     this.name = "QueuePaused"
     this.pause = pause
   }
@@ -54,15 +57,15 @@ export class QueueNotPaused extends Error {
 }
 
 /** The active pause, or undefined when the ref is absent or ends resumed. */
-export async function activePause(git: Git, remote: string): Promise<PauseRecord | undefined> {
-  const record = await readPause(git, remote)
+export async function activePause(git: Git, remote: string, queue: string): Promise<PauseRecord | undefined> {
+  const record = await readPause(git, remote, queue)
   return record?.kind === "paused" ? record : undefined
 }
 
 /** Refuse while the remote's latest pause record is paused. */
-export async function requireResumed(git: Git, remote: string): Promise<void> {
-  const pause = await activePause(git, remote)
-  if (pause !== undefined) throw new QueuePaused(pause)
+export async function requireResumed(git: Git, remote: string, queue: string): Promise<void> {
+  const pause = await activePause(git, remote, queue)
+  if (pause !== undefined) throw new QueuePaused(pause, remote, queue)
 }
 
 /**
@@ -70,47 +73,48 @@ export async function requireResumed(git: Git, remote: string): Promise<void> {
  * malformed, unreachable and unreadable state throws instead of opening the
  * queue on a guess.
  */
-export async function readPause(git: Git, remote: string): Promise<PauseRecord | undefined> {
-  const captured = await readRemoteCommit(git, remote, PAUSE_REF)
-  return captured === undefined ? undefined : parsePause(git, captured, `${remote} ${PAUSE_REF}`)
+export async function readPause(git: Git, remote: string, queue: string): Promise<PauseRecord | undefined> {
+  const ref = pauseRef(queue)
+  const captured = await readRemoteCommit(git, remote, ref)
+  return captured === undefined ? undefined : parsePause(git, captured, `${remote} ${ref}`)
 }
 
 /** Append one paused or resumed record under a lease on the remote tip. */
-export async function writePause(git: Git, remote: string, write: WritePause): Promise<PauseRecord> {
+export async function writePause(git: Git, remote: string, queue: string, write: WritePause): Promise<PauseRecord> {
+  const ref = pauseRef(queue)
   const reason = oneLine(write.reason, "a pause record needs a reason")
   const by = oneLine(write.by, "a pause record needs an actor")
-  const previous = await readPause(git, remote)
-  if (write.kind === "paused" && previous?.kind === "paused") throw new QueuePaused(previous)
+  const previous = await readPause(git, remote, queue)
+  if (write.kind === "paused" && previous?.kind === "paused") throw new QueuePaused(previous, remote, queue)
   if (write.kind === "resumed" && previous?.kind !== "paused") throw new QueueNotPaused()
   const commit = await pauseCommit(git, previous, { ...write, by, reason })
-  await git([
-    "push",
-    "--quiet",
-    `--force-with-lease=${PAUSE_REF}:${previous?.sha ?? ABSENT}`,
-    remote,
-    `${commit}:${PAUSE_REF}`,
-  ])
-  await git(["update-ref", PAUSE_REF, commit])
-  return parsePause(git, commit, `${remote} ${PAUSE_REF}`)
+  await git(["push", "--quiet", `--force-with-lease=${ref}:${previous?.sha ?? ABSENT}`, remote, `${commit}:${ref}`])
+  return parsePause(git, commit, `${remote} ${ref}`)
 }
 
 /**
  * Prepare the record that linearizes one merge against `queue pause`.
  *
  * Preparation moves no ref. The caller must include both the lease and
- * `${sha}:${PAUSE_REF}` in the SAME atomic push as the target and change
- * updates. An active pause is a normal refusal; unreadable authority is loud.
+ * `${sha}:${pauseRef(queue)}` in the SAME atomic push as the target and change
+ * updates. Only the unchanged pause admitting an explicit foreground round
+ * may be carried forward paused; any newer pause refuses. Unreadable authority is loud.
  */
-export async function resumedFence(
+export async function pauseFence(
   git: Git,
   remote: string,
+  queue: string,
   write: Readonly<{ reason: string; by: string }>,
-): Promise<ResumedFence> {
+  admittedPause?: PauseRecord,
+): Promise<PauseFence> {
   const reason = oneLine(write.reason, "a pause fence needs a reason")
   const by = oneLine(write.by, "a pause fence needs an actor")
-  const previous = await readPause(git, remote)
-  if (previous?.kind === "paused") throw new QueuePaused(previous)
-  const sha = await pauseCommit(git, previous, { by, kind: "resumed", reason })
+  const previous = await readPause(git, remote, queue)
+  if (previous?.kind === "paused" && previous.sha !== admittedPause?.sha) throw new QueuePaused(previous, remote, queue)
+  const sha =
+    previous?.kind === "paused"
+      ? await pauseCommit(git, previous, { by: previous.by, kind: "paused", reason: previous.reason }, previous.at)
+      : await pauseCommit(git, previous, { by, kind: "resumed", reason })
   return { expected: previous?.sha ?? ABSENT, previous, sha }
 }
 
@@ -120,7 +124,7 @@ export function pauseLine(record: PauseRecord): string {
   return `${record.kind} by ${record.by} since ${since}: ${record.reason}`
 }
 
-async function parsePause(git: Git, sha: string, where: string): Promise<PauseRecord> {
+export async function parsePause(git: Git, sha: string, where: string): Promise<PauseRecord> {
   const [commit, atText, block, body] = (await git(["log", "-1", `--format=${RECORD_FORMAT}`, sha])).split("\x00")
   const id = commit?.trim()
   const parsed = commitTrailers(block ?? "")
@@ -145,16 +149,25 @@ async function parsePause(git: Git, sha: string, where: string): Promise<PauseRe
   if (id === undefined || id === "" || atText === undefined || reason === undefined || reason === "") {
     throw new Error(`${where} at ${sha.slice(0, 12)} is not a readable pause record`)
   }
-  const at = new Date(atText)
+  // A foreground fence is a new commit, not a new decision to pause. Keep the
+  // original pause time while its own commit time records the merge's fence.
+  const pauseTimes = parsed.filter(([name]) => name === "Paused-At").map(([, value]) => value)
+  if (pauseTimes.length > 1) throw new Error(`${where} at ${sha.slice(0, 12)} carries multiple Paused-At: trailers`)
+  const at = new Date(pauseTimes[0] ?? atText)
   if (Number.isNaN(at.getTime())) {
-    throw new Error(`${where} at ${sha.slice(0, 12)} has an unreadable commit time '${atText}'`)
+    throw new Error(`${where} at ${sha.slice(0, 12)} has an unreadable pause time '${pauseTimes[0] ?? atText}'`)
   }
   return Object.freeze({ at, by, kind, reason, sha: id })
 }
 
-async function pauseCommit(git: Git, previous: PauseRecord | undefined, write: WritePause): Promise<string> {
+async function pauseCommit(
+  git: Git,
+  previous: PauseRecord | undefined,
+  write: WritePause,
+  pausedAt?: Date,
+): Promise<string> {
   const tree = (await git(["mktree"], "")).trim()
-  const message = `${write.reason}\n\nRecord: ${write.kind}\nPaused-By: ${write.by}\n`
+  const message = `${write.reason}\n\nRecord: ${write.kind}\nPaused-By: ${write.by}\n${pausedAt === undefined ? "" : `Paused-At: ${pausedAt.toISOString()}\n`}`
   const args = ["commit-tree", tree]
   if (previous !== undefined) args.push("-p", previous.sha)
   return (await git([...args, "-m", message])).trim()

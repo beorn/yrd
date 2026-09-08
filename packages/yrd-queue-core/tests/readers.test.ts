@@ -379,7 +379,14 @@ describe("the clocks", () => {
   it.each(["queued", "checked"] as const)("keeps counting the runtime of a %s change", (state) => {
     const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state }
 
-    expect(clocks(row, now).runtimeMs).toBe(30 * 60 * 1000)
+    for (const state of ["queued", "checked"] as const) {
+      expect(clocks({ ...row, state }, now).runtimeMs, state).toBe(30 * 60 * 1000)
+    }
+    // Git can prove a change merged or its branch disappeared without an
+    // ending record. Missing evidence must not turn a stopped clock live.
+    for (const state of ["merged", "failed", "stuck", "direct"] as const) {
+      expect(clocks({ ...row, state }, now), state).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+    }
   })
 
   it.each(["merged", "failed", "stuck", "direct"] as const)(

@@ -5,8 +5,7 @@
  * Everything here is black box on purpose. A test built on this fixture may
  * look at the queue run's exit code, at the refs the repositories carry
  * afterwards, at the tip of the target, and at where the CLI says each change
- * stands — nothing else. No journal reads, no internals, no log parsing
- * except to print on failure.
+ * stands, and the JSONL log the round publishes — no private state reads.
  *
  * The throwaway-repository shape is the one `packages/yrd-cli/tests/
  * bay-submit-selected.test.ts` proves end to end: a bare shared repository
@@ -15,7 +14,7 @@
  * queue lands on is the shared repository's `main`, never the local ref, so
  * every assertion about the target reads `origin/main`.
  */
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { changeRef } from "../../packages/yrd-queue-core/src/index.ts"
@@ -73,23 +72,7 @@ export type FakeCheckPlan = Readonly<{
    * writes the same `.yrd.yml` it always did. On, the target declares one
    * command for all four endings that appends each record to `hookLog`. */
   hooks?: boolean
-  /** Declare the `yrd` remote in `.yrd.yml`, so the submit path has somewhere
-   * to read it from when the repository has no such remote. Default off, so
-   * every case that predates this knob writes the same `.yrd.yml` it always
-   * did. The plan says the submit path "adds the `yrd` remote from `.yrd.yml`
-   * when missing" and does not name the key; `remote:` is this fixture's
-   * reading of it. */
-  yrdRemote?: boolean
 }>
-
-/**
- * The head of a `.yrd.yml`: `target: <remote>#<branch>` (ruling A5). The remote
- * is the shared repository's URL when the case asks for it to be added from the
- * declaration, and `origin` otherwise.
- */
-export function declaration(remote?: string): string {
-  return `target: ${JSON.stringify(`${remote ?? "origin"}#main`)}\n`
-}
 
 export type BoundaryRepository = Readonly<{
   /** The working repository the queue runs against. */
@@ -123,9 +106,6 @@ export function boundaryRepository(plan: FakeCheckPlan): Promise<BoundaryReposit
       },
     ],
     ...(plan.hooks === true ? { hooks: true } : {}),
-    // `remote:` is the one line that selects the queue (plan § Cutover). A case
-    // that asks for the yrd remote by name gets the shared repository's path.
-    ...(plan.yrdRemote === true ? { remoteIsOrigin: true } : {}),
   }))
 }
 
@@ -142,18 +122,19 @@ export type Change = Readonly<{
   bayPath: string
 }>
 
-/**
- * One commit on top of the target, submitted the way the queue wants it:
- * committed inside a real Bay and delivered with `yrd bay submit` from that
- * Bay. The Bay's own commit needs no `Change-Id` trailer — `bay submit`
- * records the change, and the trailer is only what a recordless `refs/for`
- * tip must carry.
- */
-export async function submitOneCommit(repo: string, bay: string): Promise<Change> {
+/** The fixture, not Yrd, attaches an authoring branch to the detached tree. */
+async function openAuthorEnvironment(repo: string, branch: string, commit: string): Promise<string> {
   const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "env", "open", "--bay", bay), "env open", opened)
-  const bayPath = opened.stdout().trim()
-  const branch = await git(bayPath, "branch", "--show-current")
+  expectZero(await yrd(repo, opened.io, "env", "open", commit), "env open", opened)
+  const path = opened.stdout().trim()
+  await git(path, "checkout", "--quiet", "-b", branch)
+  return path
+}
+
+/** One commit on top of the target, authored in a real worktree and submitted through Yrd. */
+export async function submitOneCommit(repo: string, bay: string): Promise<Change> {
+  const branch = `task/${bay}`
+  const bayPath = await openAuthorEnvironment(repo, branch, await git(repo, "rev-parse", "refs/remotes/origin/main"))
 
   await writeFile(join(bayPath, `${bay}.txt`), `${bay}\n`)
   await git(bayPath, "add", `${bay}.txt`)
@@ -219,6 +200,42 @@ export type QueueRunResult = Readonly<{
   report: string
 }>
 
+/** One record of the queue run's log. */
+export type LogRecord = Readonly<Record<string, unknown>> & { kind: unknown }
+
+/**
+ * The queue run's log, as it named it. The ONE place that knows how a queue run
+ * says where its log went: change this function and every consumer follows.
+ */
+export async function logOfQueueRun(run: QueueRunResult): Promise<{ path: string; records: readonly LogRecord[] }> {
+  let reported: unknown
+  try {
+    reported = (JSON.parse(run.stdout) as { log?: unknown }).log
+  } catch {
+    throw new Error(`the queue run's --json result did not parse, so it named no log\n${run.report}`)
+  }
+  if (typeof reported !== "string" || reported === "") {
+    throw new Error(`the queue run named no log: its --json result has no 'log' field\n${run.report}`)
+  }
+  const text = await readFile(reported, "utf8")
+  const records = text
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line, index) => {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        throw new Error(`line ${String(index + 1)} of ${reported} is not JSON: ${line}`)
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error(`line ${String(index + 1)} of ${reported} is not a JSON object: ${line}`)
+      }
+      return parsed as LogRecord
+    })
+  return { path: reported, records }
+}
+
 /** One `yrd queue run --once`, end to end. */
 export async function queueRunOnce(repo: string): Promise<QueueRunResult> {
   const run = capture(repo)
@@ -282,7 +299,7 @@ export async function checkAttempts(checkLog: string): Promise<number> {
 
 /** Every change ref a repository carries, as `<sha> <name>` lines. */
 export async function changeRefs(repo: string): Promise<readonly string[]> {
-  const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/yrd/changes/**")
+  const listed = await git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/yrd/main/**")
   return listed === "" ? [] : listed.split("\n")
 }
 
@@ -309,7 +326,7 @@ type ChangeRecord = Readonly<{
 
 /** A change's ref as a reader sees it. */
 export type ChangeReading = Readonly<{
-  /** `refs/yrd/changes/<branch>@<head>`. */
+  /** `refs/yrd/main/<branch>@<head>`. */
   ref: string
   exists: boolean
   /** The ref's tip sha, or "" when there is no such ref. */
@@ -382,7 +399,7 @@ export async function readChange(
   repo: string,
   change: Readonly<{ branch: string; headSha: string }>,
 ): Promise<ChangeReading> {
-  const ref = changeRef({ branch: change.branch, head: change.headSha })
+  const ref = changeRef("main", { branch: change.branch, head: change.headSha })
   const present = await changeRefs(repo)
   const tipLine = present.find((line) => line.endsWith(` ${ref}`))
   if (tipLine === undefined) {
@@ -460,7 +477,11 @@ export async function yrdJson(repo: string, ...args: string[]): Promise<YrdJsonR
  * The target moves without the queue: `sha` merged into it around the queue and pushed,
  * as the mechanic does in the garage. Answers the target's new tip.
  */
-export async function mergeAroundQueue(repo: string, sha: string, message = "merged around the queue"): Promise<string> {
+export async function mergeAroundQueue(
+  repo: string,
+  sha: string,
+  message = "merged around the queue",
+): Promise<string> {
   await git(repo, "fetch", "-q", "origin")
   await git(repo, "checkout", "-q", "-B", "main", "origin/main")
   await git(repo, "merge", "-q", "--no-ff", "-m", message, sha)
@@ -709,8 +730,6 @@ type BoundaryPlan = Readonly<{
   checks: readonly PhasedCheck[]
   /** Declare a hook for every ending, as `FakeCheckPlan.hooks` does. */
   hooks?: boolean
-  /** Name the shared repository by URL in `remote:`, instead of `origin`. */
-  remoteIsOrigin?: boolean
   /** Files committed on the target alongside `README.md` and `.yrd.yml`.
    * A path ending in `.sh` is committed executable. */
   files?: Readonly<Record<string, string>>
@@ -774,7 +793,7 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   const hookLog = join(root, "hooks.log")
   const plan = planOf(checkLog)
 
-  await git(root, "init", "-q", "--bare", origin)
+  await git(root, "init", "-q", "--bare", "--initial-branch=main", origin)
   await git(root, "init", "-q", "-b", "main", repoPath)
   const repo = await realpath(repoPath)
   await git(repo, "config", "user.name", "Yrd Boundary")
@@ -793,10 +812,8 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   // endings, so it wants all four, and a case can count what the queue handed
   // over and read which ending each record was for.
   const recorder = JSON.stringify(`cat >>${hookLog}`)
-  const hooks =
-    plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
-  const head = plan.remoteIsOrigin === true ? declaration(origin) : declaration()
-  await writeFile(join(repo, ".yrd.yml"), `${head}${hooks}${phasedChecks(plan.checks)}\n`)
+  const hooks = plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
+  await writeFile(join(repo, ".yrd.yml"), `${hooks}${phasedChecks(plan.checks)}\n`)
 
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")
@@ -811,10 +828,8 @@ export async function submitCommitWriting(
   bay: string,
   files: Readonly<Record<string, string>>,
 ): Promise<Change> {
-  const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "env", "open", "--bay", bay), "env open", opened)
-  const bayPath = opened.stdout().trim()
-  const branch = await git(bayPath, "branch", "--show-current")
+  const branch = `task/${bay}`
+  const bayPath = await openAuthorEnvironment(repo, branch, await git(repo, "rev-parse", "refs/remotes/origin/main"))
 
   for (const [path, content] of Object.entries(files)) {
     await writeFile(join(bayPath, path), content, path.endsWith(".sh") ? { mode: 0o755 } : {})
@@ -834,13 +849,8 @@ export async function submitCommitWriting(
  * No commit of its own, so the two changes are the same content under two
  * names — the shape that billed a submitter on 2026-09-02. */
 export async function submitSameHead(repo: string, bay: string, headSha: string): Promise<Change> {
-  const opened = capture(repo)
-  expectZero(await yrd(repo, opened.io, "env", "open", "--bay", bay), "env open", opened)
-  const bayPath = opened.stdout().trim()
-  const branch = await git(bayPath, "branch", "--show-current")
-
-  await git(bayPath, "fetch", "-q", "origin")
-  await git(bayPath, "merge", "--ff-only", "-q", headSha)
+  const branch = `task/${bay}`
+  const bayPath = await openAuthorEnvironment(repo, branch, headSha)
 
   const submitted = await submitFromBay(repo, bayPath)
   if (submitted.exitCode !== 0 || submitted.id === undefined) {
@@ -886,7 +896,16 @@ export async function advanceTargetAroundQueue(
 export async function landAroundQueue(origin: string, headSha: string, from: string): Promise<string> {
   const clone = await throwawayClone(origin)
   await git(clone, "fetch", "-q", from, "+refs/heads/*:refs/remotes/submitted/*")
-  await git(clone, "merge", "--no-ff", "--no-edit", "-q", headSha, "-m", `landed ${headSha.slice(0, 8)} around the queue`)
+  await git(
+    clone,
+    "merge",
+    "--no-ff",
+    "--no-edit",
+    "-q",
+    headSha,
+    "-m",
+    `landed ${headSha.slice(0, 8)} around the queue`,
+  )
   await git(clone, "push", "-q", "origin", "main")
   return git(clone, "rev-parse", "HEAD")
 }

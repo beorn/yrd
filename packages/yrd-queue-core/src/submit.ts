@@ -62,7 +62,10 @@ export function freshnessLine(targetHead: string): string {
 /** The same read-only admission checks serve the action and its preview. */
 export async function inspectSubmit(git: Git, remote: string, request: SubmitRequest): Promise<SubmitInspection> {
   refuseTarget(request.branch, request.target.branch)
-  await requireResumed(git, remote)
+  // This is the early courtesy refusal. The run is the enforcement point: a
+  // pause that races this read may let the change open, but it cannot let it
+  // be checked or merged while the pause stands.
+  await requireResumed(git, remote, request.target.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
@@ -147,7 +150,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     }
   }
   const change = { branch: request.branch, head }
-  const ref = changeRef(change)
+  const ref = changeRef(request.target.branch, change)
   // Where the remote holds the branch and this change right now, in one
   // reading: a retry appends to the remote's history of the change, so that
   // history is fetched first, and the branch's lease is the remote's own value,
@@ -170,11 +173,10 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   const issue = await issueOf(git, request.branch, head, request.issue)
   const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
   if (issue !== undefined) trailers.push(["Issue", issue])
-  const opened = await appendRecord(git, {
+  const opened = await appendRecord(git, request.target.branch, {
     change,
     kind: "opened",
     subject: `${request.submitter} submitted ${request.branch} to ${targetName(request.target)}`,
-    target: targetName(request.target),
     trailers,
   })
   // Two explicit leases make the push the same compare-and-swap the local

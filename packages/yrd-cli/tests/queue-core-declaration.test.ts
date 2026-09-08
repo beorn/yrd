@@ -1,23 +1,17 @@
 /**
- * @failure  The question "is there a queue here" was answered by a `remote:`
- *           line, read TWICE and by two different readers: a regex for
- *           `^remote:` decided the command belonged here, and the YAML parser
- *           two lines later decided what it said. A `.yrd.yml` that names
- *           `remote:` and does not parse passed the first and lost everything
- *           to the second, so the command went on against origin/main — a guess
- *           about which queue this repository belongs to — with the parse
- *           problem said once at debug level, which nobody runs at.
- * @level    l2 (`coreQueueCommand` driven directly against a real directory;
- *           the reading runs before any git does, so no repository is needed)
- * @consumer every seat and the service, which must be told their declaration is
- *           unreadable rather than left to guess from a silent default
+ * @failure A command reads config from the caller's checkout or a retired
+ * target: hint instead of the selected queue branch at origin, so it judges
+ * against the wrong rules or guesses after malformed authority.
+ * @level l2 (`coreQueueCommand` against a real remote and clone)
+ * @consumer Every queue command.
  */
-
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
+import { changeRef, gitIn, readQueue, writePause } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
+import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -25,79 +19,280 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
 })
 
-function capture(): Readonly<{ io: YrdCliIO; stderr(): string }> {
+function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout(): string }> {
   let stderr = ""
-  return { io: { color: false, stderr: (text) => void (stderr += text), stdout: () => {} }, stderr: () => stderr }
+  let stdout = ""
+  return {
+    io: { color: false, cwd, stderr: (text) => void (stderr += text), stdout: (text) => void (stdout += text) },
+    stderr: () => stderr,
+    stdout: () => stdout,
+  }
 }
 
-/** A directory holding one `.yrd.yml`, which is all this reads. */
-function declaring(text: string): string {
-  const root = declaringNothing()
-  writeFileSync(join(root, ".yrd.yml"), text)
-  return root
-}
-
-/** A directory with no declaration at all, and none above it: the walk stops
- * at a `.git`, so this is a repository root that declares nothing. Without the
- * `.git` the walk would climb out of the temp directory and read whatever
- * `.yrd.yml` stands above it, which on this host is yrd's own. */
-function declaringNothing(): string {
+async function world(config?: string): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-declaration-"))
   roots.push(root)
-  mkdirSync(join(root, ".git"))
-  return root
+  const remote = join(root, "remote.git")
+  const repo = join(root, "repo")
+  const seed = gitIn(root)
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, repo])
+  const git = gitIn(repo)
+  await git(["config", "user.name", "yrd test"])
+  await git(["config", "user.email", "yrd@test.invalid"])
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(repo, "README.md"), "queue\n")
+  if (config !== undefined) writeFileSync(join(repo, ".yrd.yml"), config)
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "queue"])
+  await git(["push", "--quiet", "origin", "main"])
+  return repo
 }
 
-describe("a queue is a branch whose commit carries a declaration that parses", () => {
-  it("a declaration naming remote: that does not parse says so, naming the file, and never goes quiet", async () => {
-    const root = declaring("target: origin#main\nchecks: [{\n")
-    const run = capture()
-
-    // Whatever the command then fails on is beside the point: the file was
-    // unreadable and the operator was told, rather than judged against a guess.
-    await coreQueueCommand(root, run.io, { command: "list" }).catch(() => undefined)
-
-    expect(run.stderr()).toContain(join(root, ".yrd.yml"))
-    expect(run.stderr()).toContain("does not parse")
+describe("a queue is the selected origin branch carrying config", () => {
+  it.each(["open", "close"])("refuses the retired garage %s command without changing local refs", async (verb) => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    if (verb === "close") {
+      const tree = (await git(["mktree"], "")).trim()
+      const commit = (
+        await git(["commit-tree", tree, "-m", "garage: historical declaration\n\nOpened-By: @chief\n"])
+      ).trim()
+      await git(["update-ref", "refs/yrd/garage", commit])
+    }
+    const before = await git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/"])
+    const run = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "queue", "garage", verb, ...(verb === "open" ? ["--reason", "repair"] : [])],
+        run.io,
+      ),
+    ).toBe(2)
+    expect(await git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/yrd/"])).toBe(before)
   })
 
-  it("no declaration here refuses, naming the command and where it looked", async () => {
-    // Accepted: a child without a declaration cannot borrow its parent's queue.
-    // The former parentless fixture proved absence but not this boundary.
-    const parent = declaring("target: origin#main\n")
-    const root = join(parent, "child")
-    mkdirSync(join(root, ".git"), { recursive: true })
-    const run = capture()
+  it.each(["default", "bare"])("pause/resume select the %s queue without treating it as a reason", async (mode) => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const remote = gitIn(join(dirname(repo), "remote.git"))
+    await git(["branch", "release/1.x"])
+    await git(["push", "--quiet", "origin", "release/1.x"])
+    await remote(["symbolic-ref", "HEAD", "refs/heads/release/1.x"])
+    // Administration captures the selected target object without borrowing a
+    // queue read: even an unreadable change must not prevent the operator from
+    // pausing it, and the capture must not rewrite this clone's refs/FETCH_HEAD.
+    const release = (await git(["rev-parse", "release/1.x"])).trim()
+    const tree = (await git(["rev-parse", `${release}^{tree}`])).trim()
+    const advanced = (await git(["commit-tree", tree, "-p", release, "-m", "advance the queue target"])).trim()
+    await remote(["fetch", "--quiet", "--no-tags", repo, advanced])
+    await remote(["update-ref", "refs/heads/release/1.x", advanced])
+    const malformedRef = changeRef("release/1.x", { branch: "task/unreadable", head: advanced })
+    await remote(["update-ref", malformedRef, advanced])
+    const refs = ["for-each-ref", "--format=%(refname) %(objectname)"]
+    const yrdRefs = async (): Promise<readonly string[]> =>
+      (await remote(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).trim().split("\n").sort()
+    const expectedYrdRefs = ["refs/yrd/release%2F1.x/pause", malformedRef].sort()
+    const before = await git(refs)
+    const fetchHead = (await git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"])).trim()
+    writeFileSync(fetchHead, "another command's fetch result\n")
+    const operand = mode === "default" ? [] : ["--queue", "release/1.x"]
+    const paused = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "queue", "pause", ...operand, "--reason", "checking release", "--notify", "@dev/3", "--json"],
+        paused.io,
+      ),
+      paused.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(paused.stdout())).toMatchObject({ kind: "paused", reason: "checking release" })
+    expect(await git(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
+    expect(await yrdRefs()).toEqual(expectedYrdRefs)
+    const resumed = capture(repo)
+    const reason = mode === "default" ? [] : ["--reason", "release checked"]
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "resume", ...operand, ...reason, "--json"], resumed.io),
+      resumed.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(resumed.stdout())).toMatchObject({
+      kind: "resumed",
+      reason: mode === "default" ? "pause lifted" : "release checked",
+    })
+    expect(await yrdRefs()).toEqual(expectedYrdRefs)
+    expect(await git(refs)).toBe(before)
+    expect(readFileSync(fetchHead, "utf8")).toBe("another command's fetch result\n")
+    await expect(readQueue(git, "origin", "release/1.x", advanced)).rejects.toThrow(malformedRef)
+  })
 
-    const exit = await coreQueueCommand(root, run.io, { command: "list" })
+  it("requires pause --reason before any pause ref changes", async () => {
+    const repo = await world("{}\n")
+    const run = capture(repo)
+    expect(await runYrdProcess(["bun", "yrd", "queue", "pause", "--queue", "main", "--json"], run.io)).toBe(2)
+    expect(await gitIn(join(dirname(repo), "remote.git"))(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).toBe(
+      "",
+    )
+  })
+
+  it.each(["list", "show", "watch"])("%s refuses outside a clone with repository guidance", async (verb) => {
+    const outside = mkdtempSync(join(tmpdir(), "yrd-cli-no-clone-"))
+    roots.push(outside)
+    const command = verb === "watch" ? ["watch", "topic"] : ["queue", verb, "topic"]
+    for (const selector of [[], ["--queue", "main"], ["--queue", `${outside}/no-repository#main`]]) {
+      const run = capture(outside)
+      expect(await runYrdProcess(["bun", "yrd", ...command, ...selector, "--json"], run.io)).toBe(2)
+      expect(run.stderr()).toContain("needs a repository")
+      expect(run.stderr()).toContain("inside a clone")
+      expect(run.stdout()).toBe("")
+    }
+  })
+
+  it.each(["run", "up", "pause", "resume"])("%s outside a clone requires an address-valued flag", async (verb) => {
+    const outside = mkdtempSync(join(tmpdir(), "yrd-cli-no-clone-"))
+    roots.push(outside)
+    const reason = verb === "pause" ? ["--reason", "checking"] : []
+    for (const selector of [[], ["--queue", "main"]]) {
+      const run = capture(outside)
+      expect(await runYrdProcess(["bun", "yrd", "queue", verb, ...selector, ...reason, "--json"], run.io)).toBe(2)
+      expect(run.stderr()).toContain("inside a clone or pass --queue <repo>#<queue>")
+    }
+    const operand = "https://github.com/beorn/hh.git"
+    const malformed = capture(outside)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", verb, "--queue", operand, ...reason, "--json"], malformed.io),
+    ).toBe(2)
+    expect(malformed.stderr()).toContain(`queue address '${operand}' must be <repo>#<queue>`)
+    expect(malformed.stdout()).toBe("")
+  })
+
+  it.each(["run", "up", "pause", "resume"])("%s refuses a positional queue before remote mutation", async (verb) => {
+    const repo = await world("{}\n")
+    const run = capture(repo)
+    const reason = verb === "pause" ? ["--reason", "checking"] : []
+    expect(await runYrdProcess(["bun", "yrd", "queue", verb, "main", ...reason, "--json"], run.io)).toBe(2)
+    expect(await gitIn(join(dirname(repo), "remote.git"))(["for-each-ref", "--format=%(refname)", "refs/yrd/"])).toBe(
+      "",
+    )
+  })
+
+  it("addressed submit sends the unpublished author head without rewriting origin", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    const origin = (await git(["remote", "get-url", "origin"])).trim()
+    const destination = join(dirname(repo), "destination.git")
+    await git(["clone", "--quiet", "--bare", origin, destination])
+    await git(["checkout", "--quiet", "-b", "task/addressed"])
+    writeFileSync(join(repo, "addressed.txt"), "unpublished author work\n")
+    await git(["add", "addressed.txt"])
+    await git(["commit", "--quiet", "-m", "addressed author change"])
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    const submitted = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "submit", "--queue", `${destination}#main`, "--json"], submitted.io),
+      submitted.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(submitted.stdout())).toMatchObject({ branch: "task/addressed", head })
+    expect(await git(["remote", "get-url", "origin"])).toBe(`${origin}\n`)
+    expect(await git(["ls-remote", "--refs", "origin", "refs/heads/task/addressed", "refs/yrd/main/*"])).toBe("")
+    expect((await git(["ls-remote", "--refs", destination, "refs/heads/task/addressed"])).split("\t")[0]).toBe(head)
+    await writePause(git, destination, "main", { by: "@dev/3", kind: "paused", reason: "inspect destination" })
+    const refused = capture(repo)
+    expect(
+      await runYrdProcess(
+        ["bun", "yrd", "submit", "--queue", `${destination}#main`, "--dry-run", "--json"],
+        refused.io,
+      ),
+    ).toBe(1)
+    expect(refused.stderr()).toContain("inspect destination")
+    expect(refused.stderr()).toContain("paused by @dev/3 since")
+    expect(refused.stderr()).toContain(`yrd queue resume --queue '${destination}#main' --reason '<text>'`)
+    expect(refused.stdout()).toBe("")
+  })
+
+  it("list/show/watch preserve their subjects while selecting a different queue from a nested cwd", async () => {
+    const repo = await world("{}\n")
+    const git = gitIn(repo)
+    await git(["branch", "release/1.x"])
+    await git(["push", "--quiet", "origin", "release/1.x"])
+    for (const [branch, queue] of [
+      ["task/default", "main"],
+      ["task/topic", "release/1.x"],
+      ["task/other", "release/1.x"],
+    ] as const) {
+      await git(["checkout", "--quiet", "-b", branch, "main"])
+      const file = `${branch.slice("task/".length)}.txt`
+      writeFileSync(join(repo, file), `${branch}\n`)
+      await git(["add", file])
+      await git(["commit", "--quiet", "-m", branch])
+      const submitted = capture(repo)
+      expect(
+        await runYrdProcess(["bun", "yrd", "submit", branch, "--queue", queue, "--json"], submitted.io),
+        submitted.stderr(),
+      ).toBe(0)
+    }
+    // End the selected queue in this disposable repository so watch returns
+    // immediately; no timer or live queue is involved in the parser check.
+    const merged = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "run", "--queue", "release/1.x", "--json"], merged.io),
+      merged.stderr(),
+    ).toBe(0)
+    const nested = join(repo, "nested")
+    mkdirSync(nested)
+    await git(["config", "yrd.workdir", join(dirname(repo), "state")])
+    for (const selector of ["release/1.x", `${join(dirname(repo), "remote.git")}#release/1.x`]) {
+      for (const command of [
+        ["queue", "list", "topic"],
+        ["queue", "show", "task/topic"],
+        ["watch", "topic"],
+      ]) {
+        const run = capture(nested)
+        expect(
+          await runYrdProcess(["bun", "yrd", ...command, "--queue", selector, "--json"], run.io),
+          run.stderr(),
+        ).toBe(0)
+        expect(run.stdout()).toContain("task/topic")
+        expect(run.stdout()).not.toContain("task/default")
+        expect(run.stdout()).not.toContain("task/other")
+        if (command[1] === "show") {
+          const shown = JSON.parse(run.stdout()) as Readonly<{ changes: readonly Readonly<{ queue: string }>[] }>
+          expect(shown.changes[0]?.queue).toBe("release/1.x")
+        }
+      }
+    }
+  })
+
+  it("refuses malformed config from the queue branch and names what it read", async () => {
+    const repo = await world("checks: [{\n")
+    const run = capture(repo)
+
+    await expect(coreQueueCommand(repo, run.io, { command: "list" }, { queue: "main" })).rejects.toThrow(
+      /the declaration at origin\/main cannot be read: .*\.yrd\.yml.*does not parse/u,
+    )
+
+    // The up action must forward both the addressed clone and selected branch.
+    // An unusable caller origin makes borrowing that checkout observable.
+    const git = gitIn(repo)
+    const remote = (await git(["remote", "get-url", "origin"])).trim()
+    await git(["push", "--quiet", "origin", "HEAD:refs/heads/release/uri"])
+    await git(["config", "yrd.workdir", join(dirname(repo), "state")])
+    await git(["remote", "set-url", "origin", join(dirname(repo), "missing.git")])
+    const service = capture(repo)
+    expect(
+      await runYrdProcess(["bun", "yrd", "queue", "up", "--queue", `${remote}#release/uri`, "--json"], service.io),
+    ).toBe(2)
+    expect(service.stderr()).toContain("the declaration at origin/release/uri cannot be read")
+    expect(service.stderr()).toContain(".yrd.yml")
+    expect(service.stderr()).toContain("does not parse")
+  })
+
+  it("refuses a selected branch with no config and names that branch", async () => {
+    const repo = await world()
+    const run = capture(repo)
+
+    const exit = await coreQueueCommand(repo, run.io, { command: "list" }, { queue: "main" })
 
     expect(exit).toBe(2)
     expect(run.stderr()).toContain("queue list needs a queue")
-    expect(run.stderr()).toContain(root)
-  })
-
-  it("a declaration that names no remote: is NOT refused for that: the key is optional", async () => {
-    // `remote:` used to be the switch that chose this core over the incumbent,
-    // so a repository that declared everything else and not that line was told
-    // it had no queue. The incumbent is gone; the key defaults to `origin`.
-    const root = declaring("target: main\n")
-    const run = capture()
-
-    // Whatever it then fails on is git's business: this directory is no
-    // repository. What it must not say is that there is no queue here.
-    await coreQueueCommand(root, run.io, { command: "list" }).catch(() => undefined)
-
-    expect(run.stderr()).not.toContain("needs a queue")
-  })
-
-  it("POSITIVE CONTROL: a declaration that parses says nothing about parsing", async () => {
-    // Without this, the line above is satisfied just as well by a switch that
-    // complains about every declaration it is handed.
-    const root = declaring("target: origin#main\n")
-    const run = capture()
-
-    await coreQueueCommand(root, run.io, { command: "list" }).catch(() => undefined)
-
-    expect(run.stderr()).not.toContain("does not parse")
+    expect(run.stderr()).toContain("origin/main carries no .yrd.yml")
   })
 })

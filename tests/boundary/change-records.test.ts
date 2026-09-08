@@ -1,6 +1,6 @@
 /**
  * @failure A change's records are the queue's whole store. The plan says a
- *          submit opens `refs/yrd/changes/<branch>@<head>`, that each record is
+ *          submit opens `refs/yrd/main/<branch>@<head>`, that each record is
  *          one commit written once and never amended, that the ref only moves
  *          forward — opened, then checked, then ended, then sent — and that
  *          the tip record's trailers are the entire answer for that change.
@@ -16,7 +16,7 @@
  * the two disagree, this file follows the plan and goes red.
  *
  * Black box. Git is the store the plan names, so `git for-each-ref` and
- * `git log` over `refs/yrd/changes/**` in the shared repository read the
+ * `git log` over `refs/yrd/main/**` in the shared repository read the
  * published surface. No journal, no database, no module.
  *
  * WHERE THE RECORDS ARE READ. The plan says a branch is its ref "at the `yrd`
@@ -72,10 +72,16 @@ async function isAncestor(repo: string, older: string, newer: string): Promise<b
 
 /** One value per change ref, read with no history walk at all. */
 async function tipTrailer(repo: string, key: string): Promise<readonly string[]> {
-  const listed = await git(repo, "for-each-ref", `--format=%(trailers:key=${key},valueonly)`, "refs/yrd/changes/**")
+  const listed = await git(
+    repo,
+    "for-each-ref",
+    `--format=%(refname)%00%(trailers:key=${key},valueonly)`,
+    "refs/yrd/main/**",
+  )
   return listed
     .split("\n")
-    .map((line) => line.trim())
+    .filter((line) => !line.startsWith("refs/yrd/main/pause\0"))
+    .map((line) => (line.split("\0")[1] ?? "").trim())
     .filter((line) => line !== "")
 }
 
@@ -99,7 +105,7 @@ describe("a change and its records", { timeout: 120_000 }, () => {
     // carries any ref under refs/yrd/. The change's record is a row in the
     // local clone's .git/yrd, so a fresh clone of the shared repository knows
     // nothing about it.
-    it("a submit opens refs/yrd/changes/<branch>@<head> in the shared repository", async () => {
+    it("a submit opens refs/yrd/main/<branch>@<head> in the shared repository", async () => {
       const { boundary, change } = await submitted({ exit: 0 }, "opened")
 
       const read = await readRecords(boundary, change)
@@ -108,7 +114,7 @@ describe("a change and its records", { timeout: 120_000 }, () => {
       // The branch has a slash in it, which is the case the naming rule exists
       // for: the change's name is the branch then `@` then the head sha, so
       // the sha sits inside the branch's last segment and is read from the right.
-      expect(read.ref, read.report).toBe(`refs/yrd/changes/${change.branch}@${change.headSha}`)
+      expect(read.ref, read.report).toBe(`refs/yrd/main/${change.branch}@${change.headSha}`)
       expect(change.branch, read.report).toContain("/")
     })
 
@@ -132,9 +138,9 @@ describe("a change and its records", { timeout: 120_000 }, () => {
       expect(opened.trailers.get("Change"), read.report).toEqual([`${change.branch}@${change.headSha}`])
     })
 
-    // today: red — no change ref, so no submitter, target or issue recorded
+    // Queue identity is the ref namespace; the record names the submitter and issue.
     // anywhere a plain git reader can see.
-    it("the opened record names the submitter, the time, the target and the issue", async () => {
+    it("the opened record names the submitter, time and issue without Target: or Queue:", async () => {
       // A branch under the convention `<issue>-<slug>`, so there is a work
       // item to name.
       const { boundary, change } = await submitted({ exit: 0 }, "24101-records")
@@ -145,7 +151,8 @@ describe("a change and its records", { timeout: 120_000 }, () => {
       if (opened === undefined) throw new Error(read.report)
 
       expect(opened.trailers.get("Submitter")?.[0] ?? "", read.report).not.toBe("")
-      expect(opened.trailers.get("Target")?.[0] ?? "", read.report).toContain("main")
+      expect(opened.trailers.get("Target"), read.report).toBeUndefined()
+      expect(opened.trailers.get("Queue"), read.report).toBeUndefined()
       // The key is the plan's own words (ruling B5: `Issue`).
       expect(opened.trailers.get("Issue")?.[0] ?? "", read.report).toContain("24101")
 
@@ -385,17 +392,19 @@ describe("a change and its records", { timeout: 120_000 }, () => {
   describe("the tip record is the whole answer", () => {
     // today: red — no change ref, so no `for-each-ref` answer exists at all
     // and `queue list` must read the local store the plan deletes.
-    it("one for-each-ref over the change refs answers state, change and target with no history walk", async () => {
+    it("one for-each-ref over the change refs answers state and change with no history walk", async () => {
       const { boundary } = await submitted({ exit: 0, hooks: true }, "answer")
 
       const run = await queueRunOnce(boundary.repo)
 
       // No `git log`, no walk: the ref's tip commit and its trailers, once each.
-      for (const key of ["Record", "Change", "Target"]) {
+      for (const key of ["Record", "Change"]) {
         const values = await tipTrailer(boundary.origin, key)
-        expect(values, `${runSummary(run)}\ntrailer ${key} over refs/yrd/changes/**`).toHaveLength(1)
-        expect(values[0], `${runSummary(run)}\ntrailer ${key} over refs/yrd/changes/**`).not.toBe("")
+        expect(values, `${runSummary(run)}\ntrailer ${key} over refs/yrd/main/**`).toHaveLength(1)
+        expect(values[0], `${runSummary(run)}\ntrailer ${key} over refs/yrd/main/**`).not.toBe("")
       }
+      expect(await tipTrailer(boundary.origin, "Target")).toEqual([])
+      expect(await tipTrailer(boundary.origin, "Queue")).toEqual([])
       const state = await tipTrailer(boundary.origin, "Record")
       expect(RECORD_KINDS.has(state[0] ?? ""), `${runSummary(run)}\nRecord: ${state[0] ?? "(none)"}`).toBe(true)
     })

@@ -3,8 +3,10 @@
  * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, Store).
  *
  * A change is named `<branch>@<sha>`, the branch and the full head sha, and
- * its ref is that name under `refs/yrd/changes/` (operator, 2026-09-02): no
- * translation anywhere, the name IS the last part of the ref. Git allows `@`
+ * its ref is that name under `refs/yrd/<queue>/` (CTO, 2026-09-04): no
+ * translation of the change name, which IS the tail of the ref. The queue is
+ * exactly one percent-encoded ref component, so queues in one repository own
+ * disjoint stores. Git allows `@`
  * in a ref name (only `@{` and a lone `@` are refused), so the name is read
  * from the right: the sha is the forty hex characters after the last `@`, and
  * everything before that `@` is the branch, which may itself carry `@`.
@@ -18,8 +20,38 @@
  * itself is `refs/heads/<branch>` at the queue's remote, git's own name.
  */
 
-/** Where every change lives. */
-export const CHANGES = "refs/yrd/changes"
+const YRD_REFS = "refs/yrd"
+
+/**
+ * Encode one queue branch as one ref/directory component. The allowed bytes
+ * stay readable; every other UTF-8 byte is `%XX`, including `/` and `%`, so
+ * encoding is injective and a queue can never escape its namespace.
+ */
+export function encodeQueueComponent(queue: string): string {
+  if (queue === "") throw new Error("a queue needs a branch name; got an empty one")
+  let encoded = ""
+  for (const byte of new TextEncoder().encode(queue)) {
+    const allowed =
+      (byte >= 0x41 && byte <= 0x5a) ||
+      (byte >= 0x61 && byte <= 0x7a) ||
+      (byte >= 0x30 && byte <= 0x39) ||
+      byte === 0x2e ||
+      byte === 0x5f ||
+      byte === 0x2d
+    encoded += allowed ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`
+  }
+  return encoded
+}
+
+/** The namespace one queue owns. */
+export function queueRefPrefix(queue: string): string {
+  return `${YRD_REFS}/${encodeQueueComponent(queue)}`
+}
+
+/** The operational pause ref one queue owns. */
+export function pauseRef(queue: string): string {
+  return `${queueRefPrefix(queue)}/pause`
+}
 
 /**
  * A change: a branch at a head. Everything that writes about one says both,
@@ -34,14 +66,14 @@ export function changeName(change: Change): string {
   return `${trimmed}@${change.head}`
 }
 
-/** The ref a change is: its name under `refs/yrd/changes/`. */
-export function changeRef(change: Change): string {
-  return refOfChange(changeName(change))
+/** The ref a change is: its name under its queue's namespace. */
+export function changeRef(queue: string, change: Change): string {
+  return refOfChange(queue, changeName(change))
 }
 
 /** The ref a change's NAME is, for a reader holding the name and not the pair. */
-export function refOfChange(name: string): string {
-  return `${CHANGES}/${name}`
+export function refOfChange(queue: string, name: string): string {
+  return `${queueRefPrefix(queue)}/${name}`
 }
 
 /**
@@ -58,7 +90,10 @@ export function parseChangeName(name: string): Change | undefined {
 }
 
 /** The change a ref names, or undefined when the ref is not one. */
-export function parseChangeRef(ref: string): Change | undefined {
-  if (!ref.startsWith(`${CHANGES}/`)) return undefined
-  return parseChangeName(ref.slice(CHANGES.length + 1))
+export function parseChangeRef(queue: string, ref: string): Change | undefined {
+  const prefix = `${queueRefPrefix(queue)}/`
+  if (!ref.startsWith(prefix)) return undefined
+  const name = ref.slice(prefix.length)
+  if (name === "pause") return undefined
+  return parseChangeName(name)
 }

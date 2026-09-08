@@ -28,16 +28,8 @@
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { listEnvironments, openEnvironment } from "./env-commands.ts"
-import {
-  closeGarage,
-  garageRefCommit,
-  garageSeat,
-  garageServiceRefusal,
-  garageStatusLine,
-  openGarage,
-  readGarageDeclaration,
-} from "./garage.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
+import { resolveQueueLocation } from "./queue-location.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
@@ -47,8 +39,8 @@ const DEFAULT_SUBMITTER_ENV = "YRD_DEFAULT_SUBMITTER"
 
 type GlobalOptions = YrdObservabilityFlags
 
-type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean; rebase?: boolean }>
-type PauseOptions = Readonly<{ json?: boolean; notify?: string }>
+type SubmitOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; dryRun?: boolean; rebase?: boolean; queue?: string }>
+type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string }>
 
 // Only queue actions load the runtime identity fence. Help and --version must
 // not perform its Git reads (version owns its own bounded source diagnostic).
@@ -60,6 +52,7 @@ const coreQueueCommand: typeof import("./queue-core-commands.ts").coreQueueComma
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
 const DRY_RUN_HELP = "print the change this would open and push nothing"
+const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
 const SUBMIT_HELP: [string, string][] = [
   [
@@ -112,8 +105,9 @@ function buildProgram(
     .option("-q, --quiet", "lower the log level; repeat for less", (_value, previous: number) => previous + 1, 0)
 
   const queueSubmit = async (branch: string | undefined, options: SubmitOptions): Promise<void> => {
+    const location = await resolveQueueLocation(cwd(), options.queue, env, "submit")
     const taken = await coreQueueCommand(
-      cwd(),
+      location.repo,
       io,
       {
         command: "submit",
@@ -123,7 +117,14 @@ function buildProgram(
         ...(options.dryRun === true ? { dryRun: true } : {}),
         ...(options.rebase === true ? { rebase: true } : {}),
       },
-      { json: options.json, env, log: log() },
+      {
+        json: options.json,
+        env,
+        log: log(),
+        queue: location.queue,
+        workdir: location.workdir,
+        remote: location.remote,
+      },
     )
     setExit(taken)
   }
@@ -136,6 +137,7 @@ function buildProgram(
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
+    .option("--queue <value>", QUEUE_HELP)
     .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
     .addHelpSection("On submit:", SUBMIT_HELP)
     .addHelpSection(
@@ -144,38 +146,44 @@ function buildProgram(
     )
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
-    .command("pause <reason>")
+    .command("pause")
     .description("stop checking and merging while the service keeps the queue visible")
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who paused the queue")
-    .action(async (reason, options) => {
-      const declared = options as PauseOptions
+    .option("--queue <value>", QUEUE_HELP)
+    .requiredOption("--reason <text>", "why checking and merging are paused")
+    .action(async (options) => {
+      const declared = options as PauseOptions & { reason: string }
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
       setExit(
         await coreQueueCommand(
-          cwd(),
+          location.repo,
           io,
-          { by: resolveSubmitter(declared.notify, env), command: "pause", reason: reason as string },
-          { json: declared.json, env, log: log() },
+          { by: resolveSubmitter(declared.notify, env), command: "pause", reason: declared.reason },
+          { json: declared.json, env, log: log(), queue: location.queue, workdir: location.workdir },
         ),
       )
     })
   queue
-    .command("resume [reason]")
+    .command("resume")
     .description("resume checking and merging on the next service interval")
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who resumed the queue")
-    .action(async (reason, options) => {
+    .option("--queue <value>", QUEUE_HELP)
+    .option("--reason <text>", "why checking and merging may resume")
+    .action(async (options) => {
       const declared = options as PauseOptions
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
       setExit(
         await coreQueueCommand(
-          cwd(),
+          location.repo,
           io,
           {
             by: resolveSubmitter(declared.notify, env),
             command: "resume",
-            ...(reason === undefined ? {} : { reason: reason as string }),
+            ...(declared.reason === undefined ? {} : { reason: declared.reason }),
           },
-          { json: declared.json, env, log: log() },
+          { json: declared.json, env, log: log(), queue: location.queue, workdir: location.workdir },
         ),
       )
     })
@@ -183,9 +191,16 @@ function buildProgram(
     .command("run")
     .description("one round of queue work, run now rather than by the service")
     .option("--json", "emit stable JSON")
+    .option("--queue <value>", QUEUE_HELP)
     .action(async (options) => {
-      const json = (options as { json?: boolean }).json
-      const taken = await coreQueueCommand(cwd(), io, { command: "run" }, { json, env, log: log() })
+      const { json, queue } = options as { json?: boolean; queue?: string }
+      const location = await resolveQueueLocation(cwd(), queue, env)
+      const taken = await coreQueueCommand(
+        location.repo,
+        io,
+        { command: "run" },
+        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
+      )
       setExit(taken)
     })
   queue
@@ -193,23 +208,15 @@ function buildProgram(
     .description("the service: the same round on a loop; exits 2 when stuck, 0 when the gitlink moves under it")
     .option("--interval <seconds>", "seconds between rounds (default 15)", int)
     .option("--json", "emit stable JSON")
+    .option("--queue <value>", QUEUE_HELP)
     .action(async (options) => {
-      const { interval, json } = options as { interval?: number; json?: boolean }
-      // The garage stops the SERVICE, and this is the last moment before it
-      // becomes one. `queue run` — one round, run now — goes through untouched,
-      // because that is what a garage is FOR; it stamps the reason on its own
-      // record instead.
-      const garage = readGarageDeclaration(cwd())
-      if (garage !== undefined) {
-        io.stderr(`${garageServiceRefusal(garage)}\n`)
-        setExit(2)
-        return
-      }
+      const { interval, json, queue } = options as { interval?: number; json?: boolean; queue?: string }
+      const location = await resolveQueueLocation(cwd(), queue, env)
       const taken = await coreQueueCommand(
-        cwd(),
+        location.repo,
         io,
         { command: "up", ...(interval === undefined ? {} : { intervalSeconds: interval }) },
-        { json, env, log: log() },
+        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
       )
       setExit(taken)
     })
@@ -254,18 +261,23 @@ function buildProgram(
       .option("--latest", "one row per change; the default keeps every run that touched it")
       .option("--status <state>", "select by state: exactly the same as giving <state> as a filter term")
       .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")
+      .option("--queue <value>", QUEUE_HELP)
       .option("--interval <seconds>", "seconds between refreshes while watching (default 5)", int)
   const LIST_DESCRIPTION = "every change in line, then the failed and the merged; filters are case-insensitive OR terms"
   const WATCH_FLAG_HELP = "refresh until the selected change ends, exiting with its code as yrd check does"
   const queueList = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
-    const { interval, json, latest, status, watch } = options as {
+    const { interval, json, latest, status, watch, queue } = options as {
       interval?: number
       json?: boolean
       latest?: boolean
       status?: string
       watch?: boolean
+      queue?: string
     }
-    const taken = await coreQueueCommand(cwd(), io, listRequest(filters ?? [], { interval, latest, status, watch }), {
+    const location = await resolveQueueLocation(cwd(), queue, env, "reader")
+    const taken = await coreQueueCommand(location.repo, io, listRequest(filters ?? [], { interval, latest, status, watch }), {
+      queue: location.queue,
+      workdir: location.workdir,
       json,
       env,
       interactive: interactiveHere(),
@@ -297,18 +309,20 @@ function buildProgram(
     )
     .option("--by <key>", "group under the queue line by submitter (default) or branch")
     .option("--json", "emit stable JSON: one document, complete on a pipe or a file")
+    .option("--queue <value>", QUEUE_HELP)
     .action(async (options) => {
-      const { by, json, since } = options as { by?: string; json?: boolean; since?: string }
+      const { by, json, since, queue } = options as { by?: string; json?: boolean; since?: string; queue?: string }
+      const location = await resolveQueueLocation(cwd(), queue, env, "reader")
       if (by !== undefined && by !== "submitter" && by !== "branch") {
         io.stderr(`yrd: --by takes submitter or branch, not ${by}\n`)
         setExit(2)
         return
       }
       const taken = await coreQueueCommand(
-        cwd(),
+        location.repo,
         io,
         { command: "stats", ...(since === undefined ? {} : { since }), ...(by === undefined ? {} : { by }) },
-        { json, env, log: log() },
+        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
       )
       setExit(taken)
     })
@@ -316,20 +330,18 @@ function buildProgram(
     .command("show <branch>")
     .description("the branch's changes, each check's result and log")
     .option("--json", "emit stable JSON")
+    .option("--queue <value>", QUEUE_HELP)
     .action(async (branch, options) => {
-      const json = (options as { json?: boolean }).json
+      const { json, queue } = options as { json?: boolean; queue?: string }
+      const location = await resolveQueueLocation(cwd(), queue, env, "reader")
       const taken = await coreQueueCommand(
-        cwd(),
+        location.repo,
         io,
         { branch: branch as string, command: "show" },
-        { json, env, log: log() },
+        { json, env, log: log(), queue: location.queue, workdir: location.workdir },
       )
       setExit(taken)
     })
-  // The garage is a ref, so a mechanic can open it with plain git and every
-  // surface reads it. These two spellings stay because the queue is IN the
-  // garage: they are the only non-plumbing way to open and close it, and
-  // `readGarageDeclaration` is already on the run path above.
   listOptions(
     program
       .command("watch [filter...]")
@@ -341,57 +353,7 @@ function buildProgram(
           "The run journal is local to the machine the queue runs on, so off it the check running now, " +
           "the run id, the RUNNER and STATS boxes and the check clocks are absent and the watch says where it looked.",
       ),
-  ).action(async (filters, options) => {
-    const { interval, json, latest, status } = options as {
-      interval?: number
-      json?: boolean
-      latest?: boolean
-      status?: string
-    }
-    const taken = await coreQueueCommand(
-      cwd(),
-      io,
-      listRequest((filters as string[] | undefined) ?? [], { interval, latest, status, watch: true }),
-      { json, env, interactive: interactiveHere(), log: log() },
-    )
-    setExit(taken)
-  })
-  const garage = queue
-    .command("garage", { hidden: true })
-    .description("stop the service and work on the queue yourself")
-  garage.helpCommand(false)
-  garage
-    .command("open")
-    .description("open the garage; the service stays down until it closes")
-    .requiredOption("--reason <text>", "why the service is off")
-    .action((options) => {
-      const repo = cwd()
-      const standing = readGarageDeclaration(repo)
-      if (standing !== undefined) {
-        io.stderr(`yrd: the garage is already open — ${garageStatusLine(standing)}\n`)
-        setExit(2)
-        return
-      }
-      const { reason } = options as { reason: string }
-      const { garage: opened } = openGarage(repo, { by: garageSeat(env), reason })
-      io.stdout(`${garageStatusLine(opened)}\n`)
-    })
-  garage
-    .command("close")
-    .description("close the garage; the service may start again")
-    .action(() => {
-      const repo = cwd()
-      const standing = readGarageDeclaration(repo)
-      const at = garageRefCommit(repo)
-      if (standing === undefined || at === undefined) {
-        io.stderr("yrd: no garage is open here\n")
-        setExit(2)
-        return
-      }
-      closeGarage(repo, at)
-      io.stdout(`the garage is closed (it was ${standing.reason})\n`)
-    })
-
+  ).action(async (filters, options) => queueList(filters as string[] | undefined, { ...options, watch: true }))
   addQueueExamples(queue, name)
 
   // `yrd submit` is `yrd queue submit` (plan § Commands), registered rather
@@ -403,6 +365,7 @@ function buildProgram(
     .option("--notify <seat>", NOTIFY_HELP)
     .option("--issue <id>", ISSUE_HELP)
     .option("--dry-run", DRY_RUN_HELP)
+    .option("--queue <value>", QUEUE_HELP)
     .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
     .addHelpSection("On submit:", SUBMIT_HELP)
     .addHelpSection(
@@ -472,7 +435,7 @@ function addExamples(program: CliCommand, name: string): void {
     [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
     [`$ ${name} queue run`, "one round of queue work, run now"],
     [`$ ${name} check affected-tests`, "run one of the queue's checks here, now"],
-    [`$ ${name} env open --bay fix`, "open an environment and keep it"],
+    [`$ ${name} env open <commit>`, "open an exact commit detached and keep it"],
   ])
 }
 

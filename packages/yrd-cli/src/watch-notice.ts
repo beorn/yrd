@@ -3,8 +3,8 @@
  * (S2.17, README 784).
  *
  * **It derives nothing.** The state is `Row.state`, which `readChange` alone
- * produces; the cause is the row's own `reason`/`result`; the next owner is
- * `Row.next`, derived once in state.ts beside the state it reads. There is no
+ * produces; the cause is the row's own incident/`reason`/`result`; routing is
+ * `Row.next`, derived once in state.ts. Incidents carry advice, not actors. There is no
  * comparison against a state word anywhere below, and there must never be
  * one: two parallel
  * derivations of a display band is the ready-vs-queued bug that shipped twice
@@ -25,7 +25,7 @@ export type Notice = Readonly<{
   word: string
   /** Why it is that, when the row carries a why. */
   cause?: string
-  /** Whose move it is, and why it is theirs. */
+  /** Incident advice, or whose move an ordinary change is and why. */
   next?: string
 }>
 
@@ -46,8 +46,19 @@ const WORD: Readonly<Record<Row["state"], string>> = {
 export function watchNotice(row: Row, joinedRun = false): Notice {
   const live = row.live
   const position = row.position === undefined ? "" : ` #${String(row.position)}`
-  const cause = joinedRun && row.result !== undefined ? `run result: ${row.result}` : (row.reason ?? row.result)
+  const cause =
+    row.incident !== undefined
+      ? incidentLine(row.incident)
+      : joinedRun && row.result !== undefined
+        ? `run result: ${row.result}`
+        : (row.reason ?? row.result)
   const state = joinedRun ? `change ${WORD[row.state]}` : WORD[row.state]
+  const next =
+    row.incident !== undefined
+      ? row.incident.next
+      : row.next === undefined
+        ? undefined
+        : `${row.next.owner} — ${row.next.because}`
   return {
     glyph: stateGlyph(row),
     // The overlay says what is happening RIGHT NOW; the state still says what
@@ -56,7 +67,7 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
     // answer, not a bug to paper over.
     word: live === undefined ? `${state}${position}` : `${state}${position}, checking ${live.check}`,
     ...(cause === undefined ? {} : { cause }),
-    ...(row.next === undefined ? {} : { next: `${row.next.owner} — ${row.next.because}` }),
+    ...(next === undefined ? {} : { next }),
   }
 }
 

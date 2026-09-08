@@ -18,9 +18,10 @@
 import { existsSync, readFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
 import { createGitWorkspace } from "@yrd/bay"
-import { checkedTree, gitIn, hintsIn, readConfig, refAt, runId, runSetup, SetupFailed, type Git } from "@yrd/queue-core"
+import { checkedTree, gitIn, readConfig, refAt, runId, runSetup, SetupFailed, type Git } from "@yrd/queue-core"
 import { createProcess } from "@yrd/process"
-import { declarationHere } from "./declaration.ts"
+import { repositoryHere as findRepository } from "./declaration.ts"
+import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
@@ -36,12 +37,10 @@ export type EnvRow = Readonly<{ name: string; path: string; branch?: string; hea
  * guessing `main` when the repository never said so is the silent default
  * this whole design refuses.
  */
-function repositoryHere(io: YrdCliIO): Readonly<{ root: string; target: string }> {
-  const here = declarationHere(io.cwd ?? process.cwd())
-  if (here === undefined) {
-    throw new Error("yrd: no .yrd.yml here or above; an environment is cut from the target that file declares")
-  }
-  return { root: here.root, target: hintsIn(here.text).target?.branch ?? "main" }
+async function repositoryHere(io: YrdCliIO): Promise<Readonly<{ root: string; target: string }>> {
+  const root = findRepository(io.cwd ?? process.cwd())
+  if (root === undefined) throw new Error("yrd env needs a repository; run inside a clone")
+  return { root, target: await originHead(gitIn(root)) }
 }
 
 function baysRootOf(repo: string): string {
@@ -65,14 +64,14 @@ async function resolveBaseSha(git: Git, target: string): Promise<string> {
  * path on stdout, which is what a caller `cd`s into.
  */
 export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const { root, target } = repositoryHere(io)
+  const { root, target } = await repositoryHere(io)
   const name = (options.bay ?? options.issue ?? `env-${Date.now().toString(36)}`).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
   const branch = `task/${name}`
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process)
   const base = await resolveBaseSha(git, target)
-  const config = await readConfig(git, base)
+  const config = await readConfig(git, base, { remote: "origin", branch: target })
   const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
   const provisioned = await workspace.provision({
     bay: name,
@@ -118,7 +117,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
 
 /** `yrd env list` — the environments this repository holds, as git holds them. */
 export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const { root } = repositoryHere(io)
+  const { root } = await repositoryHere(io)
   const baysRoot = baysRootOf(root)
   await using process = createProcess({ cwd: root })
   // `-z` because a worktree path may contain a newline, and the newline form

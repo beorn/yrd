@@ -22,7 +22,6 @@ import { adaptProcessGit, createProcess, gitFailure } from "@yrd/process"
 import {
   CHANGE_REF_DIAGNOSTICS,
   directMergeCommits,
-  activePause,
   changeName,
   checksOf,
   claimWorktrees,
@@ -30,7 +29,6 @@ import {
   pauseLine,
   prepareWorktree,
   gitIn,
-  hintsIn,
   incidentLines,
   journalKey,
   list,
@@ -43,13 +41,13 @@ import {
   runId,
   subjects,
   targetName,
-  refAt,
-  resolveRemote,
   runCheck,
   show,
   inspectSubmit,
   freshnessLine,
   readRemoteCommit,
+  refAt,
+  queueRefPrefix,
   submit,
   issueOf,
   QueuePaused,
@@ -66,7 +64,6 @@ import {
   type QueueRunOutcome,
   type Row,
 } from "@yrd/queue-core"
-import { declarationHere } from "./declaration.ts"
 import { clocksLine, noticeLine } from "./watch-notice.ts"
 import { filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
@@ -85,9 +82,9 @@ import {
   type SinceOrigin,
   type StatsBy,
 } from "./queue-stats.ts"
-import { readGarageDeclaration } from "./garage.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
+import { originHead } from "./queue-location.ts"
 
 // Observe this module's checkout when it loads, before declaration fetching or
 // any later queue call. A later disk HEAD is projection state, not loaded code.
@@ -191,73 +188,51 @@ export async function coreQueueCommand(
     json?: boolean
     env?: NodeJS.ProcessEnv
     workdir?: string
+    /** The queue branch selected by the CLI; absent means origin/HEAD. */
+    queue?: string
+    /** Explicit submission destination; the author checkout remains the source. */
+    remote?: string
     log?: ConditionalLogger
     /** A terminal with a keyboard on the other end: the watch draws its pane instead of printing rounds. */
     interactive?: boolean
   }> = {},
 ): Promise<YrdCliExitCode> {
-  /** No `.yrd.yml` where the command stands: nothing here says which queue this repository belongs to. */
-  const noDeclarationHere = (): YrdCliExitCode => {
-    io.stderr(
-      `yrd: ${NAMED[request.command]} needs a queue, and there is no .yrd.yml at ${repo} or in any directory ` +
-        "above it within this repository. A queue is a branch whose commit carries one.\n",
-    )
-    return 2
-  }
-  /** The target carries no declaration: whatever stands here, that branch runs no queue. */
+  /** The selected queue branch carries no declaration, so it runs no queue. */
   const noQueueOnTarget = (ref: string): YrdCliExitCode => {
     io.stderr(
       `yrd: ${NAMED[request.command]} needs a queue, and ${ref} carries no .yrd.yml. ` +
-        "The declaration that judges lives on the branch the queue lands on; one that stands only here judges nothing.\n",
+        "The queue's config lives on the queue branch itself.\n",
     )
     return 2
   }
-  // Where to look, from the declaration checked out where the command stands:
-  // `target: <remote>#<branch>`, optional, a hint. A file that does not
-  // parse hints NOTHING and says so on stderr, once: the defaults stand,
-  // because this file is a hint and the target's is the authority — a branch
-  // that breaks its own `.yrd.yml` still submits, and D2 bills it at merge
-  // (config.ts). What it may not do is go quiet.
-  const here = declarationHere(repo)
-  if (here === undefined) return noDeclarationHere()
-  const hints = hintsIn(here.text, join(here.root, ".yrd.yml"))
-  if (hints.problem !== undefined) {
-    io.stderr(
-      `yrd: ${hints.problem}; it hints nothing, so this asks origin/main, which must carry the declaration itself\n`,
-    )
-  }
-  const git = gitIn(here.root)
+  const git = gitIn(repo)
   const log = options.log?.child("queue")
-  // The declaration here only hints where the queue is (`target:`); the
-  // declaration AT that target is the authority for every judgement. A branch
-  // that rewrote or broke its own `.yrd.yml` is judged by the target's rules
-  // all the same (ruling D2 bills it at merge).
-  const hinted = await resolveRemote(git, hints.target?.remote ?? "origin")
-  const hintedTarget = hints.target?.branch ?? "main"
-  const targetRef = `${hinted}/${hintedTarget}`
+  const remote = options.remote ?? "origin"
+  const queue = options.queue ?? (await originHead(git))
+  const target = { branch: queue, remote }
+  const targetLabel = `${remote}/${queue}`
+  type CapturedDeclaration = Readonly<{ config: QueueConfig; oid: string }>
   // The target's declaration as the target holds it now: fetched, read in full
   // and held to its keys, then the remote it names resolved. Undefined when the
   // target carries no `.yrd.yml` at all — there is no queue there; a
   // declaration that exists and cannot be read throws. One reading serves a
   // one-shot command; the service reads again before every round, so an edit at
   // the target takes effect on the next round.
-  const declaration = async (): Promise<QueueConfig | undefined> => {
-    let declarationCommit = targetRef
-    if (request.command === "submit") {
-      const captured = await readRemoteCommit(git, hinted, `refs/heads/${hintedTarget}`)
-      if (captured === undefined) throw new Error(`${targetRef} has no advertised target branch`)
-      declarationCommit = captured
-    } else {
-      await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
+  const declaration = async (): Promise<CapturedDeclaration | undefined> => {
+    const oid = await readRemoteCommit(git, remote, `refs/heads/${queue}`)
+    if (oid === undefined) throw new Error(`the target ${targetLabel} is not at ${remote}`)
+    let declared: QueueConfig | undefined
+    try {
+      declared = await readConfig(git, oid, target)
+    } catch (error) {
+      throw new Error(`the declaration at ${targetLabel} cannot be read: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
     }
-    const declared = await readConfig(git, declarationCommit)
     if (declared === undefined) return undefined
-    // The declared remote may be a URL; `resolveRemote` turns it into the name
-    // this repository knows it by, adding `yrd` when it has none.
-    return { ...declared, target: { ...declared.target, remote: await resolveRemote(git, declared.target.remote) } }
+    return { config: declared, oid }
   }
-  const config = await declaration()
-  if (config === undefined) return noQueueOnTarget(targetRef)
+  const captured = await declaration()
+  if (captured === undefined) return noQueueOnTarget(targetLabel)
+  const config = captured.config
   const workdir = options.workdir ?? (await workdirOf(git))
   mkdirSync(workdir, { recursive: true })
 
@@ -271,10 +246,13 @@ export async function coreQueueCommand(
    * side: a run that could not even judge — a bad invocation, a remote that
    * cannot be read — is stuck, and has already said so.
    */
-  const oneRound = async (declared: QueueConfig): Promise<QueueRunOutcome | undefined> => {
+  const oneRound = async (declared: CapturedDeclaration): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
-      outcome = await queueRun(runOptions(repo, declared, workdir, options.env, options.log))
+      outcome = await queueRun({
+        ...runOptions(repo, declared, workdir, options.env, options.log),
+        foreground: request.command === "run",
+      })
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
       // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the service return exit 2.
@@ -288,7 +266,7 @@ export async function coreQueueCommand(
     case "pause":
     case "resume": {
       try {
-        const pause = await writePause(git, config.target.remote, {
+        const pause = await writePause(git, config.target.remote, config.target.branch, {
           by: request.by,
           kind: request.command === "pause" ? "paused" : "resumed",
           reason: request.command === "pause" ? request.reason : (request.reason ?? "pause lifted"),
@@ -355,7 +333,7 @@ export async function coreQueueCommand(
       }
     }
     case "run": {
-      const outcome = await oneRound(config)
+      const outcome = await oneRound(captured)
       return outcome?.exitCode ?? 2
     }
     case "up": {
@@ -370,18 +348,18 @@ export async function coreQueueCommand(
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
       const gitlink: Readonly<{ path: string; sha: string; checkout?: string }> | undefined =
-        request.gitlink ?? (await gitlinkOf(git, targetRef, log))
-      // A relaunch can beat the checkout updater. Do not run an old round;
-      // wait for the local checkout to materialize the target pin.
-      const reload = async (target: string): Promise<YrdCliExitCode | undefined> => {
+        request.gitlink ?? (await gitlinkOf(git, captured.oid, log))
+      // A relaunch can beat the checkout updater. Do not run an old round or
+      // spend the supervisor's restart budget repeatedly loading the old pin.
+      const reload = async (targetOid: string): Promise<YrdCliExitCode | undefined> => {
         if (gitlink === undefined) return undefined
-        let now = await gitlinkAt(git, target, gitlink.path)
+        let now = await gitlinkAt(git, targetOid, gitlink.path)
         if (now === gitlink.sha) return undefined
         let announced: string | undefined
         for (;;) {
           if (now === undefined) {
             return stuck(
-              `runtime gitlink ${gitlink.path} is absent at ${targetRef}; restore it before restarting this service`,
+              `runtime gitlink ${gitlink.path} is absent at captured target ${targetOid}; restore it before restarting this service`,
             )
           }
           // An explicitly supplied gitlink has no physical checkout to await.
@@ -416,8 +394,10 @@ export async function coreQueueCommand(
             if (stopped()) return 0
             throw error
           }
-          await git(["fetch", "--quiet", hinted, `+refs/heads/${hintedTarget}:refs/remotes/${targetRef}`])
-          now = await gitlinkAt(git, targetRef, gitlink.path)
+          const latest = await declaration()
+          if (latest === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
+          targetOid = latest.oid
+          now = await gitlinkAt(git, targetOid, gitlink.path)
         }
         const moved = `gitlink moved from ${gitlink.sha.slice(0, 12)} to ${now.slice(0, 12)}: exiting for relaunch`
         log?.info?.(moved, { from: gitlink.sha, gitlink: gitlink.path, to: now })
@@ -429,7 +409,7 @@ export async function coreQueueCommand(
         )
         return 0
       }
-      let current = config
+      let current = captured
       for (let round = 1; ; round += 1) {
         // The declaration again, as the target holds it now: a correct edit at
         // the target is the next round's, never a restart's.
@@ -437,14 +417,14 @@ export async function coreQueueCommand(
           let why: string | undefined
           try {
             const next = await declaration()
-            if (next === undefined) why = `${targetRef} no longer carries a .yrd.yml`
+            if (next === undefined) why = `${targetLabel} no longer carries a .yrd.yml`
             else current = next
           } catch (error) {
             why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
           }
           if (why !== undefined) return stuck(why)
         }
-        const before = await reload(targetRef)
+        const before = await reload(current.oid)
         if (before !== undefined) return before
         const outcome = await oneRound(current)
         if (outcome === undefined || outcome.exitCode === 2) return 2
@@ -467,10 +447,12 @@ export async function coreQueueCommand(
        * the one a plain `queue list` would print at the same instant.
        *
        * The commits that went around the queue are rows too (E5), judged at
-       * the target the queue read itself saw, so the rows and the reading are
-       * about one and the same tip and no second reading can disagree with it.
+       * the same captured declaration as the queue reading, so the rows and
+       * the reading share one tip and no second reading can disagree with it.
        */
-      const round = async (): Promise<
+      const round = async (
+        declared: CapturedDeclaration,
+      ): Promise<
         Readonly<{
           rows: readonly WatchRow[]
           data: unknown
@@ -489,12 +471,12 @@ export async function coreQueueCommand(
           journals: Journals
         }>
       > => {
-        const { queue, journals, all } = await readListing(git, config, workdir)
+        const { queue, journals, all } = await readListing(git, declared.config, workdir, declared.oid)
         const rows = filterRows(
           watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
           request.terms ?? [],
         )
-        const pause = await activePause(git, config.target.remote)
+        const pause = queue.pause?.kind === "paused" ? queue.pause : undefined
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table.
         const scope =
@@ -512,7 +494,7 @@ export async function coreQueueCommand(
           queue: queueName(config.target, await remoteUrl(git, config.target.remote)),
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
-          queues: [{ branch: config.target.branch, label: config.target.branch, path: here.root }],
+          queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
           runner: readRunnerFacts(workdir),
           // Every row, per run, whatever the filter and the lens: the box counts the queue, not the view.
           decisions: decisionsOfRows(watchRows(all, { journals })),
@@ -551,7 +533,7 @@ export async function coreQueueCommand(
       }
 
       if (request.watch !== true) {
-        const one = await round()
+        const one = await round(captured)
         if (options.json === true) emit(io, true, one.data, "")
         else io.stdout(`${await page(one)}\n`)
         return 0
@@ -563,7 +545,7 @@ export async function coreQueueCommand(
       // all — the same separation the retired build script named, restored
       // with it.
       if (options.interactive === true && options.json !== true) {
-        const first = await round()
+        const first = await round(captured)
         if (selectedNothing(request.terms, first.rows)) {
           io.stderr(missedSelector(request.terms ?? [], first.queue, first.rows.length))
           return 2
@@ -581,7 +563,9 @@ export async function coreQueueCommand(
           createElement(WatchPane, {
             intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
             load: async () => {
-              const next = await round()
+              const refreshed = await declaration()
+              if (refreshed === undefined) throw new Error(`${targetLabel} no longer carries a .yrd.yml`)
+              const next = await round(refreshed)
               entries = next.entries
               journals = next.journals
               return snapshotOf(next)
@@ -610,8 +594,9 @@ export async function coreQueueCommand(
       const interval = Math.max(1, request.intervalSeconds ?? 5) * 1000
       const stopped = (): boolean => request.stop?.aborted === true
       let first = true
+      let declared = captured
       for (;;) {
-        const one = await round()
+        const one = await round(declared)
         // A selector that matches nothing would otherwise wait forever for a
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.
@@ -637,6 +622,9 @@ export async function coreQueueCommand(
           setTimeout(resolve, interval)
         })
         if (stopped()) return 0
+        const refreshed = await declaration()
+        if (refreshed === undefined) return noQueueOnTarget(targetLabel)
+        declared = refreshed
       }
     }
     case "check": {
@@ -699,7 +687,7 @@ export async function coreQueueCommand(
         env: options.env,
         plumbing: options.log?.child("worktree"),
         ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
-        targetSha: await targetAt(git, config),
+        targetSha: captured.oid,
       })
       const results: CheckResult[] = []
       try {
@@ -754,7 +742,7 @@ export async function coreQueueCommand(
           window = { since: committed, sinceFrom: { asked: request.since, kind: "commit" } }
         }
       }
-      const { journals, all } = await readListing(git, config, workdir)
+      const { journals, all } = await readListing(git, config, workdir, captured.oid)
       const rows = watchRows(all, { journals })
       const refs = await pushedRefs(git, config.target.remote, config.target.branch)
       const stats = queueStats(rows, refs, {
@@ -767,10 +755,10 @@ export async function coreQueueCommand(
       return 0
     }
     case "show": {
-      const queue = await readQueue(git, config.target.remote, config.target.branch)
+      const queue = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
       const journals = readJournals(join(workdir, "logs"))
       const matching = queue.changes.filter((entry) => entry.change.branch === request.branch)
-      const hydrated = await readHistories(git, matching, config.target.remote)
+      const hydrated = await readHistories(git, matching, config.target.remote, config.target.branch)
       const changes = show(hydrated, request.branch, {
         journals,
         subjects: await subjects(
@@ -807,6 +795,7 @@ export async function coreQueueCommand(
         {
           changes: changes.map((change) => ({
             ...change.row,
+            queue: config.target.branch,
             checks: views.get(change.row.head)?.checks ?? [],
             ...(views.get(change.row.head)?.note === undefined ? {} : { checksNote: views.get(change.row.head)?.note }),
             records: change.records.map((record) => ({
@@ -830,6 +819,7 @@ export async function coreQueueCommand(
                 return [
                   headline,
                   ...diagnosticLines(change.row, journalFor({ row: change.row }, journals)),
+                  `  queue: ${config.target.branch}`,
                   ...(change.row.incident === undefined
                     ? []
                     : incidentLines(change.row.incident).map((line) => `  ${line}`)),
@@ -845,27 +835,15 @@ export async function coreQueueCommand(
 }
 
 /**
- * The target as this checkout has it: the remote-tracking ref the declaration
- * names, fetched by `declaration()` before any command runs here. Absent is
- * loud, because what base a check is judging against is a claim about that
- * commit. `yrd check` is the one caller: every command that reads the queue
- * takes the target from that reading instead.
- */
-async function targetAt(git: Git, config: QueueConfig): Promise<string> {
-  const ref = `refs/remotes/${config.target.remote}/${config.target.branch}`
-  const sha = await refAt(git, ref)
-  if (sha === undefined) throw new Error(`${targetName(config.target)} is not here: ${ref} is absent`)
-  return sha
-}
-
-/**
  * Identify the embedded runtime by checkout PATH, never by target SHA equality:
  * the target may already record the new pin while this module still runs the
  * old one. An external/standalone installation is explicitly outside this fence.
+ * The exact captured target OID is passed in so this check cannot re-read a
+ * mutable tracking ref and disagree with the declaration used by the round.
  */
 async function gitlinkOf(
   git: Git,
-  targetRef: string,
+  targetOid: string,
   log: ConditionalLogger | undefined,
 ): Promise<Readonly<{ path: string; sha: string; checkout: string }> | undefined> {
   const source = sourceAtLoad
@@ -889,15 +867,15 @@ async function gitlinkOf(
     )
     return undefined
   }
-  const recorded = await gitlinkAt(git, targetRef, path)
+  const recorded = await gitlinkAt(git, targetOid, path)
   const local = await gitlinkAt(git, "HEAD", path)
   if (recorded === undefined && local === undefined) {
     throw new Error(
-      `runtime checkout ${source.checkout} is inside queue checkout ${root}, but neither ${targetRef} nor HEAD records a gitlink at ${path}`,
+      `runtime checkout ${source.checkout} is inside queue checkout ${root}, but neither captured target ${targetOid} nor HEAD records a gitlink at ${path}`,
     )
   }
   log?.info?.(
-    `runtime checkout ${path} observed at module load: ${source.sha}; target ${targetRef} records ${recorded ?? "no gitlink"}`,
+    `runtime checkout ${path} observed at module load: ${source.sha}; captured target ${targetOid} records ${recorded ?? "no gitlink"}`,
   )
   return { path, sha: source.sha, checkout: source.checkout }
 }
@@ -920,19 +898,16 @@ function gitlinks(listing: string): readonly Readonly<{ path: string; sha: strin
 
 function runOptions(
   repo: string,
-  config: QueueConfig,
+  declared: Readonly<{ config: QueueConfig; oid: string }>,
   workdir: string,
   env?: NodeJS.ProcessEnv,
   log?: ConditionalLogger,
 ) {
-  // A round made while the garage is open says so on its own record, so a
-  // reader of the log can tell the mechanic's rounds from the service's.
-  const garage = readGarageDeclaration(repo)
+  const { config, oid } = declared
   return {
     checks: config.checks,
     configBlob: config.blob,
     env,
-    ...(garage === undefined ? {} : { garage: garage.reason }),
     notify: config.notify,
     // git-super narrates which submodule it borrowed and how long each phase
     // took; that is trace-level plumbing, so it gets a logger only at trace.
@@ -943,6 +918,7 @@ function runOptions(
     // finishes it, once per worktree, before any check runs in it.
     setup: config.setup,
     target: config.target,
+    targetSha: oid,
     workdir,
   }
 }
@@ -1027,7 +1003,6 @@ function describeRun(
     stuck: readonly string[]
     directMerges: readonly string[]
     log: string
-    garage?: string
     stopped?: Readonly<{ says: string }>
   }>,
 ): string {
@@ -1041,8 +1016,7 @@ function describeRun(
       : undefined,
     outcome.stopped === undefined ? undefined : `${outcome.stopped.says}; no merge was made`,
   ].filter((part): part is string => part !== undefined)
-  const garage = outcome.garage === undefined ? "" : `; in the garage: ${outcome.garage}`
-  return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")}${garage} (log ${outcome.log})`
+  return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")} (log ${outcome.log})`
 }
 
 /** One printed round of the text watch, with `updated HH:MM:SS` under the queue's name (item 30). */
@@ -1293,7 +1267,7 @@ async function declarationFor(
     return { checks: config.checks, note: "the record names no base, so these are the checks the target declares now" }
   }
   try {
-    const at = await readConfig(git, base)
+    const at = await readConfig(git, base, config.target)
     if (at !== undefined) return { checks: at.checks }
     return {
       checks: config.checks,
@@ -1359,8 +1333,9 @@ async function readListing(
   git: Git,
   config: QueueConfig,
   workdir: string,
+  targetOid: string,
 ): Promise<Readonly<{ queue: Awaited<ReturnType<typeof readQueue>>; journals: Journals; all: readonly Row[] }>> {
-  const queue = await readQueue(git, config.target.remote, config.target.branch)
+  const queue = await readQueue(git, config.target.remote, config.target.branch, targetOid)
   const journals = readJournals(join(workdir, "logs"))
   const all = list(queue.changes, {
     directMerges: await directMergeCommits(git, config.target.branch, queue.target, queue.changes),
@@ -1405,8 +1380,8 @@ async function pushedRefs(git: Git, remote: string, target: string): Promise<rea
     const [sha, ref] = line.trim().split(/\s+/u)
     if (sha === undefined || ref === undefined) continue
     if (ref.startsWith("refs/heads/")) heads.set(ref.slice("refs/heads/".length), sha)
-    else if (ref.startsWith("refs/yrd/changes/")) {
-      const name = ref.slice("refs/yrd/changes/".length)
+    else if (ref.startsWith(`${queueRefPrefix(target)}/`)) {
+      const name = ref.slice(`${queueRefPrefix(target)}/`.length)
       const at = name.lastIndexOf("@")
       submitted.add(at === -1 ? name : name.slice(0, at))
     }

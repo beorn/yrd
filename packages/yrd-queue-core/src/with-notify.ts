@@ -21,8 +21,9 @@
 
 import { createProcess, shellCommand } from "@yrd/process"
 import { readCheckTrailer } from "./check.ts"
-import { targetName, type Ending, type Notifier } from "./config.ts"
+import type { Ending, Notifier } from "./config.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
+import { INCIDENT_TRAILERS } from "./incident.ts"
 import {
   endedKind,
   readRecord,
@@ -48,15 +49,14 @@ export const withNotify: Ring = (steps) => ({
 
   bookkeep: async (run, entry) => {
     await steps.bookkeep(run, entry)
-    // An ended change whose message reached nobody is sent again (at-least-once,
-    // § The queue run), so the repair rides on the pass that runs before
-    // anything is judged.
+    // Repair delivery to each still-owed recipient before anything is judged
+    // (at-least-once, § The queue run).
     await resend(run, entry)
   },
 
-  ended: async (run, entry, kind, endedRecord) => {
-    await steps.ended(run, entry, kind, endedRecord)
-    await told(run, entry, kind, endedRecord)
+  ended: async (run, entry, kind, endedRecord, appendTip) => {
+    await steps.ended(run, entry, kind, endedRecord, appendTip)
+    await told(run, entry, kind, endedRecord, appendTip)
   },
 
   direct: async (run, commit) => {
@@ -91,10 +91,9 @@ async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
 }
 
 /**
- * Every ended change whose message reached nobody is sent again: an ended tip
- * with no sent record (a crash between the two), or a sent record whose delivery
- * failed. The id is the ended record's sha, so whoever hears it sees one message
- * however many times it is sent (§ The queue run, at-least-once).
+ * Repair the current ending's delivery: a successful sent tip can cover an
+ * earlier failed recipient. `told` reads this ending's receipts, not just its
+ * tip, and retries only the names still owed (ruling D9).
  */
 async function resend(run: Run, entry: QueueEntry): Promise<void> {
   const tip = tipOf(entry.change)
@@ -104,9 +103,8 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   // it would put `sent State: failed` on top of a merged change and tell its
   // submitter to fix what has already landed (ruling A2).
   if (entry.change.headOnTarget && endedKind(tip) !== "merged") return
-  const undelivered = tip.kind === "sent" && trailer(tip, "Delivery") === "failed"
   const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged"
-  if (!undelivered && !unsent) return
+  if (tip.kind !== "sent" && !unsent) return
   // A retired change sends nothing (ruling B3).
   const reason = trailer(tip, "Reason")
   if (reason === "replaced" || reason === "deleted") return
@@ -118,7 +116,7 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   if (written.kind !== "failed" && written.kind !== "stuck" && written.kind !== "merged") {
     throw new Error(`${entry.change.branch}: ${endedSha.slice(0, 12)} is a ${written.kind} record, not an ended one`)
   }
-  await run.steps.ended(run, entry, written.kind, written.sha)
+  await run.steps.ended(run, entry, written.kind, written.sha, tip.sha)
 }
 
 /** The one message an ended change sends, in the plan's three shapes (§ Commands). */
@@ -146,7 +144,29 @@ async function told(
   entry: QueueEntry,
   kind: "merged" | "failed" | "stuck",
   endedRecord: string,
+  initialAppendTip: string,
 ): Promise<void> {
+  // Only this ending's receipts count. The captured range excludes older
+  // endings; a contended append can interleave unrelated records above it.
+  const receipts =
+    initialAppendTip === endedRecord
+      ? []
+      : (await readRecords(run.git, `${endedRecord}..${initialAppendTip}`)).filter(
+          (record) => record.kind === "sent" && trailer(record, "For") === endedRecord,
+        )
+  const successful = new Set<string>()
+  for (const receipt of receipts) {
+    if (trailer(receipt, "Delivery") !== "sent") continue
+    const name = trailer(receipt, "To")
+    if (name === undefined || name === "") {
+      throw new Error(`${entry.change.branch}: successful sent record ${receipt.sha.slice(0, 12)} names no recipient`)
+    }
+    successful.add(name)
+  }
+  const owed = (run.options.notify ?? []).filter((entry) => entry.on.includes(kind) && !successful.has(entry.name))
+  // An absent name runs nothing; a newly declared name is owed this ending.
+  // Only the first telling can record `none`, never a completed repair pass.
+  if (receipts.length > 0 && owed.length === 0) return
   const written = await readRecord(run.git, endedRecord)
   const text = messageFor(kind, {
     branch: entry.change.branch,
@@ -165,14 +185,20 @@ async function told(
   const issue = trailer(written, "Issue")
   const lastCheck = trailers(written, "Check").at(-1)
   const log = lastCheck === undefined ? run.log.path : (readCheckTrailer(lastCheck).log ?? run.log.path)
-  const handed = await notifyAll(run, kind, {
-    change: changeName(entry.change),
-    record: kind,
-    ...(issue === undefined ? {} : { issue }),
-    ...(known ? { submitter } : {}),
-    ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
-    ...(kind === "failed" ? { failures: await failuresOf(run, entry) } : {}),
-  })
+  const handed = await notifyAll(
+    run,
+    kind,
+    {
+      change: changeName(entry.change),
+      record: kind,
+      ...(issue === undefined ? {} : { issue }),
+      ...(known ? { submitter } : {}),
+      ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
+      ...(kind === "failed" ? { failures: await failuresOf(run, entry, endedRecord) } : {}),
+    },
+    owed,
+  )
+  let appendTip: string | undefined = initialAppendTip
   for (const { name, delivery, failure } of handed) {
     // One sent record per entry that fired, so a reader can see which of them the
     // queue reached. The sent record repeats the ended state/result, so
@@ -182,7 +208,6 @@ async function told(
       change: entry.change,
       kind: "sent",
       subject: `${said(delivery)} ${name}: ${text}`,
-      target: targetName(run.options.target),
       trailers: [
         ["Message-Id", endedRecord],
         ["To", name],
@@ -193,15 +218,19 @@ async function told(
         ...written.trailers.filter(([key]) => RESULT_TRAILERS.has(key)),
       ],
     }
-    const sentRecord = await writeRecord(run, sentWrite)
-    // `delivered` is the whole truth about this message or it is worth nothing:
-    // a record a notifier took whose sent record never landed WILL be handed over
-    // again by the next run, so it is not delivered, and the log says which half
-    // failed rather than claiming the id is settled.
+    const sentRecord: string | undefined =
+      appendTip === undefined ? undefined : await writeRecord(run, sentWrite, appendTip)
+    if (sentRecord !== undefined) appendTip = sentRecord
+    // A notifier result is not durable unless its sent record landed. Keep the
+    // immutable ending id in the log and distinguish this append contention from
+    // later results that could not be appended after it.
     const unrecorded =
       sentRecord === undefined
-        ? `the sent record for ${endedRecord.slice(0, 12)} was not written; the next run sends it again`
+        ? appendTip === undefined
+          ? `the sent result for ${endedRecord.slice(0, 12)} was unrecorded after a prior sent append contended`
+          : `the sent result for ${endedRecord.slice(0, 12)} was unrecorded after its append contended`
         : undefined
+    if (sentRecord === undefined) appendTip = undefined
     const trouble = [failure, unrecorded].filter((why): why is string => why !== undefined).join("; ")
     run.log.write({
       about: entry.change.branch,
@@ -273,13 +302,14 @@ const MOVED_ON = new Set(["replaced", "deleted"])
  * records, where a retry at an unchanged head appends a second opened record and a
  * second failure under one ref, so the tip alone would forget the first.
  */
-async function failuresOf(run: Run, entry: QueueEntry): Promise<number> {
+async function failuresOf(run: Run, entry: QueueEntry, endedRecord: string): Promise<number> {
   const elsewhere = run.queue.filter((candidate) => {
     if (candidate.change.branch !== entry.change.branch || candidate.change.head === entry.change.head) return false
     const tip = tipOf(candidate.change)
     return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
   }).length
-  const own = await readRecords(run.git, entry.change)
+  // Count through the written ending, regardless of concurrent local ref changes.
+  const own = await readRecords(run.git, endedRecord)
   return (
     elsewhere +
     own.filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? "")).length
@@ -301,8 +331,13 @@ type Handed = Readonly<{ name: string; delivery: Delivery; failure?: string }>
  * to say and nobody to say it to, because an ending with no record at all reads
  * exactly like an ending nobody has got to yet.
  */
-async function notifyAll(run: Run, ending: Ending, record: NotifyRecord): Promise<readonly Handed[]> {
-  const wanted = (run.options.notify ?? []).filter((entry) => entry.on.includes(ending))
+async function notifyAll(
+  run: Run,
+  ending: Ending,
+  record: NotifyRecord,
+  selected?: readonly Notifier[],
+): Promise<readonly Handed[]> {
+  const wanted = selected ?? (run.options.notify ?? []).filter((entry) => entry.on.includes(ending))
   if (wanted.length === 0) return [{ delivery: "none", name: NOBODY }]
   const handed: Handed[] = []
   for (const entry of wanted) handed.push({ ...(await deliver(run, entry, record)), name: entry.name })
@@ -313,9 +348,9 @@ async function notifyAll(run: Run, ending: Ending, record: NotifyRecord): Promis
  * Run one notify entry's command, the record a JSON object on its stdin, and
  * say how it went: `sent` when it accepted the record, `failed` with why when it
  * exited non-zero. A command that fails changes nothing about what a change IS:
- * the ended record stands and the next run hands it the same record again
- * (ruling D9). Nothing here throws, so a failed notifier can never end a merged
- * change stuck.
+ * the ended record stands and the failed delivery is recorded under that
+ * immutable identity (ruling D9). Nothing here throws, so a failed notifier can
+ * never end a merged change stuck.
  */
 async function deliver(
   run: Run,
@@ -352,10 +387,5 @@ const RESULT_TRAILERS = new Set([
   "Base",
   "Gitlink",
   "Merged-By",
-  "Code",
-  "Subject",
-  "Via",
-  "Evidence",
-  "Next",
-  "Owner",
+  ...INCIDENT_TRAILERS,
 ])
