@@ -43,7 +43,7 @@ yrd queue show <branch>                                           that branch's 
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD
 yrd env open [commit]                                             retain an exact commit detached, or open/adopt a branch; print its path
 yrd env list                                                      list this repository's retained environments
-yrd env close <path>                                              run teardown and remove a clean, unlocked environment without force
+yrd env close <path> [--retain <directory>]                       run teardown and remove a clean, unlocked environment; retain submodule stores
 ```
 
 Queue commands and `yrd submit` take `--queue <value>`, never a positional queue. Inside a clone, a branch selects that queue at `origin`; omission reads the remote's `HEAD`. An address such as `beorn/hh#main`, `https://github.com/beorn/hh.git#main`, or `/absolute/repo#main` selects a repository and queue together. `queue run`, `up`, `pause` and `resume` accept an address outside a clone and always use a queue-owned clone, including when invoked inside another clone. Submit, list, show and watch still require a clone; addressed submit keeps the author's checkout and sends to the selected repository.

@@ -426,7 +426,11 @@ function buildProgram(
 
   env_
     .command("close <path>")
-    .description("run teardown and remove a clean, unlocked retained environment without force")
+    .description("run teardown and remove a clean, unlocked environment, retaining its submodule stores")
+    .option(
+      "--retain <directory>",
+      "durable GitSuper retention directory; defaults to the workdir retained-modules directory",
+    )
     .option("--json", "emit stable JSON")
     .action(async (path, options) => setExit(await closeEnvironment(path, options, io)))
 

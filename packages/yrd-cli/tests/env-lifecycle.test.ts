@@ -335,6 +335,7 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
 
   it.each([false, true])("closes a registered clean environment with declared teardown=%s", async (teardown) => {
     const w = await world(":", teardown ? 'printf "%s\\n" "$YRD_CANDIDATE_SHA" > ../closed.txt' : undefined)
+    if (teardown) await addMaterializedDependency(w)
     const selected = (await w.git(["rev-parse", "HEAD"])).trim()
     const { path } = await openEnvironment(w.work, selected)
     // Close reads the retained commit, never the caller's edited declaration.
@@ -344,7 +345,12 @@ describe("yrd env close preserves anything it cannot safely remove", () => {
     expect(JSON.parse(closed.stdout())).toEqual({ closed: path })
     expect(existsSync(path)).toBe(false)
     expect(await w.git(["worktree", "list", "--porcelain", "-z"])).not.toContain(path)
-    if (teardown) expect(readFileSync(join(dirname(path), "closed.txt"), "utf8")).toBe(`${selected}\n`)
+    if (teardown) {
+      expect(readFileSync(join(dirname(path), "closed.txt"), "utf8")).toBe(`${selected}\n`)
+      expect(closed.stderr()).toContain("retained environment removal proof")
+      const proof = closed.stderr().trim().replace("retained environment removal proof ", "")
+      expect(readFileSync(proof, "utf8")).toContain("vendor/dependency/config")
+    }
   })
 
   it.each(["unknown", "outside", "symlink-outside", "dirty-tracked", "dirty-untracked", "locked"])(

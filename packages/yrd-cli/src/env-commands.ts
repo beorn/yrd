@@ -38,7 +38,7 @@ import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
 export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string }>
-export type EnvCloseOptions = Readonly<{ json?: boolean }>
+export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string }>
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
 /** One environment as git holds it: a worktree under the bays root. */
@@ -186,7 +186,7 @@ async function requireClean(git: Git, path: string): Promise<void> {
   if (dirty !== "") throw new Error(`environment ${path} is dirty; preserve or commit its changes before yrd env close`)
 }
 
-/** Retained environments use Git's non-force removal, never queue reaping. */
+/** Retained environments preserve user work; GitSuper owns populated-submodule removal. */
 export async function closeEnvironment(
   operand: string,
   options: EnvCloseOptions,
@@ -251,7 +251,42 @@ export async function closeEnvironment(
     }
     await requireClean(treeGit, path)
   }
-  await git(["worktree", "remove", path])
+  const modules = await treeGit(["ls-tree", commit, "--", ".gitmodules"])
+  if (modules.trim() !== "" || options.retain !== undefined) {
+    const retain =
+      options.retain === undefined
+        ? join(workdir, "retained-modules")
+        : resolve(io.cwd ?? globalThis.process.cwd(), options.retain)
+    let removed: unknown
+    try {
+      removed = JSON.parse(await git(["super", "--json", "worktree", "remove", path, "--retain", retain]))
+    } catch (error) {
+      throw new Error(
+        `environment ${path} could not close through git super worktree remove: ${error instanceof Error ? error.message : String(error)}; inspect its registration and retention directory ${retain} before retrying; no plain-git fallback was attempted`,
+        { cause: error },
+      )
+    }
+    if (
+      typeof removed !== "object" ||
+      removed === null ||
+      !("state" in removed) ||
+      removed.state !== "updated" ||
+      !("path" in removed) ||
+      removed.path !== path ||
+      !("proof" in removed) ||
+      typeof removed.proof !== "object" ||
+      removed.proof === null ||
+      !("manifest" in removed.proof) ||
+      typeof removed.proof.manifest !== "string"
+    ) {
+      throw new Error(
+        `environment ${path} received malformed git-super removal proof; inspect git worktree list and retention directory ${retain} before retrying`,
+      )
+    }
+    io.stderr(`retained environment removal proof ${removed.proof.manifest}\n`)
+  } else {
+    await git(["worktree", "remove", path])
+  }
   io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
   return 0
 }
