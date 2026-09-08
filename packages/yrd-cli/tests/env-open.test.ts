@@ -2,6 +2,8 @@
  * @failure `yrd env open` stopped after Git/submodule materialization, so a
  *          fresh bay ignored the target's declared `setup:` and could not run
  *          its own typecheck without a hand install.
+ *          Existing issue branches were refused without checking Git worktree
+ *          occupancy; remote-only branches were silently replaced by the base.
  * @level   l2 (real bare remote and real retained Git worktree)
  * @consumer every seat opening a fresh environment through `yrd env open`
  */
@@ -135,10 +137,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "typecheck-ready"], run.io),
-      run.stderr(),
-    ).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "typecheck-ready"], run.io), run.stderr()).toBe(0)
 
     const bay = join(w.work, ".bays", "typecheck-ready")
     const typecheck = await command(bay, ["bun", "run", "typecheck"])
@@ -146,7 +145,7 @@ describe("yrd env open prepares the retained environment", () => {
     expect(typecheck.stdout).toContain("declared root typecheck ran")
   })
 
-  it("derives setup's tree from a reopened branch and the current target", async () => {
+  it.each(["--bay", "--issue"])("%s preserves a reopened branch and derives setup's tree", async (selector) => {
     const w = await world('printf \'%s\\n%s\\n\' "$YRD_BASE_SHA" "$YRD_CANDIDATE_SHA" > setup-tree.txt')
     const mergeBase = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "-b", "task/reopened"])
@@ -161,7 +160,7 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
 
-    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "reopened"], run.io), run.stderr()).toBe(0)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened"], run.io), run.stderr()).toBe(0)
 
     const bay = join(w.work, ".bays", "reopened")
     expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${candidate}\n`)
@@ -169,10 +168,61 @@ describe("yrd env open prepares the retained environment", () => {
     await w.git(["worktree", "remove", "--force", bay])
     const reopened = capture(w.work)
     expect(
-      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "reopened"], reopened.io),
+      await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened"], reopened.io),
       reopened.stderr(),
     ).toBe(0)
     expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${candidate}\n`)
+  })
+
+  it.each([
+    { source: "tracking", selector: "--issue" },
+    { source: "remote", selector: "--issue" },
+    { source: "remote", selector: "--bay" },
+  ])("$selector adopts an existing $source branch without dropping its commits", async ({ source, selector }) => {
+    const w = await world("true")
+    await w.git(["checkout", "--quiet", "-b", "task/resume"])
+    writeFileSync(join(w.work, "retained.txt"), "keep this work\n")
+    await w.git(["add", "retained.txt"])
+    await w.git(["commit", "--quiet", "-m", "work to resume"])
+    await w.git(["push", "--quiet", "origin", "task/resume"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const remote = (await w.git(["remote", "get-url", "origin"])).trim()
+    const resumer = join(w.work, "..", "resumer")
+    await w.git([
+      "clone",
+      "--quiet",
+      "--branch",
+      "main",
+      ...(source === "remote" ? ["--single-branch"] : []),
+      remote,
+      resumer,
+    ])
+    const run = capture(resumer)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", selector, "resume", "--json"], run.io), run.stderr()).toBe(
+      0,
+    )
+
+    const path = join(resumer, ".bays", "resume")
+    expect(JSON.parse(run.stdout())).toMatchObject({ branch: "task/resume", head, path })
+    expect((await gitIn(path)(["rev-parse", "HEAD"])).trim()).toBe(head)
+    expect(readFileSync(join(path, "retained.txt"), "utf8")).toBe("keep this work\n")
+  })
+
+  it("refuses an occupied branch and names its existing worktree with a supported command", async () => {
+    const w = await world("true")
+    const occupied = join(w.work, "..", "incumbent")
+    await w.git(["worktree", "add", "--quiet", "-b", "task/occupied", occupied])
+    const head = (await gitIn(occupied)(["rev-parse", "HEAD"])).trim()
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "occupied"], run.io), run.stderr()).toBe(2)
+
+    expect(run.stderr()).toContain(occupied)
+    expect(run.stderr()).toContain("git worktree list --porcelain")
+    expect(run.stderr()).not.toMatch(/claim's draft|bay open/u)
+    expect(existsSync(join(w.work, ".bays", "occupied"))).toBe(false)
+    expect((await gitIn(occupied)(["rev-parse", "HEAD"])).trim()).toBe(head)
   })
 
   it("keeps a failed environment and reports its command and output", async () => {

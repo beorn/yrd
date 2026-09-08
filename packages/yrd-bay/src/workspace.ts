@@ -31,7 +31,6 @@ export type ProvisionBayInput = Readonly<{
   name: string
   branch: string
   base: string
-  issue?: string
 }>
 
 export type ProvisionedBay = Readonly<{
