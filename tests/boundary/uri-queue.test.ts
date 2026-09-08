@@ -86,7 +86,7 @@ describe("a queue started by address on a host with no checkout", () => {
           env: {
             ...process.env,
             PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
-        GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_COUNT: "1",
             GIT_CONFIG_KEY_0: "yrd.workdir",
             GIT_CONFIG_VALUE_0: workdir,
           },
