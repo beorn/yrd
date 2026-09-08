@@ -61,7 +61,13 @@ async function world(): Promise<World> {
   // clones unless every git in the chain is told. Every git runner below and
   // the queue's own git children read this process's environment when they
   // are made, so it is said here, first.
-  process.env.GIT_CONFIG_COUNT = "1"
+  process.env.GIT_CONFIG_COUNT = "3"
+  // Ownership uses hosted identities; Git itself routes fixture transport locally,
+  // including child checkouts created later by the real queue materializer.
+  process.env.GIT_CONFIG_KEY_1 = `url.${join(root, "component.git")}.insteadOf`
+  process.env.GIT_CONFIG_VALUE_1 = "https://git-super.test/owned/component.git"
+  process.env.GIT_CONFIG_KEY_2 = `url.${join(root, "remote.git")}.insteadOf`
+  process.env.GIT_CONFIG_VALUE_2 = "https://git-super.test/owned/root.git"
   process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
   process.env.GIT_CONFIG_VALUE_0 = "always"
   const seed = gitIn(root)
@@ -76,6 +82,7 @@ async function world(): Promise<World> {
   await seed(["clone", "--quiet", component, componentWork])
   const cg = gitIn(componentWork)
   await identity(cg)
+  await cg(["remote", "set-url", "origin", "https://git-super.test/owned/component.git"])
   await cg(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(componentWork, "lib.txt"), "one\n")
   await cg(["add", "lib.txt"])
@@ -97,9 +104,10 @@ async function world(): Promise<World> {
   await seed(["clone", "--quiet", remote, work])
   const git = gitIn(work)
   await identity(git)
+  await git(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
   await git(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(work, ".yrd.yml"), "{}\n")
-  await git(["submodule", "add", "--quiet", component, "component"])
+  await git(["submodule", "add", "--quiet", "https://git-super.test/owned/component.git", "component"])
   await git(["add", ".yrd.yml", ".gitmodules", "component"])
   await git(["commit", "--quiet", "-m", "base, with the component at its main"])
   await git(["push", "--quiet", "origin", "main"])
