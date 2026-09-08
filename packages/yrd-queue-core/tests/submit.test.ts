@@ -29,7 +29,7 @@ import {
   writePause,
 } from "../src/index.ts"
 import { GitExit } from "../src/git.ts"
-import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
+import { CapturedQueueObjectsUnavailable, remoteUrl } from "../src/remote.ts"
 import type { Git } from "../src/index.ts"
 
 const roots: string[] = []
@@ -60,6 +60,19 @@ async function world(): Promise<World> {
   const target = (await git(["rev-parse", "HEAD"])).trim()
   return { git, remote, target, work }
 }
+
+// Remote identity must match the URL Git reads, while preserving the logical
+// hosted identity before transport rewriting. Single-URL worlds cannot catch this.
+it("the observation names the first fetch URL when a remote declares multiple URLs", async () => {
+  const w = await world()
+  const first = "https://example.test/owner/product.git"
+  await w.git(["remote", "set-url", "origin", first])
+  await w.git(["config", "--add", "remote.origin.url", "https://example.test/other/product.git"])
+  await w.git(["config", `url.${w.remote}.insteadOf`, first])
+  expect((await w.git(["remote", "get-url", "origin"])).trim()).toBe(w.remote)
+  expect(await readQueue(w.git, "origin", "main", w.target)).toMatchObject({ changes: [] })
+  expect(await remoteUrl(w.git, "origin")).toBe(first)
+})
 
 async function branchWithCommit(w: World, branch: string, file: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
