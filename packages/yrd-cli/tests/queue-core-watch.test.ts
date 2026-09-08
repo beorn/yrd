@@ -183,6 +183,17 @@ describe("yrd watch, the ending's exit code", () => {
       error: "remote ref moved",
     }
     appendFileSync(join(w.workdir, "logs", `${journal.id}.jsonl`), `${JSON.stringify(diagnostic)}\n`)
+    const legacy: LogRecord = {
+      kind: "change",
+      run: journal.id,
+      at: new Date(journal.at.getTime() + 1500).toISOString(),
+      branch: journal.branch,
+      head: journal.head,
+      decision: "sent",
+      reason: "change-ref-taken",
+      remote: "origin",
+    }
+    appendFileSync(join(w.workdir, "logs", `${journal.id}.jsonl`), `${JSON.stringify(legacy)}\n`)
     const run = capture(w.work)
 
     const exit = await coreQueueCommand(
@@ -197,6 +208,8 @@ describe("yrd watch, the ending's exit code", () => {
     expect(run.stdout()).toContain("merged")
     expect(run.stdout()).toContain(diagnostic.text)
     expect(run.stdout()).toContain(diagnostic.next)
+    expect(run.stdout()).toContain("The record has no explanation or inspection command (remote: origin).")
+    expect(run.stdout()).not.toContain("raw diagnostic:")
     for (const request of [
       { command: "list" as const, terms: ["task/good"] },
       { command: "list" as const, latest: true, terms: ["task/good"] },
@@ -207,10 +220,13 @@ describe("yrd watch, the ending's exit code", () => {
       expect(human.stdout()).toContain("merged")
       expect(human.stdout()).toContain(diagnostic.text)
       expect(human.stdout()).toContain(diagnostic.next)
+      expect(human.stdout()).toContain("The record has no explanation or inspection command (remote: origin).")
+      expect(human.stdout()).toContain("`yrd list --json`")
+      expect(human.stdout()).not.toContain("raw diagnostic:")
       const json = capture(w.work)
       expect(await coreQueueCommand(w.work, json.io, request, { json: true, workdir: w.workdir })).toBe(0)
       const data = JSON.parse(json.stdout()) as { changes: { diagnostics?: LogRecord[] }[] }
-      expect(data.changes[0]?.diagnostics).toEqual([diagnostic])
+      expect(data.changes[0]?.diagnostics).toEqual([diagnostic, legacy])
     }
     // A printed round is a log, and a log's rounds carry the instant they were
     // printed: the retired watch's `updated HH:MM:SS`, under the queue's name (item 30).
