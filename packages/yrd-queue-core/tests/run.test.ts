@@ -1959,7 +1959,9 @@ describe("the target's setup", () => {
     expect(whereRan(w).filter(([what]) => what === "check")).toEqual([])
     expect(messages(w)).toEqual([])
     expect(trailer(records.at(-1)!, "Delivery")).toBe("failed")
-    expect(logRecords(outcome).filter((record) => record.kind === "message")).toMatchObject([{ delivered: false, error: expect.stringContaining("could not run") }])
+    expect(logRecords(outcome).filter((record) => record.kind === "message")).toMatchObject([
+      { delivered: false, error: expect.stringContaining("could not run") },
+    ])
     expect(logRecords(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "1", result: "fail", whose: "queue" },
       { exit: "1", result: "fail", whose: "queue", phase: "notify" },

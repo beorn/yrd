@@ -407,8 +407,28 @@ function notificationEnvironment(run: Run): Promise<Readonly<{ cwd: string; runn
                 logDir: join(run.options.workdir, "checks", "notify", run.log.id),
                 tmpdir: join(run.tmpdir, "notify", run.log.id),
               },
-              starting: ({ start, log }) => recordProgramStart(run, { branch: run.options.target.branch, head: run.targetSha, name: "setup", phase: "notify", start, log }),
-              record: ({ start, end, result }) => recordProgramResult(run, { branch: run.options.target.branch, head: run.targetSha, name: "setup", phase: "notify", start, end }, result),
+              starting: ({ start, log }) =>
+                recordProgramStart(run, {
+                  branch: run.options.target.branch,
+                  head: run.targetSha,
+                  name: "setup",
+                  phase: "notify",
+                  start,
+                  log,
+                }),
+              record: ({ start, end, result }) =>
+                recordProgramResult(
+                  run,
+                  {
+                    branch: run.options.target.branch,
+                    head: run.targetSha,
+                    name: "setup",
+                    phase: "notify",
+                    start,
+                    end,
+                  },
+                  result,
+                ),
             }),
       })
       run.resources.defer(() => tree.remove())

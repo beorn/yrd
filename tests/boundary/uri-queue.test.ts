@@ -131,7 +131,7 @@ describe("a queue started by address on a host with no checkout", () => {
       .split("\n")
       .map((line) => JSON.parse(line))
     expect(receipts).toHaveLength(2)
-    expect(receipts.every((record) => record.record === "merged")).toBe(true)
+    for (const receipt of receipts) expect(receipt).toMatchObject({ record: "merged" })
     expect(existsSync(join(owned, "notify.sh"))).toBe(false)
     expect((await git(owned, "worktree", "list", "--porcelain")).match(/^worktree /gmu)).toHaveLength(1)
     const target = await git(remote, "rev-parse", "refs/heads/main")
