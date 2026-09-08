@@ -28,11 +28,13 @@ type PaneProps = Readonly<{
   snapshot: WatchSnapshot
   open?: (row: WatchRow) => Promise<ChangeDetail>
   load?: () => Promise<WatchSnapshot>
+  onEnding?: (code: 0 | 1 | 2) => void
 }>
 const rendered: {
   snapshot: WatchSnapshot | undefined
   open: PaneProps["open"]
   load: PaneProps["load"]
+  onEnding?: PaneProps["onEnding"]
   onWait?: () => Promise<void>
   unmount: ReturnType<typeof vi.fn>
 } = vi.hoisted(() => ({
@@ -46,6 +48,7 @@ vi.mock("silvery/runtime", () => ({
     rendered.snapshot = element.props.snapshot
     rendered.open = element.props.open
     rendered.load = element.props.load
+    rendered.onEnding = element.props.onEnding
     return {
       unmount: rendered.unmount,
       waitUntilExit: async () => {
@@ -185,55 +188,62 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
     expect(watched.stdout()).toContain("main")
   })
 
-  it("an invalid observation on a later interactive refresh ends the watch with exit 2", async () => {
-    const w = await world()
-    const executable = join(w.workdir, "changing-observer.sh")
-    const selected = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin/git-super")
-    const state = join(w.workdir, "observed")
-    const first = JSON.stringify({ version: 1, outcome: "observed", message: "fixture first read", notices: [] })
-    const next = JSON.stringify({
-      version: 1,
-      outcome: "invalid",
-      message: "fixture observation is invalid",
-      notices: [],
-    })
-    writeFileSync(
-      executable,
-      `#!/bin/sh
+  it.each([false, true])(
+    "an invalid observation on a later interactive refresh ends the watch with exit 2 (selected=%s)",
+    async (selectedChange) => {
+      const w = await world()
+      if (selectedChange) await change(w, "task/selected", true)
+      const executable = join(w.workdir, "changing-observer.sh")
+      const selected = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin/git-super")
+      const state = join(w.workdir, "observed")
+      const first = JSON.stringify({ version: 1, outcome: "observed", message: "fixture first read", notices: [] })
+      const next = JSON.stringify({
+        version: 1,
+        outcome: "invalid",
+        message: "fixture observation is invalid",
+        notices: [],
+      })
+      writeFileSync(
+        executable,
+        `#!/bin/sh
 if [ "$1" = super ] && [ "$2" = observe ]; then
   if [ -f '${state}' ]; then printf '%s' '${next}'; exit 2; fi
   touch '${state}'; printf '%s' '${first}'; exit 0
 fi
 exec '${selected.replaceAll("'", "'\\''")}' "$@"
 `,
-    )
-    chmodSync(executable, 0o755)
-    rendered.unmount.mockClear()
-    rendered.onWait = async () => {
-      expect(rendered.snapshot?.observation).toMatchObject({ outcome: "observed" })
-      if (rendered.load === undefined) throw new Error("the watch did not supply its refresh loader")
-      await rendered.load()
-      expect(rendered.unmount).toHaveBeenCalledTimes(1)
-    }
-    const watched = capture(w.work)
-    try {
-      expect(
-        await coreQueueCommand(
-          w.work,
-          watched.io,
-          { command: "list", watch: true },
-          {
-            interactive: true,
-            workdir: w.workdir,
-            selection: { executable, contract: "root-v1", scope: "local", origin: "fixture" },
-          },
-        ),
-      ).toBe(2)
-      expect(watched.stderr()).toContain("fixture observation is invalid")
-    } finally {
-      rendered.onWait = undefined
-    }
-  })
+      )
+      chmodSync(executable, 0o755)
+      rendered.unmount.mockClear()
+      rendered.onWait = async () => {
+        expect(rendered.snapshot?.observation).toMatchObject({ outcome: "observed" })
+        if (rendered.load === undefined) throw new Error("the watch did not supply its refresh loader")
+        await rendered.load()
+        expect(rendered.unmount).toHaveBeenCalledTimes(1)
+        // A pane refresh can report its row ending after the loader settled;
+        // it must not overwrite the invalid observation's command outcome.
+        rendered.onEnding?.(0)
+      }
+      const watched = capture(w.work)
+      try {
+        expect(
+          await coreQueueCommand(
+            w.work,
+            watched.io,
+            { command: "list", watch: true, ...(selectedChange ? { terms: ["task/selected"] } : {}) },
+            {
+              interactive: true,
+              workdir: w.workdir,
+              selection: { executable, contract: "root-v1", scope: "local", origin: "fixture" },
+            },
+          ),
+        ).toBe(2)
+        expect(watched.stderr()).toContain("fixture observation is invalid")
+      } finally {
+        rendered.onWait = undefined
+      }
+    },
+  )
 
   it("says whether a running check's log is not written, empty, or readable in plain show", async () => {
     // 24212: preserving the journal's path alone advertised future output as
