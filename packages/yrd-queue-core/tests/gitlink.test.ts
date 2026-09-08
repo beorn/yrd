@@ -225,7 +225,7 @@ describe("settling gitlinks", () => {
     expect(waitingRecords.map((record) => record.kind)).toEqual(["opened", "opened"])
     expect(trailer(waitingRecords.at(-1)!, "Code")).toBe("gitlink-off-main")
     expect(trailer(waitingRecords.at(-1)!, "Evidence")).toBe(outcome.log)
-    expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("main")
+    expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("Rebase component onto its configured component branch")
     expect(trailer(waitingRecords.at(-1)!, "Owner")).toBe("the queue operator")
     const waitingQueue = await readQueue(w.git, "origin", "main", await remoteTip(w.git, "refs/heads/main"))
     expect(waitingQueue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("queued")
