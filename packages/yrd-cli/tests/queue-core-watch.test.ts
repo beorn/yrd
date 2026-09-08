@@ -161,6 +161,13 @@ describe("yrd watch, the ending's exit code", () => {
     }
   })
 
+  /**
+   * @failure A merged change's warnings vanish or print raw JSON in human views,
+   *          or readable fallback text replaces the original diagnostics in JSON.
+   * @level l3 (CLI/controller wiring, temporary Git remote and clone, captured I/O;
+   *           the interactive renderer is mocked, with no live queue)
+   * @consumer operators reading list/latest/show/watch and scripts consuming list JSON
+   */
   it("exits 0 for a change the queue merged", async () => {
     const w = await world()
     await change(w, "task/good", true)

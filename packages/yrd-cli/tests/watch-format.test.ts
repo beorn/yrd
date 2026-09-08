@@ -47,6 +47,12 @@ describe("ref-write diagnostic lines", () => {
     )
   })
 
+  /**
+   * @failure Sparse or whitespace-only legacy warnings become raw JSON or hide
+   *          missing evidence; recorded explanations and inspection fields disappear.
+   * @level l0 (diagnosticLines called directly with records, no rendering or I/O)
+   * @consumer the operator reading ref-write warnings in list, show and watch details
+   */
   it("keeps full text and differing inspection fields, and names missing evidence", () => {
     // 24202: raw retention alone cannot prove that the human sees the recorded facts.
     const diagnostic = {
