@@ -12,7 +12,7 @@
  * plus a working repository whose `origin` is that bare one, work committed
  * in a real Bay, and `yrd bay submit` as the submit form. The target the
  * queue lands on is the shared repository's `main`, never the local ref, so
- * every assertion about the target reads `origin/main`.
+ * every assertion about the target fetches and reads `origin/main`.
  */
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -134,7 +134,7 @@ async function openAuthorEnvironment(repo: string, branch: string, commit: strin
 /** One commit on top of the target, authored in a real worktree and submitted through Yrd. */
 export async function submitOneCommit(repo: string, bay: string): Promise<Change> {
   const branch = `task/${bay}`
-  const bayPath = await openAuthorEnvironment(repo, branch, await git(repo, "rev-parse", "refs/remotes/origin/main"))
+  const bayPath = await openAuthorEnvironment(repo, branch, await targetTip(repo))
 
   await writeFile(join(bayPath, `${bay}.txt`), `${bay}\n`)
   await git(bayPath, "add", `${bay}.txt`)
@@ -262,7 +262,8 @@ export async function changeStandings(repo: string): Promise<Readonly<Record<str
 }
 
 /** The tip of the target the queue lands on — the shared one, not the local ref. */
-export function targetTip(repo: string): Promise<string> {
+export async function targetTip(repo: string): Promise<string> {
+  await git(repo, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main")
   return git(repo, "rev-parse", "origin/main")
 }
 
@@ -829,7 +830,7 @@ export async function submitCommitWriting(
   files: Readonly<Record<string, string>>,
 ): Promise<Change> {
   const branch = `task/${bay}`
-  const bayPath = await openAuthorEnvironment(repo, branch, await git(repo, "rev-parse", "refs/remotes/origin/main"))
+  const bayPath = await openAuthorEnvironment(repo, branch, await targetTip(repo))
 
   for (const [path, content] of Object.entries(files)) {
     await writeFile(join(bayPath, path), content, path.endsWith(".sh") ? { mode: 0o755 } : {})
@@ -913,13 +914,12 @@ export async function landAroundQueue(origin: string, headSha: string, from: str
 /** `origin/main` as the working repository sees it after a fetch — needed
  * whenever something other than the queue moved the target. */
 export async function refreshTarget(repo: string): Promise<string> {
-  await git(repo, "fetch", "-q", "origin")
   return targetTip(repo)
 }
 
 /** Whether a head is in the target's history — the plan's own merged test. */
 export async function mergedIntoTarget(repo: string, sha: string): Promise<boolean> {
-  return (await gitTry(repo, "merge-base", "--is-ancestor", sha, "origin/main")).exitCode === 0
+  return (await gitTry(repo, "merge-base", "--is-ancestor", sha, await targetTip(repo))).exitCode === 0
 }
 
 /** Every line a check log carries, so a case can read WHAT ran, not just how

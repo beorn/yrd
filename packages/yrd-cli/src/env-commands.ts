@@ -99,7 +99,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   const { path, headSha, baseSha } = provisioned
   const setup = config?.setup
   if (setup !== undefined) {
-    const artifacts = join(await workdirOf(git), "environments", name, runId())
+    const artifacts = join(resolve(root, await workdirOf(git)), "logs", "environments", name, runId())
     try {
       const tree = await checkedTree(path, baseSha, process)
       await runSetup({
