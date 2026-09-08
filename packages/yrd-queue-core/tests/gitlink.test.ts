@@ -283,6 +283,22 @@ describe("settling gitlinks", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>)
       .find((record) => record.kind === "merge")
     expect(merge?.gitlinks).toContain(`component ${w.onMain} -> ${w.main}`)
+    // The durable terminal record copies the exact producer bytes, and survives
+    // removal of the temporary local receipt; old merge-result tests miss this.
+    const ref = changeRef("main", { branch: "task/on", head })
+    const recordTip = await remoteTip(w.git, ref)
+    const records = await readRecords(w.git, recordTip)
+    const merged = records.find((record) => record.kind === "merged")
+    expect(merged).toBeDefined()
+    const receiptRef = `refs/git-super/receipts/${target}`
+    const bytes = await w.git(["show", `${receiptRef}:receipt.json`])
+    const copied = Buffer.from(bytes, "utf8").toString("base64")
+    expect(trailer(merged!, "Root-Changes")).toBe(copied)
+    const receipt = (await w.git(["rev-parse", receiptRef])).trim()
+    await w.git(["update-ref", "-d", receiptRef, receipt])
+    expect(
+      trailer((await readRecords(w.git, recordTip)).find((record) => record.kind === "merged")!, "Root-Changes"),
+    ).toBe(copied)
   })
 
   it("the queue-owned merge is isolated from vetoing and observing repository hooks", async () => {
@@ -425,10 +441,27 @@ describe("settling gitlinks", () => {
     const breaking = await advanceComponent(w, "breaking component main")
     const head = await submitFile(w, "task/base-red")
 
-    const outcome = await queueRun(
-      await w.options({ on: ["submit"], run: "! grep -q 'breaking component main' component/lib.txt" }),
-    )
+    // Attribution comes from the validated root receipt even if the old CLI
+    // merge-result rows contain no raises; the real producer and refs stay intact.
+    await using real = createProcess({ cwd: w.work })
+    let stripped = false
+    const observing: Process = {
+      ...real,
+      async run(request) {
+        const result = await real.run(request)
+        if (result.exitCode === 0 && request.argv.includes("merge") && request.argv.includes("super")) {
+          stripped = true
+          return { ...result, stdout: JSON.stringify({ ...JSON.parse(result.stdout), gitlinks: [] }) }
+        }
+        return result
+      },
+    }
+    const outcome = await queueRun({
+      ...(await w.options({ on: ["submit"], run: "! grep -q 'breaking component main' component/lib.txt" })),
+      process: observing,
+    })
 
+    expect(stripped).toBe(true)
     expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/base-red"] })
     const records = await readRecords(
       w.git,
@@ -454,6 +487,43 @@ describe("settling gitlinks", () => {
       .map((record) => record.phase)
     expect(phases).toEqual(["submit", "base"])
   })
+
+  /** A missing receipt claims no automatic changes; a malformed present receipt stops before candidate checks. */
+  it.each(["absent", "malformed"] as const)(
+    "treats an %s root receipt according to its declared contract",
+    async (fault) => {
+      const w = await world()
+      await advanceComponent(w, "breaking component main")
+      await submitFile(w, `task/receipt-${fault}`)
+      await using real = createProcess({ cwd: w.work })
+      const observing: Process = {
+        ...real,
+        async run(request) {
+          const result = await real.run(request)
+          if (result.exitCode === 0 && request.argv.includes("merge") && request.argv.includes("super")) {
+            const merge = (JSON.parse(result.stdout) as { commit: string }).commit
+            const ref = `refs/git-super/receipts/${merge}`
+            const prior = (await w.git(["rev-parse", ref])).trim()
+            await w.git(fault === "absent" ? ["update-ref", "-d", ref, prior] : ["update-ref", ref, merge, prior])
+          }
+          return result
+        },
+      }
+      const outcome = await queueRun({
+        ...(await w.options({ on: ["submit"], run: "exit 1" })),
+        process: observing,
+      })
+      expect(outcome.exitCode).toBe(fault === "absent" ? 1 : 2)
+      const phases = readFileSync(outcome.log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((record) => record.kind === "result" && record.name === "component-check")
+        .map((record) => record.phase)
+      expect(phases).toEqual(fault === "absent" ? ["submit"] : [])
+      if (fault === "malformed") expect(readFileSync(outcome.log, "utf8")).toContain("Root-Changes")
+    },
+  )
 
   /** Attribution must compare candidate-minus-content even when root main's old pin is divergent, not silently keep that old tree. */
   it("the settled-base comparator applies a raise over an off-main target pin", async () => {

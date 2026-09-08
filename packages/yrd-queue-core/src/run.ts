@@ -41,7 +41,17 @@ import { mkdirSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
-import { DIRECT_MERGE, endedKind, recordCommit, mergedBy, trailer, type Git, type WriteRecord } from "./records.ts"
+import {
+  DIRECT_MERGE,
+  endedKind,
+  recordCommit,
+  mergedBy,
+  trailer,
+  readRootChanges,
+  type RootChanges,
+  type Git,
+  type WriteRecord,
+} from "./records.ts"
 import { queueName, readConfig, type Target } from "./config.ts"
 import { gitEnvironment, gitIn, mergeBase, refAt } from "./git.ts"
 import { incidentTrailers, type Incident } from "./incident.ts"
@@ -547,7 +557,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) {
-      return await attributedFailure(run, entry, results, failing, "submit", composed.settled)
+      return await attributedFailure(run, entry, results, failing, "submit", composed.rootChanges?.changes ?? [])
     }
     await writeRecord(
       run,
@@ -589,7 +599,7 @@ type SuperMergeResult = Readonly<{
 }>
 
 type ComposedCandidate =
-  | Readonly<{ kind: "ready"; mergeCommit: string; settled: readonly SettledGitlink[]; worktree: PreparedWorktree }>
+  | Readonly<{ kind: "ready"; mergeCommit: string; rootChanges?: RootChanges; worktree: PreparedWorktree }>
   | Readonly<{ kind: "waiting"; detail: SuperMergeDetail }>
   | Readonly<{ kind: "failed"; detail: SuperMergeDetail; worktree: Worktree }>
 
@@ -618,6 +628,7 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
 
   const mergeCommit = result.commit
   if (mergeCommit === undefined) throw new Error(`git-super merge of ${head} lost its commit after composition`)
+  const rootChanges = await readRootChanges(run.git, mergeCommit)
   for (const settled of result.gitlinks.filter((row) => row.state !== "not-run")) {
     run.log.write({
       branch: entry.change.branch,
@@ -637,7 +648,7 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     join(run.worktrees, phase, head.slice(0, 12)),
     phase,
   )
-  return { kind: "ready", mergeCommit, settled: result.gitlinks, worktree }
+  return { kind: "ready", mergeCommit, ...(rootChanges === undefined ? {} : { rootChanges }), worktree }
 }
 
 /** Run git-super as the ruled command boundary; malformed or truncated JSON is never treated as a verdict. */
@@ -843,9 +854,8 @@ async function attributedFailure(
   results: readonly CheckResult[],
   failing: readonly CheckResult[],
   phase: CandidatePhase,
-  settled: readonly SettledGitlink[],
+  raises: RootChanges["changes"],
 ): Promise<Ended> {
-  const raises = settled.filter((row) => row.state === "raised")
   if (raises.length === 0) return endFailing(run, entry, results, failing, phase)
   const base = await prepareSettledBase(run, entry, raises)
   try {
@@ -890,7 +900,7 @@ async function attributedFailure(
 async function prepareSettledBase(
   run: Run,
   entry: QueueEntry,
-  raises: readonly SettledGitlink[],
+  raises: RootChanges["changes"],
 ): Promise<PreparedWorktree> {
   const composing = await freshWorktree(
     run.git,
@@ -903,12 +913,19 @@ async function prepareSettledBase(
   try {
     const wt = gitIn(composing.path, run.options.process)
     for (const raise of raises) {
-      const row = await wt(["ls-tree", "-z", run.targetSha, "--", raise.path])
+      const row = await wt([
+        "--literal-pathspecs",
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        run.targetSha,
+        "--",
+        raise.path,
+      ])
       const target = /^160000 commit ([0-9a-f]{40,64})\t/u.exec(row)?.[1]
-      if (target === undefined || target === raise.to) continue
-      const component = gitIn(join(composing.path, raise.path), run.options.process)
-      await component(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
-      await superGitlinkWrite(run, composing.path, raise.path, raise.to)
+      if (target === undefined || row !== `160000 commit ${target}\t${raise.path}\0` || target === raise.to) continue
+      await wt(["update-index", "-z", "--index-info"], `${raise.mode} ${raise.to}\t${raise.path}\0`)
     }
     const tree = (await wt(["write-tree"])).trim()
     const targetTree = (await wt(["rev-parse", `${run.targetSha}^{tree}`])).trim()
@@ -924,30 +941,6 @@ async function prepareSettledBase(
   return run.steps.prepare(run, entry, commit, join(run.worktrees, "base", entry.change.head.slice(0, 12)), "base")
 }
 
-async function superGitlinkWrite(run: Run, cwd: string, path: string, commit: string): Promise<void> {
-  const execution = await gitSuperExecution(run, cwd, ["gitlink", "write", path, commit])
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(execution.stdout)
-  } catch (error) {
-    throw new Error(
-      `git-super gitlink write exited ${String(execution.exitCode)} without readable JSON: ${execution.stderr.trim() || execution.stdout.trim()}`,
-      { cause: error },
-    )
-  }
-  if (typeof parsed !== "object" || parsed === null) throw new Error("git-super gitlink write JSON is not an object")
-  const result = parsed as Record<string, unknown>
-  if (
-    execution.exitCode !== 0 ||
-    (result.state !== "updated" && result.state !== "unchanged") ||
-    result.partial !== false
-  ) {
-    throw new Error(
-      `git-super gitlink write failed for ${path}@${commit}: ${typeof (result.detail as Record<string, unknown> | undefined)?.message === "string" ? String((result.detail as Record<string, unknown>).message) : execution.stderr.trim()}`,
-    )
-  }
-}
-
 /** The on-merge phase for the first checked change. */
 async function land(run: Run, entry: QueueEntry): Promise<Ended> {
   const { change } = entry
@@ -956,7 +949,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
   const composed = await composeCandidate(run, entry, "merge")
   if (composed.kind === "waiting") return waiting(run, entry, composed.detail)
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
-  const { mergeCommit, settled, worktree } = composed
+  const { mergeCommit, rootChanges, worktree } = composed
   try {
     const wt = gitIn(worktree.path, run.options.process)
     // The built-in check at merge (ruling D2): the merged tree's own declaration
@@ -998,7 +991,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) {
-      return await attributedFailure(run, entry, results, failing, "merge", settled)
+      return await attributedFailure(run, entry, results, failing, "merge", rootChanges?.changes ?? [])
     }
     // Pass. The merge is ours to make only while the target is still where this
     // change was checked against and the branch still at the head; otherwise the
@@ -1026,6 +1019,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         subject: `${branch} merged into ${run.options.target.branch} as ${mergeCommit.slice(0, 12)}`,
         trailers: [
           ["Merge", mergeCommit],
+          ...(rootChanges === undefined ? [] : [["Root-Changes", rootChanges.encoded] as const]),
           ["Base", run.targetSha],
           ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
           ...checkTrailers(results),
@@ -1065,7 +1059,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
       branch,
       change: name,
       commit: mergeCommit,
-      gitlinks: settled.filter((row) => row.state === "raised").map((row) => `${row.path} ${row.from} -> ${row.to}`),
+      gitlinks: (rootChanges?.changes ?? []).map((row) => `${row.path} ${row.from} -> ${row.to}`),
       head,
       kind: "merge",
       tip: mergeCommit,
