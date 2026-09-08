@@ -174,6 +174,11 @@ describe("yrd env open prepares the retained environment", () => {
     expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${candidate}\n`)
   })
 
+  /**
+   * @failure Tracking or remote-only issue branches were refused or replaced by the base, losing retained work.
+   * @level l2 (real remote and Git worktree through the CLI)
+   * @consumer seats resuming existing branches with `yrd env open --issue` or `--bay`
+   */
   it.each([
     { source: "tracking", selector: "--issue" },
     { source: "remote", selector: "--issue" },
@@ -209,6 +214,11 @@ describe("yrd env open prepares the retained environment", () => {
     expect(readFileSync(join(path, "retained.txt"), "utf8")).toBe("keep this work\n")
   })
 
+  /**
+   * @failure Occupied issue branches reported claim provenance instead of their actual Git worktree holder.
+   * @level l2 (real occupied Git worktree through the CLI)
+   * @consumer seats resolving an occupied branch after `yrd env open --issue` refuses
+   */
   it("refuses an occupied branch and names its existing worktree with a supported command", async () => {
     const w = await world("true")
     const occupied = join(w.work, "..", "incumbent")
