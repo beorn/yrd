@@ -13,7 +13,7 @@
 
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { delimiter, join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { gitIn, readJournals, readRunLog, submit, type Git, type LogRecord } from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
@@ -70,6 +70,7 @@ async function renderedDetails(snapshot: WatchSnapshot): Promise<readonly Change
 }
 
 const roots: string[] = []
+const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
 
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
@@ -142,7 +143,18 @@ async function change(w: World, branch: string, passes: boolean): Promise<void> 
 /** One queue round, so the changes reach an ending before the watch reads them. */
 async function drain(w: World): Promise<void> {
   const run = capture(w.work)
-  await coreQueueCommand(w.work, run.io, { command: "run" }, { json: true, workdir: w.workdir })
+  await coreQueueCommand(
+    w.work,
+    run.io,
+    { command: "run" },
+    {
+      json: true,
+      workdir: w.workdir,
+      // The root runner seals ambient PATH. Declare the real merge dependency
+      // in this fixture's child environment, as the queue-core run suite does.
+      env: { ...process.env, PATH: [gitSuperBin, process.env.PATH ?? ""].join(delimiter) },
+    },
+  )
 }
 
 describe("yrd watch, the ending's exit code", () => {
@@ -577,8 +589,13 @@ describe("what a watch says it looked at", () => {
     await w.git(["push", "--quiet", "origin", "main"])
     await change(w, "task/history", false)
 
+    const runOptions = {
+      json: true,
+      workdir: w.workdir,
+      env: { ...process.env, PATH: [gitSuperBin, process.env.PATH ?? ""].join(delimiter) },
+    }
     const first = capture(w.work)
-    expect(await coreQueueCommand(w.work, first.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(2)
+    expect(await coreQueueCommand(w.work, first.io, { command: "run" }, runOptions)).toBe(2)
     const firstId = (JSON.parse(first.stdout()) as { run: string }).run
     const before = capture(w.work)
     await coreQueueCommand(w.work, before.io, { command: "list" }, { json: true, workdir: w.workdir })
@@ -590,7 +607,7 @@ describe("what a watch says it looked at", () => {
 
     writeFileSync(control, "printf 'SECOND_RUN_FAIL \\033[30m\\033[45m slow \\033[49m\\033[39m\\n'\nexit 1\n")
     const second = capture(w.work)
-    expect(await coreQueueCommand(w.work, second.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(1)
+    expect(await coreQueueCommand(w.work, second.io, { command: "run" }, runOptions)).toBe(1)
     const secondId = (JSON.parse(second.stdout()) as { run: string }).run
     const listed = capture(w.work)
     await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })
