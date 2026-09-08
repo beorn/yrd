@@ -5,6 +5,7 @@
  */
 import { describe, expect, it, vi } from "vitest"
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { fstatSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createLogger, type Event as LogEvent } from "loggily"
@@ -17,6 +18,239 @@ function bytes(value: string): ReadableStream<Uint8Array> {
 }
 
 describe("Process", () => {
+  // An invalid control frame aborts the same Process signal. Its descriptor
+  // cleanup must never reach a reused descriptor in the next actual child.
+  it("settles an aborted extra descriptor before later real commands reuse its resources", async () => {
+    using files = vi.spyOn(Bun, "file")
+    await using runner = createProcess({ killGraceMs: 20, postKillReapGraceMs: 100, inject: { log: silentLog } })
+    for (let turn = 0; turn < 4; turn += 1) {
+      const firstFileCall = files.mock.calls.length
+      const abort = new AbortController()
+      const result = await runner.run({
+        argv: [
+          process.execPath,
+          "-e",
+          `import { writeSync } from "node:fs";
+          const reader = Bun.file(3).stream().getReader();
+          const input = await reader.read();
+          if (input.done || input.value[0] !== 1) throw new Error("missing greeting");
+          reader.releaseLock();
+          writeSync(3, new Uint8Array([255, 10]));
+          await Bun.sleep(5000);`,
+        ],
+        timeoutMs: 1_000,
+        signal: abort.signal,
+        extraStdio: { input: new Uint8Array([1]), maxBytes: 4, onData: () => abort.abort() },
+      })
+      expect(result.extraStdio, `aborted invocation ${turn}`).toMatchObject({
+        bytes: new Uint8Array([255, 10]),
+        totalBytes: 2,
+        eof: true,
+        inputBytesWritten: 1,
+      })
+      expect(result.extraStdio?.failure, `aborted invocation ${turn}`).toBeUndefined()
+      const descriptors = files.mock.calls
+        .slice(firstFileCall)
+        .map(([fd]) => fd)
+        .filter((fd) => typeof fd === "number")
+      expect(descriptors, `owned endpoint for invocation ${turn}`).toHaveLength(1)
+      expect(() => fstatSync(descriptors[0]!), `endpoint closed before GC for invocation ${turn}`).toThrowError(
+        expect.objectContaining({ code: "EBADF" }),
+      )
+      const next = await runner.run({
+        argv: [process.execPath, "-e", 'process.stdout.write("next"); process.stderr.write("diagnostic")'],
+        timeoutMs: 1_000,
+        postExitDrainGraceMs: 100,
+        // Collect the prior native subprocess while descriptors are live again.
+        onStart: () => Bun.gc(true),
+      })
+      expect(next, `following invocation ${turn}`).toMatchObject({
+        exitCode: 0,
+        stdout: "next",
+        stderr: "diagnostic",
+        timedOut: false,
+        stalled: false,
+      })
+    }
+  })
+
+  // Refusal must happen before native spawn without disabling ordinary calls.
+  // Bun.version is immutable; the real older-runtime probe is separate.
+  it("refuses unsupported extra stdio before spawning", async () => {
+    using requirement = vi.spyOn(Bun.semver, "satisfies").mockReturnValue(false)
+    using spawn = vi.spyOn(Bun, "spawn")
+    await using runner = createProcess({ inject: { log: silentLog } })
+    const argv = [process.execPath, "-e", 'process.stdout.write("ordinary")']
+    await expect(
+      runner.run({ argv, timeoutMs: 1_000, extraStdio: { input: new Uint8Array(), maxBytes: 4 } }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "infrastructure",
+        code: "extra-stdio-runtime-unsupported",
+        message: expect.stringContaining(`requires Bun >=1.4.2; running ${Bun.version}`),
+      },
+    })
+    expect(spawn).not.toHaveBeenCalled()
+    expect(requirement).toHaveBeenCalledWith(Bun.version, ">=1.4.2")
+    await expect(runner.run({ argv, timeoutMs: 1_000 })).resolves.toMatchObject({ exitCode: 0, stdout: "ordinary" })
+    expect(requirement).toHaveBeenCalledTimes(1)
+  })
+
+  // Raw evidence must survive invalid UTF-8 and retain exact offsets under the
+  // existing capture budget; decoded text and observer-only tests cannot prove it.
+  it.each([4, 16])("retains requested raw stream segments under a %i-byte budget", async (limit) => {
+    const stdout = new Uint8Array([97, 255, 0, 254, 98, 10])
+    const stderr = new Uint8Array([99, 128, 100, 10])
+    await using runner = createProcess({ maxOutputBytes: limit, inject: { log: silentLog } })
+    const result = await runner.run({
+      argv: [
+        process.execPath,
+        "-e",
+        "import { writeSync } from 'node:fs'; writeSync(1, new Uint8Array([97,255,0,254,98,10])); writeSync(2, new Uint8Array([99,128,100,10])); process.exitCode = 7",
+      ],
+      timeoutMs: 2_000,
+      captureRawOutput: true,
+    })
+    expect(result).toMatchObject({ exitCode: 7, timedOut: false, stalled: false })
+    for (const [stream, original] of [
+      ["stdout", stdout],
+      ["stderr", stderr],
+    ] as const) {
+      const raw = result.rawOutput?.[stream]
+      expect(raw).toBeDefined()
+      expect(raw?.totalBytes).toBe(original.byteLength)
+      const headSize = Math.min(original.byteLength, limit / 2)
+      const tailSize = Math.min(original.byteLength - headSize, limit / 2)
+      expect(Array.from(raw?.head ?? [])).toEqual(Array.from(original.subarray(0, headSize)))
+      expect(Array.from(raw?.tail ?? [])).toEqual(Array.from(original.subarray(original.byteLength - tailSize)))
+      expect((raw?.totalBytes ?? 0) - (raw?.head.byteLength ?? 0) - (raw?.tail.byteLength ?? 0)).toBe(
+        Math.max(0, original.byteLength - limit),
+      )
+    }
+    expect(result.stderr).toContain("\uFFFD")
+  })
+
+  // Ordinary output tests never exercise the separately owned duplex descriptor.
+  it.each([0, 30])("keeps extra stdio bytes separate through EOF and a %ims later exit", async (delay) => {
+    const observed = { stdout: [] as Uint8Array[], stderr: [] as Uint8Array[], extra: [] as Uint8Array[] }
+    await using runner = createProcess({ inject: { log: silentLog } })
+    const result = await runner.run({
+      argv: [
+        process.execPath,
+        "-e",
+        `
+        import { closeSync, writeSync } from 'node:fs'
+        if (Buffer.from(await Bun.stdin.bytes()).toString('hex') !== '0700fc') throw new Error('changed ordinary stdin')
+        const reader = Bun.file(3).stream().getReader()
+        const chunks = []
+        let length = 0
+        while (length < 4) {
+          const next = await reader.read()
+          if (next.done) throw new Error('incomplete greeting')
+          chunks.push(next.value); length += next.value.byteLength
+        }
+        reader.releaseLock()
+        if (Buffer.concat(chunks).toString('hex') !== '0100ff0a') throw new Error('changed greeting')
+        writeSync(1, new Uint8Array([111, 0, 255]))
+        writeSync(2, new Uint8Array([101, 0, 254]))
+        writeSync(3, new Uint8Array([9, 0]))
+        writeSync(3, new Uint8Array([254, 10]))
+        closeSync(3)
+        await Bun.sleep(${delay})
+        writeSync(1, new Uint8Array([10]))
+        process.exitCode = 7
+      `,
+      ],
+      timeoutMs: 2_000,
+      stdin: new Uint8Array([7, 0, 252]),
+      onOutput: ({ stream, chunk }) => observed[stream].push(chunk.slice()),
+      extraStdio: {
+        input: new Uint8Array([1, 0, 255, 10]),
+        maxBytes: 4,
+        onData: (chunk) => observed.extra.push(chunk.slice()),
+      },
+    })
+    expect(result).toMatchObject({ exitCode: 7, timedOut: false, stalled: false, lastProgressBytes: 7 })
+    expect(result.extraStdio).toEqual({
+      bytes: new Uint8Array([9, 0, 254, 10]),
+      totalBytes: 4,
+      eof: true,
+      inputBytesWritten: 4,
+    })
+    expect(Buffer.concat(observed.stdout).toString("hex")).toBe("6f00ff0a")
+    expect(Buffer.concat(observed.stderr).toString("hex")).toBe("6500fe")
+    expect(Buffer.concat(observed.extra).toString("hex")).toBe("0900fe0a")
+  })
+
+  it.each(["missing", "short-write", "read-error", "overflow", "write-pending"] as const)(
+    "settles extra stdio %s without losing its available evidence",
+    async (fault) => {
+      const exited = Promise.withResolvers<number>()
+      const kills: NodeJS.Signals[] = []
+      const close = vi.fn()
+      let reads = 0
+      const spawn: Spawn = () => ({
+        pid: 4242,
+        stdout: bytes("ordinary"),
+        stderr: bytes("diagnostic"),
+        exited: fault === "write-pending" ? Promise.resolve(0) : exited.promise,
+        signalCode: null,
+        kill(signal = "SIGTERM") {
+          kills.push(signal as NodeJS.Signals)
+          exited.resolve(143)
+        },
+        ...(fault === "missing"
+          ? {}
+          : {
+              extraStdio: {
+                readable: () =>
+                  new ReadableStream<Uint8Array>({
+                    pull(controller) {
+                      if (reads++ === 0) {
+                        controller.enqueue(new Uint8Array(fault === "overflow" ? [1, 2, 3, 4, 5] : [1, 2]))
+                      } else if (fault === "read-error") controller.error(new Error("descriptor read failed"))
+                      else controller.close()
+                    },
+                  }),
+                write: async (input: Uint8Array) =>
+                  fault === "write-pending"
+                    ? new Promise<number>(() => {})
+                    : fault === "short-write"
+                      ? 1
+                      : input.byteLength,
+                close,
+              },
+            }),
+      })
+      await using runner = createProcess({ inject: { spawn, log: silentLog }, killGraceMs: 10 })
+      const result = await runner.run({
+        argv: ["worker"],
+        timeoutMs: 100,
+        postExitDrainGraceMs: 10,
+        extraStdio: { input: new Uint8Array([1, 2]), maxBytes: 4 },
+      })
+      expect(kills).toEqual([fault === "write-pending" ? "SIGKILL" : "SIGTERM"])
+      expect(result).toMatchObject({ stdout: "ordinary", stderr: "diagnostic", timedOut: false })
+      expect(result.extraStdio?.failure).toMatch(
+        {
+          missing: /requested.*descriptor 3.*missing/u,
+          "short-write": /wrote 1 of 2/u,
+          "read-error": /descriptor read failed/u,
+          overflow: /exceeded.*4/u,
+          "write-pending": /input write.*abandoned/u,
+        }[fault],
+      )
+      if (fault === "overflow") {
+        expect(result.extraStdio).toMatchObject({ bytes: new Uint8Array([1, 2, 3, 4]), totalBytes: 5 })
+      }
+      if (fault === "read-error") {
+        expect(result.extraStdio).toMatchObject({ bytes: new Uint8Array([1, 2]), totalBytes: 2, eof: false })
+      }
+      if (fault === "short-write") expect(result.extraStdio?.inputBytesWritten).toBe(1)
+      expect(close).toHaveBeenCalledTimes(fault === "missing" ? 0 : 1)
+    },
+  )
+
   it("resolves bare executables from the environment supplied to the child", async () => {
     const bin = await mkdtemp(join(tmpdir(), "yrd-process-path-"))
     try {
@@ -265,6 +499,10 @@ describe("Process", () => {
 
     const { stdout } = await process.run({ argv: ["noisy"] })
 
+    expect(stdout).toContain("when an output observer is configured")
+    expect(stdout).toContain("only if the caller saved and completed a raw-output sink")
+    expect(stdout).not.toContain("artievent")
+
     // The arithmetic is checked against the bytes actually returned, not against
     // a number the notice asserts about itself: a drop notice that can disagree
     // with its own text is the silent truncation this whole change exists to
@@ -341,6 +579,7 @@ describe("Process", () => {
 
     expect(result.stdout).toBe("exactly-32-bytes-of-plain-output")
     expect(result.outputTruncation).toBeUndefined()
+    expect(result).not.toHaveProperty("rawOutput")
   })
 
   it("hands every dropped byte to the output observer so the full stream survives elsewhere", async () => {
@@ -362,8 +601,8 @@ describe("Process", () => {
       },
     })
 
-    // What makes the notice's promise true: the queue's artievent writer holds
-    // the complete stdout.log even though this capture kept 20 bytes.
+    // Callback delivery is measured here. Persistence belongs to the caller
+    // and is not proved by merely supplying an observer.
     expect(observed).toBe(400)
     expect(result.outputTruncation?.[0]?.droppedBytes).toBe(380)
   })
@@ -382,7 +621,7 @@ describe("Process", () => {
     })
     await using process = createProcess({ maxOutputBytes: 40, inject: { spawn, log: silentLog } })
 
-    const result = await process.run({ argv: ["unicode"] })
+    const result = await process.run({ argv: ["unicode"], captureRawOutput: true })
 
     expect(result.stdout).not.toContain("\uFFFD")
     const truncation = result.outputTruncation?.[0]
@@ -391,6 +630,10 @@ describe("Process", () => {
     // arithmetic still closes exactly.
     expect((truncation?.keptBytes as number) + (truncation?.droppedBytes as number)).toBe(300)
     expect(truncation?.keptBytes).toBeLessThan(40)
+    const original = new TextEncoder().encode("→".repeat(100))
+    expect(Array.from(result.rawOutput?.stdout.head ?? [])).toEqual(Array.from(original.subarray(0, 20)))
+    expect(Array.from(result.rawOutput?.stdout.tail ?? [])).toEqual(Array.from(original.subarray(280)))
+    expect(result.rawOutput?.stdout.totalBytes).toBe(300)
   })
 
   it("escalates timed-out children from SIGTERM to SIGKILL after the grace period", async () => {

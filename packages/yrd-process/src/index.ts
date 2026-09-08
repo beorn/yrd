@@ -1,7 +1,7 @@
 import { createScope, type Scope } from "@silvery/scope"
 import { createFailure } from "./failure.ts"
 import { createLogger, type ConditionalLogger } from "loggily"
-import { accessSync, constants, statSync, writeSync } from "node:fs"
+import { accessSync, closeSync, constants, statSync, write, writeSync } from "node:fs"
 import { delimiter, isAbsolute, resolve } from "node:path"
 export {
   FailureEventSchema,
@@ -38,6 +38,16 @@ export type ProcessRequest = Readonly<{
    * child before the error is propagated. */
   onStart?: (pid: number) => void
   onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void
+  /** Expose the existing bounded capture's exact raw head and tail alongside
+   * its decoded display text, without another capture or byte budget. */
+  captureRawOutput?: true
+  /** One optional duplex byte stream on child descriptor 3. Its traffic is
+   * separate from ordinary output and never renews the output-progress lease. */
+  extraStdio?: Readonly<{
+    input: Uint8Array
+    maxBytes: number
+    onData?: (chunk: Uint8Array) => void
+  }>
   timeoutMs?: number
   /** Explicit inter-output silence lease. It starts with the first observed
    * byte, so queue or scheduler startup latency is not child-stall evidence. */
@@ -72,11 +82,33 @@ export type OutputTruncation = Readonly<{
   limitBytes: number
 }>
 
+type RawOutputSnapshot = Readonly<{
+  /** Starts at byte 0, without UTF-8 boundary trimming. */
+  head: Uint8Array
+  /** Ends at totalBytes; bytes between head and tail may have been dropped. */
+  tail: Uint8Array
+  /** Bytes observed, not a claim that the process or its streams settled. */
+  totalBytes: number
+}>
+
 type ProcessResultBase = Readonly<{
   exitCode: number
   signal: NodeJS.Signals | null
   stdout: string
   stderr: string
+  /** Present only when requested. A head/tail length sum below totalBytes
+   * declares a gap; process settlement metadata still governs completeness. */
+  rawOutput?: Readonly<{ stdout: RawOutputSnapshot; stderr: RawOutputSnapshot }>
+  extraStdio?: Readonly<{
+    /** Exact received prefix, never decoded or annotated. */
+    bytes: Uint8Array
+    /** Bytes actually received, including any discarded after maxBytes. */
+    totalBytes: number
+    /** Natural EOF only; cancellation or abandoned drain is not EOF. */
+    eof: boolean
+    inputBytesWritten: number
+    failure?: string
+  }>
   durationMs: number
   timedOut: boolean
   lastProgressAtMs?: number
@@ -167,6 +199,7 @@ type SpawnOptions = Readonly<{
   stdin: "ignore" | Blob
   stdout: "pipe"
   stderr: "pipe"
+  extraStdio?: true
 }>
 
 type Spawned = Readonly<{
@@ -174,6 +207,12 @@ type Spawned = Readonly<{
   pid: number
   stdout: ReadableStream<Uint8Array> | null
   stderr: ReadableStream<Uint8Array> | null
+  /** Open lazily, after run() owns child termination and settlement. */
+  extraStdio?: Readonly<{
+    readable(): ReadableStream<Uint8Array>
+    write(input: Uint8Array): Promise<number>
+    close(): void
+  }>
   exited: Promise<number>
   signalCode: NodeJS.Signals | null
   kill(signal?: number | NodeJS.Signals): void
@@ -351,6 +390,7 @@ export function createProcess(
         },
       }
       const argv = validateArgv(request.argv)
+      validateExtraStdio(request.extraStdio)
       if (request.timeoutMs !== undefined && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1)) {
         throw new RangeError("yrd: Process timeoutMs must be a positive integer")
       }
@@ -388,6 +428,7 @@ export function createProcess(
       let cancelReap: (() => void) | undefined
       let cancelDrainGrace: (() => void) | undefined
       let untrackGroup: (() => void) | undefined
+      let closeExtraStdio: (() => void) | undefined
       // GIT CHATTER LIVES AT TRACE (plan of record, M2). One queue run spawns
       // ~200 git commands, and at DEBUG each one printed a finish line AND a
       // span row: 405 of a merging queue run's 537 rows were git transcript,
@@ -407,6 +448,7 @@ export function createProcess(
           stdin: request.stdin === undefined ? "ignore" : inputBlob(request.stdin),
           stdout: "pipe",
           stderr: "pipe",
+          ...(request.extraStdio === undefined ? {} : { extraStdio: true }),
           signal,
           detached: true,
         })
@@ -494,6 +536,7 @@ export function createProcess(
         // an EOF that is never coming, returning the bytes captured so far.
         const drainAbort = new AbortController()
         const truncations: { stdout?: OutputTruncation; stderr?: OutputTruncation } = {}
+        const rawField = rawOutputField(request.captureRawOutput)
         const capture = async (stream: ReadableStream<Uint8Array>, name: "stdout" | "stderr"): Promise<string> => {
           try {
             const read = await readBounded(
@@ -503,7 +546,16 @@ export function createProcess(
               renewProgressLease,
               request.onOutput,
               drainAbort.signal,
+              (error) => {
+                outputError ??= error
+                log.warn?.(`${commandText(argv)} could not finish cancelling its ${name} reader.`, {
+                  argv,
+                  error: String(error),
+                })
+              },
+              request.captureRawOutput,
             )
+            if (rawField.rawOutput !== undefined && read.raw !== undefined) rawField.rawOutput[name] = read.raw
             if (read.truncation !== undefined) {
               // Recorded per stream rather than pushed to a shared array: the
               // two captures race inside Promise.all, and a verdict reader
@@ -530,10 +582,19 @@ export function createProcess(
             terminate()
           }, request.timeoutMs)
         }
-        const capturesDone: Promise<readonly [string, string]> =
+        const ordinaryCaptures =
           child.stdout === null || child.stderr === null
             ? Promise.resolve(["", ""] as const)
             : Promise.all([capture(child.stdout, "stdout"), capture(child.stderr, "stderr")])
+        const extra =
+          request.extraStdio === undefined
+            ? undefined
+            : captureExtraStdio(request.extraStdio, child.extraStdio, drainAbort.signal, (message) => {
+                log.warn?.(message, { argv, pid: child.pid })
+                if (!childSettled) terminate()
+              })
+        closeExtraStdio = extra?.close
+        const capturesDone = Promise.all([ordinaryCaptures, extra?.done])
 
         // Bind run()'s completion to the DIRECT child's PID exit — NOT to stream
         // close. A descendant that escaped the group sweep can hold the pipe
@@ -586,7 +647,9 @@ export function createProcess(
           })
           drainAbort.abort()
         }
-        const [stdout, stderr] = await capturesDone
+        const [[stdout, stderr]] = await capturesDone
+        closeExtraStdio?.()
+        const extraResult = extra?.result()
         signal.removeEventListener("abort", onAbort)
         cancelProgressLease?.()
         cancelDrainGrace?.()
@@ -602,6 +665,8 @@ export function createProcess(
           signal: child.signalCode,
           stdout,
           stderr,
+          ...rawField,
+          ...(extraResult === undefined ? {} : { extraStdio: extraResult }),
           durationMs: Math.max(0, now() - started),
           timedOut,
           stalled,
@@ -631,7 +696,10 @@ export function createProcess(
             // A non-zero exit is command evidence for the caller to classify
             // (many Git probes intentionally use it); only abnormal process
             // settlement is a process-lifecycle failure.
-            outcome: result.signal === null && !result.timedOut && !result.stalled ? "succeeded" : "failed",
+            outcome:
+              result.signal === null && !result.timedOut && !result.stalled && extraResult?.failure === undefined
+                ? "succeeded"
+                : "failed",
             durationMs: result.durationMs,
             exitCode: result.exitCode,
             signal: result.signal,
@@ -653,6 +721,7 @@ export function createProcess(
         }
         throw error
       } finally {
+        closeExtraStdio?.()
         cancelTimeout?.()
         cancelProgressLease?.()
         cancelDrainGrace?.()
@@ -669,7 +738,18 @@ export function createProcess(
 
 const ABANDONED = Symbol("drain-abandoned")
 
-type BoundedRead = Readonly<{ text: string; truncation?: OutputTruncation }>
+type BoundedRead = Readonly<{ text: string; truncation?: OutputTruncation; raw?: RawOutputSnapshot }>
+
+/** Keep the optional result field absent unless capture was requested. */
+function rawOutputField(capture = false): { rawOutput?: { stdout: RawOutputSnapshot; stderr: RawOutputSnapshot } } {
+  if (!capture) return {}
+  return {
+    rawOutput: {
+      stdout: { head: new Uint8Array(), tail: new Uint8Array(), totalBytes: 0 },
+      stderr: { head: new Uint8Array(), tail: new Uint8Array(), totalBytes: 0 },
+    },
+  }
+}
 
 /**
  * A retained head and a retained tail, plus the count of everything dropped
@@ -732,13 +812,23 @@ class OutputWindow {
    * buffer exactly as it did before truncation existed — no seam, no notice,
    * and no multi-byte code point split across the join.
    */
-  finish(name: "stdout" | "stderr"): BoundedRead {
+  finish(name: "stdout" | "stderr", captureRawOutput = false): BoundedRead {
     const decoder = new TextDecoder()
+    const raw = captureRawOutput
+      ? {
+          head: Buffer.concat(this.#head, this.#headSize),
+          tail: Buffer.concat(this.#tail, this.#tailSize),
+          totalBytes: this.#total,
+        }
+      : undefined
     if (this.#total <= this.#limit) {
-      return { text: decoder.decode(Buffer.concat([...this.#head, ...this.#tail], this.#total)) }
+      return {
+        text: decoder.decode(Buffer.concat([...this.#head, ...this.#tail], this.#total)),
+        ...(raw === undefined ? {} : { raw }),
+      }
     }
-    const head = withoutPartialTrailingCodePoint(Buffer.concat(this.#head, this.#headSize))
-    const tail = withoutPartialLeadingCodePoint(Buffer.concat(this.#tail, this.#tailSize))
+    const head = withoutPartialTrailingCodePoint(raw?.head ?? Buffer.concat(this.#head, this.#headSize))
+    const tail = withoutPartialLeadingCodePoint(raw?.tail ?? Buffer.concat(this.#tail, this.#tailSize))
     const truncation: OutputTruncation = {
       stream: name,
       totalBytes: this.#total,
@@ -751,15 +841,15 @@ class OutputWindow {
     return {
       text: decoder.decode(head) + truncationNotice(truncation) + decoder.decode(tail),
       truncation,
+      ...(raw === undefined ? {} : { raw }),
     }
   }
 }
 
 /**
  * The drop notice, in the returned text where a reader of a check verdict
- * cannot miss it. It names what was dropped, how much, why, and where the
- * complete stream still is — a truncation that only a structured field records
- * is a silent one to every human consumer of stdout.
+ * cannot miss it. It names what was dropped and the conditions under which
+ * the caller could have retained it elsewhere; capture does not prove storage.
  */
 function truncationNotice(truncation: OutputTruncation): string {
   const { stream, droppedBytes, totalBytes, limitBytes, keptBytes } = truncation
@@ -767,8 +857,8 @@ function truncationNotice(truncation: OutputTruncation): string {
     `\n\n[yrd: ${stream} truncated — ${droppedBytes} bytes dropped here. ` +
     `The command wrote ${totalBytes} bytes, past the ${limitBytes}-byte capture limit, ` +
     `so only ${keptBytes} bytes are kept — a head and a tail — and the middle is gone. ` +
-    `Yrd still streamed every byte to this run's output observer; the queue persists that as the step's ` +
-    `${stream}.log artievent, which is where the dropped middle can be read.]\n\n`
+    `Every received byte is delivered when an output observer is configured. ` +
+    `Complete durable evidence exists only if the caller saved and completed a raw-output sink.]\n\n`
   )
 }
 
@@ -809,16 +899,146 @@ function withoutPartialLeadingCodePoint(bytes: Uint8Array): Uint8Array {
   return index === 0 ? bytes : bytes.subarray(index)
 }
 
+function validateExtraStdio(request: ProcessRequest["extraStdio"]): void {
+  if (request === undefined) return
+  positiveInteger(request.maxBytes, "extraStdio.maxBytes")
+  if (!(request.input instanceof Uint8Array)) throw new TypeError("yrd: extraStdio.input must be a Uint8Array")
+  if (request.input.byteLength > request.maxBytes) {
+    throw new RangeError("yrd: extraStdio.input exceeds extraStdio.maxBytes")
+  }
+}
+
+/** Bounded raw capture only; process deadlines and termination stay in run(). */
+function captureExtraStdio(
+  request: NonNullable<ProcessRequest["extraStdio"]>,
+  port: Spawned["extraStdio"],
+  abandon: AbortSignal,
+  onFailure: (message: string) => void,
+): Readonly<{ done: Promise<void>; close(): void; result(): NonNullable<ProcessResult["extraStdio"]> }> {
+  const chunks: Uint8Array[] = []
+  let kept = 0
+  let totalBytes = 0
+  let eof = false
+  let inputBytesWritten = 0
+  let writeSettled = false
+  let failure: string | undefined
+  let closed = false
+  let done = Promise.resolve()
+  const failed = (error: unknown): void => {
+    const message = `yrd: descriptor 3: ${error instanceof Error ? error.message : String(error)}`
+    failure = failure === undefined ? message : `${failure}\n${message}`
+    onFailure(message)
+  }
+  const close = (): void => {
+    if (closed) return
+    closed = true
+    try {
+      port?.close()
+    } catch (error) {
+      failed(error)
+    }
+  }
+  try {
+    if (port === undefined) throw new Error("requested extra descriptor 3 is missing")
+    abandon.addEventListener("abort", close, { once: true })
+    const reading = drainBytes(
+      port.readable(),
+      (chunk) => {
+        totalBytes += chunk.byteLength
+        const retained = chunk.subarray(0, Math.max(0, request.maxBytes - kept)).slice()
+        if (retained.byteLength > 0) {
+          chunks.push(retained)
+          kept += retained.byteLength
+        }
+        request.onData?.(chunk)
+        if (totalBytes > request.maxBytes && failure === undefined) {
+          failed(new Error(`receive exceeded ${request.maxBytes} bytes (${totalBytes} received)`))
+        }
+      },
+      failed,
+      abandon,
+    ).then((complete) => {
+      eof = complete
+      if (!complete) failed(new Error("drain was abandoned before EOF"))
+      return undefined
+    }, failed)
+    const abandoned = new Promise<undefined>((resolve) => {
+      abandon.addEventListener(
+        "abort",
+        () => {
+          if (!writeSettled) failed(new Error("input write was abandoned before completion"))
+          resolve(undefined)
+        },
+        { once: true },
+      )
+    })
+    const writing = Promise.resolve()
+      .then(() => port.write(request.input))
+      .then(
+        (count) => {
+          writeSettled = true
+          inputBytesWritten = count
+          if (count !== request.input.byteLength) {
+            failed(new Error(`wrote ${count} of ${request.input.byteLength} input bytes; no resend`))
+          }
+          return undefined
+        },
+        (error) => {
+          writeSettled = true
+          failed(error)
+          return undefined
+        },
+      )
+    done = Promise.all([reading, Promise.race([writing, abandoned])]).then(() => undefined)
+  } catch (error) {
+    failed(error)
+  }
+  return {
+    done,
+    close,
+    result: () => ({
+      bytes: new Uint8Array(Buffer.concat(chunks, kept)),
+      totalBytes,
+      eof,
+      inputBytesWritten,
+      ...(failure === undefined ? {} : { failure }),
+    }),
+  }
+}
+
 async function readBounded(
   stream: ReadableStream<Uint8Array>,
   limit: number,
   name: "stdout" | "stderr",
   onProgress: (bytes: number) => void = () => {},
   onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void = () => {},
-  abandon?: AbortSignal,
+  abandon: AbortSignal | undefined,
+  onCancelError: (error: unknown) => void,
+  captureRawOutput = false,
 ): Promise<BoundedRead> {
-  const reader = stream.getReader()
   const window = new OutputWindow(limit)
+  await drainBytes(
+    stream,
+    (value) => {
+      window.admit(value)
+      // Ordinary observers receive every byte, including capture overflow.
+      onProgress(value.byteLength)
+      onOutput({ stream: name, chunk: value })
+    },
+    onCancelError,
+    abandon,
+  )
+  return window.finish(name, captureRawOutput)
+}
+
+/** One drain owner for ordinary text capture and the optional raw descriptor. */
+async function drainBytes(
+  stream: ReadableStream<Uint8Array>,
+  onChunk: (chunk: Uint8Array) => void,
+  onCancelError: (error: unknown) => void,
+  abandon?: AbortSignal,
+): Promise<boolean> {
+  const reader = stream.getReader()
   // When the caller abandons the drain (a descendant is holding this pipe open
   // past the child's exit), race each read against the abort so the loop stops
   // waiting on an EOF that is never coming; cancel() releases our read end and
@@ -837,25 +1057,15 @@ async function readBounded(
     while (true) {
       const next = reader.read()
       const outcome = abandoned === undefined ? await next : await Promise.race([next, abandoned])
-      if (outcome === ABANDONED) {
-        await reader.cancel().catch(() => {})
-        return window.finish(name)
+      if (outcome === ABANDONED || abandon?.aborted) {
+        // Cancellation itself can await an escaped holder. The caller already
+        // records incomplete settlement; never let cleanup reopen that wait.
+        void reader.cancel().catch(onCancelError)
+        return false
       }
       const { done, value } = outcome
-      if (done) return window.finish(name)
-      window.admit(value)
-      // Both observers see EVERY byte, including the ones the window drops.
-      //
-      // onProgress is the no-progress lease: a flooding child is the single
-      // most active kind there is, so withholding its bytes would have the
-      // stall detector kill exactly the process this truncation exists to let
-      // finish — the same outage in a different costume.
-      //
-      // onOutput is the caller's own sink, and forwarding in full is what makes
-      // the drop notice's promise true: the queue's artievent writer holds the
-      // complete stream on disk even when this in-memory capture cannot.
-      onProgress(value.byteLength)
-      onOutput({ stream: name, chunk: value })
+      if (done) return true
+      onChunk(value)
     }
   } finally {
     reader.releaseLock()
@@ -868,10 +1078,52 @@ function spawnProcess(argv: readonly string[], options: SpawnOptions): Spawned {
   // node:child_process does not.
   const [command, ...args] = argv
   if (command === undefined) throw new TypeError("yrd: process argv must contain an executable")
-  return Bun.spawn([resolveExecutable(command, options.env), ...args], options)
+  const { extraStdio, ...ordinary } = options
+  if (extraStdio !== undefined && !Bun.semver.satisfies(Bun.version, ">=1.4.2")) {
+    throw createFailure({
+      kind: "infrastructure",
+      code: "extra-stdio-runtime-unsupported",
+      message: `yrd: extraStdio requires Bun >=1.4.2; running ${Bun.version}. Select the declared runtime before requesting descriptor 3.`,
+    })
+  }
+  const executable = [resolveExecutable(command, options.env), ...args]
+  if (extraStdio === undefined) return Bun.spawn(executable, ordinary)
+  const child = Bun.spawn(executable, {
+    ...ordinary,
+    stdio: [ordinary.stdin, "pipe", "pipe", "pipe"],
+  })
+  // Bun >=1.4.2 transfers this endpoint to the caller when stdio is read.
+  // Acquire it once; captureExtraStdio closes it at the existing settlement
+  // boundary, before a later child can reuse its number or GC can run.
+  const fd = child.stdio[3]
+  const descriptor = () => {
+    if (typeof fd !== "number") throw new Error("requested extra descriptor 3 is missing")
+    return fd
+  }
+  return {
+    pid: child.pid,
+    stdout: child.stdout,
+    stderr: child.stderr,
+    exited: child.exited,
+    get signalCode() {
+      return child.signalCode
+    },
+    kill: (signal) => child.kill(signal),
+    extraStdio: {
+      readable: () => Bun.file(descriptor()).stream(),
+      write: (input) =>
+        new Promise((resolve, reject) => {
+          write(descriptor(), input, 0, input.byteLength, null, (error, count) => {
+            if (error !== null) reject(error)
+            else resolve(count)
+          })
+        }),
+      close: () => closeSync(descriptor()),
+    },
+  }
 }
 
-function resolveExecutable(command: string, env: Readonly<Record<string, string>>): string {
+export function resolveExecutable(command: string, env: Readonly<Record<string, string>>): string {
   if (isAbsolute(command) || command.includes("/")) return command
   for (const directory of (env.PATH ?? "").split(delimiter)) {
     if (directory === "") continue
