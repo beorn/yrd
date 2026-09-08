@@ -36,7 +36,7 @@ import {
   type WriteRecord,
 } from "./records.ts"
 import { changeName } from "./refs.ts"
-import { short, writeRecord, type Ring, type Run } from "./run.ts"
+import { recordProgramStart, recordProgramResult, short, writeRecord, type Ring, type Run } from "./run.ts"
 import { tipOf } from "./state.ts"
 import type { QueueEntry } from "./remote.ts"
 
@@ -371,7 +371,11 @@ async function deliver(
     if (result.exitCode === 0) return { delivery: "sent" }
     return {
       delivery: "failed",
-      failure: `the notify entry ${entry.name} in ${cwd} exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`.replace(/\s+/gu, " "),
+      failure:
+        `the notify entry ${entry.name} in ${cwd} exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`.replace(
+          /\s+/gu,
+          " ",
+        ),
     }
   } catch (error) {
     return {
@@ -395,11 +399,17 @@ function notificationEnvironment(run: Run): Promise<Readonly<{ cwd: string; runn
         process: runner,
         env: run.options.env,
         plumbing: run.options.plumbing,
-        ...(run.options.setup === undefined ? {} : {
-          setup: { run: run.options.setup, logDir: join(run.options.workdir, "checks", "notify", run.log.id), tmpdir: join(run.tmpdir, "notify", run.log.id) },
-          starting: ({ start, log }) => run.log.write({ kind: "check", check: "setup", phase: "notify", start, log }),
-          record: ({ start, end, result }) => run.log.write({ kind: "check", check: "setup", phase: "notify", start, end, log: result.log, result: result.result, ms: result.ms }),
-        }),
+        ...(run.options.setup === undefined
+          ? {}
+          : {
+              setup: {
+                run: run.options.setup,
+                logDir: join(run.options.workdir, "checks", "notify", run.log.id),
+                tmpdir: join(run.tmpdir, "notify", run.log.id),
+              },
+              starting: ({ start, log }) => recordProgramStart(run, { branch: run.options.target.branch, head: run.targetSha, name: "setup", phase: "notify", start, log }),
+              record: ({ start, end, result }) => recordProgramResult(run, { branch: run.options.target.branch, head: run.targetSha, name: "setup", phase: "notify", start, end }, result),
+            }),
       })
       run.resources.defer(() => tree.remove())
       return { cwd: tree.path, runner }

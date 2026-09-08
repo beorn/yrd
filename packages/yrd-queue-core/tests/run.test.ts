@@ -1858,21 +1858,21 @@ describe("the target's setup", () => {
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/one"])
     const order = whereRan(w)
-    // Two worktrees this run made: the change's head on the submit path, and
-    // the target plus that head on the merge path. One setup each, no more.
+    // Submit, merge, and one captured-base notification environment each run setup once.
     const prepared = order.filter(([what]) => what === "setup").map(([, where]) => where)
-    expect(prepared).toHaveLength(2)
-    expect(new Set(prepared).size).toBe(2)
+    expect(prepared).toHaveLength(3)
+    expect(new Set(prepared).size).toBe(3)
     everyCheckWasPrepared(order)
     // The setup is recorded in a check's own shape, billed to the queue.
     expect(logRecords(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "0", name: "setup", phase: "submit", result: "pass" },
       { exit: "0", name: "setup", phase: "merge", result: "pass" },
+      { exit: "0", name: "setup", phase: "notify", result: "pass" },
     ])
-    // Two setups, each with a start row and an end row: four `check` rows.
+    // Three setups, each with a start and an end row.
     const setupRows = logRecords(outcome).filter((record) => record.kind === "check" && record.name === "setup")
-    expect(setupRows).toHaveLength(4)
-    expect(setupRows.filter((record) => record.end === undefined)).toHaveLength(2)
+    expect(setupRows).toHaveLength(6)
+    expect(setupRows.filter((record) => record.end === undefined)).toHaveLength(3)
   })
 
   /**
@@ -1928,14 +1928,14 @@ describe("the target's setup", () => {
     expect(outcome.failed).toEqual(["task/one"])
     const order = whereRan(w)
     const prepared = order.filter(([what]) => what === "setup").map(([, where]) => where)
-    expect(prepared).toHaveLength(2)
-    expect(new Set(prepared).size).toBe(2)
+    expect(prepared).toHaveLength(3)
+    expect(new Set(prepared).size).toBe(3)
     everyCheckWasPrepared(order)
     expect(
       logRecords(outcome)
         .filter((record) => record.kind === "result" && record.name === "setup")
         .map((record) => record.phase),
-    ).toEqual(["submit", "merge"])
+    ).toEqual(["submit", "merge", "notify"])
   })
 
   it("a setup that fails ends the change stuck, never failed, and nothing is judged in that worktree", async () => {
@@ -1957,12 +1957,12 @@ describe("the target's setup", () => {
     expect(records[1]?.trailers.filter(([name]) => name === "Fault")).toEqual([])
     // The check never ran: there was no prepared tree to run it in.
     expect(whereRan(w).filter(([what]) => what === "check")).toEqual([])
-    expect(messages(w)[0]).toMatchObject({
-      record: "stuck",
-      reason: expect.stringContaining("could not prepare a worktree"),
-    })
+    expect(messages(w)).toEqual([])
+    expect(trailer(records.at(-1)!, "Delivery")).toBe("failed")
+    expect(logRecords(outcome).filter((record) => record.kind === "message")).toMatchObject([{ delivered: false, error: expect.stringContaining("could not run") }])
     expect(logRecords(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
       { exit: "1", result: "fail", whose: "queue" },
+      { exit: "1", result: "fail", whose: "queue", phase: "notify" },
     ])
   })
 

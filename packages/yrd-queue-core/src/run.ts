@@ -502,9 +502,9 @@ async function prepare(
     env: run.options.env,
     plumbing: run.options.plumbing,
     process: run.options.process,
-    record: ({ result, start, end: ended }) => record(run, { ...about, end: ended, start }, result),
+    record: ({ result, start, end: ended }) => recordProgramResult(run, { ...about, end: ended, start }, result),
     ...(run.options.setup === undefined ? {} : { setup: { logDir, run: run.options.setup, tmpdir: run.tmpdir } }),
-    starting: ({ log, start }) => started(run, { ...about, log, start }),
+    starting: ({ log, start }) => recordProgramStart(run, { ...about, log, start }),
     targetSha: run.targetSha,
   })
 }
@@ -1308,7 +1308,7 @@ async function check(
     ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }),
   }
   const start = new Date().toISOString()
-  started(run, { ...about, log: checkLogPath(logDir, spec.name), start })
+  recordProgramStart(run, { ...about, log: checkLogPath(logDir, spec.name), start })
   const result = await runCheck({
     cwd,
     env: run.options.env,
@@ -1318,7 +1318,7 @@ async function check(
     spec,
     tree,
   })
-  record(run, { ...about, end: new Date().toISOString(), start }, result)
+  recordProgramResult(run, { ...about, end: new Date().toISOString(), start }, result)
   return result
 }
 
@@ -1334,7 +1334,7 @@ async function check(
  * check, and a check that is merely long reads as a hung queue: R8 was stopped
  * as a hang while a 28.7-minute check ran (plan § Owed after M5).
  */
-function started(
+export function recordProgramStart(
   run: Run,
   about: Readonly<{
     branch: string
@@ -1356,7 +1356,7 @@ function started(
  * because the setup is the queue's own ground rather than the change; a
  * failing check is the submitter's, which is the whole of the rule.
  */
-function record(
+export function recordProgramResult(
   run: Run,
   about: Readonly<{
     branch: string
