@@ -577,7 +577,7 @@ type SettledGitlink = Readonly<{
   path: string
   from: string
   to: string
-  state: "raised" | "left-off-main" | "not-run"
+  state: "raised" | "kept-ahead" | "as-written" | "left-off-main" | "not-run"
 }>
 
 type SuperMergeResult = Readonly<{
@@ -713,7 +713,7 @@ function readSuperMergeResult(value: unknown): SuperMergeResult {
       typeof entry.path !== "string" ||
       typeof entry.from !== "string" ||
       typeof entry.to !== "string" ||
-      !new Set(["raised", "left-off-main", "not-run"]).has(String(entry.state))
+      !new Set(["raised", "kept-ahead", "as-written", "left-off-main", "not-run"]).has(String(entry.state))
     ) {
       throw new Error(`git-super merge gitlink ${String(index)} is incomplete`)
     }
