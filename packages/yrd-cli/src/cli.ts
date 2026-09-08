@@ -408,6 +408,7 @@ function buildProgram(
     .command("open [commit]")
     .description("retain an exact commit detached, or open/adopt a branch; prints its path")
     .option("--bay <name>", "name the environment")
+    .option("--owner <id>", "the durable owner this environment belongs to; encoded in its path")
     .option("--issue <ref>", "the issue this environment is for")
     .option("--json", "emit stable JSON")
     .action(async (commit, options) =>
