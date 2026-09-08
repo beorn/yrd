@@ -101,9 +101,10 @@ export const RECORD_FORMAT = "%H%x00%cI%x00%(trailers:only,unfold)%x00%B"
  * a second one.
  */
 export async function recordCommit(git: Git, write: WriteRecord, parent: string | undefined): Promise<string> {
+  await recordRootChanges(git, write.trailers ?? [])
   const merges =
     write.kind === "checked"
-      ? (write.trailers ?? []).filter(([name]) => name === "Merge").map(([, value]) => value)
+      ? (write.trailers ?? []).filter(([name]) => name.toLowerCase() === "merge").map(([, value]) => value)
       : []
   if (merges.length > 1) {
     throw new Error(`checked record carries ${merges.length} Merge: trailers; one candidate merge is required`)
@@ -127,6 +128,166 @@ export async function recordCommit(git: Git, write: WriteRecord, parent: string 
   const args = ["commit-tree", EMPTY_TREE]
   for (const on of parents) args.push("-p", on)
   return (await git([...args, "-m", message])).trim()
+}
+
+/** The approved root-entry facts; no child repository, remote or delivery policy. */
+export type RootChanges = Readonly<{
+  merge: string
+  encoded: string
+  changes: readonly Readonly<{ path: string; mode: "160000"; from: string; to: string }>[]
+  /** Present only when read from the producer's temporary local ref. */
+  receipt?: Readonly<{ ref: string; oid: string }>
+}>
+
+/** Read a live producer receipt, or validate its exact copied Root-Changes bytes. */
+export async function readRootChanges(git: Git, merge: string, copied?: string): Promise<RootChanges | undefined> {
+  const format = (await git(["rev-parse", "--show-object-format"])).trim()
+  if (format !== "sha1" && format !== "sha256") {
+    throw new Error(`Root-Changes: unsupported repository object format ${format}`)
+  }
+  const width = format === "sha1" ? 40 : 64
+  const oid = (value: unknown): value is string =>
+    typeof value === "string" && new RegExp(`^[0-9a-f]{${width}}$`, "u").test(value) && !/^0+$/u.test(value)
+  function invalid(reason: string): never {
+    throw new Error(`Root-Changes for ${merge}: ${reason}`)
+  }
+  if (!oid(merge)) invalid(`Merge must be a full ${format} commit OID`)
+  let json: string
+  let receipt: RootChanges["receipt"]
+  if (copied === undefined) {
+    const ref = `refs/git-super/receipts/${merge}`
+    const refs = (await git(["for-each-ref", "--format=%(refname)%00%(objecttype)%00%(objectname)", ref]))
+      .split("\n")
+      .filter((line) => line.split("\0")[0] === ref)
+    if (refs.length === 0) return undefined
+    const row = refs[0]?.split("\0")
+    const receiptOid = row?.[2]
+    if (refs.length !== 1 || row?.[1] !== "commit" || !oid(receiptOid)) {
+      invalid(`present receipt ref ${ref} does not name one commit`)
+    }
+    if ((await git(["show", "-s", "--format=%P", receiptOid])).trim() !== merge) {
+      invalid(`receipt ${receiptOid} must have sole parent ${merge}`)
+    }
+    const tree = await git(["ls-tree", "-z", receiptOid])
+    const file = /^100644 blob ([0-9a-f]+)\treceipt\.json\0$/u.exec(tree)
+    const blob = file?.[1]
+    if (!oid(blob)) invalid(`receipt ${receiptOid} must contain exactly one regular receipt.json blob`)
+    json = await git(["cat-file", "blob", blob])
+    // Text transport must round-trip the original blob, never replacement-decode invalid bytes.
+    if ((await git(["hash-object", "--stdin"], json)).trim() !== blob) {
+      invalid(`receipt.json at ${receiptOid} is not lossless UTF-8`)
+    }
+    receipt = { ref, oid: receiptOid }
+  } else {
+    if (copied === "" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(copied)) {
+      invalid("copied trailer is not canonical base64")
+    }
+    const bytes = Buffer.from(copied, "base64")
+    if (bytes.toString("base64") !== copied) invalid("copied trailer is not canonical base64")
+    try {
+      json = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes)
+    } catch (error) {
+      throw new Error(`Root-Changes for ${merge}: copied trailer is not UTF-8`, { cause: error })
+    }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch (error) {
+    throw new Error(`Root-Changes for ${merge}: receipt.json is not JSON`, { cause: error })
+  }
+  // JSON.parse owns grammar. Audit only object-key uniqueness, including escaped keys it would overwrite.
+  const tokens = json.match(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:]/gu) ?? []
+  const objects: (Set<string> | undefined)[] = []
+  for (const [index, token] of tokens.entries()) {
+    if (token === "{") objects.push(new Set())
+    else if (token === "[") objects.push(undefined)
+    else if (token === "}" || token === "]") objects.pop()
+    else if (token.startsWith('"') && tokens[index + 1] === ":") {
+      const keys = objects.at(-1)
+      const key = JSON.parse(token) as string
+      if (keys === undefined || keys.has(key)) invalid(`duplicate JSON field ${key}`)
+      keys.add(key)
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) invalid("payload must be an object")
+  const value = parsed as Record<string, unknown>
+  if (
+    Object.keys(value).sort().join(",") !== "changes,merge,version" ||
+    value.version !== 1 ||
+    value.merge !== merge ||
+    !Array.isArray(value.changes)
+  ) {
+    invalid("payload must have version 1, the exact Merge, and a changes array")
+  }
+  if ((await git(["cat-file", "-t", merge])).trim() !== "commit") invalid("Merge does not name a commit")
+  const paths = new Set<string>()
+  const changes: RootChanges["changes"][number][] = []
+  for (const item of value.changes as unknown[]) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) invalid("change row must be an object")
+    const row = item as Record<string, unknown>
+    if (
+      Object.keys(row).sort().join(",") !== "from,mode,path,to" ||
+      row.mode !== "160000" ||
+      typeof row.path !== "string" ||
+      !oid(row.from) ||
+      !oid(row.to)
+    ) {
+      invalid("change row requires path, mode 160000 and full from/to OIDs")
+    }
+    const path = row.path as string
+    if (
+      path.includes("\0") ||
+      path.includes("\\") ||
+      path.split("/").some((part) => part === "" || part === "." || part === "..") ||
+      Buffer.from(path, "utf8").toString("utf8") !== path ||
+      paths.has(path)
+    ) {
+      invalid(`change path ${path} must be unique, root-relative UTF-8 without traversal`)
+    }
+    paths.add(path)
+    const actual = await git(["--literal-pathspecs", "ls-tree", "-r", "-z", "--full-tree", merge, "--", path])
+    if (actual !== `160000 commit ${row.to}\t${path}\0`) {
+      invalid(`change ${path} mode/to does not match the exact Merge tree`)
+    }
+    changes.push({ path, mode: "160000", from: row.from as string, to: row.to as string })
+  }
+  return {
+    merge,
+    encoded: Buffer.from(json, "utf8").toString("base64"),
+    changes,
+    ...(receipt === undefined ? {} : { receipt }),
+  }
+}
+
+/** The caller has published this durable record; only then may its exact temporary receipt ref be removed. */
+export async function cleanupRootChanges(git: Git, rootChanges: RootChanges, durableRecord: string): Promise<void> {
+  const retained = await recordRootChanges(git, (await readRecord(git, durableRecord)).trailers)
+  if (retained?.merge !== rootChanges.merge || retained.encoded !== rootChanges.encoded) {
+    throw new Error(`Root-Changes cleanup: record ${durableRecord} does not retain the exact validated receipt`)
+  }
+  if (rootChanges.receipt === undefined) return
+  const current = await readRootChanges(git, rootChanges.merge)
+  if (current === undefined) return
+  if (current.receipt?.oid !== rootChanges.receipt.oid || current.encoded !== rootChanges.encoded) {
+    throw new Error(`Root-Changes cleanup: ${rootChanges.receipt.ref} changed; preserve its unexpected value`)
+  }
+  await git(["update-ref", "-d", rootChanges.receipt.ref, rootChanges.receipt.oid])
+}
+
+async function recordRootChanges(
+  git: Git,
+  trailers: readonly (readonly [string, string])[],
+): Promise<RootChanges | undefined> {
+  const values = trailers.filter(([name]) => name.toLowerCase() === "root-changes").map(([, value]) => value)
+  if (values.length === 0) return undefined
+  const merges = trailers.filter(([name]) => name.toLowerCase() === "merge").map(([, value]) => value)
+  const merge = merges[0]
+  const copied = values[0]
+  if (values.length !== 1 || merges.length !== 1 || merge === undefined || copied === undefined) {
+    throw new Error("Root-Changes record requires exactly one Root-Changes: and one Merge: trailer")
+  }
+  return readRootChanges(git, merge, copied)
 }
 
 /**
@@ -162,6 +323,7 @@ export async function readRecord(git: Git, sha: string): Promise<ChangeRecord> {
       ? undefined
       : recordFrom(id.trim(), at, body, block)
   if (record === undefined) throw new Error(`${sha.slice(0, 12)} is not a record; a change's ref holds only records`)
+  await recordRootChanges(git, record.trailers)
   return record
 }
 
@@ -196,6 +358,7 @@ export async function readRecords(git: Git, from: string): Promise<readonly Chan
     if (parsed === undefined) break
     records.push(parsed)
   }
+  for (const record of records) await recordRootChanges(git, record.trailers)
   return records.reverse()
 }
 

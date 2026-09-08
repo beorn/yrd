@@ -23,6 +23,7 @@ import {
   trailer,
 } from "../src/index.ts"
 import type { ChangeRecord, Git } from "../src/index.ts"
+import { cleanupRootChanges, readRootChanges } from "../src/records.ts"
 
 /**
  * The records of a change that certainly has some. `ChangeRecords.records` is a
@@ -148,6 +149,159 @@ describe("a change's records are its commits", () => {
     const recovery = join(recoveryRoot, "repo.git")
     await git(["clone", "--mirror", "--no-local", root, recovery])
     await expect(gitIn(recovery)(["cat-file", "-e", `${merge}^{commit}`])).resolves.toBe("")
+  })
+
+  // Requirement: preserve the exact approved root JSON through a checked record,
+  // with no producer ref after cleanup or cold clone. Existing merge retention
+  // coverage had no automatic-change payload, malformed receipt, or CAS cleanup.
+  it("copies exact root receipt bytes, refuses unsafe cleanup, and recovers without the producer ref", async () => {
+    const { git, head, root, target } = await repository()
+    const change = { branch: "task/one", head }
+    const opened = await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    const path = "component\ufffd*"
+    const tree = (await git(["mktree", "-z"], `160000 commit ${head}\t${path}\0`)).trim()
+    const merge = (await git(["commit-tree", tree, "-p", target, "-p", head, "-m", "automatic raise"])).trim()
+    await expect(readRootChanges(git, merge)).resolves.toBeUndefined()
+    // Whitespace and key order are deliberate: JSON is not required to be canonical.
+    const json =
+      JSON.stringify({ changes: [{ path, mode: "160000", from: target, to: head }], merge, version: 1 }, null, 2) + "\n"
+    const blob = (await git(["hash-object", "-w", "--stdin"], json)).trim()
+    const receiptTree = (await git(["mktree", "-z"], `100644 blob ${blob}\treceipt.json\0`)).trim()
+    const receipt = (await git(["commit-tree", receiptTree, "-p", merge, "-m", "receipt"])).trim()
+    const ref = `refs/git-super/receipts/${merge}`
+    await git(["update-ref", ref, receipt])
+    const validated = await readRootChanges(git, merge)
+    expect(validated).toMatchObject({
+      merge,
+      encoded: Buffer.from(json).toString("base64"),
+      receipt: { ref, oid: receipt },
+      changes: [{ path, mode: "160000", from: target, to: head }],
+    })
+    if (validated === undefined) throw new Error("fixture receipt missing")
+    await expect(cleanupRootChanges(git, validated, opened)).rejects.toThrow(
+      "does not retain the exact validated receipt",
+    )
+    expect(await refAt(git, ref)).toBe(receipt)
+    const checked = await appendRecord(git, "main", {
+      change,
+      kind: "checked",
+      subject: "checked",
+      trailers: [
+        ["Merge", merge],
+        ["Root-Changes", validated.encoded],
+      ],
+    })
+    expect(trailer(await readRecord(git, checked), "Root-Changes")).toBe(validated.encoded)
+    const replacement = (
+      await git(["commit-tree", receiptTree, "-p", merge, "-m", "competing identical payload"])
+    ).trim()
+    await git(["update-ref", ref, replacement, receipt])
+    await expect(cleanupRootChanges(git, validated, checked)).rejects.toThrow("changed; preserve its unexpected value")
+    expect(await refAt(git, ref)).toBe(replacement)
+    await git(["update-ref", ref, receipt, replacement])
+    await cleanupRootChanges(git, validated, checked)
+    await cleanupRootChanges(git, validated, checked)
+    expect(await refAt(git, ref)).toBeUndefined()
+    const recovery = join(root, "..", `${root.split("/").at(-1)}-receipt-recovery.git`)
+    roots.push(recovery)
+    await git(["clone", "--mirror", "--no-local", root, recovery])
+    const cold = gitIn(recovery)
+    expect(await refAt(cold, ref)).toBeUndefined()
+    const record = await readRecord(cold, checked)
+    await expect(readRootChanges(cold, merge, trailer(record, "Root-Changes"))).resolves.toMatchObject({
+      merge,
+      encoded: validated.encoded,
+      changes: validated.changes,
+    })
+    expect((await readRecords(cold, checked)).map((row) => row.kind)).toEqual(["opened", "checked"])
+  })
+
+  it("rejects malformed present receipts and copied fields without treating them as absence", async () => {
+    const { git, head, root, target } = await repository()
+    const change = { branch: "task/one", head }
+    await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    const tree = (await git(["mktree", "-z"], `160000 commit ${head}\tcomponent\0`)).trim()
+    const merge = (await git(["commit-tree", tree, "-p", target, "-p", head, "-m", "raise"])).trim()
+    const row = { path: "component", mode: "160000", from: target, to: head }
+    const payload = { version: 1, merge, changes: [row] }
+    const good = JSON.stringify(payload)
+    const ref = `refs/git-super/receipts/${merge}`
+    for (const [json, message] of [
+      [good.replace('"version":1', '"version":0,"v\\u0065rsion":1'), "duplicate JSON field version"],
+      [good.replace('"path":"component"', '"path":"wrong","p\\u0061th":"component"'), "duplicate JSON field path"],
+      [JSON.stringify({ ...payload, version: 2 }), "version 1"],
+      [JSON.stringify({ ...payload, merge: head }), "exact Merge"],
+      [JSON.stringify({ ...payload, changes: [row, row] }), "must be unique"],
+      [JSON.stringify({ ...payload, changes: [{ ...row, path: "../component" }] }), "root-relative"],
+      [JSON.stringify({ ...payload, changes: [{ ...row, mode: "100644" }] }), "mode 160000"],
+      [JSON.stringify({ ...payload, changes: [{ ...row, to: target }] }), "does not match"],
+      [JSON.stringify({ ...payload, changes: [{ ...row, from: target.slice(0, 12) }] }), "full from/to OIDs"],
+    ] as const) {
+      const blob = (await git(["hash-object", "-w", "--stdin"], json)).trim()
+      const receiptTree = (await git(["mktree", "-z"], `100644 blob ${blob}\treceipt.json\0`)).trim()
+      const receipt = (await git(["commit-tree", receiptTree, "-p", merge, "-m", "malformed receipt"])).trim()
+      await git(["update-ref", ref, receipt])
+      await expect(readRootChanges(git, merge)).rejects.toThrow(message)
+      await expect(readRootChanges(git, merge, Buffer.from(json).toString("base64"))).rejects.toThrow(message)
+    }
+    const blob = (await git(["hash-object", "-w", "--stdin"], good)).trim()
+    await git(["update-ref", ref, blob])
+    await expect(readRootChanges(git, merge)).rejects.toThrow("does not name one commit")
+    const receiptTree = (await git(["mktree", "-z"], `100644 blob ${blob}\treceipt.json\0`)).trim()
+    const replay = (await git(["commit-tree", receiptTree, "-p", head, "-m", "wrong parent"])).trim()
+    await git(["update-ref", ref, replay])
+    await expect(readRootChanges(git, merge)).rejects.toThrow("must have sole parent")
+    const extraTree = (
+      await git(["mktree", "-z"], `100644 blob ${blob}\treceipt.json\0` + `100644 blob ${blob}\textra.json\0`)
+    ).trim()
+    const extra = (await git(["commit-tree", extraTree, "-p", merge, "-m", "extra file"])).trim()
+    await git(["update-ref", ref, extra])
+    await expect(readRootChanges(git, merge)).rejects.toThrow("exactly one regular receipt.json")
+    const invalidBlob = Bun.spawnSync(["git", "-C", root, "hash-object", "-w", "--stdin"], {
+      stdin: Buffer.from([0xff]),
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(invalidBlob.exitCode, invalidBlob.stderr.toString()).toBe(0)
+    const invalidTree = (
+      await git(["mktree", "-z"], `100644 blob ${invalidBlob.stdout.toString().trim()}\treceipt.json\0`)
+    ).trim()
+    const invalidReceipt = (await git(["commit-tree", invalidTree, "-p", merge, "-m", "invalid UTF-8"])).trim()
+    await git(["update-ref", ref, invalidReceipt])
+    await expect(readRootChanges(git, merge)).rejects.toThrow("not lossless UTF-8")
+    const readFailure = new Error("receipt ref read failed in the selected repository")
+    await expect(
+      readRootChanges(async (args, input) => {
+        if (args[0] === "for-each-ref") throw readFailure
+        return git(args, input)
+      }, merge),
+    ).rejects.toBe(readFailure)
+    await expect(readRootChanges(git, merge, "not-base64!")).rejects.toThrow("canonical base64")
+    await expect(readRootChanges(git, merge, Buffer.from([0xff]).toString("base64"))).rejects.toThrow("not UTF-8")
+    const encoded = Buffer.from(good).toString("base64")
+    await expect(
+      appendRecord(git, "main", {
+        change,
+        kind: "checked",
+        subject: "ambiguous",
+        trailers: [
+          ["Merge", merge],
+          ["Root-Changes", encoded],
+          ["root-changes", encoded],
+        ],
+      }),
+    ).rejects.toThrow("exactly one Root-Changes")
+    const badRecord = (
+      await git([
+        "commit-tree",
+        tree,
+        "-p",
+        merge,
+        "-m",
+        `malformed\n\nRecord: checked\nChange: task/one@${head}\nMerge: ${merge}\nRoot-Changes: invalid!\n`,
+      ])
+    ).trim()
+    await expect(readRecord(git, badRecord)).rejects.toThrow("canonical base64")
   })
 
   it.each([
