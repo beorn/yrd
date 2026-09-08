@@ -53,7 +53,7 @@
     "vitest": "4.1.9"
   },
   "overrides": {
-    "git-super": "github:beorn/git-super#fb0c1aec2a05177046f7610b9fabbdf1857bc931",
+    "git-super": "github:beorn/git-super#a40ae6d5361595bc7e32a96bdf7655ab02cd2b1c",
     "loggily": "github:beorn/loggily#d235700204414687adf6fc1449e73de10419656e"
   }
 }

@@ -18,6 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createGitWorkspace } from "@yrd/bay"
+import { registrationNameForOwner } from "git-super"
 import {
   checkedTree,
   freshWorktree,
@@ -37,7 +38,13 @@ import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { workdirOf } from "./workdir.ts"
 
-export type EnvOpenOptions = Readonly<{ bay?: string; issue?: string; json?: boolean; commit?: string }>
+export type EnvOpenOptions = Readonly<{
+  bay?: string
+  issue?: string
+  json?: boolean
+  commit?: string
+  owner?: string
+}>
 export type EnvCloseOptions = Readonly<{ json?: boolean; retain?: string }>
 export type EnvListOptions = Readonly<{ json?: boolean }>
 
@@ -92,6 +99,33 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     (commit === undefined ? `env-${Date.now().toString(36)}` : `${commit.slice(0, 12)}-${runId()}`)
   ).trim()
   if (name === "") throw new Error("yrd: --bay needs a name")
+  /**
+   * The environment directory is the whole identity git keeps: this command
+   * composes it below and `list` reads it back with basename(path), so an
+   * owner recorded anywhere else would be a second source of truth. Encoding
+   * it in the name is what lets a reconciler attribute the worktree from
+   * `git worktree list` alone (@i/4-supervision/24306).
+   *
+   * Composed by git-super, the layer that registers the worktree, because two
+   * paths sharing a basename collide there and only that layer can refuse an
+   * ambiguous name at composition time rather than discover a dedupe after.
+   *
+   * Optional: an environment opened without an owner keeps its bare name and
+   * behaves exactly as before, so no existing caller changes.
+   */
+  const environment = options.owner === undefined ? name : registrationNameForOwner(options.owner, name)
+  /**
+   * The BRANCH keeps the bare label. Measured: the owner separator is illegal
+   * in a git ref name, so task/<label>~<owner> is refused outright - git ref
+   * syntax forbids ~ along with ^ : ? * [ and backslash. The primitive is a
+   * REGISTRATION-name contract (a path segment), not a ref-name contract, and
+   * this is the boundary of it.
+   *
+   * That leaves two owners of the same label sharing one branch, which git then
+   * refuses to check out twice. That refusal is correct until someone rules
+   * whether one label opened by two owners is one piece of work or two; it is a
+   * product question, not a naming one, so it is not settled here.
+   */
   const branch = commit === undefined ? `task/${name}` : undefined
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process)
@@ -105,14 +139,15 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   let provisioned: { path: string; headSha: string; baseSha: string }
   if (branch === undefined) {
     const environments = join(resolve(root, await workdirOf(git)), "environments")
-    const path = resolve(environments, name)
-    if (!path.startsWith(`${environments}/`)) throw new Error(`environment name '${name}' escapes ${environments}`)
+    const path = resolve(environments, environment)
+    if (!path.startsWith(`${environments}/`))
+      throw new Error(`environment name '${environment}' escapes ${environments}`)
     mkdirSync(environments, { recursive: true })
     await freshWorktree(git, root, base, path)
     provisioned = { path, headSha: base, baseSha: base }
   } else {
     const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
-    const result = await workspace.provision({ bay: name, name, branch, base })
+    const result = await workspace.provision({ bay: environment, name: environment, branch, base })
     if (result.conclusion !== "success") {
       throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
     }
