@@ -824,8 +824,7 @@ async function candidateFailure(
     ...stuckWrite(run, {
       code: "yrd-merge-unresolved",
       detail: detail.message,
-      owner: "the queue operator",
-    next: detail.next ?? "repair the queue fault, then run yrd queue run",
+      next: detail.next ?? "repair the queue fault, then run yrd queue run",
       subject: detail.message,
       via: `git-super merge (${detail.code}, ${detail.phase}) at ${worktree.path}`,
       worktree: worktree.path,
