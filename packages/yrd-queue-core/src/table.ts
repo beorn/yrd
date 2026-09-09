@@ -51,8 +51,10 @@ export type Row = Readonly<{
   diagnostics?: readonly LogRecord[]
   issue?: string
   submitter?: string
-  /** Why: `replaced`, `deleted`, a check's code, or for a `direct` row the one line about that commit. */
+  /** Why: `replaced`, `deleted`, `superseded`, a check's code, or for a `direct` row the one line about that commit. */
   reason?: string
+  /** The branch's current head, named only when `reason` is `superseded` (state.ts). */
+  supersededBy?: string
   /** When the change was opened, from its first record's `Opened:`. */
   since?: Date
   /** When the change's last record was written; a notification has its own instant. A direct merge uses its commit time. */
@@ -317,6 +319,7 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
     log: lastCheck?.log,
     position,
     reason: incident?.code ?? entry.reading.reason,
+    ...(entry.reading.supersededBy === undefined ? {} : { supersededBy: entry.reading.supersededBy }),
     result:
       incident === undefined
         ? tip.kind === "opened"

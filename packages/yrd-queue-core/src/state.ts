@@ -12,16 +12,29 @@
  * - `failed` — the last record ended with failed, or the branch no longer carries
  *   this head (`replaced`), or the branch is gone (`deleted`).
  *
- * **Ancestry wins over any record.** A change whose head is on the target reads
- * merged even when no merged record was ever written — a direct merge in the garage
- * still shows as merged, and a queue run never re-checks content the target
- * already carries. Measured 2026-09-02: a run merged a head under one branch
- * name, then checked a second name at the identical head against the main it
- * had just moved, failed it on a check, and billed the submitter for content it
- * had itself just merged. Reading ancestry first is what makes that impossible.
+ * **Ancestry wins over any record — for a change with no failed ending.** A
+ * change whose head is on the target reads merged even when no merged record
+ * was ever written — a direct merge in the garage still shows as merged, and a
+ * queue run never re-checks content the target already carries. Measured
+ * 2026-09-02: a run merged a head under one branch name, then checked a second
+ * name at the identical head against the main it had just moved, failed it on
+ * a check, and billed the submitter for content it had itself just merged.
+ * Reading ancestry first is what makes that impossible.
+ *
+ * **A head whose own last ending was failed is the one exception.** Ancestry
+ * alone never promotes THAT head to merged: it reads `failed`, and
+ * `superseded` naming the branch's later head, when that later head is what
+ * actually reached the target. Bare reachability through somebody else's
+ * merge is not this head's own merge — the garage case above is about the
+ * SAME head merged by hand with no record at all, never about resurrecting a
+ * head whose story already ended failed. Measured 2026-09-09: a run merged
+ * `task/cto-24366-head-check` at a later head, and the queue also announced
+ * two of that branch's own earlier FAILED heads as "merged as <their own
+ * sha>" — each a bare ancestry echo, not a merge anybody made
+ * (@i/10-yrd/24098).
  */
 
-import type { ChangeRecord } from "./records.ts"
+import { endedKind, type ChangeRecord } from "./records.ts"
 import { incidentFrom } from "./incident.ts"
 
 export const CHANGE_STATES = ["queued", "checked", "stuck", "merged", "failed"] as const
@@ -30,8 +43,14 @@ export type ChangeState = (typeof CHANGE_STATES)[number]
 
 export type ChangeReading = Readonly<{
   state: ChangeState
-  /** Why, when the state has a reason: `replaced`, `deleted`, or a check's code. */
+  /** Why, when the state has a reason: `replaced`, `deleted`, `superseded`, or a check's code. */
   reason?: string
+  /**
+   * The branch's current head, named only on a `superseded` reading: the
+   * later head of this same branch that reached the target and, by ancestry
+   * alone, made this failed head's own commit reachable too (@i/10-yrd/24098).
+   */
+  supersededBy?: string
 }>
 
 export type ChangeRecords = Readonly<{
@@ -67,14 +86,34 @@ export function tipOf(change: ChangeRecords): ChangeRecord {
 
 /** Read one change's state. Pure: every input is a record or a git reading. */
 export function readChange(change: ChangeRecords): ChangeReading {
-  // Ancestry first, and before anything the records say.
+  const last = tipOf(change)
+
+  // This head's own last ending was failed, the branch has since moved on to
+  // a different head, and ancestry reaches the target only through that: the
+  // merge is the LATER head's, not this one's, so ancestry does not promote
+  // it here. Every other case — no failed ending yet, or the same head merged
+  // by hand with no record at all — falls through to ancestry-first below
+  // exactly as it reads today; this is the one carve-out, and it only fires
+  // once the branch has actually moved on AND reached the target
+  // (@i/10-yrd/24098).
+  if (
+    change.headOnTarget &&
+    change.branchHead !== undefined &&
+    change.branchHead !== change.head &&
+    endedKind(last) === "failed"
+  ) {
+    return { state: "failed", reason: "superseded", supersededBy: change.branchHead }
+  }
+
+  // Ancestry first, and before anything else the records say. A change merged
+  // BY HAND with no record at all — the garage case — still reads merged
+  // here even though its last ending (if any) was never failed.
   if (change.headOnTarget) return { state: "merged" }
 
   // The submitter's own doing, and neither carries a message.
   if (change.branchHead === undefined) return { state: "failed", reason: "deleted" }
   if (change.branchHead !== change.head) return { state: "failed", reason: "replaced" }
 
-  const last = tipOf(change)
   switch (last.kind) {
     case "merged":
       return { state: "merged" }

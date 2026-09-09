@@ -1828,6 +1828,77 @@ describe("a queue run", () => {
     ).toEqual(["merged"])
   })
 
+  it("a head that failed and was later superseded by a merged head of the same branch is never announced merged (@i/10-yrd/24098)", async () => {
+    const w = await world()
+    const headA = await submitCommit(w, "task/one", "one.txt")
+    const refA = changeRef("main", { branch: "task/one", head: headA })
+
+    // It failed its own check.
+    const failedRun = await queueRun(await w.options({ exit: 1 }))
+    expect(failedRun.exitCode).toBe(1)
+    await fetchChanges(w)
+    expect((await readRecords(w.git, (await refAt(w.git, refA))!)).map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+      "failed",
+      "sent",
+    ])
+
+    // The submitter fixed it and pushed a new head on the SAME branch, which
+    // carries the failed head as its own ancestor — the exact 2026-09-09 shape
+    // (task/cto-24366-head-check's own earlier failed heads, superseded by the
+    // head that actually merged).
+    await w.git(["checkout", "--quiet", "task/one"])
+    writeFileSync(join(w.work, "two.txt"), "two.txt\n")
+    await w.git(["add", "two.txt"])
+    await w.git(["commit", "--quiet", "-m", "two.txt"])
+    const headB = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+
+    // The new head passes its check and merges through the queue on its own.
+    const mergedRun = await queueRun(await w.options({ exit: 0 }))
+    expect(mergedRun.exitCode).toBe(0)
+    expect(mergedRun.merged).toEqual(["task/one"])
+
+    // The next run is where bare reachability used to resurrect the failed head:
+    // its own catch-up runs again, now that headOnTarget has flipped true.
+    const settled = await queueRun(await w.options({ exit: 0 }))
+    expect(settled.exitCode).toBe(0)
+
+    const after = await remoteTarget(w)
+    const rows = list((await readQueue(w.git, "origin", "main", after)).changes)
+    const rowA = rows.find((row) => row.head === headA)
+    const rowB = rows.find((row) => row.head === headB)
+    expect(rowB?.state).toBe("merged")
+    expect(rowA?.state).toBe("failed")
+    expect(rowA?.reason).toBe("superseded")
+    expect(rowA?.supersededBy).toBe(headB)
+
+    // The failed head's own record chain never gained a fabricated merged
+    // record on top of its original failure.
+    await fetchChanges(w)
+    expect((await readRecords(w.git, (await refAt(w.git, refA))!)).map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+      "failed",
+      "sent",
+    ])
+
+    // Nobody was told to close a bead for a head that never merged on its own:
+    // exactly one message ever names it, and it is the original failure.
+    const aMessages = messages(w).filter(
+      (message) => message.change === changeName({ branch: "task/one", head: headA }),
+    )
+    expect(aMessages).toHaveLength(1)
+    expect(aMessages[0]?.record).toBe("failed")
+  })
+
   it("the target is not a change: a ref named after it is judged by nothing and messages nobody (2026-09-03 main@0a9db9daf7eb)", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")

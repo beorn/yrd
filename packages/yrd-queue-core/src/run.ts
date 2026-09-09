@@ -1245,9 +1245,18 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
  * its submitter is told (§ The change: ancestry wins, and the next queue run
  * appends the merged record so the tip catches up). A retired change is left as
  * it ended.
+ *
+ * The gate is the READING, `entry.reading.state === "merged"`, never the raw
+ * `headOnTarget` fact alone: a head whose own last ending was failed and
+ * whose branch has since moved to a later head reads `failed`+`superseded`
+ * (state.ts), even when that later head's merge makes this one's commit
+ * reachable too. Re-deriving ancestry here instead of trusting that reading
+ * is exactly how a failed, superseded head used to get a fabricated merged
+ * record — and the notifier's "close your bead" — for a merge it never made
+ * (@i/10-yrd/24098).
  */
 async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
-  if (!entry.change.headOnTarget) return
+  if (entry.reading.state !== "merged") return
   const tip = tipOf(entry.change)
   if (endedKind(tip) === "merged") return
   const reason = trailer(tip, "Reason")
