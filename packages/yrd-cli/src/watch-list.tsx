@@ -19,7 +19,7 @@
  */
 
 import React, { memo } from "react"
-import { Box, Text, TogglePill, TogglePillGroup } from "silvery"
+import { Box, Pulse, Text, TogglePill, TogglePillGroup } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { clock, friendlyPath, mediaDuration, runShortName, stateColor, stateGlyph } from "./watch-format.ts"
@@ -335,9 +335,21 @@ export const ListRow = memo(function ListRow({ item, previous, label, layout, cu
             ),
           status: (
             <Box flexDirection="row" minWidth={0}>
-              <Text color={forced ?? color} flexShrink={0}>
-                {stateGlyph(row)}
-              </Text>
+              {/* The cursor row is exempted (item 13's archaeology): `forced`
+                  is the selected pair and must read as a plain, steady color,
+                  never overridden by a pulse the cell can't also apply. Off
+                  the cursor, a live row's glyph pulses like the RUNNER box's
+                  own marker — same foreground-vs-background shape, same
+                  900ms rate. */}
+              {row.live !== undefined && forced === undefined ? (
+                <Pulse synchronized colors={[color, "$bg-surface-default"]} intervalMs={900} flexShrink={0}>
+                  {stateGlyph(row)}
+                </Pulse>
+              ) : (
+                <Text color={forced ?? color} flexShrink={0}>
+                  {stateGlyph(row)}
+                </Text>
+              )}
               <Text color={forced ?? color} wrap="truncate">
                 {" "}
                 {row.state}

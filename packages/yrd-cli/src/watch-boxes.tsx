@@ -45,19 +45,27 @@ const HEALTH_COLOR: Readonly<Record<RunnerHealth, string>> = {
   silent: "$fg-error",
 }
 
-/** The one health marker, `$`, colored and pulsed by the word (item 13). */
+/**
+ * The one health marker, `$`, colored and pulsed by the word (item 13). Both
+ * live branches swing foreground-vs-BACKGROUND (`$bg-surface-default`), never
+ * foreground-vs-foreground: two foreground tokens read too close in lightness
+ * to actually flicker (the running branch's old `$fg-muted` second color
+ * measured ~1.12:1 against `$fg-info`, imperceptible), while a background
+ * token behind the glyph reliably clears a visible swing. `intervalMs={900}`
+ * restores the pre-port rate (item 13's own ag-code reference).
+ */
 function HealthMarker({ health, live }: { health: RunnerHealth; live: boolean }) {
   const color = HEALTH_COLOR[health]
   if (live && health === "running") {
     return (
-      <Pulse synchronized colors={["$fg-info", "$fg-muted"]} bold flexShrink={0}>
+      <Pulse synchronized colors={["$fg-info", "$bg-surface-default"]} intervalMs={900} bold flexShrink={0}>
         $
       </Pulse>
     )
   }
   if (live && health === "idle") {
     return (
-      <Pulse synchronized colors={["$fg-muted", "$bg-surface-default"]} flexShrink={0}>
+      <Pulse synchronized colors={["$fg-muted", "$bg-surface-default"]} intervalMs={900} flexShrink={0}>
         $
       </Pulse>
     )

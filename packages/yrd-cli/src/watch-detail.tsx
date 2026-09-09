@@ -219,7 +219,11 @@ export function RunStatusBox({
       <MarkerRow
         marker={
           working && live ? (
-            <Pulse synchronized colors={[color, "$fg-muted"]} bold flexShrink={0}>
+            // Foreground-vs-BACKGROUND, never foreground-vs-foreground: two
+            // foreground tokens read too close in lightness to actually
+            // flicker (watch-boxes.tsx's HealthMarker carries the full
+            // rationale). intervalMs restores the pre-port 900ms rate.
+            <Pulse synchronized colors={[color, "$bg-surface-default"]} intervalMs={900} bold flexShrink={0}>
               {stateGlyph(row)}
             </Pulse>
           ) : (
@@ -284,7 +288,8 @@ function StepLine({ step, live, since }: { step: WatchStep; live: boolean; since
     <MarkerRow
       marker={
         active && live ? (
-          <Pulse synchronized colors={[color, "$fg-muted"]} flexShrink={0}>
+          // Same fix as RunStatusBox's own marker above: foreground-vs-background.
+          <Pulse synchronized colors={[color, "$bg-surface-default"]} intervalMs={900} flexShrink={0}>
             {CHECK_GLYPH[step.state]}
           </Pulse>
         ) : (
