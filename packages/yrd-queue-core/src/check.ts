@@ -152,11 +152,13 @@ export function readCheckTrailer(packed: string): Readonly<{ name: string; exit?
  * pass (run.ts), so the checks after a failed one did not run and this says so
  * rather than leaving them off the screen.
  *
- * The per-check verdict follows from that same stopping rule: every trailer
- * but the last is a check the queue ran and went on from, which is a pass, and
- * the last one's verdict is the one the change's ending record already states.
- * Nothing here re-derives a change's state — `readChange` is the only place
- * that happens.
+ * The per-check verdict is read off that trailer's OWN recorded exit, through
+ * the same classifier `runCheck` judges by — never the change's ending and
+ * never the check's position. A change can end `failed` for a reason no check
+ * made, a merge conflict foremost among them, and a check that exited 0 stays
+ * passed regardless: the ending is the queue's word about the CHANGE, not a
+ * substitute for a check's own word about itself. Nothing here re-derives a
+ * change's state — `readChange` is the only place that happens.
  */
 export type CheckRun = Readonly<{
   result: "pass" | "fail" | "stuck"
@@ -192,16 +194,18 @@ export type CheckedNow = Readonly<{ name: string; log?: string }>
 
 export function checksOf(
   packed: readonly string[],
+  // Kept for callers that already have it beside `change.checks` (`show`'s
+  // own note, `endingOf`) — no longer consulted here. A check's verdict is
+  // its own trailer's exit, read by `resultOfExit` below; the change's ending
+  // decided the CHANGE, not any one check, and inferring the reverse is the
+  // defect this signature used to carry.
   ending: "checked" | "merged" | "failed" | "stuck" | "open",
   declared: readonly CheckSpec[],
   live?: CheckedNow,
   measured?: readonly JournalCheck[],
 ): readonly CheckView[] {
+  void ending
   const ran = measured ?? packed.map(readCheckTrailer)
-  const verdict = (index: number): CheckRun["result"] => {
-    if (index < ran.length - 1) return "pass"
-    return ending === "failed" ? "fail" : ending === "stuck" ? "stuck" : "pass"
-  }
   const byName = new Map(ran.map((result, index) => [result.name, { index, result }]))
   const seen = new Set<string>()
   const view = (name: string, spec: CheckSpec | undefined, found = byName.get(name)): CheckView => {
@@ -216,7 +220,7 @@ export function checksOf(
       }
     }
     const measuredCheck = measured?.[found.index]
-    const result = measured === undefined ? verdict(found.index) : measuredCheck?.result
+    const result = measured === undefined ? resultOfExit(found.result.exit) : measuredCheck?.result
     return {
       name,
       ...(measuredCheck === undefined ? {} : { phase: measuredCheck.phase }),
@@ -262,6 +266,22 @@ export function checksOf(
   // knowable — the command it ran — is absent rather than guessed.
   const undeclared = ran.filter((result) => !seen.has(result.name)).map((result) => view(result.name, undefined))
   return [...declaredViews, ...undeclared]
+}
+
+/**
+ * A trailer's own verdict, read off the exit `checkTrailer` packed onto it,
+ * through the exact classifier `runCheck` judged the live run by: `0` is a
+ * pass, `1` is a fail, and everything else — another number, `timeout`,
+ * `signal`, `missing`, `unsettled`, or a trailer so malformed its exit did
+ * not parse at all — could not judge, so it is stuck (check.ts's own default
+ * for an exit code that is not a verdict). Never the change's ending, never
+ * the check's place in the list: a check that stopped the queue's own
+ * sequence already said so in this exit, and a change that ended `failed` or
+ * `stuck` for a reason no check made — a merge conflict foremost among them —
+ * must not borrow that ending as if it were this check's word about itself.
+ */
+function resultOfExit(exit: string | undefined): CheckRun["result"] {
+  return exit === "0" ? "pass" : exit === "1" ? "fail" : "stuck"
 }
 
 export async function runCheck(run: RunCheck): Promise<CheckResult> {
