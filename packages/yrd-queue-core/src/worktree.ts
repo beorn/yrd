@@ -25,6 +25,7 @@ import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join, relative, resolve, sep } from "node:path"
 import type { Process } from "@yrd/process"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
+import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { Git } from "./records.ts"
 import { gitIn, mergeBase, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
@@ -334,15 +335,23 @@ export async function checkedTree(
  * tree for inspection. Nobody is billed for a setup failure: setup is the
  * queue's own ground, so a change that cannot be prepared is stuck, never
  * failed.
+ *
+ * `diagnosis`, when the failing command named `--frozen-lockfile`, is
+ * lockfile-diagnosis.ts's own forensics — appended onto this error's message
+ * too, so any reader of `.message` alone (a log, a bare `String(error)`, this
+ * class's existing callers) already carries it, not only a caller that reads
+ * the field.
  */
 export class SetupFailed extends Error {
   constructor(
     readonly ran: SetupRan,
     readonly commit: string,
+    readonly diagnosis?: string,
   ) {
     const { result } = ran
     super(
-      `setup ${result.result} for ${commit.slice(0, 12)}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}; log ${result.log}`,
+      `setup ${result.result} for ${commit.slice(0, 12)}: exit ${String(result.exit)}${result.why === undefined ? "" : ` (${result.why})`}; log ${result.log}` +
+        (diagnosis === undefined ? "" : `\n${diagnosis}`),
     )
     this.name = "SetupFailed"
   }
@@ -372,7 +381,19 @@ export async function runSetup(options: RunSetup): Promise<SetupRan> {
   })
   const ran: SetupRan = { end: new Date().toISOString(), result, start }
   options.record?.(ran)
-  if (result.result !== "pass") throw new SetupFailed(ran, tree.candidate)
+  if (result.result !== "pass") {
+    // Narrow trigger, one function (lockfile-diagnosis.ts): a no-op unless
+    // the declared setup line itself names --frozen-lockfile, in which case
+    // it re-resolves once, inside this same worktree, before it is torn down
+    // below by the caller's catch, and names every entry that moved.
+    const diagnosis = await frozenLockfileDiagnosis({
+      cwd,
+      env: options.env,
+      process: options.process,
+      setupRun: setup.run,
+    })
+    throw new SetupFailed(ran, tree.candidate, diagnosis)
+  }
   return ran
 }
 

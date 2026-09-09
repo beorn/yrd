@@ -241,6 +241,57 @@ async function editDeclarationAroundQueue(w: World, text: string): Promise<strin
   return (await w.git(["rev-parse", "HEAD"])).trim()
 }
 
+/**
+ * Main gets a real `package.json` depending on a local `file:` package at
+ * `from`'s version, plus a REAL `bun.lock` a real, offline `bun install`
+ * wrote for it (both committed, so every worktree the queue makes inherits
+ * them already consistent). The returned branch then raises that dependency
+ * to `to`'s version in `package.json` ALONE, never touching the lockfile —
+ * @i/10-yrd/24140's own repro for a `bun install --frozen-lockfile` that
+ * refuses without naming what moved. No network: `file:` resolves locally.
+ */
+async function submitRaisedDependency(
+  w: World,
+  branch: string,
+  name: string,
+  from: string,
+  to: string,
+): Promise<Readonly<{ head: string }>> {
+  const manifest = (version: string): string =>
+    `${JSON.stringify({ dependencies: { [name]: `file:./vendor-${version}` }, name: "fixture-root", version: "0.0.0" }, null, 2)}\n`
+  await w.git(["checkout", "--quiet", "main"])
+  for (const version of [from, to]) {
+    const vendor = join(w.work, `vendor-${version}`)
+    mkdirSync(vendor, { recursive: true })
+    writeFileSync(join(vendor, "package.json"), `${JSON.stringify({ name, version }, null, 2)}\n`)
+  }
+  writeFileSync(join(w.work, "package.json"), manifest(from))
+  // The only moment a lockfile is GENERATED rather than diffed: a real `bun
+  // install` against the BEFORE state, offline, in the fixture's own work
+  // tree.
+  const install = spawnSync("bun", ["install"], { cwd: w.work, encoding: "utf8" })
+  if (install.status !== 0) {
+    throw new Error(`fixture setup: bun install failed seeding the lockfile: ${install.stderr}\n${install.stdout}`)
+  }
+  await w.git(["add", "package.json", "bun.lock", `vendor-${from}`, `vendor-${to}`])
+  await w.git(["commit", "--quiet", "-m", `depend on ${name}@${from}`])
+  await w.git(["push", "--quiet", "origin", "main"])
+
+  await w.git(["checkout", "--quiet", "-b", branch, "main"])
+  writeFileSync(join(w.work, "package.json"), manifest(to))
+  await w.git(["add", "package.json"])
+  await w.git(["commit", "--quiet", "-m", `raise ${name} to ${to}`])
+  const head = (await w.git(["rev-parse", "HEAD"])).trim()
+  await w.git(["checkout", "--quiet", "main"])
+  await submit(w.git, "origin", {
+    branch,
+    submitter: "@dev/2",
+    target: { branch: "main", remote: "origin" },
+    issue: "@i/10-yrd/24140",
+  })
+  return { head }
+}
+
 /** Every record of a run's log, in order. */
 function logRecords(outcome: QueueRunOutcome): readonly Record<string, unknown>[] {
   return readFileSync(outcome.log, "utf8")
@@ -2242,6 +2293,39 @@ describe("the target's setup", () => {
     expect(incident.Subject).toContain(tail)
     expect(incident.Subject.length).toBeGreaterThan(400)
     expect(incidentOf(records.at(-1))).toEqual(incident)
+  })
+
+  // @i/10-yrd/24140: a failed `bun install --frozen-lockfile` used to print
+  // bun's own contentless "lockfile had changes, but lockfile is frozen" —
+  // never naming which dependency moved. Four identical stops of that exact
+  // shape cost a 3h51m outage on 2026-09-04. This drives a REAL frozen-lockfile
+  // refusal (no mock, no stub setup script) and proves the entry that moved is
+  // now named, with both specifiers, plus where the diagnosis looked.
+  it("names every entry a frozen bun install could not, plus where it looked", async () => {
+    const w = await world()
+    const { head } = await submitRaisedDependency(w, "task/raise-widget", "widget", "1.0.0", "1.1.0")
+
+    const outcome = await queueRun(await w.options({ exit: 0, setup: "bun install --frozen-lockfile" }))
+
+    // Stuck at setup, exactly like any other setup that could not pass: this
+    // diagnosis is advisory and never changes that verdict, only what the
+    // incident says about it.
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/raise-widget"])
+    await fetchChanges(w)
+    const records = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/raise-widget", head })))!,
+    )
+    expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
+    const incident = incidentOf(records[1])
+    expect(incident.Code).toBe("yrd-setup-unusable")
+    // AC1: the entry that moved, by NAME, with its before and after specifier.
+    expect(incident.Subject).toContain("widget: widget@file:vendor-1.0.0 -> widget@file:vendor-1.1.0")
+    // AC2: where it looked — the lockfile, the manifest(s), the worktree root.
+    expect(incident.Subject).toContain("bun.lock")
+    expect(incident.Subject).toContain("package.json")
+    expect(incident.Subject).toContain("worktree root")
   })
 
   it("a setup past its bound is stuck too, and the change is never billed", async () => {
