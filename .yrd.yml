@@ -1,4 +1,0 @@
-setup: bun install --frozen-lockfile
-checks:
-  - check:
-      run: VITEST_MAX_WORKERS=2 bun run check
