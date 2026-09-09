@@ -72,7 +72,14 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
                       {separator}
                     </Text>
                   )}
-                  <ListRow item={item} previous={rows[index - 1]} label={label} layout={layout} cursor={false} />
+                  <ListRow
+                    item={item}
+                    previous={rows[index - 1]}
+                    label={label}
+                    layout={layout}
+                    cursor={false}
+                    live={false}
+                  />
                 </Box>
               )
             })

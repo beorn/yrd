@@ -17,7 +17,7 @@ import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
 import type { Row, WatchRow } from "@yrd/queue-core"
 import { ListRow, type ListLayout } from "../src/watch-list.tsx"
-import { NowContext } from "../src/watch-clock.ts"
+import { NowContext, NowProvider } from "../src/watch-clock.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
@@ -70,5 +70,66 @@ describe("ListRow STATUS cell pulse, live (item 13 archaeology)", () => {
     expect(first.char).toBe("◉")
     expect(second.char).toBe("◉")
     expect(first.fg).toEqual(second.fg)
+  }, 10_000)
+})
+
+// The AGE column, read across a real tick of the watch's own clock
+// (`NowProvider`, not a still `NowContext.Provider` value): a decided row's
+// age must read the same before and after, while an open row's keeps
+// counting — the operator's 2026-09-09 report that AGE "just goes forever"
+// past a merge.
+const DECIDED_ROW: Row = {
+  branch: "task/merged-thing",
+  endedAt: new Date(NOW.getTime() - 15 * 60 * 1000),
+  head: "cafef00d".padEnd(40, "0"),
+  since: new Date(NOW.getTime() - 45 * 60 * 1000),
+  state: "merged",
+}
+
+const OPEN_ROW: Row = {
+  branch: "task/still-open",
+  head: "0ddba11f".padEnd(40, "0"),
+  since: new Date(NOW.getTime() - 45 * 60 * 1000),
+  state: "queued",
+}
+
+// LAYOUT's ageWidth (4) is sized for the pulse tests above, which never read
+// this column; "30:00"/"45:00" are 5 characters and would truncate in it.
+const AGE_LAYOUT: ListLayout = { ...LAYOUT, ageWidth: 6 }
+
+async function paintAge(row: Row) {
+  const app = render(
+    <NowProvider readAt={NOW} live>
+      <ListRow cursor={false} item={{ row }} label="main" layout={AGE_LAYOUT} previous={undefined} />
+    </NowProvider>,
+    { autoRender: true, cols: 80, rows: 3 },
+  )
+  await act(async () => {
+    await app.waitForLayoutStable()
+  })
+  const first = app.text
+  await act(async () => {
+    // Past the clock's 1-second tick, not just the pulse's 900ms one: this is
+    // NowProvider's own setInterval, the thing that must stop moving AGE.
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    await app.waitForLayoutStable()
+  })
+  const second = app.text
+  app.unmount()
+  return { first, second }
+}
+
+describe("AgeCell freezes once a row is decided (the operator's 2026-09-09 report)", () => {
+  it("keeps a merged row's age at its ending record, not at `now`, across a real tick", async () => {
+    const { first, second } = await paintAge(DECIDED_ROW)
+    // endedAt (15m ago) − since (45m ago) = 30m, fixed — never 45m (now − since).
+    expect(first).toContain("30:00")
+    expect(second).toContain("30:00")
+  }, 10_000)
+
+  it("keeps counting an open row's age past the same tick (existing behavior preserved)", async () => {
+    const { first, second } = await paintAge(OPEN_ROW)
+    expect(first).toContain("45:00")
+    expect(second).not.toContain("45:00")
   }, 10_000)
 })

@@ -234,7 +234,9 @@ describe("the clocks line", () => {
       now,
     )
 
-    expect(line).toBe("Age 1h00m · Runtime 15:00 · Wait time 30:00")
+    // Age freezes at the ending record (19:45 − 19:00 = 45m), same as runtime
+    // already does, rather than counting to `now` (20:00, which read 1h00m).
+    expect(line).toBe("Age 45:00 · Runtime 15:00 · Wait time 30:00")
   })
 
   it("leaves out a clock nothing measured rather than printing it as zero", () => {
