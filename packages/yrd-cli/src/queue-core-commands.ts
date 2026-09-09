@@ -830,10 +830,21 @@ export async function coreQueueCommand(
       const views = new Map<string, Readonly<{ checks: readonly CheckView[]; note?: string }>>()
       for (const change of changes) {
         const declared = await declarationFor(git, config, change.row.base)
+        const ending = endingOf(change.row)
+        // A DECIDED change's records are its full account: `change.checks`
+        // already folds every record's `Check:` trailers, submit through
+        // merge. The run this machine's journal happens to hold for it may be
+        // only the phase that last touched the change — an earlier phase ran
+        // under an earlier run this one does not carry — so trusting it
+        // alone here is how a merged change loses evidence it still has (its
+        // own 2026-09 recurrence). The journal stays the better source only
+        // while the change is still being decided: that is what lets a check
+        // running right now show as running instead of a stale prior result.
+        const decided = ending === "merged" || ending === "failed" || ending === "stuck"
         views.set(change.row.head, {
           checks: checksOf(
             change.checks,
-            endingOf(change.row),
+            ending,
             declared.checks,
             change.row.live === undefined
               ? undefined
@@ -841,7 +852,7 @@ export async function coreQueueCommand(
                   name: change.row.live.check,
                   ...(change.row.live.log === undefined ? {} : { log: change.row.live.log }),
                 },
-            journalFor({ row: change.row }, journals)?.checks,
+            decided ? undefined : journalFor({ row: change.row }, journals)?.checks,
           ),
           ...(declared.note === undefined ? {} : { note: declared.note }),
         })
