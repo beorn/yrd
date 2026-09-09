@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process"
 import { resolve } from "node:path"
 
-const componentRoot = resolve(import.meta.dirname, "..")
+const submoduleRoot = resolve(import.meta.dirname, "..")
 const rootCommand =
   'cd "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" && bun run typecheck'
-const topology = spawnSync("git", ["-C", componentRoot, "rev-parse", "--show-superproject-working-tree"], {
+const topology = spawnSync("git", ["-C", submoduleRoot, "rev-parse", "--show-superproject-working-tree"], {
   encoding: "utf8",
 })
 const superprojectRoot = topology.status === 0 ? topology.stdout.trim() : ""

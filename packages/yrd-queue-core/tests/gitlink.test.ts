@@ -1,13 +1,13 @@
 /**
  * Settling at submit and merge: git-super raises every held-back gitlink to its
- * component's newest main. An authored gitlink main does not carry waits without
+ * submodule's newest main. An authored gitlink main does not carry waits without
  * ending the change or blocking the next entry; an object no remote can supply
  * is the submitter's failed change, never a queue-owned stuck.
  *
  * Measured 2026-09-02 on the old core: a root gitlink pointed at a branch
  * commit forked on the gitlink, and every later change was judged against a
- * component state no main had ever carried. Measured the same day on this
- * core before E4: asking every component of the root's tree cost 15 fetches
+ * submodule state no main had ever carried. Measured the same day on this
+ * core before E4: asking every submodule of the root's tree cost 15 fetches
  * and 13.7 s per judged change.
  */
 
@@ -41,31 +41,31 @@ afterAll(() => {
 type World = Readonly<{
   git: Git
   work: string
-  /** A commit the component's main carries (behind its tip). */
+  /** A commit the submodule's main carries (behind its tip). */
   onMain: string
-  /** A commit on a branch of the component that its main does not carry. */
+  /** A commit on a branch of the submodule that its main does not carry. */
   offMain: string
-  /** The newest commit on the component's main when the fixture was made. */
+  /** The newest commit on the submodule's main when the fixture was made. */
   main: string
   options(check?: Readonly<{ run: string; on: readonly ("submit" | "merge")[] }>): Promise<QueueRunOptions>
 }>
 
 /**
- * A component whose main is `one` then `three`, with a branch `feature` at
- * `two` off `one`; a root whose main records the component at `three`.
+ * A submodule whose main is `one` then `three`, with a branch `feature` at
+ * `two` off `one`; a root whose main records the submodule at `three`.
  */
 async function world(): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-core-gitlink-"))
   roots.push(root)
-  // A component at a local path: git refuses file transport for submodule
+  // A submodule at a local path: git refuses file transport for submodule
   // clones unless every git in the chain is told. Every git runner below and
   // the queue's own git children read this process's environment when they
   // are made, so it is said here, first.
   process.env.GIT_CONFIG_COUNT = "3"
   // Ownership uses hosted identities; Git itself routes fixture transport locally,
   // including child checkouts created later by the real queue materializer.
-  process.env.GIT_CONFIG_KEY_1 = `url.${join(root, "component.git")}.insteadOf`
-  process.env.GIT_CONFIG_VALUE_1 = "https://git-super.test/owned/component.git"
+  process.env.GIT_CONFIG_KEY_1 = `url.${join(root, "submodule.git")}.insteadOf`
+  process.env.GIT_CONFIG_VALUE_1 = "https://git-super.test/owned/submodule.git"
   process.env.GIT_CONFIG_KEY_2 = `url.${join(root, "remote.git")}.insteadOf`
   process.env.GIT_CONFIG_VALUE_2 = "https://git-super.test/owned/root.git"
   process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow"
@@ -76,24 +76,24 @@ async function world(): Promise<World> {
     await git(["config", "user.name", "yrd"])
   }
 
-  const component = join(root, "component.git")
-  const componentWork = join(root, "component-work")
-  await seed(["init", "--quiet", "--bare", "--initial-branch=main", component])
-  await seed(["clone", "--quiet", component, componentWork])
-  const cg = gitIn(componentWork)
+  const submodule = join(root, "submodule.git")
+  const submoduleWork = join(root, "submodule-work")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", submodule])
+  await seed(["clone", "--quiet", submodule, submoduleWork])
+  const cg = gitIn(submoduleWork)
   await identity(cg)
-  await cg(["remote", "set-url", "origin", "https://git-super.test/owned/component.git"])
+  await cg(["remote", "set-url", "origin", "https://git-super.test/owned/submodule.git"])
   await cg(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(componentWork, "lib.txt"), "one\n")
+  writeFileSync(join(submoduleWork, "lib.txt"), "one\n")
   await cg(["add", "lib.txt"])
   await cg(["commit", "--quiet", "-m", "one"])
   const onMain = (await cg(["rev-parse", "HEAD"])).trim()
   await cg(["checkout", "--quiet", "-b", "feature"])
-  writeFileSync(join(componentWork, "lib.txt"), "two\n")
+  writeFileSync(join(submoduleWork, "lib.txt"), "two\n")
   await cg(["commit", "--quiet", "-am", "two, not on main"])
   const offMain = (await cg(["rev-parse", "HEAD"])).trim()
   await cg(["checkout", "--quiet", "main"])
-  writeFileSync(join(componentWork, "lib.txt"), "three\n")
+  writeFileSync(join(submoduleWork, "lib.txt"), "three\n")
   await cg(["commit", "--quiet", "-am", "three"])
   const main = (await cg(["rev-parse", "HEAD"])).trim()
   await cg(["push", "--quiet", "origin", "main", "feature"])
@@ -107,9 +107,9 @@ async function world(): Promise<World> {
   await git(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
   await git(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(work, ".yrd.yml"), "{}\n")
-  await git(["submodule", "add", "--quiet", "https://git-super.test/owned/component.git", "component"])
-  await git(["add", ".yrd.yml", ".gitmodules", "component"])
-  await git(["commit", "--quiet", "-m", "base, with the component at its main"])
+  await git(["submodule", "add", "--quiet", "https://git-super.test/owned/submodule.git", "submodule"])
+  await git(["add", ".yrd.yml", ".gitmodules", "submodule"])
+  await git(["commit", "--quiet", "-m", "base, with the submodule at its main"])
   await git(["push", "--quiet", "origin", "main"])
   const workdir = join(root, "queue")
   mkdirSync(workdir, { recursive: true })
@@ -120,7 +120,7 @@ async function world(): Promise<World> {
     onMain,
     options: async (check) => {
       return {
-        checks: check === undefined ? [] : [{ name: "component-check", on: check.on, run: check.run }],
+        checks: check === undefined ? [] : [{ name: "submodule-check", on: check.on, run: check.run }],
         configBlob: "test-config",
         env: process.env,
         repo: work,
@@ -133,30 +133,30 @@ async function world(): Promise<World> {
   }
 }
 
-/** A change that moves the component's gitlink to `sha`, submitted. */
+/** A change that moves the submodule's gitlink to `sha`, submitted. */
 async function submitGitlink(w: World, branch: string, sha: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
-  const sub = gitIn(join(w.work, "component"))
+  const sub = gitIn(join(w.work, "submodule"))
   await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
   await sub(["checkout", "--quiet", sha])
-  await w.git(["add", "component"])
+  await w.git(["add", "submodule"])
   // The branch is in the message, so two branches recording the same commit in
   // the same second are two heads, not one head under two names.
-  await w.git(["commit", "--quiet", "-m", `${branch}: move the component gitlink to ${sha.slice(0, 12)}`])
+  await w.git(["commit", "--quiet", "-m", `${branch}: move the submodule gitlink to ${sha.slice(0, 12)}`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
   await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
   return head
 }
 
-/** The component's gitlink moved on main itself, around the queue, and pushed: the case candidate settling never sees (E5). */
+/** The submodule's gitlink moved on main itself, around the queue, and pushed: the case candidate settling never sees (E5). */
 async function gitlinkAroundQueue(w: World, sha: string): Promise<string> {
   await w.git(["checkout", "--quiet", "main"])
-  const sub = gitIn(join(w.work, "component"))
+  const sub = gitIn(join(w.work, "submodule"))
   await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
   await sub(["checkout", "--quiet", sha])
-  await w.git(["add", "component"])
-  await w.git(["commit", "--quiet", "-m", `move the component gitlink to ${sha.slice(0, 12)} around the queue`])
+  await w.git(["add", "submodule"])
+  await w.git(["commit", "--quiet", "-m", `move the submodule gitlink to ${sha.slice(0, 12)} around the queue`])
   await w.git(["push", "--quiet", "origin", "main"])
   return (await w.git(["rev-parse", "HEAD"])).trim()
 }
@@ -177,10 +177,10 @@ async function submitFile(w: World, branch: string): Promise<string> {
 async function submitMissingGitlink(w: World, branch: string, missing: string): Promise<string> {
   const base = (await w.git(["rev-parse", "main"])).trim()
   await w.git(["read-tree", "main"])
-  await w.git(["update-index", "--add", "--info-only", "--cacheinfo", `160000,${missing},component`])
+  await w.git(["update-index", "--add", "--info-only", "--cacheinfo", `160000,${missing},submodule`])
   const tree = (await w.git(["write-tree"])).trim()
   const head = (
-    await w.git(["commit-tree", tree, "-p", base, "-m", `${branch}: record an unavailable component`])
+    await w.git(["commit-tree", tree, "-p", base, "-m", `${branch}: record an unavailable submodule`])
   ).trim()
   await w.git(["update-ref", `refs/heads/${branch}`, head])
   await w.git(["read-tree", "main"])
@@ -195,18 +195,18 @@ async function remoteTip(git: Git, ref: string): Promise<string> {
 }
 
 async function gitlinkAt(w: World, commit: string): Promise<string> {
-  const row = (await w.git(["ls-tree", commit, "--", "component"])).trim().split(/\s+/u)
+  const row = (await w.git(["ls-tree", commit, "--", "submodule"])).trim().split(/\s+/u)
   return row[2] ?? ""
 }
 
-async function advanceComponent(w: World, contents: string): Promise<string> {
-  const componentWork = join(w.work, "..", "component-work")
-  const component = gitIn(componentWork)
-  await component(["checkout", "--quiet", "main"])
-  writeFileSync(join(componentWork, "lib.txt"), `${contents}\n`)
-  await component(["commit", "--quiet", "-am", contents])
-  await component(["push", "--quiet", "origin", "main"])
-  return (await component(["rev-parse", "HEAD"])).trim()
+async function advanceSubmodule(w: World, contents: string): Promise<string> {
+  const submoduleWork = join(w.work, "..", "submodule-work")
+  const submodule = gitIn(submoduleWork)
+  await submodule(["checkout", "--quiet", "main"])
+  writeFileSync(join(submoduleWork, "lib.txt"), `${contents}\n`)
+  await submodule(["commit", "--quiet", "-am", contents])
+  await submodule(["push", "--quiet", "origin", "main"])
+  return (await submodule(["rev-parse", "HEAD"])).trim()
 }
 
 describe("settling gitlinks", () => {
@@ -225,7 +225,7 @@ describe("settling gitlinks", () => {
     expect(waitingRecords.map((record) => record.kind)).toEqual(["opened", "opened"])
     expect(trailer(waitingRecords.at(-1)!, "Code")).toBe("gitlink-off-main")
     expect(trailer(waitingRecords.at(-1)!, "Evidence")).toBe(outcome.log)
-    expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("Rebase component onto its configured component branch")
+    expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("Rebase submodule onto its configured component branch")
     expect(trailer(waitingRecords.at(-1)!, "Owner")).toBe("the queue operator")
     const waitingQueue = await readQueue(w.git, "origin", "main", await remoteTip(w.git, "refs/heads/main"))
     expect(waitingQueue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("queued")
@@ -246,12 +246,12 @@ describe("settling gitlinks", () => {
       ),
     ).toEqual(["opened", "opened"])
 
-    const componentWork = join(w.work, "..", "component-work")
-    const component = gitIn(componentWork)
-    await component(["checkout", "--quiet", "main"])
-    await component(["merge", "--quiet", "--no-ff", "-s", "ours", "-m", "merge feature", "feature"])
-    await component(["push", "--quiet", "origin", "main"])
-    const componentMain = (await component(["rev-parse", "HEAD"])).trim()
+    const submoduleWork = join(w.work, "..", "submodule-work")
+    const submodule = gitIn(submoduleWork)
+    await submodule(["checkout", "--quiet", "main"])
+    await submodule(["merge", "--quiet", "--no-ff", "-s", "ours", "-m", "merge feature", "feature"])
+    await submodule(["push", "--quiet", "origin", "main"])
+    const submoduleMain = (await submodule(["rev-parse", "HEAD"])).trim()
 
     const retried = await queueRun(await w.options())
 
@@ -261,7 +261,7 @@ describe("settling gitlinks", () => {
         (record) => record.kind,
       ),
     ).toEqual(["opened", "opened", "checked", "merged", "sent"])
-    expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(componentMain)
+    expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(submoduleMain)
   })
 
   it("a held-back authored gitlink merges raised and keeps the submitted Change identity", async () => {
@@ -304,13 +304,13 @@ describe("settling gitlinks", () => {
     expect(await gitlinkAt(w, target)).toBe(w.main)
     const message = await w.git(["show", "-s", "--format=%B", target])
     expect(message).toContain(`Change: task/on@${head}`)
-    expect(message).toContain(`Settled: component@${w.main}`)
+    expect(message).toContain(`Settled: submodule@${w.main}`)
     const merge = readFileSync(outcome.log, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
       .find((record) => record.kind === "merge")
-    expect(merge?.gitlinks).toContain(`component ${w.onMain} -> ${w.main}`)
+    expect(merge?.gitlinks).toContain(`submodule ${w.onMain} -> ${w.main}`)
     // The durable terminal record copies the exact producer bytes, and survives
     // removal of the temporary local receipt; old merge-result tests miss this.
     const ref = changeRef("main", { branch: "task/on", head })
@@ -348,7 +348,7 @@ describe("settling gitlinks", () => {
     expect(existsSync(observed)).toBe(false)
     const target = await remoteTip(w.git, "refs/heads/main")
     expect((await w.git(["rev-list", "--parents", "-n", "1", target])).trim().split(" ")).toHaveLength(3)
-    expect(await w.git(["show", "-s", "--format=%B", target])).toContain(`Settled: component@${w.main}`)
+    expect(await w.git(["show", "-s", "--format=%B", target])).toContain(`Settled: submodule@${w.main}`)
     expect(await gitlinkAt(w, target)).toBe(w.main)
     expect(
       (
@@ -369,7 +369,7 @@ describe("settling gitlinks", () => {
     const target = await remoteTip(w.git, "refs/heads/main")
     expect(await gitlinkAt(w, target)).toBe(w.offMain)
     expect(await w.git(["show", "-s", "--format=%(trailers:key=Settled,valueonly)", target])).toContain(
-      `component@${w.offMain} left-off-main component-main@${w.main}`,
+      `submodule@${w.offMain} left-off-main component-main@${w.main}`,
     )
     const settle = readFileSync(outcome.log, "utf8")
       .split("\n")
@@ -379,7 +379,7 @@ describe("settling gitlinks", () => {
     expect(settle).toContainEqual(
       expect.objectContaining({
         from: w.offMain,
-        path: "component",
+        path: "submodule",
         state: "left-off-main",
         to: w.main,
       }),
@@ -403,13 +403,13 @@ describe("settling gitlinks", () => {
     const failed = records.find((record) => record.kind === "failed")
     expect(trailer(failed!, "Fault")).toBe("submitter")
     expect(trailer(failed!, "Reason")).toContain(missing)
-    expect(failed?.subject).toContain("component")
+    expect(failed?.subject).toContain("submodule")
   })
 
   it("normalizes an unrecognized git-super failure without losing its boundary detail", async () => {
     const w = await world()
     const head = await submitGitlink(w, "task/unreadable-main", w.onMain)
-    const missing = join(w.work, "missing-component.git")
+    const missing = join(w.work, "missing-submodule.git")
     let external: Readonly<{ code: string; phase: string; message: string }> | undefined
     await using real = createProcess({ cwd: w.work })
     const observing: Process = {
@@ -417,7 +417,7 @@ describe("settling gitlinks", () => {
       async run(request) {
         const merge =
           request.argv.includes("merge") && (request.argv[0] === "git-super" || request.argv.includes("super"))
-        if (merge) await gitIn(join(request.cwd ?? w.work, "component"))(["remote", "set-url", "origin", missing])
+        if (merge) await gitIn(join(request.cwd ?? w.work, "submodule"))(["remote", "set-url", "origin", missing])
         const result = await real.run(request)
         if (merge) {
           external = (
@@ -441,7 +441,7 @@ describe("settling gitlinks", () => {
     expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
     const stuck = records[1]!
     expect(trailer(stuck, "Code")).toBe("yrd-merge-unresolved")
-    expect(trailer(stuck, "Subject")).toContain("component")
+    expect(trailer(stuck, "Subject")).toContain("submodule")
     expect(trailer(stuck, "Via")).toContain("git-failed")
     expect(trailer(stuck, "Via")).toContain("resolve-submodule-branch")
     expect(trailer(stuck, "Evidence")).toBe(outcome.log)
@@ -464,9 +464,9 @@ describe("settling gitlinks", () => {
     ])
   })
 
-  it("a candidate failure introduced by raising component main is queue-owned stuck", async () => {
+  it("a candidate failure introduced by raising submodule main is queue-owned stuck", async () => {
     const w = await world()
-    const breaking = await advanceComponent(w, "breaking component main")
+    const breaking = await advanceSubmodule(w, "breaking submodule main")
     const head = await submitFile(w, "task/base-red")
 
     // Attribution comes from the validated root receipt even if the old CLI
@@ -486,7 +486,7 @@ describe("settling gitlinks", () => {
       },
     }
     const outcome = await queueRun({
-      ...(await w.options({ on: ["submit"], run: "! grep -q 'breaking component main' component/lib.txt" })),
+      ...(await w.options({ on: ["submit"], run: "! grep -q 'breaking submodule main' submodule/lib.txt" })),
       process: observing,
     })
 
@@ -498,7 +498,7 @@ describe("settling gitlinks", () => {
     )
     const stuck = records.find((record) => record.kind === "stuck")
     expect(trailer(stuck!, "Code")).toBe("yrd-submodule-main-regression")
-    expect(trailer(stuck!, "Subject")).toContain("component")
+    expect(trailer(stuck!, "Subject")).toContain("submodule")
     expect(trailer(stuck!, "Subject")).toContain(breaking)
     expect(trailer(stuck!, "Evidence")).toBe(outcome.log)
     expect(trailer(stuck!, "Next")).toContain("yrd queue run")
@@ -512,7 +512,7 @@ describe("settling gitlinks", () => {
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
-      .filter((record) => record.kind === "result" && record.name === "component-check")
+      .filter((record) => record.kind === "result" && record.name === "submodule-check")
       .map((record) => record.phase)
     expect(phases).toEqual(["submit", "base"])
   })
@@ -522,7 +522,7 @@ describe("settling gitlinks", () => {
     "treats an %s root receipt according to its declared contract",
     async (fault) => {
       const w = await world()
-      await advanceComponent(w, "breaking component main")
+      await advanceSubmodule(w, "breaking submodule main")
       await submitFile(w, `task/receipt-${fault}`)
       await using real = createProcess({ cwd: w.work })
       const observing: Process = {
@@ -547,7 +547,7 @@ describe("settling gitlinks", () => {
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line) as Record<string, unknown>)
-        .filter((record) => record.kind === "result" && record.name === "component-check")
+        .filter((record) => record.kind === "result" && record.name === "submodule-check")
         .map((record) => record.phase)
       expect(phases).toEqual(fault === "absent" ? ["submit"] : [])
       if (fault === "malformed") expect(readFileSync(outcome.log, "utf8")).toContain("Root-Changes")
@@ -560,7 +560,7 @@ describe("settling gitlinks", () => {
     await gitlinkAroundQueue(w, w.offMain)
     const head = await submitGitlink(w, "task/repair-off-main", w.onMain)
 
-    const outcome = await queueRun(await w.options({ on: ["submit"], run: "! grep -q '^three$' component/lib.txt" }))
+    const outcome = await queueRun(await w.options({ on: ["submit"], run: "! grep -q '^three$' submodule/lib.txt" }))
 
     expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/repair-off-main"] })
     const records = await readRecords(
@@ -569,12 +569,12 @@ describe("settling gitlinks", () => {
     )
     const stuck = records.find((record) => record.kind === "stuck")
     expect(trailer(stuck!, "Code")).toBe("yrd-submodule-main-regression")
-    expect(trailer(stuck!, "Subject")).toContain(`component@${w.main}`)
+    expect(trailer(stuck!, "Subject")).toContain(`submodule@${w.main}`)
     const phases = readFileSync(outcome.log, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
-      .filter((record) => record.kind === "result" && record.name === "component-check")
+      .filter((record) => record.kind === "result" && record.name === "submodule-check")
       .map((record) => record.phase)
     expect(phases).toEqual(["submit", "base"])
   })
@@ -586,22 +586,22 @@ describe("settling gitlinks", () => {
       const w = await world()
       let head: string
       if (baseEntry === "existing-gitlink") {
-        await advanceComponent(w, "healthy component main")
+        await advanceSubmodule(w, "healthy submodule main")
         head = await submitFile(w, "task/candidate-red")
       } else {
         if (baseEntry === "ordinary-file") {
-          writeFileSync(join(w.work, "new-component"), "base-owned ordinary file\n")
-          await w.git(["add", "new-component"])
+          writeFileSync(join(w.work, "new-submodule"), "base-owned ordinary file\n")
+          await w.git(["add", "new-submodule"])
           await w.git(["commit", "--quiet", "-m", "base has an ordinary file"])
           await w.git(["push", "--quiet", "origin", "main"])
         }
         await w.git(["checkout", "--quiet", "-b", "task/candidate-red", "main"])
-        if (baseEntry === "ordinary-file") await w.git(["rm", "--quiet", "new-component"])
-        await w.git(["submodule", "add", "--quiet", "https://git-super.test/owned/component.git", "new-component"])
-        await gitIn(join(w.work, "new-component"))(["checkout", "--quiet", w.onMain])
+        if (baseEntry === "ordinary-file") await w.git(["rm", "--quiet", "new-submodule"])
+        await w.git(["submodule", "add", "--quiet", "https://git-super.test/owned/submodule.git", "new-submodule"])
+        await gitIn(join(w.work, "new-submodule"))(["checkout", "--quiet", w.onMain])
         writeFileSync(join(w.work, "task-candidate-red.txt"), "authored failure\n")
-        await w.git(["add", ".gitmodules", "new-component", "task-candidate-red.txt"])
-        await w.git(["commit", "--quiet", "-m", "candidate adds a held-back component"])
+        await w.git(["add", ".gitmodules", "new-submodule", "task-candidate-red.txt"])
+        await w.git(["commit", "--quiet", "-m", "candidate adds a held-back submodule"])
         head = (await w.git(["rev-parse", "HEAD"])).trim()
         await submit(w.git, "origin", {
           branch: "task/candidate-red",
@@ -613,7 +613,7 @@ describe("settling gitlinks", () => {
       const outcome = await queueRun(
         await w.options({
           on: ["submit"],
-          run: "if test -f task-candidate-red.txt || test -d new-component; then echo CANDIDATE_FAIL; exit 1; else echo BASE_PASS; fi",
+          run: "if test -f task-candidate-red.txt || test -d new-submodule; then echo CANDIDATE_FAIL; exit 1; else echo BASE_PASS; fi",
         }),
       )
 
@@ -633,7 +633,7 @@ describe("settling gitlinks", () => {
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line) as Record<string, unknown>)
-        .filter((record) => record.kind === "result" && record.name === "component-check")
+        .filter((record) => record.kind === "result" && record.name === "submodule-check")
         .map((record) => record.phase)
       expect(phases).toEqual(["submit", "base"])
       // The read-side must not relabel the green comparator as the candidate's
@@ -641,7 +641,7 @@ describe("settling gitlinks", () => {
       const journals = readJournals(dirname(outcome.log))
       const queue = await readQueue(w.git, "origin", "main", outcome.target)
       const shown = watchRows(list(queue.changes, { journals }), { journals }).find((row) => row.row.head === head)!
-      expect(shown.row.result).toBe("fail component-check")
+      expect(shown.row.result).toBe("fail submodule-check")
       expect(readFileSync(shown.row.log!, "utf8")).toBe("CANDIDATE_FAIL\n")
       const detail = checksOf([], "failed", [], shown.run?.running, shown.run?.checks)
       expect(detail.map((check) => [check.phase, check.state, readFileSync(check.log!, "utf8")])).toEqual([
@@ -651,7 +651,7 @@ describe("settling gitlinks", () => {
     },
   )
 
-  it("a gitlink moved on the target around the queue is reported with its path, and no component is asked about it (E5)", async () => {
+  it("a gitlink moved on the target around the queue is reported with its path, and no submodule is asked about it (E5)", async () => {
     const w = await world()
     // One change first: the queue's history starts at its own first record, so a
     // queue that has judged nothing reports nothing (direct.ts). Its branch is
@@ -670,24 +670,24 @@ describe("settling gitlinks", () => {
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
     expect(log.filter((record) => record.kind === "merged-direct")).toMatchObject([
-      { commit: direct, gitlinks: ["component"] },
+      { commit: direct, gitlinks: ["submodule"] },
     ])
     const told = log.filter((record) => record.kind === "message" && record.says === "merged-direct")
     expect(told).toMatchObject([{ id: direct, says: "merged-direct", to: "none" }])
     expect(told[0]?.text).toContain(`main moved around the queue at ${direct.slice(0, 12)}`)
-    expect(told[0]?.text).toContain("it moved the gitlink at component")
+    expect(told[0]?.text).toContain("it moved the gitlink at submodule")
   })
 
-  it("a gitlink the reference checkout never fetched is materialized from the component's remote, and the change merges", async () => {
+  it("a gitlink the reference checkout never fetched is materialized from the submodule's remote, and the change merges", async () => {
     const w = await world()
-    // The component's main moves on in its own clone and the reference
+    // The submodule's main moves on in its own clone and the reference
     // checkout under `work` never fetches it; the change records it by plumbing,
     // so the reference's submodule store lacks the commit when the queue
     // builds the worktree. The queue fetches it there (2026-09-03: it refused
     // the network and stuck on @dev/2's 24089 instead).
-    const componentWork = join(w.work, "..", "component-work")
-    const cg = gitIn(componentWork)
-    writeFileSync(join(componentWork, "lib.txt"), "four\n")
+    const submoduleWork = join(w.work, "..", "submodule-work")
+    const cg = gitIn(submoduleWork)
+    writeFileSync(join(submoduleWork, "lib.txt"), "four\n")
     await cg(["commit", "--quiet", "-am", "four"])
     await cg(["push", "--quiet", "origin", "main"])
     const four = (await cg(["rev-parse", "HEAD"])).trim()
@@ -695,7 +695,7 @@ describe("settling gitlinks", () => {
     // they are, so nothing here fetches the commit into the reference store.
     const base = (await w.git(["rev-parse", "main"])).trim()
     await w.git(["read-tree", "main"])
-    await w.git(["update-index", "--add", "--cacheinfo", `160000,${four},component`])
+    await w.git(["update-index", "--add", "--cacheinfo", `160000,${four},submodule`])
     const tree = (await w.git(["write-tree"])).trim()
     const head = (
       await w.git([
@@ -704,7 +704,7 @@ describe("settling gitlinks", () => {
         "-p",
         base,
         "-m",
-        "task/unfetched: move the component gitlink to a commit this checkout never fetched",
+        "task/unfetched: move the submodule gitlink to a commit this checkout never fetched",
       ])
     ).trim()
     await w.git(["update-ref", "refs/heads/task/unfetched", head])
@@ -725,7 +725,7 @@ describe("settling gitlinks", () => {
     expect(kinds).toContain("merged")
   })
 
-  it("two changes moving the same gitlink ask the component once per run: a commit on main stays on main (E4)", async () => {
+  it("two changes moving the same gitlink ask the submodule once per run: a commit on main stays on main (E4)", async () => {
     const w = await world()
     await submitGitlink(w, "task/first", w.onMain)
     const second = await submitGitlink(w, "task/second", w.onMain)

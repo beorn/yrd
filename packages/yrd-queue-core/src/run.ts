@@ -14,7 +14,7 @@
  * A failing check sends the change back at once, with the check, its exit, its
  * duration and its log path. Stuck is what the queue could not judge at all —
  * a crash, a missing script, a check past its bound, a check that exits 2, a
- * check the driver could not measure, a component whose remote cannot be asked
+ * check the driver could not measure, a submodule whose remote cannot be asked
  * — and nothing else.
  *
  * Every worktree this run makes is prepared before anything is judged in it:
@@ -830,7 +830,7 @@ async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): P
     via: `git-super merge (${detail.code}, ${detail.phase}) in yrd queue ${run.name} [${run.log.id}]`,
     evidence: run.log.path,
     owner: "the queue operator",
-    next: detail.next ?? "push the named component commit to its main, then run yrd queue run",
+    next: detail.next ?? "push the named submodule commit to its main, then run yrd queue run",
   }
   const tip = tipOf(entry.change)
   const sameWait =
@@ -882,7 +882,7 @@ async function candidateFailure(
     await worktree.remove()
     const reason = detail.message.replace(/\s+/gu, " ").trim()
     return run.steps.end(run, entry, "failed", {
-      remedy: detail.next ?? "publish a materializable component commit, then submit again",
+      remedy: detail.next ?? "publish a materializable submodule commit, then submit again",
       subject: (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim(),
       trailers: [["Reason", reason]],
     })
@@ -937,7 +937,7 @@ async function attributedFailure(
       "stuck",
       stuckWrite(run, {
         code: "yrd-submodule-main-regression",
-        next: `fix or revert ${gitlinks} on component main, then run yrd queue run`,
+        next: `fix or revert ${gitlinks} on submodule main, then run yrd queue run`,
         subject: `${gitlinks} breaks the root at the settled base`,
         trailers: checkTrailers(baseResults),
         via: `the settled base alone failed ${baseFailure.name}; the candidate's own content was absent`,
@@ -1182,7 +1182,7 @@ async function push(run: Run, entry: QueueEntry, plan: PushPlan): Promise<Pushed
  * submitter's, at once, with the check, its exit, its duration and its log
  * path. When candidate preparation raised a gitlink, attributedFailure first
  * runs the same declared plan once on the settled base alone: red there is the
- * component writer's stuck; green leaves this submitter ending unchanged.
+ * submodule writer's stuck; green leaves this submitter ending unchanged.
  *
  * It used to run the same check again in the change's worktree and once more
  * at the target before billing anybody, so that a coin flip or a red target
@@ -1648,7 +1648,7 @@ function finish(
   // A settled run removed every worktree it made, so its directory and pid
   // file have nothing left to say. A stuck run is evidence: in particular,
   // git-super may have left an uncommitted composition whose index and
-  // component checkouts explain the refusal. Keep that whole run directory
+  // submodule checkouts explain the refusal. Keep that whole run directory
   // for the mechanic; a later process reaps it after the repair.
   if (exitCode !== 2) rmSync(run.worktrees, { force: true, recursive: true })
   return {

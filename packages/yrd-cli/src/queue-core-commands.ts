@@ -132,7 +132,7 @@ export type CoreQueueCommand =
       /**
        * The gitlink carrying this yrd. Absent, its physical path and the
        * checkout observed at module load are used, even if the target moved
-       * ahead. A test can name them without running from a component checkout.
+       * ahead. A test can name them without running from a submodule checkout.
        */
       gitlink?: Readonly<{ path: string; sha: string }>
       /** Awaited after each round, before the gitlink is read; a test mutates the world or stops the service here. */
@@ -1014,8 +1014,8 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
       return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`
     case "settle":
       return rest.state === "left-off-main"
-        ? `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} left off component main ${String(rest.to).slice(0, 12)}`
-        : `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} -> ${String(rest.to).slice(0, 12)} (component main)`
+        ? `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} left off submodule main ${String(rest.to).slice(0, 12)}`
+        : `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} -> ${String(rest.to).slice(0, 12)} (submodule main)`
     case "merge":
       return `${where} merged as ${String(rest.commit).slice(0, 12)}`
     case "message":

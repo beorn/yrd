@@ -35,7 +35,7 @@ import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
 
-// A component at a local path: git refuses file transport for submodule clones
+// A submodule at a local path: git refuses file transport for submodule clones
 // unless every git in the chain is told. Every git runner below and the
 // queue's own git children read this process's environment when they are
 // made, so it is said here, first.
@@ -151,40 +151,40 @@ async function redeclare(w: World, text: string): Promise<void> {
 
 type GitlinkWorld = World &
   Readonly<{
-    /** The component's commit the root records at start. */
+    /** The submodule's commit the root records at start. */
     a: string
-    /** The component's next commit, on its main; the root does not record it yet. */
+    /** The submodule's next commit, on its main; the root does not record it yet. */
     b: string
-    /** The real CLI loaded from this world's component, not an injected gitlink. */
+    /** The real CLI loaded from this world's submodule, not an injected gitlink. */
     command: typeof coreQueueCommand
   }>
 
 /**
- * A component whose main is `a` then `b`; a root whose main records the component
+ * A submodule whose main is `a` then `b`; a root whose main records the submodule
  * at `a`. Modelled on the queue core's own gitlink case: `b` is on the
- * component's main, so candidate settling accepts a change that records it.
+ * submodule's main, so candidate settling accepts a change that records it.
  */
 async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-up-gitlink-"))
   roots.push(root)
   // Ownership comes from hosted identities; Git transports these fixture URLs locally.
   process.env.GIT_CONFIG_COUNT = "3"
-  process.env.GIT_CONFIG_KEY_1 = `url.${join(root, "component.git")}.insteadOf`
-  process.env.GIT_CONFIG_VALUE_1 = "https://git-super.test/owned/component.git"
+  process.env.GIT_CONFIG_KEY_1 = `url.${join(root, "submodule.git")}.insteadOf`
+  process.env.GIT_CONFIG_VALUE_1 = "https://git-super.test/owned/submodule.git"
   process.env.GIT_CONFIG_KEY_2 = `url.${join(root, "remote.git")}.insteadOf`
   process.env.GIT_CONFIG_VALUE_2 = "https://git-super.test/owned/root.git"
   const seed = gitIn(root)
 
-  const component = join(root, "component.git")
-  const componentWork = join(root, "component-work")
-  await seed(["init", "--quiet", "--bare", "--initial-branch=main", component])
-  await seed(["clone", "--quiet", component, componentWork])
-  const cg = gitIn(componentWork)
+  const submodule = join(root, "submodule.git")
+  const submoduleWork = join(root, "submodule-work")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", submodule])
+  await seed(["clone", "--quiet", submodule, submoduleWork])
+  const cg = gitIn(submoduleWork)
   await identity(cg)
-  await cg(["remote", "set-url", "origin", "https://git-super.test/owned/component.git"])
+  await cg(["remote", "set-url", "origin", "https://git-super.test/owned/submodule.git"])
   await cg(["checkout", "--quiet", "-b", "main"])
-  cpSync(resolve(import.meta.dirname, "../src"), join(componentWork, "packages/yrd-cli/src"), { recursive: true })
-  writeFileSync(join(componentWork, "lib.txt"), "a\n")
+  cpSync(resolve(import.meta.dirname, "../src"), join(submoduleWork, "packages/yrd-cli/src"), { recursive: true })
+  writeFileSync(join(submoduleWork, "lib.txt"), "a\n")
   await cg(["add", "lib.txt", "packages"])
   await cg(["commit", "--quiet", "-m", "a"])
   const a = (await cg(["rev-parse", "HEAD"])).trim()
@@ -199,39 +199,39 @@ async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
   await git(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
   await git(["checkout", "--quiet", "-b", "main"])
   writeFileSync(join(work, ".yrd.yml"), DECLARATION)
-  // The root records the component at its main as it stands now: `a`.
-  await git(["submodule", "add", "--quiet", "https://git-super.test/owned/component.git", "component"])
-  await git(["add", ".yrd.yml", ".gitmodules", "component"])
-  await git(["commit", "--quiet", "-m", "main, with the component at a"])
+  // The root records the submodule at its main as it stands now: `a`.
+  await git(["submodule", "add", "--quiet", "https://git-super.test/owned/submodule.git", "submodule"])
+  await git(["add", ".yrd.yml", ".gitmodules", "submodule"])
+  await git(["commit", "--quiet", "-m", "main, with the submodule at a"])
   await git(["push", "--quiet", "origin", "main"])
 
-  // The component's main moves on to `b`; the root still records `a`.
-  writeFileSync(join(componentWork, "lib.txt"), "b\n")
+  // The submodule's main moves on to `b`; the root still records `a`.
+  writeFileSync(join(submoduleWork, "lib.txt"), "b\n")
   await cg(["commit", "--quiet", "-am", "b"])
   const b = (await cg(["rev-parse", "HEAD"])).trim()
   await cg(["push", "--quiet", "origin", "main"])
 
   const workdir = join(root, "queue")
   mkdirSync(workdir, { recursive: true })
-  const cli = join(work, "component/packages/yrd-cli")
+  const cli = join(work, "submodule/packages/yrd-cli")
   symlinkSync(resolve(import.meta.dirname, "../node_modules"), join(cli, "node_modules"), "dir")
   if (sourceReadFailure) {
     // Leave real source files readable but make HEAD unborn: rev-parse must
     // fail, not turn an embedded service into an unchecked standalone one.
-    await gitIn(join(work, "component"))(["symbolic-ref", "HEAD", "refs/heads/unborn-runtime"])
+    await gitIn(join(work, "submodule"))(["symbolic-ref", "HEAD", "refs/heads/unborn-runtime"])
   }
   const { coreQueueCommand: command } = await import(join(cli, "src/queue-core-commands.ts"))
   return { a, b, command, git, work, workdir }
 }
 
-/** A change that moves the component's gitlink to `sha`, submitted to the queue. */
+/** A change that moves the submodule's gitlink to `sha`, submitted to the queue. */
 async function submitGitlink(w: GitlinkWorld, branch: string, sha: string): Promise<void> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
-  const sub = gitIn(join(w.work, "component"))
+  const sub = gitIn(join(w.work, "submodule"))
   await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
   await sub(["checkout", "--quiet", sha])
-  await w.git(["add", "component"])
-  await w.git(["commit", "--quiet", "-m", `move the component gitlink to ${sha.slice(0, 12)}`])
+  await w.git(["add", "submodule"])
+  await w.git(["commit", "--quiet", "-m", `move the submodule gitlink to ${sha.slice(0, 12)}`])
   await w.git(["checkout", "--quiet", "main"])
   await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
 }
@@ -668,7 +668,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
   it("ends the loop, exit 0, when the round it ran merged the change that moves its own gitlink", async () => {
     const w = await gitlinkWorld()
     await submitGitlink(w, "task/gitlink", w.b)
-    await gitIn(join(w.work, "component"))(["checkout", "--quiet", w.a])
+    await gitIn(join(w.work, "submodule"))(["checkout", "--quiet", w.a])
     const run = capture(w.work)
 
     const exit = await w.command(
@@ -679,7 +679,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         intervalSeconds: 0,
         afterRound: async () => {
           await w.git(["merge", "--ff-only", "origin/main"])
-          await gitIn(join(w.work, "component"))(["checkout", "--quiet", w.b])
+          await gitIn(join(w.work, "submodule"))(["checkout", "--quiet", w.b])
         },
       },
       { json: true, workdir: w.workdir },
@@ -694,18 +694,18 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(exit, `${run.stdout()}\n${run.stderr()}\n${runLog}`).toBe(0)
     expect(written).toHaveLength(2)
     expect(written[0]).toMatchObject({ exitCode: 0, merged: ["task/gitlink"] })
-    expect(written[1]).toEqual({ exitCode: 0, from: w.a, gitlink: "component", reason: "gitlink-moved", to: w.b })
+    expect(written[1]).toEqual({ exitCode: 0, from: w.a, gitlink: "submodule", reason: "gitlink-moved", to: w.b })
     // The target really moved the gitlink: the exit reports the world, not the request.
-    expect((await w.git(["ls-tree", "origin/main", "--", "component"])).trim()).toBe(`160000 commit ${w.b}\tcomponent`)
+    expect((await w.git(["ls-tree", "origin/main", "--", "submodule"])).trim()).toBe(`160000 commit ${w.b}\tsubmodule`)
   })
 
   it.each(["stop", "project", "already projected"])("runs no stale round during checkout lag (%s)", async (ending) => {
     const w = await gitlinkWorld()
-    // T1 includes the component checkout poll. Watching only queue outcomes
+    // T1 includes the submodule checkout poll. Watching only queue outcomes
     // left its separate gitIn call free to lose the executable and environment.
     const selected = await installSelectedGit(w.work)
     // The recorded target moves first; the process still loads a from its checkout.
-    await w.git(["update-index", "--cacheinfo", "160000", w.b, "component"])
+    await w.git(["update-index", "--cacheinfo", "160000", w.b, "submodule"])
     await w.git(["commit", "--quiet", "-m", "target records b before local projection"])
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
@@ -713,7 +713,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     const { log, rows } = logRows()
     let rounds = 0
     const project = async () => {
-      const sub = gitIn(join(w.work, "component"))
+      const sub = gitIn(join(w.work, "submodule"))
       await sub(["fetch", "--quiet", "origin", "main"])
       await sub(["checkout", "--quiet", w.b])
     }
@@ -755,7 +755,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     const checkoutReads = selected
       .readCalls()
       .filter(
-        (call) => call.cwd === join(w.work, "component") && call.args.join(" ") === "rev-parse --verify HEAD^{commit}",
+        (call) => call.cwd === join(w.work, "submodule") && call.args.join(" ") === "rev-parse --verify HEAD^{commit}",
       )
     expect(checkoutReads.length).toBeGreaterThan(0)
     expect(checkoutReads.every((call) => call.marker === "reload-poll")).toBe(true)
@@ -766,7 +766,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       expect(records(run).at(-1)).toEqual({
         exitCode: 0,
         from: w.a,
-        gitlink: "component",
+        gitlink: "submodule",
         reason: "gitlink-moved",
         to: w.b,
       })

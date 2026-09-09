@@ -158,7 +158,7 @@ describe("a change's records are its commits", () => {
     const { git, head, root, target } = await repository()
     const change = { branch: "task/one", head }
     const opened = await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
-    const path = "component\ufffd*"
+    const path = "submodule\ufffd*"
     const tree = (await git(["mktree", "-z"], `160000 commit ${head}\t${path}\0`)).trim()
     const merge = (await git(["commit-tree", tree, "-p", target, "-p", head, "-m", "automatic raise"])).trim()
     await expect(readRootChanges(git, merge)).resolves.toBeUndefined()
@@ -220,19 +220,19 @@ describe("a change's records are its commits", () => {
     const { git, head, root, target } = await repository()
     const change = { branch: "task/one", head }
     await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
-    const tree = (await git(["mktree", "-z"], `160000 commit ${head}\tcomponent\0`)).trim()
+    const tree = (await git(["mktree", "-z"], `160000 commit ${head}\tsubmodule\0`)).trim()
     const merge = (await git(["commit-tree", tree, "-p", target, "-p", head, "-m", "raise"])).trim()
-    const row = { path: "component", mode: "160000", from: target, to: head }
+    const row = { path: "submodule", mode: "160000", from: target, to: head }
     const payload = { version: 1, merge, changes: [row] }
     const good = JSON.stringify(payload)
     const ref = `refs/git-super/receipts/${merge}`
     for (const [json, message] of [
       [good.replace('"version":1', '"version":0,"v\\u0065rsion":1'), "duplicate JSON field version"],
-      [good.replace('"path":"component"', '"path":"wrong","p\\u0061th":"component"'), "duplicate JSON field path"],
+      [good.replace('"path":"submodule"', '"path":"wrong","p\\u0061th":"submodule"'), "duplicate JSON field path"],
       [JSON.stringify({ ...payload, version: 2 }), "version 1"],
       [JSON.stringify({ ...payload, merge: head }), "exact Merge"],
       [JSON.stringify({ ...payload, changes: [row, row] }), "must be unique"],
-      [JSON.stringify({ ...payload, changes: [{ ...row, path: "../component" }] }), "root-relative"],
+      [JSON.stringify({ ...payload, changes: [{ ...row, path: "../submodule" }] }), "root-relative"],
       [JSON.stringify({ ...payload, changes: [{ ...row, mode: "100644" }] }), "mode 160000"],
       [JSON.stringify({ ...payload, changes: [{ ...row, to: target }] }), "does not match"],
       [JSON.stringify({ ...payload, changes: [{ ...row, from: target.slice(0, 12) }] }), "full from/to OIDs"],
