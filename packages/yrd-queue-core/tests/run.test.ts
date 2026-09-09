@@ -2268,6 +2268,100 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
     expect(trailer(stuckRecord, "Absorbed")).toBe("no")
     expect(messages(w).filter((entry) => entry.record === "stuck")).toHaveLength(1)
   })
+
+  it("never claims a worktree at the naming slot as this head's orphaned merge once its registration names a garbage sha, and proceeds through the ordinary path instead", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    // Take the change to "checked" directly, exactly as the sibling case above.
+    const checkedRecord = await appendRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind: "checked",
+      subject: `task/one passed the on-submit checks at main ${w.target.slice(0, 12)}`,
+      trailers: [
+        ["Config", "test-config"],
+        ["Base", w.target],
+      ],
+    })
+    await w.git(["push", "--quiet", "origin", `${checkedRecord}:${ref}`])
+
+    // A worktree at task/one's own naming slot, checked out cleanly, then its
+    // OWN git-internal HEAD registration corrupted directly — the shape a
+    // half-written or truncated worktree admin file leaves behind. Git's own
+    // `worktree list` answers a garbage registration with the all-zero sha
+    // rather than erroring, so this reaches `orphanedMergeCandidate`'s read
+    // exactly as a real corrupted registration would.
+    //
+    // Verified separately (a scratch repo, not this fixture): a worktree
+    // whose registration names an object that is simply MISSING poisons
+    // every git fetch in the repository — including this run's own opening
+    // fetch of its captured queue objects, which crashes long before
+    // `orphanedMergeCandidate` ever runs. The all-zero sha does not, because
+    // git recognizes it as its own placeholder rather than trying to resolve
+    // it — the one shape of "unreadable" that isolates the read this test
+    // means to exercise.
+    const worktreePath = await deadMergeWorktree(w, "q-dead-merge-unreadable", head, w.target, exitedPid())
+    const adminHead = join(w.work, ".git", "worktrees", head.slice(0, 12), "HEAD")
+    if (!existsSync(adminHead)) {
+      throw new Error(`fixture assumption failed: no worktree admin registration at ${adminHead} for ${worktreePath}`)
+    }
+    writeFileSync(adminHead, "this-is-not-a-sha-at-all\n")
+
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    // Not treated as an orphan recovery: the change proceeds through the
+    // ordinary path and merges cleanly, exactly as if the unreadable
+    // worktree were never there — never guessed into this change's evidence.
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.stuck).toEqual([])
+    expect(outcome.merged).toEqual(["task/one"])
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.some((record) => record.kind === "stuck")).toBe(false)
+    expect(records.every((record) => trailer(record, "Orphan") === undefined)).toBe(true)
+  })
+
+  it("never claims a worktree at the naming slot as this head's orphaned merge when its parents do not include this head, and proceeds through the ordinary path instead", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    const checkedRecord = await appendRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind: "checked",
+      subject: `task/one passed the on-submit checks at main ${w.target.slice(0, 12)}`,
+      trailers: [
+        ["Config", "test-config"],
+        ["Base", w.target],
+      ],
+    })
+    await w.git(["push", "--quiet", "origin", `${checkedRecord}:${ref}`])
+
+    // A commit that never goes near the queue, purely to give the "wrong"
+    // merge below a real, unrelated parent of its own.
+    await w.git(["checkout", "--quiet", "-b", "shadow/other", "main"])
+    writeFileSync(join(w.work, "other.txt"), "other.txt\n")
+    await w.git(["add", "other.txt"])
+    await w.git(["commit", "--quiet", "-m", "other.txt"])
+    const otherHead = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+
+    // A real merge commit, but of `otherHead`, never `head`: its parents are
+    // [main tip, otherHead]. Placed at task/one's own naming slot — a stale
+    // worktree left there by an entirely different head, never redone as if
+    // it were task/one's own merge.
+    const wrongMerge = await composeMergeCandidate(w, otherHead, `merge shadow/other@${otherHead.slice(0, 12)} into main`)
+    await deadMergeWorktree(w, "q-dead-merge-wrong-parent", head, wrongMerge, exitedPid())
+
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.stuck).toEqual([])
+    expect(outcome.merged).toEqual(["task/one"])
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.some((record) => record.kind === "stuck")).toBe(false)
+    expect(records.every((record) => trailer(record, "Orphan") === undefined)).toBe(true)
+  })
 })
 
 describe("the target's setup", () => {

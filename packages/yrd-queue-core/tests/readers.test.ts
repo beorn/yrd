@@ -463,6 +463,27 @@ describe("the declared checks, joined to what ran", () => {
     expect(views[1]?.log).toBe("/w/test.log")
   })
 
+  it("reads a packed check's OWN exit even when the change's ending disagrees — the shape a merge conflict makes: every check passed, the change still ended failed", () => {
+    // Before the fix, the LAST packed trailer's verdict was inferred from the
+    // change's ending ("failed" -> fail) rather than read from its own exit.
+    // A change can end failed for a reason no check made, and a check that
+    // exited 0 must stay passed regardless of where it sits in the list.
+    const twoChecks: readonly CheckSpec[] = [
+      { name: "typecheck", run: "bun run typecheck" },
+      { name: "lint", run: "bun run lint" },
+    ]
+    const views = checksOf(
+      ["typecheck exit=0 ms=1000 log=/w/typecheck.log", "lint exit=0 ms=500 log=/w/lint.log"],
+      "failed",
+      twoChecks,
+    )
+
+    expect(views.map((view) => [view.name, view.state])).toEqual([
+      ["typecheck", "passed"],
+      ["lint", "passed"],
+    ])
+  })
+
   it("marks the check the journal says is running now, and keeps its log path", () => {
     const views = checksOf(["typecheck exit=0 ms=1000 log=/w/typecheck.log"], "open", declared, {
       log: "/w/test.log",
