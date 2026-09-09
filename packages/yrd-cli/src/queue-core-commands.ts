@@ -29,6 +29,7 @@ import {
   pauseLine,
   prepareWorktree,
   gitIn,
+  incidentLine,
   incidentLines,
   journalKey,
   list,
@@ -64,6 +65,7 @@ import {
   type GitRunner,
   type GitObservation,
   type GitSelection,
+  type Incident,
   type LogRecord,
   type QueueConfig,
   type QueueRunOutcome,
@@ -280,6 +282,13 @@ export async function coreQueueCommand(
       return undefined
     }
     emit(io, options.json, outcome, describeRun(outcome))
+    // Naming the branch is `describeRun`'s; naming what fixes it is this
+    // round's own log, which the ending that stuck it already wrote in full
+    // (run.ts `end()`). `queue list` and `queue show` render the same stored
+    // incident with `incidentLine`; a stuck round names it the same way on
+    // stderr, so "stuck task/one" is never the whole story a person gets
+    // (@i/10-yrd/24141 AC2).
+    for (const line of stuckCureLines(outcome)) io.stderr(`yrd: ${line}\n`)
     return outcome
   }
 
@@ -354,6 +363,14 @@ export async function coreQueueCommand(
       }
     }
     case "run": {
+      // One round, exactly `up`'s own (0 pass, 1 fail, 2 stuck): `outcome.exitCode`
+      // already carries that ladder, so forwarding it verbatim is the whole of
+      // the contract — a round a stuck change stopped, doing no other work,
+      // ends 2 here exactly as it ends `up`'s loop (run.ts's on-submit and
+      // on-merge steps set `exitCode: 2` the moment anything comes back stuck,
+      // never 0). A run that could not even judge is `undefined` here, and
+      // `?? 2` is that same stuck, already said by `stuck()` above
+      // (@i/10-yrd/24141 AC1).
       const outcome = await oneRound(captured)
       return outcome?.exitCode ?? 2
     }
@@ -1096,6 +1113,54 @@ function describeRun(
     ...outcome.observation.notices.map((notice) => notice.text),
   ].filter((part): part is string => part !== undefined)
   return `${words}: ${parts.length === 0 ? "nothing to do" : parts.join("; ")} (log ${outcome.log})`
+}
+
+/**
+ * One line per change this round ended stuck, naming the cure the way
+ * `queue list`/`queue show` already render a stuck row's incident
+ * (`incidentLine`, ADR-0007's compact form) — `queue run`'s own summary line
+ * names only the branch (@i/10-yrd/24141 AC2).
+ *
+ * Read from this round's own log rather than the remote: the `end()` step
+ * that pushed a change to `stuck` wrote the complete incident to `outcome.log`
+ * in the same call (run.ts), so this is that run's own record of why, never a
+ * second, possibly-later reading of the change ref.
+ */
+function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
+  if (outcome.stuck.length === 0) return []
+  const rows = readFileSync(outcome.log, "utf8")
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+  const filled = (value: unknown): value is string => typeof value === "string" && value.trim() !== ""
+  return outcome.stuck.map((branch) => {
+    const row = rows.find(
+      (record) => record.kind === "change" && record.decision === "stuck" && record.branch === branch,
+    )
+    const complete =
+      row !== undefined &&
+      filled(row.code) &&
+      filled(row.subject) &&
+      filled(row.via) &&
+      filled(row.evidence) &&
+      filled(row.next) &&
+      filled(row.owner)
+    if (!complete) {
+      // Every stuck ending writes a complete incident (run.ts `stuckWrite`);
+      // this is the guard against a future ending that stops doing so, not an
+      // expected path — it still names the branch rather than saying nothing.
+      return `stuck ${branch}: no complete incident in this run's log (${outcome.log}); see \`yrd queue show ${branch}\``
+    }
+    const incident: Incident = {
+      code: row.code as string,
+      subject: row.subject as string,
+      via: row.via as string,
+      evidence: row.evidence as string,
+      next: row.next as string,
+      owner: row.owner as string,
+    }
+    return `stuck ${branch}: ${incidentLine(incident)}`
+  })
 }
 
 /** One printed round of the text watch, with `updated HH:MM:SS` under the queue's name (item 30). */
