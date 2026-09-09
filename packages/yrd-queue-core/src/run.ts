@@ -53,7 +53,7 @@ import {
   type Git,
   type WriteRecord,
 } from "./records.ts"
-import { queueName, readConfig, type Target } from "./config.ts"
+import { queueName, queueGatesNothing, readConfig, type Target } from "./config.ts"
 import {
   GitExit,
   gitEnvironment,
@@ -1017,12 +1017,28 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     // The built-in check at merge (ruling D2): the merged tree's own declaration
     // reads, so no change can land a `.yrd.yml` that breaks the next queue run.
     let unreadable: string | undefined
+    // Beside ruling D2 and for the same reason one layer on: D2 stops a change
+    // landing a declaration the queue cannot READ; this stops one landing a
+    // declaration that GATES NOTHING. Submit already warned about it, and this
+    // is the hard stop at the only place the ungated merge could occur
+    // (@chief e5bb9c5f).
+    let gatesNothing: string | undefined
     try {
-      if ((await readConfig(wt, "HEAD", run.options.target)) === undefined) {
+      const mergedConfig = await readConfig(wt, "HEAD", run.options.target)
+      if (mergedConfig === undefined) {
         unreadable = "the merged tree has no .yrd.yml"
+      } else {
+        gatesNothing = queueGatesNothing(mergedConfig, "the merged tree's .yrd.yml")
       }
     } catch (error) {
       unreadable = String(error instanceof Error ? error.message : error)
+    }
+    if (unreadable === undefined && gatesNothing !== undefined) {
+      return await run.steps.end(run, entry, "failed", {
+        remedy: `declare at least one check in .yrd.yml on ${branch}, push, and submit again`,
+        subject: `${branch} would land a declaration that gates nothing: ${gatesNothing}`,
+        trailers: [["Reason", "config-gates-nothing"]],
+      })
     }
     if (unreadable !== undefined) {
       return await run.steps.end(run, entry, "failed", {

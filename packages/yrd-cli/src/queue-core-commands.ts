@@ -35,7 +35,7 @@ import {
   queueName,
   resolveGitSelection,
   queueRun,
-  assertQueueDeclaresChecks,
+  queueGatesNothing,
   readConfig,
   readJournals,
   readHistories,
@@ -294,13 +294,13 @@ export async function coreQueueCommand(
       }
     }
     case "submit": {
-      // Parsing is not policy; ADMITTING A CHANGE against a declaration that
-      // gates nothing is (@chief a62a0d96). Deliberately here and not in the
-      // shared declaration reader: pause, resume, watch and up all read the
-      // same declaration without admitting anything, and refusing there would
-      // take the queue's own controls down over a change nobody submitted.
-      // Before the dry-run branch, so a preview and a real submit refuse alike.
-      assertQueueDeclaresChecks(config, `the declaration at ${targetLabel}`)
+      // WARN here, REFUSE at merge (@chief e5bb9c5f). The author hears it at
+      // the moment they act and can fix the declaration long before merge;
+      // refusing here would block queuing a change whose config they could
+      // repair in the meantime, and the harm -- an ungated merge -- has not
+      // happened yet. Before the dry-run branch, so a preview warns too.
+      const gatesNothing = queueGatesNothing(config, `the declaration at ${targetLabel}`)
+      if (gatesNothing !== undefined) io.stderr(`yrd: warning: ${gatesNothing}\n`)
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       const submission = {
         branch,

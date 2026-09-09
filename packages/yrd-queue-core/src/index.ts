@@ -75,7 +75,7 @@ export { queueRun } from "./run.ts"
 export type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
 export {
   ENDINGS,
-  assertQueueDeclaresChecks,
+  queueGatesNothing,
   hintsIn,
   parseTarget,
   queueName,

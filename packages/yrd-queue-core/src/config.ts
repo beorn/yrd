@@ -138,7 +138,23 @@ export async function readConfig(git: Git, commit: string, target: Target): Prom
 }
 
 /**
- * Refuse a declaration that parses but gates nothing.
+ * Why a declaration that parses still may not be merged against: it gates
+ * nothing. Returns the message, so the two layers that care can differ in
+ * SEVERITY while never differing in WORDS.
+ *
+ * WARN EARLY, REFUSE LATE (@chief e5bb9c5f). Submit WARNS: the author hears it
+ * at the moment they act and can fix the declaration long before merge, and a
+ * refusal there would block queuing a change whose config they could repair in
+ * the meantime. Merge REFUSES: an ungated merge is the actual harm, so the hard
+ * stop belongs where it would happen and nowhere earlier.
+ *
+ * The placement was measured, not chosen. In the shared declaration reader this
+ * broke 20 tests -- pause, resume, watch and up all read a declaration without
+ * admitting anything. At submit admission it broke 8, which were submit and
+ * watch MECHANICS fixtures whose emptiness was incidental. That descent is the
+ * estate reporting how far the refusal still sat from the harm; reshaping those
+ * fixtures to fit would have been editing tests so a misplaced guard could
+ * survive review.
  *
  * PARSING IS NOT POLICY, which is why this is not inside parseConfig: a
  * declaration with no checks is well-formed, and a reader asking "what does
@@ -156,14 +172,14 @@ export async function readConfig(git: Git, commit: string, target: Target): Prom
  * does not say what a check looks like sends the author back to the same page
  * that failed them.
  */
-export function assertQueueDeclaresChecks(config: QueueConfig, where: string): void {
-  if (config.checks.length > 0) return
-  throw new Error(
-    `${where}: .yrd.yml parses but declares NO CHECKS, so every change would merge with nothing run. ` +
-      `A queue that gates nothing is not a queue. Declare at least one, for example:\n` +
-      `  checks:\n` +
-      `    - verify:\n` +
-      `        run: bun run test`,
+export function queueGatesNothing(config: QueueConfig, where: string): string | undefined {
+  if (config.checks.length > 0) return undefined
+  return (
+    `${where}: .yrd.yml parses but declares NO CHECKS, so a change would merge with nothing run. ` +
+    `A queue that gates nothing is not a queue. Declare at least one, for example:\n` +
+    `  checks:\n` +
+    `    - verify:\n` +
+    `        run: bun run test`
   )
 }
 
