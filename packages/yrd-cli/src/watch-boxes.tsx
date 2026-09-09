@@ -50,7 +50,7 @@ function HealthMarker({ health, live }: { health: RunnerHealth; live: boolean })
   const color = HEALTH_COLOR[health]
   if (live && health === "running") {
     return (
-      <Pulse synchronized colors={["$fg-info", "$fg-muted"]} bold flexShrink={0}>
+      <Pulse synchronized colors={["$fg-info", "$bg-muted"]} bold flexShrink={0}>
         $
       </Pulse>
     )

@@ -219,7 +219,7 @@ export function RunStatusBox({
       <MarkerRow
         marker={
           working && live ? (
-            <Pulse synchronized colors={[color, "$fg-muted"]} bold flexShrink={0}>
+            <Pulse synchronized colors={[color, "$bg-muted"]} bold flexShrink={0}>
               {stateGlyph(row)}
             </Pulse>
           ) : (
@@ -284,7 +284,7 @@ function StepLine({ step, live, since }: { step: WatchStep; live: boolean; since
     <MarkerRow
       marker={
         active && live ? (
-          <Pulse synchronized colors={[color, "$fg-muted"]} flexShrink={0}>
+          <Pulse synchronized colors={[color, "$bg-muted"]} flexShrink={0}>
             {CHECK_GLYPH[step.state]}
           </Pulse>
         ) : (
