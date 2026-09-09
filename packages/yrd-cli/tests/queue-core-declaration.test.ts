@@ -296,7 +296,7 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(service.stderr()).toContain("does not parse")
   })
 
-  it("refuses a selected branch with no config and names that branch", async () => {
+  it("refuses a selected branch with no config, names that branch, and names the cure", async () => {
     const repo = await world()
     const run = capture(repo)
 
@@ -305,5 +305,10 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(exit).toBe(2)
     expect(run.stderr()).toContain("queue list needs a queue")
     expect(run.stderr()).toContain("origin/main carries no .yrd.yml")
+    // The cure holds for both conditions this refusal cannot tell apart: an
+    // addressed miss (re-address it) and a repository that never declared a
+    // queue at all (a submodule's is its superproject's, not its own).
+    expect(run.stderr()).toContain("--queue <repo>#<branch>")
+    expect(run.stderr()).toContain("superproject")
   })
 })

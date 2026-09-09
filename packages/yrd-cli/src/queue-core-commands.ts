@@ -216,11 +216,23 @@ export async function coreQueueCommand(
     interactive?: boolean
   }> = {},
 ): Promise<YrdCliExitCode> {
-  /** The selected queue branch carries no declaration, so it runs no queue. */
+  /**
+   * The selected queue branch carries no declaration, so it runs no queue.
+   *
+   * `ref` is whatever was resolved — an explicit `--queue <repo>#<branch>` or
+   * the default `origin/HEAD` of `repo` — and this function cannot tell which:
+   * by the time a caller reaches here, `resolveQueueLocation` has already
+   * turned an omitted `--queue` into a concrete branch name (queue-location.ts),
+   * so an addressed miss and a repository that never declared one at all
+   * produce the identical call. The cure below is worded to hold for both.
+   */
   const noQueueOnTarget = (ref: string): YrdCliExitCode => {
     io.stderr(
       `yrd: ${NAMED[request.command]} needs a queue, and ${ref} carries no .yrd.yml. ` +
-        "The queue's config lives on the queue branch itself.\n",
+        "The queue's config lives on the queue branch itself. Point at a different one with " +
+        "--queue <repo>#<branch>, or, if this repository is a submodule with none of its own, " +
+        "the superproject that vendors it gates the change instead, by checking the gitlink, " +
+        "not a declaration here.\n",
     )
     return 2
   }

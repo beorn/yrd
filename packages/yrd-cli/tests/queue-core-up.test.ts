@@ -551,6 +551,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
           await expect(attempt).resolves.toBe(2)
           expect(run.stderr()).toContain("submit needs a queue")
           expect(run.stderr()).toContain("origin/main carries no .yrd.yml")
+          // Names the cure: re-address with --queue, or recognize a submodule
+          // with no declaration of its own is gated by its superproject instead.
+          expect(run.stderr()).toContain("--queue <repo>#<branch>")
+          expect(run.stderr()).toContain("superproject")
         }
         expect(records(run)).toEqual([])
         expect(await w.git(["ls-remote", "--refs", "origin"])).toBe(beforeRemote)
