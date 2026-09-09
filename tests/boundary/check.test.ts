@@ -33,9 +33,15 @@ describe("yrd check <name>", () => {
     const run = await runYrdIn(repo, bayPath, "check", "check", "--json")
 
     expect(run.exitCode, run.report).toBe(1)
-    const answer = JSON.parse(run.stdout) as { command: string; checks: readonly { name: string; result: string; log: string }[] }
+    const answer = JSON.parse(run.stdout) as {
+      command: string
+      checks: readonly { name: string; result: string; log: string }[]
+    }
     expect(answer.command, run.report).toBe("check")
-    expect(answer.checks.map((check) => [check.name, check.result]), run.report).toEqual([["check", "fail"]])
+    expect(
+      answer.checks.map((check) => [check.name, check.result]),
+      run.report,
+    ).toEqual([["check", "fail"]])
     expect(answer.checks[0]?.log ?? "", run.report).not.toBe("")
   })
 

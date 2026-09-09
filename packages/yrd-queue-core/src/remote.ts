@@ -263,8 +263,9 @@ export async function remoteUrl(git: Git, remote: string): Promise<string> {
   // Fetch uses the first URL; scalar config lookup returns the last. Keep
   // that same identity before insteadOf rewrites only the transport address.
   const url = (await git(["config", "--null", "--get-all", `remote.${remote}.url`])).split("\0")[0]
-  if (url === undefined || url === "")
-    {throw new Error(`queue remote ${remote}: expected remote.${remote}.url is missing or empty`)}
+  if (url === undefined || url === "") {
+    throw new Error(`queue remote ${remote}: expected remote.${remote}.url is missing or empty`)
+  }
   return url
 }
 

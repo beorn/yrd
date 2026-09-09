@@ -56,7 +56,7 @@ failure, the tail carries the summary and the exit — and drops the middle. It 
 never silent:
 
 - The returned `stdout`/`stderr` carry a `[yrd: … truncated — N bytes dropped
-  here. …]` notice, on its own lines, between the head and the tail. This is the
+here. …]` notice, on its own lines, between the head and the tail. This is the
   copy a human reading a check verdict sees.
 - `ProcessResult.outputTruncation` carries the same fact structurally, stdout
   before stderr, so machine consumers never match on the notice text.
@@ -90,5 +90,5 @@ of one probe's timeout. **If you are debugging a refusal that looks slow, that
 multiple is expected and is not a hang.**
 
 The retry count is git-super's policy, not Yrd's contract. Tests assert a
-*bounded* number of probes rather than an exact one, so that this suite does not
+_bounded_ number of probes rather than an exact one, so that this suite does not
 carry a hand-synced copy of another package's constant.

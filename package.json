@@ -35,7 +35,8 @@
     "typecheck": "tsc --noEmit",
     "typecheck:hh": "bun scripts/typecheck-hh.ts",
     "check": "bun run typecheck && bun run test",
-    "check:hh": "bun run typecheck:hh && bun run test"
+    "check:hh": "bun run typecheck:hh && bun run test",
+    "fix": "oxlint --fix . && oxfmt --write ."
   },
   "dependencies": {
     "@silvery/ansi": "^0.24.0",

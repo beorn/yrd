@@ -393,8 +393,9 @@ function readObservation(invocation: GitInvocation): GitObservation {
     value.message.trim() === "" ||
     !("notices" in value) ||
     !Array.isArray(value.notices)
-  )
-    {throw new Error("expected exactly version 1, outcome, a nonempty message and notices")}
+  ) {
+    throw new Error("expected exactly version 1, outcome, a nonempty message and notices")
+  }
   const outcome = value.outcome
   const exit =
     outcome === "observed"
@@ -425,8 +426,9 @@ function readObservation(invocation: GitInvocation): GitObservation {
       typeof notice.text !== "string" ||
       notice.text.trim() === "" ||
       ids.has(notice.id)
-    )
-      {throw new Error("notice requires exactly a unique nonempty id and complete text")}
+    ) {
+      throw new Error("notice requires exactly a unique nonempty id and complete text")
+    }
     ids.add(notice.id)
     notices.push({ id: notice.id, text: notice.text })
   }

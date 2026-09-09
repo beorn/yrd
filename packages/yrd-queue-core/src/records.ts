@@ -197,7 +197,7 @@ export async function readRootChanges(git: Git, merge: string, copied?: string):
     throw new Error(`Root-Changes for ${merge}: receipt.json is not JSON`, { cause: error })
   }
   // JSON.parse owns grammar. Audit only object-key uniqueness, including escaped keys it would overwrite.
-  const tokens = json.match(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:]/gu) ?? []
+  const tokens = json.match(/"(?:\\[\s\S]|[^"\\])*"|[{}[\]:]/gu) ?? []
   const objects: (Set<string> | undefined)[] = []
   for (const [index, token] of tokens.entries()) {
     if (token === "{") objects.push(new Set())

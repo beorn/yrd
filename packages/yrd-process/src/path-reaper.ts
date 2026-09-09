@@ -285,7 +285,8 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
 }
 
 async function canonicalPath(path: string): Promise<string> {
-  if (typeof path !== "string" || path.trim() === "") throw new TypeError("yrd: path-holder census requires a non-empty path")
+  if (typeof path !== "string" || path.trim() === "")
+    throw new TypeError("yrd: path-holder census requires a non-empty path")
   return realpath(resolve(path))
 }
 

@@ -597,8 +597,9 @@ describe("a queue run", () => {
     expect(idle.observation).toEqual({ contract: "root-v1", ...envelope })
     expect(calls).toBe(1)
     const head = await submitCommit(w, "task/one", "one.txt")
-    if (outcome === "observed")
-      {await writePause(w.git, "origin", "main", { kind: "paused", by: "operator", reason: "observation only" })}
+    if (outcome === "observed") {
+      await writePause(w.git, "origin", "main", { kind: "paused", by: "operator", reason: "observation only" })
+    }
     const next = await queueRun(options)
     expect(calls).toBe(2)
     expect(next.exitCode).toBe(outcome === "invalid" ? 2 : 0)

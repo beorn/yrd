@@ -54,7 +54,11 @@ function sourceGit(args: readonly string[]): { status: number; stdout: string } 
     output === undefined ? "" : new TextDecoder().decode(output)
   const signal = spawned.signalCode == null ? null : String(spawned.signalCode)
   const timedOut = spawned.exitedDueToTimeout === true
-  const failure = timedOut ? "source git read timed out" : signal === null ? undefined : `source git read ended on ${signal}`
+  const failure = timedOut
+    ? "source git read timed out"
+    : signal === null
+      ? undefined
+      : `source git read ended on ${signal}`
   const result = {
     code: typeof spawned.exitCode === "number" ? spawned.exitCode : 1,
     stdout: decode(spawned.stdout),
