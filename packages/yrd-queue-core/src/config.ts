@@ -303,6 +303,8 @@ const RETIRED: Readonly<Record<string, string>> = {
   scratch: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   workdir: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   target: "the branch carrying .yrd.yml is the queue; select it with --queue <branch> or --queue <repo>#<queue>",
+  landing:
+    "where a change lands is the queue it is submitted to, never a declaration key; select it with --queue <branch> or --queue <repo>#<queue>",
 }
 
 /** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */

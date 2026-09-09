@@ -96,6 +96,11 @@ describe("the queue declaration grammar", () => {
     ["retired owner", "owner: '@cto'\n", /unknown key owner .*the queue addresses nobody.*notify:/u],
     ["retired target", "target: origin#develop\n", /unknown key target .*--queue <branch>/u],
     ["retired remote", "remote: origin#develop\n", /unknown key remote .*--queue <branch>/u],
+    // A repository carrying ONLY this key reads as a typo without the cure, and
+    // the reader concludes their config is malformed rather than that the key
+    // never selected anything. Two seats reached that wrong conclusion on
+    // 2026-09-08 before the table was consulted.
+    ["retired landing", "landing: product\n", /unknown key landing .*--queue <branch>/u],
     ["scalar notify", "notify: bun tools/notify.ts\n", /notify: must be a list of/u],
     [
       "unknown ending",
