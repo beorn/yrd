@@ -71,7 +71,7 @@ export const withPause: Ring = (steps) => {
         leases: [...plan.leases, [ref, fence.expected]],
         updates: [...plan.updates, [fence.sha, ref]],
       })
-      if (pushed.landed) return pushed
+      if (pushed.merged) return pushed
       // A pause writer can win after our reads too, and then the atomic leases
       // reject every update. The remote — never Git's prose — says whether that
       // is what happened: a pause now active stops the round however else the
@@ -86,7 +86,7 @@ export const withPause: Ring = (steps) => {
       if (now?.kind === "paused" && now.sha !== admittedPause?.sha) return stop(run, now, pushed.error)
       const saw = now?.sha ?? "absent"
       if (pushed.reason !== undefined) return pushed.saw === undefined ? { ...pushed, saw } : pushed
-      if (now?.sha !== fence.previous?.sha) return { error: pushed.error, landed: false, reason: "pause-moved", saw }
+      if (now?.sha !== fence.previous?.sha) return { error: pushed.error, merged: false, reason: "pause-moved", saw }
       return pushed
     },
   }
@@ -96,7 +96,7 @@ export const withPause: Ring = (steps) => {
 function stop(run: Run, pause: PauseRecord, error: unknown): Pushed {
   recordPause(run, pause)
   run.stop(stopped(pause))
-  return { error, landed: false, reason: "paused" }
+  return { error, merged: false, reason: "paused" }
 }
 
 /** How the outcome carries a pause: the ring's name, its one line, and the record itself. */

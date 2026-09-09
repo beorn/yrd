@@ -1095,13 +1095,13 @@ describe("a queue run", () => {
     await rival(["config", "user.email", "rival@yrd.test"])
     await rival(["config", "user.name", "rival"])
 
-    let landed = false
+    let mergePushed = false
     const attempted: string[] = []
     const competing: string[] = []
     const git: Git = async (args, input) => {
-      if (args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) landed = true
+      if (args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) mergePushed = true
       const recordPush =
-        landed &&
+        mergePushed &&
         args[0] === "push" &&
         !args.includes("--atomic") &&
         args.some((arg) => arg.startsWith(`--force-with-lease=${ref}:`))
@@ -1716,7 +1716,7 @@ describe("a queue run", () => {
     const head = await submitCommit(w, "task/one", "one.txt")
     // The garage merges it around the queue: a merge commit on main, pushed.
     await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "merged around the queue", head])
-    const landing = (await w.git(["rev-parse", "HEAD"])).trim()
+    const merge = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["push", "--quiet", "origin", "main"])
 
     const rivalPath = join(w.workdir, "..", "catch-up-rival")
@@ -1736,9 +1736,9 @@ describe("a queue run", () => {
         concurrent = await appendRecord(rival, "main", {
           change: { branch: "task/one", head },
           kind: "merged",
-          subject: `another queue observed the direct merge at ${landing.slice(0, 12)}`,
+          subject: `another queue observed the direct merge at ${merge.slice(0, 12)}`,
           trailers: [
-            ["Merge", landing],
+            ["Merge", merge],
             ["Base", w.target],
             ["Merged-By", "direct"],
           ],
@@ -1752,17 +1752,17 @@ describe("a queue run", () => {
 
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual([])
-    expect(outcome.directMerges).toEqual([landing])
-    expect(await remoteTarget(w)).toBe(landing)
+    expect(outcome.directMerges).toEqual([merge])
+    expect(await remoteTarget(w)).toBe(merge)
     await fetchChanges(w)
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "merged", "merged", "sent"])
     expect(records.map((record) => record.sha)).toContain(concurrent)
-    expect(records[2]?.subject).toBe(`merged around the queue at ${landing.slice(0, 12)}`)
-    // `Base:` is the landing commit's first parent, a sha like every other Base.
+    expect(records[2]?.subject).toBe(`merged around the queue at ${merge.slice(0, 12)}`)
+    // `Base:` is the merge commit's first parent, a sha like every other Base.
     expect(records[2]?.trailers).toEqual(
       expect.arrayContaining([
-        ["Merge", landing],
+        ["Merge", merge],
         ["Base", w.target],
         ["Merged-By", "direct"],
       ]),
@@ -1780,12 +1780,12 @@ describe("a queue run", () => {
     // second with the merge commit as its id.
     expect(messages(w).filter((message) => message.record === "merged")).toMatchObject([{ submitter: "@dev/2" }])
     const broken = messages(w).filter((message) => message.record === "merged-direct")
-    expect(broken).toEqual([{ change: landing, record: "merged-direct" }])
+    expect(broken).toEqual([{ change: merge, record: "merged-direct" }])
     const told = logRecords(outcome).find((record) => record.kind === "message" && record.says === "merged-direct")
-    expect(String(told?.text)).toContain(`main moved around the queue at ${landing.slice(0, 12)}`)
+    expect(String(told?.text)).toContain(`main moved around the queue at ${merge.slice(0, 12)}`)
     expect(String(told?.text)).toContain("it carries no Change: trailer")
     expect(logRecords(outcome).filter((record) => record.kind === "merged-direct")).toMatchObject([
-      { commit: landing, gitlinks: [], parents: [w.target, head], subject: "merged around the queue" },
+      { commit: merge, gitlinks: [], parents: [w.target, head], subject: "merged around the queue" },
     ])
 
     // The next run says nothing new: the catch-up record accounts for the commit.

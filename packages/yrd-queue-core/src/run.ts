@@ -199,13 +199,13 @@ export type PushPlan = Readonly<{
 }>
 
 /**
- * What one atomic push did. A push that did not land names what moved under it
+ * What one atomic push did. A push that did not merge names what moved under it
  * when the pusher could read one; no `reason` is a push that found nothing
  * moved, and its caller raises `error` rather than inventing a race.
  */
 export type Pushed =
-  | Readonly<{ landed: true }>
-  | Readonly<{ landed: false; reason?: string; saw?: string; error: unknown }>
+  | Readonly<{ merged: true }>
+  | Readonly<{ merged: false; reason?: string; saw?: string; error: unknown }>
 
 /**
  * The steps one run is made of, every member a function, so a ring is a function
@@ -222,7 +222,7 @@ export type Steps = Readonly<{
   bookkeep: (run: Run, entry: QueueEntry) => Promise<void>
   prepare: (run: Run, entry: QueueEntry, commit: string, path: string, phase: Phase) => Promise<PreparedWorktree>
   judge: (run: Run, entry: QueueEntry) => Promise<Ended>
-  land: (run: Run, entry: QueueEntry) => Promise<Ended>
+  merge: (run: Run, entry: QueueEntry) => Promise<Ended>
   /** The one atomic push a merge makes; a ring adds to the plan before it is made. */
   push: (run: Run, entry: QueueEntry, plan: PushPlan) => Promise<Pushed>
   end: (run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended: EndedWrite) => Promise<Ended>
@@ -411,7 +411,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // checked records count.
   const checked = ordered((await read()).changes, "checked").find((entry) => !staleChecked(run, entry))
   if (checked !== undefined) {
-    const outcome = await guarded(run, checked, () => run.steps.land(run, checked))
+    const outcome = await guarded(run, checked, () => run.steps.merge(run, checked))
     if (outcome === "stuck") stuck.push(checked.change.branch)
     else if (outcome === "failed") failed.push(checked.change.branch)
     else if (outcome === "merged") merged.push(checked.change.branch)
@@ -425,7 +425,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
  * wraps in order. Every one of them is reached through `Run.steps` and never by
  * name, so a ring that wraps one sees every call to it.
  */
-const BASE: Steps = { bookkeep, direct, observed, end, ended, judge, land, open, prepare, push }
+const BASE: Steps = { bookkeep, direct, observed, end, ended, judge, merge, open, prepare, push }
 
 /** A checked change whose checked record names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
@@ -999,7 +999,7 @@ async function prepareSettledBase(
 }
 
 /** The on-merge phase for the first checked change. */
-async function land(run: Run, entry: QueueEntry): Promise<Ended> {
+async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
   const { change } = entry
   const { branch, head } = change
   const name = changeName(change)
@@ -1105,7 +1105,7 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
         [mergedRecord, ref],
       ],
     })
-    if (!pushed.landed) {
+    if (!pushed.merged) {
       // Something can win after our reads, and then the atomic leases reject
       // every update. A push that read what moved says so and the change simply
       // keeps its place; one that could read nothing raises, because a queue
@@ -1161,19 +1161,19 @@ async function push(run: Run, entry: QueueEntry, plan: PushPlan): Promise<Pushed
       run.options.target.remote,
       ...plan.updates.map(([object, ref]) => `${object}:${ref}`),
     ])
-    return { landed: true }
+    return { merged: true }
   } catch (error) {
     const ref = changeRef(run.options.target.branch, entry.change)
     const moved = await remoteHeads(run, entry.change.branch, ref)
     if (moved.target !== run.targetSha) {
-      return { error, landed: false, reason: "target-moved", saw: moved.target ?? "gone" }
+      return { error, merged: false, reason: "target-moved", saw: moved.target ?? "gone" }
     }
-    if (moved.branch !== entry.change.head) return { error, landed: false, reason: "branch-moved" }
+    if (moved.branch !== entry.change.head) return { error, merged: false, reason: "branch-moved" }
     const expectedTip = plan.leases.find(([leased]) => leased === ref)?.[1]
     if (expectedTip !== undefined && moved.change !== expectedTip) {
-      return { error, landed: false, reason: "change-ref-moved", saw: moved.change ?? "gone" }
+      return { error, merged: false, reason: "change-ref-moved", saw: moved.change ?? "gone" }
     }
-    return { error, landed: false }
+    return { error, merged: false }
   }
 }
 
@@ -1241,7 +1241,7 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
 /**
  * A head the target already carries with no merged record yet — merged around the
  * queue in the garage, or by a run that crashed after its push — gets its
- * merged record now, naming the commit that landed it and saying so, and
+ * merged record now, naming the commit that merged it and saying so, and
  * its submitter is told (§ The change: ancestry wins, and the next queue run
  * appends the merged record so the tip catches up). A retired change is left as
  * it ended.
@@ -1255,11 +1255,11 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   const { change } = entry
   const { branch, head } = change
   // The first commit on the target's first-parent line that descends from the
-  // head is the one that landed it; none means the head was fast-forwarded.
+  // head is the one that merged it; none means the head was fast-forwarded.
   // `--parents` names its first parent in the same reading, so `Base:` is a
   // sha like every other Base and not a revision expression a reader would
   // have to give back to git to resolve.
-  const landing = (
+  const row = (
     await run.git([
       "rev-list",
       "--reverse",
@@ -1274,8 +1274,8 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
     ?.trim()
     .split(/\s+/u)
     .filter((sha) => sha !== "")
-  const merge = landing?.[0] ?? head
-  const base = landing?.[1] ?? head
+  const merge = row?.[0] ?? head
+  const base = row?.[1] ?? head
   const mergedRecord = await writeRecord(
     run,
     {
