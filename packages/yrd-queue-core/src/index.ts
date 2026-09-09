@@ -73,7 +73,15 @@ export {
 } from "./worktree.ts"
 export { queueRun } from "./run.ts"
 export type { QueueRunOptions, QueueRunOutcome } from "./run.ts"
-export { ENDINGS, hintsIn, parseTarget, queueName, readConfig, targetName } from "./config.ts"
+export {
+  ENDINGS,
+  assertQueueDeclaresChecks,
+  hintsIn,
+  parseTarget,
+  queueName,
+  readConfig,
+  targetName,
+} from "./config.ts"
 export type { Ending, Notifier, QueueConfig, Target } from "./config.ts"
 export { clocks, list, show, subjects, watchRows, watchRowKey } from "./table.ts"
 export type { Clocks, ListOptions, Row, WatchRow, WatchRowOptions } from "./table.ts"

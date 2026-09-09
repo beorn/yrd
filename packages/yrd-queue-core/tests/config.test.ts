@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest"
-import { parseConfig, queueName } from "../src/config.ts"
+import { assertQueueDeclaresChecks, parseConfig, queueName } from "../src/config.ts"
 
 const TARGET = { branch: "release/1.x", remote: "yrd" } as const
 const SOURCE = { at: "captured-target-A", blob: "b".repeat(40), target: TARGET } as const
@@ -160,6 +160,26 @@ describe("the queue declaration grammar", () => {
       }
     })
 
+    // @chief a62a0d96: the fix is TWO refusals at TWO layers, and this is the
+    // pair. Accepting a retired key WITHOUT the queue refusal would trade a loud
+    // block for a silent ungated merge path -- a worse defect wearing a green
+    // tick. The parser says the key is ignored; the queue says the file gates
+    // nothing. Neither may be reached silently.
+    it("PAIRS with the queue refusal: ag's declaration parses, and is then refused for gating nothing", () => {
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {})
+      try {
+        // Layer 1 — the parser accepts it and says so out loud.
+        const config = parseConfig("landing: product\n", SOURCE)
+        expect(warned.mock.calls.length).toBeGreaterThan(0)
+        // Layer 2 — the queue refuses to admit anything against it.
+        expect(() => assertQueueDeclaresChecks(config, "the declaration at origin/main")).toThrow(
+          /declares NO CHECKS/u,
+        )
+      } finally {
+        warned.mockRestore()
+      }
+    })
+
     it("still throws for an unknown key, and names only the unknown one", () => {
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {})
       try {
@@ -172,6 +192,35 @@ describe("the queue declaration grammar", () => {
       } finally {
         warned.mockRestore()
       }
+    })
+  })
+
+  // Parsing is not policy. A declaration with no checks is well-formed, so
+  // parseConfig answers it; admitting a CHANGE against it is the queue's call,
+  // and a queue that gates nothing is not a queue.
+  describe("a declaration that gates nothing is refused at admission", () => {
+    it("refuses a parsed config declaring zero checks, naming the file and what to add", () => {
+      const config = parseConfig("setup: bun install\n", SOURCE)
+      expect(config.checks).toEqual([])
+      let thrown: unknown
+      try {
+        assertQueueDeclaresChecks(config, "the declaration at origin/main")
+      } catch (error) {
+        thrown = error
+      }
+      const said = thrown instanceof Error ? thrown.message : String(thrown)
+      // Name WHERE, name the fault, and show what a check looks like — a
+      // refusal that omits the shape sends the author back to the page that
+      // already failed them.
+      expect(said).toContain("origin/main")
+      expect(said).toMatch(/NO CHECKS/u)
+      expect(said).toMatch(/checks:/u)
+      expect(said).toMatch(/run:/u)
+    })
+
+    it("admits a declaration that names at least one check", () => {
+      const config = parseConfig("checks:\n  - verify:\n      run: bun run test\n", SOURCE)
+      expect(() => assertQueueDeclaresChecks(config, "the declaration at origin/main")).not.toThrow()
     })
   })
 })

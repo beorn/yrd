@@ -35,6 +35,7 @@ import {
   queueName,
   resolveGitSelection,
   queueRun,
+  assertQueueDeclaresChecks,
   readConfig,
   readJournals,
   readHistories,
@@ -293,6 +294,13 @@ export async function coreQueueCommand(
       }
     }
     case "submit": {
+      // Parsing is not policy; ADMITTING A CHANGE against a declaration that
+      // gates nothing is (@chief a62a0d96). Deliberately here and not in the
+      // shared declaration reader: pause, resume, watch and up all read the
+      // same declaration without admitting anything, and refusing there would
+      // take the queue's own controls down over a change nobody submitted.
+      // Before the dry-run branch, so a preview and a real submit refuse alike.
+      assertQueueDeclaresChecks(config, `the declaration at ${targetLabel}`)
       const branch = request.branch ?? (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       const submission = {
         branch,

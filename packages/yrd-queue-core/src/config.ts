@@ -137,6 +137,36 @@ export async function readConfig(git: Git, commit: string, target: Target): Prom
   return parseConfig(text, { at: commit, blob, target })
 }
 
+/**
+ * Refuse a declaration that parses but gates nothing.
+ *
+ * PARSING IS NOT POLICY, which is why this is not inside parseConfig: a
+ * declaration with no checks is well-formed, and a reader asking "what does
+ * this file say" deserves an answer rather than an exception. ADMITTING A
+ * CHANGE against it is policy, and this is where that line is drawn (@chief
+ * a62a0d96).
+ *
+ * The pairing matters. Accepting a retired key without this refusal would trade
+ * a loud block for a SILENT UNGATED MERGE PATH -- a worse defect wearing a
+ * green tick, because a queue that declares nothing to run merges everything it
+ * is handed. The two refusals are one fix at two layers: the parser says the
+ * key is retired and ignored, and the queue says the file gates nothing.
+ *
+ * The message names the file and what to add, because "declares no checks" that
+ * does not say what a check looks like sends the author back to the same page
+ * that failed them.
+ */
+export function assertQueueDeclaresChecks(config: QueueConfig, where: string): void {
+  if (config.checks.length > 0) return
+  throw new Error(
+    `${where}: .yrd.yml parses but declares NO CHECKS, so every change would merge with nothing run. ` +
+      `A queue that gates nothing is not a queue. Declare at least one, for example:\n` +
+      `  checks:\n` +
+      `    - verify:\n` +
+      `        run: bun run test`,
+  )
+}
+
 /** Parse the declaration's text with its captured source and caller-owned queue identity. */
 export function parseConfig(
   text: string,
