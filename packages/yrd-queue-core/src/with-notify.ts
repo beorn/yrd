@@ -51,10 +51,13 @@ export const withNotify: Ring = (steps) => ({
   ...steps,
 
   bookkeep: async (run, entry) => {
-    await steps.bookkeep(run, entry)
+    const outcome = await steps.bookkeep(run, entry)
     // Repair delivery to each still-owed recipient before anything is judged
-    // (at-least-once, § The queue run).
+    // (at-least-once, § The queue run). Reads the entry's own stale tip, so an
+    // ending `bookkeep` itself just wrote (never seen there) resends nothing
+    // for it here — its own `end` already told, once.
     await resend(run, entry)
+    return outcome
   },
 
   ended: async (run, entry, kind, endedRecord, appendTip) => {

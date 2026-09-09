@@ -13,7 +13,10 @@
  * plus each pre-existing off-main anomaly it retained without lowering.
  * A ninth, `pause`, appears only when an active pause stops a run before a
  * merge. A tenth, `reap`, appears only when a run before this one died without removing
- * its worktrees: one record per worktree taken down. The human line is a
+ * its worktrees: one record per worktree taken down. An eleventh, `orphan`,
+ * appears only when a reaped worktree named a merge candidate for a change
+ * still "checked": one row for what recovery decided, or for a candidate it
+ * found but would not trust (@i/10-yrd/24344). The human line is a
  * rendering of the record, never a second source: whatever a reader prints, the
  * file is what happened.
  *
@@ -74,6 +77,7 @@ export const LOG_KINDS = [
   "message",
   "merged-direct",
   "reap",
+  "orphan",
   "git",
   "observation",
 ] as const

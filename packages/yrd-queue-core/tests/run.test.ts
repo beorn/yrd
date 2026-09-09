@@ -440,6 +440,39 @@ async function worktreeOfRun(w: World, run: string, pid: number): Promise<string
   return path
 }
 
+/**
+ * A merge candidate composed exactly the way `composeCandidate` composes one
+ * — in a throwaway worktree of `main`, a plain `git merge --no-ff` of `head`
+ * onto the target's current tip — but never pushed anywhere: what a queue run
+ * would have on disk the instant after git-super hands back a commit, before
+ * that run has settled anything about it (@i/10-yrd/24344).
+ */
+async function composeMergeCandidate(w: World, head: string, message: string): Promise<string> {
+  const path = join(w.workdir, "..", "compose-scratch")
+  await w.git(["worktree", "add", "--quiet", "--detach", path, "main"])
+  const wt = gitIn(path)
+  await wt(["merge", "--quiet", "--no-ff", "-m", message, head])
+  const commit = (await wt(["rev-parse", "HEAD"])).trim()
+  await w.git(["worktree", "remove", "--force", path])
+  return commit
+}
+
+/**
+ * A dead run's leftover on-merge worktree at `<workdir>/worktrees/<run>/merge/<head-12>`,
+ * checked out at `commit` — exactly what `composeCandidate`'s own `prepare`
+ * leaves behind when the run that made it dies before removing it
+ * (@i/10-yrd/24344, mirroring `worktreeOfRun` above for the "merge" phase).
+ */
+async function deadMergeWorktree(w: World, run: string, head: string, commit: string, pid: number): Promise<string> {
+  const directory = join(w.workdir, "worktrees", run)
+  const path = join(directory, "merge", head.slice(0, 12))
+  mkdirSync(join(directory, "merge"), { recursive: true })
+  await w.git(["worktree", "add", "--quiet", "--detach", path, commit])
+  writeFileSync(join(path, "what-a-check-left.txt"), "output\n")
+  writeFileSync(join(directory, ".pid"), `${String(pid)}\n`)
+  return path
+}
+
 describe("a check log is written once", () => {
   it("a second write to a log path that already exists throws and names it, and the first log survives", async () => {
     // Every caller writes under a directory of its own — the queue run's keyed
@@ -2155,6 +2188,85 @@ describe("a queue run", () => {
     records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/two", head: second })))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "checked", "merged", "sent"])
     expect(records[2]?.trailers).toEqual(expect.arrayContaining([["Config", "config-B"]]))
+  })
+})
+
+describe("an orphaned merge (@i/10-yrd/24344)", () => {
+  it("a merge the queue itself composed, then never recorded, is caught up with its own run's attribution, not direct", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    // Two occurrences four hours apart (q-20260904T182922653Z,
+    // q-20260904T145624104Z) were the run itself: this merge's own message
+    // already carries the trailer a real crashed run's would.
+    const message = [
+      `merge task/one@${head.slice(0, 12)} into main`,
+      "",
+      `Change: task/one@${head}`,
+      "Merged-By: yrd queue main [q-crashed-run]",
+    ].join("\n")
+    const merge = await composeMergeCandidate(w, head, message)
+    // Simulates the atomic push having actually landed at the remote before
+    // the run that made it died: the target carries it, nothing else does.
+    await w.git(["push", "--quiet", "origin", `${merge}:refs/heads/main`])
+
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    expect(outcome.exitCode).toBe(0)
+    expect(await remoteTarget(w)).toBe(merge)
+    await fetchChanges(w)
+    const ref = changeRef("main", { branch: "task/one", head })
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    const mergedRecord = records.find((record) => record.kind === "merged")
+    expect(mergedRecord).toBeDefined()
+    expect(trailer(mergedRecord!, "Merge")).toBe(merge)
+    // Recovered, not `direct`: the record must say which run actually made it.
+    expect(trailer(mergedRecord!, "Merged-By")).toBe("yrd queue main [q-crashed-run]")
+    expect(messages(w).filter((entry) => entry.record === "merged")).toHaveLength(1)
+  })
+
+  it("a merge the queue composed but never pushed before it died ends stuck with its own sha and an honest absorbed answer, never a blind retry", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    // Take the change to "checked" directly, the shape a real on-submit judge
+    // leaves (this run's own checks apply only at merge, ruling A1).
+    const checkedRecord = await appendRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind: "checked",
+      subject: `task/one passed the on-submit checks at main ${w.target.slice(0, 12)}`,
+      trailers: [
+        ["Config", "test-config"],
+        ["Base", w.target],
+      ],
+    })
+    await w.git(["push", "--quiet", "origin", `${checkedRecord}:${ref}`])
+
+    // The crash window itself: composed, never pushed, its worktree left
+    // standing exactly as `composeCandidate`'s `prepare` would leave it.
+    const orphan = await composeMergeCandidate(w, head, `merge task/one@${head.slice(0, 12)} into main`)
+    const worktreePath = await deadMergeWorktree(w, "q-dead-merge", head, orphan, exitedPid())
+
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.failed).toEqual([])
+    expect(outcome.merged).toEqual([])
+    // Never redone: the target never moved, and the orphan worktree's commit
+    // is exactly what this run found, nothing recomposed.
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "stuck", "sent"])
+    const stuckRecord = records[2]!
+    const incident = incidentOf(stuckRecord)
+    expect(incident.Code).toBe("yrd-merge-orphaned")
+    expect(incident.Subject).toContain(orphan.slice(0, 12))
+    expect(incident.Subject).toContain("not absorbed")
+    expect(incident.Via).toContain(worktreePath)
+    expect(trailer(stuckRecord, "Orphan")).toBe(orphan)
+    expect(trailer(stuckRecord, "Absorbed")).toBe("no")
+    expect(messages(w).filter((entry) => entry.record === "stuck")).toHaveLength(1)
   })
 })
 
