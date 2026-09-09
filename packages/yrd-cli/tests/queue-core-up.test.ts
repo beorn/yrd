@@ -1247,3 +1247,67 @@ describe("yrd queue show, one change's evidence", () => {
     ])
   })
 })
+
+/**
+ * `queue run`, `queue up` and `queue list` on one stuck fixture (@i/10-yrd/24141).
+ *
+ * `run` used to forward `queueRun`'s exit code without ever naming what a
+ * stuck round could not do about it; `up` and `list` already carried the same
+ * information (the ladder for the first, the incident for the second). One
+ * fixture, three commands, and every one of them must agree: the branch is
+ * `task/stuck`, its state is `stuck`, and its cure is the same sentence
+ * wherever it is read.
+ */
+describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)", () => {
+  it("names the same branch and cure whichever of the three commands reports it", async () => {
+    const w = await world()
+    const check = join(w.workdir, "always-stuck.sh")
+    writeFileSync(check, "#!/bin/sh\nexit 2\n")
+    chmodSync(check, 0o755)
+    // `on: submit` so the on-submit judge writes the "stuck" ending directly
+    // (run.ts `judge`'s own `yrd-check-unresolved`), the same incident code
+    // every re-judge of this change will keep writing.
+    await redeclare(w, `checks:\n  - verify:\n      run: ${check}\n      on: submit\n`)
+    await w.git(["checkout", "--quiet", "-b", "task/stuck", "main"])
+    writeFileSync(join(w.work, "stuck.txt"), "stuck\n")
+    await w.git(["add", "stuck.txt"])
+    await w.git(["commit", "--quiet", "-m", "stuck"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/stuck",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    // `judge`'s own literal, reproduced rather than imported: a change here
+    // that silently drifts from run.ts's wording is exactly the disagreement
+    // this test exists to catch.
+    const cure = "repair verify or its queue environment, then run yrd queue run"
+
+    // AC1 + AC2: `run` takes the change, cannot get past it, ends 2, and
+    // names the branch and the cure on stderr.
+    const ranRun = capture(w.work)
+    expect(await coreQueueCommand(w.work, ranRun.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    expect(ranRun.stderr()).toContain("stuck task/stuck:")
+    expect(ranRun.stderr()).toContain(cure)
+
+    // AC3: `up`, pointed at the same still-stuck change, classifies and exits
+    // exactly as `run` just did — one round is all it takes, since the change
+    // is stuck again the moment it is re-judged.
+    const ranUp = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, ranUp.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir }),
+    ).toBe(2)
+    expect(ranUp.stderr()).toContain("stuck task/stuck:")
+    expect(ranUp.stderr()).toContain(cure)
+
+    // AC3: `list` already named this branch and this cure before `run` and
+    // `up` did (this file's "renders one stored lossless incident" case); the
+    // same fixture must show the identical code and cure through `list` too.
+    const listed = capture(w.work)
+    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes
+    const row = rows.find((entry) => entry.branch === "task/stuck")
+    expect(row, JSON.stringify(rows)).toMatchObject({ state: "stuck", reason: "yrd-check-unresolved" })
+    expect(String(row?.result)).toContain(cure)
+  })
+})
