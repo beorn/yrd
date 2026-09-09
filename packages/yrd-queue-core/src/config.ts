@@ -292,10 +292,20 @@ function readChecks(value: unknown): readonly CheckSpec[] {
 const TOP_KEYS = ["checks", "setup", "teardown", "notify"] as const
 
 /**
- * A key the declaration used to read, and where its meaning went. A typo is
- * refused the same way, with the known keys listed; a RETIRED key is refused
- * with the one sentence that cures it, because "unknown key workdir" tells a
- * reader that the queue forgot how to write somewhere, not where to say it now.
+ * A key the declaration used to read, and where its meaning went.
+ *
+ * A retired key is ACCEPTED AND IGNORED with a loud warning, never refused
+ * (@chief ba569ec5). A key is retired precisely BECAUSE it once worked, so
+ * declarations in the wild carry it, and throwing on one breaks a reader who
+ * did nothing wrong. This table is the proof that we know what the key meant --
+ * and knowing what it meant while still refusing is the worst of both: we hold
+ * the information needed to proceed and decline to use it.
+ *
+ * An UNKNOWN key still throws, and this table is exactly the discriminator:
+ * unknown means we cannot tell what you meant, retired means we can. The cure
+ * sentence is what the warning says instead of "unknown key workdir", which
+ * would tell a reader the queue forgot how to write somewhere rather than where
+ * to say it now.
  */
 const RETIRED: Readonly<Record<string, string>> = {
   owner: `the queue addresses nobody: a notify: entry decides who hears about an ending, in its own arguments (${NOTIFY_SHAPE})`,
@@ -303,17 +313,31 @@ const RETIRED: Readonly<Record<string, string>> = {
   scratch: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   workdir: "the queue workdir is `git config yrd.workdir` in the repository the command runs in, not a declaration key",
   target: "the branch carrying .yrd.yml is the queue; select it with --queue <branch> or --queue <repo>#<queue>",
+  landing:
+    "where a change lands is the queue it is submitted to, never a declaration key; select it with --queue <branch> or --queue <repo>#<queue>",
 }
 
-/** A key the queue does not read is a typo or a retired mechanism; either is said out loud, never ignored. */
+/**
+ * A key the queue does not read is a typo or a retired mechanism, and the two
+ * get opposite answers: a typo is refused because we cannot tell what was meant;
+ * a retired key is ignored with a loud warning because we can.
+ *
+ * The warning goes to stderr rather than into the returned config on purpose.
+ * Five call sites read a declaration, and a warnings field is only as loud as
+ * the least diligent of them -- a retired key accepted in silence would trade
+ * this defect for the one we care about most.
+ */
 function onlyKeys(record: Record<string, unknown>, known: readonly string[], where: string): void {
   const unknown = Object.keys(record).filter((key) => !known.includes(key))
   if (unknown.length === 0) return
-  const retired = unknown.map((key) => RETIRED[key]).filter((cure): cure is string => cure !== undefined)
-  throw new Error(
-    `${where}: unknown key ${unknown.join(", ")} (known: ${known.join(", ")})` +
-      (retired.length === 0 ? "" : `; ${retired.join("; ")}`),
-  )
+  for (const key of unknown) {
+    const cure = RETIRED[key]
+    if (cure === undefined) continue
+    console.warn(`${where}: IGNORED the retired key ${key} -- it selects nothing now; ${cure}`)
+  }
+  const unrecognized = unknown.filter((key) => RETIRED[key] === undefined)
+  if (unrecognized.length === 0) return
+  throw new Error(`${where}: unknown key ${unrecognized.join(", ")} (known: ${known.join(", ")})`)
 }
 
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {

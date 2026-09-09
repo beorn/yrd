@@ -6,7 +6,7 @@
  * @consumer Queue runners and operators authoring or identifying `.yrd.yml`.
  */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { parseConfig, queueName } from "../src/config.ts"
 
 const TARGET = { branch: "release/1.x", remote: "yrd" } as const
@@ -91,11 +91,6 @@ describe("the queue declaration grammar", () => {
   it.each([
     ["unknown top-level key", "setupp: bun install\n", /unknown key setupp .*known:/u],
     ["empty setup", "setup: ''\n", /setup: must be a non-empty string/u],
-    ["retired workdir", "workdir: /var/tmp/yrd\n", /unknown key workdir .*git config yrd\.workdir/u],
-    ["retired scratch", "scratch: /var/tmp/yrd\n", /unknown key scratch .*git config yrd\.workdir/u],
-    ["retired owner", "owner: '@cto'\n", /unknown key owner .*the queue addresses nobody.*notify:/u],
-    ["retired target", "target: origin#develop\n", /unknown key target .*--queue <branch>/u],
-    ["retired remote", "remote: origin#develop\n", /unknown key remote .*--queue <branch>/u],
     ["scalar notify", "notify: bun tools/notify.ts\n", /notify: must be a list of/u],
     [
       "unknown ending",
@@ -115,6 +110,69 @@ describe("the queue declaration grammar", () => {
     ],
   ] as const)("refuses %s with its useful remedy", (_name, text, problem) => {
     expect(() => parseConfig(text, SOURCE)).toThrow(problem)
+  })
+
+  // @chief ba569ec5: a key is RETIRED precisely because it once worked, so
+  // declarations in the wild carry it and throwing breaks a reader who did
+  // nothing wrong. The table is proof we know what it meant; refusing anyway is
+  // holding the answer and declining to use it. An UNKNOWN key still throws --
+  // the table is the discriminator.
+  describe("a retired key is accepted and ignored, never refused", () => {
+    it.each([
+      ["workdir", "workdir: /var/tmp/yrd\n", /git config yrd\.workdir/u],
+      ["scratch", "scratch: /var/tmp/yrd\n", /git config yrd\.workdir/u],
+      ["owner", "owner: '@cto'\n", /the queue addresses nobody/u],
+      ["target", "target: origin#develop\n", /--queue <branch>/u],
+      ["remote", "remote: origin#develop\n", /--queue <branch>/u],
+      ["landing", "landing: product\n", /--queue <branch>/u],
+    ] as const)("%s parses and warns instead of throwing", (key, text, cure) => {
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {})
+      try {
+        expect(() => parseConfig(text, SOURCE)).not.toThrow()
+        const said = warned.mock.calls.map((call) => String(call[0])).join("\n")
+        // The warning contract: which key, that it is retired, what replaced
+        // it, and that it was ignored. All four, or it is not loud enough.
+        expect(said).toContain(key)
+        expect(said).toMatch(/retired/iu)
+        expect(said).toMatch(cure)
+        expect(said).toMatch(/ignored/iu)
+      } finally {
+        warned.mockRestore()
+      }
+    })
+
+    // The exact bytes blocking every ag component submission, pinned by their
+    // real content rather than a paraphrase: ag/.yrd.yml at origin/main is this
+    // one line and nothing else.
+    it("parses ag's live declaration, whose entire content is one retired key", () => {
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {})
+      try {
+        expect(parseConfig("landing: product\n", SOURCE)).toEqual({
+          blob: SOURCE.blob,
+          checks: [],
+          notify: [],
+          setup: undefined,
+          target: TARGET,
+          teardown: undefined,
+        })
+      } finally {
+        warned.mockRestore()
+      }
+    })
+
+    it("still throws for an unknown key, and names only the unknown one", () => {
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {})
+      try {
+        // Retired and unknown together: the retired one is ignored with its
+        // warning, and the refusal names ONLY what it genuinely cannot read.
+        expect(() => parseConfig("landing: product\nsetupp: bun install\n", SOURCE)).toThrow(
+          /unknown key setupp \(known:/u,
+        )
+        expect(() => parseConfig("landing: product\nsetupp: bun install\n", SOURCE)).not.toThrow(/landing/u)
+      } finally {
+        warned.mockRestore()
+      }
+    })
   })
 })
 
