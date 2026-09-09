@@ -1132,7 +1132,7 @@ type QueueEntries = Awaited<ReturnType<typeof readQueue>>["changes"]
  * ABSENT with a sentence when the head is not in this repository, never a
  * blank. Nothing here writes.
  */
-async function openDetail(
+export async function openDetail(
   git: Git,
   config: QueueConfig,
   entries: QueueEntries,
@@ -1147,14 +1147,25 @@ async function openDetail(
   const packed = shown.flatMap((change) => change.checks)
   const records = shown.flatMap((change) => change.records)
   const declared = await declarationFor(git, config, row.base)
+  const ending = endingOf(row)
+  // A DECIDED change's records are its full account: `packed` (folded from
+  // `show` above) already carries every record's `Check:` trailers, submit
+  // through merge. `item.run` — this machine's own journal, selected upstream
+  // by `journalFor` — may hold only the phase that last touched the change,
+  // so trusting it here for a decided change is how a merged change loses
+  // evidence it still has (the `show` case's own 2026-09 recurrence,
+  // 1fca452c). The journal stays the better source only while the change is
+  // still being decided: that is what lets a check running right now show as
+  // running instead of a stale prior result.
+  const decided = ending === "merged" || ending === "failed" || ending === "stuck"
   const views = checksOf(
     packed,
-    endingOf(row),
+    ending,
     declared.checks,
     row.live === undefined
       ? undefined
       : { name: row.live.check, ...(row.live.log === undefined ? {} : { log: row.live.log }) },
-    item.run?.checks,
+    decided ? undefined : item.run?.checks,
   )
   const checks = views.map(readOutput)
   const about = row.state === "direct" ? {} : await headFacts(git, config, row)
@@ -1407,7 +1418,7 @@ function checkLines(check: CheckView): readonly string[] {
  * sentence that says so rather than a row that reads as if nothing were
  * running. Nothing here derives a state: `list()` does, once, for everyone.
  */
-async function readListing(
+export async function readListing(
   git: GitRunner,
   config: QueueConfig,
   workdir: string,
