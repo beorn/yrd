@@ -23,15 +23,19 @@ import {
   appendRecord,
   changeRef,
   gitIn,
+  readConfig,
   readRecords,
+  readRemoteCommit,
   readRunLog,
   runId,
   submit,
   trailer,
+  watchRows,
   type Git,
+  type GitRunner,
 } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
-import { coreQueueCommand } from "../src/queue-core-commands.ts"
+import { coreQueueCommand, openDetail, readListing } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
 
@@ -1309,5 +1313,122 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     const row = rows.find((entry) => entry.branch === "task/stuck")
     expect(row, JSON.stringify(rows)).toMatchObject({ state: "stuck", reason: "yrd-check-unresolved" })
     expect(String(row?.result)).toContain(cure)
+  })
+})
+
+describe("yrd watch's own detail pane (openDetail), one change's evidence", () => {
+  it("keeps a merged change's submit evidence when this machine's own journal only names the merge phase", async () => {
+    // The `show` sibling test above reproduces the @cto 2026-09 specimen
+    // against the `show` command's own call site (fixed by 1fca452c). This is
+    // the SAME specimen shape against `openDetail` — the watch pane's own
+    // Enter-to-open detail loader — which 1fca452c did not touch: it still
+    // unconditionally passed this machine's journal-selected run into
+    // `checksOf`, with no guard for a change that is already DECIDED. Absent
+    // the fix, this fails exactly like the `show` case did before 1fca452c:
+    // every check but the merge-phase's own reads NOT RUN.
+    const w = await world()
+    await redeclare(
+      w,
+      [
+        "checks:",
+        "  - typecheck:",
+        "      run: bun run typecheck",
+        "  - manifest-co-change:",
+        "      run: bun run manifest-co-change",
+        "  - substrate-pair:",
+        "      run: bun run substrate-pair",
+        "  - affected-tests:",
+        "      run: bun run affected-tests",
+        "  - never-ran:",
+        "      run: bun run never-ran",
+        "",
+      ].join("\n"),
+    )
+    const base = (await w.git(["rev-parse", "main"])).trim()
+    await w.git(["checkout", "--quiet", "-b", "task/evidence-open-detail", "main"])
+    writeFileSync(join(w.work, "evidence.txt"), "evidence\n")
+    await w.git(["add", "evidence.txt"])
+    await w.git(["commit", "--quiet", "-m", "evidence"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    const change = { branch: "task/evidence-open-detail", head }
+    await submit(w.git, "origin", {
+      branch: change.branch,
+      submitter: "@dev/3",
+      target: { branch: "main", remote: "origin" },
+    })
+    await appendRecord(w.git, "main", {
+      change,
+      kind: "checked",
+      subject: "on-submit checks passed",
+      trailers: [
+        ["Base", base],
+        ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
+        ["Check", "manifest-co-change exit=0 ms=13 log=/tmp/manifest.log"],
+        ["Check", "substrate-pair exit=0 ms=14 log=/tmp/substrate.log"],
+        ["Check", "affected-tests exit=0 ms=14 log=/tmp/submit-affected.log"],
+      ],
+    })
+    await appendRecord(w.git, "main", {
+      change,
+      kind: "merged",
+      subject: "merged task/evidence-open-detail into main",
+      trailers: [
+        ["Base", base],
+        ["Merge", base],
+        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
+      ],
+    })
+    await appendRecord(w.git, "main", {
+      change,
+      kind: "sent",
+      subject: "sent merge notice",
+      trailers: [
+        ["State", "merged"],
+        ["Base", base],
+        ["Merge", base],
+        ["Check", "affected-tests exit=0 ms=15 log=/tmp/affected.log"],
+      ],
+    })
+    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
+
+    // This machine's own run journal: it just processed the merge, but its
+    // journal names only the decision, never the individual checks — same
+    // shape as the `show` sibling fixture above.
+    const at = new Date().toISOString()
+    const run = runId(new Date(at))
+    const dir = join(w.workdir, "logs")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, `${run}.jsonl`),
+      [{ kind: "change", ...change, decision: "merged" }]
+        .map((record) => JSON.stringify({ ...record, at, run }))
+        .join("\n") + "\n",
+    )
+
+    // The exact pipeline `yrd watch` itself uses to get from a target OID to
+    // the `entries`/`item` pair `openDetail` is called with (queue-core-commands.ts's
+    // own `open:` callback wiring): readConfig -> readListing -> watchRows.
+    const target = { branch: "main", remote: "origin" }
+    const oid = await readRemoteCommit(w.git, "origin", "refs/heads/main")
+    if (oid === undefined) throw new Error("test setup: origin/main was not readable")
+    const config = await readConfig(w.git, oid, target)
+    if (config === undefined) throw new Error("test setup: the target carries no .yrd.yml")
+    // `World.git` is typed to the narrower `Git` call signature; the value
+    // `world()` actually hands out comes from `gitIn()`, declared `GitRunner`
+    // (the same value the CLI's own `readListing` call site is given).
+    const { all, journals, queue } = await readListing(w.git as GitRunner, config, w.workdir, oid)
+    const rows = watchRows(all, { journals })
+    const item = rows.find((row) => row.row.branch === change.branch)
+    if (item === undefined) throw new Error("test setup: the change did not appear in the watch rows")
+
+    const detail = await openDetail(w.git, config, queue.changes, item, "main")
+    expect(detail.checks.map((check) => [check.name, check.state])).toEqual([
+      ["typecheck", "passed"],
+      ["manifest-co-change", "passed"],
+      ["substrate-pair", "passed"],
+      ["affected-tests", "passed"],
+      ["never-ran", "not-run"],
+    ])
   })
 })
