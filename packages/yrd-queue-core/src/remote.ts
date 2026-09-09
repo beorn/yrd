@@ -18,7 +18,7 @@
  */
 
 import { changeOf, readRecords, recordFrom, tipRecord, trailer, type ChangeRecord, type Git } from "./records.ts"
-import { GitExit, isAncestor, configValue } from "./git.ts"
+import { GitExit, isAncestor } from "./git.ts"
 import { parsePause, type PauseRecord } from "./pause.ts"
 import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
@@ -260,8 +260,11 @@ export async function remoteUrl(git: Git, remote: string): Promise<string> {
     if (remote.includes(":") || remote.includes("/")) return remote
     throw new Error(`queue remote ${remote}: no configured remote or transport address`)
   }
-  const url = await configValue(git, `remote.${remote}.url`)
-  if (url === undefined) throw new Error(`queue remote ${remote}: expected remote.${remote}.url is missing or empty`)
+  // Fetch uses the first URL; scalar config lookup returns the last. Keep
+  // that same identity before insteadOf rewrites only the transport address.
+  const url = (await git(["config", "--null", "--get-all", `remote.${remote}.url`])).split("\0")[0]
+  if (url === undefined || url === "")
+    {throw new Error(`queue remote ${remote}: expected remote.${remote}.url is missing or empty`)}
   return url
 }
 

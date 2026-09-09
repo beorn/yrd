@@ -605,7 +605,9 @@ export async function coreQueueCommand(
               request.terms === undefined || request.terms.length === 0
                 ? undefined
                 : (code) => {
+                    if (ending !== undefined) return
                     ending = code
+                    app.unmount()
                   },
             snapshot: snapshotOf(first),
           }),
