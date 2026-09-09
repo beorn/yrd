@@ -225,7 +225,7 @@ describe("settling gitlinks", () => {
     expect(waitingRecords.map((record) => record.kind)).toEqual(["opened", "opened"])
     expect(trailer(waitingRecords.at(-1)!, "Code")).toBe("gitlink-off-main")
     expect(trailer(waitingRecords.at(-1)!, "Evidence")).toBe(outcome.log)
-    expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("Rebase submodule onto its configured component branch")
+    expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("Rebase submodule onto its configured submodule branch")
     expect(trailer(waitingRecords.at(-1)!, "Owner")).toBe("the queue operator")
     const waitingQueue = await readQueue(w.git, "origin", "main", await remoteTip(w.git, "refs/heads/main"))
     expect(waitingQueue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("queued")
@@ -369,7 +369,7 @@ describe("settling gitlinks", () => {
     const target = await remoteTip(w.git, "refs/heads/main")
     expect(await gitlinkAt(w, target)).toBe(w.offMain)
     expect(await w.git(["show", "-s", "--format=%(trailers:key=Settled,valueonly)", target])).toContain(
-      `submodule@${w.offMain} left-off-main component-main@${w.main}`,
+      `submodule@${w.offMain} left-off-main submodule-main@${w.main}`,
     )
     const settle = readFileSync(outcome.log, "utf8")
       .split("\n")
