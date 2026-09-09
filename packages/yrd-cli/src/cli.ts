@@ -257,7 +257,13 @@ function buildProgram(
    */
   const listRequest = (
     filters: readonly string[],
-    options: Readonly<{ latest?: boolean; watch?: boolean; interval?: number; status?: string }>,
+    options: Readonly<{
+      latest?: boolean
+      watch?: boolean
+      interval?: number
+      status?: string
+      requireMatch?: boolean
+    }>,
   ): CoreQueueCommand => {
     // `--status` is a SPELLING of a filter term, never a second filter path.
     // @yrd/core/21096-cli-ux/22301 merged the rule that the flag and the rows
@@ -274,6 +280,7 @@ function buildProgram(
       ...(options.latest === true ? { latest: true } : {}),
       ...(options.watch === true ? { watch: true } : {}),
       ...(options.interval === undefined ? {} : { intervalSeconds: options.interval }),
+      ...(options.requireMatch === true ? { requireMatch: true } : {}),
     }
   }
   const listOptions = <T extends { option: (flags: string, description: string, parser?: unknown) => T }>(
@@ -285,22 +292,27 @@ function buildProgram(
       .option("--json", "emit stable JSON: result belongs to the run named by run; state is the current change state")
       .option("--queue <value>", QUEUE_HELP)
       .option("--interval <seconds>", "seconds between refreshes while watching (default 5)", int)
+      .option(
+        "--require-match",
+        "exit 1 instead of 0 when a filter term matches no rows (default: exit 0, said loudly either way)",
+      )
   const LIST_DESCRIPTION = "every change in line, then the failed and the merged; filters are case-insensitive OR terms"
   const WATCH_FLAG_HELP = "refresh until the selected change ends, exiting with its code as yrd check does"
   const queueList = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
-    const { interval, json, latest, status, watch, queue } = options as {
+    const { interval, json, latest, status, watch, queue, requireMatch } = options as {
       interval?: number
       json?: boolean
       latest?: boolean
       status?: string
       watch?: boolean
       queue?: string
+      requireMatch?: boolean
     }
     const location = await resolveQueueLocation(cwd(), queue, env, "reader")
     const taken = await coreQueueCommand(
       location.repo,
       io,
-      listRequest(filters ?? [], { interval, latest, status, watch }),
+      listRequest(filters ?? [], { interval, latest, status, watch, requireMatch }),
       {
         selection: location.selection,
         queue: location.queue,

@@ -70,7 +70,7 @@ import {
   type Row,
 } from "@yrd/queue-core"
 import { clocksLine, noticeLine } from "./watch-notice.ts"
-import { filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
+import { FILTER_FIELDS, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
@@ -150,6 +150,16 @@ export type CoreQueueCommand =
       intervalSeconds?: number
       /** Stops the watch; a test ends the loop with it, a terminal ends it with a signal. */
       stop?: AbortSignal
+      /**
+       * Exit 1 instead of 0 when a filter term matches no rows, for a caller who
+       * wants a zero treated as failure. Default stays exit 0: a filter term
+       * matching zero rows is user input producing an empty result, not an
+       * invariant violation, and this keeps every existing script working
+       * (@chief ruling, 2026-09-07, a-state-name-filters-to-zero-rows-and-exit-zero AC1).
+       * Only the one-shot reading honours it; `watch` already refuses louder
+       * (exit 2) when a selector matches nothing, which this does not change.
+       */
+      requireMatch?: boolean
     }>
   | Readonly<{ command: "show"; branch: string }>
   | Readonly<{
@@ -496,11 +506,16 @@ export async function coreQueueCommand(
         )
         const pause = queue.pause?.kind === "paused" ? queue.pause : undefined
         // What was queried, where it looked, and what it left out — said on the
-        // screen, not left for the reader to infer from an empty table.
+        // screen, not left for the reader to infer from an empty table. Zero
+        // rows also names the fields the term was checked against, so a state
+        // name that found nothing is told it WAS considered, not skipped —
+        // the same message on `--json` as on the page (AC1,
+        // a-state-name-filters-to-zero-rows-and-exit-zero).
         const scope =
           request.terms === undefined || request.terms.length === 0
             ? undefined
-            : `${String(rows.length)} of ${String(all.length)} change(s) match ${request.terms.join(" or ")}`
+            : `${String(rows.length)} of ${String(all.length)} change(s) match ${request.terms.join(" or ")}` +
+              (rows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
         return {
           observation,
           data: {
@@ -508,6 +523,7 @@ export async function coreQueueCommand(
             changes: rows.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
+            ...(scope === undefined ? {} : { scope }),
           },
           entries: queue.changes,
           journals,
@@ -556,7 +572,13 @@ export async function coreQueueCommand(
         const one = await round(captured)
         if (options.json === true) emit(io, true, one.data, "")
         else io.stdout(`${await page(one)}\n`)
-        return one.observation.contract === "root-v1" && one.observation.outcome === "invalid" ? 2 : 0
+        if (one.observation.contract === "root-v1" && one.observation.outcome === "invalid") return 2
+        // Exit 0 by default even when the filter matched nothing (AC1 ruling):
+        // backward compatible, and reversible with one flag rather than a
+        // silent break for every existing caller. `--require-match` is that
+        // flag, opting a caller into treating the same zero as failure.
+        if (request.requireMatch === true && selectedNothing(request.terms, one.rows)) return 1
+        return 0
       }
 
       // A terminal with a keyboard on the other end gets the pane. It is

@@ -80,6 +80,59 @@ async function queueWithOneChange(): Promise<string> {
   return work
 }
 
+/**
+ * A queue with a change whose branch NAME coincides with the term `merged`
+ * (the live specimen, `task/merged-ball-conditional-close`) but whose own
+ * state stays `queued`, alongside a second change actually merged — landed
+ * directly onto the target, bypassing the queue entirely, which is enough for
+ * `readChange` to call it `merged` by ancestry (queue-core/src/state.ts:71,
+ * "a direct merge in the garage still shows as merged"). The defect this
+ * pins is not a wrong count: it is one row that only LOOKS like an answer.
+ */
+async function queueWithMergedCoincidence(): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), "yrd-cli-list-page-coincidence-"))
+  roots.push(root)
+  const seed = gitIn(root)
+  const remote = join(root, "remote.git")
+  const work = join(root, "work")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+  await seed(["clone", "--quiet", remote, work])
+  const git = gitIn(work)
+  await git(["config", "user.email", "queue@yrd.test"])
+  await git(["config", "user.name", "yrd"])
+  await git(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(work, ".yrd.yml"), "checks:\n  - verify:\n      run: test -f pass.txt\n")
+  await git(["add", ".yrd.yml"])
+  await git(["commit", "--quiet", "-m", "main declares the queue"])
+  await git(["push", "--quiet", "origin", "main"])
+  // The coincidence: branch TEXT says `merged`, but the change is only queued.
+  await git(["checkout", "--quiet", "-b", "task/merged-ball-conditional-close", "main"])
+  writeFileSync(join(work, "coincidence.txt"), "coincidence\n")
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "fix(yrd): condition merged bead closure on full acceptance"])
+  await git(["checkout", "--quiet", "main"])
+  await submit(git, "origin", {
+    branch: "task/merged-ball-conditional-close",
+    submitter: "@dev/10",
+    target: { branch: "main", remote: "origin" },
+  })
+  // The real merge: nothing in its own branch or subject says `merged`.
+  await git(["checkout", "--quiet", "-b", "task/direct", "main"])
+  writeFileSync(join(work, "direct.txt"), "direct\n")
+  await git(["add", "."])
+  await git(["commit", "--quiet", "-m", "task/direct lands directly"])
+  await git(["checkout", "--quiet", "main"])
+  await submit(git, "origin", {
+    branch: "task/direct",
+    submitter: "@dev/11",
+    target: { branch: "main", remote: "origin" },
+  })
+  await git(["merge", "--quiet", "--ff-only", "task/direct"])
+  await git(["push", "--quiet", "origin", "main"])
+  mkdirSync(join(root, "queue"), { recursive: true })
+  return work
+}
+
 const ESC = "["
 
 describe("`yrd list` prints the watch's page, once", () => {
@@ -174,6 +227,30 @@ describe("a state name means the state", () => {
     expect(changes, ran.report).toHaveLength(1)
     expect(changes[0]).toMatchObject({ branch: "task/one", state: "queued" })
   })
+
+  /**
+   * AC3: the coincidence pinned BESIDE the empty case, checking the exit code
+   * and the message rather than only the row count — because the row count
+   * alone is exactly what read as a plausible answer in production.
+   */
+  it("keeps the real merge beside its own coincidence, rather than stopping at the row that only looks like an answer", async () => {
+    const cwd = await queueWithMergedCoincidence()
+    const ran = await yrd(cwd, { color: false, columns: 120 }, "list", "--json", "merged")
+
+    expect(ran.exitCode, ran.report).toBe(0)
+    const document = JSON.parse(ran.stdout) as Record<string, unknown>
+    const changes = document["changes"] as readonly Record<string, unknown>[]
+    const byBranch = (branch: string): Record<string, unknown> | undefined =>
+      changes.find((change) => change["branch"] === branch)
+    // Both answer: the coincidence, matched on branch TEXT, and the real
+    // merge, matched on its own STATE — neither shadows the other.
+    expect(byBranch("task/merged-ball-conditional-close"), ran.report).toMatchObject({ state: "queued" })
+    expect(byBranch("task/direct"), ran.report).toMatchObject({ state: "merged" })
+    // The message, not only the count: both rows counted as matches, so the
+    // numerator is 2 — the denominator is however many rows this fixture's
+    // queue reading carries in total, which is not this test's concern.
+    expect(document["scope"], ran.report).toMatch(/^2 of \d+ change\(s\) match merged$/u)
+  })
 })
 
 /**
@@ -231,13 +308,15 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     // EXIT 0 BY DEFAULT is the owning bead's ruling (@chief, 2026-09-07): a
     // filter term matching zero rows is user input producing an empty result,
     // not an invariant violation, and the README taxonomy reserves 2 for stuck.
-    // An opt-in `--require-match` returning 1 belongs to that bead, not here.
+    // The opt-in `--require-match` returning 1 is pinned separately, below.
     expect(positional.exitCode, positional.report).toBe(0)
     expect(flagged.exitCode, flagged.report).toBe(positional.exitCode)
     // The promise `--json` keeps for every consumer: a parseable document, the
     // empty selection included. This is the assertion that reported the last
-    // breakage of it, so it is made on BOTH spellings rather than one.
-    expect(Object.keys(documentOf(flagged)).sort()).toEqual(["changes", "journal", "observation", "pause"])
+    // breakage of it, so it is made on BOTH spellings rather than one. `scope`
+    // joins the shape here (AC1): a zero-row filter is exactly the case that
+    // must say what it matched against, and JSON gets the same notice the page does.
+    expect(Object.keys(documentOf(flagged)).sort()).toEqual(["changes", "journal", "observation", "pause", "scope"])
     expect(documentOf(flagged)["changes"], flagged.report).toEqual([])
     expect(documentOf(positional)["changes"], positional.report).toEqual([])
     // And 22301's own specimen, the other way round: a non-matching state must
@@ -245,5 +324,47 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     expect(flagged.stdout, flagged.report).not.toContain("task/one")
     expect(flagged.stdout, flagged.report).toBe(positional.stdout)
     expect(stripAnsi(flagged.stderr), flagged.report).toBe(stripAnsi(positional.stderr))
+  })
+})
+
+/**
+ * @failure A filter term matching zero rows exited 0 with no explanation:
+ *          identical to a genuine typo, so a reader migrating off `--status
+ *          queued` was never told the flag moved, and never told their term
+ *          matched no state (a-state-name-filters-to-zero-rows-and-exit-zero,
+ *          AC1). `--json` dropped the notice entirely — only the page carried
+ *          it — so a scripted reader had strictly less to go on than a human
+ *          at the prompt.
+ * @consumer a reader who mistyped a state, or scripted `--json` wanting to
+ *           tell "no matches" apart from "my request was wrong"
+ */
+describe("a filter matching nothing says so loudly, and stays exit 0 unless asked otherwise (AC1)", () => {
+  it("names what it was checked against, on the page and in --json alike", async () => {
+    const work = await queueWithOneChange()
+    const human = await yrd(work, { color: false, columns: 120 }, "list", "merged")
+    const json = await yrd(work, { color: false, columns: 120 }, "list", "--json", "merged")
+
+    expect(human.exitCode, human.report).toBe(0)
+    expect(json.exitCode, json.report).toBe(0)
+    // Named, not just counted: the fields the term was checked against, so a
+    // state name that matched nothing is told it WAS considered, not skipped.
+    const expected = "0 of 1 change(s) match merged. Checked branch, subject, run, failure and state."
+    expect(human.stdout, human.report).toContain(expected)
+    const document = JSON.parse(json.stdout) as Record<string, unknown>
+    expect(document["scope"], json.report).toBe(expected)
+  })
+
+  it("opts into exit 1 on that same zero with --require-match, never exit 2, and leaves a real match at exit 0", async () => {
+    const work = await queueWithOneChange()
+    const empty = await yrd(work, { color: false, columns: 120 }, "list", "--json", "merged", "--require-match")
+    const matched = await yrd(work, { color: false, columns: 120 }, "list", "--json", "queued", "--require-match")
+
+    expect(empty.exitCode, empty.report).toBe(1)
+    // The README taxonomy reserves 2 for stuck; a filter matching nothing is
+    // user input producing an empty result, never an invariant violation.
+    expect(empty.exitCode, empty.report).not.toBe(2)
+    expect(matched.exitCode, matched.report).toBe(0)
+    // `--require-match` changes only the exit code, never the document.
+    expect(JSON.parse(empty.stdout)).toMatchObject({ changes: [] })
   })
 })

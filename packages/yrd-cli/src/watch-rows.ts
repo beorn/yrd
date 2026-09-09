@@ -19,6 +19,14 @@ import { stateGlyph } from "./watch-format.ts"
 export { watchRows, watchRowKey, type WatchRow, type WatchRowOptions } from "@yrd/queue-core"
 
 /**
+ * The fields `matchesTerm` checks a term against, named for a reader who gets
+ * zero rows back: the one place this list is spelled out in words, so the
+ * message that reports "nothing matched" and the code that decided it can
+ * never drift apart (a-state-name-filters-to-zero-rows-and-exit-zero, AC1).
+ */
+export const FILTER_FIELDS = "branch, subject, run, failure and state" as const
+
+/**
  * Whether a row answers to a filter term: case-insensitive, and an OR across
  * the four fields a reader actually types — the branch, the change's own
  * subject, the queue run, and the failure (S2.12, README 1093).
