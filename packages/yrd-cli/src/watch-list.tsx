@@ -23,6 +23,7 @@ import { Box, Text, TogglePill, TogglePillGroup } from "silvery"
 import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { clock, friendlyPath, mediaDuration, runShortName, stateColor, stateGlyph } from "./watch-format.ts"
+import { ActivityPulse } from "./watch-primitives.tsx"
 
 /** The status filter buckets, in the order the pills show them (items 9, 32). */
 export const BUCKETS = ["open", "running", "done", "failed"] as const
@@ -335,13 +336,29 @@ export const ListRow = memo(function ListRow({ item, previous, label, layout, cu
             ),
           status: (
             <Box flexDirection="row" minWidth={0}>
-              <Text color={forced ?? color} flexShrink={0}>
-                {stateGlyph(row)}
-              </Text>
-              <Text color={forced ?? color} wrap="truncate">
-                {" "}
-                {row.state}
-              </Text>
+              {/* A live row pulses BOTH the glyph and the word, as the retired
+                  pane did, and neither takes `forced`: the cursor's colour would
+                  flatten the two phases into one and stop the pulse on exactly
+                  the row being looked at — usually row 0, the one under check. */}
+              {row.live === undefined ? (
+                <>
+                  <Text color={forced ?? color} flexShrink={0}>
+                    {stateGlyph(row)}
+                  </Text>
+                  <Text color={forced ?? color} wrap="truncate">
+                    {" "}
+                    {row.state}
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <ActivityPulse colors={[color, "$fg-muted"]}>{stateGlyph(row)}</ActivityPulse>
+                  <ActivityPulse colors={[color, "$fg-muted"]} wrap="truncate" flexShrink={1}>
+                    {" "}
+                    {row.state}
+                  </ActivityPulse>
+                </>
+              )}
             </Box>
           ),
           time: (

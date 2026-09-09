@@ -37,7 +37,7 @@
  */
 
 import { hyperlink } from "@silvery/ansi"
-import { Box, MarkdownView, Pulse, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
+import { Box, MarkdownView, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
 import type { ChangeRecord, CheckView, JournalRun, Row } from "@yrd/queue-core"
 import { clocks } from "@yrd/queue-core"
 import { diffSummary, historyEntries, metadataGroups, metadataKeyWidth, type ChangeCommits } from "./watch-change.ts"
@@ -51,7 +51,7 @@ import {
   stateColor,
   stateGlyph,
 } from "./watch-format.ts"
-import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
+import { ActivityPulse, MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { explanationLine, headlineOf, runTitle, timingRows, type WatchRun, type WatchStep } from "./watch-run.ts"
 
 /**
@@ -219,9 +219,9 @@ export function RunStatusBox({
       <MarkerRow
         marker={
           working && live ? (
-            <Pulse synchronized colors={[color, "$fg-muted"]} bold flexShrink={0}>
+            <ActivityPulse colors={[color, "$fg-muted"]} bold>
               {stateGlyph(row)}
-            </Pulse>
+            </ActivityPulse>
           ) : (
             <Text color={color} bold flexShrink={0}>
               {stateGlyph(row)}
@@ -284,9 +284,7 @@ function StepLine({ step, live, since }: { step: WatchStep; live: boolean; since
     <MarkerRow
       marker={
         active && live ? (
-          <Pulse synchronized colors={[color, "$fg-muted"]} flexShrink={0}>
-            {CHECK_GLYPH[step.state]}
-          </Pulse>
+          <ActivityPulse colors={[color, "$fg-muted"]}>{CHECK_GLYPH[step.state]}</ActivityPulse>
         ) : (
           <Text color={color} flexShrink={0}>
             {CHECK_GLYPH[step.state]}

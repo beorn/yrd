@@ -15,10 +15,10 @@
  * as item 37 rules; per-queue lines arrive with M8's queues.
  */
 
-import { Box, Pulse, Text } from "silvery"
+import { Box, Text } from "silvery"
 import { useMinute, useNow } from "./watch-clock.ts"
 import { boundedHangingLines, clock, mediaDuration, runShortName } from "./watch-format.ts"
-import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
+import { ActivityPulse, MarkerRow, TitledBox } from "./watch-primitives.tsx"
 import { runnerHealth, type RunnerFacts, type RunnerHealth } from "./watch-runner.ts"
 import {
   STATS_ROWS,
@@ -49,18 +49,10 @@ const HEALTH_COLOR: Readonly<Record<RunnerHealth, string>> = {
 function HealthMarker({ health, live }: { health: RunnerHealth; live: boolean }) {
   const color = HEALTH_COLOR[health]
   if (live && health === "running") {
-    return (
-      <Pulse synchronized colors={["$fg-info", "$fg-muted"]} bold flexShrink={0}>
-        $
-      </Pulse>
-    )
+    return <ActivityPulse bold>$</ActivityPulse>
   }
   if (live && health === "idle") {
-    return (
-      <Pulse synchronized colors={["$fg-muted", "$bg-surface-default"]} flexShrink={0}>
-        $
-      </Pulse>
-    )
+    return <ActivityPulse colors={["$fg-muted", "$bg-surface-default"]}>$</ActivityPulse>
   }
   return (
     <Text color={color} bold={health === "silent"} flexShrink={0}>
