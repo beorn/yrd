@@ -260,7 +260,7 @@ function buildProgram(
     options: Readonly<{ latest?: boolean; watch?: boolean; interval?: number; status?: string }>,
   ): CoreQueueCommand => {
     // `--status` is a SPELLING of a filter term, never a second filter path.
-    // @yrd/core/21096-cli-ux/22301 landed the rule that the flag and the rows
+    // @yrd/core/21096-cli-ux/22301 merged the rule that the flag and the rows
     // must answer one question — it was ignored under `--json`, which emitted
     // every retained run — and the flag was then dropped with the old surface
     // (1f638504) along with the test that pinned it. One predicate is what

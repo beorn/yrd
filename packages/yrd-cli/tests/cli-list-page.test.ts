@@ -180,7 +180,7 @@ describe("a state name means the state", () => {
  * @failure `--status <state>` was removed from every `yrd list` renderer by the
  *          flag day (1f638504), which deleted `queue-list-json-filter.test.ts`
  *          — the regression test that pinned it — in the same commit, so
- *          nothing went red. What it dropped was RULED and landed:
+ *          nothing went red. What it dropped was RULED and merged:
  *          @yrd/core/21096-cli-ux/22301, closed 2026-07-28 at fe9ded50ed. Its
  *          specimen was the opposite of an empty answer — the flag was IGNORED
  *          under `--json` and the reader got all 669 retained runs, 14 MB,

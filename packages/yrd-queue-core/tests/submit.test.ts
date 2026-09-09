@@ -277,7 +277,7 @@ describe("submit is one atomic push of the branch and its opened record", () => 
     expect(await refAt(w.git, "refs/heads/task/race")).toBe(later)
   })
 
-  it("lands both refs at the remote, and the opened record names who, where and what", async () => {
+  it("merges both refs at the remote, and the opened record names who, where and what", async () => {
     const w = await world()
     const head = await branchWithCommit(w, "task/one", "one.txt")
     const submitted = await submit(w.git, "origin", {

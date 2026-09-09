@@ -308,7 +308,7 @@ describe("the submit path", { timeout: 120_000 }, () => {
   /**
    * The plan says a name collision is "loud, never prevented, because every
    * change records who submitted which head" — so the second submitter's push
-   * lands and opens its own change.
+   * merges and opens its own change.
    *
    * AMBIGUITY, and the most consequential one in this area: the same section
    * says the submit path "pushes a rebased branch with `--force-with-lease`".

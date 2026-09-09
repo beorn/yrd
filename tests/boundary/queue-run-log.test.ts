@@ -625,7 +625,7 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
    * nothing: the two messages a submitter gets are `merged` and `fail`, and
    * neither may be sent for a queue run that could not do its job.
    *
-   * The billing underneath is M1's: exit 2 and `check-stuck`, landed
+   * The billing underneath is M1's: exit 2 and `check-stuck`, merged
    * 2026-09-02. This adds the log's account of it.
    */
   it("records a stuck result and bills the submitter nothing", async () => {

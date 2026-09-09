@@ -11,7 +11,7 @@
  * bay-submit-selected.test.ts` proves end to end: a bare shared repository
  * plus a working repository whose `origin` is that bare one, work committed
  * in a real Bay, and `yrd bay submit` as the submit form. The target the
- * queue lands on is the shared repository's `main`, never the local ref, so
+ * queue merges on is the shared repository's `main`, never the local ref, so
  * every assertion about the target fetches and reads `origin/main`.
  */
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
@@ -261,7 +261,7 @@ export async function changeStandings(repo: string): Promise<Readonly<Record<str
   return Object.fromEntries(parsed.changes.map((change) => [`${change.branch}@${change.head}`, change.state]))
 }
 
-/** The tip of the target the queue lands on — the shared one, not the local ref. */
+/** The tip of the target the queue merges on — the shared one, not the local ref. */
 export async function targetTip(repo: string): Promise<string> {
   await git(repo, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main")
   return git(repo, "rev-parse", "origin/main")
@@ -503,7 +503,7 @@ export async function secondReader(origin: string): Promise<string> {
   await git(root, "clone", "-q", origin, clonePath)
   const clone = await realpath(clonePath)
   // The bare shared repository's HEAD still names git's default branch, so a
-  // plain clone lands nowhere; the target is `main` and the reader stands on it.
+  // plain clone merges nowhere; the target is `main` and the reader stands on it.
   await git(clone, "checkout", "-q", "-B", "main", "origin/main")
   await refreshSecondReader(clone)
   return clone
@@ -890,7 +890,7 @@ export async function advanceTargetAroundQueue(
   return git(clone, "rev-parse", "HEAD")
 }
 
-/** A change landed around the queue in the garage: its head merged into the target and
+/** A change merged around the queue in the garage: its head merged into the target and
  * pushed, with no queue run involved. `from` is the working repository the
  * change was submitted in — a submitted head is not at the shared repository
  * until the queue puts it there, so the throwaway clone has to fetch it. */
@@ -905,7 +905,7 @@ export async function landAroundQueue(origin: string, headSha: string, from: str
     "-q",
     headSha,
     "-m",
-    `landed ${headSha.slice(0, 8)} around the queue`,
+    `merged ${headSha.slice(0, 8)} around the queue`,
   )
   await git(clone, "push", "-q", "origin", "main")
   return git(clone, "rev-parse", "HEAD")

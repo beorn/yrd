@@ -23,7 +23,7 @@
  * remote" and the change ref lives beside it. The fixture's shared repository
  * is the bare `origin`, and it declares no `yrd` remote, so every assertion
  * here reads the bare one; each report also prints what the working repository
- * carries, so a red case says where the refs actually landed.
+ * carries, so a red case says where the refs actually merged.
  */
 import { afterEach, describe, expect, it } from "vitest"
 import {

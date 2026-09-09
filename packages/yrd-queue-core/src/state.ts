@@ -18,7 +18,7 @@
  * already carries. Measured 2026-09-02: a run merged a head under one branch
  * name, then checked a second name at the identical head against the main it
  * had just moved, failed it on a check, and billed the submitter for content it
- * had itself just landed. Reading ancestry first is what makes that impossible.
+ * had itself just merged. Reading ancestry first is what makes that impossible.
  */
 
 import type { ChangeRecord } from "./records.ts"

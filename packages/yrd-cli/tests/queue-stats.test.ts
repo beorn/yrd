@@ -200,7 +200,7 @@ describe("the real witness: eighteen rows of the live queue", () => {
     const stats = queueStats(rows, [], { now: NOW })
     expect(rows).toHaveLength(18)
     // Eight heads on five branches: seven merged — four of them by ancestry: one already on the target,
-    // three replaced heads whose successors landed — and one failed. Nothing stuck or in line.
+    // three replaced heads whose successors merged — and one failed. Nothing stuck or in line.
     expect(stats.total).toMatchObject({
       byAncestry: 4,
       changes: 8,

@@ -204,7 +204,7 @@ describe("the notice", () => {
   })
 
   it("says a change is queued AND that a check is running on it, because both are true", () => {
-    // The records say queued until the checked record lands; the journal says a
+    // The records say queued until the checked record merges; the journal says a
     // check is running now. The notice carries both rather than picking one and
     // inventing a sixth state for the difference.
     const notice = watchNotice(

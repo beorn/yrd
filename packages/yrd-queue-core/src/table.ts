@@ -80,7 +80,7 @@ export type Row = Readonly<{
   /**
    * The check running on this change RIGHT NOW, from the run journal. An
    * overlay on {@link Row.state}, never a state of its own: a change under a
-   * check still reads `queued` until its checked record lands, and that is the
+   * check still reads `queued` until its checked record merges, and that is the
    * records' answer, not a display bug.
    */
   live?: Readonly<{ run: string; check: string; phase: string; since: Date; log?: string }>

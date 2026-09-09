@@ -63,7 +63,7 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
     glyph: stateGlyph(row),
     // The overlay says what is happening RIGHT NOW; the state still says what
     // the records say, and both are on the line, because a change under a
-    // check reads `queued` until its checked record lands and that is an
+    // check reads `queued` until its checked record merges and that is an
     // answer, not a bug to paper over.
     word: live === undefined ? `${state}${position}` : `${state}${position}, checking ${live.check}`,
     ...(cause === undefined ? {} : { cause }),

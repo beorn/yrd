@@ -20,7 +20,7 @@
  * - merged / byAncestry / failed / stuck / inLine count CHANGES (distinct
  *   `branch@head`) by the queue's own current state, the one `queue list`
  *   shows: merged includes a head the target carries by ancestry (a replaced
- *   head whose successor landed, or one already on the target), and
+ *   head whose successor merged, or one already on the target), and
  *   byAncestry says how many of the merged had no merging run of their own.
  * - same-head retries: rows beyond the first for one `branch@head` — a resubmit
  *   of the same head, or the queue judging it again on a moved target; the

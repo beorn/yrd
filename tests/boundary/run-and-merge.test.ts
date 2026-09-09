@@ -121,8 +121,8 @@ describe("the queue run", { timeout: 180_000 }, () => {
   })
 
   /**
-   * "Then the checked change FIRST IN LINE" — singular. One queue run lands
-   * one change; the next keeps its place and lands on the next run, on the
+   * "Then the checked change FIRST IN LINE" — singular. One queue run merges
+   * one change; the next keeps its place and merges on the next run, on the
    * base the first one left behind.
    */
   it("one queue run merges the change first in line, and the next waits its turn", async () => {
@@ -212,14 +212,14 @@ describe("the queue run", { timeout: 180_000 }, () => {
   })
 
   /**
-   * "A head already an ancestor of the target is retired already-landed and
-   * never checked." The garage lands changes around the queue; the next queue run must
+   * "A head already an ancestor of the target is retired already-merged and
+   * never checked." The garage merges changes around the queue; the next queue run must
    * notice, not re-judge.
    */
-  it("a head already in the target is retired already-landed and never checked", async () => {
-    const log = await temporaryLog("landed")
+  it("a head already in the target is retired already-merged and never checked", async () => {
+    const log = await temporaryLog("merged")
     const { repo, origin } = await boundaryRepositoryWith(passing(log))
-    const change = await submitOneCommit(repo, "landed")
+    const change = await submitOneCommit(repo, "merged")
     await landAroundQueue(origin, change.headSha, repo)
     const before = await refreshTarget(repo)
 
@@ -235,9 +235,9 @@ describe("the queue run", { timeout: 180_000 }, () => {
    * The measured one, 2026-09-02: the queue merged a head under one name, then
    * checked a SECOND name at the same head against the main it had just moved,
    * failed it, and billed the submitter. One head cannot be both the thing
-   * that landed and a fault of its author.
+   * that merged and a fault of its author.
    */
-  it("a second branch at a head the same run merged is retired already-landed, and nobody is billed", async () => {
+  it("a second branch at a head the same run merged is retired already-merged, and nobody is billed", async () => {
     const log = await temporaryLog("same-head")
     const { repo } = await boundaryRepositoryWith(passing(log))
     const one = await submitOneCommit(repo, "one")
@@ -252,8 +252,8 @@ describe("the queue run", { timeout: 180_000 }, () => {
 
     const run = await queueRunOnce(repo)
 
-    // Nothing failed and nothing is stuck: one head landed, and the other name
-    // is that same landed head.
+    // Nothing failed and nothing is stuck: one head merged, and the other name
+    // is that same merged head.
     expect(run.exitCode, run.report).toBe(0)
     const after = await targetTip(repo)
     expect(await firstParentDistance(repo, before, after), run.report).toBe(1)
@@ -265,7 +265,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
    * "When the target moved under a checked change, the change keeps its place
    * and its on-merge checks run again at the new target. No result is carried
    * across bases." This check passes on either head alone and fails only on
-   * the two together, so a carried pass lands a broken target and an honest
+   * the two together, so a carried pass merges a broken target and an honest
    * re-judgement refuses.
    */
   it("the target moving under a checked change re-judges it, and no earlier pass carries across bases", async () => {
@@ -280,7 +280,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const before = await targetTip(repo)
 
     // Each head on its own is fine, so both pass their on-submit checks and
-    // the first in line lands.
+    // the first in line merges.
     const one = await queueRunOnce(repo)
     expect(one.exitCode, one.report).toBe(0)
     const afterOne = await targetTip(repo)
@@ -299,7 +299,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
   /**
    * A built-in check: "config parses". The target's config is the gate, so a
    * branch that breaks `.yrd.yml` is judged by a config that still works —
-   * which is exactly why the built-in has to catch it before it lands.
+   * which is exactly why the built-in has to catch it before it merges.
    */
   it("a branch whose config cannot be parsed ends failed, and the queue keeps running", async () => {
     const log = await temporaryLog("unparseable")

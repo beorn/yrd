@@ -676,7 +676,7 @@ describe("a queue run", () => {
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
     // checked after the on-submit phase, merged after the on-merge phase, sent last.
     expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
-    // The queue list row names the merge commit and its base in full, for whoever proves a landing by ancestry.
+    // The queue list row names the merge commit and its base in full, for whoever proves a merge by ancestry.
     const row = list((await readQueue(w.git, "origin", "main", after)).changes).find(
       (candidate) => candidate.branch === "task/one",
     )
@@ -1293,7 +1293,7 @@ describe("a queue run", () => {
     let moved: string | undefined
     const git: Git = async (args, input) => {
       // The window the lease exists for: the run has read the remote heads and
-      // is about to push, and somebody else lands on the target in between.
+      // is about to push, and somebody else merges onto the target in between.
       if (moved === undefined && args.includes("--atomic") && args.some((arg) => arg.endsWith(":refs/heads/main"))) {
         writeFileSync(join(rivalPath, "rival.txt"), "rival\n")
         await rival(["add", "rival.txt"])
@@ -1307,7 +1307,7 @@ describe("a queue run", () => {
     const outcome = await queueRun({ ...(await w.options({ exit: 0 })), git })
 
     // The change keeps its place and is judged again at the new target next
-    // run: nothing landed, nothing ended, and nobody was told anything.
+    // run: nothing merged, nothing ended, and nobody was told anything.
     expect(outcome.exitCode).toBe(0)
     expect(outcome.stuck).toEqual([])
     expect(outcome.merged).toEqual([])
@@ -1324,7 +1324,7 @@ describe("a queue run", () => {
     )
   })
 
-  it("a change tip moving before the atomic landing loses neither history nor the target", async () => {
+  it("a change tip moving before the atomic merge loses neither history nor the target", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const ref = changeRef("main", { branch: "task/one", head })
@@ -1390,7 +1390,7 @@ describe("a queue run", () => {
       expect.objectContaining({ by: "@chief", kind: "pause", reason: "main needs repair", state: "paused" }),
     )
 
-    await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "repair landed" })
+    await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "repair merged" })
     const resumed = await queueRun(await w.options({ exit: 0 }))
     expect(resumed.merged).toEqual(["task/one"])
   })
@@ -1485,7 +1485,7 @@ describe("a queue run", () => {
 
     // One change is already on the target but has no merged record, so catch-up
     // would mutate it; the merge itself is also a direct merge the paused run owes.
-    await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "landed around the queue", caughtUp])
+    await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "merged around the queue", caughtUp])
     const direct = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["push", "--quiet", "origin", "main"])
 
@@ -1714,8 +1714,8 @@ describe("a queue run", () => {
   it("a change merged around the queue reads merged, its catch-up record says a direct merge did it, and the direct merge is reported once (E5)", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
-    // The garage lands it around the queue: a merge commit on main, pushed.
-    await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "landed around the queue", head])
+    // The garage merges it around the queue: a merge commit on main, pushed.
+    await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "merged around the queue", head])
     const landing = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["push", "--quiet", "origin", "main"])
 
@@ -1785,7 +1785,7 @@ describe("a queue run", () => {
     expect(String(told?.text)).toContain(`main moved around the queue at ${landing.slice(0, 12)}`)
     expect(String(told?.text)).toContain("it carries no Change: trailer")
     expect(logRecords(outcome).filter((record) => record.kind === "merged-direct")).toMatchObject([
-      { commit: landing, gitlinks: [], parents: [w.target, head], subject: "landed around the queue" },
+      { commit: landing, gitlinks: [], parents: [w.target, head], subject: "merged around the queue" },
     ])
 
     // The next run says nothing new: the catch-up record accounts for the commit.
@@ -1808,9 +1808,9 @@ describe("a queue run", () => {
     expect(down.exitCode).toBe(1)
     expect(messages(w)).toEqual([])
 
-    // The garage landed it around the queue all the same.
+    // The garage merged it around the queue all the same.
     await w.git(["checkout", "--quiet", "main"])
-    await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "landed around the queue", head])
+    await w.git(["merge", "--quiet", "--no-ff", "--no-edit", "-m", "merged around the queue", head])
     await w.git(["push", "--quiet", "origin", "main"])
 
     const outcome = await queueRun(await w.options({ exit: 0 }))
@@ -2014,7 +2014,7 @@ describe("a queue run", () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     const second = await submitCommit(w, "task/two", "two.txt")
 
-    // One merge per run: task/one lands, task/two stays checked under config A.
+    // One merge per run: task/one merges, task/two stays checked under config A.
     const first = await queueRun({ ...(await w.options({ exit: 0 })), configBlob: "config-A" })
     expect(first.merged).toEqual(["task/one"])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
@@ -2026,7 +2026,7 @@ describe("a queue run", () => {
     expect(records[1]?.trailers).toEqual(expect.arrayContaining([["Config", "config-A"]]))
 
     // The target's declaration changed: the on-submit checks run again under B
-    // before the change lands, and the new checked record names B.
+    // before the change merges, and the new checked record names B.
     const next = await queueRun({ ...(await w.options({ exit: 0 })), configBlob: "config-B" })
     expect(next.merged).toEqual(["task/two"])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])

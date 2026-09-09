@@ -120,7 +120,7 @@ async function resend(run: Run, entry: QueueEntry): Promise<void> {
   // just above owns this change — it wrote the merged record and sent its message
   // this run, so this entry's tip is a reading from before that. Sending from
   // it would put `sent State: failed` on top of a merged change and tell its
-  // submitter to fix what has already landed (ruling A2).
+  // submitter to fix what has already merged (ruling A2).
   if (entry.change.headOnTarget && endedKind(tip) !== "merged") return
   const unsent = tip.kind === "failed" || tip.kind === "stuck" || tip.kind === "merged"
   if (tip.kind !== "sent" && !unsent) return

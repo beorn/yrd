@@ -249,7 +249,7 @@ describe("settling gitlinks", () => {
     const componentWork = join(w.work, "..", "component-work")
     const component = gitIn(componentWork)
     await component(["checkout", "--quiet", "main"])
-    await component(["merge", "--quiet", "--no-ff", "-s", "ours", "-m", "land feature", "feature"])
+    await component(["merge", "--quiet", "--no-ff", "-s", "ours", "-m", "merge feature", "feature"])
     await component(["push", "--quiet", "origin", "main"])
     const componentMain = (await component(["rev-parse", "HEAD"])).trim()
 

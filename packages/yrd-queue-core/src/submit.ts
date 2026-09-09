@@ -22,7 +22,7 @@ import { requireResumed } from "./pause.ts"
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
   branch: string
-  /** The queue's target: the branch it lands on, at the remote holding it. */
+  /** The queue's target: the branch it merges on, at the remote holding it. */
   target: Target
   submitter: string
   issue?: string
@@ -181,7 +181,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   })
   // Two explicit leases make the push the same compare-and-swap the local
   // append is: each ref must still be where this submitter just read it (the
-  // zero sha means "absent"), or the whole push refuses and nothing lands —
+  // zero sha means "absent"), or the whole push refuses and nothing merges —
   // and then the local change ref goes back to what the remote holds, so a
   // refused submit leaves no opened record for the next one to chain onto.
   try {

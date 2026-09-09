@@ -686,7 +686,7 @@ describe("the running step and the check-less declaration", () => {
     const direct = row({
       branch: "main",
       head: "3".repeat(40),
-      reason: "main moved around the queue at 333333333333 (fix: land it)",
+      reason: "main moved around the queue at 333333333333 (fix: merge it)",
       state: "direct",
       subject: undefined,
     })

@@ -108,7 +108,7 @@ export function resolveYrdObservability(
     // here) left `DEBUG=yrd:perf` — the exact invocation for reading the stage
     // breakdown — creating no spans, and the breakdown is derived from them, so
     // it printed an empty table with a confident `unaccountedMs`. Two
-    // independently-correct changes landed an hour apart and were incompatible;
+    // independently-correct changes merged an hour apart and were incompatible;
     // this is the seam they actually needed.
     spans: trace !== undefined || selected === "trace" || selected === "debug",
     // Unchanged in intent from the gate this replaces: DEBUG alone only ever

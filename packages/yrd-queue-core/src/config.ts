@@ -17,7 +17,7 @@ import { refAt } from "./git.ts"
 import type { CheckSpec } from "./check.ts"
 
 /**
- * A queue's target: the branch it lands on, and the remote that holds it,
+ * A queue's target: the branch it merges on, and the remote that holds it,
  * which are one thing and are declared as one — `<remote>#<branch>`.
  *
  * They were two keys, `remote:` and `target:`, and each defaulted on its own,
@@ -112,7 +112,7 @@ export type Notifier = Readonly<{
 }>
 
 export type QueueConfig = Readonly<{
-  /** The branch the queue lands on, at the remote holding it; `origin#main` unless declared. */
+  /** The branch the queue merges on, at the remote holding it; `origin#main` unless declared. */
   target: Target
   checks: readonly CheckSpec[]
   /** One shell command run in every fresh worktree the queue makes, before any check runs in it. */

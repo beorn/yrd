@@ -309,7 +309,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
               await coreQueueCommand(
                 w.work,
                 capture(w.work).io,
-                { by: "@chief", command: "resume", reason: "repair landed" },
+                { by: "@chief", command: "resume", reason: "repair merged" },
                 { workdir: w.workdir },
               )
               await w.git(["config", "yrd.git", JSON.stringify({ executable: "git", contract: "native" })])
@@ -446,7 +446,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       await coreQueueCommand(
         w.work,
         closed.io,
-        { by: "@chief", command: "resume", reason: "repair landed" },
+        { by: "@chief", command: "resume", reason: "repair merged" },
         { workdir: w.workdir },
       ),
     ).toBe(0)

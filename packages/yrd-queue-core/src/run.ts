@@ -91,7 +91,7 @@ export type QueueRunOptions = Readonly<{
   selection?: GitSelection
   /** The working repository the run reads and writes through. */
   repo: string
-  /** The branch the queue lands on, at the remote holding it: `<remote>#<branch>`. */
+  /** The branch the queue merges on, at the remote holding it: `<remote>#<branch>`. */
   target: Target
   /** The target commit whose declaration supplied this round's config and checks. */
   targetSha: string

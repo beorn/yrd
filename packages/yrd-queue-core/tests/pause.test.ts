@@ -67,7 +67,7 @@ describe("the queue pause is one leased record ref at the remote", () => {
         resumed = await writePause(w.git, "origin", "main", {
           by: "operator",
           kind: "resumed",
-          reason: "the repair landed",
+          reason: "the repair merged",
         })
       }
       return result
@@ -77,7 +77,7 @@ describe("the queue pause is one leased record ref at the remote", () => {
     expect(paused.at).toBeInstanceOf(Date)
 
     expect(await readPause(w.other, "origin", "main")).toEqual(resumed)
-    expect(resumed).toMatchObject({ by: "operator", kind: "resumed", reason: "the repair landed" })
+    expect(resumed).toMatchObject({ by: "operator", kind: "resumed", reason: "the repair merged" })
     expect((await w.other(["log", "-1", "--format=%(trailers:only,unfold)", resumed!.sha])).trim()).toBe(
       "Record: resumed\nPaused-By: operator",
     )
