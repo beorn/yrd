@@ -13,10 +13,12 @@ import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { render } from "silvery/test"
+import { createTermless, render } from "silvery/test"
+import { run } from "silvery/runtime"
 import { runId } from "@yrd/queue-core"
 import { RunnerBox } from "../src/watch-boxes.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
+import { WATCH_RUN_OPTIONS } from "../src/watch-run-options.ts"
 import { SILENT_AFTER_MS, readRunnerFacts, runnerHealth, type RunnerFacts } from "../src/watch-runner.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
@@ -249,4 +251,81 @@ describe("the RUNNER box", () => {
     expect(app.text).toContain("progress")
     app.unmount()
   })
+
+  /**
+   * @failure The RUNNING marker pulsed between two FOREGROUND tokens
+   *          ($fg-info against $fg-muted, #81A1C1 against #8F95A1, 1.12:1)
+   *          while the IDLE marker swung against the ground at 4.15:1 — so the
+   *          marker blinked while the queue was IDLE and sat still while a run
+   *          EXECUTED. Salience inverted, which is worse than no indicator: the
+   *          operator read a working queue as a dead one.
+   * @level   l1 (the painted cell, under termless, logical colour only)
+   * @consumer the operator watching whether anything is happening
+   *
+   * NOTHING COVERED THIS. Every other RunnerBox render in this file passes
+   * live={false}, so neither Pulse branch was executed by any test, and no test
+   * in the package asserted a FOREGROUND colour at all.
+   */
+  it("the running marker actually pulses, and its two phases are far apart", async () => {
+    using term = createTermless({ cols: 72, rows: 12 })
+    const handle = await run(
+      <NowContext.Provider value={NOW}>
+        <MinuteContext.Provider value={NOW}>
+          <RunnerBox facts={latest({ alive: true, pid: 4242 })} label="main" inLine={1} columns={70} live />
+        </MinuteContext.Provider>
+      </NowContext.Provider>,
+      term,
+      WATCH_RUN_OPTIONS,
+    )
+    try {
+      await handle.waitForLayoutStable()
+      const lines = term.screen.getLines()
+      const row = lines.findIndex((line) => line.includes("$ yrd queue run"))
+      expect(row, "the running marker line must be painted").toBeGreaterThan(-1)
+      const column = lines[row]!.indexOf("$")
+
+      // GUARD THE CAPTURE BEFORE MEASURING IT. Under a 16-colour capture Nord
+      // #81a1c1 collapses to #c0c0c0, and two earlier findings on this exact
+      // view were WITHDRAWN on 2026-09-07 for that artifact. A distance
+      // computed off a degraded capture is a confident wrong answer, which is
+      // the defect family this arm belongs to. Termless hands back a truecolor
+      // {r,g,b} only when it really captured one, so the SHAPE is the guard.
+      const rgb = (at: { readonly fg: unknown }): readonly [number, number, number] => {
+        const fg = at.fg as { r?: unknown; g?: unknown; b?: unknown } | null
+        expect(fg, "the marker cell must carry a colour at all").not.toBeNull()
+        for (const channel of ["r", "g", "b"] as const) {
+          expect(typeof fg?.[channel], `${channel} must be a truecolor channel, not an ANSI index`).toBe("number")
+        }
+        return [fg?.r as number, fg?.g as number, fg?.b as number]
+      }
+
+      const first = rgb(term.cell(row, column))
+      // Wait for the OBSERVABLE flip rather than sleeping one pulse interval:
+      // the phase comes from a shared synchronized clock this component does not
+      // expose, so a fixed sleep could sample the same phase twice.
+      let second = first
+      const deadline = Date.now() + 4_000
+      while (second.every((value, at) => value === first[at]) && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 25))
+        second = rgb(term.cell(row, column))
+      }
+      expect(second, "a running marker that never changes colour is not pulsing").not.toEqual(first)
+
+      // The two phases must be FAR apart, not merely unequal. The defect WAS
+      // unequal — #81A1C1 against #8F95A1 differs in every channel and is still
+      // invisible at 1.12:1. Largest per-channel distance is deliberately crude
+      // and local: it needs no dependency yrd-cli does not already carry, and it
+      // is a comparison rather than a second contrast implementation.
+      //
+      // MEASURED, not chosen: run against the pre-fix source this arm fails with
+      // "phases 129,161,193 and 143,149,161 ... expected 32 to be greater than
+      // 40" — #81A1C1 against #8F95A1, the exact pair the report named at
+      // 1.12:1. So 40 sits above the defect and below the fixed pair, and the
+      // arm is red-first by construction rather than by assertion.
+      const distance = Math.max(...first.map((value, at) => Math.abs(value - second[at]!)))
+      expect(distance, `phases ${first.join(",")} and ${second.join(",")} are too close to see`).toBeGreaterThan(40)
+    } finally {
+      handle.unmount()
+    }
+  }, 20_000)
 })
