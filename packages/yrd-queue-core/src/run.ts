@@ -53,7 +53,7 @@ import {
   type Git,
   type WriteRecord,
 } from "./records.ts"
-import { queueName, queueGatesNothing, readConfig, type Target } from "./config.ts"
+import { queueName, readConfig, type Target } from "./config.ts"
 import {
   GitExit,
   gitEnvironment,
@@ -1016,29 +1016,32 @@ async function land(run: Run, entry: QueueEntry): Promise<Ended> {
     )
     // The built-in check at merge (ruling D2): the merged tree's own declaration
     // reads, so no change can land a `.yrd.yml` that breaks the next queue run.
+    // Beside ruling D2 and one layer on from it: D2 stops a change landing a
+    // declaration the queue cannot READ; this stops a change MERGING WITH
+    // NOTHING RUN (@chief e5bb9c5f). Submit already warned; this is the hard
+    // stop at the only place the ungated merge can occur.
+    //
+    // It asks what THIS RUN gates, not what the merged tree declares. Those
+    // agree in production -- options.checks is built from the declaration at
+    // queue-core-commands.ts -- but they are not the same property, and the
+    // estate said so loudly: yrd-queue-core's run tests carry a "{}" .yrd.yml
+    // while injecting checks programmatically, so reading the tree refused 33
+    // runs that gate perfectly well. The harm is an ungated MERGE, and only the
+    // run knows whether anything ran.
+    if (run.options.checks.length === 0) {
+      return await run.steps.end(run, entry, "failed", {
+        remedy: `declare at least one check in .yrd.yml on ${run.options.target.branch}, then submit again`,
+        subject: `${branch} would merge with nothing run: the queue declares no checks`,
+        trailers: [["Reason", "config-gates-nothing"]],
+      })
+    }
     let unreadable: string | undefined
-    // Beside ruling D2 and for the same reason one layer on: D2 stops a change
-    // landing a declaration the queue cannot READ; this stops one landing a
-    // declaration that GATES NOTHING. Submit already warned about it, and this
-    // is the hard stop at the only place the ungated merge could occur
-    // (@chief e5bb9c5f).
-    let gatesNothing: string | undefined
     try {
-      const mergedConfig = await readConfig(wt, "HEAD", run.options.target)
-      if (mergedConfig === undefined) {
+      if ((await readConfig(wt, "HEAD", run.options.target)) === undefined) {
         unreadable = "the merged tree has no .yrd.yml"
-      } else {
-        gatesNothing = queueGatesNothing(mergedConfig, "the merged tree's .yrd.yml")
       }
     } catch (error) {
       unreadable = String(error instanceof Error ? error.message : error)
-    }
-    if (unreadable === undefined && gatesNothing !== undefined) {
-      return await run.steps.end(run, entry, "failed", {
-        remedy: `declare at least one check in .yrd.yml on ${branch}, push, and submit again`,
-        subject: `${branch} would land a declaration that gates nothing: ${gatesNothing}`,
-        trailers: [["Reason", "config-gates-nothing"]],
-      })
     }
     if (unreadable !== undefined) {
       return await run.steps.end(run, entry, "failed", {

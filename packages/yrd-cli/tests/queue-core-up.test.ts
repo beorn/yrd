@@ -18,7 +18,7 @@
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { afterAll, describe, expect, it, vi } from "vitest"
+import { afterAll, describe, expect, it, onTestFinished, vi } from "vitest"
 import {
   appendRecord,
   changeRef,
@@ -100,6 +100,11 @@ function logRows(): Readonly<{
 }
 
 const DECLARATION = "{}\n"
+// A world that MERGES needs a declaration that gates something (@chief
+// e5bb9c5f: warn at submit, refuse at merge). The check runs at merge only
+// (no `on:`, ruling A1) and is a no-op, so it makes the queue real without
+// changing what any test pins. Worlds that never merge keep DECLARATION.
+const MERGING_DECLARATION = 'checks:\n  - gate:\n      run: "true"\n'
 
 async function identity(git: Git): Promise<void> {
   await git(["config", "user.email", "queue@yrd.test"])
@@ -198,7 +203,7 @@ async function gitlinkWorld(sourceReadFailure = false): Promise<GitlinkWorld> {
   await identity(git)
   await git(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), DECLARATION)
+  writeFileSync(join(work, ".yrd.yml"), MERGING_DECLARATION)
   // The root records the component at its main as it stands now: `a`.
   await git(["submodule", "add", "--quiet", "https://git-super.test/owned/component.git", "component"])
   await git(["add", ".yrd.yml", ".gitmodules", "component"])
@@ -261,7 +266,14 @@ if (!tip || tip.kind !== "merged") throw new Error("notifier ran before the merg
 await appendRecord(git, "main", { change, kind: "merged", subject: "another observer recorded the merge", trailers: tip.trailers })
 `,
     )
-    await redeclare(w, `notify:\n  - rival:\n      on: [merged]\n      run: ${JSON.stringify(`bun '${rival}'`)}\n`)
+    // The subject here is notify-on-merge, not gating -- but a declaration that
+    // gates nothing can no longer merge (@chief e5bb9c5f), and this test asserts
+    // two merges succeed. The check runs at merge (no `on:`, ruling A1) and is a
+    // no-op, so it makes the queue real without changing what this test pins.
+    await redeclare(
+      w,
+      `checks:\n  - gate:\n      run: "true"\nnotify:\n  - rival:\n      on: [merged]\n      run: ${JSON.stringify(`bun '${rival}'`)}\n`,
+    )
     // One service invocation must survive its first merge's bookkeeping and
     // reach the next admitted change, not merely return success for one round.
     for (const name of ["one", "two"]) {
@@ -498,14 +510,33 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(await w.git(["ls-remote", "--refs", "origin", ref])).toBe(beforeRetry)
   })
 
-  // Accepted: a legacy protected declaration and its absent successor cannot
-  // open a submission; malformed LOCAL hints still diagnose and reach a valid
-  // protected queue. Existing service rereads and parser-only tests miss this
-  // command admission boundary and its no-write guarantee.
+  // Accepted, RESTATED 2026-09-09 (@chief 9ba672d4): a legacy protected
+  // declaration now OPENS a submission and is warned about, rather than being
+  // refused at admission. Warn early, refuse late -- the author hears it when
+  // they act and can fix the declaration, and the hard stop lives at merge
+  // where the ungated merge would actually happen. An absent successor still
+  // cannot open a submission; malformed LOCAL hints still diagnose and reach a
+  // valid protected queue. Existing service rereads and parser-only tests miss
+  // this command admission boundary and its no-write guarantee.
+  //
+  // THE FIXTURE BELOW IS EVIDENCE AND IS NOT TO BE EDITED. It is Gitomic's real
+  // captured declaration, and it is the second independent specimen -- with
+  // ag/.yrd.yml -- of a live config whose entire content is a retired key. It is
+  // why a retired key is ignored with a warning instead of refused: configs in
+  // the wild carry it. Change assertions around it; changing the blob destroys
+  // the only proof the shape existed.
   it.each(["legacy protected declaration", "absent protected successor", "valid queue with malformed local hints"])(
     "protected declaration governs submission: %s",
     async (scenario) => {
       const w = await world()
+      // The parser warns on its own channel; capture it so a retired key is
+      // provable here rather than only in the parser's unit test.
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {})
+      // Restored on every exit path, early returns included: nothing in this
+      // file restores mocks, so a leaked spy would silence later tests.
+      onTestFinished(() => {
+        warned.mockRestore()
+      })
       const valid = scenario === "valid queue with malformed local hints"
       // Gitomic's captured 14-byte declaration, unchanged from its old blob.
       const legacy = "landing: none\n"
@@ -532,7 +563,12 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
       if (valid) {
         await expect(attempt).resolves.toBe(0)
-        expect(run.stderr()).toBe("")
+        // This world's valid protected target declares no checks of its own, so
+        // the gates-nothing WARNING is correct here and not noise. The malformed
+        // local hints are still diagnosed silently -- that is what this scenario
+        // pins, and it is unchanged.
+        expect(run.stderr()).toMatch(/NO CHECKS/u)
+        expect(run.stderr()).not.toMatch(/malformed|cannot be read/u)
         expect(records(run)[0]).toMatchObject({ head })
         const history = await readRecords(w.git, (records(run)[0] as { opened: string }).opened)
         expect(history.map((record) => record.kind)).toEqual(["opened"])
@@ -542,8 +578,29 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         )
       } else {
         if (scenario === "legacy protected declaration") {
-          await expect(attempt).rejects.toThrow(/\.yrd\.yml: unknown key landing/u)
-        } else {
+          // Both layers of the ruling, against the captured blob:
+          //   1. `landing` is RETIRED, so it parses and is ignored OUT LOUD
+          //   2. what it leaves behind gates nothing, warned here and REFUSED
+          //      at merge (run.ts, Reason config-gates-nothing)
+          //
+          // The two warnings travel DIFFERENT CHANNELS, which is why this test
+          // reads both: the parser writes to console.warn (process.stderr in
+          // production), while the CLI writes through its injected io. Asserted
+          // separately rather than papered over, because a reader who captures
+          // only io would see one of the two and conclude the other is missing.
+          await expect(attempt).resolves.toBe(0)
+          const said = run.stderr()
+          // Layer 2, on the CLI's own channel: it PARSED (you cannot warn about
+          // zero checks otherwise) and it gates nothing.
+          expect(said).toMatch(/NO CHECKS/u)
+          // Layer 1, on the parser's channel: the retired key named and ignored.
+          const parserSaid = warned.mock.calls.map((call) => String(call[0])).join("\n")
+          expect(parserSaid).toMatch(/landing/u)
+          expect(parserSaid).toMatch(/retired/iu)
+          expect(parserSaid).toMatch(/ignored/iu)
+          return
+        }
+        if (scenario !== "legacy protected declaration") {
           await expect(attempt).resolves.toBe(2)
           expect(run.stderr()).toContain("submit needs a queue")
           expect(run.stderr()).toContain("origin/main carries no .yrd.yml")

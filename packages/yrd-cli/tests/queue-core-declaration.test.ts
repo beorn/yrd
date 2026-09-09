@@ -220,7 +220,11 @@ describe("a queue is the selected origin branch carrying config", () => {
   })
 
   it("list/show/watch preserve their subjects while selecting a different queue from a nested cwd", async () => {
-    const repo = await world("{}\n")
+    // This one MERGES below, and a declaration that gates nothing can no longer
+    // merge (@chief e5bb9c5f: warn at submit, refuse at merge). The check runs
+    // at merge only (no `on:`, ruling A1) and is a no-op, so the subjects this
+    // test pins are unchanged. The other worlds here never merge and keep "{}".
+    const repo = await world('checks:\n  - gate:\n      run: "true"\n')
     const git = gitIn(repo)
     await git(["branch", "release/1.x"])
     await git(["push", "--quiet", "origin", "release/1.x"])

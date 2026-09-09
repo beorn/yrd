@@ -120,7 +120,15 @@ async function world(): Promise<World> {
     onMain,
     options: async (check) => {
       return {
-        checks: check === undefined ? [] : [{ name: "component-check", on: check.on, run: check.run }],
+        // A run that gates nothing can no longer merge (@chief e5bb9c5f:
+        // warn at submit, refuse at merge), and every case here merges. The
+        // default is a no-op merge-phase check so these keep describing
+        // GITLINK settling against a queue that is legal, rather than one
+        // that could never have merged in the first place.
+        checks:
+          check === undefined
+            ? [{ name: "gate", on: ["merge"] as const, run: "true" }]
+            : [{ name: "component-check", on: check.on, run: check.run }],
         configBlob: "test-config",
         env: process.env,
         repo: work,
