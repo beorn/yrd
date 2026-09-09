@@ -454,6 +454,7 @@ export function WatchPane({
         cursor={at}
         listRef={listRef}
         active={!opened || tier !== "full"}
+        live={live}
         onCursor={(index) => {
           setCursor(index)
           // The top row is "the newest", followed as a position; any other row is followed as itself.
@@ -568,6 +569,7 @@ function Table({
   listRef,
   active,
   onCursor,
+  live,
 }: {
   rows: readonly WatchRow[]
   /** What an empty table says: an empty queue and a filter that hides everything are different facts. */
@@ -577,6 +579,8 @@ function Table({
   listRef: RefObject<ListViewHandle | null>
   active: boolean
   onCursor: (index: number) => void
+  /** False in a test or a one-shot print: passed straight through to every row's own gate. */
+  live: boolean
 }) {
   // Column widths depend on how long a duration prints, which changes on the
   // minute at most; the seconds belong to the cells, not to the table.
@@ -614,6 +618,7 @@ function Table({
                 layout={layout}
                 cursor={index === cursor}
                 hovered={meta.isHovered}
+                live={live}
               />
             )
             return separator === undefined ? (

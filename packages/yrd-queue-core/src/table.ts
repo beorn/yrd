@@ -240,7 +240,15 @@ export type Clocks = Readonly<{
 }>
 
 export function clocks(row: Row, now: Date = new Date()): Clocks {
-  const ageMs = row.since === undefined ? undefined : Math.max(0, now.getTime() - row.since.getTime())
+  // Age stops at the row's own ending record, exactly as runtime already does
+  // below (`until`): a decided change's age is when it was opened and when it
+  // ended, not how long the reader has since kept the pane open. Absent an
+  // ending record (git proved it merged or moved with no record to date it)
+  // there is no instant to freeze at, so age keeps counting from `now` — an
+  // honest ticking clock beats a fabricated freeze (the operator's 2026-09-09
+  // report: age on a merged row ran forever in `yrd watch`).
+  const ageUntil = row.endedAt ?? now
+  const ageMs = row.since === undefined ? undefined : Math.max(0, ageUntil.getTime() - row.since.getTime())
   const waitMs =
     row.since === undefined || row.startedAt === undefined
       ? undefined

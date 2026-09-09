@@ -205,9 +205,18 @@ export function ListHeader({ layout }: { layout: ListLayout }) {
  * one-second clock, memoized on the row facts it is measured from: the tick
  * re-renders these and nothing else in the row.
  */
-const AgeCell = memo(function AgeCell({ since, color }: { since: Date | undefined; color: string | undefined }) {
+const AgeCell = memo(function AgeCell({
+  since,
+  endedAt,
+  color,
+}: {
+  since: Date | undefined
+  /** Freezes the age at (endedAt − since) instead of letting it keep counting to `now` (a decided row). */
+  endedAt: Date | undefined
+  color: string | undefined
+}) {
   const now = useNow()
-  const measured = clocks({ since } as Row, now)
+  const measured = clocks({ endedAt, since } as Row, now)
   return (
     <Text color={color ?? "$fg-muted"} wrap="truncate">
       {measured.ageMs === undefined ? "" : mediaDuration(measured.ageMs)}
@@ -232,6 +241,7 @@ function sameRow(left: ListRowProps, right: ListRowProps): boolean {
   return (
     left.cursor === right.cursor &&
     left.hovered === right.hovered &&
+    left.live === right.live &&
     left.label === right.label &&
     left.item.run?.id === right.item.run?.id &&
     left.previous?.run?.id === right.previous?.run?.id &&
@@ -262,6 +272,8 @@ type ListRowProps = Readonly<{
   cursor: boolean
   /** The pointer is over this row: a tint under it, and nothing else — the cursor and the detail stay where they are. */
   hovered?: boolean
+  /** False on a one-shot print, which has no app-root scope for a synchronized clock to join. Default true (the watch). */
+  live?: boolean
 }>
 
 /**
@@ -274,7 +286,15 @@ type ListRowProps = Readonly<{
  * pair on every cell; a hovered row gets the hover surface only, which is the
  * affordance the pointer had before (item P: hover never moves the selection).
  */
-export const ListRow = memo(function ListRow({ item, previous, label, layout, cursor, hovered = false }: ListRowProps) {
+export const ListRow = memo(function ListRow({
+  item,
+  previous,
+  label,
+  layout,
+  cursor,
+  hovered = false,
+  live = true,
+}: ListRowProps) {
   const { row } = item
   const forced = cursor ? "$fg-on-selected" : undefined
   const color = stateColor(row)
@@ -288,7 +308,7 @@ export const ListRow = memo(function ListRow({ item, previous, label, layout, cu
     >
       <Cells layout={layout}>
         {{
-          age: <AgeCell since={row.since} color={forced} />,
+          age: <AgeCell since={row.since} endedAt={row.endedAt} color={forced} />,
           by: (
             <Text color={forced ?? "$fg-muted"} wrap="truncate">
               {row.submitter ?? "-"}
@@ -340,8 +360,16 @@ export const ListRow = memo(function ListRow({ item, previous, label, layout, cu
                   never overridden by a pulse the cell can't also apply. Off
                   the cursor, a live row's glyph pulses like the RUNNER box's
                   own marker — same foreground-vs-background shape, same
-                  900ms rate. */}
-              {row.live !== undefined && forced === undefined ? (
+                  900ms rate. `live` (never rendering `<Pulse>` at all when
+                  false) is what keeps a one-shot print safe: silvery's
+                  `usePulse` calls `useScopeEffect` UNCONDITIONALLY, so even an
+                  inactive `<Pulse active={false}>` still throws with no
+                  app-root scope — only `active`'s OWN `useSynchronizedPhase`
+                  guard is scope-free when inactive, not the component around
+                  it (measured 2026-09-09: `yrd queue list` crashed on any row
+                  with a check running; swapping to `active=` still crashed,
+                  one hook deeper). */}
+              {live && row.live !== undefined && forced === undefined ? (
                 <Pulse synchronized colors={[color, "$bg-surface-default"]} intervalMs={900} flexShrink={0}>
                   {stateGlyph(row)}
                 </Pulse>

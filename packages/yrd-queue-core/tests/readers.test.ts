@@ -373,7 +373,34 @@ describe("the clocks", () => {
       state: "merged",
     }
 
-    expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000, runtimeMs: 15 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+    // Age freezes at the same ending record runtime already freezes at
+    // (19:45 − 19:00 = 45m), not at `now` (20:00): a merged row does not keep
+    // aging while the reader leaves the pane open.
+    expect(clocks(row, now)).toEqual({ ageMs: 45 * 60 * 1000, runtimeMs: 15 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+  })
+
+  it("keeps a decided row's age fixed at its ending record however much later it is read", () => {
+    const row: Row = {
+      branch: "task/one",
+      endedAt: new Date("2026-09-03T19:45:00.000Z"),
+      head: "abc",
+      since,
+      state: "merged",
+    }
+
+    const soon = clocks(row, now).ageMs
+    const muchLater = clocks(row, new Date("2026-09-10T20:00:00.000Z")).ageMs
+    expect(soon).toBe(45 * 60 * 1000)
+    expect(muchLater).toBe(soon)
+  })
+
+  it("keeps counting an undecided row's age as `now` advances", () => {
+    const row: Row = { branch: "task/one", head: "abc", since, state: "queued" }
+
+    const soon = clocks(row, now).ageMs
+    const later = clocks(row, new Date("2026-09-03T21:00:00.000Z")).ageMs
+    expect(soon).toBe(60 * 60 * 1000)
+    expect(later).toBe(2 * 60 * 60 * 1000)
   })
 
   it.each(["queued", "checked"] as const)("keeps counting the runtime of a %s change", (state) => {

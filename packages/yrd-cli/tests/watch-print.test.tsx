@@ -13,7 +13,7 @@
 import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
 import type { Row } from "@yrd/queue-core"
-import { ListingPage } from "../src/watch-print.tsx"
+import { ListingPage, printListing } from "../src/watch-print.tsx"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
 
 const NOW = new Date("2026-09-05T14:00:00Z")
@@ -131,5 +131,46 @@ describe("the printed page's frame", () => {
     const box = lines.findIndex((line) => line.includes("RUNNER"))
     expect(name).toBeGreaterThanOrEqual(0)
     expect(name).toBeLessThan(box)
+  })
+})
+
+describe("a one-shot render when a row's check is running right now", () => {
+  // `printListing` is the real production path (`renderString`, dynamically
+  // imported by `queue list`'s human printer): unlike this file's own
+  // `paint()` helper, which renders through silvery/test's scoped `render()`
+  // and so always has an app-root scope, `renderString` has none. A row with
+  // `live` set used to reach ListRow's STATUS cell, which rendered a
+  // `synchronized` `<Pulse>` unconditionally in that case — and silvery's
+  // useSynchronizedPhase throws when an enabled multi-step clock has no
+  // app-root scope to join. Measured 2026-09-09: `yrd queue list` crashed
+  // with exactly this error whenever any row (or the runner) was live at
+  // read time; the same command succeeded moments later once the runner went
+  // idle. This must fail on a revert of the `live`/`active` gate in
+  // watch-list.tsx's `ListRow`.
+  it("does not throw, and prints the row's state in its static (non-pulsing) color", async () => {
+    const liveRow = row({
+      state: "checked",
+      live: { check: "typecheck", phase: "run", run: RUN_ID, since: NOW },
+    })
+
+    const text = await printListing(snapshot({ rows: [{ row: liveRow }] }), { color: false, columns: 120 })
+
+    expect(text).toContain("task/one")
+    expect(text).toContain("checked")
+  })
+
+  it("still leaves the RUNNER box's own marker crash-free while a run is active", async () => {
+    const liveRow = row({
+      state: "checked",
+      live: { check: "typecheck", phase: "run", run: RUN_ID, since: NOW },
+    })
+    const runner = {
+      journalDir: "/w/logs",
+      latest: { alive: true, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
+    }
+
+    const text = await printListing(snapshot({ rows: [{ row: liveRow }], runner }), { color: false, columns: 120 })
+
+    expect(text).toContain("RUNNER")
   })
 })
