@@ -930,15 +930,15 @@ async function attributedFailure(
     }
     const baseFailure = baseResults.find((result) => result.result === "fail")
     if (baseFailure === undefined) return await endFailing(run, entry, results, failing, phase)
-    const pins = raises.map((row) => `${row.path}@${row.to}`).join(", ")
+    const gitlinks = raises.map((row) => `${row.path}@${row.to}`).join(", ")
     return await run.steps.end(
       run,
       entry,
       "stuck",
       stuckWrite(run, {
         code: "yrd-submodule-main-regression",
-        next: `fix or revert ${pins} on component main, then run yrd queue run`,
-        subject: `${pins} breaks the root at the settled base`,
+        next: `fix or revert ${gitlinks} on component main, then run yrd queue run`,
+        subject: `${gitlinks} breaks the root at the settled base`,
         trailers: checkTrailers(baseResults),
         via: `the settled base alone failed ${baseFailure.name}; the candidate's own content was absent`,
       }),

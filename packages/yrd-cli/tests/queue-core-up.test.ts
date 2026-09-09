@@ -811,7 +811,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
     expect(exit, run.stdout()).toBe(0)
     expect(records(run)).toHaveLength(1)
-    // This CLI is outside the world's queue checkout, not an embedded stale pin.
+    // This CLI is outside the world's queue checkout, not an embedded stale gitlink.
     expect(rows.filter((row) => row.message.startsWith("the gitlink exit is off"))).toEqual([
       {
         level: "info",

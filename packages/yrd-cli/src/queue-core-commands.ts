@@ -361,7 +361,7 @@ export async function coreQueueCommand(
       const gitlink: Readonly<{ path: string; sha: string; checkout?: string }> | undefined =
         request.gitlink ?? (await gitlinkOf(git, captured.oid, log))
       // A relaunch can beat the checkout updater. Do not run an old round or
-      // spend the supervisor's restart budget repeatedly loading the old pin.
+      // spend the supervisor's restart budget repeatedly loading the old gitlink.
       const reload = async (targetOid: string): Promise<YrdCliExitCode | undefined> => {
         if (gitlink === undefined) return undefined
         let now = await gitlinkAt(git, targetOid, gitlink.path)
@@ -386,7 +386,7 @@ export async function coreQueueCommand(
           if (projected === now && checkout === now) break
           const state = `${now}:${projected}:${checkout}`
           if (state !== announced) {
-            const waiting = `waiting for checkout ${gitlink.path}: loaded ${gitlink.sha.slice(0, 12)}, target ${now.slice(0, 12)}, local pin ${projected?.slice(0, 12) ?? "absent"}, checkout ${checkout.slice(0, 12)}; no queue round will run until the checkout updater materializes the target`
+            const waiting = `waiting for checkout ${gitlink.path}: loaded ${gitlink.sha.slice(0, 12)}, target ${now.slice(0, 12)}, local gitlink ${projected?.slice(0, 12) ?? "absent"}, checkout ${checkout.slice(0, 12)}; no queue round will run until the checkout updater materializes the target`
             log?.info?.(waiting)
             emit(
               io,
@@ -871,7 +871,7 @@ export async function coreQueueCommand(
 
 /**
  * Identify the embedded runtime by checkout PATH, never by target SHA equality:
- * the target may already record the new pin while this module still runs the
+ * the target may already record the new gitlink while this module still runs the
  * old one. An external/standalone installation is explicitly outside this fence.
  * The exact captured target OID is passed in so this check cannot re-read a
  * mutable tracking ref and disagree with the declaration used by the round.

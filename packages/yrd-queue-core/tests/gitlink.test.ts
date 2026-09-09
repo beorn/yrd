@@ -1,6 +1,6 @@
 /**
  * Settling at submit and merge: git-super raises every held-back gitlink to its
- * component's newest main. An authored pin main does not carry waits without
+ * component's newest main. An authored gitlink main does not carry waits without
  * ending the change or blocking the next entry; an object no remote can supply
  * is the submitter's failed change, never a queue-owned stuck.
  *
@@ -264,7 +264,7 @@ describe("settling gitlinks", () => {
     expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(componentMain)
   })
 
-  it("a held-back authored pin merges raised and keeps the submitted Change identity", async () => {
+  it("a held-back authored gitlink merges raised and keeps the submitted Change identity", async () => {
     const w = await world()
     const head = await submitGitlink(w, "task/on", w.onMain)
     // Existing merge results cannot prove the cleanup ordering: observe real
@@ -358,7 +358,7 @@ describe("settling gitlinks", () => {
   })
 
   /** An anomaly already on root main is not the candidate's authorship, but every merge that passes over it must expose it. */
-  it("an untouched off-main target pin stays put and is reported in the run log", async () => {
+  it("an untouched off-main target gitlink stays put and is reported in the run log", async () => {
     const w = await world()
     await gitlinkAroundQueue(w, w.offMain)
     await submitFile(w, "task/pass-over-off-main")
@@ -554,8 +554,8 @@ describe("settling gitlinks", () => {
     },
   )
 
-  /** Attribution must compare candidate-minus-content even when root main's old pin is divergent, not silently keep that old tree. */
-  it("the settled-base comparator applies a raise over an off-main target pin", async () => {
+  /** Attribution must compare candidate-minus-content even when root main's old gitlink is divergent, not silently keep that old tree. */
+  it("the settled-base comparator applies a raise over an off-main target gitlink", async () => {
     const w = await world()
     await gitlinkAroundQueue(w, w.offMain)
     const head = await submitGitlink(w, "task/repair-off-main", w.onMain)

@@ -507,7 +507,7 @@ describe("a queue run", () => {
     writeFileSync(join(child, "child.txt"), "before\n")
     await childGit(["add", "."])
     await childGit(["commit", "--quiet", "-m", "child before"])
-    const pin = (await childGit(["rev-parse", "HEAD"])).trim()
+    const gitlink = (await childGit(["rev-parse", "HEAD"])).trim()
     const rootUrl = "https://example.test/acme/product.git"
     const childUrl = "https://example.test/acme/child.git"
     const config = join(w.workdir, "gitconfig")
@@ -522,7 +522,7 @@ describe("a queue run", () => {
       await w.git(["config", "-f", ".gitmodules", `submodule.child.${key}`, value])
     }
     await w.git(["add", ".gitmodules"])
-    await w.git(["update-index", "--add", "--cacheinfo", `160000,${pin},packages/child`])
+    await w.git(["update-index", "--add", "--cacheinfo", `160000,${gitlink},packages/child`])
     await w.git(["commit", "--quiet", "-m", "declare the product child"])
     await w.git(["push", "--quiet", "origin", "main"])
     const targetSha = (await w.git(["rev-parse", "HEAD"])).trim()

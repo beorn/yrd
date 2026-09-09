@@ -16,7 +16,7 @@ describe("Yrd Hab runner declarations", () => {
         command: "bun tools/yrd-runtime.mjs yrd queue up --interval 120",
         env: { TRIBE_NAME: "@yrd-service", YRD_HABITANT_RSS_CAP_MB: "24576" },
         // The queue relaunches only after an ending the loop chose: 0 for a
-        // clean round/pin recycle, or 1 for a candidate failure. Exit 2 is
+        // clean round/gitlink recycle, or 1 for a candidate failure. Exit 2 is
         // stuck, and any signal is an unplanned host-level interruption; both
         // stay down and page @ci instead of repeating an unmeasured fault.
         // No health probe: the loop's process and journal are its liveness (M7).

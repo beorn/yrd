@@ -57,7 +57,7 @@ export default {
         // liveness, its journal shows a running check, and a probe shelling
         // the CLI every tick was noise with a second opinion.
         // The loop relaunches only after an ending it chose: 0 for a clean
-        // round/pin recycle, or 1 for a candidate failure. Exit 2 is stuck.
+        // round/gitlink recycle, or 1 for a candidate failure. Exit 2 is stuck.
         // Signal decision: any signal observed by Hab is an unplanned host-level
         // interruption, so it stays down and pages @ci with every unlisted code.
         restart: "on-codes" as const,
