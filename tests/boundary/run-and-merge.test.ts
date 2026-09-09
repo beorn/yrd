@@ -53,14 +53,14 @@ function fake(log: string, exit: number): string {
  * two changes without one stops at `notify-unconfigured`, which would answer
  * every question below with the same irrelevant stuck. */
 function passing(log: string) {
-  return { hooks: true, checks: [{ name: "gate", run: fake(log, 0) }] }
+  return { hooks: true, checks: [{ name: "check", run: fake(log, 0) }] }
 }
 
 describe("the queue run", { timeout: 180_000 }, () => {
   /**
-   * "Gate authority lives on the protected side: the check config and the
+   * "Check authority lives on the protected side: the check config and the
    * check scripts run from the base commit on the target, never from the
-   * branch." A branch that rewrites the gate it will be judged by is judged
+   * branch." A branch that rewrites the check it will be judged by is judged
    * by the target's version all the same.
    */
   describe("judge from the target", () => {
@@ -72,14 +72,14 @@ describe("the queue run", { timeout: 180_000 }, () => {
       const branchLog = await temporaryLog("branch-config")
       const { repo } = await boundaryRepositoryWith({
         hooks: true,
-        checks: [{ name: "gate", run: fake(targetLog, 1) }],
+        checks: [{ name: "check", run: fake(targetLog, 1) }],
       })
       const before = await targetTip(repo)
 
       // The fake check judges content: it exits as told only where the change
       // wrote a file, so the change carries one beside its rewritten config.
       await submitCommitWriting(repo, "rewrite", {
-        ".yrd.yml": `checks: [{gate: {run: ${JSON.stringify(fake(branchLog, 0))}}}]\n`,
+        ".yrd.yml": `checks: [{check: {run: ${JSON.stringify(fake(branchLog, 0))}}}]\n`,
         "rewrite.txt": "the change\n",
       })
 
@@ -92,22 +92,22 @@ describe("the queue run", { timeout: 180_000 }, () => {
     })
 
     it("the target's check script judges a branch that rewrote the script", async () => {
-      const log = await temporaryLog("gate-script")
+      const log = await temporaryLog("check-script")
       const { repo } = await boundaryRepositoryWith({
         hooks: true,
         // The check names its script, and the queue restores it from the base
         // before the check runs (ruling D5, the declared `scripts:` list).
-        checks: [{ name: "gate", run: `GATE_LOG=${log} sh gate.sh`, scripts: ["gate.sh"] }],
-        // The target's gate is red only where the change's marker is, so this
-        // case is about WHOSE gate ran and not about whose fault a red one is.
+        checks: [{ name: "check", run: `CHECK_LOG=${log} sh check.sh`, scripts: ["check.sh"] }],
+        // The target's check is red only where the change's marker is, so this
+        // case is about WHOSE check ran and not about whose fault a red one is.
         files: {
-          "gate.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$GATE_LOG\"\nif [ -e script.txt ]; then exit 1; fi\nexit 0\n",
+          "check.sh": "#!/bin/sh\nprintf 'target\\n' >>\"$CHECK_LOG\"\nif [ -e script.txt ]; then exit 1; fi\nexit 0\n",
         },
       })
       const before = await targetTip(repo)
 
       await submitCommitWriting(repo, "script", {
-        "gate.sh": "#!/bin/sh\nprintf 'branch\\n' >>\"$GATE_LOG\"\nexit 0\n",
+        "check.sh": "#!/bin/sh\nprintf 'branch\\n' >>\"$CHECK_LOG\"\nexit 0\n",
         "script.txt": "the change\n",
       })
 
@@ -115,7 +115,7 @@ describe("the queue run", { timeout: 180_000 }, () => {
 
       expect(run.exitCode, run.report).toBe(1)
       expect(await targetTip(repo), run.report).toBe(before)
-      // Whatever else ran, the branch's version of the gate did not.
+      // Whatever else ran, the branch's version of the check did not.
       expect(await checkLines(log), run.report).not.toContain("branch")
     })
   })
@@ -155,10 +155,10 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const { repo, origin } = await boundaryRepositoryWith({
       hooks: true,
       checks: [
-        { name: "atsubmit", on: "submit", run: `PROBE_NAME=submit PROBE_LOG=${log} sh gate.sh` },
-        { name: "atmerge", on: "merge", run: `PROBE_NAME=merge PROBE_LOG=${log} sh gate.sh` },
+        { name: "atsubmit", on: "submit", run: `PROBE_NAME=submit PROBE_LOG=${log} sh check.sh` },
+        { name: "atmerge", on: "merge", run: `PROBE_NAME=merge PROBE_LOG=${log} sh check.sh` },
       ],
-      files: { "gate.sh": PROBE_SCRIPT },
+      files: { "check.sh": PROBE_SCRIPT },
     })
     await submitCommitWriting(repo, "phases", { "branch.txt": "branch\n" }).catch((cause: unknown) => {
       throw new Error(
@@ -272,8 +272,8 @@ describe("the queue run", { timeout: 180_000 }, () => {
     const log = await temporaryLog("bases")
     const { repo } = await boundaryRepositoryWith({
       hooks: true,
-      checks: [{ name: "gate", run: `PROBE_NAME=gate PROBE_LOG=${log} PROBE_FAIL_IF_ALL='a.txt b.txt' sh gate.sh` }],
-      files: { "gate.sh": PROBE_SCRIPT },
+      checks: [{ name: "check", run: `PROBE_NAME=check PROBE_LOG=${log} PROBE_FAIL_IF_ALL='a.txt b.txt' sh check.sh` }],
+      files: { "check.sh": PROBE_SCRIPT },
     })
     const first = await submitCommitWriting(repo, "aside", { "a.txt": "a\n" })
     const second = await submitCommitWriting(repo, "bside", { "b.txt": "b\n" })
@@ -297,14 +297,14 @@ describe("the queue run", { timeout: 180_000 }, () => {
   })
 
   /**
-   * A built-in check: "config parses". The target's config is the gate, so a
+   * A built-in check: "config parses". The target's config is the check, so a
    * branch that breaks `.yrd.yml` is judged by a config that still works —
    * which is exactly why the built-in has to catch it before it merges.
    */
   it("a branch whose config cannot be parsed ends failed, and the queue keeps running", async () => {
     const log = await temporaryLog("unparseable")
     const { repo } = await boundaryRepositoryWith(passing(log))
-    const change = await submitCommitWriting(repo, "broken", { ".yrd.yml": "checks: [{gate: {run:\n" })
+    const change = await submitCommitWriting(repo, "broken", { ".yrd.yml": "checks: [{check: {run:\n" })
     const before = await targetTip(repo)
 
     const run = await queueRunOnce(repo)

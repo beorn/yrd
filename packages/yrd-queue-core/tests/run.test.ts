@@ -1222,17 +1222,17 @@ describe("a queue run", () => {
 
     const outcome = await queueRun({
       ...base,
-      checks: base.checks.map((check) => ({ ...check, scripts: ["gates/absent.sh"] })),
+      checks: base.checks.map((check) => ({ ...check, scripts: ["checks/absent.sh"] })),
     })
 
-    // A gate the queue cannot restore from the protected side is the queue's
+    // A check the queue cannot restore from the protected side is the queue's
     // own ground missing, never the submitter's: stuck, and nobody is billed.
     expect(outcome.exitCode).toBe(2)
     expect(outcome.stuck).toEqual(["task/one"])
     await fetchChanges(w)
     const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
-    expect(records[1]?.subject).toContain("gates/absent.sh")
+    expect(records[1]?.subject).toContain("checks/absent.sh")
     expect(messages(w)[0]).toMatchObject({ record: "stuck" })
     expect(String(logRecords(outcome).find((record) => record.kind === "message")?.text)).toContain("does not carry")
   })

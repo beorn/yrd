@@ -1302,13 +1302,13 @@ export function short(branch: string, head: string): string {
 
 /**
  * A check's scripts come from the target, never from the branch (§ The queue
- * run: gate authority lives on the protected side). The check declares them as
+ * run: check authority lives on the protected side). The check declares them as
  * `scripts:`, files or directories of the repository; each is restored from
  * the base commit into the worktree before the check runs, so a change that
- * rewrites the gate it is judged by is judged by the target's version all the
- * same. The merge commit, already made, keeps the branch's edit: it lands, and
+ * rewrites the check it is judged by is judged by the target's version all the
+ * same. The merge commit, already made, keeps the branch's edit: it merges, and
  * judges the next change. A declared path the base does not carry is loud,
- * because a gate that silently ran the branch's copy would be the hole itself.
+ * because a check that silently ran the branch's copy would be the hole itself.
  */
 async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<void> {
   const scripts = spec.scripts ?? []

@@ -1,7 +1,7 @@
 /**
  * The target's declaration of the queue, read from the target commit
  * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, The queue run:
- * gate authority lives on the protected side).
+ * check authority lives on the protected side).
  *
  * `.yrd.yml` is read with `git show <target>:.yrd.yml`, never from a branch's
  * worktree, so a change that edits its own checks is judged by the target's

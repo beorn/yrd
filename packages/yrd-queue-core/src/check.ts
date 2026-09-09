@@ -37,7 +37,7 @@ import type { JournalCheck } from "./log.ts"
 /**
  * A check as the target declares it — the whole declaration, in one type.
  * `runCheck` here reads what it runs; the queue run reads `on` and `scripts`
- * to decide when it runs and against which gate. Two names for one
+ * to decide when it runs and against which check. Two names for one
  * declaration, with config.ts importing the wider one back from run.ts, was a
  * module cycle and a standing invitation to add a key to only one of them.
  */

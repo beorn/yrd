@@ -756,7 +756,7 @@ function rawOutputField(capture = false): { rawOutput?: { stdout: RawOutputSnaps
  * between them.
  *
  * The head carries the child's setup and its FIRST failure; the tail carries
- * the summary and the exit, which is where a gate's verdict is written. Both
+ * the summary and the exit, which is where a check's verdict is written. Both
  * ends matter, so the budget is split evenly rather than spent on whichever
  * arrives first.
  */
