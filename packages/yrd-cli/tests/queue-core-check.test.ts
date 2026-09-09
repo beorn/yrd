@@ -13,7 +13,7 @@
  *           expects it to say what the queue will say
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -170,6 +170,31 @@ describe("yrd check judges HEAD, never the invoking tree", () => {
     // The worktree it made is gone, and so is the run's own directory under it.
     expect(existsSync(join(w.workdir, "worktrees"))).toBe(true)
     expect(readdirSync(join(w.workdir, "worktrees"))).toEqual([])
+  })
+
+  it("running the same check name twice keeps both logs; the first survives the second run untouched (24101)", async () => {
+    // Two invocations of `yrd check no-marker` are two runs, each minted its
+    // own run id (log.ts's runId, time plus a random tail), so each writes
+    // under a checks/<change>/<run id>/check/ directory of its own. This is
+    // the entry point @i/10-yrd/24101 was about — the queue side already had
+    // this proved in run.test.ts's "a check log is written once" — so the
+    // same invariant is proved here at `yrd check` itself: a second run of
+    // the same check name must not silently replace the first run's log.
+    const w = await world()
+
+    const first = await check(w)
+    const log1 = /\(log ([^)]+)\)/u.exec(first.out)?.[1] ?? ""
+    expect(existsSync(log1)).toBe(true)
+    const content1 = readFileSync(log1, "utf8")
+
+    const second = await check(w)
+    const log2 = /\(log ([^)]+)\)/u.exec(second.out)?.[1] ?? ""
+    expect(existsSync(log2)).toBe(true)
+
+    expect(log2).not.toBe(log1)
+    // The second run did not touch the first log's path or its bytes.
+    expect(existsSync(log1)).toBe(true)
+    expect(readFileSync(log1, "utf8")).toBe(content1)
   })
 
   it("an unknown check refuses before any worktree is built", async () => {
