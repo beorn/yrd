@@ -38,14 +38,16 @@
  */
 
 import { mkdirSync, readdirSync, rmSync } from "node:fs"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
 import {
   DIRECT_MERGE,
+  commitTrailers,
   endedKind,
   recordCommit,
   mergedBy,
+  mergedByRun,
   trailer,
   readRootChanges,
   cleanupRootChanges,
@@ -58,6 +60,7 @@ import {
   GitExit,
   gitEnvironment,
   gitIn,
+  isAncestor,
   type GitObservation,
   type ObservationNotice,
   mergeBase,
@@ -83,6 +86,7 @@ import {
   SetupFailed,
   type PlumbingLog,
   type PreparedWorktree,
+  type Reaped,
   type Worktree,
 } from "./worktree.ts"
 
@@ -151,6 +155,13 @@ export type Run = Readonly<{
   pause: PauseRecord | undefined
   /** The target OID this run successfully pushed, or its captured starting OID. */
   targetAfter: { sha: string }
+  /**
+   * Worktrees this run's own reap took down at its start, with what each stood
+   * at when git's registration still said so: empty until reaping runs, fixed
+   * for the rest of this run after. The one trace an interrupted merge leaves
+   * once its change ref cannot yet say so (@i/10-yrd/24344).
+   */
+  reaped: { list: readonly Reaped[] }
   /** What this queue calls itself wherever a stranger reads it: `<host>/<path>#<branch>`. */
   name: string
   /** The queue as this run read it: every change at the remote, and where each stood. */
@@ -218,8 +229,14 @@ export type Pushed =
 export type Steps = Readonly<{
   /** Once, at the top of the round. A value stops the round and becomes its outcome. */
   open: (run: Run) => Promise<Stopped | undefined>
-  /** One pass per entry before anything is judged. */
-  bookkeep: (run: Run, entry: QueueEntry) => Promise<void>
+  /**
+   * One pass per entry before anything is judged: retires a moved-off or
+   * deleted branch, catches ancestry up on a record, and ends an orphaned
+   * merge honestly rather than let it be redone. `"stuck"` when the last of
+   * those ended the entry stuck, so the loop stops the round the same way a
+   * stuck judge or merge does.
+   */
+  bookkeep: (run: Run, entry: QueueEntry) => Promise<"stuck" | undefined>
   prepare: (run: Run, entry: QueueEntry, commit: string, path: string, phase: Phase) => Promise<PreparedWorktree>
   judge: (run: Run, entry: QueueEntry) => Promise<Ended>
   merge: (run: Run, entry: QueueEntry) => Promise<Ended>
@@ -331,6 +348,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     options,
     pause: queue.pause,
     queue: queue.changes,
+    reaped: { list: [] },
     steps: composed(BASE),
     stop: (said) => {
       stopped = said
@@ -370,8 +388,16 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // (plan § Owed after M5; R8's stayed). One row per worktree, because a
   // directory that vanishes with nothing said about it is the silent kind of
   // cleanup nobody can audit.
-  for (const taken of await reapWorktrees(git, join(options.workdir, "worktrees"), log.id)) {
-    log.write({ kind: "reap", of: taken.of, path: taken.path, why: taken.why })
+  const reaped = await reapWorktrees(git, join(options.workdir, "worktrees"), log.id)
+  run.reaped.list = reaped
+  for (const taken of reaped) {
+    log.write({
+      kind: "reap",
+      of: taken.of,
+      path: taken.path,
+      why: taken.why,
+      ...(taken.head === undefined ? {} : { head: taken.head }),
+    })
   }
 
   // Did something go around the queue? Read before any record is written, so a
@@ -388,8 +414,15 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   if (stopped !== undefined) return finish(run, 0, { directMerges, failed, merged, stuck }, stopped)
 
   // Bookkeeping at the edges of the records first, so every reader below reads
-  // records and never reconciles.
-  for (const entry of entries) await run.steps.bookkeep(run, entry)
+  // records and never reconciles. A bookkeeping pass can itself end an entry
+  // stuck (an orphaned merge recovery could not trust, @i/10-yrd/24344), and
+  // that stops the round exactly like a stuck judge or merge does.
+  for (const entry of entries) {
+    if ((await run.steps.bookkeep(run, entry)) === "stuck") {
+      stuck.push(entry.change.branch)
+      return finish(run, 2, { directMerges, failed, merged, stuck })
+    }
+  }
 
   // On-submit: every queued change, oldest first, in a fresh worktree of its
   // head. A stuck change kept its place, and this run takes it again from
@@ -481,11 +514,15 @@ function open(): Promise<Stopped | undefined> {
  * One pass over one entry before anything is judged: a branch that is gone or
  * moved off a head ends that head's change failed with the reason and no
  * message (ruling B3); a head the target already carries gets its merged
- * record, so the tip catches up with ancestry.
+ * record, so the tip catches up with ancestry; and a "checked" change whose
+ * merge candidate was composed by a run that died before recording it is
+ * settled or ended honestly, never left for a blind retry to redo
+ * (@i/10-yrd/24344).
  */
-async function bookkeep(run: Run, entry: QueueEntry): Promise<void> {
+async function bookkeep(run: Run, entry: QueueEntry): Promise<"stuck" | undefined> {
   await retire(run, entry)
   await catchUp(run, entry)
+  return recoverOrphanedMerge(run, entry)
 }
 
 /**
@@ -1276,16 +1313,24 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
     .filter((sha) => sha !== "")
   const merge = row?.[0] ?? head
   const base = row?.[1] ?? head
+  // The landed merge's own trailer names who made it when it names a yrd
+  // queue run: this run only reused it, and the record must say who actually
+  // did (@i/10-yrd/24344) — `direct` is for a merge the queue never composed,
+  // never for one of its own that only failed to settle.
+  const attribution = merge === head ? DIRECT_MERGE : await attributedMergedBy(run, merge)
   const mergedRecord = await writeRecord(
     run,
     {
       change,
       kind: "merged",
-      subject: `merged around the queue at ${merge.slice(0, 12)}`,
+      subject:
+        attribution === DIRECT_MERGE
+          ? `merged around the queue at ${merge.slice(0, 12)}`
+          : `merged as ${merge.slice(0, 12)}, recovered after the run that made it died before recording it`,
       trailers: [
         ["Merge", merge],
         ["Base", base],
-        ["Merged-By", DIRECT_MERGE],
+        ["Merged-By", attribution],
       ],
     },
     tip.sha,
@@ -1293,6 +1338,115 @@ async function catchUp(run: Run, entry: QueueEntry): Promise<void> {
   if (mergedRecord === undefined) return
   run.log.write({ branch, decision: "merged", head, kind: "change", reason: "already on the target" })
   await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
+}
+
+/**
+ * `Merged-By:` for a catch-up record: the landed merge commit's own trailer
+ * when it names a yrd queue run, never the constant `direct` for a merge this
+ * queue itself composed (`mergeMessage`) and then failed to settle. A merge
+ * with no such trailer, or one naming something `mergedByRun` cannot parse
+ * back into a run id, is read exactly as before: it went around the queue.
+ */
+async function attributedMergedBy(run: Run, merge: string): Promise<string> {
+  const block = await run.git(["log", "-1", "--format=%(trailers:only,unfold)", merge])
+  const found = commitTrailers(block).find(([name]) => name === "Merged-By")?.[1]
+  return found !== undefined && mergedByRun(found) !== undefined ? found : DIRECT_MERGE
+}
+
+/**
+ * The GUARD half of @i/10-yrd/24344: a run that composed and checked a merge
+ * at the "merge" phase and died before its settlement record leaves the
+ * change "checked" with nothing on its ref to say a merge was ever
+ * attempted. Unrecovered, the very next run would call `merge` again on the
+ * same head — redoing a git-super merge whose gitlinks it may already have
+ * raised once. Detected from this run's own reap (`run.reaped.list`), the
+ * change never gets a second composition: it ends stuck with the orphan's
+ * own sha and a verdict this run actually checked (the REDESIGN half,
+ * `orphanedMergeCandidate`'s caller below), never the generic crash incident
+ * a blind retry would earn instead.
+ *
+ * Gated on `entry.reading.state === "checked"`, which `readChange` already
+ * refuses whenever ancestry says the head is on the target, or the branch
+ * moved on or vanished — `catchUp` and `retire`, just above, own those, and
+ * neither ever leaves a "checked" reading behind. So whatever this finds is
+ * never the entry either of them just settled.
+ */
+async function recoverOrphanedMerge(run: Run, entry: QueueEntry): Promise<"stuck" | undefined> {
+  if (entry.reading.state !== "checked") return undefined
+  const found = await orphanedMergeCandidate(run, entry)
+  if (found === undefined) return undefined
+  const { branch } = entry.change
+  const target = run.options.target.branch
+  const absorbed = await isAncestor(run.git, found.commit, run.targetSha)
+  await run.steps.end(
+    run,
+    entry,
+    "stuck",
+    stuckWrite(run, {
+      code: "yrd-merge-orphaned",
+      next: absorbed
+        ? `${found.commit.slice(0, 12)} is already an ancestor of ${target} some other way; confirm ${branch} is truly done, close it by hand, then run yrd queue run`
+        : `read ${found.foundAt} and confirm ${found.commit.slice(0, 12)} raised no submodule gitlink that ${target} does not also carry yet; then either push it onto ${target} by hand or discard it, and run yrd queue run — the next run recomposes ${branch} from scratch otherwise`,
+      subject: `${branch}: the run that composed merge ${found.commit.slice(0, 12)} died before recording it; ${absorbed ? "absorbed into" : "not absorbed into"} ${target}`,
+      trailers: [
+        ["Orphan", found.commit],
+        ["Absorbed", absorbed ? "yes" : "no"],
+      ],
+      via: `merge-phase worktree ${found.foundAt}, left standing by a run that died before its settlement record`,
+    }),
+  )
+  return "stuck"
+}
+
+/**
+ * One dead run's leftover on-merge worktree that names `entry`'s exact head
+ * as a parent — `composeCandidate`'s own `prepare` checks the merge commit
+ * out at exactly `<run>/merge/<head-12>`, and nothing else ever creates a
+ * worktree there. Parentage is verified rather than trusted: a stale worktree
+ * from an earlier submission at a different head, or one this run cannot
+ * even read any more, is left alone with why, never guessed into this
+ * change's evidence (never redo the merge; never guess).
+ */
+async function orphanedMergeCandidate(
+  run: Run,
+  entry: QueueEntry,
+): Promise<Readonly<{ commit: string; foundAt: string }> | undefined> {
+  const { branch, head } = entry.change
+  const prefix = head.slice(0, 12)
+  const taken = run.reaped.list.find(
+    (candidate) =>
+      candidate.head !== undefined &&
+      basename(candidate.path) === prefix &&
+      basename(dirname(candidate.path)) === "merge",
+  )
+  const commit = taken?.head
+  if (taken === undefined || commit === undefined) return undefined
+  let parents: readonly string[]
+  try {
+    parents = (await run.git(["show", "-s", "--format=%P", commit])).trim().split(/\s+/u).filter((sha) => sha !== "")
+  } catch (error) {
+    run.log.write({
+      branch,
+      candidate: commit,
+      foundAt: taken.path,
+      head,
+      kind: "orphan",
+      why: `could not read ${commit.slice(0, 12)}: ${error instanceof Error ? error.message : String(error)}`,
+    })
+    return undefined
+  }
+  if (!parents.includes(head)) {
+    run.log.write({
+      branch,
+      candidate: commit,
+      foundAt: taken.path,
+      head,
+      kind: "orphan",
+      why: `${commit.slice(0, 12)} carries ${parents.length === 0 ? "no parents" : `parents ${parents.map((sha) => sha.slice(0, 12)).join(", ")}`}, not ${prefix}`,
+    })
+    return undefined
+  }
+  return { commit, foundAt: taken.path }
 }
 
 /** A change as a person reads it: the branch and twelve characters of the head, the trailer's spelling shortened. */

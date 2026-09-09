@@ -120,6 +120,13 @@ export type Reaped = Readonly<{
   path: string
   /** Why that run is not alive, in plain words. */
   why: string
+  /**
+   * The commit this worktree stood at, from git's own registration, read
+   * before the directory went. The one trace an interrupted merge leaves once
+   * its change ref cannot yet say so (@i/10-yrd/24344): absent only when git's
+   * own listing carried none, which a queue-made worktree never leaves unborn.
+   */
+  head?: string
 }>
 
 /**
@@ -156,12 +163,12 @@ export async function reapWorktrees(git: Git, root: string, thisRun: string): Pr
   }
   const reaped: Reaped[] = []
   if (dead.size > 0) {
-    for (const { path } of await registeredWorktrees(git)) {
+    for (const { path, head } of await registeredWorktrees(git)) {
       const of = runOwning(root, path)
       const why = of === undefined ? undefined : dead.get(of)
       if (of === undefined || why === undefined) continue
       rmSync(path, { force: true, recursive: true })
-      reaped.push({ of, path, why })
+      reaped.push({ of, path, why, ...(head === undefined ? {} : { head }) })
     }
     for (const run of dead.keys()) rmSync(join(root, run), { force: true, recursive: true })
   }
