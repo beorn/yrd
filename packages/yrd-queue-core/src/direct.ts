@@ -53,7 +53,7 @@ export type DirectMerge = Readonly<{
   subject: string
   /** When it was committed. */
   at: Date
-  /** The gitlink paths it changed against its first parent: a gitlink moved around the queue is the bypass class candidate settling never sees. */
+  /** The gitlink paths it changed against its first parent: a gitlink moved around the queue is the direct class candidate settling never sees. */
   gitlinks: readonly string[]
   /** Why it is not the queue's, in plain words. */
   why: string

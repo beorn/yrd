@@ -529,7 +529,7 @@ describe("a queue run", () => {
     const base = await w.options({ exit: 0 })
     await w.git(["remote", "set-url", "origin", rootUrl])
     writeFileSync(join(child, "child.txt"), "after\n")
-    await childGit(["commit", "--quiet", "-am", "child bypassed the queue"])
+    await childGit(["commit", "--quiet", "-am", "child committed directly to the queue"])
     const tip = (await childGit(["rev-parse", "HEAD"])).trim()
     const outcome = await queueRun({
       ...base,
