@@ -279,7 +279,7 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
     })
 
     for (const [body, expected] of [
-      [undefined, `running; nothing written yet at ${log}`],
+      [undefined, `running, but no log at ${log} on this machine; the queue writes its logs where it runs`],
       // A check's log is created before its child starts, so an empty file is
       // what a running check ordinarily looks like in its first seconds — and
       // it has to still read as running, not as a check that said nothing.
@@ -292,7 +292,10 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
       expect(shown.stdout()).toContain("verify running")
       expect(shown.stdout()).toContain(expected)
       if (body === undefined || body === "") expect(shown.stdout()).not.toContain(`      log ${log}\n`)
-      else expect(shown.stdout()).not.toContain("nothing written yet")
+      // "nothing written yet" is gone from the source with this change, so
+      // asserting its absence could no longer fail. The guard it stood for is
+      // the live one: a log the pane can read must not also be reported missing.
+      else expect(shown.stdout()).not.toContain("no log at")
     }
   })
 

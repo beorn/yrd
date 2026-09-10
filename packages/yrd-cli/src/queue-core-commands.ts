@@ -1396,7 +1396,11 @@ function readOutput(check: CheckView): CheckPanel {
     const why =
       (error as NodeJS.ErrnoException).code === "ENOENT"
         ? check.state === "running"
-          ? `running; nothing written yet at ${check.log}`
+          ? // A check's log is created before its child starts, so a running
+            // check's log is never merely unwritten: it exists on the machine
+            // the queue runs on. Missing HERE means this is not that machine,
+            // which is the same fact the ended arm below reports.
+            `running, but no log at ${check.log} on this machine; the queue writes its logs where it runs`
           : `no log at ${check.log} on this machine; the queue writes its logs where it runs`
         : `the log at ${check.log} could not be read: ${error instanceof Error ? error.message : String(error)}`
     return { ...check, why }
