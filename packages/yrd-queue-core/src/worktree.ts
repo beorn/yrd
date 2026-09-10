@@ -26,11 +26,24 @@ import { join, relative, resolve, sep } from "node:path"
 import type { Process } from "@yrd/process"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
+import type { LogWrite } from "./log.ts"
+import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
 import type { Git } from "./records.ts"
 import { gitIn, mergeBase, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
-/** The logger git-super narrates to; the queue hands one over only at trace. */
-export type PlumbingLog = Readonly<{ trace?: (message: string, detail: Readonly<Record<string, unknown>>) => void }>
+/**
+ * What the worktree plumbing narrates to.
+ *
+ * `trace` is the git transcript and the queue hands one over only at trace.
+ * `journal` is not: a store the reference had to create, and a compose that had
+ * to go to the network for a pin, are facts about the queue's own ground that
+ * an operator must be able to read after the fact, so they are records in the
+ * run's journal rather than lines in a log nobody turned on.
+ */
+export type PlumbingLog = Readonly<{
+  trace?: (message: string, detail: Readonly<Record<string, unknown>>) => void
+  journal?: (record: LogWrite) => void
+}>
 
 export type Worktree = Readonly<{
   /** The directory the commit is checked out in. */
@@ -41,32 +54,76 @@ export type Worktree = Readonly<{
   remove(): Promise<void>
 }>
 
+/** What a fresh worktree needs beyond the repository and the commit: how to run Git elsewhere, and where to narrate. */
+export type FreshWorktree = Readonly<{
+  plumbing?: PlumbingLog
+  /** The command's fixed selection and invocation evidence, for the reference stores as for the tree. */
+  selection?: GitSelection
+  gitOptions?: GitInvocationOptions
+  process?: Process
+  env?: NodeJS.ProcessEnv
+}>
+
 /**
  * Check `commit` out at `path` as a detached worktree of `repo`, with every
  * gitlink materialized at the commit's own gitlink. A gitlink that cannot be
  * materialized throws, because a check run against a half-materialized tree
  * would judge something no commit describes.
+ *
+ * The reference is made self-contained FIRST, for this exact commit
+ * (reference.ts). It has to happen here rather than once at the queue's start:
+ * a change that adds a submodule declares it at its own commit and nowhere
+ * else, so a reference populated from the queue's HEAD would have no store for
+ * precisely the change that needs one. The ordinary call finds every store
+ * already there and creates nothing.
  */
 export async function freshWorktree(
   git: Git,
   repo: string,
   commit: string,
   path: string,
-  plumbing?: PlumbingLog,
+  options: FreshWorktree = {},
 ): Promise<Worktree> {
+  const plumbing = options.plumbing
   // Query the selected commit, not the reference checkout's working tree.
   // An invalid commit makes ls-tree fail; only empty output means absence.
   const modules = await git(["ls-tree", commit, "--", ".gitmodules"])
   if (modules.trim() === "") {
     await git(["worktree", "add", "--quiet", "--detach", path, commit])
   } else {
+    const gitAt = (cwd: string): Git =>
+      gitIn(cwd, options.process, options.selection, {
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...options.gitOptions,
+      })
+    await populateReferenceStores({
+      commit,
+      gitIn: gitAt,
+      populated: (store) => {
+        plumbing?.journal?.({ head: commit, kind: "reference", ms: store.ms, path: store.path, sha: store.sha })
+      },
+      repo,
+    })
     let output: string
     try {
       output = await git(["super", "--json", "worktree", "add", path, commit, "--reference", repo])
     } catch (error) {
+      const said = error instanceof Error ? error.message : String(error)
+      // The population above ran for THIS commit, so reaching git-super's own
+      // absent-store refusal means the reference lost a store, or gained a
+      // gitlink, between the two. Same condition, same remedy, so the same
+      // ending — never the generic crash one, which would name the change and
+      // not the ground it could not be judged on.
+      if (said.includes(GIT_SUPER_ABSENT_STORE)) {
+        throw new ReferenceUnpopulated(
+          repo,
+          undefined,
+          `git super worktree add refused for ${commit} after the reference was populated:\n${said}`,
+        )
+      }
       throw new Error(
         `worktree ${path} at ${commit} requires git-super because that commit records .gitmodules; ` +
-          `git super worktree add failed: ${error instanceof Error ? error.message : String(error)}. ` +
+          `git super worktree add failed: ${said}. ` +
           "Ensure git-super is available on PATH and resolve the reported condition before retrying; no plain-git fallback was attempted",
         { cause: error },
       )
@@ -84,6 +141,26 @@ export async function freshWorktree(
       throw new Error(
         `malformed git-super result for worktree ${path} at ${commit}: no complete matching materialization; inspect git worktree list before retrying`,
       )
+    }
+    // A COMPOSE THAT SUCCEEDED IS NOT THE SAME AS A COMPOSE THAT BORROWED. With
+    // the reference populated every gitlink should come off local disk, so a
+    // fetch here says a store is behind and an absent one says a level had no
+    // reference at all. Neither stops the run — the tree is correct and the
+    // judgement stands — and both are exactly the signal that read as ordinary
+    // for four hours on 2026-09-09 while fifteen submodules cloned per compose.
+    const degraded = degradedGitlinks(result)
+    if (degraded !== undefined) {
+      plumbing?.journal?.({
+        absent: degraded.absent,
+        borrowed: degraded.borrowed,
+        considered: degraded.considered,
+        fetched: degraded.fetched,
+        head: commit,
+        kind: "warning",
+        paths: degraded.paths,
+        reason: "reference-not-borrowed",
+        reference: repo,
+      })
     }
     plumbing?.trace?.("materialized worktree", { commit, path, result })
   }
@@ -427,7 +504,13 @@ export async function prepareWorktree(
   path: string,
   options: PrepareWorktree,
 ): Promise<PreparedWorktree> {
-  const worktree = await freshWorktree(git, repo, commit, path, options.plumbing)
+  const worktree = await freshWorktree(git, repo, commit, path, {
+    ...(options.env === undefined ? {} : { env: options.env }),
+    ...(options.gitOptions === undefined ? {} : { gitOptions: options.gitOptions }),
+    ...(options.plumbing === undefined ? {} : { plumbing: options.plumbing }),
+    ...(options.process === undefined ? {} : { process: options.process }),
+    ...(options.selection === undefined ? {} : { selection: options.selection }),
+  })
   try {
     const tree = await checkedTree(worktree.path, options.targetSha, options.process, options.selection, {
       ...(options.env === undefined ? {} : { env: options.env }),
@@ -459,6 +542,36 @@ async function removeWorktree(git: Git, path: string): Promise<void> {
   // git is told to forget the entry afterwards.
   rmSync(path, { force: true, recursive: true })
   await git(["worktree", "prune"])
+}
+
+/**
+ * What a successful materialization did NOT borrow, or undefined when it
+ * borrowed everything.
+ *
+ * Read only after {@link materializedWorktree} has admitted the result, so the
+ * four counts are known-good integers by then and only the path arrays are
+ * checked here. They are optional on purpose: a git-super that predates them
+ * reports counts alone, and a warning that names how many is still worth
+ * writing — it is the version that names WHICH that costs nothing to use when
+ * it is there.
+ */
+function degradedGitlinks(
+  value: unknown,
+):
+  | Readonly<{ absent: number; borrowed: number; considered: number; fetched: number; paths: readonly string[] }>
+  | undefined {
+  const counts = (value as { gitlinks?: Record<string, unknown> }).gitlinks
+  if (counts === undefined) return undefined
+  const { absent, borrowed, considered, fetched } = counts as Record<string, number>
+  if (absent === undefined || borrowed === undefined || considered === undefined || fetched === undefined) {
+    return undefined
+  }
+  if (fetched === 0 && absent === 0) return undefined
+  const named = [counts["fetchedPaths"], counts["absentPaths"]]
+    .filter((list): list is readonly string[] => Array.isArray(list))
+    .flat()
+    .filter((entry): entry is string => typeof entry === "string")
+  return { absent, borrowed, considered, fetched, paths: named }
 }
 
 /** Validate the external command's success claim before admitting its tree. */

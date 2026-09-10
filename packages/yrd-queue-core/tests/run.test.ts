@@ -2349,7 +2349,11 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
     // [main tip, otherHead]. Placed at task/one's own naming slot — a stale
     // worktree left there by an entirely different head, never redone as if
     // it were task/one's own merge.
-    const wrongMerge = await composeMergeCandidate(w, otherHead, `merge shadow/other@${otherHead.slice(0, 12)} into main`)
+    const wrongMerge = await composeMergeCandidate(
+      w,
+      otherHead,
+      `merge shadow/other@${otherHead.slice(0, 12)} into main`,
+    )
     await deadMergeWorktree(w, "q-dead-merge-wrong-parent", head, wrongMerge, exitedPid())
 
     const outcome = await queueRun(await w.options({ exit: 0 }))

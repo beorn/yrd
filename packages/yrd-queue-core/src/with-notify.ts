@@ -420,7 +420,7 @@ function notificationEnvironment(run: Run): Promise<Readonly<{ cwd: string; runn
         targetSha: run.targetSha,
         process: runner,
         env: run.options.env,
-        plumbing: run.options.plumbing,
+        plumbing: run.plumbing,
         ...(run.options.setup === undefined
           ? {}
           : {
