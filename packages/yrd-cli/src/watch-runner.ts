@@ -74,13 +74,20 @@ export function readRunnerFacts(workdir: string): RunnerFacts {
   }
   const path = join(journalDir, `${id}.jsonl`)
   const lastWriteAt = statSync(path).mtime
-  const header = readRunHeader(path)
+  // Liveness BEFORE the header read. A run that is still executing has
+  // legitimately not written its header yet: the header carries `queue`, which
+  // the writer can only compute after Git reads that are themselves journaled
+  // (yrd-queue-core/src/run.ts), so a Git preamble always precedes it. Reading
+  // the header first turned "not written yet" into "malformed journal", and
+  // `latest` selects the NEWEST journal — the one most likely to be in flight.
   const pidPath = join(workdir, "worktrees", id, RUN_PID)
   const pid = existsSync(pidPath) ? readPid(pidPath) : undefined
+  const alive = pid !== undefined && running(pid)
+  const header = readRunHeader(path, alive)
   return {
     journalDir,
     latest: {
-      alive: pid !== undefined && running(pid),
+      alive,
       id,
       lastWriteAt,
       startedAt,
@@ -90,8 +97,17 @@ export function readRunnerFacts(workdir: string): RunnerFacts {
   }
 }
 
-/** Read the run header after any Git evidence written while resolving its queue. */
-function readRunHeader(path: string): Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks"> {
+/**
+ * Read the run header after any Git evidence written while resolving its queue.
+ *
+ * `alive` says whether the run is executing RIGHT NOW. A live run that has not
+ * reached its header yet is IN PROGRESS, not malformed, and returns no header
+ * fields — every one of them is optional on `RunnerRun` for exactly this case.
+ * A run that is NOT alive and still has no header is a real defect and throws,
+ * as loudly as before: the guard keeps its teeth, it just stops mistaking
+ * "not yet" for "absent". Every malformed-record refusal below is unchanged.
+ */
+function readRunHeader(path: string, alive: boolean): Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks"> {
   let text: string
   try {
     text = readFileSync(path, "utf8")
@@ -133,7 +149,11 @@ function readRunHeader(path: string): Pick<RunnerRun, "target" | "gitlink" | "qu
         : {}),
     }
   }
-  throw new Error(`run journal ${path}: required run header was not found`)
+  if (alive) return {}
+  throw new Error(
+    `run journal ${path}: required run header was not found, and the run is not executing — ` +
+      "a finished run must have written its header after its Git preamble",
+  )
 }
 
 function readPid(path: string): number | undefined {

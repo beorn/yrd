@@ -115,6 +115,32 @@ describe("readRunnerFacts", () => {
     expect(() => readRunnerFacts(workdir)).toThrow(`run journal ${path}`)
   })
 
+  /**
+   * @failure A close verb read the NEWEST journal while its run was still
+   *          executing, before the run header had been appended, and reported
+   *          "required run header was not found" — a live run reading as a
+   *          malformed one. The header cannot come first: it carries `queue`,
+   *          which the writer computes only after Git reads that are themselves
+   *          journaled, so a Git preamble always precedes it (24478).
+   */
+  it("reads a live run that has not reached its header yet as in progress, not malformed", () => {
+    const facts = readRunnerFacts(workdirWith({ ageMs: 1_000, gitBeforeHeader: true, header: "", pid: process.pid }))
+    expect(facts.absent).toBeUndefined()
+    expect(facts.latest?.alive).toBe(true)
+    // No header fields: the run has not written them yet, and every one of them
+    // is optional precisely so this state is representable.
+    expect(facts.latest?.target).toBeUndefined()
+    expect(facts.latest?.queue).toBeUndefined()
+    expect(facts.latest?.gitlink).toBeUndefined()
+    expect(facts.latest?.checks).toBeUndefined()
+  })
+
+  it("still refuses loudly when a run that is NOT executing has no header", () => {
+    expect(() => readRunnerFacts(workdirWith({ ageMs: 1_000, gitBeforeHeader: true, header: "" }))).toThrow(
+      /required run header was not found, and the run is not executing/u,
+    )
+  })
+
   it("refuses malformed and unreadable run pid files instead of calling the runner idle", () => {
     const malformed = workdirWith({ ageMs: 60_000, pidText: "42junk\n" })
     expect(() => readRunnerFacts(malformed)).toThrow(/run pid file .* positive safe integer/u)
