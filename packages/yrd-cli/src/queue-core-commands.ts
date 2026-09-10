@@ -497,7 +497,7 @@ export async function coreQueueCommand(
         if (after !== undefined) return after
         if (stopped()) return 0
         await new Promise((resolve) => {
-          setTimeout(resolve, interval)
+          setTimeout(resolve, sleepAfter(outcome, interval))
         })
         if (stopped()) return 0
       }
@@ -1193,6 +1193,31 @@ function stuckCureLines(outcome: QueueRunOutcome): readonly string[] {
     }
     return `stuck ${branch}: ${incidentLine(incident)}`
   })
+}
+
+/**
+ * The shortest sleep a round that still has work to do may be given: enough
+ * that a round making no progress — a transient wait re-reading the same line
+ * — cannot become a hot loop, and small enough to be nothing beside a merge.
+ */
+export const READY_SLEEP_MS = 1000
+
+/**
+ * How long the service waits after one round.
+ *
+ * The interval is an IDLE cadence: how often an empty line is looked at. It was
+ * being spent between two ready merges as well, so a change that arrived behind
+ * another waited the full interval for no reason — at `--interval 120`, two
+ * wasted minutes per merge, on top of the check that judged it.
+ *
+ * A round that merged, or that left checked changes it did not act on (the
+ * queue merges the first checked change and no more), has more to do NOW, and
+ * goes again at {@link READY_SLEEP_MS}. Never longer than the interval, so a
+ * short interval stays a short interval.
+ */
+export function sleepAfter(outcome: QueueRunOutcome, intervalMs: number): number {
+  const ready = outcome.merged.length > 0 || outcome.checkedWaiting > 0
+  return ready ? Math.min(intervalMs, READY_SLEEP_MS) : intervalMs
 }
 
 /** One printed round of the text watch, with `updated HH:MM:SS` under the queue's name (item 30). */

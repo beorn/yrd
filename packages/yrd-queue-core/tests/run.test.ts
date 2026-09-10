@@ -744,6 +744,11 @@ describe("a queue run", () => {
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/one"])
     expect(outcome.directMerges).toEqual([])
+    // The queue merges the FIRST checked change and no more (ruling D4), so
+    // task/two is ready and waiting the moment this round ends. A service that
+    // cannot read that spends its idle cadence between two ready merges, which
+    // at `--interval 120` was two minutes per change for nothing.
+    expect(outcome.checkedWaiting).toBe(1)
     // Two changes in this SAME run and phase must not share an artifact.
     // This preserves the class witness removed with the old attribution suite.
     const oneLog = checkLogFor(outcome, "task/one", "submit", "verify")
