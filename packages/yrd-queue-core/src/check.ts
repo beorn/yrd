@@ -9,7 +9,10 @@
  * past its bound, or one that exits with any other code could not judge either,
  * and that is the queue's fault until proven otherwise, so it is stuck too.
  * Every result names the check, its exit, its duration and its log path,
- * because a result nobody can read is not a result.
+ * because a result nobody can read is not a result. That log is readable while
+ * the check is still running: it is created before the child starts and grows
+ * as the check writes, so a long check can be WATCHED rather than only
+ * autopsied ({@link openCheckLog}).
  *
  * An exit code is only a verdict when the driver got a clean reading. When
  * `@yrd/process` reports a stall, a descendant that outlived the check holding
@@ -29,7 +32,7 @@
  * `setup:` included.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs"
+import { closeSync, mkdirSync, openSync, writeSync } from "node:fs"
 import { join } from "node:path"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import type { JournalCheck } from "./log.ts"
@@ -284,6 +287,88 @@ function resultOfExit(exit: string | undefined): CheckRun["result"] {
   return exit === "0" ? "pass" : exit === "1" ? "fail" : "stuck"
 }
 
+/**
+ * One check's log, open from before its child starts until after it settles.
+ *
+ * The whole body used to be written once, after the run returned, so a check's
+ * log did not EXIST for the check's entire life and `yrd queue show` had one
+ * sentence for a fourteen-minute run: "running; nothing written yet". A check
+ * nobody can watch cannot be told apart from a wedged one, so the bytes go to
+ * the file as they arrive.
+ *
+ * Create-only stays create-only and moves EARLIER. The `wx` open happens before
+ * the child is spawned, so two programs writing one path still refuse loudly,
+ * with the same words — and the loser now refuses without running its check at
+ * all, rather than after spending its bound on one.
+ */
+type CheckLog = Readonly<{
+  /** Append bytes, in the order they were observed. */
+  append: (chunk: Uint8Array) => void
+  /** One bracketed line of yrd's own, on a line of its own. */
+  note: (text: string) => void
+  /** Stop writing, and say whether the file can be trusted. */
+  close: () => string | undefined
+}>
+
+function openCheckLog(path: string): CheckLog {
+  let file: number
+  try {
+    file = openSync(path, "wx")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+    throw new Error(`a check log already exists at ${path}: two checks wrote the same path instead of one each`, {
+      cause: error,
+    })
+  }
+  let written = 0
+  let failure: string | undefined
+  const encoder = new TextEncoder()
+  const append = (chunk: Uint8Array): void => {
+    // The FIRST failure is the one that explains where the file stops; every
+    // later chunk against the same broken descriptor would only bury it.
+    if (failure !== undefined) return
+    try {
+      let offset = 0
+      while (offset < chunk.byteLength) {
+        // A short write is ordinary, and dropping its remainder in silence is a
+        // log missing its middle — so loop. A write that moves nothing cannot be
+        // retried into progress, so it is an error here rather than a spin.
+        const count = writeSync(file, chunk, offset, chunk.byteLength - offset)
+        if (count <= 0) throw new Error(`wrote ${String(count)} of ${String(chunk.byteLength - offset)} bytes`)
+        offset += count
+      }
+      written += chunk.byteLength
+    } catch (error) {
+      failure = `its log at ${path} could not be written after ${String(written)} bytes: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+  return {
+    append,
+    note: (text) => {
+      append(encoder.encode(`\n[yrd: ${text}]\n`))
+    },
+    close: () => {
+      if (failure !== undefined) {
+        try {
+          writeSync(file, encoder.encode(`\n[yrd: this log is INCOMPLETE — ${failure}]\n`))
+        } catch {
+          // Best effort, and not a swallow: the descriptor that just failed may
+          // well fail again, and the durable, loud copy of this same failure is
+          // the check's own stuck verdict and `why`, which the caller returns.
+        }
+      }
+      try {
+        closeSync(file)
+      } catch (error) {
+        // A deferred flush fails here or nowhere, and it means the tail of the
+        // file never landed.
+        failure ??= `its log at ${path} could not be closed: ${error instanceof Error ? error.message : String(error)}`
+      }
+      return failure
+    },
+  }
+}
+
 export async function runCheck(run: RunCheck): Promise<CheckResult> {
   mkdirSync(run.logDir, { recursive: true })
   mkdirSync(run.tmpdir, { recursive: true })
@@ -308,30 +393,56 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   env.YRD_CANDIDATE_SHA = run.tree.candidate
   env.YRD_BASE_SHA = run.tree.base
   const timeoutMs = run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
+  // Create-only, always, and open before the child exists. Every caller writes
+  // under a directory of its own — the queue run's is keyed by change, run and
+  // phase, `yrd check`'s by the instant it was invoked — so a path that already
+  // exists is two programs writing one log, and the second replacing the
+  // first's bytes in silence is the failure this refuses.
+  const logFile = openCheckLog(log)
   const started = Date.now()
-  const result = await runner.run({ argv: shellCommand(run.spec.run), cwd: run.cwd, env, timeoutMs })
-  const durationMs = Date.now() - started
-  const body = `${result.stdout}${result.stderr === "" ? "" : `\n--- stderr ---\n${result.stderr}`}`
-  // Create-only, always. Every caller now writes under a directory of its own
-  // — the queue run's is keyed by change, run and phase, `yrd check`'s by the
-  // instant it was invoked — so a path that already exists is two programs
-  // writing one log, and the second replacing the first's bytes in silence is
-  // the failure this refuses.
+  let result: ProcessResult
   try {
-    writeFileSync(log, body, { flag: "wx" })
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
-    throw new Error(`a check log already exists at ${log}: two checks wrote the same path instead of one each`, {
-      cause: error,
+    result = await runner.run({
+      argv: shellCommand(run.spec.run),
+      cwd: run.cwd,
+      env,
+      timeoutMs,
+      // stdout and stderr, interleaved in arrival order, the way a terminal
+      // shows them. The old body separated them under a `--- stderr ---` rule,
+      // which only a whole-file writer can do: it needs both streams complete
+      // before it can write the first byte of either, and that wait was the
+      // defect. Nothing read the rule (2026-09-09 sweep of this repository).
+      onOutput: ({ chunk }) => {
+        logFile.append(chunk)
+      },
     })
+  } catch (error) {
+    logFile.close()
+    throw error
   }
+  const durationMs = Date.now() - started
+  // The capture budget drops the MIDDLE of an over-long stream from the text
+  // `@yrd/process` returns, while the observer this file is written from
+  // receives every byte it read (readBounded). So the file and `result.stdout`
+  // can disagree, and the file says which of the two is short instead of
+  // letting a reader assume they match.
+  for (const dropped of result.outputTruncation ?? []) {
+    logFile.note(
+      `${dropped.stream} ran past the ${String(dropped.limitBytes)}-byte capture budget: ` +
+        `${String(dropped.droppedBytes)} of ${String(dropped.totalBytes)} bytes are missing from the text the queue read, ` +
+        `and every byte its capture observed was streamed to this file`,
+    )
+  }
+  const logFailure = logFile.close()
 
   const base = { durationMs, log, name: run.spec.name }
+  /** A stuck reason, carrying a log that could not be written alongside it. */
+  const why = (reason: string): string => (logFailure === undefined ? reason : `${reason}; ${logFailure}`)
   if (result.timedOut) {
-    return { ...base, exit: "timeout", result: "stuck", why: `ran past its bound of ${timeoutMs} ms` }
+    return { ...base, exit: "timeout", result: "stuck", why: why(`ran past its bound of ${timeoutMs} ms`) }
   }
   if (result.signal !== null) {
-    return { ...base, exit: "signal", result: "stuck", why: `ended by ${result.signal}` }
+    return { ...base, exit: "signal", result: "stuck", why: why(`ended by ${result.signal}`) }
   }
   // The driver did not get a clean reading of this run, so nothing it read is a
   // verdict: a child that exits 0 while a descendant still holds its output pipe
@@ -339,7 +450,13 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   // to be classified pass. Whatever the condition, it is the queue's ground and
   // never the submitter's fault.
   const unclean = unsettled(result)
-  if (unclean !== undefined) return { ...base, exit: "unsettled", result: "stuck", why: unclean }
+  if (unclean !== undefined) return { ...base, exit: "unsettled", result: "stuck", why: why(unclean) }
+  // A log that could not be written is a reading the driver did not get, the
+  // same as a dropped capture above: the exit code can be a clean 0 while the
+  // only durable evidence for it stops mid-stream. Returning that as a pass is
+  // exactly the partial log that reads as complete, so it is stuck, and it is
+  // the queue's ground rather than the submitter's.
+  if (logFailure !== undefined) return { ...base, exit: "unsettled", result: "stuck", why: logFailure }
   // 127 is the shell's own word for a command it could not find: the check is
   // not there, which is the queue's fault, not the submitter's.
   if (result.exitCode === 127) {
