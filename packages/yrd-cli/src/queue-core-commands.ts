@@ -1378,7 +1378,19 @@ function readOutput(check: CheckView): CheckPanel {
     // chalk backgrounds, and a background inside a Text is a strict-render
     // refusal that took the whole pane down on 2026-09-05 (soak, minute one).
     const output = stripAnsi(size > LOG_TAIL_BYTES ? text.slice(-LOG_TAIL_BYTES) : text)
-    if (output.trim() === "") return { ...check, why: `the log at ${check.log} is empty` }
+    // An empty log means two different things either side of a check's ending:
+    // one that is still running has yet to write its first line, and one that
+    // has ended never wrote one. Since a check's log is created before its
+    // child starts (check.ts), the running case is now the ORDINARY reading of
+    // a check in its first seconds, and a pane that drops the word `running`
+    // there tells a watcher nothing about whether the queue is alive.
+    if (output.trim() === "") {
+      const why =
+        check.state === "running"
+          ? `running; its log at ${check.log} is empty so far`
+          : `the log at ${check.log} is empty`
+      return { ...check, why }
+    }
     return { ...check, output }
   } catch (error) {
     const why =

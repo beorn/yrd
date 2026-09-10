@@ -280,7 +280,10 @@ exec '${selected.replaceAll("'", "'\\''")}' "$@"
 
     for (const [body, expected] of [
       [undefined, `running; nothing written yet at ${log}`],
-      ["", `the log at ${log} is empty`],
+      // A check's log is created before its child starts, so an empty file is
+      // what a running check ordinarily looks like in its first seconds — and
+      // it has to still read as running, not as a check that said nothing.
+      ["", `running; its log at ${log} is empty so far`],
       ["first output\n", `      log ${log}`],
     ] as const) {
       if (body !== undefined) writeFileSync(log, body)
