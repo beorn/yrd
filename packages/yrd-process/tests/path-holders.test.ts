@@ -112,11 +112,26 @@ describe("inspectPathHolderCensus", () => {
   )
 
   test.runIf(process.platform === "linux")(
-    "a denied source records the state of the proc behind it, zombie or live",
+    "a ZOMBIE is not a gap at all — it is counted and skipped, and only the live denial blocks",
     async () => {
-      // A zombie has released its fd table, so /proc/N/fd answers EACCES with
-      // nothing behind it. The census records the state beside the denial, so a
-      // reader can tell a gap that provably holds nothing from a live one.
+      // A zombie has been reaped by the kernel: its address space, descriptors
+      // and cwd are already released, so /proc/N/fd answers EACCES because there
+      // is NOTHING TO LIST, not because permission is withheld.
+      //
+      // This test used to assert the opposite half — that the census merely
+      // RECORDED the state beside the denial, leaving the zombie in `unreadable`
+      // and `complete` false either way. Recording it was never enough: a
+      // process that provably holds nothing was still making every caller
+      // refuse. That false gap is invisible because it errs safe, and a guard
+      // that refuses too often looks exactly like one that works.
+      //
+      // Observed on hab1 2026-09-10, blocking a whole-estate reap of 107 rows:
+      // pids 286562 (claude), 1794340 (bun), 659207/659240/659270 (git) and
+      // 4034727 (sh) — every one state Z, every one denying only `fd`.
+      //
+      // The live sibling below is the control: it denies the same source and it
+      // MUST still block, or this fix would have bought completeness by going
+      // blind.
       const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-zombie-"))
       temporary.push(fixture)
       const ownedPath = join(fixture, "owned")
@@ -139,13 +154,46 @@ describe("inspectPathHolderCensus", () => {
 
       const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
       expect(census.holders).toEqual([])
+      // The zombie is counted, never probed, and never listed as unreadable.
+      // The live one is the only thing left blocking.
       expect(census.coverage).toMatchObject({
         complete: false,
-        unreadable: [
-          { pid: 4242, comm: "probe", state: "Z", denied: ["maps"] },
-          { pid: 4243, comm: "probe", state: "S", denied: ["maps"] },
-        ],
+        processes: { enumerated: 2, sameUid: 2, otherUid: 0, zombie: 1 },
+        unreadable: [{ pid: 4243, comm: "probe", state: "S", denied: ["maps"] }],
       })
+    },
+  )
+
+  test.runIf(process.platform === "linux")(
+    "a census whose ONLY denials are zombies is COMPLETE",
+    async () => {
+      // The other direction, and the one that actually unblocks a caller: with
+      // the live sibling removed, nothing is hiding a holder and the census may
+      // say so. Without this the fix above is unobservable — `complete` would
+      // stay false for a different reason and no caller would ever notice.
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-zombies-only-"))
+      temporary.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      mkdirSync(ownedPath)
+      for (const pid of [4242, 4243]) {
+        const processRoot = join(procRoot, String(pid))
+        mkdirSync(join(processRoot, "fd"), { recursive: true })
+        symlinkSync("/", join(processRoot, "cwd"))
+        symlinkSync("/bin/sh", join(processRoot, "exe"))
+        symlinkSync("/", join(processRoot, "root"))
+        writeFileSync(join(processRoot, "maps"), "")
+        writeFileSync(join(processRoot, "stat"), `${pid} (probe) Z 1 0 0 0\n`)
+        chmodSync(join(processRoot, "maps"), 0o000)
+      }
+
+      const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+      expect(census.holders).toEqual([])
+      expect(census.coverage).toMatchObject({
+        complete: true,
+        processes: { enumerated: 2, sameUid: 2, otherUid: 0, zombie: 2 },
+      })
+      expect(census.coverage).not.toHaveProperty("unreadable")
     },
   )
 
@@ -216,7 +264,11 @@ describe("inspectPathHolderCensus", () => {
       const startedAt = (afterBootMs: number) => new Date(bootSeconds * 1_000 + afterBootMs).toISOString()
       const deniedFdTables: string[] = []
       for (const [pid, stat] of [
-        [4242, statLine(4242, "Z", 9_000)],
+        // Live (S), not Z: a zombie is no longer a denial at all — it is counted
+        // and skipped — so a zombie fixture would exercise nothing here. This
+        // test is about the IDENTITY decoration on a real gap, and it needs a
+        // real gap to decorate.
+        [4242, statLine(4242, "S", 9_000)],
         [4243, statLine(4243, "S", 12_000)],
         [4244, undefined],
       ] as const) {
@@ -236,7 +288,7 @@ describe("inspectPathHolderCensus", () => {
         expect(census.coverage).toMatchObject({
           complete: false,
           unreadable: [
-            { pid: 4242, comm: "probe", ppid: 1, state: "Z", startedAt: startedAt(90_000), denied: ["fd"] },
+            { pid: 4242, comm: "probe", ppid: 1, state: "S", startedAt: startedAt(90_000), denied: ["fd"] },
             { pid: 4243, comm: "probe", ppid: 1, state: "S", startedAt: startedAt(120_000), denied: ["fd"] },
             { pid: 4244, exited: true, denied: ["fd"] },
           ],
@@ -292,7 +344,7 @@ describe("inspectPathHolderCensus", () => {
           scope: "same-uid",
           procRoot,
           complete: true,
-          processes: { enumerated: 0, sameUid: 0, otherUid: 0, unavailable: { exited: 0, denied: 0 } },
+          processes: { enumerated: 0, sameUid: 0, otherUid: 0, zombie: 0, unavailable: { exited: 0, denied: 0 } },
           sources: {
             cwd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
             exe: { readable: 0, unavailable: { exited: 0, denied: 0 } },
