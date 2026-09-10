@@ -115,6 +115,7 @@ describe("the table is the queue read rendered", () => {
     const run = { branch: "task/one", head: one, at, startedAt: at, checks: [] }
     const journals = {
       dir: "/journal-fixture",
+      malformed: [],
       runs: new Map([
         [
           journalKey(run.branch, run.head),
@@ -133,6 +134,52 @@ describe("the table is the queue read rendered", () => {
     const split = watchRows(joined, { journals })
     expect(split[0]?.row.diagnostics).toEqual([diagnostic])
     expect(split[1]?.row.diagnostics).toBeUndefined()
+  })
+
+  // 24408: the reader degrades on a journal row it cannot read, and the row it
+  // degraded on has to be VISIBLE — the bead's ask is "show the incomplete
+  // incident as a row and render everything else". The reader tests stop at
+  // `readJournals`, so a table that dropped the defect on the floor, or that
+  // let one change's defect leak onto its neighbour, would pass every one of
+  // them while a seat reading `yrd list` learned nothing.
+  it("renders a change whose journal row could not be read, and renders its neighbour normally", async () => {
+    const w = await world("{}\n")
+    const one = await submitCommit(w, "task/one", "one.txt")
+    const two = await submitCommit(w, "task/two", "two.txt")
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+
+    const at = new Date()
+    const base = { at, checks: [], startedAt: at }
+    const message = `run journal q-1 has an incomplete incident for ${journalKey("task/one", one)}`
+    const journals = {
+      dir: "/journal-fixture",
+      malformed: [{ key: journalKey("task/one", one), message, run: "q-1" }],
+      runs: new Map([
+        [journalKey("task/one", one), [{ ...base, branch: "task/one", head: one, id: "q-1", malformed: [message] }]],
+        [journalKey("task/two", two), [{ ...base, branch: "task/two", head: two, id: "q-1" }]],
+      ]),
+    }
+
+    const rows = list(entries, { journals })
+    const defective = rows.find((row) => row.branch === "task/one")
+    expect(defective?.malformed).toEqual([message])
+    expect(defective?.next).toEqual({
+      because: `run journal q-1 has a malformed row for this change (${message}); the row was skipped — fix the writer (24408)`,
+      owner: "the queue's operator",
+    })
+    // The state its OTHER records give: no decision is invented for the gap.
+    expect(defective?.state).toBe("queued")
+    const neighbour = rows.find((row) => row.branch === "task/two")
+    expect(neighbour?.malformed).toBeUndefined()
+    expect(neighbour?.next?.owner).toBe("the queue")
+
+    // The per-run lens carries the defect on the run that holds it, and the
+    // neighbour's own run row is untouched by it.
+    const perRun = watchRows(rows, { journals })
+    expect(perRun.find((item) => item.row.branch === "task/one")?.row.next?.because).toContain(
+      "the row was skipped — fix the writer (24408)",
+    )
+    expect(perRun.find((item) => item.row.branch === "task/two")?.row.next?.owner).toBe("the queue")
   })
 
   it("lists a commit the target gained around the queue as its own row, as recent as it was committed (E5)", async () => {

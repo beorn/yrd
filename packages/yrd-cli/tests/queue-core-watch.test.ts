@@ -525,6 +525,47 @@ describe("what a watch says it looked at", () => {
     expect(listed.journal.absent).toContain("there is no such directory")
   })
 
+  // 24408: one short row from `waiting()` — an incident code with none of its
+  // five sibling authority fields — took `yrd list`, `queue list`, `queue
+  // show` and the watch down for that journal's whole seven-day window, while
+  // the queue itself was healthy and merging. The reader and table tests prove
+  // the degrade in process; only this one proves that the command a seat
+  // actually runs exits 0, still prints its table, names the skipped row where
+  // a human reads it, and hands the same defect to a `--json` consumer.
+  it("renders the table and names the journal row it could not read, instead of refusing", async () => {
+    const w = await world()
+    await change(w, "task/good", true)
+    const head = (await w.git(["rev-parse", "task/good"])).trim()
+    const journal = openLog(join(w.workdir, "logs"))
+    journal.write({ base: "aaa", checks: ["verify"], kind: "run", queue: "test", target: "main" })
+    journal.write({ branch: "task/good", code: "gitlink-off-main", decision: "stuck", head, kind: "change" })
+
+    const human = capture(w.work)
+    expect(await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    expect(human.stdout()).toContain("task/good")
+    expect(human.stderr()).toContain("incomplete incident")
+    expect(human.stderr()).toContain("the row was skipped — fix the writer (24408)")
+
+    const json = capture(w.work)
+    await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir })
+    const listed = JSON.parse(json.stdout().trim()) as Readonly<{
+      changes: readonly Readonly<{
+        branch: string
+        malformed?: readonly string[]
+        next?: Readonly<{ because: string }>
+      }>[]
+      journal: Readonly<{ malformed?: readonly Readonly<{ run: string; key: string; message: string }>[] }>
+    }>
+    expect(listed.journal.malformed).toEqual([
+      { key: `task/good@${head}`, message: expect.stringContaining("incomplete incident"), run: journal.id },
+    ])
+    const row = listed.changes.find((change) => change.branch === "task/good")
+    expect(row?.malformed?.[0]).toContain("incomplete incident")
+    expect(row?.next?.because).toContain("the row was skipped — fix the writer (24408)")
+    // Narration is stderr's; the product a consumer parses stays on stdout.
+    expect(json.stderr()).toBe("")
+  })
+
   it("puts submit- and merge-round checks into a merged change's interactive detail", async () => {
     const w = await world()
     writeFileSync(

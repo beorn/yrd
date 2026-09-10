@@ -175,8 +175,13 @@ describe("a run's journal, read back", () => {
     },
   )
 
-  it("still refuses a partial incident outside a change-ref race diagnostic", () => {
-    const { dir } = journalDir([
+  // Was "still refuses a partial incident outside a change-ref race
+  // diagnostic". 24408 supersedes the refusal, not the detection: a partial
+  // incident that is not a race diagnostic is still a defect, and it is still
+  // named — on the change it was about, where the reader is looking, instead
+  // of as a throw that takes the other changes down with it.
+  it("names a partial incident outside a change-ref race diagnostic without refusing the read", () => {
+    const { dir, run } = journalDir([
       {
         branch: "task/one",
         decision: "stuck",
@@ -184,9 +189,44 @@ describe("a run's journal, read back", () => {
         kind: "change",
         next: "repair the queue",
       },
+      { branch: "task/two", decision: "merged", head: "def456", kind: "change" },
     ])
 
-    expect(() => readJournals(dir)).toThrow("incomplete incident")
+    const journals = readJournals(dir)
+
+    const defect = journals.runs.get(journalKey("task/one", "abc123"))?.[0]?.malformed?.[0]
+    expect(defect).toContain("incomplete incident")
+    expect(defect).toContain(run)
+    expect(defect).toContain(journalKey("task/one", "abc123"))
+    expect(journals.runs.get(journalKey("task/two", "def456"))?.[0]?.decision).toBe("merged")
+  })
+
+  // 24408: one short row from `waiting()` took every read verb down for the
+  // journal's whole seven-day window while the queue itself was healthy and
+  // merging. The accepted requirement is the bead's — a read verb DEGRADES on
+  // a malformed row: it names the defect on the change that row was about and
+  // reads everything else. The partial-incident tests around this one only
+  // ever asserted the throw, so a reader that dropped B along with A, or the
+  // whole run, or the whole file, would satisfy every one of them.
+  it("one malformed row for change A does not hide change B's runs", () => {
+    const { dir, run } = journalDir([
+      { base: "aaa", checks: ["verify"], kind: "run", queue: "q", target: "main" },
+      { branch: "task/a", code: "gitlink-off-main", decision: "stuck", head: "abc123", kind: "change" },
+      { branch: "task/b", decision: "merged", head: "def456", kind: "change" },
+      { branch: "task/b", commit: "landed", head: "def456", kind: "merge" },
+    ])
+
+    const journals = readJournals(dir)
+
+    const defect = journals.runs.get(journalKey("task/a", "abc123"))?.[0]?.malformed?.[0]
+    expect(defect).toContain("incomplete incident")
+    expect(defect).toContain(run)
+    expect(defect).toContain(journalKey("task/a", "abc123"))
+    // The defect is aggregated for the caller that prints it, never skipped in silence.
+    expect(journals.malformed).toEqual([{ key: journalKey("task/a", "abc123"), message: defect, run }])
+    const b = journals.runs.get(journalKey("task/b", "def456"))?.[0]
+    expect(b).toMatchObject({ decision: "merged", merge: "landed" })
+    expect(b?.malformed).toBeUndefined()
   })
 
   // 24202: CI's parse-only regressions above do not prove retention, attempted
@@ -238,11 +278,14 @@ describe("a run's journal, read back", () => {
     expect(row).toMatchObject({ state: "merged", result: "pass", endedAt: ended, diagnostics: run?.diagnostics })
   })
 
-  // A reserved reason currently bypasses incident validation entirely.
+  // A reserved reason must not bypass incident validation. 24408 changes what
+  // "does not hide it" MEANS — the defect is reported on the change instead of
+  // thrown — so the assertion moves from the throw to `malformed`. The rule
+  // itself is untouched: a race reason still buys no exemption.
   it.each(["code", "subject", "via", "evidence", "owner"])(
     "does not let a race reason hide partial incident %s",
     (field) => {
-      const { dir } = journalDir([
+      const { dir, run } = journalDir([
         {
           branch: "task/one",
           head: "abc123",
@@ -253,12 +296,18 @@ describe("a run's journal, read back", () => {
           [field]: "present",
         },
       ])
-      expect(() => readJournals(dir)).toThrow("incomplete incident")
+      const decided = readJournals(dir)
+      expect(decided.runs.get(journalKey("task/one", "abc123"))?.[0]?.malformed?.[0]).toContain("incomplete incident")
+      expect(decided.malformed).toEqual([
+        { key: journalKey("task/one", "abc123"), message: expect.stringContaining("incomplete incident"), run },
+      ])
       // The authority-field rule must hold even when no decision string was recorded.
       const undecided = journalDir([
         { branch: "task/one", head: "abc123", kind: "change", reason: "change-ref-taken", [field]: "present" },
       ])
-      expect(() => readJournals(undecided.dir)).toThrow("incomplete incident")
+      expect(readJournals(undecided.dir).runs.get(journalKey("task/one", "abc123"))?.[0]?.malformed?.[0]).toContain(
+        "incomplete incident",
+      )
     },
   )
 
@@ -283,8 +332,12 @@ describe("a run's journal, read back", () => {
     const run = readJournals(dir).runs.get(journalKey(record.branch, record.head))?.[0]
     expect(run?.incident).toEqual(incident)
     expect(run?.diagnostics).toBeUndefined()
+    // The writer's own validator still judges the value; 24408 changes only
+    // what its verdict costs — the row, not the read.
     const malformed = journalDir([{ ...record, evidence: "relative-path" }])
-    expect(() => readJournals(malformed.dir)).toThrow("not an absolute path")
+    const defect = readJournals(malformed.dir).runs.get(journalKey(record.branch, record.head))?.[0]
+    expect(defect?.malformed?.[0]).toContain("not an absolute path")
+    expect(defect?.incident).toBeUndefined()
   })
 
   it("an abandoned older run is unmeasured after a newer run, while the newest unended run stays live", () => {
@@ -460,6 +513,7 @@ describe("the declared checks, joined to what ran", () => {
     const projected = watchRows([current], {
       journals: {
         dir: "/logs",
+        malformed: [],
         runs: new Map([
           [
             journalKey(current.branch, current.head),

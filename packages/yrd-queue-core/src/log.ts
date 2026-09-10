@@ -286,6 +286,13 @@ export type JournalRun = Readonly<{
   incident?: Incident
   /** Original ref-write warnings; they are not decisions or queue incidents. */
   diagnostics?: readonly LogRecord[]
+  /**
+   * A row of this run's journal that could not be read, as the sentence saying
+   * what was wrong with it. The row was skipped and everything else in the run
+   * was kept (24408): a writer's short row costs the row it is on, never the
+   * read. Absent when every row of this run about this change was sound.
+   */
+  malformed?: readonly string[]
   /** The target recorded in this run's header; never borrowed from a later run. */
   base?: string
   /** The merge commit this run recorded, if it recorded one. */
@@ -299,6 +306,14 @@ export type Journals = Readonly<{
   dir: string
   /** Why there is nothing, when there is nothing: a sentence naming what was looked for and where. */
   absent?: string
+  /**
+   * Every journal row in the window that could not be read, each naming the run
+   * it was in, the `<branch>@<head>` it was about, and what was wrong with it.
+   * Empty when the window was clean — never absent, because a caller that
+   * prints nothing here is stating that every row read, and a skipped row that
+   * nobody prints is exactly the silent error this reader must not commit.
+   */
+  malformed: readonly Readonly<{ run: string; key: string; message: string }>[]
   /** Every run that wrote about a change, newest run first, keyed `<branch>@<head>`. */
   runs: ReadonlyMap<string, readonly JournalRun[]>
 }>
@@ -360,7 +375,7 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
     names = readdirSync(dir)
   } catch (error) {
     const why = (error as NodeJS.ErrnoException).code === "ENOENT" ? "there is no such directory" : String(error)
-    return { absent: `no run journal was read: ${dir} — ${why}`, dir, runs: new Map() }
+    return { absent: `no run journal was read: ${dir} — ${why}`, dir, malformed: [], runs: new Map() }
   }
   const ours = names.filter((name) => name.endsWith(".jsonl")).map((name) => name.slice(0, -".jsonl".length))
   const windowed = ours.filter((id) => {
@@ -372,20 +387,58 @@ export function readJournals(dir: string, options: ReadJournalsOptions = {}): Jo
       ours.length === 0
         ? "it holds no run journal"
         : `its ${String(ours.length)} run journal(s) are all older than the window`
-    return { absent: `no run journal was read: ${dir} — ${held}`, dir, runs: new Map() }
+    return { absent: `no run journal was read: ${dir} — ${held}`, dir, malformed: [], runs: new Map() }
   }
   const runs = new Map<string, JournalRun[]>()
+  const malformed: { run: string; key: string; message: string }[] = []
   for (const id of [...windowed].sort()) {
     const startedAt = runStartedAt(id)
     if (startedAt === undefined) continue
     for (const run of runsIn(readRunLog(dir, id), id, startedAt)) {
       const key = journalKey(run.branch, run.head)
+      for (const message of run.malformed ?? []) malformed.push({ key, message, run: run.id })
       const held = runs.get(key)
       if (held === undefined) runs.set(key, [run])
       else held.unshift(run)
     }
   }
-  return { dir, runs }
+  return { dir, malformed, runs }
+}
+
+/**
+ * What one change record claims about an incident: the incident itself, the
+ * SENTENCE naming its defect, or nothing when it claims none.
+ *
+ * Reading a defect instead of throwing one is 24408. `waiting()` wrote four of
+ * the six authority fields onto a journal row, and every read verb — `yrd
+ * list`, `yrd queue list`, `yrd queue show`, the watch — refused for that
+ * journal's whole seven-day window while the queue itself was healthy and
+ * merging. One short row now costs the row it is on, and the change it was
+ * about carries the sentence. The WRITER's validator is deliberately
+ * unchanged: a malformed incident must still never be written.
+ */
+function incidentIn(record: LogRecord, id: string, branch: string, head: string): Incident | string | undefined {
+  const { code, subject, via, evidence, next, owner } = record
+  if ([code, subject, via, evidence, next, owner].every((value) => value === undefined)) return undefined
+  if (
+    typeof code !== "string" ||
+    typeof subject !== "string" ||
+    typeof via !== "string" ||
+    typeof evidence !== "string" ||
+    typeof next !== "string" ||
+    typeof owner !== "string"
+  ) {
+    return `run journal ${id} has an incomplete incident for ${journalKey(branch, head)}`
+  }
+  const incident = { code, subject, via, evidence, next, owner }
+  try {
+    // The writer's own validator, run on the read path: a malformed value is a
+    // defect of this ROW, and the reader reports it rather than dying on it.
+    incidentTrailers(incident)
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  return incident
 }
 
 /** What one run's records say about each change it touched. */
@@ -400,6 +453,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       reason?: string
       incident?: Incident
       diagnostics?: LogRecord[]
+      malformed?: string[]
       merge?: string
       at: Date
     }
@@ -418,7 +472,9 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     const at = new Date(record.at)
     if (Number.isNaN(at.getTime())) continue
     const reason = typeof record.reason === "string" ? record.reason : undefined
-    const { code, subject, via, evidence, next, owner } = record
+    // `next` is deliberately not read here: it is legacy diagnostic text as
+    // often as it is incident authority, so only `incidentIn` weighs it.
+    const { code, subject, via, evidence, owner } = record
     const diagnostic =
       record.kind === "change" &&
       Object.values(CHANGE_REF_DIAGNOSTICS).some((value) => value === reason) &&
@@ -434,38 +490,34 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       continue
     }
     if (record.kind === "change") {
+      // Read the incident BEFORE adopting anything else this record says: a
+      // row that cannot be read is skipped whole, so nothing half of it
+      // claimed reaches the change. Whatever state the run's OTHER records
+      // give still stands, and no decision is invented for the gap.
+      const claimed = incidentIn(record, id, branch, head)
+      if (typeof claimed === "string") {
+        ;(change.malformed ??= []).push(claimed)
+        continue
+      }
       if (typeof record.decision === "string") {
         change.decision = record.decision
         change.reason = reason
       }
-      if ([code, subject, via, evidence, next, owner].some((value) => value !== undefined)) {
-        if (
-          typeof code !== "string" ||
-          typeof subject !== "string" ||
-          typeof via !== "string" ||
-          typeof evidence !== "string" ||
-          typeof next !== "string" ||
-          typeof owner !== "string"
-        ) {
-          throw new Error(`run journal ${id} has an incomplete incident for ${journalKey(branch, head)}`)
-        }
-        const incident = { code, subject, via, evidence, next, owner }
-        // Reuse the writer's validator: malformed incident values must throw on read too.
-        incidentTrailers(incident)
-        change.incident = incident
-      }
+      if (claimed !== undefined) change.incident = claimed
     }
     if (record.kind === "merge" && typeof record.commit === "string") change.merge = record.commit
     if (record.kind === "result") {
       const index = change.checks.findLastIndex((check) => check.name === record.name && check.phase === record.phase)
       const check = change.checks[index]
       if (check === undefined) {
-        throw new Error(
+        ;(change.malformed ??= []).push(
           `run journal ${id} has a result without a check for ${journalKey(branch, head)}: ${String(record.name)}`,
         )
+        continue
       }
       if (record.result !== "pass" && record.result !== "fail" && record.result !== "stuck") {
-        throw new Error(`run journal ${id} has an invalid check result: ${String(record.result)}`)
+        ;(change.malformed ??= []).push(`run journal ${id} has an invalid check result: ${String(record.result)}`)
+        continue
       }
       change.checks[index] = {
         ...check,
@@ -513,6 +565,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       ...(change.reason === undefined ? {} : { reason: change.reason }),
       ...(change.incident === undefined ? {} : { incident: change.incident }),
       ...(change.diagnostics === undefined ? {} : { diagnostics: change.diagnostics }),
+      ...(change.malformed === undefined ? {} : { malformed: change.malformed }),
       ...(change.merge === undefined ? {} : { merge: change.merge }),
       ...(typeof base === "string" ? { base } : {}),
       head: change.head,

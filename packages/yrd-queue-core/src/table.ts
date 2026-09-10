@@ -49,6 +49,14 @@ export type Row = Readonly<{
   incident?: Incident
   /** Original ref-write warnings from this row's journal run; never change state. */
   diagnostics?: readonly LogRecord[]
+  /**
+   * Rows of this change's run journal that could not be read, each the
+   * sentence saying what was wrong with one of them. The rows were skipped and
+   * the rest of the run was kept, so this row's state is what its OTHER
+   * records give — never a decision invented for the gap (24408). {@link
+   * Row.next} says the same thing in the one line a reader acts on.
+   */
+  malformed?: readonly string[]
   issue?: string
   submitter?: string
   /** Why: `replaced`, `deleted`, `superseded`, a check's code, or for a `direct` row the one line about that commit. */
@@ -126,6 +134,24 @@ export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): 
   })
 }
 
+/**
+ * Who acts on a change whose run journal holds a row that could not be read,
+ * and why — said in the one line a reader already consults to decide what to
+ * do about the change. Undefined when that run read clean.
+ *
+ * This is 24408's surface. A skipped row must reach the reader who is looking
+ * at the change: dropping it in silence would trade one dead read verb for a
+ * table that quietly understates what the queue recorded, and taking the read
+ * down instead cost every seat every read verb for a seven-day window.
+ */
+function malformedNext(run: JournalRun | undefined): NextOwner | undefined {
+  if (run?.malformed === undefined || run.malformed.length === 0) return undefined
+  return {
+    because: `run journal ${run.id} has a malformed row for this change (${run.malformed.join("; ")}); the row was skipped — fix the writer (24408)`,
+    owner: "the queue's operator",
+  }
+}
+
 /** Join already-recorded run facts; never rederive the change's state. */
 function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   const check = run.decision === "failed" ? run.checks.findLast((check) => check.result === "fail") : run.checks.at(-1)
@@ -140,6 +166,7 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   // Runs are serialized per change: a newer run proves an abandoned older
   // check is no longer running, even when no decision was recorded for it.
   const live = newest ? run.running : undefined
+  const defect = malformedNext(run)
   return {
     ...current,
     // Assign absent values too: no later run's facts may survive this join.
@@ -149,6 +176,11 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
     reason: run.incident?.code ?? run.reason,
     incident: run.incident,
     diagnostics: run.diagnostics,
+    malformed: run.malformed,
+    // This run's own defect when it has one; otherwise the change's next
+    // owner, which the newest run's defect may already have replaced — the
+    // journal is defective for the change, not for one of its runs.
+    ...(defect === undefined ? {} : { next: defect }),
     result,
     log: check?.log,
     run: run.id,
@@ -313,13 +345,17 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
   const subject = options.subjects?.get(entry.change.head)
   const run = latest?.id ?? mergedByRun(trailer(tip, "Merged-By"))
   const live = running?.running
+  // The newest run's own defect outranks the state's next owner: a reader told
+  // only "the queue acts next" would never learn that part of what the queue
+  // recorded about this change could not be read (24408).
   const next =
-    incident === undefined
+    malformedNext(latest) ??
+    (incident === undefined
       ? nextOwner(entry.reading, {
           ...(submitter === undefined ? {} : { submitter }),
           ...(options.journals?.dir === undefined ? {} : { journal: options.journals.dir }),
         })
-      : undefined
+      : undefined)
   return {
     at: tip.at,
     branch: entry.change.branch,
@@ -344,6 +380,7 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
     ...(subject === undefined ? {} : { subject }),
     ...(run === undefined ? {} : { run }),
     ...(latest?.diagnostics === undefined ? {} : { diagnostics: latest.diagnostics }),
+    ...(latest?.malformed === undefined ? {} : { malformed: latest.malformed }),
     ...(startedAt === undefined ? {} : { startedAt }),
     // Ended is what the RECORD says ended it. A change read merged from
     // ancestry alone, or failed because its branch moved under it, ended

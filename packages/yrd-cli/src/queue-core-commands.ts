@@ -498,6 +498,12 @@ export async function coreQueueCommand(
     }
     case "list": {
       /**
+       * Journal defects already narrated by this invocation. One-shot, plain
+       * watch and interactive pane all refresh through `round` below, so this
+       * is the one place a defect is stated, and stated once.
+       */
+      const said = new Set<string>()
+      /**
        * One reading of the queue, rendered. Everything the list and the watch
        * show comes from here, so a refresh cannot show a different table from
        * the one a plain `queue list` would print at the same instant.
@@ -529,6 +535,7 @@ export async function coreQueueCommand(
         }>
       > => {
         const { queue, journals, all, observation } = await readListing(git, declared.config, workdir, declared.oid)
+        if (options.json !== true) narrateMalformed(io, journals, said)
         const rows = filterRows(
           watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
           request.terms ?? [],
@@ -828,6 +835,9 @@ export async function coreQueueCommand(
         }
       }
       const { journals, all } = await readListing(git, config, workdir, captured.oid)
+      // The counts below are read from the same rows; a row the journal could
+      // not be read for must not make an understated stat look measured.
+      if (options.json !== true) narrateMalformed(io, journals, new Set())
       const rows = watchRows(all, { journals })
       const refs = await pushedRefs(git, config.target.remote, config.target.branch)
       const stats = queueStats(rows, refs, {
@@ -842,6 +852,7 @@ export async function coreQueueCommand(
     case "show": {
       const queue = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
       const journals = readJournals(join(workdir, "logs"))
+      if (options.json !== true) narrateMalformed(io, journals, new Set())
       const matching = queue.changes.filter((entry) => entry.change.branch === request.branch)
       const hydrated = await readHistories(git, matching, config.target.remote, config.target.branch)
       const changes = show(hydrated, request.branch, {
@@ -1409,8 +1420,34 @@ function journalFor(item: WatchRow, journals: Journals): JournalRun | undefined 
  * sees no `live` and no `run` can tell a queue with nothing running from a
  * machine that holds no journal at all.
  */
-function journalFact(journals: Journals): Readonly<{ dir: string; absent?: string }> {
-  return { dir: journals.dir, ...(journals.absent === undefined ? {} : { absent: journals.absent }) }
+function journalFact(
+  journals: Journals,
+): Readonly<{ dir: string; absent?: string; malformed?: Journals["malformed"] }> {
+  return {
+    dir: journals.dir,
+    ...(journals.absent === undefined ? {} : { absent: journals.absent }),
+    ...(journals.malformed.length === 0 ? {} : { malformed: journals.malformed }),
+  }
+}
+
+/**
+ * Every journal row the reader could not read, said out loud on stderr the
+ * first time this command sees it. Narration, so the product on stdout is
+ * unchanged and a `--json` consumer reads the same defects from
+ * {@link journalFact} instead.
+ *
+ * The read survives one malformed row (24408) — and a skipped row that nobody
+ * prints is exactly the silent error that degrading must not become. `said` is
+ * scoped to one invocation, so a watch refreshing every few seconds states a
+ * defect once while a NEW one still reaches the reader the round it appears.
+ */
+function narrateMalformed(io: YrdCliIO, journals: Journals, said: Set<string>): void {
+  for (const defect of journals.malformed) {
+    const line = `yrd: run journal ${defect.run} has a row that could not be read for ${defect.key}: ${defect.message}; the row was skipped — fix the writer (24408)\n`
+    if (said.has(line)) continue
+    said.add(line)
+    io.stderr(line)
+  }
 }
 
 /**

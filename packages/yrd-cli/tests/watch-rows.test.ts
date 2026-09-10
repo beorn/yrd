@@ -34,7 +34,8 @@ function journals(entries: Readonly<Record<string, readonly string[]>>): Journal
       })),
     ]),
   )
-  return { dir: "/w/logs", runs }
+  // 24408: a journal read carries the rows it could not read; this fixture has none.
+  return { dir: "/w/logs", malformed: [], runs }
 }
 
 describe("the rows a watch shows", () => {
