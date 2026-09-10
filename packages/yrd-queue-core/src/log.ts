@@ -73,6 +73,10 @@ export const LOG_KINDS = [
   "check",
   "result",
   "settle",
+  // A submodule main the queue moved at land, children first, to a pin the
+  // settling merge kept ahead of it (24454): one row per published path, so the
+  // journal says which submodule mains a landing moved and to what.
+  "publish",
   "merge",
   "message",
   "merged-direct",

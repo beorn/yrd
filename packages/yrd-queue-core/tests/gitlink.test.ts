@@ -210,6 +210,30 @@ async function advanceSubmodule(w: World, contents: string): Promise<string> {
   return (await submodule(["rev-parse", "HEAD"])).trim()
 }
 
+/**
+ * A commit on top of the submodule's main that main does not carry yet, pushed
+ * under a branch so the queue can fetch it: the shape 24454 lands through the
+ * root queue, with nobody fast-forwarding the submodule by hand.
+ */
+async function aheadOfSubmodule(w: World, contents: string): Promise<string> {
+  const submoduleWork = join(w.work, "..", "submodule-work")
+  const submodule = gitIn(submoduleWork)
+  await submodule(["checkout", "--quiet", "-b", `ahead-${contents}`, "main"])
+  writeFileSync(join(submoduleWork, "lib.txt"), `${contents}\n`)
+  await submodule(["commit", "--quiet", "-am", `${contents}, ahead of main`])
+  await submodule(["push", "--quiet", "origin", `ahead-${contents}`])
+  await submodule(["checkout", "--quiet", "main"])
+  return (await submodule(["rev-parse", `ahead-${contents}`])).trim()
+}
+
+async function submoduleMain(w: World): Promise<string> {
+  const tip = (await w.git(["ls-remote", "--refs", "https://git-super.test/owned/submodule.git", "refs/heads/main"]))
+    .trim()
+    .split(/\s+/u)[0]
+  if (tip === undefined || tip === "") throw new Error("the submodule remote has no main")
+  return tip
+}
+
 describe("settling gitlinks", () => {
   it("an off-main gitlink waits in place while the next change proceeds", async () => {
     const w = await world()
@@ -293,6 +317,39 @@ describe("settling gitlinks", () => {
       owner: trailer(record, "Owner"),
     })
     expect(run?.incident?.evidence).toBe(outcome.log)
+  })
+
+  // 24454: a submodule change lands through the ROOT queue. The authored pin is
+  // ahead of the submodule's main; git-super keeps it (kept-ahead) and freezes
+  // its publication into the merge, and the queue publishes that intent at
+  // land: the submodule's main first, root main last. Nobody fast-forwards the
+  // submodule by hand, and no submodule main moves before the root merge has
+  // passed every check.
+  it("an authored gitlink ahead of submodule main lands with that main advanced to it, children first", async () => {
+    const w = await world()
+    const ahead = await aheadOfSubmodule(w, "four")
+    expect(await submoduleMain(w)).toBe(w.main)
+    const head = await submitGitlink(w, "task/ahead", ahead)
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/ahead"])
+    const target = await remoteTip(w.git, "refs/heads/main")
+    expect(await gitlinkAt(w, target)).toBe(ahead)
+    // The queue advanced the submodule's main to the landed pin: a fresh
+    // recursive clone of root main fetches it from main, not from a branch.
+    expect(await submoduleMain(w)).toBe(ahead)
+    const message = await w.git(["show", "-s", "--format=%B", target])
+    expect(message).toContain(`Change: task/ahead@${head}`)
+    expect(message).toContain(`Settled: submodule@${ahead} kept-ahead submodule-main@${w.main}`)
+    const merged = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/ahead", head })))
+    ).find((record) => record.kind === "merged")
+    expect(merged).toBeDefined()
+    expect(trailer(merged!, "Merge")).toBe(target)
+    // The published child is on the record, so a reader of the record alone
+    // knows which submodule main this landing moved and to what.
+    expect(trailer(merged!, "Published")).toBe(`submodule ${w.main} -> ${ahead}`)
   })
 
   it("a held-back authored gitlink merges raised and keeps the submitted Change identity", async () => {

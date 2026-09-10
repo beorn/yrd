@@ -614,7 +614,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     // A candidate's setup that did not pass is the one crash whose owner the
     // queue can read rather than assume: `attributedSetupFailure` runs the same
     // setup on the settled base and bills whoever the ground names.
-    if (error instanceof CandidateSetupFailed) return await attributedSetupFailure(run, entry, error)
+    if (error instanceof CandidateSetupFailed) return  attributedSetupFailure(run, entry, error)
     const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim()
     // A setup that did not pass anywhere a candidate could be attributed from —
     // the settled base's own worktree — is the queue's: it could not build the
@@ -813,7 +813,14 @@ type SuperMergeResult = Readonly<{
 }>
 
 type ComposedCandidate =
-  | Readonly<{ kind: "ready"; mergeCommit: string; rootChanges?: RootChanges; worktree: PreparedWorktree }>
+  | Readonly<{
+      kind: "ready"
+      mergeCommit: string
+      rootChanges?: RootChanges
+      worktree: PreparedWorktree
+      /** Pins the settling merge kept AHEAD of their submodule main: the land publishes these, children first (24454). */
+      publishing: readonly SettledGitlink[]
+    }>
   | Readonly<{ kind: "waiting"; detail: SuperMergeDetail }>
   | Readonly<{ kind: "failed"; detail: SuperMergeDetail; worktree: Worktree }>
 
@@ -871,7 +878,13 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     if (!(error instanceof SetupFailed)) throw error
     throw new CandidateSetupFailed(error, phase, rootChanges?.changes ?? [])
   }
-  return { kind: "ready", mergeCommit, ...(rootChanges === undefined ? {} : { rootChanges }), worktree }
+  return {
+    kind: "ready",
+    mergeCommit,
+    ...(rootChanges === undefined ? {} : { rootChanges }),
+    worktree,
+    publishing: result.gitlinks.filter((row) => row.state === "kept-ahead"),
+  }
 }
 
 /** Run git-super as the ruled command boundary; malformed or truncated JSON is never treated as a verdict. */
@@ -1154,7 +1167,7 @@ async function attributedSetupFailure(run: Run, entry: QueueEntry, failure: Cand
   const ground = await judgeSettledBase(run, entry, raises)
   if (ground.passed) {
     recordProgramVerdict(run, about, result, "submitter")
-    return await run.steps.end(run, entry, "failed", {
+    return  run.steps.end(run, entry, "failed", {
       remedy: `fix ${SETUP} (log: ${result.log}), push, and submit again`,
       subject: `${entry.change.branch} failed ${SETUP}${phase === "merge" ? " at merge" : ""}: ${message}`,
       trailers: [
@@ -1167,7 +1180,7 @@ async function attributedSetupFailure(run: Run, entry: QueueEntry, failure: Cand
     })
   }
   recordProgramVerdict(run, about, result)
-  return await run.steps.end(
+  return  run.steps.end(
     run,
     entry,
     "stuck",
@@ -1274,6 +1287,180 @@ async function prepareSettledBase(
   return run.steps.prepare(run, entry, commit, join(run.worktrees, "base", entry.change.head.slice(0, 12)), "base")
 }
 
+/** `<path> <submodule main before> -> <pin>`: what a publication moved, as a record and a log both say it. */
+function publishedRow(row: SettledGitlink): string {
+  // git-super reports a kept-ahead row as from=the pin, to=the main it was ahead of.
+  return `${row.path} ${row.to} -> ${row.from}`
+}
+
+type Publication = Readonly<{ kind: "published"; record: string }> | Readonly<{ kind: "kept"; ended: Ended }>
+
+/**
+ * Move the submodule mains a merge kept its pins ahead of, before root main
+ * moves (24454). Two writes, in this order, and each one durable before the next:
+ *
+ * 1. A landing record on the change ref, leased on the tip this run read. It
+ *    retains the merge as its second parent, so the exact merge and the
+ *    `Git-Super-Push:` intent frozen into it are on the remote before any
+ *    submodule main moves: a reader of the record alone, or a fresh clone,
+ *    knows what was about to be published and can finish it.
+ * 2. `git super push --recurse-submodules=only` of that merge: git-super
+ *    executes the publication it froze at compose, each submodule main leased
+ *    on the value it was compared against, leaf first, and touches no root
+ *    ref. Root main and the merged record then go through the ordinary atomic
+ *    push, so a ring's fence still rides it.
+ *
+ * A refusal at either write keeps the change in its place, never stuck: the
+ * next run composes again against whatever the submodule main is by then (a
+ * published child reads as an Equal pin; a main a person moved is fetched and
+ * classified afresh), and the log says exactly which repositories moved.
+ */
+async function publishChildren(
+  run: Run,
+  entry: QueueEntry,
+  cwd: string,
+  mergeCommit: string,
+  publishing: readonly SettledGitlink[],
+  rootChanges: RootChanges | undefined,
+  results: readonly CheckResult[],
+): Promise<Publication> {
+  const { change } = entry
+  const { branch, head } = change
+  const target = run.options.target
+  const ref = changeRef(target.branch, change)
+  const expectedTip = tipOf(change).sha
+  const rows = publishing.map(publishedRow)
+  const landingRecord = await recordCommit(
+    run.git,
+    {
+      change,
+      kind: "checked",
+      subject: `${branch}: publishing ${rows.join(", ")} before the merge into ${target.branch}`,
+      trailers: [
+        ["Merge", mergeCommit],
+        ...(rootChanges === undefined ? [] : [["Root-Changes", rootChanges.encoded] as const]),
+        ["Base", run.targetSha],
+        ["Merged-By", mergedBy(target.branch, run.log.id)],
+        ...rows.map((row) => ["Publishing", row] as const),
+        ...checkTrailers(results),
+      ],
+    },
+    expectedTip,
+  )
+  try {
+    await run.git([
+      "push",
+      "--quiet",
+      "--atomic",
+      `--force-with-lease=${ref}:${expectedTip}`,
+      target.remote,
+      `${landingRecord}:${ref}`,
+    ])
+  } catch (error) {
+    const moved = await remoteHeads(run, branch, ref)
+    if (moved.change === expectedTip) throw error
+    run.log.write({
+      branch,
+      decision: "checked",
+      expected: expectedTip,
+      head,
+      kind: "change",
+      reason: "change-ref-moved",
+      ...(moved.change === undefined ? {} : { saw: moved.change }),
+    })
+    return { kind: "kept", ended: "checked" }
+  }
+  const execution = await gitSuperExecution(run, cwd, [
+    "push",
+    "--recurse-submodules=only",
+    target.remote,
+    `${mergeCommit}:refs/heads/${target.branch}`,
+  ])
+  let published: GitSuperPushResult
+  try {
+    published = readGitSuperPushResult(JSON.parse(execution.stdout))
+  } catch (error) {
+    throw new Error(
+      `git-super push exited ${String(execution.exitCode)} without readable JSON: ${execution.stderr.trim() || execution.stdout.trim()}`,
+      { cause: error },
+    )
+  }
+  const moved = published.repositories.flatMap((repository) =>
+    repository.refs
+      .filter((row) => row.state === "updated")
+      .map((row) => `${repository.repository} ${row.destination} -> ${row.source.slice(0, 12)}`),
+  )
+  if (execution.exitCode === 0 && published.state === "updated" && !published.partial) {
+    for (const row of publishing) {
+      run.log.write({ branch, from: row.to, head, kind: "publish", path: row.path, phase: "merge", to: row.from })
+    }
+    return { kind: "published", record: landingRecord }
+  }
+  // Nothing to raise: the remotes answered. What moved, if anything, is named,
+  // and the change keeps its place for the next run's fresh composition.
+  const detail = published.detail
+  run.log.write({
+    branch,
+    decision: "checked",
+    head,
+    kind: "change",
+    reason: "publication-refused",
+    saw:
+      `git-super push exit ${String(execution.exitCode)} state=${published.state} partial=${String(published.partial)}` +
+      (detail === undefined ? "" : ` ${detail.code} (${detail.phase}): ${detail.message}`) +
+      (moved.length === 0 ? "; nothing moved" : `; moved: ${moved.join(", ")}`),
+  })
+  return { kind: "kept", ended: "checked" }
+}
+
+type GitSuperPushResult = Readonly<{
+  state: "updated" | "unchanged" | "failed" | "unknown"
+  partial: boolean
+  detail?: SuperMergeDetail
+  repositories: readonly Readonly<{
+    repository: string
+    state: string
+    refs: readonly Readonly<{ source: string; destination: string; state: string }>[]
+  }>[]
+}>
+
+/** git-super push as the ruled command boundary; malformed JSON is never read as a publication. */
+function readGitSuperPushResult(value: unknown): GitSuperPushResult {
+  if (typeof value !== "object" || value === null) throw new Error("git-super push JSON is not an object")
+  const found = value as Record<string, unknown>
+  if (!new Set(["updated", "unchanged", "failed", "unknown"]).has(String(found.state))) {
+    throw new Error(`git-super push JSON has invalid state ${String(found.state)}`)
+  }
+  if (typeof found.partial !== "boolean") throw new Error("git-super push JSON has no boolean partial field")
+  if (!Array.isArray(found.repositories)) throw new Error("git-super push JSON has no repositories array")
+  const repositories = found.repositories.map((row, index) => {
+    if (typeof row !== "object" || row === null)
+      {throw new Error(`git-super push repository ${String(index)} is not an object`)}
+    const repository = row as Record<string, unknown>
+    if (typeof repository.repository !== "string" || !Array.isArray(repository.refs)) {
+      throw new Error(`git-super push repository ${String(index)} is incomplete`)
+    }
+    const refs = repository.refs.map((entry, at) => {
+      if (typeof entry !== "object" || entry === null) {
+        throw new Error(`git-super push ref ${String(index)}.${String(at)} is not an object`)
+      }
+      const ref = entry as Record<string, unknown>
+      if (typeof ref.source !== "string" || typeof ref.destination !== "string" || typeof ref.state !== "string") {
+        throw new Error(`git-super push ref ${String(index)}.${String(at)} is incomplete`)
+      }
+      return { source: ref.source, destination: ref.destination, state: ref.state }
+    })
+    return { repository: repository.repository, state: String(repository.state), refs }
+  })
+  const detail = found.detail === undefined ? undefined : readSuperMergeDetail(found.detail)
+  return {
+    state: found.state as GitSuperPushResult["state"],
+    partial: found.partial,
+    ...(detail === undefined ? {} : { detail }),
+    repositories,
+  }
+}
+
 /** The on-merge phase for the first checked change. */
 async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
   const { change } = entry
@@ -1282,7 +1469,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
   const composed = await composeCandidate(run, entry, "merge")
   if (composed.kind === "waiting") return waiting(run, entry, composed.detail)
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
-  const { mergeCommit, rootChanges, worktree } = composed
+  const { mergeCommit, rootChanges, worktree, publishing } = composed
   try {
     const wt = gitIn(
       worktree.path,
@@ -1354,7 +1541,18 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     // The merged record says how it was merged and what it checked: by the queue,
     // with the on-merge checks' results, in the shape the checked record uses.
     const ref = changeRef(run.options.target.branch, change)
-    const expectedTip = tipOf(entry.change).sha
+    let expectedTip = tipOf(entry.change).sha
+    // 24454: a pin the merge kept AHEAD of its submodule main lands by moving
+    // that main, and the queue moves it, only now, after every check passed on
+    // the merged tree, and children first: a root main whose gitlink names a
+    // commit no submodule main carries strands every fresh clone, while a
+    // submodule main ahead of root is the one partial state this landing
+    // accepts, and the next run composes on it as an Equal pin.
+    if (publishing.length > 0) {
+      const landing = await publishChildren(run, entry, worktree.path, mergeCommit, publishing, rootChanges, results)
+      if (landing.kind === "kept") return landing.ended
+      expectedTip = landing.record
+    }
     const mergedRecord = await recordCommit(
       run.git,
       {
@@ -1366,6 +1564,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
           ...(rootChanges === undefined ? [] : [["Root-Changes", rootChanges.encoded] as const]),
           ["Base", run.targetSha],
           ["Merged-By", mergedBy(run.options.target.branch, run.log.id)],
+          ...publishing.map((row) => ["Published", publishedRow(row)] as const),
           ...checkTrailers(results),
         ],
       },
@@ -1406,6 +1605,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
       gitlinks: (rootChanges?.changes ?? []).map((row) => `${row.path} ${row.from} -> ${row.to}`),
       head,
       kind: "merge",
+      published: publishing.map(publishedRow),
       tip: mergeCommit,
     })
     run.log.write({ branch, decision: "merged", head, kind: "change" })
