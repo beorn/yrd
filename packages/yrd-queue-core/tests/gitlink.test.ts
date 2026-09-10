@@ -773,4 +773,95 @@ describe("settling gitlinks", () => {
       ).map((record) => record.kind),
     ).toEqual(["opened", "checked"])
   })
+
+  /**
+   * The settled-base run exists to answer one question — does the base fail
+   * the same things? — and re-running the whole check to answer it is what
+   * costs the queue a second full check on every failure (hh-dev, run
+   * q-20260910T063044822Z-41b0c4ff: 5.3 min to name one attributable test id,
+   * then 4.7 min re-running the identical plan to say it was green at base).
+   * The check names the scope; the queue puts it in that same check's base
+   * environment and says on the row which of the two runs it made.
+   */
+  describe("the scope the base run is given", () => {
+    /** A check that fails where the raised submodule content is, saying `line` on its way. */
+    const failingCheck = (line: string): string =>
+      [
+        `printf 'ONLY=%s\\n' "\${AFFECTED_TESTS_ONLY:-unset}"`,
+        `printf '%s\\n' '${line}'`,
+        "! grep -q 'breaking submodule main' submodule/lib.txt",
+      ].join("; ")
+
+    /** The base-phase rows this run wrote for the check, and the run's narrowing refusals. */
+    const baseRows = (
+      log: string,
+    ): Readonly<{ rows: readonly Record<string, unknown>[]; refusals: readonly Record<string, unknown>[] }> => {
+      const records = readFileSync(log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+      return {
+        refusals: records.filter((record) => record.kind === "narrowing"),
+        rows: records.filter((record) => record.kind === "check" && record.phase === "base"),
+      }
+    }
+
+    it("is the scope the failing check asked for, and the base run is told it", async () => {
+      const w = await world()
+      await advanceSubmodule(w, "breaking submodule main")
+      await submitFile(w, "task/narrowed-base")
+
+      const outcome = await queueRun(
+        await w.options({
+          on: ["submit"],
+          run: failingCheck('YRD-BASE-NARROWING {"env":{"AFFECTED_TESTS_ONLY":"tools/pool.test.ts"}}'),
+        }),
+      )
+
+      // Unchanged verdict: the base fails the same check, so the raise is the
+      // fault and nobody is billed for it.
+      expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/narrowed-base"] })
+      const { refusals, rows } = baseRows(outcome.log)
+      expect(refusals).toEqual([])
+      expect(rows.map((row) => row.scope)).toEqual(["narrowed", "narrowed"])
+      // The name is NOT in the check's `environmentPassthrough`, so the only
+      // way it can reach the base run is the offer the check itself made.
+      const [start] = rows
+      expect(readFileSync(String(start?.log), "utf8")).toContain("ONLY=tools/pool.test.ts")
+    })
+
+    it("is the whole check when the failing check offers nothing", async () => {
+      const w = await world()
+      await advanceSubmodule(w, "breaking submodule main")
+      await submitFile(w, "task/full-base")
+
+      const outcome = await queueRun(await w.options({ on: ["submit"], run: failingCheck("no offer on this line") }))
+
+      expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/full-base"] })
+      const { refusals, rows } = baseRows(outcome.log)
+      expect(refusals).toEqual([])
+      expect(rows.map((row) => row.scope)).toEqual(["full", "full"])
+      expect(readFileSync(String(rows[0]?.log), "utf8")).toContain("ONLY=unset")
+    })
+
+    it("is the whole check when the offer cannot be honoured, and the run says why", async () => {
+      const w = await world()
+      await advanceSubmodule(w, "breaking submodule main")
+      await submitFile(w, "task/refused-base")
+
+      const outcome = await queueRun(
+        await w.options({ on: ["submit"], run: failingCheck("YRD-BASE-NARROWING {not json}") }),
+      )
+
+      expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/refused-base"] })
+      const { refusals, rows } = baseRows(outcome.log)
+      // A refusal is never a quiet absence: the row names the check and the
+      // sentence, and the base run it fell back to is the full one.
+      expect(refusals).toMatchObject([
+        { name: "submodule-check", reason: expect.stringContaining("is not JSON"), scope: "full" },
+      ])
+      expect(rows.map((row) => row.scope)).toEqual(["full", "full"])
+      expect(readFileSync(String(rows[0]?.log), "utf8")).toContain("ONLY=unset")
+    })
+  })
 })

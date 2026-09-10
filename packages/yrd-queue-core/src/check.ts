@@ -98,6 +98,13 @@ export type RunCheck = Readonly<{
   tmpdir: string
   process?: Process
   env?: NodeJS.ProcessEnv
+  /**
+   * What the check itself asked for in this run, read off its own earlier log
+   * (narrowing.ts). It joins the environment after the declaration's
+   * passthrough and before the queue's own `YRD_*` statements, which stay
+   * authoritative.
+   */
+  extraEnv?: Readonly<Record<string, string>>
 }>
 
 /**
@@ -386,6 +393,10 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   for (const [name, value] of Object.entries(source)) {
     if (name.startsWith("LC_") && value !== undefined) env[name] = value
   }
+  // What this check asked its own next run for. After the declaration, so a
+  // check can narrow a scope its passthrough also names, and before the
+  // `YRD_*` trio below, which is the queue's word and not the check's.
+  for (const [name, value] of Object.entries(run.extraEnv ?? {})) env[name] = value
   // Last, so they cannot be inherited over: what the check is judging is the
   // queue's own statement about the tree it just prepared, and a check told a
   // stale base by the environment would select the wrong work and say nothing.

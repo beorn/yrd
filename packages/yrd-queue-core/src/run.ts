@@ -75,6 +75,7 @@ import {
 import { incidentTrailers, type Incident } from "./incident.ts"
 import type { PauseRecord } from "./pause.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
+import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
@@ -1061,9 +1062,14 @@ async function attributedFailure(
   raises: RootChanges["changes"],
 ): Promise<Ended> {
   if (raises.length === 0) return endFailing(run, entry, results, failing, phase)
+  // What the base run must measure, asked of the checks that failed, BEFORE
+  // the base tree is composed: the answer is read off logs the candidate phase
+  // already wrote, and it decides how long the composition it precedes will be
+  // used for.
+  const narrowed = await narrowedBase(run, entry, failing)
   const base = await prepareSettledBase(run, entry, raises)
   try {
-    const baseResults = await runPhase(run, entry, phase, base.path, base.tree, "base")
+    const baseResults = await runPhase(run, entry, phase, base.path, base.tree, "base", narrowed)
     const unresolved = baseResults.find((result) => result.result === "stuck")
     if (unresolved !== undefined) {
       return await run.steps.end(
@@ -1721,10 +1727,11 @@ async function runPhase(
   cwd: string,
   tree: CheckedTree,
   phase: Phase = declaredPhase,
+  narrowed: ReadonlyMap<string, Readonly<Record<string, string>>> = new Map(),
 ): Promise<readonly CheckResult[]> {
   const results: CheckResult[] = []
   for (const spec of run.options.checks.filter((candidate) => (candidate.on ?? ["merge"]).includes(declaredPhase))) {
-    results.push(await check(run, entry, spec, cwd, tree, phase))
+    results.push(await check(run, entry, spec, cwd, tree, phase, narrowed.get(spec.name)))
     if (results.at(-1)?.result !== "pass") break
   }
   return results
@@ -1737,6 +1744,7 @@ async function check(
   cwd: string,
   tree: CheckedTree,
   phase: Phase,
+  extraEnv?: Readonly<Record<string, string>>,
 ): Promise<CheckResult> {
   await restoreScripts(run, spec, cwd)
   const logDir = checkLogDir(run, entry, phase)
@@ -1745,6 +1753,11 @@ async function check(
     head: entry.change.head,
     name: spec.name,
     phase,
+    // Which of the two base runs this is, on the row a reader already looks at
+    // for this check: the whole check, or the scope the check itself asked for
+    // (narrowing.ts). A narrowed run that reads like a full one is a verdict
+    // nobody can size.
+    ...(phase === "base" ? { scope: extraEnv === undefined ? ("full" as const) : ("narrowed" as const) } : {}),
     ...(spec.scripts === undefined || spec.scripts.length === 0 ? {} : { scripts: spec.scripts }),
   }
   const start = new Date().toISOString()
@@ -1757,9 +1770,42 @@ async function check(
     tmpdir: run.tmpdir,
     spec,
     tree,
+    ...(extraEnv === undefined ? {} : { extraEnv }),
   })
   recordProgramResult(run, { ...about, end: new Date().toISOString(), start }, result)
   return result
+}
+
+/**
+ * The scope each failing check asked its own base run for, by check name.
+ *
+ * Read from the log the check just wrote ({@link narrowingOf}), so the queue
+ * learns what a base comparison needs from the only thing that knows — never
+ * by understanding the check. A check that offers nothing gets the full base
+ * run it always had; an offer that cannot be honoured gets the full run too
+ * and a journal row saying so, because a defect folded into an absence is a
+ * base phase nobody can tell apart from the ordinary one.
+ */
+async function narrowedBase(
+  run: Run,
+  entry: QueueEntry,
+  failing: readonly CheckResult[],
+): Promise<ReadonlyMap<string, Readonly<Record<string, string>>>> {
+  const narrowed = new Map<string, Readonly<Record<string, string>>>()
+  for (const result of failing) {
+    const offer = await narrowingOf(result.log)
+    if (offer.kind === "narrowed") narrowed.set(result.name, offer.env)
+    if (offer.kind !== "refused") continue
+    run.log.write({
+      branch: entry.change.branch,
+      head: entry.change.head,
+      kind: "narrowing",
+      name: result.name,
+      reason: offer.why,
+      scope: "full",
+    })
+  }
+  return narrowed
 }
 
 /**
@@ -1783,6 +1829,8 @@ export function recordProgramStart(
     phase: string
     start: string
     log: string
+    /** Which base run this is, on a base-phase row: the whole check, or the scope it asked for. */
+    scope?: "narrowed" | "full"
     scripts?: readonly string[]
   }>,
 ): void {
@@ -1804,6 +1852,8 @@ export function recordProgramResult(
     phase: string
     start: string
     end: string
+    /** Which base run this is, on a base-phase row: the whole check, or the scope it asked for. */
+    scope?: "narrowed" | "full"
     scripts?: readonly string[]
   }>,
   result: CheckResult,
@@ -1822,6 +1872,8 @@ function recordProgramEnd(
     phase: string
     start: string
     end: string
+    /** Which base run this is, on a base-phase row: the whole check, or the scope it asked for. */
+    scope?: "narrowed" | "full"
     scripts?: readonly string[]
   }>,
   result: CheckResult,
@@ -1835,6 +1887,7 @@ function recordProgramEnd(
     ms: result.durationMs,
     name: about.name,
     phase: about.phase,
+    ...(about.scope === undefined ? {} : { scope: about.scope }),
     ...(about.scripts === undefined ? {} : { scripts: about.scripts }),
     start: about.start,
   })

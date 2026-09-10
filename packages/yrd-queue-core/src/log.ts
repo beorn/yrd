@@ -90,6 +90,12 @@ export const LOG_KINDS = [
   // from an ordinary fetch.
   "reference",
   "warning",
+  // A scope a failing check offered its own settled-base run that the queue
+  // could not honour (narrowing.ts). Only the refusal is a row of its own: an
+  // honoured offer and an absent one are both readable on the base check's own
+  // `scope` field, and a refusal that left no trace would be indistinguishable
+  // from a check that never offered anything.
+  "narrowing",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]
@@ -276,6 +282,13 @@ export type JournalCheck = Readonly<{
   /** The separate result row's measured verdict and exit, not the change's current state. */
   result?: "pass" | "fail" | "stuck"
   exit?: string
+  /**
+   * On a `base` phase row, which of the two base runs this was: `full` is the
+   * whole check re-run at the settled base, `narrowed` is the scope the check
+   * itself asked for (narrowing.ts). Absent on every other phase, and on a
+   * base row written before this field existed.
+   */
+  scope?: "narrowed" | "full"
 }>
 
 /** What one run's journal says about one change. */
@@ -574,6 +587,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
     )
     const end = typeof record.end === "string" ? new Date(record.end) : undefined
     const ended = end === undefined || Number.isNaN(end.getTime()) ? undefined : end
+    const scope = record.scope === "narrowed" || record.scope === "full" ? record.scope : undefined
     const check: JournalCheck = {
       name,
       phase,
@@ -581,6 +595,7 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
       ...(log === undefined ? {} : { log }),
       ...(ended === undefined ? {} : { endedAt: ended }),
       ...(typeof record.ms === "number" ? { ms: record.ms } : {}),
+      ...(scope === undefined ? {} : { scope }),
     }
     if (standing === -1) change.checks.push(check)
     else change.checks[standing] = check
