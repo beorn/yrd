@@ -41,7 +41,7 @@ yrd watch [filter...]                                             `yrd queue lis
 yrd queue stats [--since 3h|<time>|<sha>] [--by submitter|branch] merged, failed, same-head retries, re-pushed branches, refs pushed and never submitted, opened→merged latency
 yrd queue show <branch>                                           that branch's changes, newest first, each check's result and log
 yrd check <name...>                                               run the named checks here, now, in a fresh checkout of HEAD
-yrd env open [commit]                                             retain an exact commit detached, or open/adopt a branch; print its path
+yrd env open [commit] | --bay <name> | --issue <ref>              with [commit], retain that exact commit detached; with --bay/--issue instead, open or adopt its task/<name> branch; print the path
 yrd env list                                                      list this repository's retained environments
 yrd env close <path> [--retain <directory>]                       run teardown and remove a clean, unlocked environment; retain submodule stores
 ```

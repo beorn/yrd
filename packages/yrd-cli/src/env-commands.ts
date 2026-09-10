@@ -83,7 +83,18 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   const root = requireRepository(io)
   const commit = options.commit
   if (commit !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit)) {
-    throw new Error(`yrd env open needs an exact commit object ID, not '${commit}'; resolve it with git rev-parse HEAD`)
+    // The argument is an exact commit and nothing else; a BRANCH is opened
+    // with --bay/--issue and no argument. Offering only `rev-parse HEAD`
+    // answered a question the caller had not asked: it resolves to a commit
+    // and detaches, discarding the branch identity they named.
+    const resolved = await refAt(gitIn(root), commit)
+    throw new Error(
+      `yrd env open takes an exact commit object ID as its argument, not '${commit}'.` +
+        (resolved === undefined ? "" : ` '${commit}' is a ref here, and this argument never accepts one.`) +
+        ` To open or adopt a branch, pass --bay <name> or --issue <ref> with no argument;` +
+        ` the branch it opens or adopts is always task/<name>.` +
+        ` To retain an exact commit detached, resolve one first with git rev-parse ${resolved === undefined ? "HEAD" : commit}.`,
+    )
   }
   const target = commit === undefined ? await originHead(gitIn(root)) : "HEAD"
   const name = (
