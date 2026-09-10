@@ -11,7 +11,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "../src/git.ts"
 import type { LogWrite } from "../src/log.ts"
-import { populateReferenceStores } from "../src/reference.ts"
+import { GitlinkNotOnRemote, populateReferenceStores, ReferenceUnpopulated } from "../src/reference.ts"
 import { freshWorktree } from "../src/worktree.ts"
 
 process.env.GIT_CONFIG_COUNT = "1"
@@ -161,6 +161,57 @@ describe("populateReferenceStores", () => {
     await storeGit(["gc", "--prune=now", "--quiet"])
     expect(await storeGit(["cat-file", "-t", raised])).toContain("commit")
   }, 60_000)
+
+  /**
+   * The two causes of an unfetchable pin, told apart by one probe. Both
+   * fixtures raise the SAME gitlink to the SAME unpushed commit; the only
+   * difference is whether the component's remote answers, which is the only
+   * thing that decides who is billed.
+   */
+  it.each([
+    ["reachable", true],
+    ["unreachable", false],
+  ] as const)(
+    "bills a pin missing from a %s remote to the right owner",
+    async (_name, reachable) => {
+      const root = mkdtempSync(join(tmpdir(), `yrd-reference-${_name}-`))
+      roots.push(root)
+      const { product, vendor } = await superproject(root)
+      const repo = await queueClone(root, product)
+      await populateReferenceStores({ gitIn: (cwd) => gitIn(cwd), repo })
+
+      // A component commit that never left its author's bay: made in a clone,
+      // never pushed, and the root carrier raised to it anyway.
+      const bay = join(root, "vendor-bay")
+      await gitIn(root)(["clone", "--quiet", vendor, bay])
+      const bayGit = gitIn(bay)
+      writeFileSync(join(bay, "vendor.txt"), "only in the bay\n")
+      await bayGit(["add", "--all"])
+      await bayGit([...author, "commit", "--quiet", "--message", "unpushed component commit"])
+      const unpushed = (await bayGit(["rev-parse", "HEAD"])).trim()
+      const productGit = gitIn(product)
+      await productGit(["update-index", "--add", "--cacheinfo", `160000,${unpushed},vendor/dep`])
+      await productGit([...author, "commit", "--quiet", "--message", "raise vendor/dep to an unpushed commit"])
+      await gitIn(repo)(["fetch", "--quiet", "origin", "main"])
+      const head = (await gitIn(repo)(["rev-parse", "FETCH_HEAD"])).trim()
+      // The store's origin is the component's real remote; taking it away is the
+      // only difference between the two cases.
+      if (!reachable) rmSync(vendor, { force: true, recursive: true })
+
+      const populating = populateReferenceStores({ commit: head, gitIn: (cwd) => gitIn(cwd), repo })
+
+      if (reachable) {
+        // The remote answered and does not hold the commit: the submitter's.
+        await expect(populating).rejects.toBeInstanceOf(GitlinkNotOnRemote)
+        await expect(populating).rejects.toMatchObject({ path: "vendor/dep", sha: unpushed, url: vendor })
+      } else {
+        // Nothing answered, so nothing can be attributed: the queue's ground.
+        await expect(populating).rejects.toBeInstanceOf(ReferenceUnpopulated)
+        await expect(populating).rejects.toThrow(/could not be reached either/u)
+      }
+    },
+    60_000,
+  )
 
   it("refuses a gitlink whose remote cannot be cloned, naming the store it could not make", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-reference-unreachable-"))

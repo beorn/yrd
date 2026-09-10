@@ -71,7 +71,12 @@ export {
   runSetup,
   SetupFailed,
 } from "./worktree.ts"
-export { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
+export {
+  GIT_SUPER_ABSENT_STORE,
+  GitlinkNotOnRemote,
+  populateReferenceStores,
+  ReferenceUnpopulated,
+} from "./reference.ts"
 export type { PopulateReference, ReferenceStore } from "./reference.ts"
 export { queueRun } from "./run.ts"
 export type { QueueRunOptions, QueueRunOutcome } from "./run.ts"

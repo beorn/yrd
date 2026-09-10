@@ -79,7 +79,7 @@ import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
 import { CapturedQueueObjectsUnavailable, readQueue, remoteUrl, type QueueEntry, type QueueRead } from "./remote.ts"
-import { ReferenceUnpopulated } from "./reference.ts"
+import { GitlinkNotOnRemote, ReferenceUnpopulated } from "./reference.ts"
 import { inLine, tipOf } from "./state.ts"
 import {
   checkedTree,
@@ -602,6 +602,31 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
           via: SETUP,
         }),
       )
+    }
+    // THE SUBMITTER'S, and the only failure on this path that is. A pin the
+    // reference could not fetch has two causes with opposite owners, separated
+    // by one `ls-remote` before we get here: a remote that answered and simply
+    // does not hold the commit is a component commit that never left somebody's
+    // bay. Nothing is wrong with the queue, so nothing about the queue is
+    // repaired by stopping it — the change fails, its submitter is billed, and
+    // the line moves. Specimen 2026-09-03: a root carrier stood at km gitlink
+    // 11d9312c, which existed only in the author's bay, and the queue billed
+    // itself and stopped.
+    if (error instanceof GitlinkNotOnRemote) {
+      return run.steps.end(run, entry, "failed", {
+        remedy:
+          `push the component commit to its remote (it must be on the component's main ` +
+          `before a root carrier may carry it), then resubmit`,
+        subject: `${entry.change.branch}: gitlink ${error.path} at ${error.sha} is not on ${error.url}`,
+        trailers: [
+          ["Reason", "gitlink-not-on-remote"],
+          // What the attribution READ, so the record answers "why is a missing
+          // pin the submitter's here" without its reader going to the journal:
+          // the remote answered, and did not have this commit.
+          ["Remote-Answered", "yes"],
+          ["Gitlink", `${error.path}@${error.sha}`],
+        ],
+      })
     }
     // The other crash with a name, and the same shape as setup: the reference
     // repository is the queue's own ground, so a gitlink it cannot be given a
