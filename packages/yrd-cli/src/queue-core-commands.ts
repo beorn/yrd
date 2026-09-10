@@ -369,7 +369,11 @@ export async function coreQueueCommand(
           io,
           options.json,
           submitted,
-          `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}; ${freshnessLine(submitted.targetHead)}`,
+          `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}; ${freshnessLine(submitted.targetHead)}` +
+            // 24454: a moved gitlink's commit went to its submodule remote first; say where.
+            submitted.published
+              .map((row) => `\n${row.state} ${row.path}@${row.sha.slice(0, 12)} at ${row.remote} ${row.ref}`)
+              .join(""),
         )
         return 0
       } catch (error) {

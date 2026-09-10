@@ -2868,7 +2868,7 @@ describe("a gitlink the component's remote does not hold", () => {
     expect(trailer(failed!, "Remote-Answered")).toBe("yes")
     expect(trailer(failed!, "Gitlink")).toBe(`packages/child@${unpushed}`)
     expect(trailer(failed!, "Fault")).toBe("submitter")
-    expect(trailer(failed!, "Remedy")).toContain("push the component commit to its remote")
+    expect(trailer(failed!, "Remedy")).toContain("resubmit from the checkout that holds the commit")
   })
 
   it("sticks the change on the queue when the remote cannot be reached either", async () => {

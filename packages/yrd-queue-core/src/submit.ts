@@ -13,9 +13,10 @@
  */
 
 import { readdir } from "node:fs/promises"
+import { join } from "node:path"
 import { targetName, type Target } from "./config.ts"
 import { ABSENT, appendRecord, type Git } from "./records.ts"
-import { isAncestor, mergeBase, readRemoteCommit, refAt } from "./git.ts"
+import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
 import { requireResumed } from "./pause.ts"
 
@@ -39,7 +40,114 @@ export type Submitted = Readonly<{
   opened: string
   /** True when the change already existed at this head, so this was a retry. */
   retry: boolean
+  /** Gitlinks this change moved whose commits submit published to their submodule remotes (24454). */
+  published: readonly PublishedGitlink[]
 }>
+
+export type PublishedGitlink = Readonly<{
+  /** Root-relative, nested paths joined: `km`, `km/apps/maddoc`. */
+  path: string
+  /** The pin the change records at that path. */
+  sha: string
+  /** The submodule remote the pin now lives at, and the retention ref naming it there. */
+  remote: string
+  ref: string
+  /**
+   * `published`: this submit wrote the ref. `retained`: it already named the pin (a retry, or a prior submit).
+   * `fetchable`: the checkout lacked the pin and the remote already held it under some ref (a branch somebody
+   * pushed), so nothing was written; the queue fetches by sha exactly as this did.
+   */
+  state: "published" | "retained" | "fetchable"
+}>
+
+/** git-super's retention namespace: one ref per object, named by it, create-only, never advanced. */
+export function retentionRef(sha: string): string {
+  return `refs/git-super/pins/${sha}`
+}
+
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+const ZERO_SHA = /^0+$/u
+
+/**
+ * Publish every gitlink `to` moved against `from`, nested paths included, to
+ * its submodule's remote under git-super's retention ref (24454).
+ *
+ * A submodule change lands as an ordinary submit of the root: the author
+ * commits inside the submodule, bumps the gitlink, and submits the root. The
+ * queue judges the whole tree and, after every check has passed, moves the
+ * submodule main itself. For that the queue must be able to FETCH the pin
+ * from the submodule's remote, and a commit made in a bay is nowhere else,
+ * so submit puts it there first, on a ref that advances no branch: the
+ * retention ref is named by the object, written create-only, and an identical
+ * value already there is the one write it accepts again (a retry). Nothing
+ * about a submodule main moves here; that is the queue's, at merge.
+ *
+ * The pin has to be in the submitter's own submodule checkout, because that is
+ * the only store that holds it; a checkout that lacks it refuses the submit
+ * and says which commit and which checkout, before anything is pushed.
+ */
+export async function publishMovedGitlinks(
+  git: Git,
+  root: string,
+  from: string,
+  to: string,
+  prefix = "",
+): Promise<readonly PublishedGitlink[]> {
+  const published: PublishedGitlink[] = []
+  for (const row of await gitlinkRows(git, from, to)) {
+    if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
+    const path = prefix === "" ? row.path : `${prefix}/${row.path}`
+    const checkout = join(root, row.path)
+    const child = gitIn(checkout)
+    const remote = (await child(["remote", "get-url", "origin"])).trim()
+    // Where the pin is: this checkout, else the remote under some ref (a branch
+    // somebody pushed by hand; the queue fetches by sha, so ask the same way),
+    // else nowhere, which is a refusal before anything is pushed.
+    let fetchedFromRemote = false
+    try {
+      await child(["cat-file", "-e", `${row.sha}^{commit}`])
+    } catch {
+      try {
+        await child([
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          "--no-recurse-submodules",
+          "--no-write-fetch-head",
+          "origin",
+          row.sha,
+        ])
+        fetchedFromRemote = true
+      } catch (cause) {
+        throw new Error(
+          `${path} at ${row.sha} is a gitlink this change moved to a commit neither ${checkout} nor ${remote} holds; ` +
+            "commit it in that checkout (or check the submodule out at it) so submit can publish it, then resubmit",
+          { cause },
+        )
+      }
+    }
+    const ref = retentionRef(row.sha)
+    const listed = (await child(["ls-remote", "--refs", "origin", ref])).trim().split(/\s+/u)[0] ?? ""
+    if (listed === row.sha) {
+      published.push({ path, sha: row.sha, remote, ref, state: "retained" })
+    } else if (listed !== "") {
+      throw new Error(
+        `${remote} ${ref} names ${listed}, not ${row.sha}: a retention ref is named by its object and never moves; ` +
+          "repair that ref at the submodule remote before resubmitting",
+      )
+    } else if (fetchedFromRemote) {
+      published.push({ path, sha: row.sha, remote, ref, state: "fetchable" })
+    } else {
+      await child(["push", "--quiet", `--force-with-lease=${ref}:${ABSENT}`, "origin", `${row.sha}:${ref}`])
+      published.push({ path, sha: row.sha, remote, ref, state: "published" })
+    }
+    // A moved submodule may itself have moved a gitlink: the nested pin has to
+    // be fetchable too, from ITS remote, or the queue cannot materialize km.
+    const before = row.oldMode === "160000" ? (await git(["rev-parse", `${from}:${row.path}`])).trim() : EMPTY_TREE
+    published.push(...(await publishMovedGitlinks(child, checkout, before, row.sha, path)))
+  }
+  return published
+}
 
 /**
  * The target is not a change. Thrown at the one path in, and by the CLI's
@@ -149,6 +257,11 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
       )
     }
   }
+  // 24454: every gitlink this head moved is fetchable from its submodule
+  // remote before the change exists, or the submit refuses with the commit and
+  // checkout named. A refused publication opens nothing.
+  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+  const published = await publishMovedGitlinks(git, root, targetHead, head)
   const change = { branch: request.branch, head }
   const ref = changeRef(request.target.branch, change)
   // Where the remote holds the branch and this change right now, in one
@@ -199,7 +312,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     await git(retry ? ["update-ref", ref, remoteTip] : ["update-ref", "-d", ref])
     throw error
   }
-  return { branch: request.branch, head, targetHead, opened, retry }
+  return { branch: request.branch, head, targetHead, opened, retry, published }
 }
 
 /**

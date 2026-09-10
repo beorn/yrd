@@ -18,6 +18,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
 import {
+  appendRecord,
   changeRef,
   checksOf,
   gitIn,
@@ -174,7 +175,13 @@ async function submitFile(w: World, branch: string): Promise<string> {
   return head
 }
 
-/** Submit a root commit whose gitlink object exists nowhere the queue can fetch. */
+/**
+ * A change whose gitlink object exists nowhere the queue can fetch. Submit
+ * itself refuses it now (24454: the pin is in no store it could publish
+ * from), so the queue's own defence is exercised by opening the change by
+ * hand exactly as a submit does: an older submit, or an object that vanished
+ * from the remote after it, opens the same change.
+ */
 async function submitMissingGitlink(w: World, branch: string, missing: string): Promise<string> {
   const base = (await w.git(["rev-parse", "main"])).trim()
   await w.git(["read-tree", "main"])
@@ -185,7 +192,22 @@ async function submitMissingGitlink(w: World, branch: string, missing: string): 
   ).trim()
   await w.git(["update-ref", `refs/heads/${branch}`, head])
   await w.git(["read-tree", "main"])
-  await submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } })
+  await expect(
+    submit(w.git, "origin", { branch, submitter: "@dev/2", target: { branch: "main", remote: "origin" } }),
+  ).rejects.toThrow(
+    new RegExp(`submodule at ${missing} is a gitlink this change moved to a commit neither .* holds`, "u"),
+  )
+  // Nothing was opened by the refused submit; the change below is opened by hand.
+  expect((await w.git(["ls-remote", "--refs", "origin", `refs/heads/${branch}`])).trim()).toBe("")
+  const change = { branch, head }
+  const ref = changeRef("main", change)
+  await appendRecord(w.git, "main", {
+    change,
+    kind: "opened",
+    subject: `@dev/2 submitted ${branch} to origin main`,
+    trailers: [["Submitter", "@dev/2"]],
+  })
+  await w.git(["push", "--quiet", "--atomic", "origin", `${head}:refs/heads/${branch}`, `${ref}:${ref}`])
   return head
 }
 
@@ -224,6 +246,29 @@ async function aheadOfSubmodule(w: World, contents: string): Promise<string> {
   await submodule(["push", "--quiet", "origin", `ahead-${contents}`])
   await submodule(["checkout", "--quiet", "main"])
   return (await submodule(["rev-parse", `ahead-${contents}`])).trim()
+}
+
+/**
+ * A commit made in the submitter's OWN submodule checkout, on top of the
+ * submodule's main, and pushed nowhere: the shape an author's bay holds after
+ * committing a submodule change and before anything publishes it.
+ */
+async function bayOnlySubmoduleCommit(w: World, contents: string): Promise<string> {
+  const sub = gitIn(join(w.work, "submodule"))
+  await sub(["config", "user.email", "queue@yrd.test"])
+  await sub(["config", "user.name", "yrd"])
+  await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+  await sub(["checkout", "--quiet", "--detach", w.main])
+  writeFileSync(join(w.work, "submodule", "lib.txt"), `${contents}\n`)
+  await sub(["commit", "--quiet", "-am", `${contents}, only in the bay`])
+  return (await sub(["rev-parse", "HEAD"])).trim()
+}
+
+async function submoduleRemoteRef(w: World, ref: string): Promise<string | undefined> {
+  const tip = (await w.git(["ls-remote", "--refs", "https://git-super.test/owned/submodule.git", ref]))
+    .trim()
+    .split(/\s+/u)[0]
+  return tip === undefined || tip === "" ? undefined : tip
 }
 
 async function submoduleMain(w: World): Promise<string> {
@@ -350,6 +395,128 @@ describe("settling gitlinks", () => {
     // The published child is on the record, so a reader of the record alone
     // knows which submodule main this landing moved and to what.
     expect(trailer(merged!, "Published")).toBe(`submodule ${w.main} -> ${ahead}`)
+  })
+
+  // 24454: the whole landing is one ordinary submit of the root. The author
+  // committed inside the submodule and bumped the gitlink; nothing else was
+  // pushed. Submit publishes the moved pin to the submodule's remote under
+  // git-super's retention ref, create-only and named by the oid, so the queue
+  // can fetch it, judge the whole tree, and move the submodule's main itself.
+  it("a submit publishes a moved gitlink's commit the submodule remote lacks, and the queue lands it", async () => {
+    const w = await world()
+    const pin = await bayOnlySubmoduleCommit(w, "five")
+    expect(await submoduleRemoteRef(w, `refs/git-super/pins/${pin}`)).toBeUndefined()
+    const head = await submitGitlink(w, "task/bay-only", pin)
+    // Published at submit, before the change was opened: the retention ref
+    // names exactly the pin, and the submodule's main has not moved.
+    expect(await submoduleRemoteRef(w, `refs/git-super/pins/${pin}`)).toBe(pin)
+    expect(await submoduleMain(w)).toBe(w.main)
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/bay-only"])
+    const target = await remoteTip(w.git, "refs/heads/main")
+    expect(await gitlinkAt(w, target)).toBe(pin)
+    expect(await submoduleMain(w)).toBe(pin)
+    const merged = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/bay-only", head })))
+    ).find((record) => record.kind === "merged")
+    expect(merged).toBeDefined()
+    expect(trailer(merged!, "Published")).toBe(`submodule ${w.main} -> ${pin}`)
+  })
+
+  // The same submit, retried at the same head: the retention ref already
+  // names the pin, which is the one identical write a create-only ref accepts.
+  it("a retried submit finds its moved pin already retained and opens the retry", async () => {
+    const w = await world()
+    const pin = await bayOnlySubmoduleCommit(w, "six")
+    const head = await submitGitlink(w, "task/bay-only-twice", pin)
+    expect(await submoduleRemoteRef(w, `refs/git-super/pins/${pin}`)).toBe(pin)
+    const again = await submit(w.git, "origin", {
+      branch: "task/bay-only-twice",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    expect(again).toMatchObject({ head, retry: true })
+    expect(await submoduleRemoteRef(w, `refs/git-super/pins/${pin}`)).toBe(pin)
+  })
+
+  // 24454, the partial-failure rule: the submodule main is published, then
+  // the root push is refused because root main moved under its lease (a
+  // direct merge, or another queue). That is the one partial state this
+  // landing accepts: the change keeps its place, nothing is stuck, and the
+  // next run composes on the new root main where the published pin reads as
+  // Equal, so the landing finishes with no second publication.
+  it("a published child under a refused root push keeps the change in place, and the next run lands it", async () => {
+    const w = await world()
+    const ahead = await aheadOfSubmodule(w, "seven")
+    const head = await submitGitlink(w, "task/partial", ahead)
+    await using real = createProcess({ cwd: w.work })
+    let rootPushesSeen = 0
+    let movedAround = ""
+    const observing: Process = {
+      ...real,
+      async run(request) {
+        const rootPush =
+          request.argv.includes("push") &&
+          !request.argv.includes("super") &&
+          request.argv.some((arg) => arg.endsWith(":refs/heads/main"))
+        if (rootPush && rootPushesSeen++ === 0) {
+          // Between the children's publication and the root push, root main
+          // moves around the queue: the lease must refuse, and nothing else.
+          expect(await submoduleMain(w)).toBe(ahead)
+          await w.git(["checkout", "--quiet", "main"])
+          writeFileSync(join(w.work, "around.txt"), "around the queue\n")
+          await w.git(["add", "around.txt"])
+          await w.git(["commit", "--quiet", "-m", "a file landed around the queue"])
+          await w.git(["push", "--quiet", "origin", "main"])
+          movedAround = (await w.git(["rev-parse", "HEAD"])).trim()
+        }
+        return real.run(request)
+      },
+    }
+    const first = await queueRun({ ...(await w.options()), process: observing })
+    expect(first.exitCode).toBe(0)
+    expect(first.merged).toEqual([])
+    expect(first.stuck).toEqual([])
+    expect(rootPushesSeen).toBe(1)
+    // The partial state, exactly: submodule main moved, root main did not take the merge.
+    expect(await submoduleMain(w)).toBe(ahead)
+    expect(await remoteTip(w.git, "refs/heads/main")).toBe(movedAround)
+    const firstRows = readFileSync(first.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(firstRows.find((row) => row.kind === "publish")).toMatchObject({
+      path: "submodule",
+      from: w.main,
+      to: ahead,
+    })
+    expect(firstRows.find((row) => row.kind === "change" && row.decision === "checked")).toMatchObject({
+      reason: "target-moved",
+    })
+    // The landing record is on the change ref, and it says what was published.
+    const ref = changeRef("main", { branch: "task/partial", head })
+    const landing = (await readRecords(w.git, await remoteTip(w.git, ref))).at(-1)
+    expect(landing?.kind).toBe("checked")
+    expect(trailer(landing!, "Publishing")).toBe(`submodule ${w.main} -> ${ahead}`)
+
+    const second = await queueRun(await w.options())
+    expect(second.exitCode).toBe(0)
+    expect(second.merged).toEqual(["task/partial"])
+    const target = await remoteTip(w.git, "refs/heads/main")
+    expect(await gitlinkAt(w, target)).toBe(ahead)
+    expect(await submoduleMain(w)).toBe(ahead)
+    expect((await w.git(["rev-parse", `${target}^1`])).trim()).toBe(movedAround)
+    const secondRows = readFileSync(second.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    // Nothing to publish the second time: the pin now equals the submodule's main.
+    expect(secondRows.find((row) => row.kind === "publish")).toBeUndefined()
+    const merged = (await readRecords(w.git, await remoteTip(w.git, ref))).find((record) => record.kind === "merged")
+    expect(merged).toBeDefined()
+    expect(trailer(merged!, "Published")).toBeUndefined()
   })
 
   it("a held-back authored gitlink merges raised and keeps the submitted Change identity", async () => {

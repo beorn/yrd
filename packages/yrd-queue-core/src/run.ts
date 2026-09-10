@@ -614,7 +614,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     // A candidate's setup that did not pass is the one crash whose owner the
     // queue can read rather than assume: `attributedSetupFailure` runs the same
     // setup on the settled base and bills whoever the ground names.
-    if (error instanceof CandidateSetupFailed) return  attributedSetupFailure(run, entry, error)
+    if (error instanceof CandidateSetupFailed) return attributedSetupFailure(run, entry, error)
     const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim()
     // A setup that did not pass anywhere a candidate could be attributed from —
     // the settled base's own worktree — is the queue's: it could not build the
@@ -644,8 +644,8 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     if (error instanceof GitlinkNotOnRemote) {
       return run.steps.end(run, entry, "failed", {
         remedy:
-          `push the component commit to its remote (it must be on the component's main ` +
-          `before a root carrier may carry it), then resubmit`,
+          "resubmit from the checkout that holds the commit: yrd submit publishes a moved gitlink's commit to its " +
+          "submodule remote (refs/git-super/pins), and a pin ahead of the submodule's main lands by the queue moving that main",
         subject: `${entry.change.branch}: gitlink ${error.path} at ${error.sha} is not on ${error.url}`,
         trailers: [
           ["Reason", "gitlink-not-on-remote"],
@@ -1167,7 +1167,7 @@ async function attributedSetupFailure(run: Run, entry: QueueEntry, failure: Cand
   const ground = await judgeSettledBase(run, entry, raises)
   if (ground.passed) {
     recordProgramVerdict(run, about, result, "submitter")
-    return  run.steps.end(run, entry, "failed", {
+    return run.steps.end(run, entry, "failed", {
       remedy: `fix ${SETUP} (log: ${result.log}), push, and submit again`,
       subject: `${entry.change.branch} failed ${SETUP}${phase === "merge" ? " at merge" : ""}: ${message}`,
       trailers: [
@@ -1180,7 +1180,7 @@ async function attributedSetupFailure(run: Run, entry: QueueEntry, failure: Cand
     })
   }
   recordProgramVerdict(run, about, result)
-  return  run.steps.end(
+  return run.steps.end(
     run,
     entry,
     "stuck",
@@ -1434,8 +1434,9 @@ function readGitSuperPushResult(value: unknown): GitSuperPushResult {
   if (typeof found.partial !== "boolean") throw new Error("git-super push JSON has no boolean partial field")
   if (!Array.isArray(found.repositories)) throw new Error("git-super push JSON has no repositories array")
   const repositories = found.repositories.map((row, index) => {
-    if (typeof row !== "object" || row === null)
-      {throw new Error(`git-super push repository ${String(index)} is not an object`)}
+    if (typeof row !== "object" || row === null) {
+      throw new Error(`git-super push repository ${String(index)} is not an object`)
+    }
     const repository = row as Record<string, unknown>
     if (typeof repository.repository !== "string" || !Array.isArray(repository.refs)) {
       throw new Error(`git-super push repository ${String(index)} is incomplete`)
