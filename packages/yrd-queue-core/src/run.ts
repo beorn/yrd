@@ -100,6 +100,12 @@ export type QueueRunOptions = Readonly<{
   selection?: GitSelection
   /** The working repository the run reads and writes through. */
   repo: string
+  /**
+   * Whether `repo` is the queue's OWN clone, and may be given the submodule
+   * stores every compose borrows from. Only `resolveQueueLocation` knows, so
+   * only it may say; a run against a seat's checkout leaves that tree alone.
+   */
+  populateReference?: boolean
   /** The branch the queue merges on, at the remote holding it: `<remote>#<branch>`. */
   target: Target
   /** The target commit whose declaration supplied this round's config and checks. */
@@ -688,6 +694,7 @@ async function prepare(
   const about = { branch: entry.change.branch, head: entry.change.head, name: SETUP, phase }
   return prepareWorktree(run.git, run.options.repo, commit, path, {
     env: run.options.env,
+    populateReference: run.options.populateReference,
     selection: run.options.selection,
     gitOptions: gitInvocationOptions(run.options, run.log),
     plumbing: run.plumbing,
@@ -799,6 +806,7 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       env: run.options.env,
       gitOptions: gitInvocationOptions(run.options, run.log),
       plumbing: run.plumbing,
+      populateReference: run.options.populateReference,
       process: run.options.process,
       selection: run.options.selection,
     },
@@ -1172,7 +1180,16 @@ async function judgeSettledBase(
   return { passed: true }
 }
 
-/** Materialize the target with the candidate's exact raises on existing gitlinks, but none of its authored content. */
+/**
+ * Materialize the target with the candidate's exact raises on existing
+ * gitlinks, but none of its authored content.
+ *
+ * A gitlink of the TARGET is never the submitter's, and needs no flag to say
+ * so: this queue is the only writer of main, so every gitlink it composes from
+ * main is one it put there and already proved fetchable. A pin missing here
+ * can therefore only be the queue's own ground, which is the ending
+ * {@link GitlinkNotOnRemote}'s probe reaches for it anyway when nothing answers.
+ */
 async function prepareSettledBase(
   run: Run,
   entry: QueueEntry,
@@ -1187,6 +1204,7 @@ async function prepareSettledBase(
       env: run.options.env,
       gitOptions: gitInvocationOptions(run.options, run.log),
       plumbing: run.plumbing,
+      populateReference: run.options.populateReference,
       process: run.options.process,
       selection: run.options.selection,
     },

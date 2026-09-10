@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { gitIn } from "../src/git.ts"
 import type { LogWrite } from "../src/log.ts"
@@ -24,6 +24,23 @@ afterAll(() => {
 })
 
 const author = ["-c", "user.email=reference@yrd.test", "-c", "user.name=yrd"] as const
+
+/**
+ * The git-super this repository PINS, not whichever one the host happens to
+ * have on PATH.
+ *
+ * A subcommand is a PATH lookup, so a compose silently takes the ambient
+ * binary — and the ambient one is a different build with different refusals. A
+ * test asserting that the compose refuses would then be asserting something
+ * about the machine it ran on.
+ */
+const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
+const superEnv = { ...process.env, PATH: `${gitSuperBin}:${process.env.PATH ?? ""}` }
+
+/** A Git that composes through the pinned build, and hands the same PATH to whatever it starts. */
+function composingGit(cwd: string): ReturnType<typeof gitIn> {
+  return gitIn(cwd, undefined, undefined, { env: superEnv })
+}
 
 async function repository(path: string, file: string): Promise<string> {
   mkdirSync(path, { recursive: true })
@@ -233,12 +250,16 @@ describe("freshWorktree", () => {
     roots.push(root)
     const { product } = await superproject(root)
     const repo = await queueClone(root, product)
-    const git = gitIn(repo)
+    const git = composingGit(repo)
     const commit = (await git(["rev-parse", "HEAD"])).trim()
     const journal: LogWrite[] = []
     const plumbing = { journal: (record: LogWrite) => void journal.push(record) }
 
-    const worktree = await freshWorktree(git, repo, commit, join(root, "candidate"), { plumbing })
+    const worktree = await freshWorktree(git, repo, commit, join(root, "candidate"), {
+      env: superEnv,
+      plumbing,
+      populateReference: true,
+    })
 
     // Populated on the way in, and reported as records rather than as a trace
     // line nobody turned on.
@@ -257,12 +278,49 @@ describe("freshWorktree", () => {
     // make, so no row to write, and it still borrows.
     const again: LogWrite[] = []
     const second = await freshWorktree(git, repo, commit, join(root, "candidate-2"), {
+      env: superEnv,
       plumbing: { journal: (record: LogWrite) => void again.push(record) },
+      populateReference: true,
     })
     expect(again.filter(({ kind }) => kind === "reference")).toEqual([])
     expect(again.filter(({ kind }) => kind === "warning")).toEqual([])
     expect(existsSync(join(second.path, "vendor/dep/apps/nested/nested.txt"))).toBe(true)
   }, 120_000)
+
+  /**
+   * The other branch of the same boolean, and the reason it exists.
+   *
+   * `yrd check` and `yrd env` compose from the SEAT's own checkout, so `repo`
+   * there is a tree somebody is working in. Populating it would write a clone
+   * into an uninitialized submodule directory as a side effect of a command
+   * that asked for nothing of the kind. The compose refuses instead, and
+   * git-super's refusal carries the `submodule update --init` that fixes it, so
+   * the person reading it owns that decision rather than having it made for
+   * them.
+   */
+  it("leaves the tree alone and lets git-super name the remedy when the repository is not the queue's", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-reference-not-owned-"))
+    roots.push(root)
+    const { product } = await superproject(root)
+    const repo = await queueClone(root, product)
+    const git = composingGit(repo)
+    const commit = (await git(["rev-parse", "HEAD"])).trim()
+    const journal: LogWrite[] = []
+
+    // The default: no flag, no population.
+    const composing = freshWorktree(git, repo, commit, join(root, "candidate"), {
+      env: superEnv,
+      plumbing: { journal: (record: LogWrite) => void journal.push(record) },
+    })
+
+    await expect(composing).rejects.toBeInstanceOf(ReferenceUnpopulated)
+    await expect(composing).rejects.toThrow(/holds no object store for/u)
+    // The remedy reaches the reader through the refusal, unedited.
+    await expect(composing).rejects.toThrow(new RegExp(`submodule update --init -- vendor/dep`, "u"))
+    // Nothing was created and nothing was said: the tree is exactly as found.
+    expect(existsSync(join(repo, "vendor/dep"))).toBe(false)
+    expect(journal).toEqual([])
+  }, 60_000)
 
   /**
    * The reference is REAL and already self-contained here, so the populate step

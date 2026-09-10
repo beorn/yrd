@@ -214,6 +214,12 @@ export async function coreQueueCommand(
     selection?: GitSelection
     /** A terminal with a keyboard on the other end: the watch draws its pane instead of printing rounds. */
     interactive?: boolean
+    /**
+     * Whether `repo` is the queue's own clone (`QueueLocation.owned`). Only
+     * then may a compose populate the submodule stores it borrows from;
+     * composing from a seat's checkout leaves that tree exactly as it found it.
+     */
+    populateReference?: boolean
   }> = {},
 ): Promise<YrdCliExitCode> {
   /**
@@ -285,7 +291,7 @@ export async function coreQueueCommand(
     let outcome: QueueRunOutcome
     try {
       outcome = await queueRun({
-        ...runOptions(repo, declared, workdir, selection, options.env, options.log),
+        ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
         foreground: request.command === "run",
       })
     } catch (error) {
@@ -775,6 +781,7 @@ export async function coreQueueCommand(
       // declaration's setup run once, and told the same three values.
       const prepared = await prepareWorktree(git, repo, head, join(worktrees, "check", head.slice(0, 12)), {
         env: options.env,
+        populateReference: options.populateReference,
         selection,
         gitOptions: { env: options.env },
         plumbing: options.log?.child("worktree"),
@@ -1011,12 +1018,14 @@ function runOptions(
   selection: GitSelection,
   env?: NodeJS.ProcessEnv,
   log?: ConditionalLogger,
+  populateReference?: boolean,
 ) {
   const { config, oid } = declared
   return {
     checks: config.checks,
     configBlob: config.blob,
     env,
+    populateReference,
     selection,
     notify: config.notify,
     // git-super narrates which submodule it borrowed and how long each phase

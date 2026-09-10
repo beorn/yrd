@@ -56,6 +56,19 @@ export type Worktree = Readonly<{
 
 /** What a fresh worktree needs beyond the repository and the commit: how to run Git elsewhere, and where to narrate. */
 export type FreshWorktree = Readonly<{
+  /**
+   * Whether this repository is the queue's OWN clone, and may therefore be
+   * given the stores it lends.
+   *
+   * Off by default, because `repo` is not always the queue's. `yrd check` and
+   * `yrd env` compose from the seat's own checkout, and populating there would
+   * write a clone into an uninitialized submodule directory as a side effect of
+   * a command the seat asked nothing of the kind from. A tree somebody is
+   * working in is not ours to provision; git-super's own refusal names the
+   * `submodule update --init` that would fix it, and the person reading it owns
+   * that decision.
+   */
+  populateReference?: boolean
   plumbing?: PlumbingLog
   /** The command's fixed selection and invocation evidence, for the reference stores as for the tree. */
   selection?: GitSelection
@@ -91,29 +104,33 @@ export async function freshWorktree(
   if (modules.trim() === "") {
     await git(["worktree", "add", "--quiet", "--detach", path, commit])
   } else {
-    const gitAt = (cwd: string): Git =>
-      gitIn(cwd, options.process, options.selection, {
-        ...(options.env === undefined ? {} : { env: options.env }),
-        ...options.gitOptions,
+    if (options.populateReference === true) {
+      const gitAt = (cwd: string): Git =>
+        gitIn(cwd, options.process, options.selection, {
+          ...(options.env === undefined ? {} : { env: options.env }),
+          ...options.gitOptions,
+        })
+      await populateReferenceStores({
+        commit,
+        gitIn: gitAt,
+        populated: (store) => {
+          plumbing?.journal?.({ head: commit, kind: "reference", ms: store.ms, path: store.path, sha: store.sha })
+        },
+        repo,
       })
-    await populateReferenceStores({
-      commit,
-      gitIn: gitAt,
-      populated: (store) => {
-        plumbing?.journal?.({ head: commit, kind: "reference", ms: store.ms, path: store.path, sha: store.sha })
-      },
-      repo,
-    })
+    }
     let output: string
     try {
       output = await git(["super", "--json", "worktree", "add", path, commit, "--reference", repo])
     } catch (error) {
       const said = error instanceof Error ? error.message : String(error)
-      // The population above ran for THIS commit, so reaching git-super's own
-      // absent-store refusal means the reference lost a store, or gained a
-      // gitlink, between the two. Same condition, same remedy, so the same
-      // ending — never the generic crash one, which would name the change and
-      // not the ground it could not be judged on.
+      // The reference has no store for a gitlink of this commit — because it
+      // was never populated (a seat's own checkout), or because it lost one
+      // between the population and now. Same condition and same remedy either
+      // way, so the same ending, never the generic crash one, which would name
+      // the change and not the ground it could not be judged on. git-super's
+      // full refusal is carried through, so the command that populates it
+      // reaches whoever reads this.
       if (said.includes(GIT_SUPER_ABSENT_STORE)) {
         throw new ReferenceUnpopulated(
           repo,
@@ -367,6 +384,8 @@ export type PrepareWorktree = Readonly<{
   gitOptions?: GitInvocationOptions
   /** The target every base is measured against: `YRD_BASE_SHA` is the merge base of it and the worktree's HEAD. */
   targetSha: string
+  /** Whether `repo` is the queue's own clone; see {@link FreshWorktree.populateReference}. */
+  populateReference?: boolean
   /** Run once in the fresh worktree, after materialization and before any check. Absent, nothing runs. */
   setup?: SetupSpec
   /** Told how the setup went, pass or not, before a failure throws: the one place a caller records it. */
@@ -505,6 +524,7 @@ export async function prepareWorktree(
   options: PrepareWorktree,
 ): Promise<PreparedWorktree> {
   const worktree = await freshWorktree(git, repo, commit, path, {
+    ...(options.populateReference === undefined ? {} : { populateReference: options.populateReference }),
     ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.gitOptions === undefined ? {} : { gitOptions: options.gitOptions }),
     ...(options.plumbing === undefined ? {} : { plumbing: options.plumbing }),

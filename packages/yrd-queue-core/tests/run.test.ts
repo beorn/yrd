@@ -186,6 +186,10 @@ async function world(plan: Readonly<{ declaredLater?: boolean }> = {}): Promise<
         PATH: `${gitSuperBin}:${process.env.PATH ?? ""}`,
       },
       notify: [{ name: "recorder", on: ["merged", "failed", "stuck", "merged-direct"], run: notifier }],
+      // What the CLI passes for a queue-owned clone (`QueueLocation.owned`).
+      // A run against a seat's checkout leaves that tree alone instead, which
+      // is the other branch and lives in reference.test.ts.
+      populateReference: true,
       repo: work,
       ...(check.setup === undefined ? {} : { setup: check.setup }),
       target: { branch: "main", remote: "origin" },

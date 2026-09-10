@@ -20,6 +20,15 @@ export type QueueLocation = Readonly<{
   /** One immutable selection, resolved before address reads and retained by the queue command. */
   selection: GitSelection
   /**
+   * Whether `repo` is the queue's OWN clone rather than the caller's checkout.
+   *
+   * The one fact that says whether this repository may be GIVEN the submodule
+   * stores a compose borrows from. Only this module can know it — everything
+   * downstream sees a path — and a command that composes from a seat's own tree
+   * must leave that tree alone.
+   */
+  owned: boolean
+  /**
    * Stores the queue-owned clone had to be given before anything could borrow
    * from it. Empty for a reference that was already self-contained, and for
    * every context that reads from the caller's own checkout instead.
@@ -141,6 +150,7 @@ export async function resolveQueueLocation(
     return {
       address,
       selection,
+      owned: false,
       queue: address.queue,
       referenceStores: [],
       repo: inside,
@@ -152,6 +162,7 @@ export async function resolveQueueLocation(
   return {
     address,
     selection,
+    owned: true,
     queue: address.queue,
     referenceStores: owned.referenceStores,
     repo: owned.repo,

@@ -421,6 +421,7 @@ function notificationEnvironment(run: Run): Promise<Readonly<{ cwd: string; runn
         process: runner,
         env: run.options.env,
         plumbing: run.plumbing,
+        populateReference: run.options.populateReference,
         ...(run.options.setup === undefined
           ? {}
           : {
