@@ -13,7 +13,7 @@ describe("Yrd Hab runner declarations", () => {
     ])
     expect(hab.services).toEqual({
       "yrd-service": {
-        command: "bun tools/yrd-runtime.mjs yrd queue up --interval 120",
+        command: "bun tools/yrd-runtime.mjs yrd queue up --interval 20",
         env: { TRIBE_NAME: "@yrd-service", YRD_HABITANT_RSS_CAP_MB: "24576" },
         // The queue relaunches only after an ending the loop chose: 0 for a
         // clean round/gitlink recycle, or 1 for a candidate failure. Exit 2 is
