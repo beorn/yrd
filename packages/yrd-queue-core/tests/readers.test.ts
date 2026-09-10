@@ -198,7 +198,23 @@ describe("a run's journal, read back", () => {
     expect(defect).toContain("incomplete incident")
     expect(defect).toContain(run)
     expect(defect).toContain(journalKey("task/one", "abc123"))
+    // Only `next` was written, so the other five are the ones to name.
+    expect(defect).toContain("missing code, subject, via, evidence, owner")
     expect(journals.runs.get(journalKey("task/two", "def456"))?.[0]?.decision).toBe("merged")
+  })
+
+  // @cto rider 2 on 24408: a field PRESENT but unreadable is a different bug
+  // from one never written, and reporting them as one sends the reader back to
+  // the JSONL to find out which they have. The five-undefined case above
+  // cannot catch a reader that labels every defect "missing".
+  it("tells a field that was never written apart from one that is not a string", () => {
+    const { dir } = journalDir([
+      { branch: "task/one", code: "check-failed", head: "abc123", kind: "change", owner: 7, subject: "task/one" },
+    ])
+
+    const defect = readJournals(dir).runs.get(journalKey("task/one", "abc123"))?.[0]?.malformed?.[0]
+    expect(defect).toContain("missing via, evidence, next")
+    expect(defect).toContain("not a string: owner")
   })
 
   // 24408: one short row from `waiting()` took every read verb down for the
@@ -222,8 +238,13 @@ describe("a run's journal, read back", () => {
     expect(defect).toContain("incomplete incident")
     expect(defect).toContain(run)
     expect(defect).toContain(journalKey("task/a", "abc123"))
-    // The defect is aggregated for the caller that prints it, never skipped in silence.
+    // The exact 24408 writer bug: a code and none of its five siblings. Naming
+    // WHICH five is what saves the reader the trip to the JSONL with jq.
+    expect(defect).toContain("missing subject, via, evidence, next, owner")
+    // The defect is aggregated for the caller that prints it, never skipped in
+    // silence, and the aggregate carries the same field names.
     expect(journals.malformed).toEqual([{ key: journalKey("task/a", "abc123"), message: defect, run }])
+    expect(journals.malformed[0]?.message).toContain("missing subject, via, evidence, next, owner")
     const b = journals.runs.get(journalKey("task/b", "def456"))?.[0]
     expect(b).toMatchObject({ decision: "merged", merge: "landed" })
     expect(b?.malformed).toBeUndefined()

@@ -150,7 +150,9 @@ describe("the table is the queue read rendered", () => {
 
     const at = new Date()
     const base = { at, checks: [], startedAt: at }
-    const message = `run journal q-1 has an incomplete incident for ${journalKey("task/one", one)}`
+    const message =
+      `run journal q-1 has an incomplete incident for ${journalKey("task/one", one)}: ` +
+      "missing subject, via, evidence, next, owner"
     const journals = {
       dir: "/journal-fixture",
       malformed: [{ key: journalKey("task/one", one), message, run: "q-1" }],
@@ -161,12 +163,25 @@ describe("the table is the queue read rendered", () => {
     }
 
     const rows = list(entries, { journals })
+    // A defective change is a ROW, never an omission: the listing still counts
+    // both changes and both keep their place in line (@cto rider 2).
+    expect(rows).toHaveLength(2)
+    expect(rows.map((row) => [row.branch, row.position, row.state])).toEqual([
+      ["task/one", 1, "queued"],
+      ["task/two", 2, "queued"],
+    ])
     const defective = rows.find((row) => row.branch === "task/one")
     expect(defective?.malformed).toEqual([message])
     expect(defective?.next).toEqual({
       because: `run journal q-1 has a malformed row for this change (${message}); the row was skipped — fix the writer (24408)`,
       owner: "the queue's operator",
     })
+    // The line a reader acts on names the run, the change, WHICH fields are
+    // gone, and the fix — not just that something was wrong.
+    expect(defective?.next?.because).toContain("q-1")
+    expect(defective?.next?.because).toContain(journalKey("task/one", one))
+    expect(defective?.next?.because).toContain("missing subject, via, evidence, next, owner")
+    expect(defective?.next?.because).toContain("fix the writer (24408)")
     // The state its OTHER records give: no decision is invented for the gap.
     expect(defective?.state).toBe("queued")
     const neighbour = rows.find((row) => row.branch === "task/two")

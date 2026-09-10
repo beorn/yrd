@@ -535,6 +535,7 @@ describe("what a watch says it looked at", () => {
   it("renders the table and names the journal row it could not read, instead of refusing", async () => {
     const w = await world()
     await change(w, "task/good", true)
+    await change(w, "task/other", true)
     const head = (await w.git(["rev-parse", "task/good"])).trim()
     const journal = openLog(join(w.workdir, "logs"))
     journal.write({ base: "aaa", checks: ["verify"], kind: "run", queue: "test", target: "main" })
@@ -542,8 +543,11 @@ describe("what a watch says it looked at", () => {
 
     const human = capture(w.work)
     expect(await coreQueueCommand(w.work, human.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
+    // Both changes are on the page: the defective one is a ROW, not an omission.
     expect(human.stdout()).toContain("task/good")
+    expect(human.stdout()).toContain("task/other")
     expect(human.stderr()).toContain("incomplete incident")
+    expect(human.stderr()).toContain("missing subject, via, evidence, next, owner")
     expect(human.stderr()).toContain("the row was skipped — fix the writer (24408)")
 
     const json = capture(w.work)
@@ -551,17 +555,30 @@ describe("what a watch says it looked at", () => {
     const listed = JSON.parse(json.stdout().trim()) as Readonly<{
       changes: readonly Readonly<{
         branch: string
+        state: string
         malformed?: readonly string[]
         next?: Readonly<{ because: string }>
       }>[]
       journal: Readonly<{ malformed?: readonly Readonly<{ run: string; key: string; message: string }>[] }>
     }>
     expect(listed.journal.malformed).toEqual([
-      { key: `task/good@${head}`, message: expect.stringContaining("incomplete incident"), run: journal.id },
+      {
+        key: `task/good@${head}`,
+        message: expect.stringContaining("missing subject, via, evidence, next, owner"),
+        run: journal.id,
+      },
     ])
+    // Counted, not omitted: a listing that hid the defective change would still
+    // satisfy every assertion about the defect itself (@cto rider 2).
+    expect(listed.changes.map((change) => change.branch)).toEqual(["task/good", "task/other"])
     const row = listed.changes.find((change) => change.branch === "task/good")
+    // Its own state, from its own records — the journal defect changes nothing.
+    expect(row?.state).toBe("queued")
     expect(row?.malformed?.[0]).toContain("incomplete incident")
+    expect(row?.malformed?.[0]).toContain("missing subject, via, evidence, next, owner")
+    expect(row?.next?.because).toContain("missing subject, via, evidence, next, owner")
     expect(row?.next?.because).toContain("the row was skipped — fix the writer (24408)")
+    expect(listed.changes.find((change) => change.branch === "task/other")?.malformed).toBeUndefined()
     // Narration is stderr's; the product a consumer parses stays on stdout.
     expect(json.stderr()).toBe("")
   })

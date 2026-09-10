@@ -428,7 +428,27 @@ function incidentIn(record: LogRecord, id: string, branch: string, head: string)
     typeof next !== "string" ||
     typeof owner !== "string"
   ) {
-    return `run journal ${id} has an incomplete incident for ${journalKey(branch, head)}`
+    // Name WHICH of the six are gone. "Incomplete" alone sends the reader back
+    // to the JSONL with jq — the very cost 24408 was opened to remove — and a
+    // field that is present but not a string is a different bug from one that
+    // was never written, so the two are never reported as one.
+    const claimed = [
+      ["code", code],
+      ["subject", subject],
+      ["via", via],
+      ["evidence", evidence],
+      ["next", next],
+      ["owner", owner],
+    ] as const
+    const absent = claimed.filter(([, value]) => value === undefined).map(([name]) => name)
+    const unreadable = claimed
+      .filter(([, value]) => value !== undefined && typeof value !== "string")
+      .map(([name]) => name)
+    const said = [
+      ...(absent.length === 0 ? [] : [`missing ${absent.join(", ")}`]),
+      ...(unreadable.length === 0 ? [] : [`not a string: ${unreadable.join(", ")}`]),
+    ].join("; ")
+    return `run journal ${id} has an incomplete incident for ${journalKey(branch, head)}: ${said}`
   }
   const incident = { code, subject, via, evidence, next, owner }
   try {
