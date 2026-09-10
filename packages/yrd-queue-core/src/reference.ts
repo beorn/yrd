@@ -91,6 +91,28 @@ export class ReferenceUnpopulated extends Error {
   }
 }
 
+/**
+ * A gitlink standing at a commit its own remote does not have.
+ *
+ * The SUBMITTER's, and the one failure here that is. A pin the reference cannot
+ * fetch has two causes with opposite owners, and telling them apart is one
+ * `ls-remote`: a remote that answers and simply lacks the commit is a component
+ * commit that never left somebody's bay, while a remote that cannot be reached
+ * at all is the queue's own ground. Specimen 2026-09-03: a root carrier stood
+ * at km gitlink 11d9312c, which existed only in the author's bay, and the queue
+ * billed itself and stopped for it.
+ */
+export class GitlinkNotOnRemote extends Error {
+  constructor(
+    readonly path: string,
+    readonly sha: string,
+    readonly url: string,
+  ) {
+    super(`gitlink ${path} at ${sha} is not on ${url}`)
+    this.name = "GitlinkNotOnRemote"
+  }
+}
+
 /** The marker git-super's own refusal carries when a reference has no store for a gitlink.
  *
  * A compose can still meet that refusal after this module ran — a gitlink added
@@ -197,6 +219,16 @@ export async function populateReferenceStores(options: PopulateReference): Promi
         // written for a pin already here exactly as for one just fetched.
         await storeGit(["update-ref", pinRef(sha), sha])
       } else {
+        // TWO CAUSES, OPPOSITE OWNERS, ONE PROBE. Whichever way this fetch
+        // fails, the pin is not here — but "the remote does not have it" is a
+        // component commit still sitting in somebody's bay, and "the remote
+        // cannot be reached" is the queue's own ground. Billing both to the
+        // queue stops the whole line for one submitter's unpushed gitlink,
+        // which is what happened on 2026-09-03.
+        const unresolved = async (why: string): Promise<never> => {
+          if (await remoteAnswers(storeGit)) throw new GitlinkNotOnRemote(named, sha, url)
+          throw new ReferenceUnpopulated(root, named, `${why}; ${url} could not be reached either`)
+        }
         try {
           await storeGit([
             "fetch",
@@ -207,14 +239,12 @@ export async function populateReferenceStores(options: PopulateReference): Promi
             `${sha}:${pinRef(sha)}`,
           ])
         } catch (error) {
-          throw new ReferenceUnpopulated(
-            root,
-            named,
+          await unresolved(
             `${store} lacks ${sha} and fetching it from origin failed: ${error instanceof Error ? error.message : String(error)}`,
           )
         }
         if (!(await holdsCommit(storeGit, sha))) {
-          throw new ReferenceUnpopulated(root, named, `${store} still lacks ${sha} after one fetch from origin`)
+          await unresolved(`${store} still lacks ${sha} after one fetch from origin`)
         }
       }
       levels.push({ commit: sha, dir: store, prefix: named })
@@ -303,6 +333,28 @@ async function isRepositoryAt(gitIn: (cwd: string) => Git, path: string): Promis
     // directory that is not a repository, a git that refuses to resolve it —
     // is that same answer. Saying so returns the caller to the populate path,
     // which reports and throws on its own failures.
+    return false
+  }
+}
+
+/**
+ * Whether the store's `origin` ANSWERS — not whether it holds anything.
+ *
+ * Deliberately without `--exit-code`: a reachable repository with no branches
+ * exits 0 with empty output, and that is a reachable remote, which is the only
+ * question being asked. `--exit-code` would turn it into a failure and bill the
+ * queue for a remote that was talking to us perfectly well.
+ *
+ * One call, only on the path where a pin is already known to be missing, so a
+ * healthy reference never makes it.
+ */
+async function remoteAnswers(git: Git): Promise<boolean> {
+  try {
+    await git(["ls-remote", "--heads", "origin"])
+    return true
+  } catch {
+    // silent-fallback-allow: unreachable IS the answer, and the one caller
+    // turns it straight into a loud ReferenceUnpopulated naming the url.
     return false
   }
 }

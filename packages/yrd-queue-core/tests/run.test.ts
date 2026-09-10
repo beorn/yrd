@@ -2788,3 +2788,97 @@ describe("a failing check bills the submitter at once", () => {
     expect(whereRan(w)).toHaveLength(1)
   })
 })
+
+/**
+ * A gitlink standing at a commit its own remote does not hold has two causes
+ * with opposite owners, and for one night the queue billed both to itself: a
+ * component commit that never left an author's bay stopped every change in
+ * line, waiting for a person (specimen 2026-09-03, km gitlink 11d9312c).
+ *
+ * The probe that separates them is unit-tested in reference.test.ts, both
+ * branches. What these two prove is the half that only a real run can show:
+ * which ENDING each cause reaches through `guarded()`, and what the change's
+ * own record then says about who is billed.
+ */
+describe("a gitlink the component's remote does not hold", () => {
+  /** The world's target, carrying one gitlink at a commit nothing pushed. */
+  async function withUnpushedGitlink(w: World): Promise<Readonly<{ child: string; unpushed: string }>> {
+    const child = join(w.workdir, "child")
+    mkdirSync(w.workdir, { recursive: true })
+    await w.git(["init", "--quiet", "--initial-branch=main", child])
+    const childGit = gitIn(child)
+    await childGit(["config", "user.email", "queue@yrd.test"])
+    await childGit(["config", "user.name", "yrd"])
+    writeFileSync(join(child, "child.txt"), "published\n")
+    await childGit(["add", "."])
+    await childGit(["commit", "--quiet", "-m", "child, published"])
+    // The bay: a clone that commits and never pushes, which is the whole
+    // specimen. The commit exists, is reachable by its author, and is on no
+    // remote anywhere.
+    const bay = join(w.workdir, "child-bay")
+    await w.git(["clone", "--quiet", child, bay])
+    const bayGit = gitIn(bay)
+    await bayGit(["config", "user.email", "queue@yrd.test"])
+    await bayGit(["config", "user.name", "yrd"])
+    writeFileSync(join(bay, "child.txt"), "only in the bay\n")
+    await bayGit(["commit", "--quiet", "-am", "child, unpushed"])
+    const unpushed = (await bayGit(["rev-parse", "HEAD"])).trim()
+    for (const [key, value] of [
+      ["path", "packages/child"],
+      ["url", child],
+      ["branch", "main"],
+    ] as const) {
+      await w.git(["config", "-f", ".gitmodules", `submodule.child.${key}`, value])
+    }
+    await w.git(["add", ".gitmodules"])
+    await w.git(["update-index", "--add", "--cacheinfo", `160000,${unpushed},packages/child`])
+    await w.git(["commit", "--quiet", "-m", "declare a child at a commit nobody pushed"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    return { child, unpushed }
+  }
+
+  it("fails the change and bills its submitter when the remote answers and lacks the pin", async () => {
+    const w = await world()
+    const { child, unpushed } = await withUnpushedGitlink(w)
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    // Exit 1, not 2: nothing about the queue is repaired by stopping it, so
+    // the line moves on to the next change.
+    expect(outcome.exitCode).toBe(1)
+    expect(outcome.failed).toEqual(["task/one"])
+    expect(outcome.stuck).toEqual([])
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
+    expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
+    const failed = records[1]
+    expect(failed?.subject).toContain(`packages/child at ${unpushed} is not on ${child}`)
+    // What was READ, so the record answers "why is a missing pin the
+    // submitter's here" without its reader going to the journal.
+    expect(trailer(failed!, "Remote-Answered")).toBe("yes")
+    expect(trailer(failed!, "Gitlink")).toBe(`packages/child@${unpushed}`)
+    expect(trailer(failed!, "Fault")).toBe("submitter")
+    expect(trailer(failed!, "Remedy")).toContain("push the component commit to its remote")
+  })
+
+  it("sticks the change on the queue when the remote cannot be reached either", async () => {
+    const w = await world()
+    const { child } = await withUnpushedGitlink(w)
+    const head = await submitCommit(w, "task/one", "one.txt")
+    // Nothing answers, so nothing can be attributed, so nobody is billed.
+    rmSync(child, { force: true, recursive: true })
+
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.failed).toEqual([])
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
+    const stuck = records.find((record) => record.kind === "stuck")
+    expect(incidentOf(stuck).Code).toBe("yrd-reference-unpopulated")
+    // A stuck bills nobody, and says so by saying nothing.
+    expect(records.flatMap((record) => record.trailers.filter(([name]) => name === "Fault"))).toEqual([])
+  })
+})
