@@ -254,3 +254,60 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain(bay)
   })
 })
+
+/**
+ * @failure The help advertised "open/adopt a branch" beside the usage line
+ *          `open [commit]`, so the argument read as accepting a branch. It
+ *          never did: a branch is opened with --bay/--issue, and the argument
+ *          is an exact commit. A caller who believed the description was
+ *          refused and handed `git rev-parse HEAD`, which silently discards
+ *          the branch identity they asked for.
+ * @level   l2 (real clone, real refs, through the CLI)
+ * @consumer anyone reading `yrd env open --help` or hitting its refusal
+ */
+describe("yrd env open says which input selects which path", () => {
+  it("names both spellings in its own help, so the argument cannot be read as a branch", async () => {
+    const w = await world("true")
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--help"], run.io), run.stderr()).toBe(0)
+
+    const help = run.stdout()
+    // The argument's contract and the branch route are stated as SEPARATE
+    // inputs. The bug was one sentence covering both with only one on the
+    // usage line.
+    expect(help).toMatch(/\[commit\]/u)
+    expect(help).toMatch(/--bay/u)
+    expect(help).toMatch(/--issue/u)
+    // An adopted branch is always task/<name>, which no surface said before.
+    expect(help).toContain("task/")
+  })
+
+  it("points a branch-shaped argument at --bay/--issue instead of only offering rev-parse", async () => {
+    const w = await world("true")
+    await w.git(["branch", "task/wanted-branch"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "task/wanted-branch"], run.io)).toBe(2)
+
+    const refusal = run.stderr()
+    expect(refusal).toContain("task/wanted-branch")
+    // The whole defect: the only cure offered was rev-parse, which detaches
+    // and throws away the branch the caller named.
+    expect(refusal).toMatch(/--bay/u)
+    expect(refusal).toMatch(/--issue/u)
+    expect(existsSync(join(w.work, ".bays", "task/wanted-branch"))).toBe(false)
+  })
+
+  it("still refuses a value that is neither a commit nor a ref, and still names rev-parse", async () => {
+    const w = await world("true")
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "not-a-ref-at-all"], run.io)).toBe(2)
+
+    // The negative control: widening the message must not cost the original
+    // cure for the case it was written for.
+    expect(run.stderr()).toContain("not-a-ref-at-all")
+    expect(run.stderr()).toContain("git rev-parse")
+  })
+})

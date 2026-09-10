@@ -470,7 +470,10 @@ function buildProgram(
   env_.helpCommand(false)
   env_
     .command("open [commit]")
-    .description("retain an exact commit detached, or open/adopt a branch; prints its path")
+    .description(
+      "with [commit], retain that exact commit detached; with --bay/--issue and no argument instead, " +
+        "open or adopt its task/<name> branch; prints the path either way",
+    )
     .option("--bay <name>", "name the environment")
     .option("--issue <ref>", "the issue this environment is for")
     .option("--json", "emit stable JSON")
