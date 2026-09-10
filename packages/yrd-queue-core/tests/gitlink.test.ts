@@ -21,6 +21,7 @@ import {
   changeRef,
   checksOf,
   gitIn,
+  journalKey,
   list,
   queueRun,
   readJournals,
@@ -262,6 +263,36 @@ describe("settling gitlinks", () => {
       ),
     ).toEqual(["opened", "opened", "checked", "merged", "sent"])
     expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(submoduleMain)
+  })
+
+  // 24408: the wait's record carried the whole incident while its journal row
+  // carried only the code, and `readJournals` refuses a row that claims incident
+  // authority without all six fields. One such row took `yrd list` and
+  // `yrd queue show` down for the journal window, long after the wait was cured.
+  it("an off-main wait writes the same complete incident to its journal row as to its record", async () => {
+    const w = await world()
+    const head = await submitGitlink(w, "task/off", w.offMain)
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
+    const record = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/off", head })))
+    ).at(-1)!
+    expect(trailer(record, "Code")).toBe("gitlink-off-main")
+    const read = () => readJournals(dirname(outcome.log))
+    expect(read).not.toThrow()
+    const run = read().runs.get(journalKey("task/off", head))?.[0]
+    expect(run?.decision).toBe("queued")
+    expect(run?.incident).toEqual({
+      code: trailer(record, "Code"),
+      subject: trailer(record, "Subject"),
+      via: trailer(record, "Via"),
+      evidence: trailer(record, "Evidence"),
+      next: trailer(record, "Next"),
+      owner: trailer(record, "Owner"),
+    })
+    expect(run?.incident?.evidence).toBe(outcome.log)
   })
 
   it("a held-back authored gitlink merges raised and keeps the submitted Change identity", async () => {

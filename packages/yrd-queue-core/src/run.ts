@@ -886,14 +886,18 @@ async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): P
       tip.sha,
     )
   }
+  // The journal row carries the same complete incident as the record: a reader
+  // that finds one incident field and not all six refuses the whole journal,
+  // and every read verb with it, for as long as the journal is in its window.
   run.log.write({
     branch: entry.change.branch,
-    code: detail.code,
     decision: entry.reading.state === "checked" ? "checked" : "queued",
     head: entry.change.head,
     kind: "change",
-    phase: detail.phase,
     reason: detail.message,
+    ...incident,
+    diagnosisCode: detail.code,
+    phase: detail.phase,
   })
   return "waiting"
 }
