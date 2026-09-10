@@ -27,6 +27,7 @@ import type { ObservationNotice } from "./git.ts"
 import type { Ending, Notifier } from "./config.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
 import { INCIDENT_TRAILERS } from "./incident.ts"
+import { recordsMatching } from "./log.ts"
 import {
   endedKind,
   readRecord,
@@ -87,16 +88,42 @@ export const withNotify: Ring = (steps) => ({
   },
 })
 
-/** A commit that went around the queue, told about: there is no change to end. */
+/**
+ * A commit that went around the queue, told about: there is no change to end.
+ *
+ * direct.ts finds this same commit again every run until something of the
+ * queue's lands on top of it, and says so plainly: "a direct merge with
+ * nothing of the queue's on top is reported again next run... so the
+ * notifier sees one message however many runs say it" (E5). Nothing upstream
+ * gates that repeat — it is `directMergeCommits`' own documented shape — so
+ * the one-message promise is this function's to keep. A change keeps its
+ * receipts on its own ref (`told`, just below); a direct merge has no change
+ * and so no ref, and its receipts are its own prior "message" rows instead,
+ * read back from this machine's run journals (log.ts). Only entries still
+ * owed run again, mirroring `told`'s own resend logic, and a commit already
+ * told in full runs nothing at all.
+ */
 async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
   const target = run.options.target.branch
+  const priorMessages = recordsMatching(
+    join(run.options.workdir, "logs"),
+    (record) => record.kind === "message" && record.says === DIRECT && record.head === commit.commit,
+  )
+  const successful = new Set<string>()
+  for (const record of priorMessages) {
+    if (record.delivered === true && typeof record.to === "string" && record.to !== "") successful.add(record.to)
+  }
+  const owed = (run.options.notify ?? []).filter((entry) => entry.on.includes(DIRECT) && !successful.has(entry.name))
+  if (priorMessages.length > 0 && owed.length === 0) return
   const text = `${directMergeLine(commit)}: ${commit.why}. The queue goes on from the new base; a rollback is a git revert, pushed through the queue.`
   // A direct merge has no change, so the commit that went around the queue stands
   // where a change's name would (`NotifyRecord`).
-  for (const { name, delivery, failure } of await notifyAll(run, DIRECT, {
-    change: commit.commit,
-    record: DIRECT,
-  })) {
+  for (const { name, delivery, failure } of await notifyAll(
+    run,
+    DIRECT,
+    { change: commit.commit, record: DIRECT },
+    owed,
+  )) {
     run.log.write({
       about: target,
       branch: target,

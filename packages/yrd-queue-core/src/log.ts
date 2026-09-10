@@ -380,6 +380,37 @@ export function readRunLog(dir: string, run: string): readonly LogRecord[] {
   return records
 }
 
+/**
+ * Every record across every run journal in the directory that matches,
+ * oldest run first — unwindowed, unlike {@link readJournals}: a caller asking
+ * "has this already happened" needs the true history, not the seven days
+ * `list` renders, and a run journal is never pruned once written. A missing
+ * directory reads as no runs made yet, the same absence `readJournals` reads;
+ * any other failure to list it is thrown rather than read as "no runs" or
+ * "every run", because a caller using this to decide whether to do something
+ * again needs to know the question could not be answered, not be handed
+ * either wrong answer silently. A direct merge's own notifier is the first
+ * of these: having no change ref to hold a receipt (with-notify.ts), it reads
+ * its own prior "message" rows back through here.
+ */
+export function recordsMatching(dir: string, matches: (record: LogRecord) => boolean): readonly LogRecord[] {
+  let names: readonly string[]
+  try {
+    names = readdirSync(dir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
+  }
+  const ids = names.filter((name) => name.endsWith(".jsonl")).map((name) => name.slice(0, -".jsonl".length))
+  const found: LogRecord[] = []
+  for (const id of ids.sort()) {
+    for (const record of readRunLog(dir, id)) {
+      if (matches(record)) found.push(record)
+    }
+  }
+  return found
+}
+
 export type ReadJournalsOptions = Readonly<{
   now?: Date
   /** How far back the runs read reach; the same seven days `list` windows its ended rows by. */

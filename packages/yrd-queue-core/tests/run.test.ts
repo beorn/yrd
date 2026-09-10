@@ -2118,6 +2118,59 @@ describe("a queue run", () => {
     expect(messages(w).filter((message) => message.record === "merged-direct")).toHaveLength(1)
   })
 
+  it("a commit around the queue with nothing of the queue's on top is found again every run, but told about only once (E5)", async () => {
+    const w = await world()
+    // A change merged through the queue first, in its own run, purely to give
+    // `queueStarted` a history to walk from (direct.ts: no entry ever, no
+    // business reporting anything). Merging it here, before either direct
+    // push, keeps it off the first-parent line above them, so nothing of the
+    // queue's ever lands on the direct commits below and neither is ever
+    // accounted for — the scenario no existing case covers.
+    await submitCommit(w, "task/one", "one.txt")
+    const primed = await queueRun(await w.options({ exit: 0 }))
+    expect(primed.merged).toEqual(["task/one"])
+    // The run merged and pushed straight to the bare remote; `w.work`'s own
+    // `main` never moved, and `pushAroundQueue` pushes from it next.
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+
+    const direct = await pushAroundQueue(w, "direct.txt")
+
+    const first = await queueRun(await w.options({ exit: 0 }))
+    expect(first.directMerges).toEqual([direct])
+    expect(messages(w).filter((message) => message.record === "merged-direct")).toEqual([
+      { change: direct, record: "merged-direct" },
+    ])
+
+    // Nothing landed on top of it, so the walk in direct.ts never reaches an
+    // accounted commit: `directMerges` and the log's own `merged-direct` row
+    // legitimately repeat every run, exactly as direct.ts's own doc says they
+    // must ("reported again next run, with the commit sha as its id"). What
+    // must NOT repeat is the notifier's own message — direct.ts promises "the
+    // notifier sees one message however many runs say it".
+    const second = await queueRun(await w.options({ exit: 0 }))
+    expect(second.directMerges).toEqual([direct])
+    expect(logRecords(second).filter((record) => record.kind === "merged-direct")).toHaveLength(1)
+    expect(messages(w).filter((message) => message.record === "merged-direct")).toHaveLength(1)
+
+    // A third run in a row still says nothing new to the notifier.
+    const third = await queueRun(await w.options({ exit: 0 }))
+    expect(third.directMerges).toEqual([direct])
+    expect(messages(w).filter((message) => message.record === "merged-direct")).toHaveLength(1)
+
+    // A genuinely new direct merge, still with nothing of the queue's on top
+    // of either commit, is told about exactly once, oldest first — the old
+    // one stays silent.
+    const secondDirect = await pushAroundQueue(w, "direct-two.txt")
+    const fourth = await queueRun(await w.options({ exit: 0 }))
+    expect(fourth.directMerges).toEqual([direct, secondDirect])
+    expect(messages(w).filter((message) => message.record === "merged-direct")).toEqual([
+      { change: direct, record: "merged-direct" },
+      { change: secondDirect, record: "merged-direct" },
+    ])
+  })
+
   it("a queue that has judged nothing has no history, so it judges nothing on the target (E5)", async () => {
     // Not one change was ever submitted here, so there is no first record and no
     // instant to start from — and every commit on the target belongs to
