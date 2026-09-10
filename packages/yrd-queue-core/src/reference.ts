@@ -105,6 +105,25 @@ export const GIT_SUPER_ABSENT_STORE = "holds no object store for"
 const GITLINK_ROW = /^160000 commit ([0-9a-f]+)\t(.+)$/u
 
 /**
+ * The ref that keeps one borrowed pin reachable in its store.
+ *
+ * A fetch of a bare sha writes NO ref, so the objects land unreachable and the
+ * next `gc` in that store is free to take them. Measured 2026-09-09: a pin
+ * borrowed that way was collected out from under a raised gitlink and the
+ * submodule could not be checked out at it any more. The whole point of a
+ * reference store is that what it lends today it still holds tomorrow, and in
+ * Git that means a ref.
+ *
+ * One ref per pin, never deleted here: a pin nothing points at is the state
+ * this exists to prevent, and refs pack down to a line each. Named by the sha
+ * so two runs asking for the same pin write the same ref rather than racing
+ * over a shared name.
+ */
+function pinRef(sha: string): string {
+  return `refs/yrd/pins/${sha}`
+}
+
+/**
  * Give every gitlink of `commit` a borrowable store inside `repo`, recursively.
  *
  * Idempotent by construction: a store that is already a repository at its path
@@ -171,9 +190,22 @@ export async function populateReferenceStores(options: PopulateReference): Promi
         options.populated?.(populated)
       }
       const storeGit = options.gitIn(store)
-      if (!(await holdsCommit(storeGit, sha))) {
+      if (await holdsCommit(storeGit, sha)) {
+        // Present is not the same as REACHABLE, and only reachable survives.
+        // A pin that arrived on a branch stops being reachable the moment that
+        // branch moves, and the next gc in this store takes it — so the ref is
+        // written for a pin already here exactly as for one just fetched.
+        await storeGit(["update-ref", pinRef(sha), sha])
+      } else {
         try {
-          await storeGit(["fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "origin", sha])
+          await storeGit([
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "origin",
+            `${sha}:${pinRef(sha)}`,
+          ])
         } catch (error) {
           throw new ReferenceUnpopulated(
             root,
