@@ -22,7 +22,7 @@ export type YrdQueueRunnerDeclaration = Readonly<{
 }>
 
 export const yrdQueueRunnerDeclarations: readonly YrdQueueRunnerDeclaration[] = Object.freeze([
-  { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@ci" },
+  { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
 ])
 
 export default {
@@ -59,13 +59,14 @@ export default {
         // The loop relaunches only after an ending it chose: 0 for a clean
         // round/gitlink recycle, or 1 for a candidate failure. Exit 2 is stuck.
         // Signal decision: any signal observed by Hab is an unplanned host-level
-        // interruption, so it stays down and pages @ci with every unlisted code.
+        // interruption, so it stays down and pages the declared owner — @cto
+        // today — with every unlisted code.
         restart: "on-codes" as const,
         relaunchExitCodes: [0, 1],
         // `HabServiceDefinition.owner` is a recognized service key in
         // ag/packages/hab-config. Spreading the registry row's owner here makes
-        // a terminal-ending andon page reach @ci instead of falling back to the
-        // fleet-wide @chief default.
+        // a terminal-ending andon page reach the declared owner — @cto today —
+        // instead of falling back to the fleet-wide @chief default.
         owner,
       },
     ]),
