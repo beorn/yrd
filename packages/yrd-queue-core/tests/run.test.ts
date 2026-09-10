@@ -2460,8 +2460,8 @@ describe("the target's setup", () => {
 
     const outcome = await queueRun(await w.options({ exit: 0, setup: w.setupCommand(1) }))
 
-    // Stuck, exit 2: the queue could not build the ground a judgement stands
-    // on, which is never the submitter's fault.
+    // Stuck, exit 2: this setup fails on the settled base too, so the queue
+    // could not build the ground a judgement stands on and nobody is billed.
     expect(outcome.exitCode).toBe(2)
     expect(outcome.stuck).toEqual(["task/one"])
     expect(outcome.failed).toEqual([])
@@ -2479,8 +2479,107 @@ describe("the target's setup", () => {
       { delivered: false, error: expect.stringContaining("could not run") },
     ])
     expect(logRecords(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
-      { exit: "1", result: "fail", whose: "queue" },
-      { exit: "1", result: "fail", whose: "queue", phase: "notify" },
+      { exit: "1", phase: "base", result: "fail", whose: "queue" },
+      { exit: "1", phase: "submit", result: "fail", whose: "queue" },
+      { exit: "1", phase: "notify", result: "fail", whose: "queue" },
+    ])
+  })
+
+  /**
+   * Run q-20260910T051200413Z-adf158d1, 2026-09-09 22:12 PDT: a submitter's
+   * head added a workspace package without its lockfile, the target's `bun
+   * install --frozen-lockfile` refused in the submit phase, and the whole
+   * service went down exit 2 with the queue billed. The same setup passed on
+   * the settled base, so the queue's ground was never broken — one change's
+   * content was, and every other change in line waited for a person.
+   */
+  it("bills the submitter when the setup fails only with the candidate's own content", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/breaks-setup", "BREAK_SETUP")
+    await submitCommit(w, "task/two", "two.txt")
+
+    // Passes on any tree but the candidate's: the settled base carries none of
+    // the candidate's authored content, so it is the discriminating reading.
+    const outcome = await queueRun(
+      await w.options({ exit: 0, setup: `echo "setup cwd=$(pwd)" >> ${w.checkLog} && test ! -e BREAK_SETUP` }),
+    )
+
+    // The ordinary failed path: exit 1, not 2, and the run went on to judge and
+    // merge the next change in line rather than stopping for a person.
+    expect(outcome.exitCode).toBe(1)
+    expect(outcome.failed).toEqual(["task/breaks-setup"])
+    expect(outcome.stuck).toEqual([])
+    expect(outcome.merged).toEqual(["task/two"])
+
+    await fetchChanges(w)
+    const ref = changeRef("main", { branch: "task/breaks-setup", head })
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
+    const failed = records[1]!
+    expect(trailer(failed, "Fault")).toBe("submitter")
+    expect(trailer(failed, "Reason")).toBe("setup")
+    // The reading the attribution stands on, in the record itself.
+    expect(trailer(failed, "Base-Setup")).toBe("passed")
+    expect(records[1]?.trailers.filter(([name]) => name === "Code")).toEqual([])
+    // The setup's own diagnosis and the log a person reads it in.
+    const log = checkLogFor(outcome, "task/breaks-setup", "submit", "setup")
+    expect(failed.subject).toContain(log)
+    expect(trailer(failed, "Remedy")).toContain(log)
+    expect(trailer(failed, "Check")).toContain(`log=${log}`)
+    expect(existsSync(log)).toBe(true)
+    // The setup ran once more, in a worktree of the settled base alone.
+    expect(
+      whereRan(w).filter(([what, where]) => what === "setup" && where.includes(join("worktrees", outcome.run, "base"))),
+    ).toHaveLength(1)
+    // The base's own rows are journaled like any other setup, and the
+    // candidate's verdict says who the base named.
+    expect(
+      logRecords(outcome).filter(
+        (record) => record.kind === "result" && record.name === "setup" && record.head === head,
+      ),
+    ).toMatchObject([
+      { exit: "0", phase: "base", result: "pass" },
+      { exit: "1", phase: "submit", result: "fail", whose: "submitter" },
+    ])
+    expect(
+      logRecords(outcome).filter(
+        (record) => record.kind === "check" && record.name === "setup" && record.phase === "base",
+      ),
+    ).toHaveLength(2)
+    expect(messages(w)[0]).toMatchObject({
+      change: changeName({ branch: "task/breaks-setup", head }),
+      log,
+      reason: "setup",
+      record: "failed",
+      submitter: "@dev/2",
+    })
+  })
+
+  it("keeps the queue's stuck when the same setup fails on the settled base too", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, setup: "false" }))
+
+    // The ground itself is broken: nobody is billed and the run stops there.
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.failed).toEqual([])
+    expect(await remoteTarget(w)).toBe(w.target)
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
+    expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
+    const incident = incidentOf(records[1])
+    expect(incident.Code).toBe("yrd-setup-unusable")
+    expect(incident.Via).toContain("failed on the settled base alone too")
+    expect(records[1]?.trailers.filter(([name]) => name === "Fault" || name === "Base-Setup")).toEqual([])
+    expect(
+      logRecords(outcome).filter(
+        (record) => record.kind === "result" && record.name === "setup" && record.head === head,
+      ),
+    ).toMatchObject([
+      { exit: "1", phase: "base", result: "fail", whose: "queue" },
+      { exit: "1", phase: "submit", result: "fail", whose: "queue" },
     ])
   })
 
@@ -2513,25 +2612,35 @@ describe("the target's setup", () => {
 
     const outcome = await queueRun(await w.options({ exit: 0, setup: "bun install --frozen-lockfile" }))
 
-    // Stuck at setup, exactly like any other setup that could not pass: this
-    // diagnosis is advisory and never changes that verdict, only what the
-    // incident says about it.
-    expect(outcome.exitCode).toBe(2)
-    expect(outcome.stuck).toEqual(["task/raise-widget"])
+    // The candidate's own manifest is what the lockfile disagrees with, and the
+    // same setup passes on the settled base: the submitter's, exit 1, the queue
+    // still standing. This diagnosis is advisory and never changes that
+    // verdict, only what the ending says about it.
+    expect(outcome.exitCode).toBe(1)
+    expect(outcome.failed).toEqual(["task/raise-widget"])
+    expect(outcome.stuck).toEqual([])
     await fetchChanges(w)
     const records = await readRecords(
       w.git,
       (await refAt(w.git, changeRef("main", { branch: "task/raise-widget", head })))!,
     )
-    expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
-    const incident = incidentOf(records[1])
-    expect(incident.Code).toBe("yrd-setup-unusable")
+    expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
+    const failed = records[1]!
+    expect(trailer(failed, "Fault")).toBe("submitter")
+    expect(trailer(failed, "Base-Setup")).toBe("passed")
     // AC1: the entry that moved, by NAME, with its before and after specifier.
-    expect(incident.Subject).toContain("widget: widget@file:vendor-1.0.0 -> widget@file:vendor-1.1.0")
+    expect(failed.subject).toContain("widget: widget@file:vendor-1.0.0 -> widget@file:vendor-1.1.0")
     // AC2: where it looked — the lockfile, the manifest(s), the worktree root.
-    expect(incident.Subject).toContain("bun.lock")
-    expect(incident.Subject).toContain("package.json")
-    expect(incident.Subject).toContain("worktree root")
+    expect(failed.subject).toContain("bun.lock")
+    expect(failed.subject).toContain("package.json")
+    expect(failed.subject).toContain("worktree root")
+    // AC3: the submitter hears it, rather than a person finding a stopped
+    // queue. (The fixture's own lockfile seed went around the queue, so the
+    // first message this run sends is that direct merge.)
+    expect(messages(w).find((message) => message.record === "failed")).toMatchObject({
+      reason: "setup",
+      submitter: "@dev/2",
+    })
   })
 
   it("a setup past its bound is stuck too, and the change is never billed", async () => {
@@ -2550,8 +2659,9 @@ describe("the target's setup", () => {
     expect(records.map((record) => record.kind)).toEqual(["opened", "stuck", "sent"])
     expect(incidentOf(records[1])).toMatchObject({ Code: "yrd-setup-unusable" })
     expect(logRecords(outcome).filter((record) => record.kind === "result" && record.name === "setup")).toMatchObject([
-      { exit: "missing", result: "stuck", whose: "queue", phase: "submit" },
-      { exit: "missing", result: "stuck", whose: "queue", phase: "notify" },
+      { exit: "missing", phase: "base", result: "stuck", whose: "queue" },
+      { exit: "missing", phase: "submit", result: "stuck", whose: "queue" },
+      { exit: "missing", phase: "notify", result: "stuck", whose: "queue" },
     ])
   })
 })

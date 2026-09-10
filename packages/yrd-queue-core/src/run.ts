@@ -19,8 +19,12 @@
  *
  * Every worktree this run makes is prepared before anything is judged in it:
  * the target's `setup:`, once, after materialization and before the first
- * check (worktree.ts). A setup that does not pass is the queue's own ground
- * failing, so the change ends stuck with a complete incident and nobody is billed.
+ * check (worktree.ts). A candidate's setup that does not pass is attributed
+ * the way a failing check is: the same setup runs once on the settled base
+ * alone, and a base that passes makes the candidate's own content the thing
+ * that broke it, so the change ends failed and its submitter is billed. A base
+ * that fails is the queue's own ground failing, so the change ends stuck with a
+ * complete incident and nobody is billed.
  *
  * A branch at the remote with no change is not a change (E2): the queue read
  * never lists it, so nothing here judges, opens or messages it. `submit` is
@@ -258,6 +262,24 @@ export type Steps = Readonly<{
 
 /** One ring of the onion: the same bundle, with the members it owns wrapped. */
 export type Ring = (steps: Steps) => Steps
+
+/**
+ * A candidate's setup did not pass, carrying what deciding whose failure it is
+ * needs and nothing else: the phase whose worktree it was, and the gitlinks
+ * composition settled into that worktree, so the settled base can be built the
+ * same way. A base worktree's own setup failure stays a bare `SetupFailed`,
+ * because there is no further ground left to judge it against.
+ */
+class CandidateSetupFailed extends Error {
+  constructor(
+    readonly setup: SetupFailed,
+    readonly phase: CandidatePhase,
+    readonly raises: RootChanges["changes"],
+  ) {
+    super(setup.message, { cause: setup })
+    this.name = "CandidateSetupFailed"
+  }
+}
 
 /** An authority read failed outside any one change's responsibility. */
 export class QueueAuthorityUnreadable extends Error {
@@ -547,10 +569,14 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     return await step()
   } catch (error) {
     if (error instanceof QueueAuthorityUnreadable) throw error
+    // A candidate's setup that did not pass is the one crash whose owner the
+    // queue can read rather than assume: `attributedSetupFailure` runs the same
+    // setup on the settled base and bills whoever the ground names.
+    if (error instanceof CandidateSetupFailed) return await attributedSetupFailure(run, entry, error)
     const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim()
-    // A setup that did not pass is the one crash with a name: the queue could
-    // not build the ground a judgement stands on, which is never the
-    // submitter's fault, so the reason says setup and not crash.
+    // A setup that did not pass anywhere a candidate could be attributed from —
+    // the settled base's own worktree — is the queue's: it could not build the
+    // ground a judgement stands on, so the reason says setup and not crash.
     if (error instanceof SetupFailed) {
       return run.steps.end(
         run,
@@ -583,8 +609,12 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
  * A fresh worktree of `commit`, with the target's `setup:` run in it before
  * anything judges it (§ The queue run). The setup's log and temp root are the
  * phase's own, so one worktree's records sit together, and its result is
- * recorded in the check's shape: what ran, then how it ended, billed to the
- * queue whichever way it went.
+ * recorded in the check's shape: what ran, then how it ended.
+ *
+ * A CANDIDATE setup that did not pass writes its end row here and leaves its
+ * verdict row to `attributedSetupFailure`, because that row's `whose` IS the
+ * attribution and nothing here has read the ground it stood on yet. A base
+ * worktree's setup, and any setup that passed, is decided the moment it ends.
  */
 async function prepare(
   run: Run,
@@ -601,7 +631,11 @@ async function prepare(
     gitOptions: gitInvocationOptions(run.options, run.log),
     plumbing: run.options.plumbing,
     process: run.options.process,
-    record: ({ result, start, end: ended }) => recordProgramResult(run, { ...about, end: ended, start }, result),
+    record: ({ result, start, end: ended }) => {
+      const row = { ...about, end: ended, start }
+      if (phase === "base" || result.result === "pass") recordProgramResult(run, row, result)
+      else recordProgramEnd(run, row, result)
+    },
     ...(run.options.setup === undefined ? {} : { setup: { logDir, run: run.options.setup, tmpdir: run.tmpdir } }),
     starting: ({ log, start }) => recordProgramStart(run, { ...about, log, start }),
     targetSha: run.targetSha,
@@ -730,13 +764,15 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       to: settled.to,
     })
   }
-  const worktree = await run.steps.prepare(
-    run,
-    entry,
-    mergeCommit,
-    join(run.worktrees, phase, head.slice(0, 12)),
-    phase,
-  )
+  let worktree: PreparedWorktree
+  try {
+    worktree = await run.steps.prepare(run, entry, mergeCommit, join(run.worktrees, phase, head.slice(0, 12)), phase)
+  } catch (error) {
+    // The one place that knows both facts the attribution needs: which phase's
+    // candidate this was, and what composition settled into it.
+    if (!(error instanceof SetupFailed)) throw error
+    throw new CandidateSetupFailed(error, phase, rootChanges?.changes ?? [])
+  }
   return { kind: "ready", mergeCommit, ...(rootChanges === undefined ? {} : { rootChanges }), worktree }
 }
 
@@ -987,6 +1023,86 @@ async function attributedFailure(
   } finally {
     await base.remove()
   }
+}
+
+/**
+ * A candidate's setup did not pass, and whose failure that is follows from the
+ * ground it stood on rather than from a standing assumption.
+ *
+ * The same setup runs once on the settled base alone — the tree the base phase
+ * already judges: the target, with this candidate's raises on existing gitlinks
+ * and none of its authored content. A base that PASSES leaves the candidate's
+ * own content as the only thing that broke setup, so the change ends failed,
+ * the submitter's, carrying the setup's own diagnosis and log path, and the run
+ * goes on to the next change. A base that FAILS is the queue's own ground gone
+ * bad: stuck, `yrd-setup-unusable`, nobody billed, and the run stops there. A
+ * base that cannot be composed at all is stuck too, and the incident says the
+ * queue could not attribute rather than pretending it did.
+ *
+ * A submitter's lockfile miss took the whole service down for exit 2 this way
+ * once (run q-20260910T051200413Z-adf158d1): the setup failed only with that
+ * candidate's content, and every other change in line waited for a person.
+ */
+async function attributedSetupFailure(run: Run, entry: QueueEntry, failure: CandidateSetupFailed): Promise<Ended> {
+  const { phase, raises, setup } = failure
+  const { result } = setup.ran
+  const about = { branch: entry.change.branch, head: entry.change.head, name: SETUP, phase }
+  const message = setup.message.replace(/\s+/gu, " ").trim()
+  const ground = await judgeSettledBase(run, entry, raises)
+  if (ground.passed) {
+    recordProgramVerdict(run, about, result, "submitter")
+    return await run.steps.end(run, entry, "failed", {
+      remedy: `fix ${SETUP} (log: ${result.log}), push, and submit again`,
+      subject: `${entry.change.branch} failed ${SETUP}${phase === "merge" ? " at merge" : ""}: ${message}`,
+      trailers: [
+        ["Reason", SETUP],
+        // What the attribution READ, so the record answers "why is a setup the
+        // submitter's here" without its reader going to the journal for it.
+        ["Base-Setup", "passed"],
+        ["Check", checkTrailer(result)],
+      ],
+    })
+  }
+  recordProgramVerdict(run, about, result)
+  return await run.steps.end(
+    run,
+    entry,
+    "stuck",
+    stuckWrite(run, {
+      code: "yrd-setup-unusable",
+      next: "repair the queue setup, then run yrd queue run",
+      subject: `the queue could not prepare a worktree for ${entry.change.branch}: ${message}`,
+      via:
+        ground.why === undefined
+          ? `${SETUP}, which failed on the settled base alone too`
+          : `${SETUP}; the settled base it would have been attributed against could not be composed: ${ground.why}`,
+    }),
+  )
+}
+
+/**
+ * The target's setup, run once on the settled base alone, as a reading: passed,
+ * or not passed with why nobody could be attributed when the base could not
+ * even be built. The base's own setup failing is not a `why` — it IS the
+ * reading, and the one the ground was asked for.
+ */
+async function judgeSettledBase(
+  run: Run,
+  entry: QueueEntry,
+  raises: RootChanges["changes"],
+): Promise<Readonly<{ passed: boolean; why?: string }>> {
+  let base: PreparedWorktree
+  try {
+    base = await prepareSettledBase(run, entry, raises)
+  } catch (error) {
+    if (error instanceof SetupFailed) return { passed: false }
+    return {
+      passed: false,
+      why: (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim(),
+    }
+  }
+  await base.remove()
+  return { passed: true }
 }
 
 /** Materialize the target with the candidate's exact raises on existing gitlinks, but none of its authored content. */
@@ -1581,10 +1697,9 @@ export function recordProgramStart(
 
 /**
  * The two records every program the queue runs writes, one shape for all of
- * them: what ran, then how it ended. `whose` is who the result is billed to —
- * a stuck result is always the queue's, and so is anything the setup did,
- * because the setup is the queue's own ground rather than the change; a
- * failing check is the submitter's, which is the whole of the rule.
+ * them: what ran, then how it ended. Both at once for every caller that knows
+ * how it ended AND whose it is by then, which is every caller but one — a
+ * candidate's failing setup, whose verdict waits for the settled base.
  */
 export function recordProgramResult(
   run: Run,
@@ -1599,19 +1714,67 @@ export function recordProgramResult(
   }>,
   result: CheckResult,
 ): void {
-  const common = { branch: about.branch, head: about.head, name: about.name, phase: about.phase }
+  recordProgramEnd(run, about, result)
+  recordProgramVerdict(run, about, result)
+}
+
+/** The row that says a program the queue ran ENDED: how long it took, and the log it wrote. */
+function recordProgramEnd(
+  run: Run,
+  about: Readonly<{
+    branch: string
+    head: string
+    name: string
+    phase: string
+    start: string
+    end: string
+    scripts?: readonly string[]
+  }>,
+  result: CheckResult,
+): void {
   run.log.write({
-    ...common,
+    branch: about.branch,
     end: about.end,
+    head: about.head,
     kind: "check",
     log: result.log,
     ms: result.durationMs,
+    name: about.name,
+    phase: about.phase,
     ...(about.scripts === undefined ? {} : { scripts: about.scripts }),
     start: about.start,
   })
-  const whose =
-    result.result === "pass" ? undefined : result.result === "stuck" || about.name === SETUP ? "queue" : "submitter"
-  run.log.write({ ...common, exit: String(result.exit), kind: "result", result: result.result, whose })
+}
+
+/**
+ * The row that says what a program the queue ran DECIDED, and whose that is.
+ *
+ * A stuck result is always the queue's, and so is a setup the queue could not
+ * attribute; a failing check is the submitter's, which is the whole of the
+ * rule. `whose` names an owner the caller has READ instead: a candidate setup
+ * that failed where the settled base passed is the submitter's, and only the
+ * base's own run can say so, which is why this row is separable from the end
+ * row at all.
+ */
+function recordProgramVerdict(
+  run: Run,
+  about: Readonly<{ branch: string; head: string; name: string; phase: string }>,
+  result: CheckResult,
+  whose?: "queue" | "submitter",
+): void {
+  run.log.write({
+    branch: about.branch,
+    exit: String(result.exit),
+    head: about.head,
+    kind: "result",
+    name: about.name,
+    phase: about.phase,
+    result: result.result,
+    whose:
+      result.result === "pass"
+        ? undefined
+        : (whose ?? (result.result === "stuck" || about.name === SETUP ? "queue" : "submitter")),
+  })
 }
 
 async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended: EndedWrite): Promise<Ended> {

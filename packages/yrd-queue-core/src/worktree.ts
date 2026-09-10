@@ -339,9 +339,11 @@ export async function checkedTree(
 /**
  * A setup that did not pass. Worktree lifecycle belongs to the caller: the
  * queue removes its ephemeral tree, while an environment keeps its retained
- * tree for inspection. Nobody is billed for a setup failure: setup is the
- * queue's own ground, so a change that cannot be prepared is stuck, never
- * failed.
+ * tree for inspection. This says nothing about whose failure it is, because
+ * one worktree cannot know: the queue decides that by running the same setup
+ * on the settled base alone (run.ts, `attributedSetupFailure`) — a base that
+ * passes makes the candidate's content the failure and its submitter the
+ * owner, and a base that fails is the queue's own ground and nobody's bill.
  *
  * `diagnosis`, when the failing command named `--frozen-lockfile`, is
  * lockfile-diagnosis.ts's own forensics — appended onto this error's message
@@ -414,9 +416,9 @@ export async function runSetup(options: RunSetup): Promise<SetupRan> {
  *
  * Only `pass` prepares a worktree. A setup that exits anything else, runs past
  * its bound or is not there throws `SetupFailed` with the worktree already
- * removed: the queue could not build its own ground, which is never the
- * submitter's fault, and a half-prepared tree would judge something no commit
- * describes.
+ * removed, and a half-prepared tree never judges anything: what no commit
+ * describes cannot be checked. Whose failure it was is the caller's reading,
+ * not this one's — see `SetupFailed`.
  */
 export async function prepareWorktree(
   git: Git,
