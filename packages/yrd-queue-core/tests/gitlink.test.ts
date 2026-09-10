@@ -280,88 +280,84 @@ async function submoduleMain(w: World): Promise<string> {
 }
 
 describe("settling gitlinks", () => {
-  it("an off-main gitlink waits in place while the next change proceeds", async () => {
+  // D1 (24454, 2026-09-10): a pin that diverged from its submodule's main is
+  // the submitter's defect and FAILS back to them. It used to wait (H5) for a
+  // person to move main under it; the queue now moves main itself, forward only,
+  // so nothing could ever clear that wait.
+  it("an off-main gitlink fails back to its submitter while the next change proceeds", async () => {
     const w = await world()
     const head = await submitGitlink(w, "task/off", w.offMain)
     await submitFile(w, "task/next")
 
     const outcome = await queueRun(await w.options())
 
-    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/next"], stuck: [] })
-    const waitingRecords = await readRecords(
+    // A run that failed a change exits 1: the exit code is the run's verdict, not the queue's health.
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/off"], merged: ["task/next"], stuck: [] })
+    const failedRecords = await readRecords(
       w.git,
       await remoteTip(w.git, changeRef("main", { branch: "task/off", head })),
     )
-    expect(waitingRecords.map((record) => record.kind)).toEqual(["opened", "opened"])
-    expect(trailer(waitingRecords.at(-1)!, "Code")).toBe("gitlink-off-main")
-    expect(trailer(waitingRecords.at(-1)!, "Evidence")).toBe(outcome.log)
-    expect(trailer(waitingRecords.at(-1)!, "Next")).toContain("Rebase submodule onto its configured submodule branch")
-    expect(trailer(waitingRecords.at(-1)!, "Owner")).toBe("the queue operator")
-    const waitingQueue = await readQueue(w.git, "origin", "main", await remoteTip(w.git, "refs/heads/main"))
-    expect(waitingQueue.changes.find((entry) => entry.change.head === head)?.reading.state).toBe("queued")
-    const waitingRow = list(waitingQueue.changes).find((row) => row.head === head)
-    expect(waitingRow).toMatchObject({
-      incident: { code: "gitlink-off-main" },
-      position: 1,
-      state: "queued",
-    })
-    expect(waitingRow?.result).toContain(w.offMain)
+    // The failure, then the notification of it: the submitter is told, not left to find out.
+    expect(failedRecords.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
+    const failure = failedRecords.at(-2)!
+    expect(trailer(failure, "Fault")).toBe("submitter")
+    expect(trailer(failure, "Reason")).toBe("gitlink-off-main")
+    expect(trailer(failure, "Remedy")).toContain("Rebase submodule onto its configured submodule branch")
+    expect(trailer(failure, "Remedy")).toContain("submit again")
+    expect(trailer(failure, "Detail")).toContain(w.offMain)
     expect(readFileSync(outcome.log, "utf8")).toContain("gitlink-off-main")
 
+    // Nothing waits: the next run has nothing to do for it.
     const repeated = await queueRun(await w.options())
     expect(repeated).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
     expect(
       (await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/off", head })))).map(
         (record) => record.kind,
       ),
-    ).toEqual(["opened", "opened"])
+    ).toEqual(["opened", "failed", "sent"])
 
+    // The submitter's cure: put the pin on submodule main, then submit again.
     const submoduleWork = join(w.work, "..", "submodule-work")
     const submodule = gitIn(submoduleWork)
     await submodule(["checkout", "--quiet", "main"])
     await submodule(["merge", "--quiet", "--no-ff", "-s", "ours", "-m", "merge feature", "feature"])
     await submodule(["push", "--quiet", "origin", "main"])
     const submoduleMain = (await submodule(["rev-parse", "HEAD"])).trim()
+    // The submitter's root checkout follows main, which task/next moved.
+    await w.git(["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const resubmitted = await submitGitlink(w, "task/off-rebased", w.offMain)
 
     const retried = await queueRun(await w.options())
 
-    expect(retried).toMatchObject({ exitCode: 0, failed: [], merged: ["task/off"], stuck: [] })
+    expect(retried).toMatchObject({ exitCode: 0, failed: [], merged: ["task/off-rebased"], stuck: [] })
     expect(
-      (await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/off", head })))).map(
-        (record) => record.kind,
-      ),
-    ).toEqual(["opened", "opened", "checked", "merged", "sent"])
+      (
+        await readRecords(
+          w.git,
+          await remoteTip(w.git, changeRef("main", { branch: "task/off-rebased", head: resubmitted })),
+        )
+      ).map((record) => record.kind),
+    ).toEqual(["opened", "checked", "merged", "sent"])
     expect(await gitlinkAt(w, await remoteTip(w.git, "refs/heads/main"))).toBe(submoduleMain)
   })
 
-  // 24408: the wait's record carried the whole incident while its journal row
-  // carried only the code, and `readJournals` refuses a row that claims incident
-  // authority without all six fields. One such row took `yrd list` and
-  // `yrd queue show` down for the journal window, long after the wait was cured.
-  it("an off-main wait writes the same complete incident to its journal row as to its record", async () => {
+  // 24408 kept its teeth after D1: the failure's journal row must stay readable
+  // by every read verb, and carries no half-written incident (a failed change
+  // is the submitter's, not a queue incident).
+  it("an off-main failure writes a journal row the readers accept, with no incident", async () => {
     const w = await world()
     const head = await submitGitlink(w, "task/off", w.offMain)
 
     const outcome = await queueRun(await w.options())
 
-    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
-    const record = (
-      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/off", head })))
-    ).at(-1)!
-    expect(trailer(record, "Code")).toBe("gitlink-off-main")
+    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/off"], merged: [], stuck: [] })
     const read = () => readJournals(dirname(outcome.log))
     expect(read).not.toThrow()
     const run = read().runs.get(journalKey("task/off", head))?.[0]
-    expect(run?.decision).toBe("queued")
-    expect(run?.incident).toEqual({
-      code: trailer(record, "Code"),
-      subject: trailer(record, "Subject"),
-      via: trailer(record, "Via"),
-      evidence: trailer(record, "Evidence"),
-      next: trailer(record, "Next"),
-      owner: trailer(record, "Owner"),
-    })
-    expect(run?.incident?.evidence).toBe(outcome.log)
+    expect(run?.decision).toBe("failed")
+    expect(run?.incident).toBeUndefined()
   })
 
   // 24454: a submodule change lands through the ROOT queue. The authored pin is

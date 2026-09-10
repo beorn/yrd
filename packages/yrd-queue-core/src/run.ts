@@ -200,7 +200,7 @@ export type Run = Readonly<{
   stop: (stopped: Stopped) => void
 }>
 
-type Ended = "checked" | "waiting" | "failed" | "stuck" | "merged"
+type Ended = "checked" | "failed" | "stuck" | "merged"
 
 /** Which side of a change a step is on: the head it was submitted at, or its merge with the target. */
 type CandidatePhase = "submit" | "merge"
@@ -749,7 +749,6 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
     })
   }
   const composed = await composeCandidate(run, entry, "submit")
-  if (composed.kind === "waiting") return waiting(run, entry, composed.detail)
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
   const { worktree } = composed
   try {
@@ -821,7 +820,6 @@ type ComposedCandidate =
       /** Pins the settling merge kept AHEAD of their submodule main: the land publishes these, children first (24454). */
       publishing: readonly SettledGitlink[]
     }>
-  | Readonly<{ kind: "waiting"; detail: SuperMergeDetail }>
   | Readonly<{ kind: "failed"; detail: SuperMergeDetail; worktree: Worktree }>
 
 /** Compose and settle the exact tree a phase will judge, then materialize that final commit before setup or checks run. */
@@ -847,9 +845,7 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     if (detail === undefined) {
       throw new Error(`git-super merge of ${head} returned ${result.state} without a failure detail`)
     }
-    if (detail.code !== "gitlink-off-main") return { detail, kind: "failed", worktree: composing }
-    await composing.remove()
-    return { detail, kind: "waiting" }
+    return { detail, kind: "failed", worktree: composing }
   }
   if (result.commit === undefined) throw new Error(`git-super merge of ${head} reported updated without a commit`)
   await composing.remove()
@@ -1006,49 +1002,6 @@ function mergeMessage(run: Run, entry: QueueEntry): string {
   ].join("\n")
 }
 
-async function waiting(run: Run, entry: QueueEntry, detail: SuperMergeDetail): Promise<Ended> {
-  const subject = (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim()
-  const incident = {
-    code: "gitlink-off-main" as const,
-    subject,
-    via: `git-super merge (${detail.code}, ${detail.phase}) in yrd queue ${run.name} [${run.log.id}]`,
-    evidence: run.log.path,
-    owner: "the queue operator",
-    next: detail.next ?? "push the named submodule commit to its main, then run yrd queue run",
-  }
-  const tip = tipOf(entry.change)
-  const sameWait =
-    trailer(tip, "Code") === incident.code &&
-    trailer(tip, "Subject") === incident.subject &&
-    trailer(tip, "Next") === incident.next
-  if (!sameWait) {
-    await writeRecord(
-      run,
-      {
-        change: entry.change,
-        kind: "opened",
-        subject,
-        trailers: incidentTrailers(incident),
-      },
-      tip.sha,
-    )
-  }
-  // The journal row carries the same complete incident as the record: a reader
-  // that finds one incident field and not all six refuses the whole journal,
-  // and every read verb with it, for as long as the journal is in its window.
-  run.log.write({
-    branch: entry.change.branch,
-    decision: entry.reading.state === "checked" ? "checked" : "queued",
-    head: entry.change.head,
-    kind: "change",
-    reason: detail.message,
-    ...incident,
-    diagnosisCode: detail.code,
-    phase: detail.phase,
-  })
-  return "waiting"
-}
-
 async function candidateFailure(
   run: Run,
   entry: QueueEntry,
@@ -1063,6 +1016,25 @@ async function candidateFailure(
       trailers: [
         ["Reason", "conflict"],
         ["Detail", detail.message],
+      ],
+    })
+  }
+  if (detail.code === "gitlink-off-main") {
+    // A pin that DIVERGED from its submodule's main. Until 2026-09-10 this was a
+    // wait (H5): a person was expected to move main under it by hand. The queue
+    // now moves a submodule main itself, forward only, to a pin that contains it
+    // (24454), so the person the wait waited for no longer exists, and a wait
+    // that nothing can clear is a hang wearing a status word. Back to the
+    // submitter, the only one who can rebase.
+    await worktree.remove()
+    return run.steps.end(run, entry, "failed", {
+      remedy:
+        `${detail.next ?? "rebase the submodule commit onto its main."} The queue advances a submodule main only to ` +
+        "a commit that contains it; a pin that diverged from main is the submitter's to rebase, then submit again.",
+      subject: (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim(),
+      trailers: [
+        ["Reason", "gitlink-off-main"],
+        ["Detail", detail.message.replace(/\s+/gu, " ").trim()],
       ],
     })
   }
@@ -1468,7 +1440,6 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
   const { branch, head } = change
   const name = changeName(change)
   const composed = await composeCandidate(run, entry, "merge")
-  if (composed.kind === "waiting") return waiting(run, entry, composed.detail)
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
   const { mergeCommit, rootChanges, worktree, publishing } = composed
   try {
