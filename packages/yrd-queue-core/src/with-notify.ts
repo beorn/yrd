@@ -236,7 +236,7 @@ async function told(
         ["State", kind],
         ["For", endedRecord],
         ["Delivery", delivery],
-        ...(failure === undefined ? [] : [["Delivery-Error", failure] as const]),
+        ...(failure === undefined ? [] : [["Delivery-Error", oneLine(failure)] as const]),
         ...written.trailers.filter(([key]) => RESULT_TRAILERS.has(key)),
       ],
     }
@@ -308,6 +308,27 @@ const DIRECT = "merged-direct"
 const NOBODY = "none"
 
 /** What a sent record's subject says about its entry, in two words. */
+/**
+ * One trailer is one line, and a value carrying a line break is REFUSED at
+ * record-write time (`recordMessage` in records.ts), which throws out of the
+ * notify path and takes the whole run down with it. A delivery that failed is
+ * the worst moment to lose a run: the ending it was reporting is already
+ * decided, and the crash replaces a record saying so with no record at all.
+ *
+ * Two producers feed this, and only one of them was safe. A notifier that EXITS
+ * non-zero has its output collapsed where it is read; a notifier that could not
+ * RUN carries the thrown message verbatim, and a spawn or timeout message is
+ * routinely several lines. Collapsing at the writer covers both, and the next
+ * producer as well.
+ *
+ * Every line break becomes ONE space and nothing else changes. `\s+` would
+ * flatten runs of spacing the failure text meant to keep, and the point of this
+ * trailer is to stay loud: the whole message survives, on one line.
+ */
+function oneLine(value: string): string {
+  return value.replace(/\r\n|\n|\r/gu, " ")
+}
+
 function said(delivery: Delivery): string {
   return delivery === "sent" ? "told" : delivery === "none" ? "told nobody:" : "could not tell"
 }

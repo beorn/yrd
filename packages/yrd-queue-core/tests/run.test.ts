@@ -2886,3 +2886,45 @@ describe("a gitlink the component's remote does not hold", () => {
     expect(records.flatMap((record) => record.trailers.filter(([name]) => name === "Fault"))).toEqual([])
   })
 })
+
+/**
+ * @failure A delivery failure carrying a line break is refused at record-write time and
+ *          takes the whole run down, replacing the record that says what happened with none.
+ *
+ * One trailer is one line (`recordMessage` in records.ts). Two producers feed
+ * `Delivery-Error` and only one was safe: a notifier that EXITS non-zero has
+ * its output collapsed where it is read, while a notifier that could not RUN
+ * carries the thrown message verbatim — and a spawn or timeout message is
+ * routinely several lines.
+ */
+describe("a notify entry that could not run at all", () => {
+  it("records its multi-line failure on one line instead of crashing the run", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const thrown = "spawn failed\n  at the first frame\n  at the second frame"
+    await using runner = createProcess({ cwd: w.work })
+    const failingNotifier = {
+      ...runner,
+      run: async (request: Parameters<typeof runner.run>[0]) => {
+        if (request.argv.join(" ").includes(w.notifier)) throw new Error(thrown)
+        return runner.run(request)
+      },
+    }
+
+    const outcome = await queueRun({ ...(await w.options({ exit: 0 })), process: failingNotifier })
+
+    // The ending itself is decided before anything is delivered, so a delivery
+    // that could not happen must not change it — and must not lose it either.
+    expect(outcome.exitCode).toBe(0)
+    expect(outcome.merged).toEqual(["task/one"])
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
+    const sent = records.find((record) => record.kind === "sent")
+    expect(sent, "the sent record was never written").toBeDefined()
+    const said = trailer(sent!, "Delivery-Error")
+    expect(said).not.toContain("\n")
+    // Every character survives; only the line breaks became spaces, so the
+    // trailer stays as loud as the message it carries.
+    expect(said).toContain("spawn failed   at the first frame   at the second frame")
+  })
+})
