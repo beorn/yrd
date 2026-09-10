@@ -114,6 +114,54 @@ describe("populateReferenceStores", () => {
     expect((await gitIn(join(repo, "vendor/dep"))(["rev-parse", "HEAD"])).trim()).toBe(head)
   }, 60_000)
 
+  /**
+   * @failure A pin fetched by sha lands unreachable, and the next gc in that store takes it.
+   *
+   * The second populate is what makes this a real test: the store already
+   * exists and does NOT hold the raised pin, which is the only path that
+   * fetches. `refs/remotes/origin/main` still names the first commit, so the
+   * raised one is reachable through the pin ref or through nothing at all —
+   * and `gc --prune=now` is the same collection that made a submodule
+   * un-checkout-able at its raised pin on 2026-09-09.
+   */
+  it("keeps a pin it fetched reachable, so a later gc in that store cannot take it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-reference-pinned-"))
+    roots.push(root)
+    const { product, vendor } = await superproject(root)
+    const repo = await queueClone(root, product)
+    const first = await populateReferenceStores({ gitIn: (cwd) => gitIn(cwd), repo })
+    expect(first.length).toBe(2)
+    const store = join(repo, "vendor/dep")
+    const storeGit = gitIn(store)
+    // A pin already in the store is pinned too: it arrived on a branch, and a
+    // branch moves.
+    const cloned = (await storeGit(["rev-parse", "HEAD"])).trim()
+    expect(await storeGit(["for-each-ref", "--format=%(refname)", "refs/yrd/pins"])).toContain(cloned)
+
+    // Raise the gitlink to a commit the store has never seen.
+    const vendorGit = gitIn(vendor)
+    writeFileSync(join(vendor, "vendor.txt"), "vendor moved\n")
+    await vendorGit(["add", "--all"])
+    await vendorGit([...author, "commit", "--quiet", "--message", "advance vendor"])
+    const raised = (await vendorGit(["rev-parse", "HEAD"])).trim()
+    const productGit = gitIn(product)
+    await productGit(["-C", "vendor/dep", "fetch", "--quiet", "origin"])
+    await productGit(["-C", "vendor/dep", "checkout", "--quiet", "--detach", raised])
+    await productGit([...author, "commit", "--quiet", "--all", "--message", "raise vendor/dep"])
+    await gitIn(repo)(["fetch", "--quiet", "origin", "main"])
+    const head = (await gitIn(repo)(["rev-parse", "FETCH_HEAD"])).trim()
+    await expect(storeGit(["cat-file", "-e", `${raised}^{commit}`])).rejects.toThrow()
+
+    await populateReferenceStores({ commit: head, gitIn: (cwd) => gitIn(cwd), repo })
+
+    expect(await storeGit(["for-each-ref", "--format=%(refname)", "refs/yrd/pins"])).toContain(raised)
+    // The remote-tracking ref still names the OLD commit, so nothing but the
+    // pin ref stands between the raised one and the collector.
+    expect((await storeGit(["rev-parse", "refs/remotes/origin/main"])).trim()).toBe(cloned)
+    await storeGit(["gc", "--prune=now", "--quiet"])
+    expect(await storeGit(["cat-file", "-t", raised])).toContain("commit")
+  }, 60_000)
+
   it("refuses a gitlink whose remote cannot be cloned, naming the store it could not make", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-reference-unreachable-"))
     roots.push(root)
