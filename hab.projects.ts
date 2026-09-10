@@ -40,7 +40,12 @@ export default {
         // take no repository argument — the declaration where the command
         // stands IS the repository, and the service stands in it
         // (`repository.path`).
-        command: "bun tools/yrd-runtime.mjs yrd queue up --interval 120",
+        // The IDLE cadence: how often an empty line is looked at. It is not
+        // the gap between two ready merges — a round that merged or left
+        // checked work goes again in a second (`sleepAfter`). At 120 it was
+        // both, so every change queued behind another waited two minutes for
+        // nothing on top of the check that judged it.
+        command: "bun tools/yrd-runtime.mjs yrd queue up --interval 20",
         // The habitant stands down over this RSS (exit 12, memory-cap) instead of
         // waiting for the kernel; @cto ruling 2026-08-30 on
         // @i/10-yrd/runner-exits-and-respawns — one habitant per host. Raised

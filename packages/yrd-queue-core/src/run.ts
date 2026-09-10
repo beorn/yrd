@@ -146,6 +146,14 @@ export type QueueRunOutcome = Readonly<{
   stuck: readonly string[]
   /** The commits on the target's first-parent line that the queue did not put there, reported this run (E5). */
   directMerges: readonly string[]
+  /**
+   * Checked changes still in line that this run did not act on: it merges the
+   * FIRST checked change and no more (ruling D4), so a line of five leaves
+   * four here. A service reads it to know it has work ready NOW rather than
+   * spending its idle cadence between two ready merges. Zero when the run
+   * ended before it could read the line.
+   */
+  checkedWaiting: number
 }>
 
 /** Everything one run's steps share. */
@@ -417,7 +425,13 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     message: observation.message,
   })
   if (observation.contract === "root-v1" && observation.outcome !== "observed") {
-    return finish(run, observation.outcome === "invalid" ? 2 : 0, { directMerges: [], failed, merged, stuck })
+    return finish(run, observation.outcome === "invalid" ? 2 : 0, {
+      checkedWaiting: 0,
+      directMerges: [],
+      failed,
+      merged,
+      stuck,
+    })
   }
   for (const notice of observation.notices) {
     log.write({ kind: "observation", id: notice.id, text: notice.text })
@@ -453,7 +467,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   // below writes a change record or tells somebody about one, so a stopped round
   // leaves every change exactly as it found it while still surfacing direct merges.
   stopped = await run.steps.open(run)
-  if (stopped !== undefined) return finish(run, 0, { directMerges, failed, merged, stuck }, stopped)
+  if (stopped !== undefined) return finish(run, 0, { checkedWaiting: 0, directMerges, failed, merged, stuck }, stopped)
 
   // Bookkeeping at the edges of the records first, so every reader below reads
   // records and never reconciles. A bookkeeping pass can itself end an entry
@@ -462,7 +476,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   for (const entry of entries) {
     if ((await run.steps.bookkeep(run, entry)) === "stuck") {
       stuck.push(entry.change.branch)
-      return finish(run, 2, { directMerges, failed, merged, stuck })
+      return finish(run, 2, { checkedWaiting: 0, directMerges, failed, merged, stuck })
     }
   }
 
@@ -477,14 +491,15 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     const outcome = await guarded(run, entry, () => run.steps.judge(run, entry))
     if (outcome === "stuck") {
       stuck.push(entry.change.branch)
-      return finish(run, 2, { directMerges, failed, merged, stuck })
+      return finish(run, 2, { checkedWaiting: 0, directMerges, failed, merged, stuck })
     }
     if (outcome === "failed") failed.push(entry.change.branch)
   }
 
   // On-merge: the first checked change in line, re-read so this run's own
   // checked records count.
-  const checked = ordered((await read()).changes, "checked").find((entry) => !staleChecked(run, entry))
+  const line = ordered((await read()).changes, "checked").filter((entry) => !staleChecked(run, entry))
+  const checked = line[0]
   if (checked !== undefined) {
     const outcome = await guarded(run, checked, () => run.steps.merge(run, checked))
     if (outcome === "stuck") stuck.push(checked.change.branch)
@@ -492,7 +507,14 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     else if (outcome === "merged") merged.push(checked.change.branch)
   }
 
-  return finish(run, stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0, { directMerges, failed, merged, stuck }, stopped)
+  return finish(
+    run,
+    stuck.length > 0 ? 2 : failed.length > 0 ? 1 : 0,
+    // Everything this run left checked behind the one it acted on. Read from
+    // the line it already re-read, so saying it costs no second look.
+    { checkedWaiting: Math.max(0, line.length - 1), directMerges, failed, merged, stuck },
+    stopped,
+  )
 }
 
 /**
@@ -2116,7 +2138,13 @@ async function remoteHeads(
 function finish(
   run: Run,
   exitCode: 0 | 1 | 2,
-  lists: Readonly<{ merged: string[]; failed: string[]; stuck: string[]; directMerges: readonly string[] }>,
+  lists: Readonly<{
+    merged: string[]
+    failed: string[]
+    stuck: string[]
+    directMerges: readonly string[]
+    checkedWaiting: number
+  }>,
   stopped?: Stopped,
 ): QueueRunOutcome {
   // The accepted merge object is the target this run left; readers and pushes
