@@ -80,6 +80,16 @@ export const LOG_KINDS = [
   "orphan",
   "git",
   "observation",
+  // A store the queue's reference repository had to be given before a compose
+  // could borrow from it, and a compose that succeeded without borrowing. Two
+  // kinds rather than one because they are a cause and its symptom: a
+  // `reference` row is the queue repairing its own ground, and a `warning` row
+  // is a compose that went to the network anyway. On 2026-09-09 the second
+  // happened fifteen times per compose for four hours with no row of either
+  // kind to read, because the counts that carried it were indistinguishable
+  // from an ordinary fetch.
+  "reference",
+  "warning",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]

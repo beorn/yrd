@@ -79,6 +79,7 @@ import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
 import { CapturedQueueObjectsUnavailable, readQueue, remoteUrl, type QueueEntry, type QueueRead } from "./remote.ts"
+import { ReferenceUnpopulated } from "./reference.ts"
 import { inLine, tipOf } from "./state.ts"
 import {
   checkedTree,
@@ -170,6 +171,14 @@ export type Run = Readonly<{
   name: string
   /** The queue as this run read it: every change at the remote, and where each stood. */
   queue: QueueRead
+  /**
+   * What the worktree plumbing narrates to, for THIS run: the caller's trace
+   * logger when there is one, and always this run's journal. The journal half
+   * is not optional and not trace-gated — a store the reference had to be given
+   * and a compose that did not borrow are facts about the queue's own ground,
+   * and they were unreadable for four hours on 2026-09-09 for want of a row.
+   */
+  plumbing: PlumbingLog
   /** The steps this run is made of, rings and all: every step call goes through these. */
   steps: Steps
   /** Say a ring stopped this round before it could merge; the outcome carries what it said. */
@@ -369,6 +378,10 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     name,
     options,
     pause: queue.pause,
+    // The caller's trace half, kept exactly as it was passed, plus this run's
+    // journal, which is always wired: the two halves answer different questions
+    // and only one of them is a git transcript nobody turned on.
+    plumbing: { ...options.plumbing, journal: log.write },
     queue: queue.changes,
     reaped: { list: [] },
     steps: composed(BASE),
@@ -590,6 +603,29 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
         }),
       )
     }
+    // The other crash with a name, and the same shape as setup: the reference
+    // repository is the queue's own ground, so a gitlink it cannot be given a
+    // store for is never the submitter's fault. The remedy names the populate
+    // step rather than "repair the queue fault", because the store is the thing
+    // to repair and an operator reading a crash ending would go looking at the
+    // change instead.
+    if (error instanceof ReferenceUnpopulated) {
+      return run.steps.end(
+        run,
+        entry,
+        "stuck",
+        stuckWrite(run, {
+          code: "yrd-reference-unpopulated",
+          next:
+            error.path === undefined
+              ? `populate the queue's reference repository ${error.repo} with the command the refusal in this incident names, then run yrd queue run`
+              : `give the queue's reference repository a store for '${error.path}' — ` +
+                `git -C ${error.repo} submodule update --init -- ${error.path} — then run yrd queue run`,
+          subject: `the queue's reference repository cannot be borrowed from for ${entry.change.branch}: ${message}`,
+          via: "reference population",
+        }),
+      )
+    }
     return run.steps.end(
       run,
       entry,
@@ -629,7 +665,7 @@ async function prepare(
     env: run.options.env,
     selection: run.options.selection,
     gitOptions: gitInvocationOptions(run.options, run.log),
-    plumbing: run.options.plumbing,
+    plumbing: run.plumbing,
     process: run.options.process,
     record: ({ result, start, end: ended }) => {
       const row = { ...about, end: ended, start }
@@ -734,7 +770,13 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
     run.options.repo,
     run.targetSha,
     join(run.worktrees, "compose", phase, head.slice(0, 12)),
-    run.options.plumbing,
+    {
+      env: run.options.env,
+      gitOptions: gitInvocationOptions(run.options, run.log),
+      plumbing: run.plumbing,
+      process: run.options.process,
+      selection: run.options.selection,
+    },
   )
   const result = await superMerge(run, composing.path, head, mergeMessage(run, entry))
   if (result.state !== "updated" || result.partial) {
@@ -1116,7 +1158,13 @@ async function prepareSettledBase(
     run.options.repo,
     run.targetSha,
     join(run.worktrees, "compose", "base", entry.change.head.slice(0, 12)),
-    run.options.plumbing,
+    {
+      env: run.options.env,
+      gitOptions: gitInvocationOptions(run.options, run.log),
+      plumbing: run.plumbing,
+      process: run.options.process,
+      selection: run.options.selection,
+    },
   )
   let commit = run.targetSha
   try {
@@ -1552,7 +1600,10 @@ async function orphanedMergeCandidate(
   if (taken === undefined || commit === undefined) return undefined
   let parents: readonly string[]
   try {
-    parents = (await run.git(["show", "-s", "--format=%P", commit])).trim().split(/\s+/u).filter((sha) => sha !== "")
+    parents = (await run.git(["show", "-s", "--format=%P", commit]))
+      .trim()
+      .split(/\s+/u)
+      .filter((sha) => sha !== "")
   } catch (error) {
     run.log.write({
       branch,
