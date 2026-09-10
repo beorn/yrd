@@ -70,6 +70,24 @@ export type LinuxPathHolderCoverage = Readonly<{
     enumerated: number
     sameUid: number
     otherUid: number
+    /**
+     * Same-UID entries in state `Z`, counted and NOT probed.
+     *
+     * A zombie has been reaped by the kernel: its address space, file
+     * descriptors and cwd are already released, and only its exit status
+     * remains in the process table. So `/proc/N/fd` is unreadable because there
+     * is nothing to list, not because permission is withheld — and counting
+     * that as a denial reports "cannot tell" about a process that provably
+     * holds nothing.
+     *
+     * That false gap is invisible in the safe direction, which is why it stood:
+     * it makes `complete` false, so callers refuse rather than act, and a guard
+     * that refuses too often looks exactly like one that works. Observed on
+     * hab1 2026-09-10 blocking a whole-estate reap: pids 286562 (claude),
+     * 1794340 (bun), 659207/659240/659270 (git) and 4034727 (sh), every one
+     * state Z, every one denying only `fd`.
+     */
+    zombie: number
     unavailable: PathHolderUnavailableCoverage
   }>
   sources: Readonly<Record<"cwd" | "exe" | "root" | "maps" | "fd", PathHolderSourceCoverage>>
@@ -193,6 +211,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
     enumerated: numericEntries.length,
     sameUid: 0,
     otherUid: 0,
+    zombie: 0,
     unavailable: { exited: 0, denied: 0 },
   }
   const sourceCoverage: Record<"cwd" | "exe" | "root" | "maps" | "fd", MutableSourceCoverage> = {
@@ -220,6 +239,16 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
         return []
       }
       processCoverage.sameUid += 1
+      // Identity FIRST, because its `state` decides whether probing is
+      // meaningful at all. A zombie holds nothing — see `zombie` above — so it
+      // is counted and skipped rather than probed and then reported as a gap.
+      // Reading it here also means the denial path below reuses this read
+      // instead of making a second one.
+      const identity = await observeProcessIdentity(proc, bootedAtMs)
+      if (identity.state === "Z") {
+        processCoverage.zombie += 1
+        return []
+      }
       const [cwd, executable, processRoot, mappedFiles, descriptors] = await Promise.all([
         observeProcessLink(`${proc}/cwd`),
         observeProcessLink(`${proc}/exe`),
@@ -244,7 +273,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
         .filter(([, availability]) => availability === "denied")
         .map(([name]) => name)
       if (deniedSources.length > 0) {
-        unreadable.push({ pid, ...(await observeProcessIdentity(proc, bootedAtMs)), denied: deniedSources })
+        unreadable.push({ pid, ...identity, denied: deniedSources })
       }
       const holders: PathHolder[] = []
       if (cwd.value !== undefined && pathWithin(root, cwd.value)) {
