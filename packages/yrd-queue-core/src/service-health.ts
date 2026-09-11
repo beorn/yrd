@@ -49,9 +49,28 @@ export const STUCK_BACKOFF_CAP_MS = 30 * 60 * 1000
  * attached, and it is worse than having no probe, because a page that never
  * opens reads exactly like a service that is fine.
  *
- * Ten minutes, and the number is the fleet's own ceiling rather than a guess: a
- * request older than ten minutes is broken, not slow, and a queue whose journal
- * has not moved for that long is the same thing. It is a BUDGET ON TOP of the
+ * Ten minutes, and the number is MEASURED rather than borrowed. @cto read all
+ * 189 queue journals since 2026-09-10 and timed each round from its first event
+ * to its last: median 3 s, p90 262 s, p95 346 s, p99 388 s, max 489 s — 8.2
+ * minutes, run q-20260911T075823542Z-25b8774a. Fourteen rounds passed five
+ * minutes, one passed eight, none passed ten.
+ *
+ * SO THE MARGIN IS ABOUT 1.8 MINUTES ABOVE THE WORST ROUND EVER OBSERVED, and
+ * that is written here so the next reader sees how thin it is instead of
+ * rediscovering it. What an overrun costs is a PAGE, not delivery: the round
+ * that finally finishes writes healthy and the supervisor drops the page by
+ * itself.
+ *
+ * BATCHING MOVES THIS NUMBER (@i/10-yrd/24227, M10). One round will check N
+ * changes by design, so rounds get longer and ten minutes stops being a
+ * measurement of anything. When batching lands, derive the budget from the
+ * round's OWN declared check limits rather than from a constant — then a round
+ * cannot legitimately outlive its deadline, and the reader still only reads the
+ * loop's word.
+ *
+ * The number also happens to be the fleet's own ceiling — a request older than
+ * ten minutes is broken, not slow — which is why it reads naturally, but the
+ * measurement above is the reason to keep it. It is a BUDGET ON TOP of the
  * sleep the loop actually chose, so a deliberate thirty-minute backoff does not
  * read as overdue — staleness is measured against the loop's own declared
  * intent, never against a fixed cadence a reader assumed.
