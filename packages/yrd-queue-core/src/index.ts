@@ -101,6 +101,7 @@ export {
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
   queueHealthExitCode,
+  relaunchStalledHealthDocument,
   ROUND_BUDGET_MS,
   roundHealthDocument,
   STUCK_BACKOFF_CAP_MS,

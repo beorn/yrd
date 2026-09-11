@@ -56,6 +56,7 @@ import {
   nextStuckStreak,
   QUEUE_HEALTH_DOCUMENT,
   ROUND_BUDGET_MS,
+  relaunchStalledHealthDocument,
   roundHealthDocument,
   runtimeGitlinkPath,
   stuckBackoffMs,
@@ -102,6 +103,9 @@ import {
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { SERVICE } from "./queue-health.ts"
 
+import { workdirOf } from "./workdir.ts"
+import { originHead } from "./queue-location.ts"
+
 /**
  * How long the relaunch may wait for the shared checkout before it says so.
  *
@@ -111,8 +115,6 @@ import { SERVICE } from "./queue-health.ts"
  * not coming, and the difference has to reach a person rather than accumulate.
  */
 const RELAUNCH_WAIT_CAP_MS = ROUND_BUDGET_MS
-import { workdirOf } from "./workdir.ts"
-import { originHead } from "./queue-location.ts"
 
 // Observe this module's checkout when it loads, before declaration fetching or
 // any later queue call. A later disk HEAD is projection state, not loaded code.
@@ -548,6 +550,7 @@ export async function coreQueueCommand(
         const waitCapMs = request.relaunchWaitCapMs ?? RELAUNCH_WAIT_CAP_MS
         let alarmDueAt = waitStartedAt + waitCapMs
         let stalls = 0
+        let waitingFacts: Readonly<Record<string, unknown>> = {}
         for (;;) {
           if (now === undefined) {
             return stuck(
@@ -585,19 +588,20 @@ export async function coreQueueCommand(
             // preserves `facts` when it turns a stale document unhealthy, so
             // writing this at the start of the wait is what makes the eventual
             // overdue answer explain itself instead of saying only "overdue".
+            // Held, not just written: the STALL page below re-uses exactly this
+            // observation. Rebuilding it there would describe the moment the
+            // alarm fired rather than the moment the wait began, and the
+            // overdue answer merges whatever `facts` it finds.
+            waitingFacts = {
+              ...relaunchOff,
+              waitingForCheckout: gitlink.path,
+              waitingTarget: now,
+              waitingLocalGitlink: projected ?? "absent",
+              waitingCheckout: gitlink.checkout,
+              waitingCheckoutHead: checkout,
+            }
             const alive = roundHealthDocument(SERVICE, {}, undefined, waitCapMs, new Date())
-            writeHealth({
-              ...alive,
-              facts: {
-                ...alive.facts,
-                ...relaunchOff,
-                waitingForCheckout: gitlink.path,
-                waitingTarget: now,
-                waitingLocalGitlink: projected ?? "absent",
-                waitingCheckout: gitlink.checkout,
-                waitingCheckoutHead: checkout,
-              },
-            })
+            writeHealth({ ...alive, facts: { ...alive.facts, ...waitingFacts } })
             emit(
               io,
               options.json,
@@ -649,11 +653,19 @@ export async function coreQueueCommand(
             // — or the ladder would restart its backoff every time the target
             // moves, which is exactly when it should be climbing.
             stalls += 1
+            // ITS OWN DOCUMENT, not `roundHealthDocument`'s stuck branch. That
+            // branch's prose is about ROUNDS — read the round's record, the next
+            // round runs in N ms, the loop will run it by itself — and all three
+            // are false while waiting on a checkout. A page whose resolution
+            // lines contradict its own cause is what operators followed on the
+            // evening of 2026-09-11 (@cto).
             writeHealth(
-              roundHealthDocument(
+              relaunchStalledHealthDocument(
                 SERVICE,
-                { stuck: { key: `relaunch-wait:${gitlink.path}`, reason: why } },
-                { key: `relaunch-wait:${gitlink.path}`, reason: why, consecutive: stalls },
+                { checkout: gitlink.checkout, path: gitlink.path, sha: now },
+                why,
+                { ...waitingFacts, waitingLocalGitlink: projected ?? "absent", waitingCheckoutHead: checkout },
+                stalls,
                 waitCapMs,
                 new Date(),
               ),

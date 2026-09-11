@@ -841,18 +841,49 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       const paged = JSON.parse(readFileSync(join(w.workdir, "service-health.json"), "utf8")) as {
         state: string
         verdict: { kind: string }
-        error?: { cause?: string }
-        facts?: { reasonKey?: string }
+        error?: { code?: string; cause?: string; resolution?: string[] }
+        facts?: Record<string, unknown>
       }
       expect(paged.state).toBe("unhealthy")
       expect(paged.verdict.kind).toBe("running")
-      // The STABLE key travels as a field and the prose as the cause — the two
-      // are separate so a ladder counting stalls cannot be reset by wording that
-      // embeds a moving sha.
+      // ITS OWN CODE. A stall is not a stuck round, and borrowing that code
+      // brings prose about rounds with it.
+      expect(paged.error?.code).toBe("queue-relaunch-stalled")
+      // The STABLE key travels as a field and the prose as the cause — separate,
+      // so a ladder counting stalls cannot be reset by wording that embeds a
+      // moving sha.
       expect(paged.facts?.reasonKey).toBe("relaunch-wait:submodule")
       // And it names the checkout, not merely the fact of waiting: "stuck" that
       // does not say WHICH of the three is behind sends a reader to all three.
       expect(paged.error?.cause).toContain(join(w.work, "submodule"))
+
+      // THE FACTS FROM THE START OF THE WAIT SURVIVE INTO THE PAGE. The first
+      // cut of this rebuilt the document and destroyed them, which quietly
+      // undid the reason they are written at all: `believableHealthDocument`
+      // merges `facts`, so an overdue answer explains itself only if they are
+      // still there.
+      expect(paged.facts?.waitingForCheckout).toBe("submodule")
+      expect(paged.facts?.waitingCheckout).toBe(join(w.work, "submodule"))
+      expect(paged.facts?.waitingTarget).toBe(w.b)
+
+      // AND THE ROUND PROSE IS GONE. Three lines of the stuck-round branch are
+      // false here — read the round's record, the loop will run the next round
+      // by itself, the next runs in N ms — and an operator following a
+      // resolution line is how the evening of 2026-09-11 was lost.
+      const resolution = (paged.error?.resolution ?? []).join(" ")
+      expect(resolution).not.toContain("yrd queue list")
+      expect(resolution).not.toContain("next round")
+      // It names the checkout to make, exactly.
+      expect(resolution).toContain(`Check out submodule@${w.b} in ${join(w.work, "submodule")}`)
+      expect(resolution).toContain("No restart, and nothing to delete")
+      // AND IT DOES NOT OVER-PROMISE. The page does not clear when the checkout
+      // lands — the process exits 0 then and THIS document stays on disk until
+      // the relaunched service finishes its first round. I had written the
+      // easier, wrong version of that line and @cto caught it.
+      expect(resolution).toContain("clears after the relaunched service finishes its first round")
+      // No prefix: a reader grepping the stuck-round code must not land here.
+      expect(paged.error?.cause).not.toContain("yrd-round-stuck")
+      expect(paged.facts).not.toHaveProperty("nextRoundInMs")
       // And it has not run a round on the stale code while waiting.
       expect(rounds).toBe(0)
 

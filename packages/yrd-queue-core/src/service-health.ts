@@ -317,6 +317,71 @@ export function believableHealthDocument(document: QueueHealthDocument, now: Dat
  * supervisor pages only on the second. Saying `unhealthy` here would page for
  * a service nobody started.
  */
+/**
+ * The document for a relaunch that is waiting on a checkout which has not come.
+ *
+ * ITS OWN BUILDER, NOT A BRANCH OF {@link roundHealthDocument}, and that is the
+ * whole point (@cto, @i/10-yrd/24515). A stall is not a stuck round, and reusing
+ * the stuck branch shipped three resolution lines that are FALSE here: there is
+ * no round to read with `yrd queue list`, no next round runs until the checkout
+ * lands, and the interval quoted is the alarm's, not a round's. A page that
+ * contradicts its own cause is read by someone acting on it at 3am — operators
+ * following resolution lines is exactly what cost us the evening of
+ * 2026-09-11.
+ *
+ * `running` is TRUE and load-bearing: this process is alive and still waiting,
+ * which is what makes this a page rather than a tombstone, and what lets the
+ * supervisor's restart loop respawn later without meeting the admission gate
+ * that refuses unhealthy+running.
+ *
+ * `facts` carries the observation made when the wait STARTED, unchanged. The
+ * overdue answer is built by merging `facts`, so losing them here would delete
+ * the only thing that makes a later overdue page explain itself.
+ */
+export function relaunchStalledHealthDocument(
+  service: string,
+  awaited: Readonly<{ path: string; sha: string; checkout: string }>,
+  why: string,
+  waiting: Readonly<Record<string, unknown>>,
+  stalls: number,
+  nextAlarmInMs: number,
+  now: Date,
+): QueueHealthDocument {
+  return {
+    schema: QUEUE_HEALTH_SCHEMA,
+    service,
+    state: "unhealthy",
+    verdict: { kind: "running" },
+    error: {
+      code: "queue-relaunch-stalled",
+      // The `why` alone: NO `yrd-round-stuck:` prefix, because this is not a
+      // round and a reader who greps that code would be led to the wrong page.
+      cause: why,
+      // FOUR LINES, EACH OF THEM TRUE. The last one is the one that is easy to
+      // get subtly wrong, and @cto caught me getting it wrong: the page does
+      // NOT clear when the checkout lands. The process exits 0 then, and this
+      // document stays on disk until the RELAUNCHED service finishes its first
+      // round and writes over it.
+      resolution: [
+        `Check out ${awaited.path}@${awaited.sha} in ${awaited.checkout}.`,
+        "No restart, and nothing to delete: this process relaunches itself with exit 0 the moment that checkout lands.",
+        "No queue round runs until then.",
+        "This page clears after the relaunched service finishes its first round.",
+      ],
+    },
+    // No `nextRoundInMs`: there is no next round to promise. `nextAlarmInMs` is
+    // the interval this document is re-written on, which is a different claim.
+    facts: {
+      ...waiting,
+      writtenAt: now.toISOString(),
+      staleAfter: new Date(now.getTime() + nextAlarmInMs + ROUND_BUDGET_MS).toISOString(),
+      reasonKey: `relaunch-wait:${awaited.path}`,
+      stalledAlarms: stalls,
+      nextAlarmInMs,
+    },
+  }
+}
+
 export function absentHealthDocument(service: string, why: string): QueueHealthDocument {
   return {
     schema: QUEUE_HEALTH_SCHEMA,
