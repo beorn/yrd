@@ -107,6 +107,12 @@ export async function publishMovedGitlinks(
     try {
       await child(["cat-file", "-e", `${row.sha}^{commit}`])
     } catch {
+      // catch-cause-allow: absence IS the answer here, not a failure. This
+      // `cat-file -e` asks "does this checkout already hold the pin?", and the
+      // error it throws on a miss carries nothing a caller could act on — the
+      // next line goes and fetches it. Nothing is swallowed: if the fetch ALSO
+      // fails, the inner catch below rethrows with `{ cause }` and the message
+      // names the checkout, the remote and the sha.
       try {
         await child([
           "fetch",
