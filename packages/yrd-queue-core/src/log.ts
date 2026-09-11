@@ -100,6 +100,12 @@ export const LOG_KINDS = [
   // `scope` field, and a refusal that left no trace would be indistinguishable
   // from a check that never offered anything.
   "narrowing",
+  // git-super's descent into an Ahead parent (24454 row 2). One record per
+  // parent, because an EQUAL nested child emits no settle row -- so without
+  // this the commonest nested outcome is invisible in the journal and the only
+  // proof of the walk is a hand run. Readers match kinds by equality and none
+  // refuses an unrecognised one, so adding this cannot break an existing reader.
+  "descent",
 ] as const
 
 export type LogKind = (typeof LOG_KINDS)[number]

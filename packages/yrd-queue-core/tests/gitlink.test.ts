@@ -1205,6 +1205,24 @@ describe("settling gitlinks", () => {
       `submodule/apps/leaf@${nested.leafRecorded} kept-behind submodule-main@${nested.leafMain}`,
     )
 
+    // 24454 row 2 — THE DESCENT REACHES THE JOURNAL. git-super journals its walk
+    // into every Ahead parent, and until this row that field was parsed and
+    // dropped: yrd read state/partial/commit/detail/gitlinks and nothing else.
+    // This is the write half, on a real round rather than a fixture; the reader
+    // half is super-merge-descents.test.ts against git-super's own output.
+    const descents = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "descent")
+    expect(descents).toContainEqual(
+      expect.objectContaining({
+        parent: "submodule",
+        parentTarget: ahead,
+        children: [`submodule/apps/leaf kept-behind ${nested.leafRecorded}`],
+      }),
+    )
+
     // NOT PUBLISHED. The parent's main moved because the parent was Ahead; the
     // leaf's main did not move at all, and the landing record names only the
     // parent as published.

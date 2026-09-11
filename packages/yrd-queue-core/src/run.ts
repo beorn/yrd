@@ -854,12 +854,35 @@ type SettledGitlink = Readonly<{
   state: "raised" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main" | "not-run"
 }>
 
+/**
+ * One nested child seen while git-super descended into an Ahead parent.
+ *
+ * An EQUAL child emits no settle row -- it is recorded as it stands, neither
+ * published nor refused -- and Equal is the NORMAL state for a nested pin. So
+ * without this, the commonest nested outcome is indistinguishable in the journal
+ * from a walk that never ran (24454 row 2).
+ */
+type SuperMergeDescentChild = Readonly<{
+  path: string
+  target: string
+  state: "equal" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main"
+}>
+
+/** git-super's descent into one Ahead parent, and everything it classified there. */
+type SuperMergeDescent = Readonly<{
+  parent: string
+  parentTarget: string
+  children: readonly SuperMergeDescentChild[]
+}>
+
 type SuperMergeResult = Readonly<{
   state: "updated" | "unchanged" | "failed" | "unknown"
   partial: boolean
   commit?: string
   detail?: SuperMergeDetail
   gitlinks: readonly SettledGitlink[]
+  /** Absent when no parent was Ahead. Optional so an older git-super still parses. */
+  descents?: readonly SuperMergeDescent[]
 }>
 
 type ComposedCandidate =
@@ -914,6 +937,21 @@ async function composeCandidate(run: Run, entry: QueueEntry, phase: CandidatePha
       phase,
       state: settled.state,
       to: settled.to,
+    })
+  }
+  // AFTER the settle rows, so the journal reads parent-then-descent in the order
+  // the walk actually ran. `children` is a string list rather than objects
+  // because LogRecord fields are scalars or string arrays -- a nested shape
+  // cannot be written here, and flattening keeps every row greppable.
+  for (const descent of result.descents ?? []) {
+    run.log.write({
+      branch: entry.change.branch,
+      children: descent.children.map((child) => `${child.path} ${child.state} ${child.target}`),
+      head,
+      kind: "descent",
+      parent: descent.parent,
+      parentTarget: descent.parentTarget,
+      phase,
     })
   }
   let worktree: PreparedWorktree
@@ -990,7 +1028,13 @@ async function gitSuperExecution(
   }
 }
 
-function readSuperMergeResult(value: unknown): SuperMergeResult {
+/**
+ * Parse git-super's merge JSON. Exported because it is a pure reader with no
+ * coverage of its own until now, and the only other way to exercise it is a
+ * full queue round -- which is what let the descents field reach production
+ * unparsed. Same shape as the other readers this package exports.
+ */
+export function readSuperMergeResult(value: unknown): SuperMergeResult {
   if (typeof value !== "object" || value === null) throw new Error("git-super merge JSON is not an object")
   const found = value as Record<string, unknown>
   if (!new Set(["updated", "unchanged", "failed", "unknown"]).has(String(found.state))) {
@@ -1016,13 +1060,54 @@ function readSuperMergeResult(value: unknown): SuperMergeResult {
     return entry as SettledGitlink
   })
   const detail = found.detail === undefined ? undefined : readSuperMergeDetail(found.detail)
+  // ABSENT MEANS NONE, MALFORMED MEANS THROW -- the same contract the gitlinks
+  // array gets. Absent is the normal case for a round with no Ahead parent and
+  // for any git-super older than the field, so it cannot be an error; but a
+  // present-and-wrong row is a producer defect and swallowing it would leave the
+  // journal quietly incomplete, which is the exact failure this row exists for.
+  const descents = found.descents === undefined ? undefined : readSuperMergeDescents(found.descents)
   return {
     state: found.state as SuperMergeResult["state"],
     partial: found.partial,
     ...(typeof found.commit === "string" ? { commit: found.commit } : {}),
     ...(detail === undefined ? {} : { detail }),
     gitlinks,
+    ...(descents === undefined ? {} : { descents }),
   }
+}
+
+function readSuperMergeDescents(value: unknown): readonly SuperMergeDescent[] {
+  if (!Array.isArray(value)) throw new Error("git-super merge descents is not an array")
+  return value.map((row, index): SuperMergeDescent => {
+    if (typeof row !== "object" || row === null) {
+      throw new Error(`git-super merge descent ${String(index)} is not an object`)
+    }
+    const entry = row as Record<string, unknown>
+    if (typeof entry.parent !== "string" || typeof entry.parentTarget !== "string") {
+      throw new Error(`git-super merge descent ${String(index)} is incomplete`)
+    }
+    if (!Array.isArray(entry.children)) {
+      throw new Error(`git-super merge descent ${String(index)} has no children array`)
+    }
+    const children = entry.children.map((child, childIndex): SuperMergeDescentChild => {
+      if (typeof child !== "object" || child === null) {
+        throw new Error(`git-super merge descent ${String(index)} child ${String(childIndex)} is not an object`)
+      }
+      const found = child as Record<string, unknown>
+      if (
+        typeof found.path !== "string" ||
+        typeof found.target !== "string" ||
+        !new Set(["equal", "kept-ahead", "kept-behind", "as-written", "left-off-main"]).has(String(found.state))
+      ) {
+        throw new Error(`git-super merge descent ${String(index)} child ${String(childIndex)} is incomplete`)
+      }
+      return found as SuperMergeDescentChild
+    })
+    // An EMPTY children array is meaningful, not a degenerate row: it says the
+    // walk descended into this parent and found no nested gitlink. Dropping it
+    // would erase the difference between that and never descending at all.
+    return { parent: entry.parent, parentTarget: entry.parentTarget, children }
+  })
 }
 
 function readSuperMergeDetail(value: unknown): SuperMergeDetail {
