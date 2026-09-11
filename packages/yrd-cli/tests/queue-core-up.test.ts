@@ -785,6 +785,53 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(run.stderr()).not.toContain("the relaunch exit is off")
   })
 
+  // @cto's row, on @i/10-yrd/24515: the wait above used to have no time limit.
+  // It never ran in production until the relaunch exit was repaired; now it
+  // runs on every vendor/yrd move, and a shared checkout that is detached,
+  // drifted or simply not coming would park the delivery service forever with
+  // nothing said. The trade — no rounds rather than stale code — is right. The
+  // silence was not.
+  it("ends stuck when the shared checkout never materializes the target, and names it", async () => {
+    const w = await gitlinkWorld()
+    // The target records b. The runtime's own checkout is left at a and NOBODY
+    // ever projects it: this is the stalled-updater world, not a lagging one.
+    await w.git(["update-index", "--cacheinfo", "160000", w.b, "submodule"])
+    await w.git(["commit", "--quiet", "-m", "target records b, checkout never follows"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const { log } = logRows()
+    let rounds = 0
+
+    const exit = await w.command(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        // Fifty milliseconds stands in for ten minutes. What is under test is
+        // that the wait ENDS and says why, which does not depend on the number.
+        relaunchWaitCapMs: 50,
+        afterRound: () => {
+          rounds += 1
+          stop.abort()
+        },
+      },
+      { json: true, log, workdir: w.workdir },
+    )
+
+    // Stuck, not zero and not a hang: the service could not reload, so it must
+    // not run another round on the old code either.
+    expect(exit, `${run.stdout()}\n${run.stderr()}`).toBe(2)
+    expect(rounds).toBe(0)
+    // NAMING THE CHECKOUT is the whole ask. "Stuck" that does not say which of
+    // the three is behind sends a reader to the same three places every time.
+    const said = `${run.stdout()}\n${run.stderr()}`
+    expect(said).toContain(join(w.work, "submodule"))
+    expect(said).toContain("relaunches on its own")
+  })
+
   it.each(["stop", "project", "already projected"])("runs no stale round during checkout lag (%s)", async (ending) => {
     const w = await gitlinkWorld()
     // T1 includes the submodule checkout poll. Watching only queue outcomes

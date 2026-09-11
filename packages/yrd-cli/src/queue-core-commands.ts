@@ -55,6 +55,7 @@ import {
   issueOf,
   nextStuckStreak,
   QUEUE_HEALTH_DOCUMENT,
+  ROUND_BUDGET_MS,
   roundHealthDocument,
   runtimeGitlinkPath,
   stuckBackoffMs,
@@ -100,6 +101,16 @@ import {
 } from "./queue-stats.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 import { SERVICE } from "./queue-health.ts"
+
+/**
+ * How long the relaunch may wait for the shared checkout before it says so.
+ *
+ * The round budget, deliberately: this wait REPLACES a round, so the service
+ * should not be silent for longer than a round is allowed to take. Past it the
+ * wait is no longer "the updater is a moment behind" — it is a checkout that is
+ * not coming, and the difference has to reach a person rather than accumulate.
+ */
+const RELAUNCH_WAIT_CAP_MS = ROUND_BUDGET_MS
 import { workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
 
@@ -161,6 +172,16 @@ export type CoreQueueCommand =
        * ahead. A test can name them without running from a submodule checkout.
        */
       gitlink?: Readonly<{ path: string; sha: string }>
+      /**
+       * How long the relaunch waits for the shared checkout before it ends
+       * stuck. Defaults to {@link RELAUNCH_WAIT_CAP_MS}.
+       *
+       * A test names it for one reason only: the production cap is ten minutes,
+       * and a test that actually waited that long would be deleted rather than
+       * fixed the first time it was slow. The BEHAVIOUR under test is the same
+       * at 50ms and at ten minutes.
+       */
+      relaunchWaitCapMs?: number
       /** Awaited after each round, before the gitlink is read; a test mutates the world or stops the service here. */
       afterRound?: (outcome: QueueRunOutcome) => void | Promise<void>
       /**
@@ -515,6 +536,16 @@ export async function coreQueueCommand(
         let now = await gitlinkAt(git, targetOid, gitlink.path)
         if (now === gitlink.sha) return undefined
         let announced: string | undefined
+        // THE WAIT IS BOUNDED NOW (@cto 2026-09-11, on @i/10-yrd/24515). Before
+        // the relaunch exit was repaired this loop never ran in production; it
+        // now runs on every vendor/yrd move, and it ended only when the shared
+        // checkout caught up. If the updater stalls, or that checkout is
+        // detached, drifted or ahead, an unbounded wait runs NO ROUNDS and
+        // writes NO DOCUMENT — and the first sign is an overdue answer twelve
+        // minutes later that says "overdue" without saying why. Trading stale
+        // code for no rounds is the right trade; doing it quietly is not.
+        const waitStartedAt = Date.now()
+        const waitCapMs = request.relaunchWaitCapMs ?? RELAUNCH_WAIT_CAP_MS
         for (;;) {
           if (now === undefined) {
             return stuck(
@@ -544,7 +575,27 @@ export async function coreQueueCommand(
           const state = `${now}:${projected}:${checkout}`
           if (state !== announced) {
             const waiting = `waiting for checkout ${gitlink.path}: loaded ${gitlink.sha.slice(0, 12)}, target ${now.slice(0, 12)}, local gitlink ${projected?.slice(0, 12) ?? "absent"}, checkout ${checkout.slice(0, 12)}; no queue round will run until the checkout updater materializes the target`
-            log?.info?.(waiting)
+            // WARN, not info: while this is announced the delivery service is
+            // doing nothing, and an INFO line is where the last capability that
+            // switched itself off hid for a month.
+            log?.warn?.(waiting, { checkout: gitlink.checkout, gitlink: gitlink.path, projected, target: now })
+            // THE FACT THE OVERDUE PAGE WILL CARRY. `believableHealthDocument`
+            // preserves `facts` when it turns a stale document unhealthy, so
+            // writing this at the start of the wait is what makes the eventual
+            // overdue answer explain itself instead of saying only "overdue".
+            const alive = roundHealthDocument(SERVICE, {}, undefined, waitCapMs, new Date())
+            writeHealth({
+              ...alive,
+              facts: {
+                ...alive.facts,
+                ...relaunchOff,
+                waitingForCheckout: gitlink.path,
+                waitingTarget: now,
+                waitingLocalGitlink: projected ?? "absent",
+                waitingCheckout: gitlink.checkout,
+                waitingCheckoutHead: checkout,
+              },
+            })
             emit(
               io,
               options.json,
@@ -562,6 +613,28 @@ export async function coreQueueCommand(
             announced = state
           }
           if (stopped()) return 0
+          if (Date.now() - waitStartedAt >= waitCapMs) {
+            const why =
+              `waited ${String(Math.round(waitCapMs / 1000))}s for ${gitlink.checkout} to check out ` +
+              `${gitlink.path}@${now.slice(0, 12)} and it has not: its own gitlink reads ` +
+              `${projected?.slice(0, 12) ?? "absent"} and its working tree reads ${checkout.slice(0, 12)}. ` +
+              `No queue round has run since. Once ${gitlink.path}@${now.slice(0, 12)} is checked out there, ` +
+              `the service relaunches on its own.`
+            // The alarm rides the document as well as the exit, because the exit
+            // is read by the supervisor and the document is read by a person.
+            // The stuck KEY is stable — the path, not the sha — or a ladder keyed
+            // on prose would restart its backoff on every new target.
+            writeHealth(
+              roundHealthDocument(
+                SERVICE,
+                { stuck: { key: `relaunch-wait:${gitlink.path}`, reason: why } },
+                { key: `relaunch-wait:${gitlink.path}`, reason: why, consecutive: 1 },
+                waitCapMs,
+                new Date(),
+              ),
+            )
+            return stuck(why)
+          }
           try {
             await delay(1000, undefined, { signal: request.stop })
           } catch (error) {
