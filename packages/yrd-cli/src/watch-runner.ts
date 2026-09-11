@@ -192,7 +192,7 @@ function running(pid: number): boolean {
 }
 
 /** The one word the box renders. */
-export type RunnerHealth = "running" | "idle" | "silent" | "absent"
+export type RunnerHealth = "processing" | "idle" | "silent" | "absent"
 
 /**
  * The fleet's own ceiling: a request older than ten minutes is broken, not
@@ -207,9 +207,40 @@ export const SILENT_AFTER_MS = 10 * 60 * 1000
  * `silent` when changes wait in line and nothing has written for
  * {@link SILENT_AFTER_MS}; `idle` otherwise.
  */
-export function runnerHealth(facts: RunnerFacts, inLine: number, now: Date): RunnerHealth {
+/**
+ * IS A CHANGE UNDER A CHECK RIGHT NOW? The ruled predicate, named so it can be
+ * tested and audited rather than living as a filter expression in the frame.
+ *
+ * A row carries `live` only while the runner holds a check open on it
+ * (`yrd-queue-core/src/table.ts`: run, check, phase, since). That IS the
+ * question, not a stand-in for it.
+ */
+export function changeUnderCheck(rows: readonly { readonly row: { readonly live?: unknown } }[]): boolean {
+  return rows.some((item) => item.row.live !== undefined)
+}
+
+/**
+ * The one word, and its predicate is A CHANGE IS UNDER A CHECK RIGHT NOW.
+ *
+ * It used to be `facts.latest.alive` — THE SERVICE PROCESS EXISTS — which is
+ * nearly always true, so the marker reported the same value in exactly the case
+ * it exists to separate and tracked nothing the reader cares about. Ruled by
+ * @chief 2026-09-11, restoring the 2026-08-18 spec rather than changing it.
+ *
+ * `underCheck` is measured, not inferred: a row carries `live` only while the
+ * runner has a check open on it (`yrd-queue-core/src/table.ts`), naming the run,
+ * check and phase. No proxy was synthesised — had the data carried only
+ * run-level state, the ruling says to report that rather than invent one.
+ *
+ * SILENCE IS TESTED FIRST, deliberately. A runner that dies mid-check leaves
+ * `live` set on its row forever, so asking `underCheck` first would report
+ * `processing` for all time and rebuild the always-true defect in a new place.
+ * A stalled writer is evidence about the runner; a row's `live` is only a claim
+ * it made before it stopped.
+ */
+export function runnerHealth(facts: RunnerFacts, inLine: number, now: Date, underCheck: boolean): RunnerHealth {
   if (facts.latest === undefined) return "absent"
-  if (facts.latest.alive) return "running"
   if (inLine > 0 && now.getTime() - facts.latest.lastWriteAt.getTime() > SILENT_AFTER_MS) return "silent"
+  if (underCheck) return "processing"
   return "idle"
 }

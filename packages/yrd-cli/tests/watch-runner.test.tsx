@@ -17,7 +17,13 @@ import { render } from "silvery/test"
 import { runId } from "@yrd/queue-core"
 import { RunnerBox } from "../src/watch-boxes.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
-import { SILENT_AFTER_MS, readRunnerFacts, runnerHealth, type RunnerFacts } from "../src/watch-runner.ts"
+import {
+  SILENT_AFTER_MS,
+  changeUnderCheck,
+  readRunnerFacts,
+  runnerHealth,
+  type RunnerFacts,
+} from "../src/watch-runner.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
@@ -157,20 +163,48 @@ describe("runnerHealth, the one word", () => {
   })
 
   it("is running while the run's process lives, whatever else is true", () => {
-    expect(runnerHealth(facts({ alive: true, lastWriteAt: new Date(0) }), 5, NOW)).toBe("running")
+    // THE PREDICATE, ruled 2026-09-11: a change is under a check RIGHT NOW.
+    // `alive` no longer decides anything — a live process with no check open is
+    // idle, which is the whole point of the change.
+    expect(runnerHealth(facts({ alive: true, lastWriteAt: new Date(NOW.getTime()) }), 0, NOW, true)).toBe("processing")
+    expect(
+      runnerHealth(facts({ alive: true, lastWriteAt: new Date(NOW.getTime()) }), 0, NOW, false),
+      "a live process with nothing under a check is idle, not processing",
+    ).toBe("idle")
+  })
+
+  it("SILENCE BEATS A STALE LIVE ROW: a runner that stopped writing is silent, not processing", () => {
+    // The ordering, pinned. A runner that dies mid-check leaves `live` set on
+    // its row forever. Asking "under a check?" first would report `processing`
+    // for all time and rebuild the always-true defect this change removes, so
+    // silence — evidence the writer stopped — is tested first.
+    const stalled = facts({ alive: true, lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
+    expect(runnerHealth(stalled, 1, NOW, true)).toBe("silent")
+    // And while it IS writing, the same stale-looking claim is a real one.
+    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime()) }), 1, NOW, true)).toBe("processing")
+  })
+
+  it("changeUnderCheck asks for an OPEN CHECK, never merely for rows", () => {
+    // The frame derives the predicate from this. A version reading
+    // `rows.length > 0` would be true whenever the queue is non-empty, which is
+    // the same always-true shape in a different place.
+    expect(changeUnderCheck([]), "no rows").toBe(false)
+    expect(changeUnderCheck([{ row: {} }]), "a row with no open check").toBe(false)
+    expect(changeUnderCheck([{ row: {} }, { row: {} }]), "several rows, none checked").toBe(false)
+    expect(changeUnderCheck([{ row: {} }, { row: { live: { check: "typecheck" } } }]), "one checked").toBe(true)
   })
 
   it("is absent with no journal, silent past the ceiling only while something waits in line, idle otherwise", () => {
-    expect(runnerHealth({ journalDir: "/w/logs", absent: "none" }, 3, NOW)).toBe("absent")
+    expect(runnerHealth({ journalDir: "/w/logs", absent: "none" }, 3, NOW, false)).toBe("absent")
     const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
-    expect(runnerHealth(quiet, 1, NOW)).toBe("silent")
-    expect(runnerHealth(quiet, 0, NOW)).toBe("idle")
-    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), 3, NOW)).toBe("idle")
+    expect(runnerHealth(quiet, 1, NOW, false)).toBe("silent")
+    expect(runnerHealth(quiet, 0, NOW, false)).toBe("idle")
+    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), 3, NOW, false)).toBe("idle")
   })
 })
 
 describe("the RUNNER box", () => {
-  async function paint(facts: RunnerFacts, inLine: number, pause?: string): Promise<string> {
+  async function paint(facts: RunnerFacts, inLine: number, pause?: string, underCheck = false): Promise<string> {
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
@@ -178,6 +212,7 @@ describe("the RUNNER box", () => {
             facts={facts}
             label="main"
             inLine={inLine}
+            underCheck={underCheck}
             columns={70}
             live={false}
             {...(pause === undefined ? {} : { pause })}
@@ -206,7 +241,9 @@ describe("the RUNNER box", () => {
   })
 
   it("names the live run with its pid on the `$` line, the run's facts and the measured-at clock under it, hanging off one gutter", async () => {
-    const text = await paint(latest({ alive: true, pid: 4242 }), 1)
+    // UNDER A CHECK, stated rather than implied: this arm is about the box while
+    // a change is being checked, and `alive` alone no longer produces that state.
+    const text = await paint(latest({ alive: true, pid: 4242 }), 1, undefined, true)
 
     expect(text).toContain("RUNNER")
     expect(text).toContain("run 2:00")
@@ -259,6 +296,7 @@ describe("the RUNNER box", () => {
             facts={latest({ alive: true, pid: 4242 })}
             label="a-very-long-queue-label-indeed-and-then-some-more-of-it"
             inLine={1}
+            underCheck
             columns={30}
             live={false}
           />

@@ -41,7 +41,7 @@ const SILENT_MAX_ROWS = 3
 const HEALTH_COLOR: Readonly<Record<RunnerHealth, string>> = {
   absent: "$fg-muted",
   idle: "$fg-muted",
-  running: "$fg-info",
+  processing: "$fg-info",
   silent: "$fg-error",
 }
 
@@ -56,7 +56,7 @@ const HEALTH_COLOR: Readonly<Record<RunnerHealth, string>> = {
  */
 function HealthMarker({ health, live }: { health: RunnerHealth; live: boolean }) {
   const color = HEALTH_COLOR[health]
-  if (live && health === "running") {
+  if (live && health === "processing") {
     return (
       <Pulse synchronized colors={["$fg-info", "$bg-surface-default"]} intervalMs={900} bold flexShrink={0}>
         $
@@ -81,6 +81,7 @@ export function RunnerBox({
   facts,
   label,
   inLine,
+  underCheck,
   columns,
   pause,
   live = true,
@@ -90,6 +91,8 @@ export function RunnerBox({
   label: string
   /** How many changes wait in line: silence only matters while something waits. */
   inLine: number
+  /** Is a change under a check right now? The marker's whole predicate (item 5). */
+  underCheck: boolean
   /** The pane's width, so the command wraps with a hanging indent bounded to three rows (item 29). */
   columns: number
   /** The pause line, when the queue is paused: the box's border and its last rail say so (item 27). */
@@ -97,21 +100,21 @@ export function RunnerBox({
   live?: boolean
 }) {
   const now = useNow()
-  const health = runnerHealth(facts, inLine, now)
+  const health = runnerHealth(facts, inLine, now, underCheck)
   const color = HEALTH_COLOR[health]
   const latest = facts.latest
   const sinceWrite = latest === undefined ? undefined : now.getTime() - latest.lastWriteAt.getTime()
   const timer =
     latest === undefined
       ? undefined
-      : health === "running"
+      : health === "processing"
         ? `run ${mediaDuration(now.getTime() - latest.startedAt.getTime())}`
         : `${health} ${mediaDuration(sinceWrite ?? 0)}`
   const border = health === "silent" ? "$fg-error" : pause === undefined ? undefined : "$fg-warning"
   const command =
     latest === undefined
       ? "yrd queue up"
-      : health === "running"
+      : health === "processing"
         ? `yrd queue run · ${runShortName(label, latest.id)}${latest.pid === undefined ? "" : ` [pid ${String(latest.pid)}]`}`
         : `yrd queue up · last run ${runShortName(label, latest.id)} wrote ${mediaDuration(sinceWrite ?? 0)} ago`
   // Every rail that can run long is pre-wrapped into rows, like the command

@@ -11,6 +11,7 @@
  *
  */
 
+import { changeUnderCheck } from "./watch-runner.ts"
 import type { ReactNode } from "react"
 import { Box, Text } from "silvery"
 import { RunnerBox } from "./watch-boxes.tsx"
@@ -58,6 +59,7 @@ export function ListStack({
   paddingX?: number
 }) {
   const inLine = snapshot.rows.filter((item) => item.row.position !== undefined).length
+  const underCheck = changeUnderCheck(snapshot.rows)
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={paddingX}>
       {snapshot.runner === undefined ? null : (
@@ -65,6 +67,7 @@ export function ListStack({
           facts={snapshot.runner}
           label={label}
           inLine={inLine}
+          underCheck={underCheck}
           columns={columns}
           live={live}
           {...(snapshot.pause === undefined ? {} : { pause: snapshot.pause })}
