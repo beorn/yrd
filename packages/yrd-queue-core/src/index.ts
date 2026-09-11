@@ -92,3 +92,24 @@ export { QueuePaused, QueueNotPaused, activePause, pauseLine, readPause, require
 export type { PauseRecord, PauseKind, WritePause } from "./pause.ts"
 
 export { remoteUrl } from "./remote.ts"
+
+export {
+  absentHealthDocument,
+  nextStuckStreak,
+  parseQueueHealthDocument,
+  QUEUE_HEALTH_DOCUMENT,
+  QUEUE_HEALTH_SCHEMA,
+  queueHealthExitCode,
+  roundHealthDocument,
+  STUCK_BACKOFF_CAP_MS,
+  stuckBackoffMs,
+  unreadableHealthDocument,
+} from "./service-health.ts"
+export type {
+  QueueHealthDocument,
+  QueueHealthFailure,
+  QueueHealthState,
+  QueueHealthVerdict,
+  RoundFacts,
+  StuckStreak,
+} from "./service-health.ts"

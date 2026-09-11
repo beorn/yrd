@@ -53,11 +53,25 @@ export default {
         // The service's tribe name is its own key, never `@yrd`: that seat is
         // retired (2026-08-31) and a service must not resurrect it.
         env: { TRIBE_NAME: "@yrd-service", YRD_HABITANT_RSS_CAP_MB: "24576" },
-        // No health probe (M7, 2026-09-03): the loop's own process is its
-        // liveness, its journal shows a running check, and a probe shelling
-        // the CLI every tick was noise with a second opinion.
+        // The declared health probe (2026-09-11). M7 rejected a probe on
+        // 2026-09-03 as noise with a SECOND OPINION, and that objection is
+        // answered rather than overruled: `queue health` re-derives nothing.
+        // It reads the document the loop itself wrote at the end of its last
+        // round, so there is exactly one opinion and it is the loop's. No
+        // network, no declaration read, no judgement of the queue.
+        //
+        // This is where the stuck ALARM now lives. A stuck round used to end
+        // the process, which made the alarm and the stop one event and took
+        // delivery offline with relaunch disabled for a fault the next round
+        // would have cleared. Now a stuck round leaves an unhealthy document,
+        // the supervisor pages on unhealthy-while-running WITHOUT restarting,
+        // and it drops the page by itself when a round comes back clear.
+        health: { command: "bun tools/yrd-runtime.mjs yrd queue health" },
         // The loop relaunches only after an ending it chose: 0 for a clean
-        // round/gitlink recycle, or 1 for a candidate failure. Exit 2 is stuck.
+        // round/gitlink recycle, or 1 for a candidate failure. Exit 2 is now
+        // reserved for what NO round can fix — a declaration that is absent or
+        // unreadable, a runtime gitlink that is absent — so it stays off the
+        // allowlist and still pages non-relaunchable.
         // Signal decision: any signal observed by Hab is an unplanned host-level
         // interruption, so it stays down and pages the declared owner — @cto
         // today — with every unlisted code.
