@@ -711,6 +711,80 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect((await w.git(["ls-tree", "origin/main", "--", "submodule"])).trim()).toBe(`160000 commit ${w.b}\tsubmodule`)
   })
 
+  /**
+   * @failure  THE PRODUCTION CONFIGURATION, and no test had it. Every gitlink
+   *           test above runs the queue from the SAME checkout the runtime
+   *           lives in — which is what the pre-M8 deployment looked like. M8
+   *           moved the queue into its own clone, the old identification asked
+   *           whether the runtime sits inside the QUEUE checkout, the answer
+   *           became "no" permanently, and the relaunch exit was silently off
+   *           in production for a month (@i/10-yrd/24515). The change that
+   *           broke it touched neither the function nor any test of it, because
+   *           no test described the shape it broke.
+   * @level    l2 (two clones of one root, the real CLI, a real gitlink move)
+   * @consumer every seat whose landed yrd change is not actually running
+   */
+  it("exits 0 on a gitlink move when the QUEUE runs from a different clone than the runtime", async () => {
+    const w = await gitlinkWorld()
+    await submitGitlink(w, "task/gitlink-elsewhere", w.b)
+    await gitIn(join(w.work, "submodule"))(["checkout", "--quiet", w.a])
+
+    // THE WHOLE POINT: the queue works from its own clone of the same root,
+    // while the runtime keeps living in `w.work/submodule`. Superproject and
+    // queue checkout are now two different directories, as in production.
+    // Beside the world, NOT inside the queue workdir: the run owns that
+    // directory and scans it for its own worktrees and journals.
+    const queueClone = join(dirname(w.work), "queue-clone")
+    await gitIn(dirname(w.work))(["clone", "--quiet", w.work, queueClone])
+    await identity(gitIn(queueClone))
+    await gitIn(queueClone)(["remote", "set-url", "origin", "https://git-super.test/owned/root.git"])
+    await gitIn(queueClone)(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    // The queue borrows submodule objects from its own checkout, so that
+    // checkout must carry a store for every gitlink. The refusal names this
+    // exact command when it is missing, which is how this line was written.
+    await gitIn(queueClone)(["submodule", "update", "--init", "--", "submodule"])
+
+    const run = capture(queueClone)
+    const stop = new AbortController()
+    let rounds = 0
+    const exit = await w.command(
+      queueClone,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        // Every round, stuck ones included — a stuck round no longer ends the
+        // loop, so without this the test hangs instead of reporting.
+        afterHealth: () => {
+          rounds += 1
+          if (rounds >= 4) stop.abort()
+        },
+        afterRound: async () => {
+          // The runtime's OWN superproject projects the move — which is the
+          // tree this process would re-exec out of, and the one the wait must
+          // follow. The queue clone advancing says nothing about it.
+          await w.git(["fetch", "--quiet", "origin", "main"])
+          await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+          await gitIn(join(w.work, "submodule"))(["checkout", "--quiet", w.b])
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+
+    // EXIT 0, the allowlisted ending: hab relaunches, and the new pin runs. The
+    // old identification returned undefined here and the loop ran on forever.
+    const written = records(run)
+    // The hang guard, and it is the failure this bead is about: with the exit
+    // disarmed the loop runs forever and nothing says why. Four rounds means
+    // the gitlink move was never seen.
+    expect(rounds, `the loop never exited on the gitlink move; ${run.stdout()}\n${run.stderr()}`).toBeLessThan(4)
+    expect(exit, `${run.stdout()}\n${run.stderr()}`).toBe(0)
+    expect(written.at(-1)).toEqual({ exitCode: 0, from: w.a, gitlink: "submodule", reason: "gitlink-moved", to: w.b })
+    // And the exit was never announced as disarmed.
+    expect(run.stderr()).not.toContain("the relaunch exit is off")
+  })
+
   it.each(["stop", "project", "already projected"])("runs no stale round during checkout lag (%s)", async (ending) => {
     const w = await gitlinkWorld()
     // T1 includes the submodule checkout poll. Watching only queue outcomes
@@ -808,7 +882,18 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(rounds).toBe(0)
   })
 
-  it("a standalone runtime runs normally and explicitly names the checkout outside this queue", async () => {
+  /**
+   * CHANGED BY @i/10-yrd/24515, and the change is the bead. This asserted that
+   * the exit is off because the runtime is not inside the QUEUE checkout —
+   * which is the predicate that had been silently disarming the relaunch in
+   * production for a month. It is no longer the question.
+   *
+   * The runtime is now identified by its own superproject, so in this world the
+   * exit is off for an honest reason instead: the temporary target records no
+   * gitlink at the path this runtime occupies. Same outcome, different
+   * question, and the reason is one a person can act on.
+   */
+  it("a runtime whose target records no gitlink runs normally and says so LOUDLY", async () => {
     const w = await world()
     const run = capture(w.work)
     const stop = new AbortController()
@@ -823,13 +908,16 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
     expect(exit, run.stdout()).toBe(0)
     expect(records(run)).toHaveLength(1)
-    // This CLI is outside the world's queue checkout, not an embedded stale gitlink.
-    expect(rows.filter((row) => row.message.startsWith("the gitlink exit is off"))).toEqual([
-      {
-        level: "info",
-        message: `the gitlink exit is off: runtime checkout ${resolve(import.meta.dirname, "../../..")} is not embedded in queue checkout ${w.work}`,
-      },
-    ])
+    // WARN, NOT INFO. The old line was an INFO that @cto could not find in
+    // hab's session files at all, which is how a capability that had switched
+    // itself off went a month without anyone noticing.
+    const off = rows.filter((row) => row.message.startsWith("the relaunch exit is off"))
+    expect(off, JSON.stringify(rows)).toHaveLength(1)
+    expect(off[0]?.level).toBe("warn")
+    expect(off[0]?.message).toContain("records no gitlink")
+    // And it reaches stderr too, so a person watching the service sees it
+    // without a log level set.
+    expect(run.stderr()).toContain("the relaunch exit is off")
   })
 })
 

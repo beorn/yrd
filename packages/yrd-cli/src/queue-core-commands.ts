@@ -56,6 +56,7 @@ import {
   nextStuckStreak,
   QUEUE_HEALTH_DOCUMENT,
   roundHealthDocument,
+  runtimeGitlinkPath,
   stuckBackoffMs,
   QueuePaused,
   QueueNotPaused,
@@ -75,6 +76,7 @@ import {
   type QueueHealthDocument,
   type QueueRunOutcome,
   type RoundFacts,
+  type RuntimeGitlinkOff,
   type StuckStreak,
   type Row,
 } from "@yrd/queue-core"
@@ -108,16 +110,30 @@ const sourceAtLoad = await (async () => {
   await using process = createProcess()
   const source = adaptProcessGit(process, { timeoutMs: 5000 })
   try {
-    const [checkout, head] = await Promise.all([
+    // The SUPERPROJECT is read here, beside the checkout, because it is the
+    // same kind of fact: what this runtime IS, observed once at module load.
+    // It is what decides the relaunch exit (@i/10-yrd/24515) — the question is
+    // "what path does this runtime occupy in its own superproject", never
+    // "where is the queue working today".
+    //
+    // An empty answer is normal and not a failure: a standalone clone of yrd
+    // has no superproject, so `--show-superproject-working-tree` prints
+    // nothing and exits 0.
+    const [checkout, head, superproject] = await Promise.all([
       source.run({ repo: sourceDirectory, args: ["rev-parse", "--show-toplevel"] }),
       source.run({ repo: sourceDirectory, args: ["rev-parse", "--verify", "HEAD^{commit}"] }),
+      source.run({ repo: sourceDirectory, args: ["rev-parse", "--show-superproject-working-tree"] }),
     ])
-    for (const result of [checkout, head]) {
+    for (const result of [checkout, head, superproject]) {
       if (result.code !== 0 || result.timedOut || result.signal || result.failure) {
         throw new Error(`source Git in ${sourceDirectory}: ${gitFailure(result, 5000)}`)
       }
     }
-    return { checkout: checkout.stdout.trim(), sha: head.stdout.trim() }
+    return {
+      checkout: checkout.stdout.trim(),
+      sha: head.stdout.trim(),
+      superproject: superproject.stdout.trim(),
+    }
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) }
   }
@@ -475,8 +491,23 @@ export async function coreQueueCommand(
           )
         }
       }
-      const gitlink: Readonly<{ path: string; sha: string; checkout?: string }> | undefined =
-        request.gitlink ?? (await gitlinkOf(git, captured.oid, log))
+      // THE RELAUNCH EXIT, and whether it is armed (@i/10-yrd/24515). An
+      // injected gitlink is a test's, and arms it by construction; otherwise
+      // the runtime asks what path IT occupies in ITS OWN superproject.
+      const identified: RuntimeGitlink | RuntimeGitlinkOff =
+        request.gitlink === undefined
+          ? await gitlinkOf(git, captured.oid, log)
+          : { kind: "gitlink", ...request.gitlink }
+      // LOUD, because this is the defect: the old code returned undefined and
+      // said so at INFO, and a capability that switches itself off where nobody
+      // reads is indistinguishable from one that works. It went a month.
+      if (identified.kind === "off") {
+        log?.warn?.(identified.why, { relaunchExit: "off", reason: identified.reason })
+        io.stderr(`yrd: ${identified.why}\n`)
+      }
+      const gitlink = identified.kind === "gitlink" ? identified : undefined
+      /** A fact in every health document while the exit is disarmed, so a reader meets it without looking. */
+      const relaunchOff = identified.kind === "off" ? { relaunchExit: identified.reason } : {}
       // A relaunch can beat the checkout updater. Do not run an old round or
       // spend the supervisor's restart budget repeatedly loading the old gitlink.
       const reload = async (targetOid: string): Promise<YrdCliExitCode | undefined> => {
@@ -491,8 +522,17 @@ export async function coreQueueCommand(
             )
           }
           // An explicitly supplied gitlink has no physical checkout to await.
-          if (gitlink.checkout === undefined) break
-          const projected = await gitlinkAt(git, "HEAD", gitlink.path)
+          if (gitlink.checkout === undefined || gitlink.superproject === undefined) break
+          // THE PROJECTION THIS RUNTIME ACTUALLY RELOADS FROM is its own
+          // superproject's, not the queue clone's (@i/10-yrd/24515). The queue
+          // clone advancing says nothing about whether the tree this process
+          // will re-exec out of has the new code yet — they are different
+          // working trees of the same repository, updated by different things.
+          const projected = await gitlinkAt(
+            gitIn(gitlink.superproject, undefined, selection, { env: options.env }),
+            "HEAD",
+            gitlink.path,
+          )
           const checkout = (
             await gitIn(gitlink.checkout, undefined, selection, { env: options.env })([
               "rev-parse",
@@ -583,7 +623,11 @@ export async function coreQueueCommand(
         if (streak !== undefined) sleepMs = stuckBackoffMs(streak.consecutive, interval)
         else if (!isRoundStuck(outcome)) sleepMs = sleepAfter(outcome, interval)
         else throw new Error(`a stuck round left no streak to space it out: ${outcome.why}`)
-        const document = roundHealthDocument(SERVICE, facts, streak, sleepMs, new Date())
+        const base = roundHealthDocument(SERVICE, facts, streak, sleepMs, new Date())
+        // The disarmed exit, carried where a reader already looks. A warning is
+        // read once, at the moment nobody is watching; a fact in the health
+        // document is read every time anyone asks how this service is.
+        const document = identified.kind === "off" ? { ...base, facts: { ...base.facts, ...relaunchOff } } : base
         writeHealth(document)
         await request.afterHealth?.(document)
         if (stopped()) return 0
@@ -1060,40 +1104,63 @@ async function gitlinkOf(
   git: Git,
   targetOid: string,
   log: ConditionalLogger | undefined,
-): Promise<Readonly<{ path: string; sha: string; checkout: string }> | undefined> {
+): Promise<RuntimeGitlink | RuntimeGitlinkOff> {
   const source = sourceAtLoad
-  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
   if ("error" in source) {
+    // A BROKEN EMBEDDED INSTALL STILL REFUSES TO START, unchanged. The
+    // queue-relative test survives HERE and only here: it is a sufficient
+    // condition for "this runtime was deployed as part of the tree being
+    // checked, and its git is unreadable", which is a broken install whatever
+    // the arming question says. What it must never again be is the ARMING
+    // decision itself — that is @i/10-yrd/24515, and it now lives in
+    // `runtimeGitlinkPath`, which is not given the queue's location at all.
+    const root = (await git(["rev-parse", "--show-toplevel"])).trim()
     const location = relative(root, sourceDirectory).split(sep).join("/")
     if (location !== ".." && !location.startsWith("../")) {
       throw new Error(
         `cannot identify embedded runtime at ${sourceDirectory} inside queue checkout ${root}: ${source.error}; repair the source checkout before restarting`,
       )
     }
-    log?.info?.("the gitlink exit is off: this yrd runs from no git checkout", {
-      error: source.error,
-    })
-    return undefined
+    // Otherwise: a runtime with no readable git is a standalone or packaged
+    // install, which legitimately has no gitlink to watch.
+    return {
+      kind: "off",
+      reason: "no-source-checkout",
+      why: `the relaunch exit is off: this yrd at ${sourceDirectory} runs from no readable git checkout: ${source.error}`,
+    }
   }
-  const path = relative(root, source.checkout).split(sep).join("/")
-  if (path === "" || path === ".." || path.startsWith("../")) {
-    log?.info?.(
-      `the gitlink exit is off: runtime checkout ${source.checkout} is not embedded in queue checkout ${root}`,
-    )
-    return undefined
-  }
+  const decided = runtimeGitlinkPath(source.checkout, source.superproject)
+  if (decided.kind === "off") return decided
+  const { path } = decided
+  // The target's gitlink, read through the QUEUE's clone — same repository as
+  // the runtime's superproject, so the same path addresses the same submodule.
+  // What the queue clone must NOT decide is whether the exit exists at all.
   const recorded = await gitlinkAt(git, targetOid, path)
-  const local = await gitlinkAt(git, "HEAD", path)
-  if (recorded === undefined && local === undefined) {
-    throw new Error(
-      `runtime checkout ${source.checkout} is inside queue checkout ${root}, but neither captured target ${targetOid} nor HEAD records a gitlink at ${path}`,
-    )
+  if (recorded === undefined) {
+    return {
+      kind: "off",
+      reason: "target-records-no-gitlink",
+      why:
+        `the relaunch exit is off: this yrd runs at ${path} of ${source.superproject}, but the captured target ` +
+        `${targetOid} records no gitlink there, so a move cannot be observed`,
+    }
   }
   log?.info?.(
-    `runtime checkout ${path} observed at module load: ${source.sha}; captured target ${targetOid} records ${recorded ?? "no gitlink"}`,
+    `runtime ${path} observed at module load: ${source.sha}; captured target ${targetOid} records ${recorded}`,
   )
-  return { path, sha: source.sha, checkout: source.checkout }
+  return { kind: "gitlink", path, sha: source.sha, checkout: source.checkout, superproject: source.superproject }
 }
+
+/** This runtime's own gitlink, once identified. */
+type RuntimeGitlink = Readonly<{
+  kind: "gitlink"
+  path: string
+  sha: string
+  /** Absent for an injected gitlink: a test names the shas and has no tree to await. */
+  checkout?: string
+  /** The working tree that RECORDS this runtime, and whose projection the wait follows. */
+  superproject?: string
+}>
 
 /** The gitlink at `path` in `commit`, or undefined when there is none there. */
 async function gitlinkAt(git: Git, commit: string, path: string): Promise<string | undefined> {

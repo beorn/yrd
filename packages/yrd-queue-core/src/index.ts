@@ -127,3 +127,6 @@ export {
   transportFaultIn,
 } from "./setup-transport.ts"
 export type { TransportFault } from "./setup-transport.ts"
+
+export { runtimeGitlinkPath } from "./runtime-gitlink.ts"
+export type { RuntimeGitlinkDecision, RuntimeGitlinkOff, RuntimeGitlinkPath } from "./runtime-gitlink.ts"
