@@ -18,30 +18,12 @@ import { render } from "silvery/test"
 import { RunnerBox } from "../src/watch-boxes.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
 import type { RunnerFacts } from "../src/watch-runner.ts"
+// One home for the perception floor. This file used to carry its own copy, and
+// the detail pane's pulse arm would have carried a second — two tests each
+// agreeing with their own duplicate while the thing they measure drifts.
+import { PERCEPTIBLE_SWING, PULSE_HALF_PERIOD_MS, contrastRatio } from "./support/perceptible-color.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
-
-/** WCAG relative luminance (0..1) of a resolved RGB triple. */
-function relativeLuminance({ r, g, b }: { r: number; g: number; b: number }): number {
-  const channel = (value: number): number => {
-    const s = value / 255
-    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
-  }
-  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
-}
-
-/** WCAG contrast ratio between two resolved colors: 1 (identical) to 21 (black/white). */
-function contrastRatio(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): number {
-  const la = relativeLuminance(a)
-  const lb = relativeLuminance(b)
-  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
-}
-
-// The audit measured the broken foreground-vs-foreground swing at ~1.12:1 and
-// the working idle marker's foreground-vs-background swing well above it.
-// This floor sits between the two: it fails the broken pair and clears easily
-// for a swing that actually reads as a marker turning on and off.
-const PERCEPTIBLE_SWING = 2
 
 const RUNNING: RunnerFacts = {
   journalDir: "/w/logs",
@@ -81,7 +63,7 @@ describe("RunnerBox `$` marker pulse, live (item 13)", () => {
     // clock for it, so this waits out one real half-period to see the other
     // phase, the same way an operator's eye would.
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 950))
+      await new Promise((resolve) => setTimeout(resolve, PULSE_HALF_PERIOD_MS))
       await app.waitForLayoutStable()
     })
     const phaseB = app.cell(col, row)

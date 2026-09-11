@@ -12,8 +12,10 @@
  */
 
 import type React from "react"
+import { act } from "react"
 import { describe, expect, it, vi } from "vitest"
 import { bufferToText, render } from "silvery/test"
+import { PERCEPTIBLE_SWING, PULSE_HALF_PERIOD_MS, contrastRatio, type Rgb } from "./support/perceptible-color.ts"
 import type { ChangeRecord, Row } from "@yrd/queue-core"
 import { WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
 import {
@@ -25,7 +27,7 @@ import {
   type CheckPanel,
 } from "../src/watch-detail.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
-import { clock } from "../src/watch-format.ts"
+import { clock, stateGlyph } from "../src/watch-format.ts"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
 import { watchRowKey, type WatchRow } from "../src/watch-rows.ts"
 
@@ -386,6 +388,80 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
     expect(text).toContain("◉ roll out")
     expect(text).toMatch(/− smoke\s+not run/u)
   })
+})
+
+describe("the status box marker PULSES on a change under a check (items 1, 5, 13)", () => {
+  // Every one of this suite's ten RunStatusBox/WatchDetail renders passed
+  // live={false}, so the Pulse branch had NO coverage at all — which is how the
+  // 900ms period was lost by omission once already. These two arms make the
+  // 2026-09-11 ruling enforceable rather than advisory: the marker's predicate
+  // is A CHANGE IS UNDER A CHECK RIGHT NOW, never merely that a process exists.
+  const underCheck = () =>
+    row({
+      at: NOW,
+      live: { check: "typecheck", phase: "fast", run: RUN_ID, since: new Date(NOW.getTime() - 30_000) },
+      run: RUN_ID,
+      startedAt: new Date(NOW.getTime() - 60_000),
+      state: "checked",
+    })
+
+  /**
+   * The marker cell's color in two phases, one real half-period apart.
+   *
+   * `autoRender` is LOAD-BEARING, not boilerplate. Without it the buffer is
+   * never repainted on an animation tick, so every sample returns the first
+   * frame: the swinging marker reads as frozen and — worse — the "holds still"
+   * arm below passes without observing anything at all. Measured 2026-09-11,
+   * after this helper briefly reported a working pulse as a dead one.
+   */
+  async function twoPhases(r: Row): Promise<{ a: Rgb; b: Rgb; char: string }> {
+    const app = render(at(<RunStatusBox run={runOf(r, "main", CHECKS, RUN_ID)} live />), {
+      autoRender: true,
+      cols: 120,
+      rows: 20,
+    })
+    await act(async () => {
+      await app.waitForLayoutStable()
+    })
+    const glyph = stateGlyph(r)
+    const line = app.lines.findIndex((l) => l.includes(glyph))
+    expect(line, `the marker ${glyph} renders`).toBeGreaterThan(-1)
+    const col = app.lines[line]!.indexOf(glyph)
+    const first = app.cell(col, line)
+    expect(first.fg, "the marker resolves a color at all").not.toBeNull()
+
+    // Silvery's pulse rides a SHARED wall clock with no injectable time source,
+    // so the other phase is observed by waiting, as an operator's eye would.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, PULSE_HALF_PERIOD_MS))
+      await app.waitForLayoutStable()
+    })
+    const second = app.cell(col, line)
+    app.unmount()
+    expect(second.fg, "and still resolves one in the other phase").not.toBeNull()
+    return { a: first.fg!, b: second.fg!, char: first.char }
+  }
+
+  it("swings the marker perceptibly while a check is open on the change", async () => {
+    const { a, b } = await twoPhases(underCheck())
+
+    expect(a, "the two phases differ").not.toEqual(b)
+    // Not merely different: an eye must see it. Two foreground tokens measured
+    // ~1.12:1 apart in the item-13 audit and read as no pulse at all.
+    expect(contrastRatio(a, b), "and the swing is perceptible").toBeGreaterThan(PERCEPTIBLE_SWING)
+  }, 10_000)
+
+  it("HOLDS STILL when no check is open, even though the pane is live", async () => {
+    // THE RULING, as an assertion. A marker that pulses whenever the pane is
+    // live reports the same value in exactly the case it exists to separate —
+    // the defect that `facts.latest.alive` had, in a second place.
+    const quiet = row({ at: NOW, endedAt: NOW, result: "pass", run: RUN_ID, state: "merged" })
+    expect(quiet.live, "the fixture really has no open check").toBeUndefined()
+
+    const { a, b } = await twoPhases(quiet)
+
+    expect(a, "an idle marker does not pulse").toEqual(b)
+  }, 10_000)
 })
 
 describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () => {
