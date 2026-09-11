@@ -588,10 +588,15 @@ export async function coreQueueCommand(
             // preserves `facts` when it turns a stale document unhealthy, so
             // writing this at the start of the wait is what makes the eventual
             // overdue answer explain itself instead of saying only "overdue".
-            // Held, not just written: the STALL page below re-uses exactly this
-            // observation. Rebuilding it there would describe the moment the
-            // alarm fired rather than the moment the wait began, and the
-            // overdue answer merges whatever `facts` it finds.
+            // Held, not just written: the STALL page below re-uses this
+            // observation, refreshed to the latest ANNOUNCED one. Refreshing is
+            // the point rather than a compromise — production proved it on the
+            // first live relaunch (2026-09-11 16:24Z), where the superproject's
+            // recorded gitlink advanced a full second before its working tree,
+            // so the two announcements differ and only the later one describes
+            // the state a reader would find. The overdue answer merges whatever
+            // `facts` it finds, so a stale pair here would explain the wrong
+            // instant.
             waitingFacts = {
               ...relaunchOff,
               waitingForCheckout: gitlink.path,

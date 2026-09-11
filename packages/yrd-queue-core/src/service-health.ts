@@ -334,9 +334,12 @@ export function believableHealthDocument(document: QueueHealthDocument, now: Dat
  * supervisor's restart loop respawn later without meeting the admission gate
  * that refuses unhealthy+running.
  *
- * `facts` carries the observation made when the wait STARTED, unchanged. The
- * overdue answer is built by merging `facts`, so losing them here would delete
- * the only thing that makes a later overdue page explain itself.
+ * `facts` carries the caller's latest ANNOUNCED observation of the wait, not a
+ * frozen copy from its first instant: the three values move while the checkout
+ * catches up, and a page describing a moment that has passed sends a reader to
+ * the wrong place. The overdue answer is built by merging `facts`, so dropping
+ * them here would delete the only thing that makes a later overdue page explain
+ * itself at all.
  */
 export function relaunchStalledHealthDocument(
   service: string,
