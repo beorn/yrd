@@ -14,6 +14,7 @@
 import type { ReactNode } from "react"
 import { Box, Text } from "silvery"
 import { RunnerBox } from "./watch-boxes.tsx"
+import { bucketOf } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 
 /** The pause when nothing else will carry it: RUNNER owns the rail whenever a run journal exists. */
@@ -58,6 +59,11 @@ export function ListStack({
   paddingX?: number
 }) {
   const inLine = snapshot.rows.filter((item) => item.row.position !== undefined).length
+  // The marker's predicate, item 5: a change is under a check RIGHT NOW, never
+  // "the service process exists". Read through `bucketOf` so this and the
+  // status pills answer the question from one definition -- a second predicate
+  // here would drift from the list sitting directly below the box.
+  const underCheck = snapshot.rows.some((item) => bucketOf(item.row) === "running")
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={paddingX}>
       {snapshot.runner === undefined ? null : (
@@ -65,6 +71,7 @@ export function ListStack({
           facts={snapshot.runner}
           label={label}
           inLine={inLine}
+          underCheck={underCheck}
           columns={columns}
           live={live}
           {...(snapshot.pause === undefined ? {} : { pause: snapshot.pause })}

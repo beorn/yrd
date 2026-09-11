@@ -156,15 +156,47 @@ describe("runnerHealth, the one word", () => {
     latest: { alive: false, id: "q-x", lastWriteAt: NOW, startedAt: NOW, ...over },
   })
 
-  it("is running while the run's process lives, whatever else is true", () => {
-    expect(runnerHealth(facts({ alive: true, lastWriteAt: new Date(0) }), NOW)).toBe("running")
+  /**
+   * CHANGED MEANING, deliberately, and kept here rather than retyped quietly.
+   * This arm asserted the defect items 1 and 5 name: `running` whenever the
+   * PROCESS lived, "whatever else is true" -- including a journal that had not
+   * moved since the epoch. That short-circuit sat ABOVE the silence check, so a
+   * live process whose journal had stopped read healthy, and the wedged case
+   * was masked by the very process that was wedged.
+   */
+  it("a live process whose journal has stopped is SILENT, not healthy", () => {
+    expect(runnerHealth(facts({ alive: true, lastWriteAt: new Date(0) }), NOW, false)).toBe("silent")
+    // And it stays silent even if a row still claims a check is live: a service
+    // that died mid-check leaves exactly that residue.
+    expect(runnerHealth(facts({ alive: true, lastWriteAt: new Date(0) }), NOW, true)).toBe("silent")
+  })
+
+  /**
+   * @failure The marker reads the same word in every state it exists to tell
+   *          apart, so an operator cannot see whether anything is being checked.
+   * @level   l1
+   */
+  it("is PROCESSING when a change is under a check right now (items 1 and 5)", () => {
+    expect(runnerHealth(facts({ alive: true }), NOW, true)).toBe("processing")
+    // The process does not enter into it, in either direction.
+    expect(runnerHealth(facts({ alive: false }), NOW, true)).toBe("processing")
+  })
+
+  /**
+   * THE CONTROL, and it is the whole point of the change. The service is a
+   * long-running `yrd queue up --interval 120` under hab, so its process is up
+   * nearly always; if that still produced the marker, the marker would separate
+   * nothing and this slice would have changed only a word.
+   */
+  it("CONTROL: a live process with NOTHING under a check is idle, never processing", () => {
+    expect(runnerHealth(facts({ alive: true }), NOW, false)).toBe("idle")
   })
 
   it("is absent with no journal, silent past the ceiling, idle otherwise", () => {
-    expect(runnerHealth({ journalDir: "/w/logs", absent: "none" }, NOW)).toBe("absent")
+    expect(runnerHealth({ journalDir: "/w/logs", absent: "none" }, NOW, false)).toBe("absent")
     const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
-    expect(runnerHealth(quiet, NOW)).toBe("silent")
-    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), NOW)).toBe("idle")
+    expect(runnerHealth(quiet, NOW, false)).toBe("silent")
+    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), NOW, false)).toBe("idle")
   })
 
   /**
@@ -173,7 +205,7 @@ describe("runnerHealth, the one word", () => {
    */
   it("is silent on an EMPTY queue too — the state a submitter arrives into (@i/10-yrd/24486)", () => {
     const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
-    expect(runnerHealth(quiet, NOW)).toBe("silent")
+    expect(runnerHealth(quiet, NOW, false)).toBe("silent")
   })
 
   /**
@@ -188,15 +220,15 @@ describe("runnerHealth, the one word", () => {
     // round had work.
     const cadenceMs = 125_000
     expect(cadenceMs * 4).toBeLessThan(SILENT_AFTER_MS)
-    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs) }), NOW)).toBe("idle")
-    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs * 4) }), NOW)).toBe("idle")
+    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs) }), NOW, false)).toBe("idle")
+    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs * 4) }), NOW, false)).toBe("idle")
     // And the queue depth cannot change that answer, because the signature no
     // longer admits one: whatever is in line, these are the same two facts.
   })
 })
 
 describe("the RUNNER box", () => {
-  async function paint(facts: RunnerFacts, inLine: number, pause?: string): Promise<string> {
+  async function paint(facts: RunnerFacts, inLine: number, pause?: string, underCheck = false): Promise<string> {
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
@@ -204,6 +236,7 @@ describe("the RUNNER box", () => {
             facts={facts}
             label="main"
             inLine={inLine}
+            underCheck={underCheck}
             columns={70}
             live={false}
             {...(pause === undefined ? {} : { pause })}
@@ -231,11 +264,16 @@ describe("the RUNNER box", () => {
     },
   })
 
-  it("names the live run with its pid on the `$` line, the run's facts and the measured-at clock under it, hanging off one gutter", async () => {
-    const text = await paint(latest({ alive: true, pid: 4242 }), 1)
+  // CHANGED MEANING (items 1 and 5): this used to paint a live PROCESS and
+  // expect the run rails. The process being up is no longer the predicate, so
+  // the same rails are now reached by a change actually being under a check --
+  // which is what they were always describing.
+  it("names the run under check with its pid on the `$` line, the run's facts and the measured-at clock under it, hanging off one gutter", async () => {
+    const text = await paint(latest({ alive: true, pid: 4242 }), 1, undefined, true)
 
     expect(text).toContain("RUNNER")
-    expect(text).toContain("run 2:00")
+    // Item 1: the marker shows its own word, as idle and silent always did.
+    expect(text).toContain("processing 2:00")
     expect(text).toContain("$ yrd queue run · main#")
     expect(text).toContain("[pid 4242]")
     expect(text).toMatch(/^\s*│\s{3}target main · gitlink 3c285a41af46 · checks typecheck, test/mu)
@@ -297,6 +335,9 @@ describe("the RUNNER box", () => {
   })
 
   it("wraps a long command with a hanging indent bounded to three rows, so the rails under it survive (item 29)", async () => {
+    // `underCheck` because the long `yrd queue run · <label>` rail this measures
+    // only exists while processing; an idle box renders the shorter `queue up`
+    // form and the wrap would not be exercised at all.
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
@@ -304,6 +345,7 @@ describe("the RUNNER box", () => {
             facts={latest({ alive: true, pid: 4242 })}
             label="a-very-long-queue-label-indeed-and-then-some-more-of-it"
             inLine={1}
+            underCheck
             columns={30}
             live={false}
           />

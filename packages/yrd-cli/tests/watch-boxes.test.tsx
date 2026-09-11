@@ -43,6 +43,10 @@ function contrastRatio(a: { r: number; g: number; b: number }, b: { r: number; g
 // for a swing that actually reads as a marker turning on and off.
 const PERCEPTIBLE_SWING = 2
 
+// `alive` is retained because the box still names the run's pid, but it is no
+// longer what makes the marker pulse: `underCheck` is (items 1 and 5). A fixture
+// that only set `alive` would now paint an idle box and the pulse arm would
+// measure a marker that is deliberately not pulsing.
 const RUNNING: RunnerFacts = {
   journalDir: "/w/logs",
   latest: {
@@ -61,7 +65,7 @@ describe("RunnerBox `$` marker pulse, live (item 13)", () => {
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
-          <RunnerBox facts={RUNNING} label="main" inLine={1} columns={70} live />
+          <RunnerBox facts={RUNNING} label="main" inLine={1} underCheck columns={70} live />
         </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols: 72, rows: 12, autoRender: true },

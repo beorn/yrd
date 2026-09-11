@@ -996,3 +996,54 @@ describe("the frame's order under the table", () => {
     app.unmount()
   })
 })
+
+/**
+ * @failure  The RUNNER marker is wired to nothing. Its predicate lives in the
+ *           frame, one `some()` over the rows, and NOTHING pinned that wiring:
+ *           hardcoding it to `true` or to `false` passed every arm in this
+ *           package (measured by mutation, 2026-09-11). The marker could have
+ *           read `processing` over an empty queue, or never at all, and the
+ *           whole of items 1 and 5 would still have looked delivered.
+ * @level    l2 — the pane, painted, rows and runner together.
+ * @consumer the operator reading the box to decide whether to submit.
+ */
+describe("the RUNNER marker is wired to the ROWS, not to the process (items 1, 5)", () => {
+  // `alive: false` throughout, deliberately. The ported marker keyed on the
+  // service process being up; if that still decided anything, the arm below
+  // could not go `processing` and the control could not stay `idle`.
+  const runner = {
+    journalDir: "/w/logs",
+    latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: new Date(NOW.getTime() - 120_000) },
+  }
+  const underCheck = row({
+    live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: new Date(NOW.getTime() - 151_000) },
+    position: 1,
+    state: "checked",
+  })
+
+  it("reads PROCESSING while a row has a live check", async () => {
+    const app = render(<WatchPane snapshot={snapshot({ runner, rows: [{ row: underCheck }] })} live={false} />, {
+      cols: 120,
+      rows: 30,
+    })
+    await app.waitForLayoutStable()
+    await settle(app)
+
+    expect(app.text).toContain("processing 2:00")
+    expect(app.text, "the queue is not idle while it is checking something").not.toMatch(/\bidle \d/u)
+    app.unmount()
+  })
+
+  it("CONTROL: the same runner with NO row under a check reads idle", async () => {
+    const app = render(<WatchPane snapshot={snapshot({ runner, rows: [{ row: row({ position: 1 }) }] })} live={false} />, {
+      cols: 120,
+      rows: 30,
+    })
+    await app.waitForLayoutStable()
+    await settle(app)
+
+    expect(app.text).toMatch(/\bidle \d/u)
+    expect(app.text, "nothing is under a check, so nothing is processing").not.toContain("processing")
+    app.unmount()
+  })
+})

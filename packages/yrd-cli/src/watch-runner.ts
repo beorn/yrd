@@ -191,8 +191,16 @@ function running(pid: number): boolean {
   }
 }
 
-/** The one word the box renders. */
-export type RunnerHealth = "running" | "idle" | "silent" | "absent"
+/**
+ * The one word the box renders.
+ *
+ * `processing` REPLACES `running`, and the word follows the predicate rather
+ * than the other way round (spec items 1 and 5, ruled by @chief 2026-09-11).
+ * The ported marker said `running` whenever the service PROCESS was up, which
+ * is nearly always, so it separated nothing; the operator's question is whether
+ * a change is under a check RIGHT NOW.
+ */
+export type RunnerHealth = "processing" | "idle" | "silent" | "absent"
 
 /**
  * The fleet's own ceiling: a request older than ten minutes is broken, not
@@ -202,10 +210,23 @@ export type RunnerHealth = "running" | "idle" | "silent" | "absent"
 export const SILENT_AFTER_MS = 10 * 60 * 1000
 
 /**
- * ONE derivation of the service's health. `running` while the newest run's
- * process is alive; `absent` when there is no journal on this machine at all;
- * `silent` when nothing has written for {@link SILENT_AFTER_MS}; `idle`
- * otherwise.
+ * ONE derivation of the service's health. `absent` when there is no journal on
+ * this machine at all; `silent` when nothing has written for
+ * {@link SILENT_AFTER_MS}; `processing` when a change is under a check right
+ * now; `idle` otherwise.
+ *
+ * THE PREDICATE IS NOT "THE PROCESS EXISTS" (items 1 and 5). It used to be
+ * `facts.latest.alive`, and because the service is a long-running
+ * `yrd queue up --interval 120` under hab, that was true nearly always: the
+ * marker said `running` in every state it existed to tell apart. It also
+ * short-circuited ABOVE the silence check, so a live process whose journal had
+ * stopped moving still read healthy -- the wedged case, masked by the very
+ * process that was wedged.
+ *
+ * `underCheck` is supplied by the caller from the SAME derivation the status
+ * pills use (`bucketOf(row) === "running"`, i.e. `row.live !== undefined`), so
+ * "a change is under a check" has one home and the marker cannot drift from the
+ * list beside it. It is not a proxy: it is the fact itself, already on the row.
  *
  * SILENCE DOES NOT WAIT FOR A QUEUE (@i/10-yrd/24486). It used to also require
  * a change in line, on the reading that silence only matters while something
@@ -223,9 +244,15 @@ export const SILENT_AFTER_MS = 10 * 60 * 1000
  * PAUSE, where a round still opens and records before it stops. So an idle
  * healthy queue is never called silent, whatever is or is not in line.
  */
-export function runnerHealth(facts: RunnerFacts, now: Date): RunnerHealth {
+export function runnerHealth(facts: RunnerFacts, now: Date, underCheck: boolean): RunnerHealth {
   if (facts.latest === undefined) return "absent"
-  if (facts.latest.alive) return "running"
+  // SILENCE OUTRANKS PROCESSING, and the order is the whole safety argument.
+  // `underCheck` is read off the rows, and a service that died mid-check leaves
+  // a row still marked live; taking that at face value would announce
+  // `processing` over a dead queue -- a worse lie than the one being removed,
+  // and precisely the failure 24486 exists to prevent. A journal that has not
+  // moved for the ceiling is silent whatever the rows claim.
   if (now.getTime() - facts.latest.lastWriteAt.getTime() > SILENT_AFTER_MS) return "silent"
+  if (underCheck) return "processing"
   return "idle"
 }
