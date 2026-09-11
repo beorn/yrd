@@ -14,7 +14,6 @@ import {
   STUCK_RECORD_NEXT,
   stuckBackoffMs,
   unreadableHealthDocument,
-  type QueueHealthDocument,
   type StuckStreak,
 } from "../src/service-health.ts"
 
@@ -263,87 +262,20 @@ describe("a document expires", () => {
   })
 })
 
-/**
- * @failure  A document yrd emits is REFUSED by the supervisor's parser, so hab
- *           reads it as unparsed and pages `health-not-measured` — an alarm
- *           about the alarm. Measured in production 2026-09-11 14:25:51Z, the
- *           first thing the live probe did: the ABSENT document carried a typed
- *           error, and `hab-service-health/2` forbids one on `absent` and
- *           `healthy` (@cto, hab-core service-health-probe.ts:446-482).
- * @level    l1
- * @consumer hab's health parser, which gates every page this service can open
- *
- * THE CONTRACT TEST @cto ASKED FOR, and the reason it is the right instrument:
- * every unit test here asserts what OUR code produces, and all of them passed
- * while the document was unusable. What none of them asked is whether the
- * SUPERVISOR would accept it. The rules are reproduced rather than imported —
- * this package is standalone and must not depend on the host that vendors it —
- * so the risk is drift, and that is a trade made with open eyes: a rule written
- * here is checked on every run, while a rule checked nowhere is what this
- * defect was.
- */
-describe("every document yrd emits satisfies hab-service-health/2", () => {
-  /** The supervisor's own placement rules, from service-health-probe.ts:453-472. */
-  const accepts = (doc: QueueHealthDocument): true => {
-    if (doc.schema !== QUEUE_HEALTH_SCHEMA) throw new Error(`schema is ${doc.schema}`)
-    if (doc.state === "unhealthy") {
-      if (doc.error === undefined) throw new Error("unhealthy probe omitted its typed error/cause/resolution")
-      if (typeof doc.error.code !== "string" || doc.error.code === "") throw new Error("error.code missing")
-      if (typeof doc.error.cause !== "string" || doc.error.cause === "") throw new Error("error.cause missing")
-      if (!Array.isArray(doc.error.resolution)) throw new Error("error.resolution missing")
-      return true
-    }
-    // `unknown` MAY carry one; `healthy` and `absent` may not, and a document
-    // that does is rejected whole rather than trimmed.
-    if (doc.state !== "unknown" && doc.error !== undefined) {
-      throw new Error(`${doc.state} probe unexpectedly carried an error`)
-    }
-    return true
-  }
-
-  const streak = { key: "stuck-changes:task/one", reason: "the round stopped on task/one", consecutive: 2 }
-
-  test.each([
-    ["healthy", () => roundHealthDocument("yrd-service", {}, undefined, INTERVAL, NOW)],
-    [
-      "unhealthy (a stuck round)",
-      () => roundHealthDocument("yrd-service", { stuck: stuck(streak.key, streak.reason) }, streak, INTERVAL, NOW),
-    ],
-    [
-      "unhealthy (an overdue round)",
-      () =>
-        believableHealthDocument(
-          roundHealthDocument("yrd-service", {}, undefined, INTERVAL, NOW),
-          new Date(NOW.getTime() + INTERVAL + ROUND_BUDGET_MS + 1),
-        ),
-    ],
-    ["absent", () => absentHealthDocument("yrd-service", "no health document at /w/service-health.json")],
-    ["unknown", () => unreadableHealthDocument("yrd-service", "not a document", "{")],
-  ])("%s is accepted", (_name, build) => {
-    expect(accepts(build())).toBe(true)
-  })
-
-  // The absent document's explanation still reaches a person — it moved to
-  // `facts`, which the same parser carries through untouched.
-  test("the absent document keeps its explanation in facts", () => {
-    const doc = absentHealthDocument("yrd-service", "no health document at /w/service-health.json")
-    expect(doc.error).toBeUndefined()
-    expect(String(doc.facts?.why)).toContain("/w/service-health.json")
-    expect(Array.isArray(doc.facts?.resolution)).toBe(true)
-  })
-
-  // NEGATIVE CONTROL: the checker must actually fire. A contract test that
-  // cannot fail is the decoration this defect already paid for once.
-  test("the checker refuses the exact document that paged in production", () => {
-    const paged = {
-      ...absentHealthDocument("yrd-service", "why"),
-      error: { code: "queue-health-document-absent", cause: "why", resolution: [] },
-    } as QueueHealthDocument
-    expect(() => accepts(paged)).toThrow(/absent probe unexpectedly carried an error/u)
-  })
-
-  test("the checker refuses an unhealthy document with no typed error", () => {
-    const doc = { schema: QUEUE_HEALTH_SCHEMA, service: "yrd-service", state: "unhealthy", verdict: { kind: "running" } } as QueueHealthDocument
-    expect(() => accepts(doc)).toThrow(/omitted its typed error/u)
-  })
-})
+// THE CONTRACT TEST THAT USED TO SIT HERE HAS MOVED TO THE ROOT, to
+// `tools/yrd-health-contract.test.ts`, and it is checked on every root run.
+//
+// It asserted that every document these builders emit is accepted by hab's
+// `hab-service-health/2` parser — the rule a live probe broke on 2026-09-11,
+// paging `health-not-measured` while all 726 tests here were green. This
+// package is standalone and must not depend on the host that vendors it, so
+// the version living here had to REPRODUCE hab's placement rules, and a
+// reproduced rule drifts from the one actually enforced. The root holds both
+// sides, so the root test imports `parseHabServiceObservedHealth` itself and
+// fails when EITHER side changes.
+//
+// It also reaches ground this copy could not: the parser checks the EXIT
+// LADDER and the state x verdict pairing, and a document-only checker sees
+// neither. If you change `roundHealthDocument`, `absentHealthDocument`,
+// `unreadableHealthDocument`, `believableHealthDocument` or
+// `queueHealthExitCode`, that root test is the one that will catch you.
