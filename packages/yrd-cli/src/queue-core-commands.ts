@@ -13,7 +13,7 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
-import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs"
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
@@ -53,6 +53,10 @@ import {
   queueRefPrefix,
   submit,
   issueOf,
+  nextStuckStreak,
+  QUEUE_HEALTH_DOCUMENT,
+  roundHealthDocument,
+  stuckBackoffMs,
   QueuePaused,
   QueueNotPaused,
   writePause,
@@ -68,7 +72,10 @@ import {
   type Incident,
   type LogRecord,
   type QueueConfig,
+  type QueueHealthDocument,
   type QueueRunOutcome,
+  type RoundFacts,
+  type StuckStreak,
   type Row,
 } from "@yrd/queue-core"
 import { clocksLine, noticeLine } from "./watch-notice.ts"
@@ -90,6 +97,7 @@ import {
   type StatsBy,
 } from "./queue-stats.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
+import { SERVICE } from "./queue-health.ts"
 import { workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
 
@@ -139,6 +147,17 @@ export type CoreQueueCommand =
       gitlink?: Readonly<{ path: string; sha: string }>
       /** Awaited after each round, before the gitlink is read; a test mutates the world or stops the service here. */
       afterRound?: (outcome: QueueRunOutcome) => void | Promise<void>
+      /**
+       * Awaited after EVERY round, stuck ones included, with the document that
+       * round wrote.
+       *
+       * `afterRound` cannot serve here: it takes an outcome, and a round that
+       * could not judge has none. It is also the only seam that can stop a
+       * service which — deliberately, as of @i/10-yrd/24395 — no longer ends
+       * itself on a stuck round. A test without it would run forever, which is
+       * the correct new behaviour and an untestable one.
+       */
+      afterHealth?: (document: QueueHealthDocument) => void | Promise<void>
     }>
   | Readonly<{
       command: "list"
@@ -283,11 +302,17 @@ export async function coreQueueCommand(
     return 2
   }
   /**
-   * One queue run, emitted. Undefined is the one exit site from the caller's
-   * side: a run that could not even judge — a bad invocation, a remote that
-   * cannot be read — is stuck, and has already said so.
+   * One queue run, emitted. A run that could not even judge — a bad
+   * invocation, a remote that cannot be read — comes back as {@link RoundStuck}
+   * carrying WHY, and has already said so.
+   *
+   * It carries the reason rather than `undefined` because the service now
+   * survives this: a stuck round is a round outcome, and the loop's health
+   * document has to name the fault it is unhealthy for. `undefined` could only
+   * ever become "stuck for reasons unknown", which is the silent half of the
+   * alarm this bead exists to remove.
    */
-  const oneRound = async (declared: CapturedDeclaration): Promise<QueueRunOutcome | undefined> => {
+  const oneRound = async (declared: CapturedDeclaration): Promise<QueueRunOutcome | RoundStuck> => {
     let outcome: QueueRunOutcome
     try {
       outcome = await queueRun({
@@ -295,9 +320,9 @@ export async function coreQueueCommand(
         foreground: request.command === "run",
       })
     } catch (error) {
-      stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
-      // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the service return exit 2.
-      return undefined
+      const why = `the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`
+      stuck(why)
+      return { why }
     }
     emit(io, options.json, outcome, describeRun(outcome))
     // Naming the branch is `describeRun`'s; naming what fixes it is this
@@ -394,19 +419,51 @@ export async function coreQueueCommand(
       // `?? 2` is that same stuck, already said by `stuck()` above
       // (@i/10-yrd/24141 AC1).
       const outcome = await oneRound(captured)
-      return outcome?.exitCode ?? 2
+      return isRoundStuck(outcome) ? 2 : outcome.exitCode
     }
     case "up": {
       // The service: the same round on a loop, what hab runs. It has ONE
-      // permanent exit, 2: a round is stuck, or the target's declaration can no
-      // longer be read or is no longer there at all, and the queue stays down
-      // until a person fixes it. Everything else it does on purpose — an explicit
+      // permanent exit, 2, and as of @i/10-yrd/24395 it is reserved for what NO
+      // round can fix: the target's declaration can no longer be read or is no
+      // longer there at all, or the runtime gitlink is absent. A STUCK ROUND is
+      // not one of those — the round ends, the loop sleeps and runs the next
+      // one, and the alarm is carried by the health document instead of by the
+      // process ending. Everything else it does on purpose — an explicit
       // AbortSignal stop request or a gitlink moving under it — exits 0, which is
       // on Hab's relaunch allowlist. A process signal bypasses this return path and
       // stays terminal under the service's `restart: "on-codes"` declaration.
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
+      /**
+       * Consecutive same-reason stuck rounds, carried across the loop.
+       *
+       * `undefined` is healthy. It lives out here rather than inside the round
+       * because the whole value of the ladder is that it remembers: a stuck
+       * reason that survives a retry is a different fact from one that does not.
+       */
+      let streak: StuckStreak | undefined
+      /**
+       * Leave the document where the declared health probe reads it.
+       *
+       * Best-effort ON PURPOSE, and this is the one place in this change where
+       * that is the right call: a filesystem that cannot take the document must
+       * not end the delivery service, which is the exact failure mode being
+       * removed. It is not silent — the failure is logged and named — and the
+       * probe reports `unknown` rather than inventing a state, so a document
+       * that stopped being written is visible as itself.
+       */
+      const writeHealth = (document: QueueHealthDocument): void => {
+        try {
+          writeFileSync(join(workdir, QUEUE_HEALTH_DOCUMENT), `${JSON.stringify(document, undefined, 2)}\n`)
+        } catch (error) {
+          log?.warn?.(
+            `could not write the service health document to ${join(workdir, QUEUE_HEALTH_DOCUMENT)}: ${
+              error instanceof Error ? error.message : String(error)
+            }; the declared health probe will report unknown until the next round writes one`,
+          )
+        }
+      }
       const gitlink: Readonly<{ path: string; sha: string; checkout?: string }> | undefined =
         request.gitlink ?? (await gitlinkOf(git, captured.oid, log))
       // A relaunch can beat the checkout updater. Do not run an old round or
@@ -493,15 +550,43 @@ export async function coreQueueCommand(
         const before = await reload(current.oid)
         if (before !== undefined) return before
         const outcome = await oneRound(current)
-        if (outcome === undefined || outcome.exitCode === 2) return 2
-        await request.afterRound?.(outcome)
-        // The gitlink, at the target as this round left it: the round that merged
-        // the change moving this yrd's own gitlink is the last one this code runs.
-        const after = await reload(outcome.target)
-        if (after !== undefined) return after
+
+        // STUCK IS A ROUND OUTCOME, NOT A PROCESS OUTCOME (@cto 2026-09-11,
+        // @i/10-yrd/24395). This used to `return 2`, which made the alarm and
+        // the stop one event: a routine, recoverable, submitter-independent
+        // fault took the only fleet delivery mechanism offline with automatic
+        // restart disabled. Measured: a code-host 504 during setup cost about
+        // 24 minutes of delivery for a fault the next round cleared.
+        //
+        // The round ends; the loop does not. The alarm moves to the health
+        // document written below, which the supervisor already turns into a
+        // page it drops again on its own when a round comes back clear.
+        const facts = roundFacts(outcome)
+        streak = nextStuckStreak(streak, facts)
+        // A streak exists exactly when the round was stuck, because `roundFacts`
+        // names a reason for every stuck round and `nextStuckStreak` keeps one
+        // for every reason. The third branch is that invariant stated rather
+        // than a fallback: a silent `interval` there would turn a broken
+        // invariant into a service that merely sleeps oddly.
+        let sleepMs: number
+        if (streak !== undefined) sleepMs = stuckBackoffMs(streak.consecutive, interval)
+        else if (!isRoundStuck(outcome)) sleepMs = sleepAfter(outcome, interval)
+        else throw new Error(`a stuck round left no streak to space it out: ${outcome.why}`)
+        const document = roundHealthDocument(SERVICE, facts, streak, sleepMs)
+        writeHealth(document)
+        await request.afterHealth?.(document)
+        if (stopped()) return 0
+
+        if (!isRoundStuck(outcome)) {
+          await request.afterRound?.(outcome)
+          // The gitlink, at the target as this round left it: the round that merged
+          // the change moving this yrd's own gitlink is the last one this code runs.
+          const after = await reload(outcome.target)
+          if (after !== undefined) return after
+        }
         if (stopped()) return 0
         await new Promise((resolve) => {
-          setTimeout(resolve, sleepAfter(outcome, interval))
+          setTimeout(resolve, sleepMs)
         })
         if (stopped()) return 0
       }
@@ -1219,6 +1304,38 @@ export const READY_SLEEP_MS = 1000
  * goes again at {@link READY_SLEEP_MS}. Never longer than the interval, so a
  * short interval stays a short interval.
  */
+/** A round that could not judge at all, carrying why. */
+export type RoundStuck = Readonly<{ why: string }>
+
+export function isRoundStuck(outcome: QueueRunOutcome | RoundStuck): outcome is RoundStuck {
+  return "why" in outcome
+}
+
+/**
+ * What a finished round tells the loop's health: whether it was stuck, and
+ * what it saw in the line.
+ *
+ * The fingerprint is every change the round touched plus how many it left
+ * checked and waiting. It answers exactly one question — did new work arrive
+ * since the last stuck round — so it is deliberately absent, never empty, when
+ * the round never got far enough to read the line. An empty fingerprint would
+ * compare equal to another empty one and claim the line had not moved, on
+ * exactly the rounds that know nothing about the line at all.
+ */
+export function roundFacts(outcome: QueueRunOutcome | RoundStuck): RoundFacts {
+  if (isRoundStuck(outcome)) return { stuck: outcome.why }
+  const fingerprint = `${[...outcome.merged, ...outcome.failed, ...outcome.stuck]
+    .slice()
+    .sort()
+    .join(" ")}+${String(outcome.checkedWaiting)}`
+  if (outcome.exitCode !== 2) return { fingerprint }
+  const why =
+    outcome.stuck.length > 0
+      ? `the round stopped on ${outcome.stuck.join(", ")}`
+      : `the round ended stuck without naming a change (run ${outcome.run})`
+  return { stuck: why, fingerprint }
+}
+
 export function sleepAfter(outcome: QueueRunOutcome, intervalMs: number): number {
   const ready = outcome.merged.length > 0 || outcome.checkedWaiting > 0
   return ready ? Math.min(intervalMs, READY_SLEEP_MS) : intervalMs

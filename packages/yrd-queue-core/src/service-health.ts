@@ -1,0 +1,259 @@
+/**
+ * Stuck as a ROUND outcome, and the health document that carries the alarm.
+ *
+ * The service used to end its process on a stuck round, so one routine,
+ * recoverable, submitter-independent fault took the only delivery mechanism
+ * offline with automatic restart disabled — the alarm and the stop were one
+ * event. Measured cost: a code-host 504 during setup kept delivery down about
+ * 24 minutes for a fault the next round would have cleared.
+ *
+ * The split is: the ROUND ends stuck, the LOOP keeps running, and the alarm
+ * moves to the health contract the supervisor already speaks. Consecutive
+ * stuck rounds with the same reason space out so a deterministic stuck does
+ * not re-run setup every interval; a clear round, or new work arriving in the
+ * line, resets the spacing.
+ *
+ * Everything here is pure — no clock, no filesystem, no Git. The loop supplies
+ * the facts and writes what these functions return, which is what lets the
+ * backoff ladder and the document be asserted without a queue.
+ *
+ * The schema string below is the supervisor's contract, spoken as a literal
+ * on purpose: this package is standalone and must not depend on the host that
+ * vendors it. The exit-code ladder is part of that contract and is stated in
+ * {@link queueHealthExitCode}.
+ */
+
+export const QUEUE_HEALTH_SCHEMA = "hab-service-health/2" as const
+
+/** Where the loop leaves the document it wrote, relative to the queue workdir. */
+export const QUEUE_HEALTH_DOCUMENT = "service-health.json"
+
+/**
+ * The ceiling on stuck spacing.
+ *
+ * A deterministic stuck — a declaration the queue can read but no change can
+ * pass — would otherwise re-run a full setup every interval forever. Thirty
+ * minutes is slow enough to stop burning the host and fast enough that a fix
+ * pushed by a person is picked up without anyone restarting the service.
+ */
+export const STUCK_BACKOFF_CAP_MS = 30 * 60 * 1000
+
+export type QueueHealthState = "healthy" | "absent" | "unhealthy" | "unknown"
+
+export type QueueHealthVerdict =
+  | { readonly kind: "running" }
+  | { readonly kind: "stopped" }
+  | { readonly kind: "unknown"; readonly reason: "absent" | "unparsed" | "timeout"; readonly observed: string | null }
+
+/** A typed fault: what broke, why, and the lines that clear it. */
+export type QueueHealthFailure = Readonly<{
+  code: string
+  cause: string
+  resolution: readonly string[]
+}>
+
+export type QueueHealthDocument = Readonly<{
+  schema: typeof QUEUE_HEALTH_SCHEMA
+  service: string
+  state: QueueHealthState
+  verdict: QueueHealthVerdict
+  error?: QueueHealthFailure
+  facts?: Readonly<Record<string, unknown>>
+}>
+
+/**
+ * The exit code a probe declaring `state` must use.
+ *
+ * Three claims plus one disclaimer, and this is the supervisor's ladder, not
+ * this package's invention: `healthy 0`, `absent 1`, `unhealthy 2`,
+ * `unknown 3`. A probe that prints a state and exits with a different code is
+ * making two claims that disagree, so the one function both the printer and
+ * its tests read is the only place the mapping exists.
+ */
+export function queueHealthExitCode(state: QueueHealthState): 0 | 1 | 2 | 3 {
+  switch (state) {
+    case "healthy":
+      return 0
+    case "absent":
+      return 1
+    case "unhealthy":
+      return 2
+    case "unknown":
+      return 3
+  }
+}
+
+/** What one finished round tells the loop about its own health. */
+export type RoundFacts = Readonly<{
+  /** Why the round ended stuck; absent when it did not. */
+  stuck?: string
+  /**
+   * What the round saw in the line, for "did new work arrive".
+   *
+   * Absent when the round never got far enough to read the line — a remote
+   * that cannot be read has no queue contents, and an absent fingerprint must
+   * never be compared as if it were an empty one.
+   */
+  fingerprint?: string
+}>
+
+/** Consecutive same-reason stuck rounds, and the line they were stuck on. */
+export type StuckStreak = Readonly<{
+  reason: string
+  consecutive: number
+  fingerprint?: string
+}>
+
+/**
+ * The streak after this round. `undefined` is a clear round — the loop is
+ * healthy and the next stuck starts from one again.
+ *
+ * Three things reset the ladder, and the third is the one worth naming: a
+ * clear round, a DIFFERENT stuck reason, and new work in the line. Without the
+ * third, a submitter who pushes a fix while the queue is deterministically
+ * stuck waits out a backoff their change had nothing to do with.
+ *
+ * A fingerprint that is absent on either side is not evidence of sameness, so
+ * it cannot reset and cannot suppress a reset; only two present-and-different
+ * fingerprints say new work arrived.
+ */
+export function nextStuckStreak(previous: StuckStreak | undefined, facts: RoundFacts): StuckStreak | undefined {
+  const reason = facts.stuck
+  if (reason === undefined) return undefined
+  const carry = facts.fingerprint === undefined ? {} : { fingerprint: facts.fingerprint }
+  if (previous === undefined || previous.reason !== reason) return { reason, consecutive: 1, ...carry }
+  const moved =
+    previous.fingerprint !== undefined && facts.fingerprint !== undefined && previous.fingerprint !== facts.fingerprint
+  return { reason, consecutive: moved ? 1 : previous.consecutive + 1, ...carry }
+}
+
+/**
+ * How long to sleep after a stuck round: the interval, doubling per
+ * consecutive same-reason round, capped.
+ *
+ * The FIRST stuck round sleeps the plain interval. That is the whole point of
+ * the change — a transient fault must be retried promptly by the next round,
+ * not punished — so the ladder only starts climbing once the same reason has
+ * survived a retry.
+ */
+export function stuckBackoffMs(consecutive: number, intervalMs: number): number {
+  if (consecutive < 1) throw new Error(`a stuck streak is at least one round, got ${String(consecutive)}`)
+  // Zero is a real interval — `--interval 0` is how the service is asked to run
+  // rounds back to back, and doubling it correctly yields no spacing at all. A
+  // NEGATIVE interval is the meaningless one, and it is refused rather than
+  // clamped so a caller that computed one hears about it.
+  if (intervalMs < 0) throw new Error(`the service interval cannot be negative, got ${String(intervalMs)}`)
+  const doublings = Math.min(consecutive - 1, 32)
+  return Math.min(intervalMs * 2 ** doublings, STUCK_BACKOFF_CAP_MS)
+}
+
+/**
+ * The document the loop writes at the end of every round.
+ *
+ * `running` either way: the loop IS the instance, and it is alive to write
+ * this. What changes is `state`, which is what the supervisor pages on.
+ */
+export function roundHealthDocument(
+  service: string,
+  facts: RoundFacts,
+  streak: StuckStreak | undefined,
+  sleepMs: number,
+): QueueHealthDocument {
+  const base = { schema: QUEUE_HEALTH_SCHEMA, service, verdict: { kind: "running" } as const }
+  if (streak === undefined) {
+    return { ...base, state: "healthy", facts: { stuckRounds: 0, nextRoundInMs: sleepMs } }
+  }
+  return {
+    ...base,
+    state: "unhealthy",
+    error: {
+      code: "queue-round-stuck",
+      cause: streak.reason,
+      resolution: [
+        "No restart is needed or wanted: the loop is alive and will run the next round by itself.",
+        `Consecutive rounds stuck for this reason: ${String(streak.consecutive)}; the next runs in ${String(sleepMs)}ms.`,
+        "A clear round, or a new change arriving in the line, resets the spacing.",
+        "This page clears on its own the moment a round comes back clear.",
+      ],
+    },
+    facts: {
+      stuckRounds: streak.consecutive,
+      nextRoundInMs: sleepMs,
+      ...(streak.fingerprint === undefined ? {} : { line: streak.fingerprint }),
+      ...(facts.fingerprint === undefined ? { lineRead: false } : {}),
+    },
+  }
+}
+
+/**
+ * The answer when no document exists.
+ *
+ * `absent` + `stopped`, never `unhealthy`: nothing has claimed this service,
+ * which is a different fact from a loop that is running and failing, and the
+ * supervisor pages only on the second. Saying `unhealthy` here would page for
+ * a service nobody started.
+ */
+export function absentHealthDocument(service: string, why: string): QueueHealthDocument {
+  return {
+    schema: QUEUE_HEALTH_SCHEMA,
+    service,
+    state: "absent",
+    verdict: { kind: "stopped" },
+    error: {
+      code: "queue-health-document-absent",
+      cause: why,
+      resolution: [
+        "Start the service — `yrd queue up` writes this document at the end of every round.",
+        "A service that IS running and has not finished its first round has not written one yet.",
+      ],
+    },
+  }
+}
+
+/**
+ * The answer when a document exists and cannot be read.
+ *
+ * Loud and typed rather than absent: a file that is there and unparseable is
+ * evidence of a defect, and reporting it as `absent` would file that defect
+ * under "nobody started the service" where nobody would look for it.
+ */
+export function unreadableHealthDocument(service: string, why: string, observed: string | null): QueueHealthDocument {
+  return {
+    schema: QUEUE_HEALTH_SCHEMA,
+    service,
+    state: "unknown",
+    verdict: { kind: "unknown", reason: "unparsed", observed },
+    error: {
+      code: "queue-health-document-unreadable",
+      cause: why,
+      resolution: [
+        "The document is written whole by the service at the end of each round; a partial one is a defect, not a state.",
+        "The next completed round overwrites it.",
+      ],
+    },
+  }
+}
+
+/**
+ * A stored document, validated, or `undefined` when the text is not one.
+ *
+ * Validation is deliberately shallow-but-real: the schema tag and a known
+ * state. It exists so a caller can tell "this is a health document" from "this
+ * is some other JSON", which is the distinction that decides between reporting
+ * a state and reporting that the file is broken.
+ */
+export function parseQueueHealthDocument(text: string): QueueHealthDocument | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    // silent-fallback-allow: the caller turns undefined into a typed unreadable document naming the text
+    return undefined
+  }
+  if (typeof value !== "object" || value === null) return undefined
+  const record = value as Record<string, unknown>
+  if (record.schema !== QUEUE_HEALTH_SCHEMA) return undefined
+  const state = record.state
+  if (state !== "healthy" && state !== "absent" && state !== "unhealthy" && state !== "unknown") return undefined
+  return record as unknown as QueueHealthDocument
+}

@@ -16,8 +16,15 @@
  * 2 and every signal stay terminal. Relaunching onto the new gitlink is the cure,
  * not the fault. The incumbent resident's lifecycle codes (3, 10 to 18) went
  * with it at M6.
+ *
+ * 3 came back in 2026-09 for ONE command: `queue health`, the declared
+ * supervisor probe, whose ladder is the supervisor's and not the queue's —
+ * `healthy 0`, `absent 1`, `unhealthy 2`, `unknown 3`. It is not a fourth queue
+ * outcome and no queue command returns it. A probe that printed `unknown` and
+ * exited 2 would be making two claims that disagree, which is the defect this
+ * whole bead is about, one layer down.
  */
-export type YrdCliExitCode = 0 | 1 | 2
+export type YrdCliExitCode = 0 | 1 | 2 | 3
 
 export type YrdCliIO = {
   stdout(text: string): void
