@@ -11,7 +11,16 @@
  * and 13.7 s per judged change.
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -1209,5 +1218,116 @@ describe("settling gitlinks", () => {
     expect(merged).toBeDefined()
     expect(trailer(merged!, "Published")).toBe(`submodule ${nested.submoduleMain} -> ${ahead}`)
     expect(trailer(merged!, "Published")).not.toContain("apps/leaf")
+  })
+
+  /**
+   * B2 (@cto, 24454 row 4). `candidateFailure` names three cases and sends
+   * EVERYTHING ELSE to stuck as `yrd-merge-unresolved`, a queue fault needing a
+   * person. `nested-pin-lowered` is built by git-super's `obviousDetail`, whose
+   * phase defaults to "preflight", so before this it matched none of the three.
+   *
+   * A lowering is the SUBMITTER's -- its own remedy says "owner: the submodule
+   * writer" -- so an unclassified one would have stopped the line for the fleet
+   * instead of going back to the one person who can re-record the gitlink.
+   */
+  it("fails the change on a nested pin LOWERED below the parent's own main, never stuck", async () => {
+    const w = await world()
+    const nested = await addNestedSubmodule(w)
+    // The submodule's main ADVANCES its nested pin, so the candidate below --
+    // which keeps recording the older one -- is a lowering rather than merely
+    // behind.
+    const submoduleWork = join(w.work, "..", "submodule-work")
+    const sg = gitIn(submoduleWork)
+    await sg(["checkout", "--quiet", "main"])
+    const nestedCheckout = gitIn(join(submoduleWork, "apps/leaf"))
+    await nestedCheckout(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await nestedCheckout(["checkout", "--quiet", nested.leafMain])
+    await sg(["add", "apps/leaf"])
+    await sg(["commit", "--quiet", "-m", "the submodule's main raises its nested pin"])
+    await sg(["push", "--quiet", "origin", "main"])
+
+    // The candidate is cut from that new submodule main -- so the PARENT is
+    // Ahead and the planner descends -- and re-records the leaf at the older
+    // pin, which is the lowering.
+    const sub = gitIn(join(w.work, "submodule"))
+    await w.git(["checkout", "--quiet", "-b", "task/nested-lowered", "main"])
+    await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await sub(["checkout", "--quiet", (await sg(["rev-parse", "HEAD"])).trim()])
+    const subLeaf = gitIn(join(w.work, "submodule/apps/leaf"))
+    await subLeaf(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await subLeaf(["checkout", "--quiet", nested.leafRecorded])
+    await sub(["add", "apps/leaf"])
+    await sub(["commit", "--quiet", "-m", "re-record the nested pin at an older commit"])
+    await sub(["push", "--quiet", "origin", "HEAD:refs/git-super/pins/lowered"])
+    await w.git(["add", "submodule"])
+    await w.git(["commit", "--quiet", "-m", "task/nested-lowered: carry the lowered nested pin"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/nested-lowered",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    const outcome = await queueRun(await w.options())
+
+    // FAILED, NOT STUCK. exitCode 1 is an attributed candidate failure; 2 is the
+    // queue going down.
+    expect(outcome.exitCode, "a submitter's lowering must not stop the queue").toBe(1)
+    expect(outcome.merged).toEqual([])
+    const records = await readRecords(
+      w.git,
+      await remoteTip(w.git, changeRef("main", { branch: "task/nested-lowered", head })),
+    )
+    expect(records.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
+    const failed = records.find((record) => record.kind === "failed")
+    expect(trailer(failed!, "Reason")).toBe("nested-pin-lowered")
+    // And the record tells the author what to do, rather than naming a queue fault.
+    expect(failed?.subject ?? "").toContain("apps/leaf")
+  })
+
+  /**
+   * THE PRODUCTION LAYOUT (@cto, measured 2026-09-11). In the queue's own clone
+   * `km/apps/maddoc` holds ONLY a `.git` directory and no checked-out files,
+   * where `addNestedSubmodule` builds a fully populated one.
+   *
+   * That distinction is exactly what row 4's `gitlink-store-absent` guard keys
+   * on, so an arm that only ever sees a populated nested checkout cannot say
+   * whether the guard refuses real traffic. It must not: an EMPTY worktree with
+   * its own `.git` is still that gitlink's own repository, and only a path with
+   * NO repository at all makes Git discovery answer with the parent.
+   */
+  it("classifies a nested pin whose checkout holds only its .git, as production does", async () => {
+    const w = await world()
+    const nested = await addNestedSubmodule(w)
+    const ahead = await aheadOfSubmodule(w, "eight")
+    // Strip the nested checkout down to its `.git`, leaving the repository in
+    // place and the working tree empty -- the queue clone's shape.
+    const nestedPath = join(w.work, "submodule/apps/leaf")
+    for (const entry of readdirSync(nestedPath)) {
+      if (entry !== ".git") rmSync(join(nestedPath, entry), { force: true, recursive: true })
+    }
+    expect(readdirSync(nestedPath)).toEqual([".git"])
+    await submitGitlink(w, "task/nested-bare", ahead)
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome, "an empty worktree with its own .git is not an absent store").toMatchObject({
+      exitCode: 0,
+      merged: ["task/nested-bare"],
+    })
+    const settle = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "settle")
+    expect(settle).toContainEqual(
+      expect.objectContaining({
+        from: nested.leafRecorded,
+        path: "submodule/apps/leaf",
+        state: "kept-behind",
+        to: nested.leafMain,
+      }),
+    )
   })
 })

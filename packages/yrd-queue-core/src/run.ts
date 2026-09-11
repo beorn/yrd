@@ -1091,6 +1091,34 @@ async function candidateFailure(
       ],
     })
   }
+  if (detail.code === "nested-pin-lowered") {
+    // A NESTED pin recorded below what its parent's own main already records
+    // for it (24454 row 4). Its own remedy names "the submodule writer", and
+    // the author is the only one who can re-record the gitlink -- so this is a
+    // failed change, beside gitlink-off-main, never a queue fault.
+    //
+    // THE GENERAL RULE, because this is the second time it bit: a new refusal
+    // code from git-super has to be classified HERE as well as accepted by the
+    // reader. Everything this function does not name ends the round stuck, so a
+    // submitter's mistake that arrives under an unknown code stops the line for
+    // the fleet instead of going back to the one person who can fix it. Reading
+    // the new word is half the contract; deciding whose fault it is, is the
+    // other half.
+    //
+    // `gitlink-store-absent` is deliberately NOT here: it says the queue's own
+    // checkout is wrong, and failing it would blame an author who did nothing.
+    await worktree.remove()
+    return run.steps.end(run, entry, "failed", {
+      remedy:
+        detail.next ??
+        "re-record the nested gitlink at or after the pin its parent's main already carries, then submit again",
+      subject: (detail.subject ?? detail.message).replace(/\s+/gu, " ").trim(),
+      trailers: [
+        ["Reason", "nested-pin-lowered"],
+        ["Detail", detail.message.replace(/\s+/gu, " ").trim()],
+      ],
+    })
+  }
   if (detail.phase === "prove-gitlink-on-main") {
     await worktree.remove()
     const reason = detail.message.replace(/\s+/gu, " ").trim()
