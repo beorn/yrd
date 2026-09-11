@@ -21,6 +21,14 @@ describe("Yrd Hab runner declarations", () => {
         // document the loop itself wrote, touches no network and captures no
         // declaration, so it cannot disagree with the loop about the queue.
         health: { command: "bun tools/yrd-runtime.mjs yrd queue health" },
+        // Garage eligibility, added by @dev/11 for @i/10-yrd/24147. It lives on
+        // the SERVICE rather than in a /garage table, so this assertion is where
+        // it is pinned.
+        garage: {
+          ledgerRoot: "/home/hh/scratch",
+          leaveRule:
+            "ten queue runs in a row that needed no explaining, with at least one merge and one fail among them",
+        },
         // The queue relaunches only after an ending the loop chose: 0 for a
         // clean round/gitlink recycle, or 1 for a candidate failure. Exit 2 is
         // now reserved for what NO round can fix — an absent or unreadable
