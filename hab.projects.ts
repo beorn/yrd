@@ -79,13 +79,13 @@ export default {
         // unreadable, a runtime gitlink that is absent — so it stays off the
         // allowlist and still pages non-relaunchable.
         // Signal decision: any signal observed by Hab is an unplanned host-level
-        // interruption, so it stays down and pages the declared owner — @cto
+        // interruption, so it stays down and pages the declared owner — @ci
         // today — with every unlisted code.
         restart: "on-codes" as const,
         relaunchExitCodes: [0, 1],
         // `HabServiceDefinition.owner` is a recognized service key in
         // ag/packages/hab-config. Spreading the registry row's owner here makes
-        // a terminal-ending andon page reach the declared owner — @cto today —
+        // a terminal-ending andon page reach the declared owner — @ci today —
         // instead of falling back to the fleet-wide @chief default.
         owner,
       },
