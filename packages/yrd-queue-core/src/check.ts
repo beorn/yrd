@@ -432,9 +432,12 @@ function openCheckLog(path: string): CheckLog {
         try {
           writeSync(file, encoder.encode(`\n[yrd: this log is INCOMPLETE — ${failure}]\n`))
         } catch {
-          // Best effort, and not a swallow: the descriptor that just failed may
-          // well fail again, and the durable, loud copy of this same failure is
-          // the check's own stuck verdict and `why`, which the caller returns.
+          // silent-fallback-allow: best effort, and not a swallow. This is the
+          // attempt to write "this log is INCOMPLETE" into the very descriptor
+          // that just failed, so it may well fail again — and the durable, loud
+          // copy of this same failure is the check's own stuck verdict and
+          // `why`, which the caller returns. Throwing here would replace a
+          // reported failure with an unreported one.
         }
       }
       try {

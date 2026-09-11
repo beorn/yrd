@@ -1939,6 +1939,18 @@ async function orphanedMergeCandidate(
       .split(/\s+/u)
       .filter((sha) => sha !== "")
   } catch (error) {
+    // silent-fallback-allow: `undefined` here is "not this change's evidence",
+    // and it is a DECIDED outcome rather than a swallowed failure. The `orphan`
+    // record written first is the log's eleventh kind, specified for exactly
+    // this case — "one row for what recovery decided, or for a candidate it
+    // found but would not trust" (log.ts:16-19) — and the journal is the source
+    // of truth, not a second copy of it.
+    //
+    // Not trusting is the point. A worktree whose parents this run cannot read
+    // cannot be shown to be THIS head's orphan, and guessing it into the
+    // change's evidence is the failure 24344 exists to prevent: never redo the
+    // merge, never guess. The alternative — ending stuck — would let one
+    // unreadable leftover from an unrelated dead run stop a healthy change.
     run.log.write({
       branch,
       candidate: commit,
