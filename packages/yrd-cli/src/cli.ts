@@ -56,6 +56,14 @@ const coreQueueCommand: typeof import("./queue-core-commands.ts").coreQueueComma
   return queue.coreQueueCommand(...args)
 }
 
+// The declared health probe loads the same way, and for a sharper reason: it
+// runs on the supervisor's tick, so it must not pay for the queue core it does
+// not use. It reads one file.
+const queueHealthCommand = async (workdir: string, io: YrdCliIO): Promise<YrdCliExitCode> => {
+  const health = await import("./queue-health.ts")
+  return health.queueHealthCommand(workdir, health.SERVICE, io)
+}
+
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
 const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
 const DRY_RUN_HELP = "print the change this would open and push nothing"
@@ -155,6 +163,23 @@ function buildProgram(
     )
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
+    .command("health")
+    .description(
+      "print the service's own health document, as the last finished round wrote it; the declared supervisor probe",
+    )
+    .option("--queue <value>", QUEUE_HELP)
+    .addHelpSection(
+      "On health:",
+      "Reads a file and nothing else — no network, no declaration, no second judgement of the queue. " +
+        "The service writes the document at the end of every round, so this reports the loop's own verdict " +
+        "rather than forming one. Exits 0 healthy, 1 no document, 2 stuck, 3 the document is unreadable.",
+    )
+    .action(async (options) => {
+      const declared = options as { queue?: string }
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
+      setExit(await queueHealthCommand(location.workdir, io))
+    })
+  queue
     .command("pause")
     .description(
       "refuse new submissions AND stop checking and merging, while the service keeps the queue visible; " +
@@ -241,7 +266,10 @@ function buildProgram(
     })
   queue
     .command("up")
-    .description("the service: the same round on a loop; exits 2 when stuck, 0 when the gitlink moves under it")
+    .description(
+      "the service: the same round on a loop; a stuck ROUND is reported by queue health and the loop runs on, " +
+        "and it exits 0 when the gitlink moves under it, 2 only when no round could fix what is wrong",
+    )
     .option("--interval <seconds>", "seconds between rounds (default 15)", int)
     .option("--json", "emit stable JSON")
     .option("--queue <value>", QUEUE_HELP)

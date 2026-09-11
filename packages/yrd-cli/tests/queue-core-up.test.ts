@@ -32,10 +32,12 @@ import {
   trailer,
   watchRows,
   type Git,
+  type QueueHealthDocument,
   type GitRunner,
 } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { coreQueueCommand, openDetail, readListing } from "../src/queue-core-commands.ts"
+import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
 
@@ -1298,15 +1300,45 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     expect(ranRun.stderr()).toContain("stuck task/stuck:")
     expect(ranRun.stderr()).toContain(cure)
 
-    // AC3: `up`, pointed at the same still-stuck change, classifies and exits
-    // exactly as `run` just did — one round is all it takes, since the change
-    // is stuck again the moment it is re-judged.
+    // AC3: `up`, pointed at the same still-stuck change, CLASSIFIES exactly as
+    // `run` just did — it names the same branch and the same cure.
+    //
+    // What it no longer does is exit (@i/10-yrd/24395). This block used to
+    // assert exit 2, and that assertion was the defect written down: it made
+    // the stuck ALARM and the service STOP one event, so a routine recoverable
+    // fault took delivery offline with relaunch disabled. The round is stuck;
+    // the loop is not. 24141's subject — the three commands agreeing on the
+    // branch and the cure — is untouched, and is what is asserted here.
     const ranUp = capture(w.work)
+    const stop = new AbortController()
+    const documents: QueueHealthDocument[] = []
     expect(
-      await coreQueueCommand(w.work, ranUp.io, { command: "up", intervalSeconds: 0 }, { workdir: w.workdir }),
-    ).toBe(2)
+      await coreQueueCommand(
+        w.work,
+        ranUp.io,
+        {
+          command: "up",
+          intervalSeconds: 0,
+          stop: stop.signal,
+          afterHealth: (document) => {
+            documents.push(document)
+            // Two rounds, so the second proves the first did not end the loop.
+            if (documents.length === 2) stop.abort()
+          },
+        },
+        { workdir: w.workdir },
+      ),
+    ).toBe(0)
     expect(ranUp.stderr()).toContain("stuck task/stuck:")
     expect(ranUp.stderr()).toContain(cure)
+    // The alarm the exit used to carry, now carried by the document — and the
+    // ladder proves the loop treated these as two rounds, not one.
+    expect(documents.map((document) => document.state)).toEqual(["unhealthy", "unhealthy"])
+    expect(documents.map((document) => document.facts?.stuckRounds)).toEqual([1, 2])
+    expect(documents[0]?.error?.cause).toContain("task/stuck")
+    expect(documents[0]?.verdict).toEqual({ kind: "running" })
+    // And the same document is on disk where the declared probe reads it.
+    expect(readQueueHealth(w.workdir, SERVICE)).toEqual(documents[1])
 
     // AC3: `list` already named this branch and this cure before `run` and
     // `up` did (this file's "renders one stored lossless incident" case); the
@@ -1434,5 +1466,186 @@ describe("yrd watch's own detail pane (openDetail), one change's evidence", () =
       ["affected-tests", "passed"],
       ["never-ran", "not-run"],
     ])
+  })
+})
+
+/**
+ * @failure  A stuck round ends the SERVICE. The stuck alarm and the stop are one
+ *           event, so a routine, recoverable, submitter-independent fault — a
+ *           code-host 504 during setup — takes the only fleet delivery mechanism
+ *           offline with automatic relaunch disabled, and delivery stays down
+ *           until a person notices. Measured 2026-09-11: run
+ *           q-20260911T063507008Z-500ae413, about 24 minutes down for a fault the
+ *           next round cleared (@i/10-yrd/24395, @cto ruling).
+ * @level    l2 (a real remote and a clone under a temporary root; the loop driven
+ *           directly, no process boundary)
+ * @consumer the supervisor, which reads the declared health probe and pages on
+ *           unhealthy-while-running without restarting · everyone waiting on a
+ *           change behind a transient fault
+ */
+describe("a stuck round ends the round, not the service (@i/10-yrd/24395)", () => {
+  /**
+   * A setup that fails for as long as a fault marker exists.
+   *
+   * Deliberately NOT "fails the first N times": a round runs setup more than
+   * once — a candidate's failure is re-run on the settled base to decide whose
+   * failure it is — so a counting fixture encodes an implementation detail and
+   * silently stops reproducing the fault when that detail changes. The fault is
+   * a CONDITION here, exactly as a code host being unreachable is, and the test
+   * clears the condition at the moment it wants to.
+   */
+  function faultySetup(dir: string): Readonly<{ command: string; clear: () => void }> {
+    const marker = join(dir, "code-host-unreachable")
+    const script = join(dir, "faulty-setup.sh")
+    writeFileSync(marker, "the code host is down\n")
+    writeFileSync(
+      script,
+      [
+        "#!/bin/sh",
+        `if [ -f ${marker} ]; then`,
+        "  echo 'fatal: unable to access https://example.invalid/: The requested URL returned error: 504' >&2",
+        "  exit 128",
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(script, 0o755)
+    return { command: script, clear: () => rmSync(marker, { force: true }) }
+  }
+
+  /** One change waiting in the line, so a round has something to merge. */
+  async function oneChange(w: World, branch: string): Promise<void> {
+    await w.git(["checkout", "--quiet", "-b", branch, "main"])
+    writeFileSync(join(w.work, `${branch.replace("/", "-")}.txt`), "work\n")
+    await w.git(["add", "-A"])
+    await w.git(["commit", "--quiet", "-m", branch])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", { branch, submitter: "@dev/4", target: { branch: "main", remote: "origin" } })
+  }
+
+  /** Catch the local clone up to a target the service has since advanced. */
+  async function catchUp(w: World): Promise<void> {
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+  }
+
+  // ACCEPTANCE (a) and (b): the process never exits, a later round merges, and
+  // the probe reads unhealthy then healthy — which is exactly the pair the
+  // supervisor turns into a page and then drops, with no restart between them.
+  it("survives a setup fault, merges once it clears, and its health goes unhealthy then healthy", async () => {
+    const w = await world()
+    const fault = faultySetup(w.workdir)
+    await redeclare(w, `setup: ${fault.command}\n`)
+    await oneChange(w, "task/after-the-fault")
+
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterHealth: (document) => {
+          seen.push(document)
+          // The outage ends after the service has already been stuck by it —
+          // so the recovery is the loop's, not the fixture's timing.
+          if (seen.length === 2) fault.clear()
+          if (document.state === "healthy") stop.abort()
+        },
+      },
+      // `json: true` so the rounds this test reads back are machine-readable;
+      // the stuck lines it does not read stay on stderr either way.
+      { json: true, workdir: w.workdir },
+    )
+
+    // Exit 0: the loop was STOPPED, never ended by the fault. Before this
+    // change the first stuck round returned 2 and the service went down.
+    expect(exit, run.stderr()).toBe(0)
+    const states = seen.map((document) => document.state)
+    expect(states.length, JSON.stringify(states)).toBeGreaterThanOrEqual(3)
+    expect(states.slice(0, 2)).toEqual(["unhealthy", "unhealthy"])
+    expect(states.at(-1)).toBe("healthy")
+    expect(states.slice(0, -1).every((state) => state === "unhealthy")).toBe(true)
+    // unhealthy + RUNNING is the combination that pages without a restart. A
+    // stuck round reporting `stopped` would be claiming the loop had died.
+    expect(seen[0]?.verdict).toEqual({ kind: "running" })
+    expect(seen[0]?.error?.code).toBe("queue-round-stuck")
+    // The ladder climbed while the fault held: proof these were separate rounds.
+    expect(seen[0]?.facts?.stuckRounds).toBe(1)
+    expect(seen[1]?.facts?.stuckRounds).toBe(2)
+    // The page clears because the document says healthy, not because anything
+    // restarted: same process, same loop, a later round.
+    expect(seen.at(-1)?.error).toBeUndefined()
+    expect(seen.at(-1)?.verdict).toEqual({ kind: "running" })
+    // And a round did the work the stuck ones could not.
+    const merged = records(run).filter((row) => Array.isArray(row.merged) && (row.merged as unknown[]).length > 0)
+    expect(merged, run.stdout()).toHaveLength(1)
+    expect(merged[0]?.merged).toEqual(["task/after-the-fault"])
+    // The declared probe reads the same document off disk that the loop wrote.
+    expect(readQueueHealth(w.workdir, SERVICE)).toEqual(seen.at(-1))
+  })
+
+  // ACCEPTANCE (c), the NEGATIVE CONTROL. Exit 2 must survive for what no round
+  // can fix. Without this, "the loop never exits" would be indistinguishable
+  // from "the loop cannot exit", and a queue whose declaration is gone would
+  // spin forever instead of paging non-relaunchable.
+  it("still exits 2 when the target no longer carries a declaration", async () => {
+    const w = await world()
+    const run = capture(w.work)
+    let rounds = 0
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        afterHealth: async () => {
+          rounds += 1
+          // The declaration goes away AFTER a first round has run, so the exit
+          // is proved to come from the unreadable declaration and not from a
+          // service that never started.
+          if (rounds !== 1) return
+          await catchUp(w)
+          await undeclare(w)
+        },
+      },
+      { workdir: w.workdir },
+    )
+    expect(exit, run.stderr()).toBe(2)
+    expect(rounds).toBe(1)
+    expect(run.stdout()).toContain("no longer carries a .yrd.yml")
+  })
+
+  // The other half of that control: a PERMANENT exit leaves the last round's
+  // document behind rather than overwriting it with a claim about a loop that
+  // has ended. The supervisor learns about a terminal exit from the exit, and
+  // this file must not contradict it by inventing a state nobody measured.
+  it("writes no document for the round it never ran", async () => {
+    const w = await world()
+    const run = capture(w.work)
+    let rounds = 0
+    await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        afterHealth: async () => {
+          rounds += 1
+          if (rounds !== 1) return
+          await catchUp(w)
+          await undeclare(w)
+        },
+      },
+      { workdir: w.workdir },
+    )
+    expect(rounds).toBe(1)
+    const left = readQueueHealth(w.workdir, SERVICE)
+    expect(left.state).toBe("healthy")
+    expect(left.verdict).toEqual({ kind: "running" })
   })
 })
