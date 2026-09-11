@@ -113,3 +113,12 @@ export type {
   RoundFacts,
   StuckStreak,
 } from "./service-health.ts"
+
+export {
+  SETUP_UNREACHABLE_CODE,
+  SETUP_UNUSABLE_CODE,
+  setupStuckCode,
+  setupStuckNext,
+  transportFaultIn,
+} from "./setup-transport.ts"
+export type { TransportFault } from "./setup-transport.ts"
