@@ -244,6 +244,7 @@ async function told(
       ...(known ? { submitter } : {}),
       ...(kind === "merged" ? { merge: trailer(written, "Merge") ?? "" } : { log, reason: reasonFor(kind, written) }),
       ...(kind === "failed" ? { failures: await failuresOf(run, entry, endedRecord) } : {}),
+      ...(kind === "failed" ? await priorFailureReason(run, entry, endedRecord) : {}),
     },
     owed,
   )
@@ -321,6 +322,14 @@ export type NotifyRecord =
       reason?: string
       log?: string
       failures?: number
+      /**
+       * On a `failed` record only, and only when every prior failure of this
+       * branch carried one and the same reason. The notifier's third
+       * disposition — hold and route, do not resubmit — turns on this matching
+       * `reason` (@i/10-yrd/24485). Absent means "not unambiguous", and the
+       * notifier then says what it always said.
+       */
+      priorReason?: string
     }>
 
 /** Why a change ended, as its record says it: the check for a fail, the sentence for a stuck. */
@@ -374,6 +383,66 @@ const MOVED_ON = new Set(["replaced", "deleted"])
  * records, where a retry at an unchanged head appends a second opened record and a
  * second failure under one ref, so the tip alone would forget the first.
  */
+/**
+ * The one reason every element carries, or nothing when they do not agree.
+ *
+ * Pure and exported so the rule can be tested without a queue: the notifier's
+ * third disposition turns on it (@i/10-yrd/24485), and "same error again" is a
+ * claim that has to be exactly right in both directions.
+ */
+export function sameFailureReason(reasons: readonly (string | undefined)[]): string | undefined {
+  // No length check: an empty list has no first element, and the absent-reason
+  // guard below already refuses `undefined`. Mutation control found the extra
+  // condition unkillable by any test, which is what an unreachable branch looks
+  // like from the outside.
+  const first = reasons[0]
+  if (first === undefined || first === "") return undefined
+  return reasons.every((reason) => reason === first) ? first : undefined
+}
+
+/**
+ * The reason EVERY prior failure of this branch carried, or nothing.
+ *
+ * Deliberately not "the reason the previous one carried". The notifier uses this
+ * to decide whether a failure is the same failure again, and a branch that
+ * alternates between two faults has an immediate predecessor that sometimes
+ * matches by coincidence. Requiring all of them to agree makes the signal mean
+ * what its consumer reads it as, and it needs no ordering across refs to
+ * compute — which matters, because a branch's failures live under several and
+ * their relative times are not recorded.
+ *
+ * Undefined whenever the answer is not unambiguous: no prior failures, a reason
+ * missing from any of them, or more than one distinct reason. The notifier's
+ * third disposition then does not fire, which is the safe direction — it tells
+ * an author to hold, and holding on a branch that is genuinely broken in a new
+ * way each time would be the same defect pointing the other way.
+ */
+/** Spread-shaped: a record never carries `priorReason: undefined`, it carries no field. */
+async function priorFailureReason(
+  run: Run,
+  entry: QueueEntry,
+  endedRecord: string,
+): Promise<Readonly<{ priorReason?: string }>> {
+  const reason = await priorFailureReasonOf(run, entry, endedRecord)
+  return reason === undefined ? {} : { priorReason: reason }
+}
+
+async function priorFailureReasonOf(run: Run, entry: QueueEntry, endedRecord: string): Promise<string | undefined> {
+  const elsewhere = run.queue
+    .filter((candidate) => {
+      if (candidate.change.branch !== entry.change.branch || candidate.change.head === entry.change.head) return false
+      const tip = tipOf(candidate.change)
+      return endedKind(tip) === "failed" && !MOVED_ON.has(trailer(tip, "Reason") ?? "")
+    })
+    .map((candidate) => trailer(tipOf(candidate.change), "Reason"))
+  // `own` is append-ordered under one ref and its LAST failed record is the
+  // ending being written right now, which is not its own predecessor.
+  const own = (await readRecords(run.git, endedRecord))
+    .filter((record) => record.kind === "failed" && !MOVED_ON.has(trailer(record, "Reason") ?? ""))
+    .map((record) => trailer(record, "Reason"))
+  return sameFailureReason([...elsewhere, ...own.slice(0, -1)])
+}
+
 async function failuresOf(run: Run, entry: QueueEntry, endedRecord: string): Promise<number> {
   const elsewhere = run.queue.filter((candidate) => {
     if (candidate.change.branch !== entry.change.branch || candidate.change.head === entry.change.head) return false
