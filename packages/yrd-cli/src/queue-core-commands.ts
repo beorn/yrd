@@ -13,7 +13,7 @@
  * add a line it does not need. The incumbent went at M6; the switch goes here.
  */
 
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
@@ -455,7 +455,18 @@ export async function coreQueueCommand(
        */
       const writeHealth = (document: QueueHealthDocument): void => {
         try {
-          writeFileSync(join(workdir, QUEUE_HEALTH_DOCUMENT), `${JSON.stringify(document, undefined, 2)}\n`)
+          // ATOMIC, and the reason is a page nobody should ever have got:
+          // `writeFileSync` truncates before it writes, so a probe landing in
+          // that window reads an EMPTY file, which parses as unreadable, which
+          // becomes `unknown`, which habd pages as health-not-measured. The
+          // probe runs on the supervisor's own tick, so the window is hit by
+          // chance and the page names a defect that does not exist. Same
+          // directory, so the rename is a rename and not a copy (@cto
+          // 2026-09-11).
+          const path = join(workdir, QUEUE_HEALTH_DOCUMENT)
+          const staging = `${path}.${String(process.pid)}.tmp`
+          writeFileSync(staging, `${JSON.stringify(document, undefined, 2)}\n`)
+          renameSync(staging, path)
         } catch (error) {
           log?.warn?.(
             `could not write the service health document to ${join(workdir, QUEUE_HEALTH_DOCUMENT)}: ${
@@ -572,7 +583,7 @@ export async function coreQueueCommand(
         if (streak !== undefined) sleepMs = stuckBackoffMs(streak.consecutive, interval)
         else if (!isRoundStuck(outcome)) sleepMs = sleepAfter(outcome, interval)
         else throw new Error(`a stuck round left no streak to space it out: ${outcome.why}`)
-        const document = roundHealthDocument(SERVICE, facts, streak, sleepMs)
+        const document = roundHealthDocument(SERVICE, facts, streak, sleepMs, new Date())
         writeHealth(document)
         await request.afterHealth?.(document)
         if (stopped()) return 0
@@ -1323,17 +1334,30 @@ export function isRoundStuck(outcome: QueueRunOutcome | RoundStuck): outcome is 
  * exactly the rounds that know nothing about the line at all.
  */
 export function roundFacts(outcome: QueueRunOutcome | RoundStuck): RoundFacts {
-  if (isRoundStuck(outcome)) return { stuck: outcome.why }
+  // EVERY `key` BELOW IS STABLE ACROSS ROUNDS and every `reason` is free to
+  // name this round's specifics. The first version used one string for both,
+  // and two of these embed something that changes every round — the run id and
+  // a raw error message — so the ladder started over each time and never
+  // climbed for the two faults most likely to repeat (@cto 2026-09-11).
+  if (isRoundStuck(outcome)) return { stuck: { key: "could-not-judge", reason: outcome.why } }
   const fingerprint = `${[...outcome.merged, ...outcome.failed, ...outcome.stuck]
     .slice()
     .sort()
     .join(" ")}+${String(outcome.checkedWaiting)}`
   if (outcome.exitCode !== 2) return { fingerprint }
-  const why =
+  // The branch names ARE stable while the same change stays stuck, which is
+  // exactly the case the ladder is for; the run id is not, and stays in prose.
+  const stuck =
     outcome.stuck.length > 0
-      ? `the round stopped on ${outcome.stuck.join(", ")}`
-      : `the round ended stuck without naming a change (run ${outcome.run})`
-  return { stuck: why, fingerprint }
+      ? {
+          key: `stuck-changes:${[...outcome.stuck].sort().join(",")}`,
+          reason: `the round stopped on ${outcome.stuck.join(", ")}`,
+        }
+      : {
+          key: "stuck-unnamed",
+          reason: `the round ended stuck without naming a change (run ${outcome.run})`,
+        }
+  return { stuck, fingerprint }
 }
 
 export function sleepAfter(outcome: QueueRunOutcome, intervalMs: number): number {

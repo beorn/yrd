@@ -40,6 +40,12 @@ describe("what IS an unreachable remote", () => {
     ["timeout", "Error: connect ETIMEDOUT 140.82.121.3:443"],
     ["timeout", "net/http: TLS handshake timeout"],
     ["http-5xx", "error: GET https://registry.npmjs.org/left-pad - 502"],
+    // GIT'S OWN LINE, and the gap that mattered most: git is the likeliest
+    // producer of a transport fault during setup, and its wording matches
+    // neither the `- <code>` form nor the `HTTP <code>` one (@cto 2026-09-11).
+    ["http-5xx", "fatal: unable to access 'https://github.com/beorn/x/': The requested URL returned error: 502"],
+    ["http-5xx", "fatal: unable to access 'https://example.invalid/': The requested URL returned error: 503"],
+    ["rate-limited", "fatal: unable to access 'https://github.com/beorn/x/': The requested URL returned error: 429"],
     ["http-5xx", "remote: HTTP 503 Service Unavailable"],
     ["rate-limited", "error: GET https://api.github.com/rate_limit - 429"],
     ["rate-limited", "remote: 429 Too Many Requests"],
@@ -82,6 +88,11 @@ describe("row 3, the negative control: what is NOT an unreachable remote", () =>
     ["404, the remote answered", "error: GET https://api.github.com/repos/beorn/x/tarball/deadbeef - 404"],
     ["401, the remote answered", "error: GET https://api.github.com/repos/beorn/x - 401"],
     ["403, the remote answered", "remote: HTTP 403 Forbidden"],
+    // The same control in git's wording. Widening for git's 5xx must not widen
+    // for git's 4xx: a repository that is private or gone ANSWERED, and no
+    // number of retries changes the answer.
+    ["git's own 404", "fatal: unable to access 'https://github.com/beorn/x/': The requested URL returned error: 404"],
+    ["git's own 403", "fatal: unable to access 'https://github.com/beorn/x/': The requested URL returned error: 403"],
   ])("%s is an ANSWER, not a fault", (_why, line) => {
     expect(transportFaultIn(line)).toBeUndefined()
   })

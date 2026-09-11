@@ -49,10 +49,17 @@ const TRANSPORT_SIGNATURES: readonly Readonly<{ signature: string; pattern: RegE
   // Anchored on a URL so a version string or a byte count can never match.
   { signature: "http-5xx", pattern: /https?:\/\/\S+\s+-\s+(?:50\d|5[1-9]\d)\b/u },
   { signature: "http-5xx", pattern: /\b(?:HTTP|status(?: code)?)[\s:]+(?:5\d\d)\b/iu },
+  // Git's OWN line, which matches neither of the two above: it names no `- <code>`
+  // and says "error:" where the others say "HTTP". Missed on the first pass
+  // (@cto 2026-09-11) — and Git is the single most likely producer of a
+  // transport fault during setup, so this was the gap that mattered most.
+  //   fatal: unable to access 'https://host/': The requested URL returned error: 502
+  { signature: "http-5xx", pattern: /requested URL returned error:\s*5\d\d\b/iu },
   // Rate limiting is transport-shaped: the remote is up, refusing right now,
   // and the next round is the cure. Every OTHER 4xx is an answer, not a fault.
   { signature: "rate-limited", pattern: /https?:\/\/\S+\s+-\s+429\b/u },
   { signature: "rate-limited", pattern: /\b(?:HTTP|status(?: code)?)[\s:]+429\b/iu },
+  { signature: "rate-limited", pattern: /requested URL returned error:\s*429\b/iu },
   { signature: "rate-limited", pattern: /\bToo Many Requests\b/iu },
   { signature: "dns", pattern: /\bCould not resolve host\b/iu },
   { signature: "dns", pattern: /\bTemporary failure in name resolution\b/iu },

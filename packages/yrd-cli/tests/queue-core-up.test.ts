@@ -23,6 +23,7 @@ import {
   appendRecord,
   changeRef,
   gitIn,
+  nextStuckStreak,
   readConfig,
   readRecords,
   readRemoteCommit,
@@ -33,10 +34,11 @@ import {
   watchRows,
   type Git,
   type QueueHealthDocument,
+  type QueueRunOutcome,
   type GitRunner,
 } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
-import { coreQueueCommand, openDetail, readListing } from "../src/queue-core-commands.ts"
+import { coreQueueCommand, openDetail, readListing, roundFacts } from "../src/queue-core-commands.ts"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
@@ -1728,5 +1730,105 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
     const line = "error: GET https://api.github.com/repos/beorn/x/tarball/deadbeef - 404"
     await roundWithSetup(w, "task/answered-404", failingSetup(w.workdir, "answered-404", line))
     expect((await reasonFor(w, "task/answered-404")).reason).toBe("yrd-setup-unusable")
+  })
+})
+
+/**
+ * @failure  The ladder is keyed on the reason TEXT, and two of the reasons
+ *           embed something that changes every round — the run id, and a raw
+ *           error message — so `nextStuckStreak` starts over each time and the
+ *           spacing never climbs for the two faults most likely to repeat. The
+ *           pure ladder tests pass anyway, because they hand the ladder a
+ *           stable string themselves: they prove the MECHANISM and never ask
+ *           whether its real producer emits a stable key (@cto follow-up F3,
+ *           2026-09-11).
+ * @level    l1 (the producer, against constructed outcomes)
+ * @consumer the loop's own spacing, and therefore the host it stops hammering
+ */
+describe("the producer emits a STABLE streak key (@i/10-yrd/24395 F3)", () => {
+  const outcome = (over: Partial<QueueRunOutcome>): QueueRunOutcome =>
+    ({
+      observation: {} as QueueRunOutcome["observation"],
+      exitCode: 2,
+      log: "/w/log",
+      run: "q-20260911T120000000Z-aaaaaaaa",
+      base: "a".repeat(40),
+      config: "b".repeat(40),
+      target: "c".repeat(40),
+      merged: [],
+      failed: [],
+      stuck: [],
+      directMerges: [],
+      checkedWaiting: 0,
+      ...over,
+    }) as QueueRunOutcome
+
+  // THE TEST @cto ASKED FOR. Two rounds of the SAME fault, whose prose differs
+  // because it names the run — the key must not.
+  it("a round stuck without naming a change keys the same across rounds", () => {
+    const first = roundFacts(outcome({ run: "q-20260911T120000000Z-aaaaaaaa" }))
+    const second = roundFacts(outcome({ run: "q-20260911T120200000Z-bbbbbbbb" }))
+    expect(first.stuck?.key).toBe(second.stuck?.key)
+    // And the prose still names this round's run, so nothing was lost.
+    expect(first.stuck?.reason).not.toBe(second.stuck?.reason)
+    expect(first.stuck?.reason).toContain("aaaaaaaa")
+    // The ladder therefore CLIMBS, which is the behaviour the key exists for.
+    const one = nextStuckStreak(undefined, first)
+    expect(nextStuckStreak(one, second)?.consecutive).toBe(2)
+  })
+
+  it("a round that could not judge keys the same across rounds", () => {
+    const first = roundFacts({ why: "the queue run could not judge: connect ETIMEDOUT 140.82.121.3:443" })
+    const second = roundFacts({ why: "the queue run could not judge: connect ETIMEDOUT 140.82.121.4:443" })
+    expect(first.stuck?.key).toBe(second.stuck?.key)
+    expect(first.stuck?.reason).not.toBe(second.stuck?.reason)
+    expect(nextStuckStreak(nextStuckStreak(undefined, first), second)?.consecutive).toBe(2)
+  })
+
+  it("the same stuck change keys the same however the round names it", () => {
+    const first = roundFacts(outcome({ stuck: ["task/one"], run: "q-1" }))
+    const second = roundFacts(outcome({ stuck: ["task/one"], run: "q-2" }))
+    expect(first.stuck?.key).toBe(second.stuck?.key)
+    expect(nextStuckStreak(nextStuckStreak(undefined, first), second)?.consecutive).toBe(2)
+  })
+
+  // NEGATIVE CONTROLS: the key must still SEPARATE genuinely different faults,
+  // or the ladder would count unrelated rounds together and space out a fault
+  // that just appeared.
+  it("different stuck changes key differently", () => {
+    expect(roundFacts(outcome({ stuck: ["task/one"] })).stuck?.key).not.toBe(
+      roundFacts(outcome({ stuck: ["task/two"] })).stuck?.key,
+    )
+  })
+
+  it("a could-not-judge round and a stuck-change round key differently", () => {
+    expect(roundFacts({ why: "boom" }).stuck?.key).not.toBe(roundFacts(outcome({ stuck: ["task/one"] })).stuck?.key)
+  })
+
+  it("the same changes in a different order key the same", () => {
+    expect(roundFacts(outcome({ stuck: ["task/a", "task/b"] })).stuck?.key).toBe(
+      roundFacts(outcome({ stuck: ["task/b", "task/a"] })).stuck?.key,
+    )
+  })
+
+  // No key may carry a run id, a sha, a path or an error message — the rule the
+  // type states, asserted rather than trusted.
+  it("no key embeds anything that changes between rounds", () => {
+    const keys = [
+      roundFacts(outcome({})).stuck?.key,
+      roundFacts(outcome({ stuck: ["task/one"] })).stuck?.key,
+      roundFacts({ why: "the queue run could not judge: /tmp/x/y failed at deadbeefdeadbeef" }).stuck?.key,
+    ]
+    for (const key of keys) {
+      expect(key).toBeDefined()
+      // No run id, and no sha. A branch name may contain a slash, so paths are
+      // not banned outright — only the two things that actually move per round.
+      expect(key).not.toMatch(/q-\d{8}T/u)
+      expect(key).not.toMatch(/\b[0-9a-f]{12,}\b/u)
+    }
+  })
+
+  it("a clear round produces no stuck fact at all", () => {
+    expect(roundFacts(outcome({ exitCode: 0, merged: ["task/one"] })).stuck).toBeUndefined()
   })
 })

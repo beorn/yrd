@@ -38,6 +38,26 @@ export const QUEUE_HEALTH_DOCUMENT = "service-health.json"
  */
 export const STUCK_BACKOFF_CAP_MS = 30 * 60 * 1000
 
+/**
+ * How long past its own next-round instant a document is still believed.
+ *
+ * THE DEFECT THIS EXISTS FOR (@cto, 2026-09-11): a document with no expiry is
+ * an instrument that asserts a verdict it did not measure. If a round hangs
+ * inside the run, the loop never writes again and the probe keeps printing the
+ * last round's `healthy` for as long as the hang lasts — the longer the outage,
+ * the more confident the lie. That is the silent-fallback shape with a clock
+ * attached, and it is worse than having no probe, because a page that never
+ * opens reads exactly like a service that is fine.
+ *
+ * Ten minutes, and the number is the fleet's own ceiling rather than a guess: a
+ * request older than ten minutes is broken, not slow, and a queue whose journal
+ * has not moved for that long is the same thing. It is a BUDGET ON TOP of the
+ * sleep the loop actually chose, so a deliberate thirty-minute backoff does not
+ * read as overdue — staleness is measured against the loop's own declared
+ * intent, never against a fixed cadence a reader assumed.
+ */
+export const ROUND_BUDGET_MS = 10 * 60 * 1000
+
 export type QueueHealthState = "healthy" | "absent" | "unhealthy" | "unknown"
 
 export type QueueHealthVerdict =
@@ -83,10 +103,29 @@ export function queueHealthExitCode(state: QueueHealthState): 0 | 1 | 2 | 3 {
   }
 }
 
+/**
+ * Why a round ended stuck: a STABLE key the ladder counts on, and the prose a
+ * person reads.
+ *
+ * They are separate because the prose is not stable. The first version keyed
+ * the streak on the reason text, and two of the reasons embed something that
+ * changes every round — the run id, and a raw error message — so the ladder
+ * started over on exactly the two faults most likely to repeat and never
+ * climbed for them (@cto, 2026-09-11). The pure tests passed because they hand
+ * the ladder a stable string themselves: they proved the mechanism and never
+ * asked whether its real producer emits a stable key.
+ */
+export type StuckFact = Readonly<{
+  /** Counted on. Must not embed a run id, a sha, a path or an error message. */
+  key: string
+  /** Read by a person. Free to name whatever this particular round hit. */
+  reason: string
+}>
+
 /** What one finished round tells the loop about its own health. */
 export type RoundFacts = Readonly<{
   /** Why the round ended stuck; absent when it did not. */
-  stuck?: string
+  stuck?: StuckFact
   /**
    * What the round saw in the line, for "did new work arrive".
    *
@@ -99,6 +138,9 @@ export type RoundFacts = Readonly<{
 
 /** Consecutive same-reason stuck rounds, and the line they were stuck on. */
 export type StuckStreak = Readonly<{
+  /** The stable key the count is kept against. */
+  key: string
+  /** The most recent round's prose, for the document. */
   reason: string
   consecutive: number
   fingerprint?: string
@@ -118,13 +160,16 @@ export type StuckStreak = Readonly<{
  * fingerprints say new work arrived.
  */
 export function nextStuckStreak(previous: StuckStreak | undefined, facts: RoundFacts): StuckStreak | undefined {
-  const reason = facts.stuck
-  if (reason === undefined) return undefined
+  const stuck = facts.stuck
+  if (stuck === undefined) return undefined
   const carry = facts.fingerprint === undefined ? {} : { fingerprint: facts.fingerprint }
-  if (previous === undefined || previous.reason !== reason) return { reason, consecutive: 1, ...carry }
+  const head = { key: stuck.key, reason: stuck.reason }
+  // The KEY decides sameness, never the prose. A reason that embeds a run id
+  // reads different every round while naming the identical fault.
+  if (previous === undefined || previous.key !== stuck.key) return { ...head, consecutive: 1, ...carry }
   const moved =
     previous.fingerprint !== undefined && facts.fingerprint !== undefined && previous.fingerprint !== facts.fingerprint
-  return { reason, consecutive: moved ? 1 : previous.consecutive + 1, ...carry }
+  return { ...head, consecutive: moved ? 1 : previous.consecutive + 1, ...carry }
 }
 
 /**
@@ -158,18 +203,31 @@ export function roundHealthDocument(
   facts: RoundFacts,
   streak: StuckStreak | undefined,
   sleepMs: number,
+  now: Date,
 ): QueueHealthDocument {
   const base = { schema: QUEUE_HEALTH_SCHEMA, service, verdict: { kind: "running" } as const }
+  // WHEN THIS STOPS BEING BELIEVABLE, written by the loop rather than computed
+  // by a reader. The loop is the only party that knows what sleep it chose, so
+  // a reader re-deriving the deadline would be a second opinion about the one
+  // thing the loop is authoritative on.
+  const when = {
+    writtenAt: now.toISOString(),
+    staleAfter: new Date(now.getTime() + sleepMs + ROUND_BUDGET_MS).toISOString(),
+  }
   if (streak === undefined) {
-    return { ...base, state: "healthy", facts: { stuckRounds: 0, nextRoundInMs: sleepMs } }
+    return { ...base, state: "healthy", facts: { ...when, stuckRounds: 0, nextRoundInMs: sleepMs } }
   }
   return {
     ...base,
     state: "unhealthy",
     error: {
       code: "queue-round-stuck",
-      cause: streak.reason,
+      cause: `${STUCK_RECORD_CODE}: ${streak.reason}`,
       resolution: [
+        // The stuck record's own next step, named here rather than left in the
+        // journal: a refusal names its cure (G1), and a page is read by someone
+        // who has not got the journal open.
+        STUCK_RECORD_NEXT,
         "No restart is needed or wanted: the loop is alive and will run the next round by itself.",
         `Consecutive rounds stuck for this reason: ${String(streak.consecutive)}; the next runs in ${String(sleepMs)}ms.`,
         "A clear round, or a new change arriving in the line, resets the spacing.",
@@ -177,11 +235,58 @@ export function roundHealthDocument(
       ],
     },
     facts: {
+      ...when,
       stuckRounds: streak.consecutive,
       nextRoundInMs: sleepMs,
+      reasonKey: streak.key,
       ...(streak.fingerprint === undefined ? {} : { line: streak.fingerprint }),
       ...(facts.fingerprint === undefined ? { lineRead: false } : {}),
     },
+  }
+}
+
+/** The stuck record's own code and next step, as `queue list` and `queue show` render them. */
+export const STUCK_RECORD_CODE = "yrd-round-stuck"
+export const STUCK_RECORD_NEXT = "Read the round's own record with `yrd queue list` for the change and its cure."
+
+/**
+ * The document a reader should act on: the stored one, or an OVERDUE verdict
+ * when the loop stopped writing.
+ *
+ * Overdue outranks whatever the document last said, including `healthy`, and
+ * that ordering is the point: past `staleAfter` the interesting fact is not
+ * what the last round found, it is that no round has finished since. A stale
+ * `healthy` is the confident lie; a stale `unhealthy` is at least alarming for
+ * the wrong reason, and both are cured by the same sentence.
+ *
+ * A document with no `staleAfter` at all is one a pre-2026-09-11 loop wrote. It
+ * is passed through unchanged rather than declared overdue: absence of a
+ * deadline is not evidence that one passed.
+ */
+export function believableHealthDocument(document: QueueHealthDocument, now: Date): QueueHealthDocument {
+  const staleAfter = document.facts?.staleAfter
+  const writtenAt = document.facts?.writtenAt
+  if (typeof staleAfter !== "string") return document
+  const deadline = Date.parse(staleAfter)
+  if (Number.isNaN(deadline) || now.getTime() <= deadline) return document
+  return {
+    schema: QUEUE_HEALTH_SCHEMA,
+    service: document.service,
+    state: "unhealthy",
+    verdict: { kind: "running" },
+    error: {
+      code: "queue-round-overdue",
+      cause:
+        `no round has finished since ${typeof writtenAt === "string" ? writtenAt : "an unrecorded instant"}; ` +
+        `the loop declared its next round due by ${staleAfter} and has written nothing since, ` +
+        `so its last verdict (${document.state}) is no longer a measurement of anything`,
+      resolution: [
+        "A round is hung or the loop is gone; the document cannot tell which apart, and says so rather than guessing.",
+        "Read the newest run journal to see where the round stopped.",
+        "This clears by itself the moment any round finishes and writes again.",
+      ],
+    },
+    facts: { ...document.facts, overdueBy: now.getTime() - deadline },
   }
 }
 
