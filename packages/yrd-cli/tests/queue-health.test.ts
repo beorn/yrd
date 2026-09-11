@@ -73,9 +73,14 @@ describe("the declared health probe", () => {
     expect(queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(1)
     const printed = JSON.parse(run.stdout()) as Record<string, unknown>
     expect(printed).toMatchObject({ state: "absent", verdict: { kind: "stopped" } })
-    // It names the path it looked in — a probe that says "nothing here" without
-    // saying where it looked cannot be argued with.
-    expect(String((printed.error as Record<string, unknown>).cause)).toContain(QUEUE_HEALTH_DOCUMENT)
+    // NO `error`: hab-service-health/2 refuses the whole document if `absent`
+    // carries one, which is how the first live probe paged health-not-measured
+    // about a service that was merely not running yet.
+    expect(printed.error).toBeUndefined()
+    // It still names the path it looked in — a probe that says "nothing here"
+    // without saying where it looked cannot be argued with. That explanation
+    // moved to `facts`, which the supervisor's parser carries through.
+    expect(String((printed.facts as Record<string, unknown>).why)).toContain(QUEUE_HEALTH_DOCUMENT)
   })
 
   it("says UNKNOWN and quotes the text when the document is broken, exit 3", () => {

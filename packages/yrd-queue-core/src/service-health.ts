@@ -323,9 +323,18 @@ export function absentHealthDocument(service: string, why: string): QueueHealthD
     service,
     state: "absent",
     verdict: { kind: "stopped" },
-    error: {
-      code: "queue-health-document-absent",
-      cause: why,
+    // NO `error`, and that is the CONTRACT rather than a style choice. The
+    // supervisor's parser requires a typed error on `unhealthy`, allows one on
+    // `unknown`, and REFUSES the whole document if `healthy` or `absent` carries
+    // one — "absent probe unexpectedly carried an error". This carried one, so
+    // hab read the document as unparsed and paged health-not-measured: an alarm
+    // about the alarm, on a service that was simply not running yet. Measured in
+    // production 2026-09-11 14:25:51Z, the first thing the live probe did.
+    //
+    // The explanation is not lost, only moved: `facts` is free-form and is
+    // carried through by the same parser.
+    facts: {
+      why,
       resolution: [
         "Start the service — `yrd queue up` writes this document at the end of every round.",
         "A service that IS running and has not finished its first round has not written one yet.",
