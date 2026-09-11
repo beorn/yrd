@@ -22,7 +22,13 @@ export type YrdQueueRunnerDeclaration = Readonly<{
 }>
 
 export const yrdQueueRunnerDeclarations: readonly YrdQueueRunnerDeclaration[] = Object.freeze([
-  { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@cto" },
+  // OWNER, changed 2026-09-11 on @cto's own recommendation. Item 5 of
+  // @i/10-yrd/24395 made this declaration bite: before it, an unhealthy page
+  // went to the fleet default whatever this said, so a misdeclaration here cost
+  // nothing. Now it decides who is woken. @cto authors nothing and cannot
+  // unstick a round; the cure for a stuck queue is queue operation, so the page
+  // goes to the seat that can act on it.
+  { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@ci" },
 ])
 
 export default {
