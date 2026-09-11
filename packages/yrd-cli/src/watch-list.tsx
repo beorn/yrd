@@ -24,25 +24,14 @@ import { clocks, type Row, type WatchRow } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { clock, friendlyPath, mediaDuration, runShortName, stateColor, stateGlyph } from "./watch-format.ts"
 
-/** The status filter buckets, in the order the pills show them (items 9, 32). */
-export const BUCKETS = ["open", "running", "done", "failed"] as const
-export type StatusBucket = (typeof BUCKETS)[number]
+// The bucket derivation moved to `watch-buckets.ts`, a module with no renderer
+// in it, so the `--json` payload can read the SAME one without loading React
+// (@i/10-yrd/24486 row 5). Re-exported here because every existing caller
+// imports it from this module, and because two derivations of one fact is how
+// a marker and a list come to disagree.
+import { BUCKETS, bucketOf, type StatusBucket } from "./watch-buckets.ts"
 
-/** Which bucket a row is in — read off the state and the live overlay, decided nowhere else. */
-export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
-  if (row.live !== undefined) return "running"
-  switch (row.state) {
-    case "merged":
-    case "direct":
-      return "done"
-    case "failed":
-      return "failed"
-    case "queued":
-    case "checked":
-    case "stuck":
-      return "open"
-  }
-}
+export { BUCKETS, bucketOf, type StatusBucket }
 
 /** One queue as the top line shows it (pre-M8 exactly one): the digit, the friendly path and the branch. */
 export type WatchQueue = Readonly<{

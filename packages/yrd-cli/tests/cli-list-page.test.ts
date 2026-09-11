@@ -198,12 +198,38 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(colored.stdout).toBe(plain.stdout)
     expect(plain.stdout).not.toContain(ESC)
     const document = JSON.parse(plain.stdout) as Record<string, unknown>
-    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "pause"])
+    // `runner` joined the document on 2026-09-11 (@i/10-yrd/24486 row 5). This
+    // assertion is the reason the addition is deliberate rather than incidental:
+    // a `--json` that changes shape breaks every consumer, so the key set is
+    // pinned and a new key has to be argued for here before it ships.
+    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "pause", "runner"])
     expect((document as { observation: unknown }).observation).toMatchObject({ contract: "native", notices: [] })
     const [row] = document["changes"] as readonly Record<string, unknown>[]
     expect(row).toMatchObject({ branch: "task/one", position: 1, state: "queued", submitter: "@dev/10" })
     // The bare-line era's row fields, all still there under their names.
     expect(Object.keys(row!)).toEqual(expect.arrayContaining(["branch", "head", "state", "since", "subject"]))
+  })
+
+  /**
+   * @failure Three rows read `queued` and nothing is working them, and a script
+   *          reading `--json` cannot tell — so a seat submits into an outage on
+   *          the strength of a row that reads exactly as it does when the queue
+   *          is healthy and merely busy. Measured 2026-09-11 during the outage
+   *          this bead is about (@i/10-yrd/24486 row 5).
+   */
+  it("says whether anything is polling, on a QUEUED row and not only on a stuck one", async () => {
+    const work = await queueWithOneChange()
+    const ran = await yrd(work, { color: false }, "list", "--json")
+    expect(ran.exitCode, ran.report).toBe(0)
+    const document = JSON.parse(ran.stdout) as { changes: readonly { state: string }[]; runner: Record<string, unknown> }
+    // The state a submitter ARRIVES INTO, which is the whole point of the row:
+    // the answer must be there when nothing is stuck.
+    expect(document.changes[0]?.state).toBe("queued")
+    expect(document.runner).toMatchObject({ health: expect.any(String) as string })
+    expect(["processing", "idle", "silent", "absent"]).toContain(document.runner["health"])
+    // Never a blank and never a zero: with no journal it says where it looked.
+    if (document.runner["health"] === "absent") expect(document.runner["absent"]).toEqual(expect.any(String))
+    expect(document.runner["journalDir"]).toEqual(expect.any(String))
   })
 })
 
@@ -316,7 +342,18 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     // breakage of it, so it is made on BOTH spellings rather than one. `scope`
     // joins the shape here (AC1): a zero-row filter is exactly the case that
     // must say what it matched against, and JSON gets the same notice the page does.
-    expect(Object.keys(documentOf(flagged)).sort()).toEqual(["changes", "journal", "observation", "pause", "scope"])
+    // `runner` is here for the same reason and is arguably needed MOST here: a
+    // reader who selected nothing has the least evidence of all, and "no rows"
+    // reads identically whether the queue is empty or nothing is polling
+    // (@i/10-yrd/24486 row 5).
+    expect(Object.keys(documentOf(flagged)).sort()).toEqual([
+      "changes",
+      "journal",
+      "observation",
+      "pause",
+      "runner",
+      "scope",
+    ])
     expect(documentOf(flagged)["changes"], flagged.report).toEqual([])
     expect(documentOf(positional)["changes"], positional.report).toEqual([])
     // And 22301's own specimen, the other way round: a non-matching state must
