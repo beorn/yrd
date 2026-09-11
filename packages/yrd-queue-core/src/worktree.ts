@@ -436,6 +436,91 @@ export async function checkedTree(
   return { base, candidate }
 }
 
+/** One file the candidate changed, as the merge commit records it and as it lies on disk. */
+export type JudgedFile = Readonly<{
+  path: string
+  /** The blob the merge commit records at `path`. */
+  committed: string
+  /** The bytes actually on disk in the judged root, hashed; `absent` if the file is not there. */
+  ondisk: string
+  same: boolean
+}>
+
+/**
+ * WHAT THE CHECKS ARE ABOUT TO READ, HASHED — the answer to "was this the right
+ * tree", asked before anything is judged rather than reconstructed afterwards.
+ *
+ * 24573: the queue judged a change on a merge root whose `tools/affected-tests.ts`
+ * did not carry a symbol the candidate had added, on a file the other side had
+ * not touched in the entire range. Three rounds of a good change were spent on
+ * it, and nobody could say which step produced the wrong bytes, because the root
+ * is torn down as the run ends and every diagnosis had to be an inference from
+ * behaviour. Behaviour cannot separate `the module was stale` from `my logic is
+ * wrong`; both read as `the answer is not what I expected`.
+ *
+ * THIS COMPARISON IS DELIBERATELY SELF-REFERENTIAL. It asks whether the root
+ * contains the commit it CLAIMS to be — the blob oid the merge commit records
+ * against the hash of the bytes on disk — and takes no candidate sha as input.
+ * A check given the candidate sha can be fooled by being handed the wrong one;
+ * this cannot. A disagreement names root construction outright. Agreement means
+ * the bytes were right and whatever went wrong lives above the filesystem, in
+ * resolution, which is the half no instrument could reach.
+ *
+ * ONLY THE PATHS THE CANDIDATE CHANGED, because those are the ones a stale tree
+ * silently reverts and the only ones worth two hashes each. Gitlinks are skipped:
+ * a submodule path is a directory here and its pin is already journalled by the
+ * settle rows.
+ *
+ * A file the merge DELETED is reported with `ondisk: "absent"` and `same: true`
+ * rather than omitted — the row says the deletion was carried out, which is a
+ * different fact from the path never having been looked at.
+ */
+export async function judgedTreeDigest(
+  worktree: string,
+  tree: CheckedTree,
+  process?: Process,
+  selection?: GitSelection,
+  options: GitInvocationOptions = {},
+): Promise<readonly JudgedFile[]> {
+  const wt = gitIn(worktree, process, selection, options)
+  // --raw carries the mode, which is the only way to tell a gitlink from a file
+  // without a second call per path; -z because a path may carry anything.
+  const raw = await wt(["diff", "--raw", "--no-renames", "-z", tree.base, tree.candidate])
+  const fields = raw.split("\0")
+  const files: JudgedFile[] = []
+  for (let index = 0; index < fields.length; index += 1) {
+    const meta = fields[index]
+    if (meta === undefined || !meta.startsWith(":")) continue
+    const path = fields[index + 1]
+    if (path === undefined || path === "") continue
+    index += 1
+    // ":<srcmode> <dstmode> <srcsha> <dstsha> <status>"
+    const destinationMode = meta.slice(1).split(" ")[1]
+    if (destinationMode === "160000") continue
+    let committed: string
+    try {
+      committed = (await wt(["rev-parse", `${tree.candidate}:${path}`])).trim()
+    } catch {
+      // The merge commit does not carry this path: it was DELETED by the change.
+      // silent-fallback-allow: absence here is the answer, not a failure to get
+      // one, and the row below reports it as such rather than dropping the path.
+      committed = "deleted"
+    }
+    let ondisk: string
+    try {
+      ondisk = (await wt(["hash-object", "--", path])).trim()
+    } catch {
+      // silent-fallback-allow: the file is not on disk. That is a REPORTED
+      // finding — the row carries `absent` and is compared below — not a
+      // swallowed error.
+      ondisk = "absent"
+    }
+    const same = committed === "deleted" ? ondisk === "absent" : committed === ondisk
+    files.push({ committed, ondisk, path, same })
+  }
+  return files
+}
+
 /**
  * A setup that did not pass. Worktree lifecycle belongs to the caller: the
  * queue removes its ephemeral tree, while an environment keeps its retained

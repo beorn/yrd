@@ -83,6 +83,15 @@ export const LOG_KINDS = [
   "reap",
   "orphan",
   "git",
+  // 24573: what the checks are about to read, hashed — one row per path the
+  // candidate changed, carrying the blob the merge commit records and the hash
+  // of the bytes on disk. A `judged` row with same=false says the root does not
+  // contain the commit it claims to be, which is the question three seats could
+  // not answer because the root was gone by the time anyone looked.
+  "judged",
+  // The merge root a failing run KEPT, and where. Written only when a check
+  // fails, so the next investigator reads bytes instead of inferring.
+  "retained",
   "observation",
   // A store the queue's reference repository had to be given before a compose
   // could borrow from it, and a compose that succeeded without borrowing. Two

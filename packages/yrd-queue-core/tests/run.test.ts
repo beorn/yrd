@@ -835,16 +835,29 @@ describe("a queue run", () => {
       (record) => record.kind === "check" && record.phase === "merge" && record.end === undefined,
     )
     expect(mergeCheck).toBeGreaterThan(0)
-    const beforeMergeCheck = runRecords
-      .slice(0, mergeCheck)
-      .filter((record) => record.kind === "git")
-      .slice(-2)
-    expect(beforeMergeCheck.map((record) => record.args)).toEqual([
-      ["rev-parse", "HEAD"],
-      ["merge-base", after, w.target],
-    ])
-    expect(beforeMergeCheck[0]?.cwd).toBe(beforeMergeCheck[1]?.cwd)
-    expect(beforeMergeCheck[0]?.cwd).not.toBe(w.work)
+    // The pair is found rather than taken from the end of the list. It used to
+    // be `.slice(-2)`, which silently encoded "nothing else runs between the
+    // re-read and the check" — true until 24573's judged-tree digest landed
+    // between them, and the assertion then failed for a reason that had nothing
+    // to do with what it exists to prove. The invariant is the PAIRING and its
+    // cwd, not adjacency to the check.
+    const gitBeforeMergeCheck = runRecords.slice(0, mergeCheck).filter((record) => record.kind === "git")
+    const mergeBaseAt = gitBeforeMergeCheck.findLastIndex(
+      (record) => Array.isArray(record.args) && record.args.join(" ") === `merge-base ${after} ${w.target}`,
+    )
+    expect(mergeBaseAt, "the merged tree's base must be re-read before the merge check").toBeGreaterThan(0)
+    const reread = gitBeforeMergeCheck[mergeBaseAt - 1]
+    expect(reread?.args).toEqual(["rev-parse", "HEAD"])
+    expect(reread?.cwd).toBe(gitBeforeMergeCheck[mergeBaseAt]?.cwd)
+    expect(reread?.cwd).not.toBe(w.work)
+
+    // 24573: and the digest that says WHAT the checks are about to read must
+    // itself run before them. Without this the queue can judge a root whose
+    // bytes are not the merge commit's and nothing records that it happened.
+    const judgedRows = runRecords.filter((record) => record.kind === "judged")
+    expect(judgedRows.length, "the judged-tree digest must run before the merge checks").toBeGreaterThan(0)
+    expect(judgedRows.every((record) => record.same === true)).toBe(true)
+    expect(runRecords.findIndex((record) => record.kind === "judged")).toBeLessThan(mergeCheck)
   })
 
   it.each([

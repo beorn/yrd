@@ -95,6 +95,7 @@ import {
   type PreparedWorktree,
   type Reaped,
   type Worktree,
+  judgedTreeDigest,
 } from "./worktree.ts"
 
 export type QueueRunOptions = Readonly<{
@@ -1618,6 +1619,12 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
   const composed = await composeCandidate(run, entry, "merge")
   if (composed.kind === "failed") return candidateFailure(run, entry, composed.detail, composed.worktree)
   const { mergeCommit, rootChanges, worktree, publishing } = composed
+  // 24573: the path to KEEP instead of removing, set when a check fails or the
+  // digest above disagrees. @dev/4 went for this root three times on one branch
+  // and found it already gone each time, so every diagnosis had to be an
+  // inference from behaviour — and behaviour cannot separate a stale module
+  // from a wrong test. Success still tears down: nothing is pooled or reused.
+  let retained: string | undefined
   try {
     const wt = gitIn(
       worktree.path,
@@ -1652,6 +1659,48 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
       run.options.selection,
       gitInvocationOptions(run.options, run.log),
     )
+    // 24573: BEFORE anything is judged, say what is about to be read. One row
+    // per path the candidate changed, carrying the blob the merge commit
+    // records and the hash of the bytes actually on disk. The comparison is
+    // self-referential on purpose — it asks whether this root contains the
+    // commit it claims to be and takes no candidate sha as input, so it cannot
+    // be fooled by being handed the wrong one. A disagreement names root
+    // construction; agreement leaves resolution, and until this row existed
+    // nobody could tell those apart once the root was torn down.
+    const judged = await judgedTreeDigest(
+      worktree.path,
+      merged,
+      run.options.process,
+      run.options.selection,
+      gitInvocationOptions(run.options, run.log),
+    )
+    for (const file of judged) {
+      run.log.write({
+        branch,
+        committed: file.committed,
+        head,
+        kind: "judged",
+        ondisk: file.ondisk,
+        path: file.path,
+        phase: "merge",
+        same: file.same,
+      })
+    }
+    const divergent = judged.filter((file) => !file.same)
+    if (divergent.length > 0) {
+      // NOT a check failure and deliberately not fatal: the queue's own ground
+      // is wrong, which is nobody's submission, and a change must not be
+      // attributed to a submitter for it. It is loud, named, and retained.
+      retained = worktree.path
+      run.log.write({
+        branch,
+        head,
+        kind: "observation",
+        paths: divergent.map((file) => `${file.path} committed=${file.committed} ondisk=${file.ondisk}`),
+        phase: "merge",
+        why: `the merge root does not contain ${mergeCommit.slice(0, 12)} at ${divergent.length} path(s) the candidate changed`,
+      })
+    }
     const results = await runPhase(run, entry, "merge", worktree.path, merged)
     const stuckOne = results.find((result) => result.result === "stuck")
     if (stuckOne !== undefined) {
@@ -1670,6 +1719,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     }
     const failing = results.filter((result) => result.result === "fail")
     if (failing.length > 0) {
+      retained = worktree.path
       return await attributedFailure(run, entry, results, failing, "merge", rootChanges?.changes ?? [])
     }
     // Pass. The merge is ours to make only while the target is still where this
@@ -1761,7 +1811,13 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
     await run.steps.ended(run, entry, "merged", mergedRecord, mergedRecord)
     return "merged"
   } finally {
-    await worktree.remove()
+    if (retained === undefined) {
+      await worktree.remove()
+    } else {
+      // Say where it is, in the journal that is always written, or a retained
+      // root is just disk nobody knows to read.
+      run.log.write({ branch, head, kind: "retained", path: retained, phase: "merge" })
+    }
   }
 }
 
