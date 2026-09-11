@@ -156,11 +156,14 @@ function buildProgram(
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
     .command("pause")
-    .description("stop checking and merging while the service keeps the queue visible")
+    .description(
+      "refuse new submissions AND stop checking and merging, while the service keeps the queue visible; " +
+        "submit is the command a pause actually refuses, so work cannot be queued up during one",
+    )
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who paused the queue")
     .option("--queue <value>", QUEUE_HELP)
-    .requiredOption("--reason <text>", "why checking and merging are paused")
+    .requiredOption("--reason <text>", "why submissions are refused and checking and merging are paused")
     .action(async (options) => {
       const declared = options as PauseOptions & { reason: string }
       const location = await resolveQueueLocation(cwd(), declared.queue, env)
@@ -183,7 +186,7 @@ function buildProgram(
     })
   queue
     .command("resume")
-    .description("resume checking and merging on the next service interval")
+    .description("admit submissions again immediately, and resume checking and merging on the next service interval")
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who resumed the queue")
     .option("--queue <value>", QUEUE_HELP)
