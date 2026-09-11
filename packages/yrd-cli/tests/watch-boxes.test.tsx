@@ -61,7 +61,7 @@ describe("RunnerBox `$` marker pulse, live (item 13)", () => {
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
-          <RunnerBox facts={RUNNING} label="main" inLine={1} columns={70} live />
+          <RunnerBox facts={RUNNING} label="main" inLine={1} underCheck columns={70} live />
         </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols: 72, rows: 12, autoRender: true },
