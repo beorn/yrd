@@ -88,7 +88,7 @@ export function RunnerBox({
   facts: RunnerFacts
   /** The queue's name, for the run's short form. */
   label: string
-  /** How many changes wait in line: silence only matters while something waits. */
+  /** How many changes wait in line. Silence is decided without it; the rail says which of the two silences this is. */
   inLine: number
   /** The pane's width, so the command wraps with a hanging indent bounded to three rows (item 29). */
   columns: number
@@ -97,7 +97,7 @@ export function RunnerBox({
   live?: boolean
 }) {
   const now = useNow()
-  const health = runnerHealth(facts, inLine, now)
+  const health = runnerHealth(facts, now)
   const color = HEALTH_COLOR[health]
   const latest = facts.latest
   const sinceWrite = latest === undefined ? undefined : now.getTime() - latest.lastWriteAt.getTime()
@@ -128,9 +128,11 @@ export function RunnerBox({
   const silentRows =
     latest !== undefined && health === "silent"
       ? boundedHangingLines(
-          `RUNNER SILENT — no journal write for ${mediaDuration(sinceWrite ?? 0)} while ${String(inLine)} ${
-            inLine === 1 ? "change waits" : "changes wait"
-          } in line; is yrd-service up? (hab ps yrd-service)`,
+          `RUNNER SILENT — no journal write for ${mediaDuration(sinceWrite ?? 0)}${
+            inLine === 0
+              ? " and nothing is in line, so a change submitted now would not be picked up"
+              : ` while ${String(inLine)} ${inLine === 1 ? "change waits" : "changes wait"} in line`
+          }; is yrd-service up? (hab ps yrd-service)`,
           railWidth,
           SILENT_MAX_ROWS,
         )

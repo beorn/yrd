@@ -204,12 +204,28 @@ export const SILENT_AFTER_MS = 10 * 60 * 1000
 /**
  * ONE derivation of the service's health. `running` while the newest run's
  * process is alive; `absent` when there is no journal on this machine at all;
- * `silent` when changes wait in line and nothing has written for
- * {@link SILENT_AFTER_MS}; `idle` otherwise.
+ * `silent` when nothing has written for {@link SILENT_AFTER_MS}; `idle`
+ * otherwise.
+ *
+ * SILENCE DOES NOT WAIT FOR A QUEUE (@i/10-yrd/24486). It used to also require
+ * a change in line, on the reading that silence only matters while something
+ * waits. It matters more when nothing does: that is the state a submitter
+ * ARRIVES INTO, and they submit on the strength of it. Measured 2026-09-11
+ * during an outage — three rows sat queued with no live check on any of them
+ * while the service was down, and a fourth seat submitted into it, because
+ * every row read `queued`, which is what a row reads when the queue is healthy
+ * and merely busy.
+ *
+ * The journal is a heartbeat and that is what makes the weaker condition
+ * sound: a round writes one whether or not it has work, so the newest mtime
+ * moves on the service's own cadence — measured at about 2:05 on the live
+ * queue, nearly five times inside this ceiling — and it keeps moving through a
+ * PAUSE, where a round still opens and records before it stops. So an idle
+ * healthy queue is never called silent, whatever is or is not in line.
  */
-export function runnerHealth(facts: RunnerFacts, inLine: number, now: Date): RunnerHealth {
+export function runnerHealth(facts: RunnerFacts, now: Date): RunnerHealth {
   if (facts.latest === undefined) return "absent"
   if (facts.latest.alive) return "running"
-  if (inLine > 0 && now.getTime() - facts.latest.lastWriteAt.getTime() > SILENT_AFTER_MS) return "silent"
+  if (now.getTime() - facts.latest.lastWriteAt.getTime() > SILENT_AFTER_MS) return "silent"
   return "idle"
 }

@@ -157,15 +157,41 @@ describe("runnerHealth, the one word", () => {
   })
 
   it("is running while the run's process lives, whatever else is true", () => {
-    expect(runnerHealth(facts({ alive: true, lastWriteAt: new Date(0) }), 5, NOW)).toBe("running")
+    expect(runnerHealth(facts({ alive: true, lastWriteAt: new Date(0) }), NOW)).toBe("running")
   })
 
-  it("is absent with no journal, silent past the ceiling only while something waits in line, idle otherwise", () => {
-    expect(runnerHealth({ journalDir: "/w/logs", absent: "none" }, 3, NOW)).toBe("absent")
+  it("is absent with no journal, silent past the ceiling, idle otherwise", () => {
+    expect(runnerHealth({ journalDir: "/w/logs", absent: "none" }, NOW)).toBe("absent")
     const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
-    expect(runnerHealth(quiet, 1, NOW)).toBe("silent")
-    expect(runnerHealth(quiet, 0, NOW)).toBe("idle")
-    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), 3, NOW)).toBe("idle")
+    expect(runnerHealth(quiet, NOW)).toBe("silent")
+    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), NOW)).toBe("idle")
+  })
+
+  /**
+   * @failure An empty queue whose service is dead reads `idle`, so the seat
+   *          about to submit into it sees a healthy queue and submits.
+   */
+  it("is silent on an EMPTY queue too — the state a submitter arrives into (@i/10-yrd/24486)", () => {
+    const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
+    expect(runnerHealth(quiet, NOW)).toBe("silent")
+  })
+
+  /**
+   * @failure The weaker silence condition turns a healthy queue between polls
+   *          into a false alarm, and a box that cries wolf gets ignored.
+   * @level l1
+   */
+  it("NEGATIVE CONTROL: a healthy queue between polls is never silent", () => {
+    // The live queue's measured cadence, 2026-09-11: journals at 09:01:16,
+    // 09:03:21, 09:05:26, 09:07:30, 09:09:35, 09:11:40 — about 2:05 apart,
+    // nearly five times inside the ceiling, and written whether or not the
+    // round had work.
+    const cadenceMs = 125_000
+    expect(cadenceMs * 4).toBeLessThan(SILENT_AFTER_MS)
+    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs) }), NOW)).toBe("idle")
+    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs * 4) }), NOW)).toBe("idle")
+    // And the queue depth cannot change that answer, because the signature no
+    // longer admits one: whatever is in line, these are the same two facts.
   })
 })
 
@@ -223,6 +249,25 @@ describe("the RUNNER box", () => {
     expect(text).toContain("$ yrd queue up · last run main#")
     expect(text).toContain("wrote 0:02 ago")
     expect(text).not.toContain("SILENT")
+  })
+
+  /**
+   * @failure The box reads `idle` at the exact moment a seat is deciding
+   *          whether to submit, and the submission goes into a dead queue.
+   */
+  it("goes loud on an EMPTY queue too, and says what submitting now would do (@i/10-yrd/24486)", async () => {
+    const text = await paint(latest({ lastWriteAt: new Date(NOW.getTime() - 12 * 60_000) }), 0)
+
+    // The rail hangs across rows, so read the sentence with the box chrome
+    // taken out rather than asserting on wherever this width happens to wrap.
+    const rail = text.replaceAll("│", " ").replaceAll(/\s+/gu, " ")
+
+    expect(text).toContain("silent 12:00")
+    expect(rail).toContain("RUNNER SILENT — no journal write for 12:00")
+    expect(rail).toContain("nothing is in line, so a change submitted now would not be picked up")
+    expect(rail).toContain("is yrd-service up? (hab ps yrd-service)")
+    // Never the in-line sentence, which would be a lie at zero.
+    expect(rail).not.toContain("wait in line")
   })
 
   it("goes loud when changes wait and nothing has written past the ceiling", async () => {
