@@ -1176,7 +1176,7 @@ function renderer(root: ConditionalLogger | undefined): (record: LogRecord) => v
   }
 }
 
-function summarize(kind: string, rest: Readonly<Record<string, unknown>>): string {
+export function summarize(kind: string, rest: Readonly<Record<string, unknown>>): string {
   const where = [rest.branch, typeof rest.head === "string" ? rest.head.slice(0, 12) : undefined]
     .filter(Boolean)
     .join(" at ")
@@ -1195,9 +1195,17 @@ function summarize(kind: string, rest: Readonly<Record<string, unknown>>): strin
     case "result":
       return `${String(rest.name)} ${String(rest.result)} for ${where}${rest.whose === undefined ? "" : `, ${String(rest.whose)}'s`}`
     case "settle":
-      return rest.state === "left-off-main"
-        ? `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} left off submodule main ${String(rest.to).slice(0, 12)}`
-        : `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} -> ${String(rest.to).slice(0, 12)} (submodule main)`
+      // The arrow form says a pin MOVED. A nested pin left behind its own main
+      // did not move, and rendering it as a raise would put a landing in the log
+      // that never happened.
+      switch (rest.state) {
+        case "left-off-main":
+          return `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} left off submodule main ${String(rest.to).slice(0, 12)}`
+        case "kept-behind":
+          return `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} kept behind submodule main ${String(rest.to).slice(0, 12)}`
+        default:
+          return `${where}: ${String(rest.path)} ${String(rest.from).slice(0, 12)} -> ${String(rest.to).slice(0, 12)} (submodule main)`
+      }
     case "merge":
       return `${where} merged as ${String(rest.commit).slice(0, 12)}`
     case "message":

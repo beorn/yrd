@@ -279,6 +279,74 @@ async function submoduleMain(w: World): Promise<string> {
   return tip
 }
 
+/**
+ * One level deeper than `world()`: `apps/leaf` inside the submodule, which is
+ * the shape `km/apps/maddoc` has in production.
+ *
+ * The leaf's own main is then moved ON, so the pin the submodule records for it
+ * is BEHIND. That is the ordinary resting state of a nested pin -- the leaf's
+ * main moves independently of the parent that records it -- and it is what
+ * makes `kept-behind` the common case rather than an exotic one.
+ */
+async function addNestedSubmodule(
+  w: World,
+): Promise<Readonly<{ leafRecorded: string; leafMain: string; submoduleMain: string }>> {
+  const root = join(w.work, "..")
+  const seed = gitIn(root)
+  // A fourth transport rewrite, beside the three `world()` declared. Ownership
+  // is decided on the hosted identity, so the leaf needs one of its own or
+  // git-super records it `as-written` and never asks its main anything.
+  process.env.GIT_CONFIG_COUNT = "4"
+  process.env.GIT_CONFIG_KEY_3 = `url.${join(root, "leaf.git")}.insteadOf`
+  process.env.GIT_CONFIG_VALUE_3 = "https://git-super.test/owned/leaf.git"
+
+  const leaf = join(root, "leaf.git")
+  const leafWork = join(root, "leaf-work")
+  await seed(["init", "--quiet", "--bare", "--initial-branch=main", leaf])
+  await seed(["clone", "--quiet", leaf, leafWork])
+  const lg = gitIn(leafWork)
+  await lg(["config", "user.email", "queue@yrd.test"])
+  await lg(["config", "user.name", "yrd"])
+  await lg(["remote", "set-url", "origin", "https://git-super.test/owned/leaf.git"])
+  await lg(["checkout", "--quiet", "-b", "main"])
+  writeFileSync(join(leafWork, "leaf.txt"), "leaf one\n")
+  await lg(["add", "leaf.txt"])
+  await lg(["commit", "--quiet", "-m", "leaf one"])
+  await lg(["push", "--quiet", "origin", "main"])
+  const leafRecorded = (await lg(["rev-parse", "HEAD"])).trim()
+
+  const submoduleWork = join(root, "submodule-work")
+  const sg = gitIn(submoduleWork)
+  await sg(["checkout", "--quiet", "main"])
+  await sg(["submodule", "add", "--quiet", "https://git-super.test/owned/leaf.git", "apps/leaf"])
+  await sg(["add", ".gitmodules", "apps/leaf"])
+  await sg(["commit", "--quiet", "-m", "the submodule gains a nested app"])
+  await sg(["push", "--quiet", "origin", "main"])
+  const submoduleMain = (await sg(["rev-parse", "HEAD"])).trim()
+
+  // The leaf's main moves on AFTER the submodule pinned it, so the recorded
+  // nested pin is behind its own main without anybody doing anything wrong.
+  writeFileSync(join(leafWork, "leaf.txt"), "leaf two\n")
+  await lg(["commit", "--quiet", "-am", "leaf two"])
+  await lg(["push", "--quiet", "origin", "main"])
+  const leafMain = (await lg(["rev-parse", "HEAD"])).trim()
+
+  const sub = gitIn(join(w.work, "submodule"))
+  await w.git(["checkout", "--quiet", "main"])
+  await sub(["fetch", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+  await sub(["checkout", "--quiet", submoduleMain])
+  // The queue BORROWS from this checkout as its reference, and git-super
+  // refuses to borrow from a reference that carries no store for a gitlink --
+  // at any depth. Without this the run ends stuck on "the reference holds no
+  // object store for apps/leaf", which is the materializer doing its job and
+  // says nothing about the state under test.
+  await sub(["submodule", "update", "--init", "--recursive"])
+  await w.git(["add", "submodule"])
+  await w.git(["commit", "--quiet", "-m", "root records the submodule that carries the nested app"])
+  await w.git(["push", "--quiet", "origin", "main"])
+  return { leafMain, leafRecorded, submoduleMain }
+}
+
 describe("settling gitlinks", () => {
   // D1 (24454, 2026-09-10): a pin that diverged from its submodule's main is
   // the submitter's defect and FAILS back to them. It used to wait (H5) for a
@@ -1083,5 +1151,63 @@ describe("settling gitlinks", () => {
       expect(rows.map((row) => row.scope)).toEqual(["full", "full"])
       expect(readFileSync(String(rows[0]?.log), "utf8")).toContain("ONLY=unset")
     })
+  })
+
+  /**
+   * 24454 row 4, the consumer half. git-super now classifies NESTED gitlinks and
+   * emits `kept-behind` for a nested pin behind its own main. This queue reads
+   * that JSON as its ruled command boundary, so a state it does not know is a
+   * throw out of `superMerge` and into composition -- and km pins maddoc, whose
+   * main moves on its own, so every km change would have carried one.
+   *
+   * The whole point is that it is READ and LOGGED and NOT PUBLISHED. A nested pin
+   * lives inside its parent's commit; publishing it would move a main no root
+   * merge is entitled to move.
+   */
+  it("reads a nested kept-behind pin, logs it, and publishes nothing for it", async () => {
+    const w = await world()
+    const nested = await addNestedSubmodule(w)
+    // The parent must be AHEAD or the planner does not descend into it at all,
+    // and this arm would assert on a level that was never walked.
+    const ahead = await aheadOfSubmodule(w, "five")
+    const head = await submitGitlink(w, "task/nested-behind", ahead)
+
+    const outcome = await queueRun(await w.options())
+
+    expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/nested-behind"] })
+    const target = await remoteTip(w.git, "refs/heads/main")
+
+    const settle = readFileSync(outcome.log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.kind === "settle")
+    // READ, and read as itself: the nested path, on its own rung, measured
+    // against the leaf's main rather than the parent's.
+    expect(settle).toContainEqual(
+      expect.objectContaining({
+        from: nested.leafRecorded,
+        path: "submodule/apps/leaf",
+        state: "kept-behind",
+        to: nested.leafMain,
+      }),
+    )
+    expect(await w.git(["show", "-s", "--format=%(trailers:key=Settled,valueonly)", target])).toContain(
+      `submodule/apps/leaf@${nested.leafRecorded} kept-behind submodule-main@${nested.leafMain}`,
+    )
+
+    // NOT PUBLISHED. The parent's main moved because the parent was Ahead; the
+    // leaf's main did not move at all, and the landing record names only the
+    // parent as published.
+    expect(await submoduleMain(w)).toBe(ahead)
+    expect((await gitIn(join(w.work, "..", "leaf-work"))(["ls-remote", "origin", "refs/heads/main"])).trim()).toContain(
+      nested.leafMain,
+    )
+    const merged = (
+      await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/nested-behind", head })))
+    ).find((record) => record.kind === "merged")
+    expect(merged).toBeDefined()
+    expect(trailer(merged!, "Published")).toBe(`submodule ${nested.submoduleMain} -> ${ahead}`)
+    expect(trailer(merged!, "Published")).not.toContain("apps/leaf")
   })
 })

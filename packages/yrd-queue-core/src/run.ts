@@ -840,7 +840,18 @@ type SettledGitlink = Readonly<{
   path: string
   from: string
   to: string
-  state: "raised" | "kept-ahead" | "as-written" | "left-off-main" | "not-run"
+  /**
+   * `kept-behind` is a NESTED pin the planner classified and deliberately left
+   * alone: behind its own main, recorded inside its parent component's commit,
+   * which a root merge does not rewrite (24454 row 4). It is neither a
+   * publication nor a refusal, so it is logged like any other settle row and
+   * never reaches `publishing`.
+   *
+   * It is the NORMAL state for km/apps/maddoc, not a rare one -- maddoc main
+   * moves independently of the pin km records -- so refusing it would refuse
+   * every km change whose maddoc pin had not caught up.
+   */
+  state: "raised" | "kept-ahead" | "kept-behind" | "as-written" | "left-off-main" | "not-run"
 }>
 
 type SuperMergeResult = Readonly<{
@@ -996,7 +1007,9 @@ function readSuperMergeResult(value: unknown): SuperMergeResult {
       typeof entry.path !== "string" ||
       typeof entry.from !== "string" ||
       typeof entry.to !== "string" ||
-      !new Set(["raised", "kept-ahead", "as-written", "left-off-main", "not-run"]).has(String(entry.state))
+      !new Set(["raised", "kept-ahead", "kept-behind", "as-written", "left-off-main", "not-run"]).has(
+        String(entry.state),
+      )
     ) {
       throw new Error(`git-super merge gitlink ${String(index)} is incomplete`)
     }
