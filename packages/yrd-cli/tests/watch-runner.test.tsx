@@ -17,7 +17,7 @@ import { render } from "silvery/test"
 import { runId } from "@yrd/queue-core"
 import { RunnerBox } from "../src/watch-boxes.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
-import { SILENT_AFTER_MS, readRunnerFacts, runnerHealth, type RunnerFacts } from "../src/watch-runner.ts"
+import { SILENT_AFTER_MS, readRunnerFacts, runnerFact, runnerHealth, type RunnerFacts } from "../src/watch-runner.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
@@ -361,5 +361,82 @@ describe("the RUNNER box", () => {
     expect(lines.slice(command, command + 3).join("\n")).toContain("…")
     expect(app.text).toContain("progress")
     app.unmount()
+  })
+})
+
+/**
+ * @failure  `yrd queue list --json` carries no way to ask whether anything is
+ *           polling, so a script sees three QUEUED rows and cannot tell that
+ *           nothing is working them. Measured during the 2026-09-11 outage:
+ *           `queued rows: 3 | any running: False`, and a fourth seat submitted
+ *           into it, because every row reads `queued` when the queue is healthy
+ *           and merely busy too (@i/10-yrd/24486 row 5).
+ * @level    l1 (the shaper, against constructed facts)
+ * @consumer any script or seat reading `queue list --json` during an outage
+ */
+describe("runnerFact, the machine reader's half of the RUNNER box", () => {
+  const facts = (over: Partial<NonNullable<RunnerFacts["latest"]>>): RunnerFacts => ({
+    journalDir: "/w/logs",
+    latest: { alive: false, id: "q-x", lastWriteAt: NOW, startedAt: NOW, ...over },
+  })
+
+  it("says a live queue is live, and shows the number silence is decided on", () => {
+    const fact = runnerFact(facts({}), new Date(NOW.getTime() + 60_000), false)
+    expect(fact.health).toBe("idle")
+    expect(fact.latestRun?.sinceWriteMs).toBe(60_000)
+    expect(fact.journalDir).toBe("/w/logs")
+    expect(fact.absent).toBeUndefined()
+  })
+
+  /**
+   * THE NEGATIVE CONTROL THE BEAD ASKS FOR, and it is the half that decides
+   * whether this line is worth printing: a healthy queue with rows merely
+   * waiting their turn must NOT be reported as having no poller. Trading a
+   * silent failure for a noisy one is not an improvement.
+   */
+  it("a healthy queue with work waiting is NOT reported as having no poller", () => {
+    const waiting = runnerFact(facts({}), new Date(NOW.getTime() + 60_000), false)
+    expect(waiting.health).toBe("idle")
+    const working = runnerFact(facts({}), new Date(NOW.getTime() + 60_000), true)
+    expect(working.health).toBe("processing")
+    for (const fact of [waiting, working]) expect(fact.health).not.toBe("silent")
+  })
+
+  it("says SILENT when the journal has stopped, whatever the rows claim", () => {
+    const now = new Date(NOW.getTime() + SILENT_AFTER_MS + 1)
+    expect(runnerFact(facts({ alive: true }), now, false).health).toBe("silent")
+    // A service that died mid-check leaves a row still marked live; the journal
+    // outranks it, in the payload exactly as in the box.
+    expect(runnerFact(facts({ alive: true }), now, true).health).toBe("silent")
+  })
+
+  /**
+   * Never a blank and never a zero: with no journal at all the payload says
+   * ABSENT and carries the sentence naming where it looked. A reader that got
+   * `health: "idle"` with no run would have been told the queue was fine.
+   */
+  it("carries the sentence when there is no journal here at all", () => {
+    const absent: RunnerFacts = { journalDir: "/w/logs", absent: "no run journals under /w/logs" }
+    const fact = runnerFact(absent, NOW, false)
+    expect(fact.health).toBe("absent")
+    expect(fact.absent).toBe("no run journals under /w/logs")
+    expect(fact.latestRun).toBeUndefined()
+  })
+
+  it("carries the run's pid when the run still claims one", () => {
+    expect(runnerFact(facts({ pid: 4242 }), NOW, false).latestRun?.pid).toBe(4242)
+    expect(runnerFact(facts({}), NOW, false).latestRun?.pid).toBeUndefined()
+  })
+
+  // One derivation, two renderings: the payload must never be able to say a
+  // different word from the box for the same facts.
+  it("agrees with runnerHealth for every shape the box can paint", () => {
+    const now = new Date(NOW.getTime() + 60_000)
+    for (const alive of [true, false]) {
+      for (const underCheck of [true, false]) {
+        const f = facts({ alive })
+        expect(runnerFact(f, now, underCheck).health).toBe(runnerHealth(f, now, underCheck))
+      }
+    }
   })
 })

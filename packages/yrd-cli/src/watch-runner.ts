@@ -256,3 +256,55 @@ export function runnerHealth(facts: RunnerFacts, now: Date, underCheck: boolean)
   if (underCheck) return "processing"
   return "idle"
 }
+
+/**
+ * The runner, as a machine reader sees it (@i/10-yrd/24486 row 5).
+ *
+ * The human page has had this since the RUNNER box landed — one word and a
+ * duration, on every row state. `--json` had nothing: `changes`, `journal`,
+ * `observation`, `pause`, and no way to ask whether anything was polling. That
+ * gap is what produced this bead's own second specimen, `queued rows: 3 | any
+ * running: False` — a script that could count the line but could not tell that
+ * nothing was working it, while a fourth seat submitted into the outage because
+ * every row read `queued`, which is what a row reads when the queue is healthy
+ * and merely busy.
+ *
+ * Same {@link runnerHealth} the box renders, so the page and the payload cannot
+ * disagree; this shapes the facts and derives nothing of its own. `absent`
+ * carries the sentence naming where it looked — never a blank, never a zero.
+ */
+export type RunnerFact = Readonly<{
+  health: RunnerHealth
+  /** Where the journals were looked for; present whatever the health. */
+  journalDir: string
+  /** Why there is no run to show, when there is none. */
+  absent?: string
+  latestRun?: Readonly<{
+    id: string
+    startedAt: string
+    lastWriteAt: string
+    /** Milliseconds since the journal last moved: the number `silent` is decided on. */
+    sinceWriteMs: number
+    pid?: number
+  }>
+}>
+
+export function runnerFact(facts: RunnerFacts, now: Date, underCheck: boolean): RunnerFact {
+  const latest = facts.latest
+  return {
+    health: runnerHealth(facts, now, underCheck),
+    journalDir: facts.journalDir,
+    ...(facts.absent === undefined ? {} : { absent: facts.absent }),
+    ...(latest === undefined
+      ? {}
+      : {
+          latestRun: {
+            id: latest.id,
+            startedAt: latest.startedAt.toISOString(),
+            lastWriteAt: latest.lastWriteAt.toISOString(),
+            sinceWriteMs: now.getTime() - latest.lastWriteAt.getTime(),
+            ...(latest.pid === undefined ? {} : { pid: latest.pid }),
+          },
+        }),
+  }
+}

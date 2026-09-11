@@ -86,7 +86,8 @@ import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
 import { CHECK_GLYPH, clock, diagnosticLines, firstLine, mediaDuration } from "./watch-format.ts"
-import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
+import { bucketOf } from "./watch-buckets.ts"
+import { readRunnerFacts, runnerFact, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
   formatQueueStats,
@@ -647,12 +648,28 @@ export async function coreQueueCommand(
             ? undefined
             : `${String(rows.length)} of ${String(all.length)} change(s) match ${request.terms.join(" or ")}` +
               (rows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
+        const runner = readRunnerFacts(workdir)
         return {
           observation,
           data: {
             observation,
             changes: rows.map((row) => row.row),
             journal: journalFact(journals),
+            // WHETHER ANYTHING IS POLLING, on every row state and not only on
+            // stuck (@i/10-yrd/24486 row 5). The human page has shown this since
+            // the RUNNER box landed; `--json` had no way to ask, which is how a
+            // script reported three queued rows with nothing working them while
+            // a fourth seat submitted into the outage — every row reads `queued`
+            // when the queue is healthy and merely busy, too.
+            //
+            // `underCheck` comes off the rows through the same `bucketOf` the
+            // pills and the box use, so the payload and the page cannot
+            // disagree about it.
+            runner: runnerFact(
+              runner,
+              new Date(),
+              rows.some((item) => bucketOf(item.row) === "running"),
+            ),
             pause: pause ?? null,
             ...(scope === undefined ? {} : { scope }),
           },
@@ -662,7 +679,7 @@ export async function coreQueueCommand(
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
-          runner: readRunnerFacts(workdir),
+          runner,
           // Every row, per run, whatever the filter and the lens: the box counts the queue, not the view.
           decisions: decisionsOfRows(watchRows(all, { journals })),
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
