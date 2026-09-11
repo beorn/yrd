@@ -83,6 +83,12 @@ export default {
         // today — with every unlisted code.
         restart: "on-codes" as const,
         relaunchExitCodes: [0, 1],
+        // 24147: eligibility lives on the service, never the /garage table.
+        garage: {
+          ledgerRoot: "/home/hh/scratch",
+          leaveRule:
+            "ten queue runs in a row that needed no explaining, with at least one merge and one fail among them",
+        },
         // `HabServiceDefinition.owner` is a recognized service key in
         // ag/packages/hab-config. Spreading the registry row's owner here makes
         // a terminal-ending andon page reach the declared owner — @ci today —
