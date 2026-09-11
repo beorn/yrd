@@ -102,7 +102,11 @@ export async function freshWorktree(
   // An invalid commit makes ls-tree fail; only empty output means absence.
   const modules = await git(["ls-tree", commit, "--", ".gitmodules"])
   if (modules.trim() === "") {
-    await git(["worktree", "add", "--quiet", "--detach", path, commit])
+    // A commit that declares no submodules has no boundary for git-super to
+    // cross. `worktreeWithoutSubmodules` re-asks that question rather than
+    // trusting this branch, so a refactor that moves the call cannot silently
+    // take the plain path with a submodule-bearing commit.
+    await worktreeWithoutSubmodules(git, git, commit, ["add", "--quiet", "--detach", path, commit])
   } else {
     if (options.populateReference === true) {
       const gitAt = (cwd: string): Git =>
@@ -635,4 +639,52 @@ function materializedWorktree(value: unknown, path: string, commit: string): boo
     return false
   }
   return considered === (borrowed as number) + (fetched as number) + (absent as number)
+}
+
+/**
+ * The ONE place a raw `git worktree add|remove` is issued, and it proves its own
+ * precondition before issuing one.
+ *
+ * THE INVARIANT IS A CONDITION, NOT A SHAPE (@chief ruling 2026-09-11,
+ * @hh/tooling/24502). Every worktree mutation must cross the git-super adapter
+ * when the commit declares submodules — and a commit that declares none has no
+ * submodule boundary to cross, so there is nothing there for the invariant to
+ * bind. That is the invariant's own SCOPE, not an exemption from it: an
+ * exemption would assert the hazard is present and tolerated, and invite a
+ * waiver review that should never come.
+ *
+ * ONE QUESTION ASKED IN THREE PLACES, two of which precede a mutation:
+ * `freshWorktree` here, `closeEnvironment` in yrd-cli, and `declaredSubmodules`
+ * in reference.ts, which only early-returns. Both mutating sites now route
+ * through this function, so the identity a guard has to track is one symbol
+ * rather than a neighbourhood.
+ *
+ * AND IT RE-ASKS RATHER THAN TRUSTING ITS CALLER. A scanner proves the code sits
+ * in the right branch AS WRITTEN TODAY; this proves it EVERY TIME IT RUNS,
+ * including after a refactor moves the call out from under the probe. That is
+ * the condition a static matcher cannot see, which by our own rule is exactly
+ * the condition worth failing loudly on.
+ *
+ * The probe and the mutation take separate Git handles on purpose: the question
+ * is about a COMMIT, which is answered wherever that commit is readable, while
+ * the mutation belongs to the repository that owns the worktree registry. In
+ * `closeEnvironment` those are two different repositories.
+ */
+export async function worktreeWithoutSubmodules(
+  read: Git,
+  mutate: Git,
+  commit: string,
+  argv: readonly string[],
+): Promise<string> {
+  const declared = (await read(["ls-tree", commit, "--", ".gitmodules"])).trim()
+  if (declared !== "") {
+    throw new Error(
+      `refusing a plain git worktree ${argv[0] ?? "(no verb)"} for ${commit}: that commit RECORDS .gitmodules, ` +
+        `so its gitlinks must be materialized through git super worktree ${argv[0] ?? ""} instead. ` +
+        "A plain worktree call stops at the gitlink and leaves every submodule unmaterialized. " +
+        "Reached here because a caller took the no-submodule path for a commit that has them " +
+        "(@hh/tooling/24502); fix the caller rather than this check.",
+    )
+  }
+  return mutate(["worktree", ...argv])
 }

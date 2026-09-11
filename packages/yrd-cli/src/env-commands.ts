@@ -29,6 +29,7 @@ import {
   runId,
   runSetup,
   SetupFailed,
+  worktreeWithoutSubmodules,
   type Git,
 } from "@yrd/queue-core"
 import { createProcess } from "@yrd/process"
@@ -296,7 +297,11 @@ export async function closeEnvironment(
     }
     io.stderr(`retained environment removal proof ${removed.proof.manifest}\n`)
   } else {
-    await git(["worktree", "remove", path])
+    // No submodules recorded at this commit, so there is no gitlink for
+    // git-super to materialize on the way out. The helper re-asks before it
+    // issues the plain removal — the probe reads the TREE, the mutation belongs
+    // to the repository that owns the worktree registry.
+    await worktreeWithoutSubmodules(treeGit, git, commit, ["remove", path])
   }
   io.stdout(options.json === true ? `${JSON.stringify({ closed: path })}\n` : `closed environment ${path}\n`)
   return 0

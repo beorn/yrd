@@ -70,6 +70,7 @@ export {
   registeredWorktrees,
   runSetup,
   SetupFailed,
+  worktreeWithoutSubmodules,
 } from "./worktree.ts"
 export {
   GIT_SUPER_ABSENT_STORE,
