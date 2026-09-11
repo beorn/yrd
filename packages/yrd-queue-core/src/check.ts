@@ -183,7 +183,7 @@ export type CheckRun = Readonly<{
 export type CheckView = Readonly<{
   /** The check's name — whether the declaration names it, it ran, or both. */
   name: string
-  /** The recorded phase of this measured occurrence; absent for trailer-only views. */
+  /** The phase this occurrence ran in: the measured reading's own when there is one; otherwise the declaration's own `on:` (ruling A1's default), positioned by which of that name's own occurrences this is. */
   phase?: string
   /**
    * The declaration's own entry, the command included. Absent when the
@@ -215,10 +215,35 @@ export function checksOf(
   measured?: readonly JournalCheck[],
 ): readonly CheckView[] {
   void ending
-  const ran = measured ?? packed.map(readCheckTrailer)
-  const byName = new Map(ran.map((result, index) => [result.name, { index, result }]))
+  // An ending record's own `Check:` trailers are carried forward verbatim
+  // onto the `sent` record that follows it (records.ts), so one real
+  // occurrence's exact trailer text — name, exit, ms and its create-only,
+  // therefore never-reused, log path together — can be folded in twice by
+  // `show()`. Two trailers that are not byte-identical are never the same
+  // occurrence; two that ARE can only be this carry-forward, so collapsing
+  // exact duplicates (order-preserving) loses nothing and stops it being
+  // double-counted as a second run of the same check.
+  const ran = measured ?? [...new Set(packed)].map(readCheckTrailer)
+  // Every occurrence of a name, in the order it ran — never collapsed to the
+  // last. A check declared in two phases writes one trailer per phase under
+  // the same name, and a change retried after "stuck" writes a fresh trailer
+  // under that same name again; a by-name Map's own overwrite kept only the
+  // last of those and erased the rest's own result — a row vanishing is this
+  // bucket's fix, the same guarantee CTO b55a973f already holds the measured
+  // reading below to ("every occurrence survives").
+  const byName = new Map<string, { index: number; result: (typeof ran)[number] }[]>()
+  for (const [index, result] of ran.entries()) {
+    const bucket = byName.get(result.name)
+    if (bucket === undefined) byName.set(result.name, [{ index, result }])
+    else bucket.push({ index, result })
+  }
   const seen = new Set<string>()
-  const view = (name: string, spec: CheckSpec | undefined, found = byName.get(name)): CheckView => {
+  const view = (
+    name: string,
+    spec: CheckSpec | undefined,
+    found: Readonly<{ index: number; result: (typeof ran)[number] }> | undefined,
+    phase?: string,
+  ): CheckView => {
     seen.add(name)
     if (found === undefined) {
       const state = measured === undefined && live?.name === name ? "running" : "not-run"
@@ -231,9 +256,13 @@ export function checksOf(
     }
     const measuredCheck = measured?.[found.index]
     const result = measured === undefined ? resultOfExit(found.result.exit) : measuredCheck?.result
+    // The measured reading's own phase when there is one; otherwise the
+    // declaration's, at whichever of its own occurrences this call was given
+    // (below) — a packed trailer never carried a phase of its own.
+    const resolvedPhase = measuredCheck?.phase ?? phase
     return {
       name,
-      ...(measuredCheck === undefined ? {} : { phase: measuredCheck.phase }),
+      ...(resolvedPhase === undefined ? {} : { phase: resolvedPhase }),
       ...(result === undefined
         ? {}
         : {
@@ -268,14 +297,58 @@ export function checksOf(
         { index, result: check },
       ),
     )
-    return [...occurrences, ...declared.filter((spec) => !seen.has(spec.name)).map((spec) => view(spec.name, spec))]
+    return [
+      ...occurrences,
+      ...declared.filter((spec) => !seen.has(spec.name)).map((spec) => view(spec.name, spec, undefined)),
+    ]
   }
-  const declaredViews = declared.map((spec) => view(spec.name, spec))
+  // No measured reading, so no occurrence carries its own phase: read it off
+  // the declaration instead. A check declared in ONE phase keeps its ORIGINAL
+  // reading here — its own last occurrence, the same one a by-name Map's
+  // overwrite always kept: more than one packed trailer under a single
+  // declared phase is that check's own re-run of the ONE slot the declaration
+  // gives it (1fca452c's fixture: `affected-tests`, declared merge-only,
+  // still carries a trailer from the submit-phase record too), not a second
+  // phase of equal standing, so the reader keeps only the check's own final
+  // say, not both. A check declared in TWO phases is different: each is its
+  // own distinct, equally-valid evidence, so it keeps one row per declared
+  // phase, in run order — submit before merge (ruling A1) — consuming that
+  // many of its own occurrences in that order rather than the collapse
+  // b55a973f forbids.
+  const nextOccurrence = new Map<string, number>()
+  const phased = (["submit", "merge"] as const).flatMap((phase) =>
+    declared
+      .filter((spec) => (spec.on ?? ["merge"]).includes(phase))
+      .map((spec) => {
+        const bucket = byName.get(spec.name) ?? []
+        const phases = spec.on ?? ["merge"]
+        if (phases.length <= 1) return view(spec.name, spec, bucket.at(-1), phase)
+        const at = nextOccurrence.get(spec.name) ?? 0
+        nextOccurrence.set(spec.name, at + 1)
+        return view(spec.name, spec, bucket[at], phase)
+      }),
+  )
+  // A check declared in two-or-more phases that ALSO ran more times than it
+  // has declared phases for keeps every extra occurrence too, under its last
+  // declared phase, rather than dropping the evidence a fresh trailer just
+  // wrote. A check declared in only one phase has no "extra" here: multiple
+  // occurrences under one phase are the collapse-to-latest case above, not
+  // this one.
+  const extra = declared.flatMap((spec) => {
+    const phases = spec.on ?? ["merge"]
+    if (phases.length <= 1) return []
+    const bucket = byName.get(spec.name) ?? []
+    return bucket.length <= phases.length
+      ? []
+      : bucket.slice(phases.length).map((found) => view(spec.name, spec, found, phases.at(-1)))
+  })
   // A check that ran but the declaration does not name: the declaration moved
   // under the change. Its result is measured and stays on screen; what is not
   // knowable — the command it ran — is absent rather than guessed.
-  const undeclared = ran.filter((result) => !seen.has(result.name)).map((result) => view(result.name, undefined))
-  return [...declaredViews, ...undeclared]
+  const undeclared = [...byName.entries()]
+    .filter(([name]) => !seen.has(name))
+    .flatMap(([name, bucket]) => bucket.map((found) => view(name, undefined, found)))
+  return [...phased, ...extra, ...undeclared]
 }
 
 /**
