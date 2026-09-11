@@ -791,19 +791,28 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
   // drifted or simply not coming would park the delivery service forever with
   // nothing said. The trade — no rounds rather than stale code — is right. The
   // silence was not.
-  it("ends stuck when the shared checkout never materializes the target, and names it", async () => {
+  // @cto's row, on @i/10-yrd/24515: the wait above used to have no time limit.
+  // It never ran in production until the relaunch exit was repaired; now it runs
+  // on every vendor/yrd move, and a shared checkout that is detached, drifted or
+  // simply not coming would park the delivery service forever with nothing said.
+  //
+  // THE CAP IS AN ALARM, NOT AN ENDING, and the first cut of this test asserted
+  // the opposite. Ending on exit 2 would leave the service DOWN (exit 2 is not
+  // in relaunchExitCodes) having just written unhealthy+running — the exact pair
+  // hab's pre-spawn gate refuses, which is the deadlock measured at 15:31Z on
+  // 2026-09-11 and broken only by deleting the document by hand.
+  it("pages while it waits for a checkout that never comes, then relaunches when it lands", async () => {
     const w = await gitlinkWorld()
     // The target records b. The runtime's own checkout is left at a and NOBODY
-    // ever projects it: this is the stalled-updater world, not a lagging one.
+    // projects it: the stalled-updater world, not a lagging one.
     await w.git(["update-index", "--cacheinfo", "160000", w.b, "submodule"])
-    await w.git(["commit", "--quiet", "-m", "target records b, checkout never follows"])
+    await w.git(["commit", "--quiet", "-m", "target records b, checkout does not follow"])
     await w.git(["push", "--quiet", "origin", "main"])
     const run = capture(w.work)
     const stop = new AbortController()
-    const { log } = logRows()
     let rounds = 0
 
-    const exit = await w.command(
+    const service = w.command(
       w.work,
       run.io,
       {
@@ -811,25 +820,61 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         intervalSeconds: 0,
         stop: stop.signal,
         // Fifty milliseconds stands in for ten minutes. What is under test is
-        // that the wait ENDS and says why, which does not depend on the number.
+        // that the wait ALARMS and keeps waiting, which does not depend on it.
         relaunchWaitCapMs: 50,
         afterRound: () => {
           rounds += 1
           stop.abort()
         },
       },
-      { json: true, log, workdir: w.workdir },
+      { json: true, workdir: w.workdir },
     )
 
-    // Stuck, not zero and not a hang: the service could not reload, so it must
-    // not run another round on the old code either.
-    expect(exit, `${run.stdout()}\n${run.stderr()}`).toBe(2)
+    try {
+      // THE PAGE, while the process is still alive. `running` is true and must
+      // be: it is what makes this a page rather than a tombstone, and what lets
+      // habd respawn later without meeting the admission gate.
+      // The poll is on a one-second tick, so a 50ms cap still alarms on the NEXT
+      // pass, not instantly. Default waitFor gives up at 1000ms and lands in the
+      // race; the cap under test is the alarm, never the tick.
+      await vi.waitFor(() => expect(run.stdout()).toContain("relaunch-wait-stalled"), { timeout: 8000 })
+      const paged = JSON.parse(readFileSync(join(w.workdir, "service-health.json"), "utf8")) as {
+        state: string
+        verdict: { kind: string }
+        error?: { cause?: string }
+        facts?: { reasonKey?: string }
+      }
+      expect(paged.state).toBe("unhealthy")
+      expect(paged.verdict.kind).toBe("running")
+      // The STABLE key travels as a field and the prose as the cause — the two
+      // are separate so a ladder counting stalls cannot be reset by wording that
+      // embeds a moving sha.
+      expect(paged.facts?.reasonKey).toBe("relaunch-wait:submodule")
+      // And it names the checkout, not merely the fact of waiting: "stuck" that
+      // does not say WHICH of the three is behind sends a reader to all three.
+      expect(paged.error?.cause).toContain(join(w.work, "submodule"))
+      // And it has not run a round on the stale code while waiting.
+      expect(rounds).toBe(0)
+
+      // THE CURE THE DOCUMENT NAMES, applied: the checkout lands.
+      const sub = gitIn(join(w.work, "submodule"))
+      await sub(["fetch", "--quiet", "origin", "main"])
+      await sub(["checkout", "--quiet", w.b])
+
+      // Exit 0 — the relaunch ending. No `hab up`, no deleting a file.
+      expect(await service, `${run.stdout()}\n${run.stderr()}`).toBe(0)
+    } finally {
+      stop.abort()
+      await service.catch(() => undefined)
+    }
     expect(rounds).toBe(0)
-    // NAMING THE CHECKOUT is the whole ask. "Stuck" that does not say which of
-    // the three is behind sends a reader to the same three places every time.
-    const said = `${run.stdout()}\n${run.stderr()}`
-    expect(said).toContain(join(w.work, "submodule"))
-    expect(said).toContain("relaunches on its own")
+    expect(records(run).at(-1)).toEqual({
+      exitCode: 0,
+      from: w.a,
+      gitlink: "submodule",
+      reason: "gitlink-moved",
+      to: w.b,
+    })
   })
 
   it.each(["stop", "project", "already projected"])("runs no stale round during checkout lag (%s)", async (ending) => {

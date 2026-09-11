@@ -546,6 +546,8 @@ export async function coreQueueCommand(
         // code for no rounds is the right trade; doing it quietly is not.
         const waitStartedAt = Date.now()
         const waitCapMs = request.relaunchWaitCapMs ?? RELAUNCH_WAIT_CAP_MS
+        let alarmDueAt = waitStartedAt + waitCapMs
+        let stalls = 0
         for (;;) {
           if (now === undefined) {
             return stuck(
@@ -613,27 +615,66 @@ export async function coreQueueCommand(
             announced = state
           }
           if (stopped()) return 0
-          if (Date.now() - waitStartedAt >= waitCapMs) {
+          // THE CAP IS AN ALARM, NOT AN ENDING (@cto, reviewing the first cut of
+          // this). Ending here was wrong twice over, and the second way is the
+          // one worth remembering:
+          //
+          // - `stuck()` returns 2, and `relaunchExitCodes` is [0, 1], so exit 2
+          //   is TERMINAL. The service would stay down — while the text it wrote
+          //   promised "the service relaunches on its own".
+          // - Worse, `roundHealthDocument` always writes verdict `running`. So it
+          //   would leave behind unhealthy+running and exit; after a terminal
+          //   exit the only cure is `hab up`, and hab's pre-spawn gate refuses
+          //   exactly unhealthy+running. That is the deadlock measured at 15:31Z
+          //   on 2026-09-11, which was broken only by deleting the document by
+          //   hand. A cap whose ending refuses its own named cure is worse than
+          //   no cap.
+          //
+          // Staying alive makes the promise true instead: hab pages on
+          // unhealthy-while-running WITHOUT restarting, the process keeps
+          // waiting and runs no stale round, and when the checkout lands the
+          // exit-0 path below relaunches it. habd respawns that directly and
+          // never runs the admission probe, so the gate above is never met.
+          if (Date.now() >= alarmDueAt) {
             const why =
-              `waited ${String(Math.round(waitCapMs / 1000))}s for ${gitlink.checkout} to check out ` +
-              `${gitlink.path}@${now.slice(0, 12)} and it has not: its own gitlink reads ` +
+              `waited ${String(Math.round((Date.now() - waitStartedAt) / 1000))}s for ${gitlink.checkout} to check ` +
+              `out ${gitlink.path}@${now.slice(0, 12)} and it has not: its own gitlink reads ` +
               `${projected?.slice(0, 12) ?? "absent"} and its working tree reads ${checkout.slice(0, 12)}. ` +
-              `No queue round has run since. Once ${gitlink.path}@${now.slice(0, 12)} is checked out there, ` +
-              `the service relaunches on its own.`
-            // The alarm rides the document as well as the exit, because the exit
-            // is read by the supervisor and the document is read by a person.
-            // The stuck KEY is stable — the path, not the sha — or a ladder keyed
-            // on prose would restart its backoff on every new target.
+              `No queue round is running and none will until it lands. Once ${gitlink.path}@${now.slice(0, 12)} ` +
+              `is checked out there, the service relaunches on its own — no restart, and nothing to delete.`
+            log?.warn?.(why, { checkout: gitlink.checkout, gitlink: gitlink.path, projected, target: now })
+            // `running` is TRUE here and that is the whole point: this process is
+            // alive and still waiting, which is what makes the page a page rather
+            // than a tombstone. The stuck KEY is stable — the path, never the sha
+            // — or the ladder would restart its backoff every time the target
+            // moves, which is exactly when it should be climbing.
+            stalls += 1
             writeHealth(
               roundHealthDocument(
                 SERVICE,
                 { stuck: { key: `relaunch-wait:${gitlink.path}`, reason: why } },
-                { key: `relaunch-wait:${gitlink.path}`, reason: why, consecutive: 1 },
+                { key: `relaunch-wait:${gitlink.path}`, reason: why, consecutive: stalls },
                 waitCapMs,
                 new Date(),
               ),
             )
-            return stuck(why)
+            emit(
+              io,
+              options.json,
+              {
+                checkout,
+                from: gitlink.sha,
+                gitlink: gitlink.path,
+                message: why,
+                projected,
+                reason: "relaunch-wait-stalled",
+                to: now,
+              },
+              why,
+            )
+            // Re-armed rather than one-shot, so a long stall stays a FRESH
+            // measurement instead of ageing into a generic overdue answer.
+            alarmDueAt = Date.now() + waitCapMs
           }
           try {
             await delay(1000, undefined, { signal: request.stop })
