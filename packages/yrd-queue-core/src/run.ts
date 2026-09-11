@@ -41,7 +41,7 @@
  * could not do its own job, and the next thing to happen is a person.
  */
 
-import { mkdirSync, readdirSync, rmSync } from "node:fs"
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
@@ -81,6 +81,7 @@ import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
 import { CapturedQueueObjectsUnavailable, readQueue, remoteUrl, type QueueEntry, type QueueRead } from "./remote.ts"
 import { GitlinkNotOnRemote, ReferenceUnpopulated } from "./reference.ts"
+import { setupStuckCode, setupStuckNext, transportFaultIn } from "./setup-transport.ts"
 import { inLine, tipOf } from "./state.ts"
 import {
   checkedTree,
@@ -286,6 +287,27 @@ export type Steps = Readonly<{
 
 /** One ring of the onion: the same bundle, with the members it owns wrapped. */
 export type Ring = (steps: Steps) => Steps
+
+/** Bound on the setup log read for classification: the tail is where a failure is. */
+const SETUP_LOG_TAIL_BYTES = 64 * 1024
+
+/**
+ * The setup log's text, for classifying WHY it failed — with the read's own
+ * failure reported rather than swallowed.
+ *
+ * `unreachable`/`unusable` is decided from this text, so a read that silently
+ * returned "" would make every fault look like a repository break, which is
+ * exactly the conflation being fixed. The caller puts `unreadable` in the
+ * record so the classification can be argued with.
+ */
+function setupLogText(log: string): Readonly<{ text: string; unreadable?: string }> {
+  try {
+    const whole = readFileSync(log, "utf8")
+    return { text: whole.length > SETUP_LOG_TAIL_BYTES ? whole.slice(-SETUP_LOG_TAIL_BYTES) : whole }
+  } catch (error) {
+    return { text: "", unreadable: error instanceof Error ? error.message : String(error) }
+  }
+}
 
 /**
  * A candidate's setup did not pass, carrying what deciding whose failure it is
@@ -620,14 +642,32 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
     // the settled base's own worktree — is the queue's: it could not build the
     // ground a judgement stands on, so the reason says setup and not crash.
     if (error instanceof SetupFailed) {
+      // AN UNREACHABLE REMOTE IS NOT A BROKEN REPOSITORY (@i/10-yrd/24486 rows
+      // 2 and 3). Both used to read `yrd-setup-unusable`, so a person reading
+      // the record could not tell a code host having a bad minute from a change
+      // that must never merge — and the fleet's delivery stopped on either.
+      // Measured 2026-09-11: one GitHub 504 cost 19m47s.
+      //
+      // The classification is over the setup's own log, which holds the
+      // transport line; the exception message alone carries only the exit and
+      // the log's PATH. An unreadable log is not treated as evidence of
+      // anything: it falls through to the repository verdict, which is the
+      // stricter one and the behaviour that was already there, and the subject
+      // says the log could not be read so nobody mistakes silence for a clean
+      // classification.
+      const read = setupLogText(error.ran.result.log)
+      const fault = transportFaultIn(`${read.text}\n${message}`)
       return run.steps.end(
         run,
         entry,
         "stuck",
         stuckWrite(run, {
-          code: "yrd-setup-unusable",
-          next: "repair the queue setup, then run yrd queue run",
-          subject: `the queue could not prepare a worktree for ${entry.change.branch}: ${message}`,
+          code: setupStuckCode(fault),
+          next: setupStuckNext(fault),
+          subject:
+            `the queue could not prepare a worktree for ${entry.change.branch}: ${message}` +
+            (fault === undefined ? "" : `; unreachable remote (${fault.signature}): ${fault.line}`) +
+            (read.unreadable === undefined ? "" : `; the setup log could not be read (${read.unreadable})`),
           via: SETUP,
         }),
       )
@@ -1152,14 +1192,24 @@ async function attributedSetupFailure(run: Run, entry: QueueEntry, failure: Cand
     })
   }
   recordProgramVerdict(run, about, result)
+  // THE PATH THE MEASURED OUTAGE ACTUALLY TOOK (@i/10-yrd/24486 rows 2 and 3).
+  // A code host that is down fails the candidate AND the settled base, so
+  // attribution lands here rather than on the bare `SetupFailed` branch — which
+  // is why classifying only there would have fixed the reason for a case the
+  // 504 never reached. Same two reasons, same one classifier.
+  const read = setupLogText(result.log)
+  const fault = transportFaultIn(`${read.text}\n${message}`)
   return run.steps.end(
     run,
     entry,
     "stuck",
     stuckWrite(run, {
-      code: "yrd-setup-unusable",
-      next: "repair the queue setup, then run yrd queue run",
-      subject: `the queue could not prepare a worktree for ${entry.change.branch}: ${message}`,
+      code: setupStuckCode(fault),
+      next: setupStuckNext(fault),
+      subject:
+        `the queue could not prepare a worktree for ${entry.change.branch}: ${message}` +
+        (fault === undefined ? "" : `; unreachable remote (${fault.signature}): ${fault.line}`) +
+        (read.unreadable === undefined ? "" : `; the setup log could not be read (${read.unreadable})`),
       via:
         ground.why === undefined
           ? `${SETUP}, which failed on the settled base alone too`

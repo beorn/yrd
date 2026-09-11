@@ -1649,3 +1649,84 @@ describe("a stuck round ends the round, not the service (@i/10-yrd/24395)", () =
     expect(left.verdict).toEqual({ kind: "running" })
   })
 })
+
+/**
+ * @failure  A code host having a bad minute and a change that must never merge
+ *           are recorded with the SAME reason, `yrd-setup-unusable`, so a person
+ *           reading the queue cannot tell an outage from a break — and the
+ *           fleet's only delivery mechanism stops on either. Measured
+ *           2026-09-11: one GitHub 504 during `bun install` cost 19m47s
+ *           (@i/10-yrd/24486 rows 2 and 3).
+ * @level    l2 (a real remote, a clone, and a real setup command that fails)
+ * @consumer whoever reads `yrd queue list` during an outage · the submitter who
+ *           would otherwise go looking for a defect in their own change
+ */
+describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)", () => {
+  /** A setup that fails, printing whatever the test wants it to print. */
+  function failingSetup(dir: string, name: string, line: string): string {
+    const script = join(dir, `${name}.sh`)
+    writeFileSync(script, ["#!/bin/sh", `echo '${line}' >&2`, "exit 1", ""].join("\n"))
+    chmodSync(script, 0o755)
+    return script
+  }
+
+  /** The stored reason for the one change in the line, as `queue list` reports it. */
+  async function reasonFor(w: World, branch: string): Promise<Readonly<{ reason?: string; result?: string }>> {
+    const listed = capture(w.work)
+    expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes
+    const row = rows.find((entry) => entry.branch === branch)
+    expect(row, JSON.stringify(rows)).toBeDefined()
+    return { reason: row?.reason as string | undefined, result: row?.result as string | undefined }
+  }
+
+  async function roundWithSetup(w: World, branch: string, setup: string): Promise<void> {
+    await redeclare(w, `setup: ${setup}\n`)
+    await w.git(["checkout", "--quiet", "-b", branch, "main"])
+    writeFileSync(join(w.work, "work.txt"), "work\n")
+    await w.git(["add", "-A"])
+    await w.git(["commit", "--quiet", "-m", branch])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", { branch, submitter: "@dev/4", target: { branch: "main", remote: "origin" } })
+    const run = capture(w.work)
+    expect(await coreQueueCommand(w.work, run.io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+  }
+
+  // ROW 2. The measured specimen, reproduced: the record says the remote could
+  // not be reached, and says which signature it saw.
+  it("says yrd-setup-unreachable, and names the signature it matched", async () => {
+    const w = await world()
+    const line = "error: GET https://api.github.com/repos/beorn/verify-publishable/tarball/ef92031daa - 504"
+    await roundWithSetup(w, "task/upstream-504", failingSetup(w.workdir, "upstream-504", line))
+    const stored = await reasonFor(w, "task/upstream-504")
+    expect(stored.reason).toBe("yrd-setup-unreachable")
+    // And it tells the submitter their change is not the problem, which is the
+    // whole point of separating the two reasons.
+    expect(String(stored.result)).toContain("nothing here is the change's fault")
+    expect(String(stored.result)).toContain("http-5xx")
+  })
+
+  // ROW 3, THE NEGATIVE CONTROL, and the half that matters: a setup failure that
+  // is not transport-shaped must still be billed exactly as before. A classifier
+  // that is too generous does not fail loudly — it relabels real breaks as
+  // outages, and then they are retried forever instead of being fixed.
+  it("a real break still says yrd-setup-unusable and still tells you to repair it", async () => {
+    const w = await world()
+    const line = "error: lockfile had changes, but lockfile is frozen"
+    await roundWithSetup(w, "task/real-break", failingSetup(w.workdir, "real-break", line))
+    const stored = await reasonFor(w, "task/real-break")
+    expect(stored.reason).toBe("yrd-setup-unusable")
+    expect(String(stored.result)).toContain("repair the queue setup")
+    expect(String(stored.result)).not.toContain("nothing here is the change's fault")
+  })
+
+  // The distinction yrd already paid for one layer up, asserted here too: a
+  // remote that ANSWERED 404 holds an answer, not a fault. Retrying it forever
+  // would stop the queue on a component commit that never left somebody's bay.
+  it("a 404 is an answer, not an unreachable remote", async () => {
+    const w = await world()
+    const line = "error: GET https://api.github.com/repos/beorn/x/tarball/deadbeef - 404"
+    await roundWithSetup(w, "task/answered-404", failingSetup(w.workdir, "answered-404", line))
+    expect((await reasonFor(w, "task/answered-404")).reason).toBe("yrd-setup-unusable")
+  })
+})
