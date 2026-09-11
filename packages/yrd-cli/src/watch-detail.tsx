@@ -162,7 +162,16 @@ export function WatchDetail({
       >
         <TabList flexWrap="wrap">
           <Tab key={CHANGES_TAB} value={CHANGES_TAB}>
-            <Text bold={tab === CHANGES_TAB}>Changes{(row.diagnostics?.length ?? 0) === 0 ? "" : " ⚠"}</Text>
+            {/* The label stays neutral and the SEVERITY MARKER carries the hue,
+                the same treatment the runner box gives its own warning sign
+                (watch-boxes.tsx). Every sibling tab is colored by CHECK_COLOR;
+                this was the one tab that signaled a problem with emphasis and
+                no color, which is the whole of what the candidate work item
+                found true about the pane. */}
+            <Text bold={tab === CHANGES_TAB}>
+              Changes
+              {(row.diagnostics?.length ?? 0) === 0 ? "" : <Text color="$fg-warning"> ⚠</Text>}
+            </Text>
           </Tab>
           {detail.checks.map((check, at) => (
             <Tab key={String(at)} value={String(at)}>

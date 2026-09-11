@@ -389,6 +389,80 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
 })
 
 describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () => {
+  it("colors the diagnostics warning sign by SEVERITY, not by emphasis alone", async () => {
+    // The CANDIDATE WORK ITEM said the pane expresses importance by brightness
+    // and never by hue. Measured 2026-09-11, that is false everywhere but here:
+    // every sibling tab takes CHECK_COLOR, and the ONE tab that signals a
+    // problem took bold and no color at all — the warning sign resolved to
+    // rgb(216,222,233), byte-identical to the ordinary label beside it.
+    //
+    // This reads CELLS, not text. The text buffer cannot see a hue, and 24277
+    // records the quantiser collapsing error into muted at ansi16, which voided
+    // an earlier verdict on this very surface. The reference cells below are
+    // the control: if the renderer ever stops resolving hue, `×` and the plain
+    // label collapse together and this arm fails loudly instead of passing on
+    // an instrument that went blind.
+    const withDiagnostics = {
+      ...failedRow(),
+      diagnostics: [
+        {
+          kind: "change" as const,
+          run: RUN_ID,
+          at: NOW.toISOString(),
+          reason: "change-ref-taken",
+          text: "remote ref changed after the merge",
+          next: "git show refs/changes/task/one",
+        },
+      ],
+    }
+    // A `stuck` check rides along so the frame contains a cell that resolves
+    // the SAME token the warning sign should use (CHECK_COLOR maps stuck to
+    // `$fg-warning`). Comparing against it pins the hue without hardcoding an
+    // RGB triple, so a palette change moves both cells and this stays true.
+    const checks: readonly CheckPanel[] = [
+      ...CHECKS,
+      { name: "publish", spec: { name: "publish", run: "bun run publish" }, state: "stuck" },
+    ]
+    const app = render(
+      <WatchDetail detail={detailOf({ row: withDiagnostics }, checks)} live={false} selected="1" />,
+      { cols: 120, rows: 40 },
+    )
+    await app.waitForLayoutStable()
+    const at = app.lines.findIndex((line) => line.includes("Changes"))
+    expect(at, "the tab strip renders").toBeGreaterThan(-1)
+    const line = app.lines[at]!
+
+    const cellAt = (needle: string) => app.cell(line.indexOf(needle), at)
+    const warning = cellAt("⚠")
+    const label = cellAt("Changes")
+    const failed = cellAt("×")
+    const stuck = cellAt("◌")
+    app.unmount()
+
+    // THE CONTROL, asserted first: this renderer really does resolve hue, so a
+    // pass below is evidence rather than a blind instrument agreeing with itself.
+    expect(failed.fg, "the failed glyph carries a hue").not.toEqual(label.fg)
+    expect(stuck.fg, "and the warning-token reference is itself colored").not.toEqual(label.fg)
+
+    expect(warning.fg, "the warning sign is not painted as ordinary label text").not.toEqual(label.fg)
+    // Not merely SOME hue — the pane's warning hue. A marker painted the
+    // success or info token would satisfy "different" and still be wrong.
+    expect(warning.fg, "and it is the pane's warning token, not just any color").toEqual(stuck.fg)
+
+    // THE OTHER HALF, and it was a real hole: mutating the marker to render
+    // unconditionally was caught by NONE of this file's other 38 arms. A
+    // permanent warning sign is worse than none — it stops meaning anything.
+    const quiet = render(<WatchDetail detail={detailOf({ row: failedRow() }, checks)} live={false} selected="1" />, {
+      cols: 120,
+      rows: 40,
+    })
+    await quiet.waitForLayoutStable()
+    const quietStrip = quiet.lines.find((l) => l.includes("Changes")) ?? ""
+    quiet.unmount()
+    expect(quietStrip, "the strip still renders").toContain("Changes")
+    expect(quietStrip, "no diagnostics, no warning sign").not.toContain("⚠")
+  })
+
   it("lists the change under the box as `· <branch>@<sha12> <subject>` and puts Changes first on the tab strip", async () => {
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} open={opener()} />, ["Enter"])
 
