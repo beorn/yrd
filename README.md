@@ -62,7 +62,9 @@ JSON reports `reused`, the verified `head`, issue binding and `setup`. Only a ne
 
 Setup is `not-required`, `passed`, `failed` or `unverified`. A reused environment with required setup reports `partial` and exits 2 because registration cannot prove prior setup completion.
 
-Setup failures and changed identities retain the environment and name the recovery need. After successful setup, Yrd verifies the resulting branch, HEAD and issue binding before reporting success.
+Setup failures and changed identities retain the environment and name the recovery need.
+
+With `--issue`, successful setup is followed by branch, HEAD and binding verification.
 
 Submission scans branch history back to its merge-base with the captured target, excluding target history. The first explicit `Refs:` or `Resolves:` binding wins.
 
