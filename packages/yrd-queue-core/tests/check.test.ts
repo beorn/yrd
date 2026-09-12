@@ -196,3 +196,39 @@ describe("a check log and the text the queue read", () => {
     expect(written).toContain("every byte its capture observed was streamed to this file]")
   })
 })
+
+describe("check exit codes", () => {
+  it("treats 0 as pass and 1 as fail", async () => {
+    const pass = await runCheck({ ...place("exit-0"), spec: { name: "ok", run: "exit 0" } })
+    expect(pass).toMatchObject({ exit: 0, result: "pass" })
+    const fail = await runCheck({ ...place("exit-1"), spec: { name: "red", run: "exit 1" } })
+    expect(fail).toMatchObject({ exit: 1, result: "fail" })
+  })
+
+  it("treats 2 as stuck — the check said the queue could not judge", async () => {
+    const result = await runCheck({ ...place("exit-2"), spec: { name: "env", run: "exit 2" } })
+    expect(result).toMatchObject({
+      exit: 2,
+      result: "stuck",
+      why: "the check said it could not judge",
+    })
+  })
+
+  it("bounces exit 3 cannot-judge to the submitter as fail, not stuck", async () => {
+    const result = await runCheck({ ...place("exit-3"), spec: { name: "affected-tests", run: "exit 3" } })
+    expect(result).toMatchObject({
+      exit: 3,
+      result: "fail",
+      why: "cannot-judge: bounced to the submitter",
+    })
+  })
+
+  it("treats any other code as stuck — not a verdict", async () => {
+    const result = await runCheck({ ...place("exit-99"), spec: { name: "weird", run: "exit 99" } })
+    expect(result).toMatchObject({
+      exit: 99,
+      result: "stuck",
+      why: "exit 99 is not a verdict",
+    })
+  })
+})

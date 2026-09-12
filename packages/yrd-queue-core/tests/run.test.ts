@@ -2572,6 +2572,19 @@ describe("the target's setup", () => {
    * the settled base, so the queue's ground was never broken — one change's
    * content was, and every other change in line waited for a person.
    */
+  it("bounces cannot-judge (exit 3) to the submitter and keeps judging the line", async () => {
+    const w = await world()
+    await submitCommit(w, "task/cannot-judge", "one.txt")
+    await submitCommit(w, "task/two", "two.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 3, on: ["submit"] }))
+
+    expect(outcome.exitCode).toBe(1)
+    expect(outcome.failed).toEqual(["task/cannot-judge"])
+    expect(outcome.stuck).toEqual([])
+    expect(outcome.merged).toEqual(["task/two"])
+  })
+
   it("bills the submitter when the setup fails only with the candidate's own content", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/breaks-setup", "BREAK_SETUP")

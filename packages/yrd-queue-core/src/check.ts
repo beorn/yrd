@@ -5,9 +5,12 @@
  * A check is a command the target declares, run in a change's worktree with a
  * bound. Its result is one of three words, read off the exit code once the run
  * itself settled cleanly: 0 is pass, 1 is fail, 2 is stuck — the check's own
- * statement that it could not judge. A check that is not there, one that runs
- * past its bound, or one that exits with any other code could not judge either,
- * and that is the queue's fault until proven otherwise, so it is stuck too.
+ * statement that the *queue* could not judge. Exit 3 is cannot-judge owned by
+ * the change (`AFFECTED_CANNOT_JUDGE_EXIT`): bounce it to the submitter as
+ * fail, or the runner halts fleet-wide (`yrd-check-unresolved`). A check that
+ * is not there, one that runs past its bound, or one that exits with any other
+ * code could not judge either, and that is the queue's fault until proven
+ * otherwise, so it is stuck too.
  * Every result names the check, its exit, its duration and its log path,
  * because a result nobody can read is not a result. That log is readable while
  * the check is still running: it is created before the child starts and grows
@@ -354,17 +357,18 @@ export function checksOf(
 /**
  * A trailer's own verdict, read off the exit `checkTrailer` packed onto it,
  * through the exact classifier `runCheck` judged the live run by: `0` is a
- * pass, `1` is a fail, and everything else — another number, `timeout`,
- * `signal`, `missing`, `unsettled`, or a trailer so malformed its exit did
- * not parse at all — could not judge, so it is stuck (check.ts's own default
- * for an exit code that is not a verdict). Never the change's ending, never
- * the check's place in the list: a check that stopped the queue's own
- * sequence already said so in this exit, and a change that ended `failed` or
- * `stuck` for a reason no check made — a merge conflict foremost among them —
- * must not borrow that ending as if it were this check's word about itself.
+ * pass, `1` and `3` are fail (`3` = cannot-judge, bounced to the submitter),
+ * and everything else — another number, `timeout`, `signal`, `missing`,
+ * `unsettled`, or a trailer so malformed its exit did not parse at all —
+ * could not judge, so it is stuck (check.ts's own default for an exit code
+ * that is not a verdict). Never the change's ending, never the check's place
+ * in the list: a check that stopped the queue's own sequence already said so
+ * in this exit, and a change that ended `failed` or `stuck` for a reason no
+ * check made — a merge conflict foremost among them — must not borrow that
+ * ending as if it were this check's word about itself.
  */
 function resultOfExit(exit: string | undefined): CheckRun["result"] {
-  return exit === "0" ? "pass" : exit === "1" ? "fail" : "stuck"
+  return exit === "0" ? "pass" : exit === "1" || exit === "3" ? "fail" : "stuck"
 }
 
 /**
@@ -556,6 +560,16 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
       return { ...base, exit: 1, result: "fail" }
     case 2:
       return { ...base, exit: 2, result: "stuck", why: "the check said it could not judge" }
+    case 3:
+      // affected-tests AFFECTED_CANNOT_JUDGE_EXIT. Mapping this to stuck
+      // halted the runner (yrd-check-unresolved). Renumbering to 2 is a
+      // no-op: arm 2 is also stuck. Bounce to the submitter instead.
+      return {
+        ...base,
+        exit: 3,
+        result: "fail",
+        why: "cannot-judge: bounced to the submitter",
+      }
     default:
       return { ...base, exit: result.exitCode, result: "stuck", why: `exit ${result.exitCode} is not a verdict` }
   }
