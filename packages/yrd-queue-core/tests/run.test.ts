@@ -19,7 +19,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import { gitEnvironment } from "../src/git.ts"
 import { CapturedQueueObjectsUnavailable } from "../src/remote.ts"
@@ -1445,6 +1445,7 @@ describe("a queue run", () => {
     // inherits the run's stdout, so the driver abandons the drain at its grace
     // and hands back exit 0 with a partial log. Read as an exit code alone,
     // that is a pass on a check nobody measured.
+    using warning = vi.spyOn(console, "warn").mockImplementation(() => undefined)
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const base = await w.options({ on: ["submit"] })
@@ -1466,6 +1467,12 @@ describe("a queue run", () => {
     const check = trailers(wedged, "Check")[0] ?? ""
     expect(check).toContain("exit=unsettled")
     expect(existsSync(check.match(/log=(\S+)/u)?.[1] ?? "")).toBe(true)
+    expect(warning).toHaveBeenCalledTimes(1)
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("yrd:process"),
+      expect.stringContaining("a child process kept its output open"),
+      expect.objectContaining({ argv: ["sh", "-c", "sleep 30 & exit 0"], pid: expect.any(Number) }),
+    )
   }, 30_000)
 
   it("the target moving between the merge reading and the lease keeps the change checked, not stuck (D4)", async () => {
