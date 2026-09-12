@@ -176,7 +176,8 @@ async function gitlinkAroundQueue(w: World, sha: string): Promise<string> {
 async function submitFile(w: World, branch: string): Promise<string> {
   await w.git(["checkout", "--quiet", "-b", branch, "main"])
   writeFileSync(join(w.work, `${branch.replace(/\//gu, "-")}.txt`), `${branch}\n`)
-  await w.git(["add", "."])
+  const file = `${branch.replace(/\//gu, "-")}.txt`
+  await w.git(["add", file])
   await w.git(["commit", "--quiet", "-m", `${branch}: a file, no gitlink`])
   const head = (await w.git(["rev-parse", "HEAD"])).trim()
   await w.git(["checkout", "--quiet", "main"])
@@ -357,41 +358,37 @@ async function addNestedSubmodule(
 }
 
 describe("settling gitlinks", () => {
+  // 24463: the same defect D1 used to catch at merge is refused at submit, with
+  // the merge-and-pin cure, before a queue cycle.
+  it("yrd submit refuses a gitlink that diverged from refs/heads/main", async () => {
+    const w = await world()
+    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(
+      new RegExp(
+        `submodule pin ${w.offMain} has diverged from refs/heads/main at ${w.main}\\. Merge submodule's current main into task/off`,
+        "u",
+      ),
+    )
+  })
+
+  it("a pin that is an ancestor of refs/heads/main submits silently", async () => {
+    const w = await world()
+    await expect(submitGitlink(w, "task/behind", w.onMain)).resolves.toMatch(/^[0-9a-f]{40}$/u)
+  })
+
   // D1 (24454, 2026-09-10): a pin that diverged from its submodule's main is
   // the submitter's defect and FAILS back to them. It used to wait (H5) for a
   // person to move main under it; the queue now moves main itself, forward only,
-  // so nothing could ever clear that wait.
+  // so nothing could ever clear that wait. 24463 now refuses at submit; the
+  // merge-time failure remains for a change opened by hand.
   it("an off-main gitlink fails back to its submitter while the next change proceeds", async () => {
     const w = await world()
-    const head = await submitGitlink(w, "task/off", w.offMain)
+    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/diverged from refs\/heads\/main/u)
     await submitFile(w, "task/next")
 
     const outcome = await queueRun(await w.options())
 
-    // A run that failed a change exits 1: the exit code is the run's verdict, not the queue's health.
-    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/off"], merged: ["task/next"], stuck: [] })
-    const failedRecords = await readRecords(
-      w.git,
-      await remoteTip(w.git, changeRef("main", { branch: "task/off", head })),
-    )
-    // The failure, then the notification of it: the submitter is told, not left to find out.
-    expect(failedRecords.map((record) => record.kind)).toEqual(["opened", "failed", "sent"])
-    const failure = failedRecords.at(-2)!
-    expect(trailer(failure, "Fault")).toBe("submitter")
-    expect(trailer(failure, "Reason")).toBe("gitlink-off-main")
-    expect(trailer(failure, "Remedy")).toContain("Rebase submodule onto its configured submodule branch")
-    expect(trailer(failure, "Remedy")).toContain("submit again")
-    expect(trailer(failure, "Detail")).toContain(w.offMain)
-    expect(readFileSync(outcome.log, "utf8")).toContain("gitlink-off-main")
-
-    // Nothing waits: the next run has nothing to do for it.
-    const repeated = await queueRun(await w.options())
-    expect(repeated).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
-    expect(
-      (await readRecords(w.git, await remoteTip(w.git, changeRef("main", { branch: "task/off", head })))).map(
-        (record) => record.kind,
-      ),
-    ).toEqual(["opened", "failed", "sent"])
+    // 24463: the diverged pin never entered the queue. The next change proceeds.
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/next"], stuck: [] })
 
     // The submitter's cure: put the pin on submodule main, then submit again.
     const submoduleWork = join(w.work, "..", "submodule-work")
@@ -423,18 +420,18 @@ describe("settling gitlinks", () => {
   // 24408 kept its teeth after D1: the failure's journal row must stay readable
   // by every read verb, and carries no half-written incident (a failed change
   // is the submitter's, not a queue incident).
-  it("an off-main failure writes a journal row the readers accept, with no incident", async () => {
+  it("an off-main pin never opens a change, so readers see no incident", async () => {
     const w = await world()
-    const head = await submitGitlink(w, "task/off", w.offMain)
+    await expect(submitGitlink(w, "task/off", w.offMain)).rejects.toThrow(/diverged from refs\/heads\/main/u)
+    const head = await submitFile(w, "task/file")
 
     const outcome = await queueRun(await w.options())
 
-    expect(outcome).toMatchObject({ exitCode: 1, failed: ["task/off"], merged: [], stuck: [] })
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/file"], stuck: [] })
     const read = () => readJournals(dirname(outcome.log))
     expect(read).not.toThrow()
-    const run = read().runs.get(journalKey("task/off", head))?.[0]
-    expect(run?.decision).toBe("failed")
-    expect(run?.incident).toBeUndefined()
+    expect(read().runs.get(journalKey("task/off", head))).toBeUndefined()
+    expect(read().runs.get(journalKey("task/file", head))?.[0]?.incident).toBeUndefined()
   })
 
   // 24454: a submodule change lands through the ROOT queue. The authored pin is

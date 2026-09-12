@@ -202,7 +202,43 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
     )
   }
   if (request.rebase === true) await requireRebaseWorktree(git, request.branch, bound)
+  await refuseDivergedMovedPins(git, targetHead, head, request.branch)
   return { head, targetHead, base, rebaseRequired }
+}
+
+/**
+ * 24463: a moved gitlink that has diverged from that component's current
+ * `refs/heads/main` will fail at merge as gitlink-off-main. Refuse at submit
+ * instead, naming the merge-and-pin cure, before a queue cycle.
+ *
+ * Equal, behind (pin ancestor of main), and ahead (main ancestor of pin) pass:
+ * the queue can settle or publish those. Diverged cannot.
+ */
+export async function refuseDivergedMovedPins(git: Git, from: string, to: string, branch: string): Promise<void> {
+  const root = (await git(["rev-parse", "--show-toplevel"])).trim()
+  for (const row of await gitlinkRows(git, from, to)) {
+    if (row.newMode !== "160000" || ZERO_SHA.test(row.sha)) continue
+    const child = gitIn(join(root, row.path))
+    const componentMain = await readRemoteCommit(child, "origin", "refs/heads/main")
+    if (componentMain === undefined) {
+      throw new Error(
+        `${row.path} origin has no refs/heads/main; cannot check pin ${row.sha} against component main`,
+      )
+    }
+    try {
+      await child(["cat-file", "-e", `${row.sha}^{commit}`])
+    } catch {
+      // Missing object: 24454 publishMovedGitlinks names the checkout and remote.
+      continue
+    }
+    if ((await isAncestor(child, row.sha, componentMain)) || (await isAncestor(child, componentMain, row.sha))) {
+      continue
+    }
+    throw new Error(
+      `${row.path} pin ${row.sha} has diverged from refs/heads/main at ${componentMain}. ` +
+        `Merge ${row.path}'s current main into ${branch}, pin the merge commit, and resubmit.`,
+    )
+  }
 }
 
 async function requireRebaseWorktree(git: Git, branch: string, bound: string): Promise<void> {
@@ -268,6 +304,9 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // checkout named. A refused publication opens nothing.
   const root = (await git(["rev-parse", "--show-toplevel"])).trim()
   const published = await publishMovedGitlinks(git, root, targetHead, head)
+  // 24463 row 5: re-measure immediately before the push; a verdict is void
+  // the moment component main moves.
+  await refuseDivergedMovedPins(git, targetHead, head, request.branch)
   const change = { branch: request.branch, head }
   const ref = changeRef(request.target.branch, change)
   // Where the remote holds the branch and this change right now, in one
