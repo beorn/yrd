@@ -10,7 +10,7 @@
 
 import { afterEach, describe, expect, it } from "vitest"
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { judgedTreeDigest } from "../src/worktree.ts"
@@ -95,6 +95,31 @@ describe("judgedTreeDigest says what the checks are about to read (24573)", () =
     expect(files[0]?.committed).toBe("deleted")
     expect(files[0]?.ondisk).toBe("absent")
     expect(files[0]?.same).toBe(true)
+  })
+
+  it.each([
+    { mutation: undefined, same: true, title: "matches a candidate-added symlink by its stored link text" },
+    {
+      mutation: "untouched.ts",
+      same: false,
+      title: "FIRES when a candidate-added symlink's link text changes on disk",
+    },
+  ])("$title", async ({ mutation, same }) => {
+    const { repo, base } = repoWithACandidate()
+    symlinkSync("tool.ts", join(repo, "link.ts"))
+    git(repo, ["add", "link.ts"])
+    git(repo, ["commit", "-q", "-m", "candidate adds a link"])
+    const candidate = git(repo, ["rev-parse", "HEAD"])
+    if (mutation !== undefined) {
+      rmSync(join(repo, "link.ts"))
+      symlinkSync(mutation, join(repo, "link.ts"))
+    }
+
+    const link = (await judgedTreeDigest(repo, { base, candidate })).find((file) => file.path === "link.ts")
+
+    expect(link?.same).toBe(same)
+    if (same) expect(link?.committed).toBe(link?.ondisk)
+    else expect(link?.committed).not.toBe(link?.ondisk)
   })
 
   it("skips gitlinks, whose pins the settle rows already carry", async () => {

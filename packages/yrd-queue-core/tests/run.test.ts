@@ -1328,7 +1328,7 @@ describe("a queue run", () => {
 
     const outcome = await queueRun({
       ...base,
-      checks: base.checks.map((check) => ({ ...check, scripts: ["checks/absent.sh"] })),
+      checks: base.checks.map((check) => ({ ...check, programRoot: true, scripts: ["checks/absent.sh"] })),
     })
 
     // A check the queue cannot restore from the protected side is the queue's
@@ -1358,6 +1358,87 @@ describe("a queue run", () => {
     expect(outcome.exitCode).toBe(0)
     expect(outcome.merged).toEqual(["task/one"])
   })
+
+  /**
+   * @failure target setup could rewrite source or move HEAD after generic
+   * preparation, leaving an opted-in child to judge bytes or identity no
+   * recorded commit describes.
+   * @level L3 real queue integration: this crosses the actual worktree/setup and
+   * child-run boundary; a fake Git store could not prove cleanup or identity.
+   * @consumer queue checks reject a P/C root that target setup changed before runCheck.
+   */
+  it.each(["source", "head", "deleted"] as const)(
+    "removes both fresh roots when target setup mutates candidate %s state",
+    async (mode) => {
+      const w = await world()
+      writeFileSync(join(w.work, "program.sh"), "exit 0\n")
+      writeFileSync(join(w.work, ".gitignore"), "program.sh\n")
+      await w.git(["add", ".gitignore"])
+      await w.git(["add", "-f", "program.sh"])
+      await w.git(["commit", "--quiet", "-m", "target program"])
+      await w.git(["push", "--quiet", "origin", "main"])
+      const target = (await w.git(["rev-parse", "main"])).trim()
+      if (mode === "deleted") {
+        await w.git(["checkout", "--quiet", "-b", "task/program", "main"])
+        await w.git(["rm", "--quiet", "program.sh"])
+        await w.git(["commit", "--quiet", "-m", "delete program"])
+        await w.git(["checkout", "--quiet", "main"])
+        await submit(w.git, "origin", {
+          branch: "task/program",
+          submitter: "@dev/2",
+          target: { branch: "main", remote: "origin" },
+          issue: "@i/10-yrd/1",
+        })
+      } else {
+        await submitCommit(w, "task/program", "program.sh")
+      }
+      const setup = join(w.workdir, `mutate-${mode}.sh`)
+      writeFileSync(
+        setup,
+        [
+          "#!/bin/sh",
+          'if [ "$YRD_CANDIDATE_SHA" = "$1" ]; then exit 0; fi',
+          mode === "head"
+            ? 'printf "moved\\n" > moved-by-setup.txt && git add moved-by-setup.txt && git -c user.email=queue@yrd.test -c user.name=yrd commit --quiet -m moved-by-setup'
+            : 'printf "mutated\\n" > program.sh',
+          "",
+        ].join("\n"),
+      )
+      chmodSync(setup, 0o755)
+      const base = await w.options({ exit: 0, on: ["submit"], setup: `${setup} ${target}` })
+      const outcome = await queueRun({
+        ...base,
+        checks: base.checks.map((check) => ({
+          ...check,
+          programRoot: true,
+          run: 'sh "$YRD_PROGRAM_ROOT/program.sh"',
+          scripts: ["program.sh"],
+        })),
+      })
+
+      expect(outcome.exitCode).toBe(2)
+      const rejected = logRecords(outcome).find(
+        (record) =>
+          record.kind === "judged" &&
+          record.stage === (mode === "head" ? "program-subject-tree" : "program-subject-source") &&
+          record.same === false,
+      )
+      expect(rejected).toMatchObject({ name: "verify", phase: "submit" })
+      const freshRoots = [
+        ...new Set(
+          logRecords(outcome)
+            .filter(
+              (record) =>
+                record.kind === "judged" && typeof record.stage === "string" && record.stage.startsWith("program-"),
+            )
+            .map((record) => record.root)
+            .filter((root): root is string => typeof root === "string"),
+        ),
+      ]
+      expect(freshRoots).toHaveLength(2)
+      for (const root of freshRoots) expect(existsSync(root)).toBe(false)
+    },
+  )
 
   it("a check whose child exits 0 while a descendant holds its output open is stuck, not pass", async () => {
     // The live wedge shape: `sh` exits 0 immediately and the backgrounded sleep

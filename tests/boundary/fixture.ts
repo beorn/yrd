@@ -724,11 +724,15 @@ type PhasedCheck = Readonly<{
   timeoutMs?: number
   /** Repository paths restored from the base before the check runs (ruling D5). */
   scripts?: readonly string[]
+  /** Opt into a target-program root with a pristine current subject. */
+  programRoot?: true
 }>
 
 type BoundaryPlan = Readonly<{
   /** The target's checks, in order. */
   checks: readonly PhasedCheck[]
+  /** The target setup run in every materialized check root. */
+  setup?: string
   /** Declare a hook for every ending, as `FakeCheckPlan.hooks` does. */
   hooks?: boolean
   /** Files committed on the target alongside `README.md` and `.yrd.yml`.
@@ -768,6 +772,7 @@ function phasedChecks(checks: readonly PhasedCheck[]): string {
     if (check.on !== undefined) fields.push(`on: ${check.on}`)
     if (check.timeoutMs !== undefined) fields.push(`timeoutMs: ${String(check.timeoutMs)}`)
     if (check.scripts !== undefined) fields.push(`scripts: ${JSON.stringify(check.scripts)}`)
+    if (check.programRoot === true) fields.push("programRoot: true")
     return `{${check.name}: {${fields.join(", ")}}}`
   })
   return `checks: [${entries.join(", ")}]`
@@ -814,7 +819,8 @@ async function buildBoundaryRepository(planOf: (checkLog: string) => BoundaryPla
   // over and read which ending each record was for.
   const recorder = JSON.stringify(`cat >>${hookLog}`)
   const hooks = plan.hooks === true ? `notify: [{recorder: {run: ${recorder}}}]\n` : ""
-  await writeFile(join(repo, ".yrd.yml"), `${hooks}${phasedChecks(plan.checks)}\n`)
+  const setup = plan.setup === undefined ? "" : `setup: ${JSON.stringify(plan.setup)}\n`
+  await writeFile(join(repo, ".yrd.yml"), `${hooks}${setup}${phasedChecks(plan.checks)}\n`)
 
   await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd", ...extra.map(([path]) => path))
   await git(repo, "commit", "-qm", "main")

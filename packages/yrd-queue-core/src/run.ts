@@ -41,7 +41,7 @@
  * could not do its own job, and the next thing to happen is a person.
  */
 
-import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
+import { lstatSync, mkdirSync, readlinkSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { checkLogPath, checkTrailer, runCheck, type CheckedTree, type CheckResult, type CheckSpec } from "./check.ts"
@@ -753,9 +753,18 @@ async function prepare(
   commit: string,
   path: string,
   phase: Phase,
+  setupRoot?: string,
 ): Promise<PreparedWorktree> {
-  const logDir = checkLogDir(run, entry, phase)
-  const about = { branch: entry.change.branch, head: entry.change.head, name: SETUP, phase }
+  const logDir =
+    setupRoot === undefined
+      ? checkLogDir(run, entry, phase)
+      : join(checkLogDir(run, entry, phase), "program", setupRoot)
+  const about = {
+    branch: entry.change.branch,
+    head: entry.change.head,
+    name: setupRoot === undefined ? SETUP : `${SETUP}-program-${setupRoot}`,
+    phase,
+  }
   return prepareWorktree(run.git, run.options.repo, commit, path, {
     env: run.options.env,
     populateReference: run.options.populateReference,
@@ -2131,10 +2140,9 @@ export function short(branch: string, head: string): string {
  * judges the next change. A declared path the base does not carry is loud,
  * because a check that silently ran the branch's copy would be the hole itself.
  */
-async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<void> {
+async function validateScripts(run: Run, spec: CheckSpec): Promise<void> {
   const scripts = spec.scripts ?? []
   if (scripts.length === 0) return
-  const wt = gitIn(cwd, run.options.process, run.options.selection, gitInvocationOptions(run.options, run.log))
   for (const path of scripts) {
     if (
       (await refAt(run.git, `${run.targetSha}:${path}`, "blob")) === undefined &&
@@ -2144,7 +2152,239 @@ async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<v
         `check ${spec.name} declares scripts: ${path}, which the target ${run.targetSha.slice(0, 12)} does not carry`,
       )
     }
+  }
+}
+
+async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<void> {
+  await validateScripts(run, spec)
+  const scripts = spec.scripts ?? []
+  if (scripts.length === 0) return
+  const wt = gitIn(cwd, run.options.process, run.options.selection, gitInvocationOptions(run.options, run.log))
+  for (const path of scripts) {
     await wt(["checkout", "--quiet", run.targetSha, "--", path])
+  }
+}
+
+type SourceBlob = Readonly<{ kind: "blob" | "commit"; oid: string }>
+
+/**
+ * The declared source closure, read from a commit before setup can touch either
+ * root. `--name-only` leaves Git to parse its own tree rows; this code only
+ * carries the NUL-delimited repository paths into the existing blob reader.
+ */
+async function declaredSourceBlobs(
+  run: Run,
+  commit: string,
+  scripts: readonly string[],
+): Promise<ReadonlyMap<string, SourceBlob>> {
+  const blobs = new Map<string, SourceBlob>()
+  for (const script of scripts) {
+    const names = (await run.git(["--literal-pathspecs", "ls-tree", "-r", "--name-only", "-z", commit, "--", script]))
+      .split("\0")
+      .filter((path) => path !== "")
+    for (const path of names) {
+      const oid = await refAt(run.git, `${commit}:${path}`, "blob")
+      if (oid === undefined) throw new Error(`${commit.slice(0, 12)} lists declared source ${path} without an object`)
+      const kind = (await run.git(["cat-file", "-t", `${commit}:${path}`])).trim()
+      if (kind !== "blob" && kind !== "commit") {
+        throw new Error(`${commit.slice(0, 12)} declared source ${path} is ${kind}, not a file or gitlink`)
+      }
+      const prior = blobs.get(path)
+      if (prior !== undefined && (prior.kind !== kind || prior.oid !== oid)) {
+        throw new Error(`${commit.slice(0, 12)} names declared source ${path} with conflicting objects`)
+      }
+      blobs.set(path, { kind, oid })
+    }
+  }
+  return blobs
+}
+
+async function onDiskDeclaredPaths(run: Run, root: string, scripts: readonly string[]): Promise<ReadonlySet<string>> {
+  if (scripts.length === 0) return new Set()
+  const wt = gitIn(root, run.options.process, run.options.selection, gitInvocationOptions(run.options, run.log))
+  return new Set(
+    (await wt(["--literal-pathspecs", "ls-files", "-co", "--exclude-standard", "-z", "--", ...scripts]))
+      .split("\0")
+      .filter((path) => path !== ""),
+  )
+}
+
+async function onDiskSourceBlob(
+  run: Run,
+  root: string,
+  path: string,
+  expected: SourceBlob | undefined,
+  symlink: boolean = false,
+): Promise<string> {
+  try {
+    if (symlink) {
+      return (
+        await gitIn(
+          root,
+          run.options.process,
+          run.options.selection,
+          gitInvocationOptions(run.options, run.log),
+        )(["hash-object", "--stdin"], readlinkSync(join(root, path)))
+      ).trim()
+    }
+    if (expected?.kind === "commit") {
+      return (
+        await gitIn(
+          join(root, path),
+          run.options.process,
+          run.options.selection,
+          gitInvocationOptions(run.options, run.log),
+        )(["rev-parse", "HEAD"])
+      ).trim()
+    }
+    return (
+      await gitIn(
+        root,
+        run.options.process,
+        run.options.selection,
+        gitInvocationOptions(run.options, run.log),
+      )(["hash-object", "--", path])
+    ).trim()
+  } catch (error) {
+    // A listed but unreadable source is a mismatch below, named in the log;
+    // collapsing it into an absence would turn a damaged root into a pass.
+    return `unreadable: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
+/**
+ * A declared source must be checked on disk even when the candidate deleted it:
+ * `ls-files --others --exclude-standard` deliberately omits ignored remnants,
+ * which are still executable bytes if setup resurrected them.
+ */
+function declaredPathState(root: string, path: string): "present" | "absent" | "symlink" | string {
+  try {
+    const stat = lstatSync(join(root, path))
+    if (stat.isSymbolicLink()) return "symlink"
+    return "present"
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent"
+    return `unreadable: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
+async function witnessDeclaredSources(
+  run: Run,
+  entry: QueueEntry,
+  spec: CheckSpec,
+  phase: Phase,
+  stage: "program" | "subject",
+  root: string,
+  expected: ReadonlyMap<string, SourceBlob>,
+  baseline: ReadonlyMap<string, SourceBlob>,
+): Promise<void> {
+  const actual = await onDiskDeclaredPaths(run, root, spec.scripts ?? [])
+  const paths = new Set([...expected.keys(), ...baseline.keys(), ...actual])
+  const mismatched: string[] = []
+  for (const path of [...paths].sort()) {
+    const committed = expected.get(path)
+    const state =
+      committed === undefined && !baseline.has(path) && actual.has(path) ? "present" : declaredPathState(root, path)
+    const ondisk =
+      state === "present" || state === "symlink"
+        ? await onDiskSourceBlob(run, root, path, committed, state === "symlink")
+        : state
+    const same = committed === undefined ? ondisk === "absent" : committed.oid === ondisk
+    run.log.write({
+      branch: entry.change.branch,
+      committed: committed?.oid ?? "deleted",
+      head: entry.change.head,
+      kind: "judged",
+      name: spec.name,
+      ondisk,
+      path,
+      phase,
+      root,
+      same,
+      stage: `program-${stage}-source`,
+    })
+    if (!same) mismatched.push(`${path} committed=${committed?.oid ?? "deleted"} ondisk=${ondisk}`)
+  }
+  if (mismatched.length > 0) {
+    throw new Error(`program-root ${stage} source in ${root} differs from its recorded blobs: ${mismatched.join(", ")}`)
+  }
+}
+
+async function witnessTree(
+  run: Run,
+  entry: QueueEntry,
+  spec: CheckSpec,
+  phase: Phase,
+  stage: "program" | "subject",
+  root: string,
+  expected: CheckedTree,
+): Promise<void> {
+  const actual = await checkedTree(
+    root,
+    run.targetSha,
+    run.options.process,
+    run.options.selection,
+    gitInvocationOptions(run.options, run.log),
+  )
+  const same = actual.candidate === expected.candidate && actual.base === expected.base
+  run.log.write({
+    base: actual.base,
+    branch: entry.change.branch,
+    candidate: actual.candidate,
+    expectedBase: expected.base,
+    expectedCandidate: expected.candidate,
+    head: entry.change.head,
+    kind: "judged",
+    name: spec.name,
+    phase,
+    root,
+    same,
+    stage: `program-${stage}-tree`,
+  })
+  if (!same) {
+    throw new Error(
+      `program-root ${stage} ${root} moved during setup: expected ${expected.candidate.slice(0, 12)}/${expected.base.slice(0, 12)}, ` +
+        `read ${actual.candidate.slice(0, 12)}/${actual.base.slice(0, 12)}`,
+    )
+  }
+}
+
+async function witnessChangedSubject(
+  run: Run,
+  entry: QueueEntry,
+  spec: CheckSpec,
+  phase: Phase,
+  root: string,
+  tree: CheckedTree,
+): Promise<void> {
+  const files = await judgedTreeDigest(
+    root,
+    tree,
+    run.options.process,
+    run.options.selection,
+    gitInvocationOptions(run.options, run.log),
+  )
+  for (const file of files) {
+    run.log.write({
+      branch: entry.change.branch,
+      committed: file.committed,
+      head: entry.change.head,
+      kind: "judged",
+      name: spec.name,
+      ondisk: file.ondisk,
+      path: file.path,
+      phase,
+      root,
+      same: file.same,
+      stage: "program-subject-changed",
+    })
+  }
+  const divergent = files.filter((file) => !file.same)
+  if (divergent.length > 0) {
+    throw new Error(
+      `program-root subject ${root} differs from its recorded candidate blobs: ` +
+        divergent.map((file) => `${file.path} committed=${file.committed} ondisk=${file.ondisk}`).join(", "),
+    )
   }
 }
 
@@ -2184,7 +2424,24 @@ async function check(
   phase: Phase,
   extraEnv?: Readonly<Record<string, string>>,
 ): Promise<CheckResult> {
+  if (spec.programRoot === true) {
+    return programRootCheck(run, entry, spec, tree, phase, extraEnv)
+  }
   await restoreScripts(run, spec, cwd)
+  return runDeclaredCheck(run, entry, spec, cwd, tree, phase, extraEnv)
+}
+
+/** Run the existing check grammar, optionally pointing its immutable program root at P. */
+async function runDeclaredCheck(
+  run: Run,
+  entry: QueueEntry,
+  spec: CheckSpec,
+  cwd: string,
+  tree: CheckedTree,
+  phase: Phase,
+  extraEnv?: Readonly<Record<string, string>>,
+  programRoot?: string,
+): Promise<CheckResult> {
   const logDir = checkLogDir(run, entry, phase)
   const about = {
     branch: entry.change.branch,
@@ -2209,9 +2466,71 @@ async function check(
     spec,
     tree,
     ...(extraEnv === undefined ? {} : { extraEnv }),
+    ...(programRoot === undefined ? {} : { programRoot }),
   })
   recordProgramResult(run, { ...about, end: new Date().toISOString(), start }, result)
   return result
+}
+
+/**
+ * Materialize an immutable target program P beside a fresh candidate C for one
+ * opted-in check. P supplies the command's sources; C remains the exact tree
+ * the queue composed. Neither root borrows the queue driver's base pool.
+ */
+async function programRootCheck(
+  run: Run,
+  entry: QueueEntry,
+  spec: CheckSpec,
+  tree: CheckedTree,
+  phase: Phase,
+  extraEnv?: Readonly<Record<string, string>>,
+): Promise<CheckResult> {
+  await validateScripts(run, spec)
+  const scripts = spec.scripts ?? []
+  // Read both declarations before either setup runs. The comparison below is
+  // against these immutable tree objects, never a post-setup Git index.
+  const targetSources = await declaredSourceBlobs(run, run.targetSha, scripts)
+  const subjectSources = await declaredSourceBlobs(run, tree.candidate, scripts)
+  const targetTree: CheckedTree = { base: run.targetSha, candidate: run.targetSha }
+  const root = join(run.worktrees, "program", phase, entry.change.head.slice(0, 12), spec.name)
+  let program: PreparedWorktree | undefined
+  let subject: PreparedWorktree | undefined
+  try {
+    program = await prepare(run, entry, run.targetSha, join(root, "P"), phase, `target-${spec.name}`)
+    await witnessTree(run, entry, spec, phase, "program", program.path, targetTree)
+    await witnessDeclaredSources(run, entry, spec, phase, "program", program.path, targetSources, targetSources)
+
+    try {
+      subject = await prepare(run, entry, tree.candidate, join(root, "C"), phase, `subject-${spec.name}`)
+    } catch (error) {
+      // C is another candidate worktree in submit/merge, so its setup needs
+      // the same settled-ground reading as the phase worktree. Base has no
+      // lower ground to read, and P is the target's own program root.
+      if (!(error instanceof SetupFailed) || phase === "base") throw error
+      const rootChanges = await readRootChanges(run.git, tree.candidate)
+      throw new CandidateSetupFailed(error, phase, rootChanges?.changes ?? [])
+    }
+    await witnessTree(run, entry, spec, phase, "subject", subject.path, tree)
+    await witnessDeclaredSources(run, entry, spec, phase, "subject", subject.path, subjectSources, targetSources)
+    await witnessChangedSubject(run, entry, spec, phase, subject.path, tree)
+
+    // `prepareWorktree` captures its tree before setup. Read both roots again
+    // at the launch boundary, when an identity or source mutation still has a
+    // retained log row and cannot become a child result by accident.
+    await witnessTree(run, entry, spec, phase, "program", program.path, targetTree)
+    await witnessDeclaredSources(run, entry, spec, phase, "program", program.path, targetSources, targetSources)
+    await witnessTree(run, entry, spec, phase, "subject", subject.path, tree)
+    await witnessDeclaredSources(run, entry, spec, phase, "subject", subject.path, subjectSources, targetSources)
+    await witnessChangedSubject(run, entry, spec, phase, subject.path, tree)
+
+    return await runDeclaredCheck(run, entry, spec, subject.path, tree, phase, extraEnv, program.path)
+  } finally {
+    try {
+      if (subject !== undefined) await subject.remove()
+    } finally {
+      if (program !== undefined) await program.remove()
+    }
+  }
 }
 
 /**

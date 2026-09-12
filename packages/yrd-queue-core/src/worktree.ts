@@ -21,7 +21,7 @@
  * git transcript. The caller hands in a logger only when trace is on.
  */
 
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { lstatSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs"
 import { join, relative, resolve, sep } from "node:path"
 import type { Process } from "@yrd/process"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
@@ -29,7 +29,7 @@ import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
 import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
 import type { Git } from "./records.ts"
-import { gitIn, mergeBase, type GitInvocationOptions, type GitSelection } from "./git.ts"
+import { gitIn, mergeBase, refAt, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
 /**
  * What the worktree plumbing narrates to.
@@ -497,23 +497,31 @@ export async function judgedTreeDigest(
     // ":<srcmode> <dstmode> <srcsha> <dstsha> <status>"
     const destinationMode = meta.slice(1).split(" ")[1]
     if (destinationMode === "160000") continue
-    let committed: string
-    try {
-      committed = (await wt(["rev-parse", `${tree.candidate}:${path}`])).trim()
-    } catch {
-      // The merge commit does not carry this path: it was DELETED by the change.
-      // silent-fallback-allow: absence here is the answer, not a failure to get
-      // one, and the row below reports it as such rather than dropping the path.
-      committed = "deleted"
-    }
+    // The merge commit does not carry this path only when the candidate
+    // deleted it. `refAt` reserves undefined for that Git answer and leaves
+    // every unreadable object or invocation fault loud.
+    const committed = (await refAt(wt, `${tree.candidate}:${path}`, "blob")) ?? "deleted"
     let ondisk: string
     try {
-      ondisk = (await wt(["hash-object", "--", path])).trim()
-    } catch {
-      // silent-fallback-allow: the file is not on disk. That is a REPORTED
-      // finding — the row carries `absent` and is compared below — not a
-      // swallowed error.
-      ondisk = "absent"
+      const onDiskPath = join(worktree, path)
+      // Git hashes a symlink's stored link text. `hash-object -- path` follows
+      // it, so feed readlink's bytes through the same Git object hasher.
+      ondisk = lstatSync(onDiskPath).isSymbolicLink()
+        ? (await wt(["hash-object", "--stdin"], readlinkSync(onDiskPath))).trim()
+        : (await wt(["hash-object", "--", path])).trim()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        // The deleted candidate path is absent on disk: a reported, matching
+        // deletion, never a missing observation.
+        ondisk = "absent"
+      } else {
+        throw new Error(
+          `cannot hash judged path ${path} in ${worktree}: ${error instanceof Error ? error.message : String(error)}`,
+          {
+            cause: error,
+          },
+        )
+      }
     }
     const same = committed === "deleted" ? ondisk === "absent" : committed === ondisk
     files.push({ committed, ondisk, path, same })

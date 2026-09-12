@@ -15,6 +15,7 @@
  *
  * The vocabulary is the plan's: change, check, result, queue run, target.
  */
+import { existsSync } from "node:fs"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   advanceTargetAroundQueue,
@@ -55,6 +56,12 @@ function fake(log: string, exit: number): string {
 function passing(log: string) {
   return { hooks: true, checks: [{ name: "check", run: fake(log, 0) }] }
 }
+
+type ProgramObservation = Readonly<Record<string, string>> &
+  Readonly<{
+    line: string
+    phase: string
+  }>
 
 describe("the queue run", { timeout: 180_000 }, () => {
   /**
@@ -117,6 +124,160 @@ describe("the queue run", { timeout: 180_000 }, () => {
       expect(await targetTip(repo), run.report).toBe(before)
       // Whatever else ran, the branch's version of the check did not.
       expect(await checkLines(log), run.report).not.toContain("branch")
+    })
+
+    it("a target program uses its own closure with a fresh current subject after legacy overlay, in submit and merge", async () => {
+      const log = await temporaryLog("program-root")
+      const { repo } = await boundaryRepositoryWith({
+        hooks: true,
+        // Three opted-in checks share submit/merge phases. A no-op still opens
+        // a create-only setup log for each P/C root, so a colliding namespace
+        // fails before this program can accidentally look green.
+        setup: "true",
+        checks: [
+          {
+            name: "legacy",
+            on: "submit",
+            run: `PROGRAM_LOG=${log} sh legacy.sh`,
+            scripts: ["legacy.sh"],
+          },
+          {
+            name: "program-submit",
+            on: "submit",
+            programRoot: true,
+            run: `PROGRAM_LOG=${log} PROGRAM_PHASE=submit sh "$YRD_PROGRAM_ROOT/program.sh"`,
+            scripts: ["program.sh", "program-helper.txt"],
+          },
+          {
+            name: "program-merge",
+            on: "merge",
+            programRoot: true,
+            run: `PROGRAM_LOG=${log} PROGRAM_PHASE=merge sh "$YRD_PROGRAM_ROOT/program.sh"`,
+            scripts: ["program.sh", "program-helper.txt"],
+          },
+          {
+            name: "program-failure",
+            on: "merge",
+            programRoot: true,
+            run: `PROGRAM_LOG=${log} PROGRAM_PHASE=failure PROGRAM_FAIL_ON_CANDIDATE=1 sh "$YRD_PROGRAM_ROOT/program.sh"`,
+            scripts: ["program.sh", "program-helper.txt"],
+          },
+        ],
+        files: {
+          "legacy.sh": `#!/bin/sh
+set -eu
+: "\${PROGRAM_LOG:?legacy needs a log}"
+printf 'legacy cwd=%s candidate=%s\n' "$(pwd)" "\${YRD_CANDIDATE_SHA}" >>"$PROGRAM_LOG"
+touch legacy-overlay.txt
+`,
+          "program-helper.txt": "target-helper\n",
+          "program.sh": `#!/bin/sh
+set -eu
+: "\${PROGRAM_LOG:?program needs a log}"
+helper=$(cat "\${YRD_PROGRAM_ROOT}/program-helper.txt")
+legacy=absent
+if [ -e legacy-overlay.txt ]; then legacy=present; fi
+actual=$(git rev-parse HEAD)
+psha=$(git -C "\${YRD_PROGRAM_ROOT}" rev-parse HEAD)
+product=$(cat product.txt)
+config=$(cat config-marker.txt)
+printf '%s driver=target helper=%s psha=%s cwd=%s repo=%s candidate=%s base=%s actual=%s product=%s config=%s legacy=%s program=%s\n' "\${PROGRAM_PHASE}" "$helper" "$psha" "$(pwd)" "\${YRD_REPO}" "\${YRD_CANDIDATE_SHA}" "\${YRD_BASE_SHA}" "$actual" "$product" "$config" "$legacy" "\${YRD_PROGRAM_ROOT}" >>"$PROGRAM_LOG"
+test "$helper" = target-helper
+test "$product" = candidate-product || test "$product" = target-product
+test "$config" = candidate-config || test "$config" = target-config
+test "$legacy" = absent
+if [ "\${PROGRAM_FAIL_ON_CANDIDATE:-0}" = 1 ] && [ "$product" = candidate-product ]; then exit 1; fi
+`,
+          "product.txt": "target-product\n",
+          "config-marker.txt": "target-config\n",
+        },
+      })
+      const capturedTarget = await targetTip(repo)
+
+      await submitCommitWriting(repo, "program-root", {
+        "program.sh": "#!/bin/sh\nprintf 'candidate program ran\\n' >>\"$PROGRAM_LOG\"\nexit 97\n",
+        "program-helper.txt": "candidate-helper\n",
+        "product.txt": "candidate-product\n",
+        "config-marker.txt": "candidate-config\n",
+      })
+      const run = await queueRunOnce(repo)
+      const lines = await checkLines(log)
+      const seen = `${run.report}\n--- protected program observations ---\n${lines.join("\n")}`
+
+      expect(run.exitCode, seen).toBe(1)
+      const legacy = lines.find((line) => line.startsWith("legacy "))
+      expect(legacy, seen).toBeDefined()
+      const legacyCwd = /cwd=([^ ]+)/u.exec(legacy ?? "")?.[1]
+      expect(legacyCwd, seen).toBeDefined()
+
+      const observed: readonly ProgramObservation[] = ["submit", "merge", "failure"].map((phase) => {
+        const line = lines.find(
+          (candidate) => candidate.startsWith(`${phase} `) && candidate.includes("product=candidate-product"),
+        )
+        expect(line, seen).toBeDefined()
+        const fields: Record<string, string> = Object.fromEntries(
+          (line ?? "")
+            .split(" ")
+            .slice(1)
+            .map((field) => field.split("=", 2) as [string, string]),
+        )
+        return { line: line ?? "", phase, ...fields }
+      })
+
+      for (const observation of observed) {
+        expect(observation.line, seen).toContain("driver=target")
+        expect(observation.line, seen).toContain("helper=target-helper")
+        expect(observation.product, seen).toBe("candidate-product")
+        expect(observation.config, seen).toBe("candidate-config")
+        expect(observation.legacy, seen).toBe("absent")
+        expect(observation.cwd, seen).not.toBe(legacyCwd)
+        expect(observation.repo, seen).toBe(observation.cwd)
+        expect(observation.candidate, seen).toBe(observation.actual)
+        expect(observation.base, seen).toBe(capturedTarget)
+        expect(observation.psha, seen).toBe(capturedTarget)
+      }
+      expect(new Set(observed.map((observation) => observation.cwd)).size, seen).toBe(3)
+      const failed = observed.find((observation) => observation.phase === "failure")
+      expect(failed, seen).toBeDefined()
+      // The queue must tear down both roots after a failed program check; a
+      // retained P or C risks becoming a later check's untracked subject.
+      expect(existsSync(failed?.cwd ?? ""), seen).toBe(false)
+      expect(existsSync(failed?.program ?? ""), seen).toBe(false)
+    })
+
+    it("attributes a fresh protected-program subject setup failure to its submitter", async () => {
+      // The ordinary submit worktree and P must pass. Only C is both a fresh
+      // protected-program root and carries the candidate product, so this
+      // isolates the second setup whose failure must still read settled ground.
+      const { repo } = await boundaryRepositoryWith({
+        hooks: true,
+        setup: `case "$YRD_REPO" in
+  */program/*/C) test "$(cat product.txt)" != candidate-product ;;
+esac`,
+        checks: [
+          {
+            name: "protected",
+            on: "submit",
+            programRoot: true,
+            run: 'sh "$YRD_PROGRAM_ROOT/program.sh"',
+            scripts: ["program.sh"],
+          },
+        ],
+        files: {
+          "product.txt": "target-product\n",
+          "program.sh": "#!/bin/sh\nexit 0\n",
+        },
+      })
+      const before = await targetTip(repo)
+
+      const change = await submitCommitWriting(repo, "program-setup", { "product.txt": "candidate-product\n" })
+      const run = await queueRunOnce(repo)
+
+      // A bare SetupFailed makes this stuck (2). The settled base passes, so
+      // the same setup failure on fresh C belongs to this submitter (1).
+      expect(run.exitCode, run.report).toBe(1)
+      expect(await targetTip(repo), run.report).toBe(before)
+      expect(run.report, run.report).toContain(change.branch)
     })
   })
 
