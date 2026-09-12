@@ -383,6 +383,26 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     // Three rounds launch the real selected executable for every Git call.
   }, 15_000)
 
+  // 24472: legacy branch-name inference must be visible in both submit modes;
+  // the domain reader tests cannot prove the CLI tells its caller.
+  it.each([true, false])("reports legacy issue fallback during submit (dryRun=%s)", async (dryRun) => {
+    const w = await world()
+    const branch = "task/24472-legacy"
+    await w.git(["checkout", "--quiet", "-b", branch])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "legacy work without a binding"])
+    const run = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        { branch, command: "submit", dryRun, submitter: "@dev/2" },
+        { workdir: w.workdir, json: true },
+      ),
+    ).toBe(0)
+    expect(run.stderr()).toContain(`legacy branch-name fallback: ${branch} -> 24472`)
+    expect(records(run)[0]).toMatchObject({ issue: "24472", issueSource: "legacy-branch" })
+  })
+
   it("pause is visible, refuses live and dry-run submit, and resume admits the same branch", async () => {
     const w = await world()
     await w.git(["checkout", "--quiet", "-b", "task/one", "main"])

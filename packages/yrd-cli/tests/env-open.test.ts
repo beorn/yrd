@@ -171,7 +171,16 @@ describe("yrd env open prepares the retained environment", () => {
     expect(await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened"], run.io), run.stderr()).toBe(0)
 
     const bay = join(w.work, ".bays", "reopened")
-    expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${candidate}\n`)
+    const openedGit = gitIn(bay)
+    const opened = (await openedGit(["rev-parse", "HEAD"])).trim()
+    if (selector === "--issue") {
+      expect((await openedGit(["rev-parse", "HEAD^"])).trim()).toBe(candidate)
+      expect((await openedGit(["rev-parse", "HEAD^{tree}"])).trim()).toBe(
+        (await w.git(["rev-parse", `${candidate}^{tree}`])).trim(),
+      )
+      expect(await openedGit(["log", "-1", "--format=%B"])).toContain("Refs: reopened")
+    } else expect(opened).toBe(candidate)
+    expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${opened}\n`)
 
     await w.git(["worktree", "remove", "--force", bay])
     const reopened = capture(w.work)
@@ -179,7 +188,65 @@ describe("yrd env open prepares the retained environment", () => {
       await runYrdProcess(["bun", "yrd", "env", "open", selector, "reopened"], reopened.io),
       reopened.stderr(),
     ).toBe(0)
-    expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${candidate}\n`)
+    expect((await gitIn(bay)(["rev-parse", "HEAD"])).trim()).toBe(opened)
+    expect(readFileSync(join(bay, "setup-tree.txt"), "utf8")).toBe(`${mergeBase}\n${opened}\n`)
+  })
+
+  it("binds a fresh issue before setup and reports the exact binding head", async () => {
+    const w = await world("printf '%s\\n' \"$YRD_CANDIDATE_SHA\" > setup-head.txt")
+    const before = (await w.git(["rev-parse", "HEAD"])).trim()
+    const tree = (await w.git(["rev-parse", "HEAD^{tree}"])).trim()
+    const run = capture(w.work)
+    const issue = "@i/work/24472-bind-work"
+
+    expect(
+      await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "binding", "--issue", issue, "--json"], run.io),
+      run.stderr(),
+    ).toBe(0)
+
+    const bay = join(w.work, ".bays", "binding")
+    const opened = gitIn(bay)
+    const head = (await opened(["rev-parse", "HEAD"])).trim()
+    expect(head).not.toBe(before)
+    expect((await opened(["rev-parse", "HEAD^"])).trim()).toBe(before)
+    expect((await opened(["rev-parse", "HEAD^{tree}"])).trim()).toBe(tree)
+    expect((await opened(["log", "-1", "--format=%(trailers:key=Refs,valueonly)"])).trim()).toBe(issue)
+    expect(JSON.parse(run.stdout())).toMatchObject({ path: bay, head, branch: "task/binding" })
+    expect(readFileSync(join(bay, "setup-head.txt"), "utf8")).toBe(`${head}\n`)
+  })
+
+  it("refuses a conflicting binding before setup and retains the actual environment", async () => {
+    const w = await world("touch setup-ran.txt")
+    await w.git(["checkout", "--quiet", "-b", "task/requested"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind prior work\n\nRefs: other-issue"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--issue", "requested"], run.io)).toBe(2)
+
+    const bay = join(w.work, ".bays", "requested")
+    expect(existsSync(bay)).toBe(true)
+    expect((await gitIn(bay)(["rev-parse", "HEAD"])).trim()).toBe(head)
+    expect(existsSync(join(bay, "setup-ran.txt"))).toBe(false)
+    expect(run.stdout()).toBe("")
+    expect(run.stderr()).toContain(bay)
+    expect(run.stderr()).toContain("requested")
+    expect(run.stderr()).toContain("other-issue")
+    expect(run.stderr()).toContain(head)
+  })
+
+  it("refuses an issue with a detached commit before provisioning", async () => {
+    const w = await world("true")
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    const registrations = await w.git(["worktree", "list", "--porcelain"])
+    const run = capture(w.work)
+
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", head, "--issue", "detached"], run.io)).toBe(2)
+
+    expect(await w.git(["worktree", "list", "--porcelain"])).toBe(registrations)
+    expect(run.stderr()).toMatch(/detached.*--issue|--issue.*detached/u)
+    expect(run.stdout()).toBe("")
   })
 
   /**
@@ -210,6 +277,8 @@ describe("yrd env open prepares the retained environment", () => {
       remote,
       resumer,
     ])
+    await gitIn(resumer)(["config", "user.email", "env-open@yrd.test"])
+    await gitIn(resumer)(["config", "user.name", "yrd"])
     const run = capture(resumer)
 
     expect(await runYrdProcess(["bun", "yrd", "env", "open", selector, "resume", "--json"], run.io), run.stderr()).toBe(
@@ -217,8 +286,10 @@ describe("yrd env open prepares the retained environment", () => {
     )
 
     const path = join(isolateHome(w.work), "resume")
-    expect(JSON.parse(run.stdout())).toMatchObject({ branch: "task/resume", head, path })
-    expect((await gitIn(path)(["rev-parse", "HEAD"])).trim()).toBe(head)
+    const opened = (await gitIn(path)(["rev-parse", "HEAD"])).trim()
+    expect(JSON.parse(run.stdout())).toMatchObject({ branch: "task/resume", head: opened, path })
+    if (selector === "--issue") expect((await gitIn(path)(["rev-parse", "HEAD^"])).trim()).toBe(head)
+    else expect(opened).toBe(head)
     expect(readFileSync(join(path, "retained.txt"), "utf8")).toBe("keep this work\n")
   })
 

@@ -65,7 +65,8 @@ const queueHealthCommand = async (workdir: string, io: YrdCliIO): Promise<YrdCli
 }
 
 const NOTIFY_HELP = `the seat that hears the result; else ${DEFAULT_SUBMITTER_ENV}, else unknown`
-const ISSUE_HELP = "the issue; else the head's Resolves/Refs trailer, else the branch name's leading segment"
+const ISSUE_HELP =
+  "the issue, checked against the branch's first Refs/Resolves binding; unbound legacy name fallback is reported"
 const DRY_RUN_HELP = "print the change this would open and push nothing"
 const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to origin/HEAD inside a clone"
 
@@ -506,7 +507,7 @@ function buildProgram(
         "open or adopt its task/<name> branch; prints the path either way",
     )
     .option("--bay <name>", "name the environment")
-    .option("--issue <ref>", "the issue this environment is for")
+    .option("--issue <ref>", "bind the branch to this issue with a Refs commit before setup")
     .option("--json", "emit stable JSON")
     .action(async (commit, options) =>
       setExit(

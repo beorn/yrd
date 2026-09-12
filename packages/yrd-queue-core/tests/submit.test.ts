@@ -17,6 +17,7 @@ import {
   gitIn,
   inLine,
   inspectSubmit,
+  issueOf,
   parseChangeName,
   parseChangeRef,
   pauseRef,
@@ -92,6 +93,154 @@ async function remoteRefs(w: World): Promise<readonly string[]> {
 }
 
 describe("submit is one atomic push of the branch and its opened record", () => {
+  /** @failure Later heads/renames lose bindings, or target history assigns unrelated work.
+   * @level l2 @consumer Yrd env open and submit
+   */
+  it("retains the first branch binding across later heads and renames, excluding target history", async () => {
+    const w = await world()
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "target binding\n\nRefs: target-issue"])
+    const target = (await w.git(["rev-parse", "HEAD"])).trim()
+    await branchWithCommit(w, "task/123-old-label", "change.txt")
+    await w.git(["checkout", "--quiet", "task/123-old-label"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: canonical-issue"])
+    const binding = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "repeat\n\nResolves: canonical-issue"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "later work"])
+    await w.git(["branch", "-m", "task/renamed"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    expect(await issueOf(w.git, "task/renamed", head, target)).toEqual({
+      issue: "canonical-issue",
+      source: "binding",
+      commit: binding,
+    })
+    expect(await issueOf(w.git, "task/renamed", head, target, "canonical-issue")).toEqual({
+      issue: "canonical-issue",
+      source: "binding",
+      commit: binding,
+    })
+    expect(await issueOf(w.git, "task/plain", target, target)).toBeUndefined()
+    expect(await issueOf(w.git, "task/123-label", target, target)).toEqual({ issue: "123", source: "legacy-branch" })
+    expect(await issueOf(w.git, "task/123-label", target, target, "requested-issue")).toEqual({
+      issue: "requested-issue",
+      source: "declared",
+    })
+    for (const invalid of ["", " ", " leading", "trailing ", "issue\nRefs: injected", "issue\u0001"]) {
+      await expect(issueOf(w.git, "task/plain", target, target, invalid)).rejects.toThrow("issue")
+    }
+    const failed: Git = (args, input) =>
+      args[0] === "log" ? w.git(["log", "missing-binding-object"]) : w.git(args, input)
+    await expect(issueOf(failed, "task/123-label", head, target)).rejects.toThrow("missing-binding-object")
+  })
+
+  /** @failure Binding conflicts publish work or a declared issue overrides explicit history.
+   * @level l2 @consumer Yrd submit and dry run
+   */
+  it.each(["later binding", "declared issue"])("refuses %s conflicts before rebase or publication", async (kind) => {
+    const w = await world()
+    await branchWithCommit(w, "task/bound", "change.txt")
+    await w.git(["checkout", "--quiet", "task/bound"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "bind\n\nRefs: first-issue"])
+    const first = (await w.git(["rev-parse", "HEAD"])).trim()
+    if (kind === "later binding") {
+      await w.git(["commit", "--quiet", "--allow-empty", "-m", "conflict\n\nResolves: other-issue"])
+    }
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "target advanced"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "task/bound"])
+    const beforeLocal = await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])
+    const beforeRemote = await w.git(["ls-remote", "--refs", "origin"])
+    const calls: string[][] = []
+    const observed: Git = (args, input) => {
+      calls.push([...args])
+      return w.git(args, input)
+    }
+    for (const call of [inspectSubmit, submit]) {
+      const attempt = call(observed, "origin", {
+        branch: "task/bound",
+        target: { remote: "origin", branch: "main" },
+        submitter: "author",
+        rebase: true,
+        ...(kind === "declared issue" ? { issue: "other-issue" } : {}),
+      })
+      await expect(attempt).rejects.toThrow("first-issue")
+      await expect(attempt).rejects.toThrow("other-issue")
+      await expect(attempt).rejects.toThrow(first)
+      if (kind === "later binding") await expect(attempt).rejects.toThrow(head)
+    }
+    // This is the publication boundary: neither rewriting nor any root/pin push may start.
+    expect(calls.some((args) => args[0] === "rebase" || args[0] === "push" || args.includes("--show-toplevel"))).toBe(
+      false,
+    )
+    expect(await w.git(["for-each-ref", "--format=%(refname) %(objectname)"])).toBe(beforeLocal)
+    expect(await w.git(["ls-remote", "--refs", "origin"])).toBe(beforeRemote)
+  })
+
+  /** @failure A rebase changes binding history after admission but before publication.
+   * @level l2 @consumer Yrd submit --rebase
+   */
+  it("revalidates the resulting rebase head before publishing it", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/rebound", "change.txt")
+    await w.git(["commit", "--quiet", "--allow-empty", "-m", "target advanced"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "task/rebound"])
+    let rebased = false
+    let published = false
+    const changed: Git = async (args, input) => {
+      if (rebased && (args[0] === "push" || args.includes("--show-toplevel"))) published = true
+      const result = await w.git(args, input)
+      if (args[0] === "rebase") {
+        rebased = true
+        await w.git(["commit", "--quiet", "--allow-empty", "-m", "new binding\n\nRefs: unexpected-issue"])
+      }
+      return result
+    }
+    await expect(
+      submit(changed, "origin", {
+        branch: "task/rebound",
+        target: { remote: "origin", branch: "main" },
+        submitter: "author",
+        rebase: true,
+        issue: "requested-issue",
+      }),
+    ).rejects.toThrow("unexpected-issue")
+    expect(rebased).toBe(true)
+    expect(published).toBe(false)
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+  })
+
+  /** @failure Rebase drops an already-applied binding commit and silently falls back to the branch label.
+   * @level l2 @consumer Yrd submit --rebase
+   */
+  it("refuses when rebase loses the explicit binding it admitted", async () => {
+    const w = await world()
+    await branchWithCommit(w, "task/123-bound", "change.txt")
+    await w.git(["checkout", "--quiet", "task/123-bound"])
+    await w.git(["commit", "--quiet", "--amend", "-m", "bound patch\n\nRefs: canonical-issue"])
+    const binding = (await w.git(["rev-parse", "HEAD"])).trim()
+    writeFileSync(join(w.work, "later.txt"), "later work\n")
+    await w.git(["add", "later.txt"])
+    await w.git(["commit", "--quiet", "-m", "later work"])
+    await w.git(["checkout", "--quiet", "main"])
+    writeFileSync(join(w.work, "change.txt"), "change.txt\n")
+    await w.git(["add", "change.txt"])
+    await w.git(["commit", "--quiet", "-m", "target already has patch"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "task/123-bound"])
+    const attempt = submit(w.git, "origin", {
+      branch: "task/123-bound",
+      target: { remote: "origin", branch: "main" },
+      submitter: "author",
+      rebase: true,
+    })
+    await expect(attempt).rejects.toThrow("binding")
+    await expect(attempt).rejects.toThrow(binding)
+    await expect(attempt).rejects.toThrow("canonical-issue")
+    expect(await remoteRefs(w)).toEqual(["refs/heads/main"])
+  })
+
   // A moved target used to be discovered only by the queue. The existing
   // atomic-push cases keep main fixed and cannot catch this entry refusal.
   it("refuses a stale head without changing refs or FETCH_HEAD, including the resumed pause read", async () => {

@@ -50,7 +50,21 @@ Queue commands and `yrd submit` take `--queue <value>`, never a positional queue
 
 Every command takes `--json`. `yrd submit` refuses the queue branch itself: it is not a change. While paused, submit and dry-run refuse with who paused the queue, when, why, and the resume command; already-submitted changes keep their place. `yrd queue up` stays visible but does no automatic checking or merging until resume. An explicit `yrd queue run` is permitted while paused and leaves the pause in place. `yrd check` checks out HEAD afresh, so uncommitted changes are not seen.
 
-With a commit operand, `yrd env open` requires a full commit object ID already present locally. Without it, `--bay <name>` or `--issue <ref>` opens or adopts `task/<name>` using Git worktree registration; an occupied branch refuses and names its holder. It materializes that commit's submodules and runs its declared setup; setup failure preserves the environment for inspection. Close reads teardown from the environment's current commit and refuses dirty, locked, unregistered or out-of-root paths. Failed teardown also preserves the environment.
+With a commit operand, `yrd env open` requires a full commit object ID already present locally and refuses `--issue`.
+
+Without a commit, `--bay <name>` or `--issue <ref>` opens or adopts `task/<name>` through Git worktree registration. An occupied branch refuses and names its holder.
+
+With `--issue`, an initial `Refs:` commit records the binding before setup and preserves the current tree and history. A matching binding adds no commit.
+
+Conflicting bindings refuse and name the preserved environment. Setup and output use the resulting head; setup failure preserves that environment.
+
+Submission scans branch history back to its merge-base with the captured target, excluding target history. The first explicit `Refs:` or `Resolves:` binding wins.
+
+Later commits and branch renames retain the binding. Conflicts name both issues and commits; `--issue` must match an existing binding.
+
+Only unbound legacy branches may fall back to their leading numeric issue segment. Live and dry-run submission report that fallback. Git publication starts after binding validation.
+
+Close reads teardown from the environment's current commit and refuses dirty, locked, unregistered or out-of-root paths. Failed teardown preserves the environment.
 
 **Your workflow.** Once your changes are committed, work from your own branch. These examples use `fix-login` and the default target, `origin#main`; substitute your branch and configured target.
 

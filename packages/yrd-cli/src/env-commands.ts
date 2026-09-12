@@ -26,6 +26,7 @@ import {
   registeredWorktrees,
   runCheck,
   gitIn,
+  issueOf,
   readConfig,
   refAt,
   runId,
@@ -89,6 +90,11 @@ async function resolveBaseSha(git: Git, target: string): Promise<string> {
 export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
   const commit = options.commit
+  if (commit !== undefined && options.issue !== undefined) {
+    throw new Error(
+      `yrd env open cannot bind --issue ${options.issue} to a detached commit; open a branch with --issue and no commit argument`,
+    )
+  }
   if (commit !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit)) {
     // The argument is an exact commit and nothing else; a BRANCH is opened
     // with --bay/--issue and no argument. Offering only `rev-parse HEAD`
@@ -136,7 +142,41 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     }
     provisioned = result.output
   }
-  const { path, headSha, baseSha } = provisioned
+  const { path, baseSha } = provisioned
+  let headSha = provisioned.headSha
+  if (options.issue !== undefined && branch !== undefined) {
+    try {
+      const environmentGit = gitIn(path, process)
+      headSha = (await environmentGit(["rev-parse", "HEAD"])).trim()
+      const binding = await issueOf(environmentGit, branch, headSha, base, options.issue)
+      if (binding === undefined) throw new Error(`no issue resolved for requested binding ${options.issue}`)
+      if (binding.source !== "binding") {
+        const tree = (await environmentGit(["rev-parse", `${headSha}^{tree}`])).trim()
+        const bound = (
+          await environmentGit([
+            "commit-tree",
+            tree,
+            "-p",
+            headSha,
+            "-m",
+            `Bind work to ${binding.issue}\n\nRefs: ${binding.issue}`,
+          ])
+        ).trim()
+        await environmentGit(["update-ref", `refs/heads/${branch}`, bound, headSha])
+        headSha = bound
+      }
+      const currentHead = (await environmentGit(["rev-parse", "HEAD"])).trim()
+      if (currentHead !== headSha) {
+        throw new Error(`HEAD changed from verified binding ${headSha} to ${currentHead}`)
+      }
+      headSha = currentHead
+    } catch (error) {
+      throw new Error(
+        `issue binding failed in preserved environment ${path}; setup has not run: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      )
+    }
+  }
   const setup = config?.setup
   if (setup !== undefined) {
     const artifacts = join(resolve(root, await workdirOf(git)), "logs", "environments", name, runId())

@@ -52,7 +52,6 @@ import {
   refAt,
   queueRefPrefix,
   submit,
-  issueOf,
   nextStuckStreak,
   QUEUE_HEALTH_DOCUMENT,
   ROUND_BUDGET_MS,
@@ -69,6 +68,7 @@ import {
   type Journals,
   type JournalRun,
   type Git,
+  type IssueResolution,
   type GitRunner,
   type GitObservation,
   type GitSelection,
@@ -85,6 +85,7 @@ import {
 import { clocksLine, noticeLine } from "./watch-notice.ts"
 import { FILTER_FIELDS, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
+
 import type { WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
@@ -105,6 +106,20 @@ import { SERVICE } from "./queue-health.ts"
 
 import { workdirOf } from "./workdir.ts"
 import { originHead } from "./queue-location.ts"
+
+function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution | undefined) {
+  if (resolution === undefined) return {}
+  if (resolution.source === "legacy-branch") {
+    io.stderr(
+      `yrd: legacy branch-name fallback: ${branch} -> ${resolution.issue}; no explicit issue binding was found\n`,
+    )
+  }
+  return {
+    issue: resolution.issue,
+    issueSource: resolution.source,
+    ...(resolution.commit === undefined ? {} : { issueCommit: resolution.commit }),
+  }
+}
 
 /**
  * How long the relaunch may wait for the shared checkout before it says so.
@@ -406,7 +421,7 @@ export async function coreQueueCommand(
         if (request.dryRun === true) {
           const inspected = await inspectSubmit(git, config.target.remote, submission)
           const { head, targetHead, rebaseRequired } = inspected
-          const issue = await issueOf(git, branch, head, request.issue)
+          const issue = inspected.issue
           emit(
             io,
             options.json,
@@ -419,12 +434,12 @@ export async function coreQueueCommand(
               target: targetName(config.target),
               targetHead,
               freshness: freshnessLine(targetHead),
-              ...(issue === undefined ? {} : { issue }),
+              ...issueOutput(io, branch, issue),
             },
             (rebaseRequired
               ? `would rebase ${branch} at ${head} onto ${targetHead}, then open its new head (unknown until rebase)`
               : `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}`) +
-              `${issue === undefined ? "" : ` (issue ${issue})`}; nothing was pushed; ${freshnessLine(targetHead)}`,
+              `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}`,
           )
           return 0
         }
@@ -432,7 +447,7 @@ export async function coreQueueCommand(
         emit(
           io,
           options.json,
-          submitted,
+          { ...submitted, ...issueOutput(io, branch, submitted.issue) },
           `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}; ${freshnessLine(submitted.targetHead)}` +
             // 24454: a moved gitlink's commit went to its submodule remote first; say where.
             submitted.published

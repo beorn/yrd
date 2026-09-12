@@ -31,6 +31,13 @@ export type SubmitRequest = Readonly<{
   rebase?: boolean
 }>
 
+export type IssueResolution = Readonly<{
+  issue: string
+  source: "binding" | "declared" | "legacy-branch"
+  /** The first explicit binding's carrying commit, when source is binding. */
+  commit?: string
+}>
+
 export type Submitted = Readonly<{
   branch: string
   head: string
@@ -42,6 +49,7 @@ export type Submitted = Readonly<{
   retry: boolean
   /** Gitlinks this change moved whose commits submit published to their submodule remotes (24454). */
   published: readonly PublishedGitlink[]
+  issue?: IssueResolution
 }>
 
 export type PublishedGitlink = Readonly<{
@@ -166,7 +174,13 @@ export function refuseTarget(branch: string, target: string): void {
   }
 }
 
-export type SubmitInspection = Readonly<{ head: string; targetHead: string; base: string; rebaseRequired: boolean }>
+export type SubmitInspection = Readonly<{
+  head: string
+  targetHead: string
+  base: string
+  rebaseRequired: boolean
+  issue?: IssueResolution
+}>
 
 /** The bound on a courtesy check: this observation cannot reserve the target. */
 export function freshnessLine(targetHead: string): string {
@@ -201,9 +215,10 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
       `${request.branch} is stale: found merge base ${base}, expected ${targetName(request.target)} at ${targetHead}. Rebase onto that target and retry, or check out this branch and use yrd submit --rebase; ${bound}`,
     )
   }
+  const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
   if (request.rebase === true) await requireRebaseWorktree(git, request.branch, bound)
   await refuseDivergedMovedPins(git, targetHead, head, request.branch)
-  return { head, targetHead, base, rebaseRequired }
+  return { head, targetHead, base, rebaseRequired, ...(issue === undefined ? {} : { issue }) }
 }
 
 /**
@@ -221,9 +236,7 @@ export async function refuseDivergedMovedPins(git: Git, from: string, to: string
     const child = gitIn(join(root, row.path))
     const componentMain = await readRemoteCommit(child, "origin", "refs/heads/main")
     if (componentMain === undefined) {
-      throw new Error(
-        `${row.path} origin has no refs/heads/main; cannot check pin ${row.sha} against component main`,
-      )
+      throw new Error(`${row.path} origin has no refs/heads/main; cannot check pin ${row.sha} against component main`)
     }
     try {
       await child(["cat-file", "-e", `${row.sha}^{commit}`])
@@ -278,6 +291,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   const inspected = await inspectSubmit(git, remote, request)
   const { targetHead } = inspected
   let head = inspected.head
+  let issue = inspected.issue
   if (inspected.rebaseRequired) {
     try {
       await git(["rebase", "--no-autostash", "--no-update-refs", targetHead])
@@ -296,6 +310,13 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     if (head === targetHead) {
       throw new Error(
         `nothing new to submit after rebase: ${targetName(request.target)} at ${targetHead} already contains this change; ${freshnessLine(targetHead)}`,
+      )
+    }
+    const priorBinding = inspected.issue?.source === "binding" ? inspected.issue : undefined
+    issue = await issueOf(git, request.branch, head, targetHead, request.issue ?? priorBinding?.issue)
+    if (priorBinding !== undefined && issue?.source !== "binding") {
+      throw new Error(
+        `rebase lost issue binding ${priorBinding.issue} at ${priorBinding.commit} on ${request.branch}; resulting head ${head} has no explicit binding. Rebind the issue before submitting; no change was opened`,
       )
     }
   }
@@ -328,9 +349,8 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
   // A local change ref the remote does not hold is an orphan of a refused
   // push; submit is the only writer of these refs, so it goes.
   else if ((await refAt(git, ref)) !== undefined) await git(["update-ref", "-d", ref])
-  const issue = await issueOf(git, request.branch, head, request.issue)
   const trailers: (readonly [string, string])[] = [["Submitter", request.submitter]]
-  if (issue !== undefined) trailers.push(["Issue", issue])
+  if (issue !== undefined) trailers.push(["Issue", issue.issue])
   const opened = await appendRecord(git, request.target.branch, {
     change,
     kind: "opened",
@@ -357,23 +377,96 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     await git(retry ? ["update-ref", ref, remoteTip] : ["update-ref", "-d", ref])
     throw error
   }
-  return { branch: request.branch, head, targetHead, opened, retry, published }
+  return {
+    branch: request.branch,
+    head,
+    targetHead,
+    opened,
+    retry,
+    published,
+    ...(issue === undefined ? {} : { issue }),
+  }
 }
 
 /**
- * The issue a change is for (ruling C4): the one declared on submit, else
- * the head commit's `Resolves:` or `Refs:` trailer, else the leading
- * `<issue>-` segment of the branch name's last component, the convention
- * (§ The change). None of those, and the change has no issue.
+ * The first explicit Refs/Resolves binding in branch history wins. The
+ * merge-base and all target ancestry are excluded; neither later work nor a
+ * branch rename loses the binding. Conflicting explicit/declared issues refuse.
+ * An unbound branch may use a declaration or the reported legacy name fallback.
  */
-export async function issueOf(git: Git, branch: string, head: string, declared?: string): Promise<string | undefined> {
-  if (declared !== undefined) return declared
-  const fromTrailer = (
-    await git(["log", "-1", "--format=%(trailers:key=Resolves,key=Refs,valueonly,separator=%x00)", head])
-  )
-    .split("\0")
-    .map((value) => value.trim())
-    .find((value) => value !== "")
-  if (fromTrailer !== undefined) return fromTrailer
-  return /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+export async function issueOf(
+  git: Git,
+  branch: string,
+  head: string,
+  targetHead: string,
+  declared?: string,
+): Promise<IssueResolution | undefined> {
+  if (
+    declared !== undefined &&
+    (declared.trim() === "" || declared !== declared.trim() || /[\u0000-\u001f\u007f]/u.test(declared))
+  ) {
+    throw new Error(
+      `issue for ${branch} must be a nonempty single-line value without surrounding whitespace or control characters`,
+    )
+  }
+  let history: string
+  try {
+    const base = await mergeBase(git, head, targetHead)
+    if (base === undefined) throw new Error("no merge base")
+    // NUL separates each commit and its trailer block. Git supplies trailer
+    // parsing; record separators distinguish values within that block.
+    history = await git([
+      "log",
+      "--reverse",
+      "--topo-order",
+      "-z",
+      "--format=%H%x00%(trailers:key=Resolves,key=Refs,valueonly,separator=%x1e)",
+      `${base}..${head}`,
+      `^${targetHead}`,
+      "--",
+    ])
+  } catch (cause) {
+    throw new Error(
+      `cannot read issue binding for ${branch} at ${head} against target ${targetHead}: ${String(cause)}`,
+      { cause },
+    )
+  }
+  let binding: IssueResolution | undefined
+  const records = history.split("\0")
+  if (records.pop() !== "") {
+    throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
+  }
+  for (let index = 0; index < records.length; index += 2) {
+    const commit = records[index]
+    const values = records[index + 1]
+    if (commit === undefined || values === undefined) {
+      throw new Error(`incomplete issue binding history for ${branch} at ${head} against target ${targetHead}`)
+    }
+    for (const value of values.split("\u001e")) {
+      const issue = value.trim()
+      if (issue === "") continue
+      if (/[\u0000-\u001f\u007f]/u.test(issue)) {
+        throw new Error(
+          `invalid issue binding in ${branch} at ${commit}: expected a single-line value without control characters`,
+        )
+      }
+      if (binding === undefined) binding = { issue, source: "binding", commit }
+      else if (binding.issue !== issue) {
+        throw new Error(
+          `conflicting issue bindings for ${branch}: ${binding.issue} at ${binding.commit}; ${issue} at ${commit}`,
+        )
+      }
+    }
+  }
+  if (binding !== undefined) {
+    if (declared !== undefined && declared !== binding.issue) {
+      throw new Error(
+        `declared issue ${declared} conflicts with ${binding.issue} bound at ${binding.commit} on ${branch}`,
+      )
+    }
+    return binding
+  }
+  if (declared !== undefined) return { issue: declared, source: "declared" }
+  const legacy = /^(\d+)-/u.exec(branch.split("/").at(-1) ?? "")?.[1]
+  return legacy === undefined ? undefined : { issue: legacy, source: "legacy-branch" }
 }
