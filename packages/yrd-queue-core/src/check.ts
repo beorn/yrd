@@ -36,7 +36,7 @@
  */
 
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import type { JournalCheck } from "./log.ts"
 
@@ -57,8 +57,10 @@ export type CheckSpec = Readonly<{
   environmentPassthrough?: readonly string[]
   /** The phases the check runs in; absent means merge (ruling A1). */
   on?: readonly ("submit" | "merge")[]
-  /** Repository paths restored from the base commit before the check runs: the check's own scripts (ruling D5). */
+  /** Repository paths the check owns: legacy mode restores them from base; program-root mode validates them in the target program root without overlaying the candidate checkout. */
   scripts?: readonly string[]
+  /** Opt in to the queue-provided, immutable program root for this check. */
+  programRoot?: true
 }>
 
 export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000
@@ -108,6 +110,12 @@ export type RunCheck = Readonly<{
    * authoritative.
    */
   extraEnv?: Readonly<Record<string, string>>
+  /**
+   * The absolute root carrying queue-owned program code, supplied only to a
+   * check that declared {@link CheckSpec.programRoot}. The runner rejects a
+   * missing, relative, or legacy use before it starts the child.
+   */
+  programRoot?: string
 }>
 
 /**
@@ -118,6 +126,33 @@ export type RunCheck = Readonly<{
  */
 export function checkLogPath(logDir: string, name: string): string {
   return join(logDir, `${name}.log`)
+}
+
+/**
+ * The program root is a queue statement, just as the checked-tree trio is.
+ * Keep the declaration and the call boundary together: a legacy command
+ * cannot acquire a new authority merely because its caller happened to carry
+ * one, and an opted-in command cannot silently fall back to its worktree.
+ */
+function checkedProgramRoot(run: RunCheck): string | undefined {
+  if (run.spec.programRoot !== undefined && run.spec.programRoot !== true) {
+    throw new Error(`check ${run.spec.name}: programRoot must be true when present`)
+  }
+  if (run.spec.programRoot !== true) {
+    if (run.programRoot !== undefined) {
+      throw new Error(
+        `check ${run.spec.name} does not declare programRoot: true, so its caller must not supply programRoot`,
+      )
+    }
+    return undefined
+  }
+  if (run.programRoot === undefined) {
+    throw new Error(`check ${run.spec.name}: programRoot: true requires an absolute programRoot`)
+  }
+  if (typeof run.programRoot !== "string" || !isAbsolute(run.programRoot)) {
+    throw new Error(`check ${run.spec.name}: programRoot must be an absolute path`)
+  }
+  return run.programRoot
 }
 
 /**
@@ -457,6 +492,7 @@ function openCheckLog(path: string): CheckLog {
 }
 
 export async function runCheck(run: RunCheck): Promise<CheckResult> {
+  const programRoot = checkedProgramRoot(run)
   mkdirSync(run.logDir, { recursive: true })
   mkdirSync(run.tmpdir, { recursive: true })
   const log = checkLogPath(run.logDir, run.spec.name)
@@ -483,6 +519,11 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   env.YRD_REPO = run.cwd
   env.YRD_CANDIDATE_SHA = run.tree.candidate
   env.YRD_BASE_SHA = run.tree.base
+  // A check may pass through or request every other declared value, but this
+  // name belongs to the queue. Remove either caller source in both modes, and
+  // set it only after its declaration and absolute queue argument agreed.
+  delete env.YRD_PROGRAM_ROOT
+  if (programRoot !== undefined) env.YRD_PROGRAM_ROOT = programRoot
   const timeoutMs = run.spec.timeoutMs ?? DEFAULT_CHECK_BOUND_MS
   // Create-only, always, and open before the child exists. Every caller writes
   // under a directory of its own — the queue run's is keyed by change, run and

@@ -25,6 +25,7 @@ describe("the queue declaration grammar", () => {
         "      timeoutMs: 1234",
         "      scripts: [tools/verify.ts, config/schema.json]",
         "      environmentPassthrough: [CI, VERIFY_TOKEN]",
+        "      programRoot: true",
         "  - merge-only:",
         "      run: bun run integration",
         "notify:",
@@ -51,6 +52,7 @@ describe("the queue declaration grammar", () => {
           environmentPassthrough: ["CI", "VERIFY_TOKEN"],
           name: "verify",
           on: ["submit", "merge"],
+          programRoot: true,
           run: "bun run verify",
           scripts: ["tools/verify.ts", "config/schema.json"],
           timeoutMs: 1234,
@@ -96,6 +98,31 @@ describe("the queue declaration grammar", () => {
     ["retired owner", "owner: '@cto'\n", /unknown key owner .*the queue addresses nobody.*notify:/u],
     ["retired target", "target: origin#develop\n", /unknown key target .*--queue <branch>/u],
     ["retired remote", "remote: origin#develop\n", /unknown key remote .*--queue <branch>/u],
+    [
+      "false program-root opt-in",
+      "checks:\n  - verify:\n      run: bun run verify\n      programRoot: false\n",
+      /programRoot: must be true when present/u,
+    ],
+    [
+      "null program-root opt-in",
+      "checks:\n  - verify:\n      run: bun run verify\n      programRoot: null\n",
+      /programRoot: must be true when present/u,
+    ],
+    [
+      "string program-root opt-in",
+      "checks:\n  - verify:\n      run: bun run verify\n      programRoot: 'true'\n",
+      /programRoot: must be true when present/u,
+    ],
+    [
+      "numeric program-root opt-in",
+      "checks:\n  - verify:\n      run: bun run verify\n      programRoot: 1\n",
+      /programRoot: must be true when present/u,
+    ],
+    [
+      "list program-root opt-in",
+      "checks:\n  - verify:\n      run: bun run verify\n      programRoot: []\n",
+      /programRoot: must be true when present/u,
+    ],
     ["scalar notify", "notify: bun tools/notify.ts\n", /notify: must be a list of/u],
     [
       "unknown ending",

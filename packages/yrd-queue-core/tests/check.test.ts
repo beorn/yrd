@@ -156,6 +156,88 @@ function stubDriver(streamed: readonly string[], dropped?: ProcessResult["output
   }
 }
 
+/**
+ * @failure A caller can smuggle its own program root into a check, making the
+ *          check read candidate-owned code after the queue selected a root.
+ * @level l1 (an injected Process boundary and temporary filesystem inspect the runner request before a child can run).
+ * @consumer Queue checks that opt into the immutable program-root capability.
+ */
+describe("a queue-owned program root", () => {
+  it("overwrites passed-through and check-requested program roots only for an explicit opt-in", async () => {
+    const where = place("program-root")
+    const programRoot = join(where.cwd, "target-program")
+    let request: ProcessRequest | undefined
+    const process: Process = {
+      run: (received) => {
+        request = received
+        return Promise.resolve({ durationMs: 1, exitCode: 0, signal: null, stderr: "", stdout: "", timedOut: false })
+      },
+      close: () => Promise.resolve(),
+      [Symbol.asyncDispose]: () => Promise.resolve(),
+    }
+
+    await expect(
+      runCheck({
+        ...where,
+        env: { PATH: "/test/path", YRD_PROGRAM_ROOT: "/inherited-program" },
+        extraEnv: { YRD_PROGRAM_ROOT: "/check-requested-program" },
+        process,
+        programRoot,
+        spec: { environmentPassthrough: ["YRD_PROGRAM_ROOT"], name: "program", programRoot: true, run: "unused" },
+      }),
+    ).resolves.toMatchObject({ result: "pass" })
+
+    expect(request?.cwd).toBe(where.cwd)
+    expect(request?.env?.YRD_PROGRAM_ROOT).toBe(programRoot)
+    expect(request?.env?.YRD_REPO).toBe(where.cwd)
+    expect(request?.env?.YRD_CANDIDATE_SHA).toBe(TREE.candidate)
+    expect(request?.env?.YRD_BASE_SHA).toBe(TREE.base)
+  })
+
+  it("refuses missing or relative opt-ins and program roots supplied to legacy checks", async () => {
+    const absolute = join(place("absolute-program-root").cwd, "program")
+
+    await expect(
+      runCheck({ ...place("missing-program-root"), spec: { name: "missing", programRoot: true, run: "exit 0" } }),
+    ).rejects.toThrow(/programRoot: true requires an absolute programRoot/u)
+    await expect(
+      runCheck({
+        ...place("relative-program-root"),
+        programRoot: "relative-program",
+        spec: { name: "relative", programRoot: true, run: "exit 0" },
+      }),
+    ).rejects.toThrow(/programRoot must be an absolute path/u)
+    await expect(
+      runCheck({ ...place("legacy-program-root"), programRoot: absolute, spec: { name: "legacy", run: "exit 0" } }),
+    ).rejects.toThrow(/does not declare programRoot: true/u)
+  })
+
+  it("removes both passed-through and check-requested roots from legacy checks", async () => {
+    const where = place("legacy-program-root-spoof")
+    let request: ProcessRequest | undefined
+    const process: Process = {
+      run: (received) => {
+        request = received
+        return Promise.resolve({ durationMs: 1, exitCode: 0, signal: null, stderr: "", stdout: "", timedOut: false })
+      },
+      close: () => Promise.resolve(),
+      [Symbol.asyncDispose]: () => Promise.resolve(),
+    }
+
+    await expect(
+      runCheck({
+        ...where,
+        env: { PATH: "/test/path", YRD_PROGRAM_ROOT: "/inherited-program" },
+        extraEnv: { YRD_PROGRAM_ROOT: "/check-requested-program" },
+        process,
+        spec: { environmentPassthrough: ["YRD_PROGRAM_ROOT"], name: "legacy", run: "unused" },
+      }),
+    ).resolves.toMatchObject({ result: "pass" })
+
+    expect(request?.env?.YRD_PROGRAM_ROOT).toBeUndefined()
+  })
+})
+
 describe("a check log and the text the queue read", () => {
   it("holds the streamed bytes only, never a second copy written at the end", async () => {
     const where = place("streamed-only")

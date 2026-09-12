@@ -100,11 +100,12 @@ Everything the file can say:
 setup: bun install --frozen-lockfile # runs once in every fresh checkout the queue makes, before any check
 checks:
   - typecheck: # each check is one mapping of its name to its settings
-      run: bun run typecheck
+      run: bun "$YRD_PROGRAM_ROOT/tools/typecheck.ts"
       on: [submit, merge] # when it runs: submit = on the change alone, merge = on its merge with the queue branch; default: merge
       timeoutMs: 1800000 # default: 30 minutes
-      scripts: [tools/typecheck.ts] # restored from the queue branch before the check runs, so a change cannot edit its own judge
+      scripts: [tools/typecheck.ts] # validated in the target program root; the candidate copy stays intact
       environmentPassthrough: [GITHUB_TOKEN]
+      programRoot: true # opt in to the queue-selected program root at $YRD_PROGRAM_ROOT
 notify: # the same shape as checks: a name, when it runs, what runs
   - submitter:
       on: [merged, failed] # default: all four endings
@@ -114,7 +115,9 @@ notify: # the same shape as checks: a name, when it runs, what runs
       run: bun tools/yrd-notify.ts --to @cto
 ```
 
-A key the queue does not read is refused, never ignored. Queue identity is not configuration: `target:` and `remote:` are refused; the branch carrying this file is the queue selected by `--queue`. The machine's storage path is Git configuration, described below. A check's environment is built, not inherited. `YRD_CANDIDATE_SHA` names the queue candidate, the exact commit the check judges: the change's head on submit, its prospective merge commit on merge, or the queue branch for a target check. `YRD_BASE_SHA` names that candidate's merge base with the queue branch, and `YRD_REPO` names its checkout. The environment also carries `PATH`, `HOME`, `SHELL`, `LANG`, `USER`, `LOGNAME`, `LC_*`, a `TMPDIR` under the queue workdir, and the variables listed under `environmentPassthrough`.
+A key the queue does not read is refused, never ignored. Queue identity is not configuration: `target:` and `remote:` are refused; the branch carrying this file is the queue selected by `--queue`. The machine's storage path is Git configuration, described below. A check's environment is built, not inherited. `YRD_CANDIDATE_SHA` names the queue candidate, the exact commit the check judges: the change's head on submit, its prospective merge commit on merge, or the queue branch for a target check. `YRD_BASE_SHA` names that candidate's merge base with the queue branch, and `YRD_REPO` names its fresh checkout C. The environment also carries `PATH`, `HOME`, `SHELL`, `LANG`, `USER`, `LOGNAME`, `LC_*`, a `TMPDIR` under the queue workdir, and the variables listed under `environmentPassthrough`.
+
+`programRoot: true` is an explicit capability for a check whose shell command needs the queue-selected target program P as well as its fresh checkout C. Such a check names `$YRD_PROGRAM_ROOT` in its command; the queue sets that value to P's absolute path after every passed-through or check-requested environment value, so neither can replace it. A legacy check remains the default and receives no `YRD_PROGRAM_ROOT`; the queue reserves that name in both modes. This constrains the environment the queue supplies, not what an arbitrary shell command can deliberately read.
 
 ## Where things are
 
