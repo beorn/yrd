@@ -52,11 +52,17 @@ Every command takes `--json`. `yrd submit` refuses the queue branch itself: it i
 
 With a commit operand, `yrd env open` requires a full commit object ID already present locally and refuses `--issue`.
 
-Without a commit, `--bay <name>` or `--issue <ref>` opens or adopts `task/<name>` through Git worktree registration. An occupied branch refuses and names its holder.
+Without a commit, `--bay <name>` or `--issue <ref>` opens or adopts `task/<name>` through Git worktree registration. An occupied branch requires `--issue` for verified reuse.
 
 With `--issue`, an initial `Refs:` commit records the binding before setup and preserves the current tree and history. A matching binding adds no commit.
 
-Conflicting bindings refuse and name the preserved environment. Setup and output use the resulting head; setup failure preserves that environment.
+Reuse verifies the registered path, repository, branch, HEAD and explicit issue binding. It preserves staged, unstaged and untracked work and does not run setup or write another binding.
+
+JSON reports `reused`, the verified `head`, issue binding and `setup`. Only a new environment reports its original `base`.
+
+Setup is `not-required`, `passed`, `failed` or `unverified`. A reused environment with required setup reports `partial` and exits 2 because registration cannot prove prior setup completion.
+
+Setup failures and changed identities retain the environment and name the recovery need. After successful setup, Yrd verifies the resulting branch, HEAD and issue binding before reporting success.
 
 Submission scans branch history back to its merge-base with the captured target, excluding target history. The first explicit `Refs:` or `Resolves:` binding wins.
 

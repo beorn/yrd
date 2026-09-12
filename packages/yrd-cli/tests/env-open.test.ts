@@ -8,10 +8,11 @@
  * @consumer every seat opening a fresh environment through `yrd env open`
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import * as queueCore from "@yrd/queue-core"
 import { gitIn, type Git } from "@yrd/queue-core"
 import { runYrdProcess } from "../src/cli.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -62,7 +63,7 @@ function isolateHome(work: string): string {
   return home
 }
 
-async function world(setup: string): Promise<World> {
+async function world(setup?: string): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-open-"))
   roots.push(root)
   const seed = gitIn(root)
@@ -74,7 +75,7 @@ async function world(setup: string): Promise<World> {
   await git(["config", "user.email", "env-open@yrd.test"])
   await git(["config", "user.name", "yrd"])
   await git(["checkout", "--quiet", "-b", "main"])
-  writeFileSync(join(work, ".yrd.yml"), `setup: ${JSON.stringify(setup)}\n`)
+  writeFileSync(join(work, ".yrd.yml"), setup === undefined ? "{}\n" : `setup: ${JSON.stringify(setup)}\n`)
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "declare environment setup"])
   await git(["push", "--quiet", "origin", "main"])
@@ -331,6 +332,209 @@ describe("yrd env open prepares the retained environment", () => {
     expect(run.stderr()).toContain("exit 23 is not a verdict")
     expect(run.stderr()).toContain("setup exploded")
     expect(run.stderr()).toContain(bay)
+  })
+})
+
+/**
+ * @failure Occupied work was either refused wholesale or could be mistaken for
+ *          a verified environment without checking repository identity/setup.
+ * @level l2 (public CLI, real worktree registry and binding history)
+ * @consumer work-on reusing an explicitly bound environment without losing dirt
+ */
+describe("yrd env open explicitly verifies occupied work", () => {
+  // Successful setup may itself commit or switch work. Work-on needs the
+  // resulting verified identity; the original setup tests only wrote files.
+  it.each(["advance", "switch", "conflict", "advance-then-fail"] as const)(
+    "verifies identity after setup can %s",
+    async (change) => {
+      const setup =
+        change === "switch"
+          ? "git checkout --quiet -b setup-switched"
+          : `git commit --quiet --allow-empty -m ${change === "conflict" ? "'setup changed binding' -m 'Refs: @project/other'" : "'setup advanced'"}${change === "advance-then-fail" ? "; exit 23" : ""}`
+      const w = await world(setup)
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", "--bay", "setup-head", "--issue", "@project/work", "--json"],
+          run.io,
+        ),
+      ).toBe(change === "advance" ? 0 : 2)
+      const bay = join(w.work, ".bays", "setup-head")
+      const git = gitIn(bay)
+      const head = (await git(["rev-parse", "HEAD"])).trim()
+      const result = JSON.parse(run.stdout())
+      expect(result).toMatchObject({
+        path: bay,
+        reused: false,
+        setup: change === "advance-then-fail" ? "failed" : "passed",
+      })
+      if (change === "advance") {
+        expect(result).toMatchObject({
+          head,
+          branch: "task/setup-head",
+          issue: "@project/work",
+          issueSource: "binding",
+        })
+        expect(result.issueCommit).toBe((await git(["rev-parse", "HEAD^"])).trim())
+      } else {
+        expect(result).toMatchObject({ status: "partial" })
+        expect(result.reason).toContain(bay)
+        expect(result).not.toHaveProperty("head")
+        expect(result).not.toHaveProperty("branch")
+        expect(result).not.toHaveProperty("issueCommit")
+        expect(result).not.toHaveProperty("issueSource")
+        expect((await git(["branch", "--show-current"])).trim()).toBe(
+          change === "switch" ? "setup-switched" : "task/setup-head",
+        )
+      }
+    },
+  )
+
+  it("repeatedly reuses matching bound work without changing dirty files, index or HEAD", async () => {
+    const w = await world()
+    const argv = ["bun", "yrd", "env", "open", "--bay", "reuse", "--issue", "@project/work", "--json"]
+    const first = capture(w.work)
+    expect(await runYrdProcess(argv, first.io), first.stderr()).toBe(0)
+    const bay = join(w.work, ".bays", "reuse")
+    const git = gitIn(bay)
+    const head = (await git(["rev-parse", "HEAD"])).trim()
+    expect(JSON.parse(first.stdout())).toMatchObject({ reused: false, setup: "not-required", issueCommit: head })
+    writeFileSync(join(bay, "staged.txt"), "staged work\n")
+    await git(["add", "staged.txt"])
+    writeFileSync(join(bay, ".yrd.yml"), "setup: exit 99\n")
+    writeFileSync(join(bay, "untracked.txt"), "untracked work\n")
+    const before = await git(["status", "--porcelain=v1"])
+    const index = await git(["diff", "--cached"])
+    const registrations = await w.git(["worktree", "list", "--porcelain"])
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const run = capture(w.work)
+      expect(await runYrdProcess(argv, run.io), run.stderr()).toBe(0)
+      const result = JSON.parse(run.stdout())
+      expect(result).toMatchObject({
+        name: "reuse",
+        path: bay,
+        branch: "task/reuse",
+        head,
+        reused: true,
+        issue: "@project/work",
+        issueSource: "binding",
+        issueCommit: head,
+        setup: "not-required",
+      })
+      expect(result).not.toHaveProperty("base")
+      expect(await git(["status", "--porcelain=v1"])).toBe(before)
+      expect(await git(["diff", "--cached"])).toBe(index)
+      expect(await w.git(["worktree", "list", "--porcelain"])).toBe(registrations)
+      expect(readFileSync(join(bay, ".yrd.yml"), "utf8")).toBe("setup: exit 99\n")
+      expect(readFileSync(join(bay, "untracked.txt"), "utf8")).toBe("untracked work\n")
+    }
+    const bare = capture(w.work)
+    expect(await runYrdProcess(["bun", "yrd", "env", "open", "--bay", "reuse"], bare.io)).toBe(2)
+    expect((await git(["rev-parse", "HEAD"])).trim()).toBe(head)
+  })
+
+  it.each([false, true])(
+    "required setup stays partial on reuse after failure=%s, without another attempt",
+    async (fail) => {
+      const setup = `printf 'attempt\\n' >> setup-attempts.txt${fail ? "; exit 23" : ""}`
+      const w = await world(setup)
+      const argv = ["bun", "yrd", "env", "open", "--bay", "setup", "--issue", "@project/work", "--json"]
+      const first = capture(w.work)
+      expect(await runYrdProcess(argv, first.io), first.stderr()).toBe(fail ? 2 : 0)
+      const bay = join(w.work, ".bays", "setup")
+      const firstResult = JSON.parse(first.stdout())
+      expect(firstResult).toMatchObject({ path: bay, reused: false, setup: fail ? "failed" : "passed" })
+      if (fail) expect(firstResult).toMatchObject({ status: "partial" })
+      const head = (await gitIn(bay)(["rev-parse", "HEAD"])).trim()
+
+      const resumed = capture(w.work)
+      expect(await runYrdProcess(argv, resumed.io)).toBe(2)
+      const result = JSON.parse(resumed.stdout())
+      expect(result).toMatchObject({ path: bay, head, reused: true, setup: "unverified", status: "partial" })
+      expect(result).not.toHaveProperty("base")
+      expect(result.next).toContain(setup)
+      expect(result.next).toContain(bay)
+      expect(resumed.stderr()).toContain("unverified")
+      expect(readFileSync(join(bay, "setup-attempts.txt"), "utf8")).toBe("attempt\n")
+      expect((await gitIn(bay)(["rev-parse", "HEAD"])).trim()).toBe(head)
+    },
+  )
+
+  it.each(["unbound", "conflicting", "detached", "outside", "missing", "foreign"] as const)(
+    "refuses %s occupied identity without changing its work",
+    async (fault) => {
+      const w = await world()
+      const bay = fault === "outside" ? join(w.work, "..", "holder") : join(w.work, ".bays", "identity")
+      await w.git(["worktree", "add", "--quiet", "-b", "task/identity", bay])
+      const git = gitIn(bay)
+      if (fault !== "unbound") {
+        await git([
+          "commit",
+          "--quiet",
+          "--allow-empty",
+          "-m",
+          `binding\n\nRefs: ${fault === "conflicting" ? "@project/other" : "@project/work"}`,
+        ])
+      }
+      const head = (await git(["rev-parse", "HEAD"])).trim()
+      if (fault === "detached") await git(["checkout", "--quiet", "--detach", head])
+      if (fault === "missing" || fault === "foreign") {
+        renameSync(bay, `${bay}-preserved`)
+        if (fault === "foreign") {
+          await w.git(["clone", "--quiet", "--branch", "task/identity", w.work, bay])
+        }
+      }
+      const registrations = await w.git(["worktree", "list", "--porcelain"])
+      const run = capture(w.work)
+
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", "--bay", "identity", "--issue", "@project/work", "--json"],
+          run.io,
+        ),
+      ).toBe(2)
+
+      expect(run.stdout()).toBe("")
+      expect(run.stderr()).toContain(bay)
+      expect(run.stderr()).toMatch(/reuse|reus|identity|registered|outside|repository|binding/iu)
+      expect(await w.git(["worktree", "list", "--porcelain"])).toBe(registrations)
+      expect((await w.git(["rev-parse", "refs/heads/task/identity"])).trim()).toBe(head)
+    },
+  )
+
+  it.each(["head", "registration"] as const)("refuses a changed %s after binding inspection", async (change) => {
+    const w = await world()
+    const bay = join(w.work, ".bays", "changing")
+    await w.git(["worktree", "add", "--quiet", "-b", "task/changing", bay])
+    const git = gitIn(bay)
+    await git(["commit", "--quiet", "--allow-empty", "-m", "binding\n\nRefs: @project/work"])
+    const original = queueCore.issueOf
+    let changed = false
+    const inspection = vi.spyOn(queueCore, "issueOf").mockImplementation(async (...args) => {
+      const result = await original(...args)
+      if (change === "head") await git(["commit", "--quiet", "--allow-empty", "-m", "concurrent work"])
+      else await w.git(["worktree", "move", bay, `${bay}-moved`])
+      changed = true
+      return result
+    })
+    try {
+      const run = capture(w.work)
+      expect(
+        await runYrdProcess(
+          ["bun", "yrd", "env", "open", "--bay", "changing", "--issue", "@project/work", "--json"],
+          run.io,
+        ),
+      ).toBe(2)
+      expect(changed).toBe(true)
+      expect(run.stdout()).toBe("")
+      expect(run.stderr()).toContain(bay)
+      expect(run.stderr()).toMatch(/changed/iu)
+      if (change === "head") expect(await git(["log", "-1", "--format=%s"])).toContain("concurrent work")
+      else expect(existsSync(`${bay}-moved`)).toBe(true)
+    } finally {
+      inspection.mockRestore()
+    }
   })
 })
 

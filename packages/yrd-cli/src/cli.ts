@@ -507,7 +507,7 @@ function buildProgram(
         "open or adopt its task/<name> branch; prints the path either way",
     )
     .option("--bay <name>", "name the environment")
-    .option("--issue <ref>", "bind the branch to this issue with a Refs commit before setup")
+    .option("--issue <ref>", "bind new work before setup or verify an occupied environment for this issue")
     .option("--json", "emit stable JSON")
     .action(async (commit, options) =>
       setExit(

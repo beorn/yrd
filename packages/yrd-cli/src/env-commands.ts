@@ -35,7 +35,7 @@ import {
   worktreeWithoutSubmodules,
   type Git,
 } from "@yrd/queue-core"
-import { createProcess } from "@yrd/process"
+import { createProcess, type Process } from "@yrd/process"
 import { repositoryHere as findRepository } from "./declaration.ts"
 import { originHead } from "./queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
@@ -71,6 +71,18 @@ function legacyBaysRoot(repo: string): string {
   return join(repo, ".bays")
 }
 
+async function environmentRoots(root: string, git: Git): Promise<string[]> {
+  return [baysRootOf(), legacyBaysRoot(root), join(resolve(root, await workdirOf(git)), "environments")]
+}
+
+function withinEnvironmentRoots(path: string, roots: readonly string[]): boolean {
+  return roots.some((directory) => {
+    if (!existsSync(directory)) return false
+    const within = relative(realpathSync(directory), path)
+    return within !== "" && within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within)
+  })
+}
+
 /** The base a fresh environment is cut from: the target as this checkout last
  * fetched it, else the local branch of that name. Named, so a refusal says
  * which ref was missing rather than "could not resolve HEAD". */
@@ -81,6 +93,173 @@ async function resolveBaseSha(git: Git, target: string): Promise<string> {
   const local = await refAt(git, target)
   if (local !== undefined) return local
   throw new Error(`yrd: target '${target}' is absent at both ${tracking} and the local branch`)
+}
+
+/** Read the registered identity twice around the existing canonical binding reader. */
+async function inspectOccupiedEnvironment(
+  {
+    root,
+    name,
+    branch,
+    targetHead,
+    issue,
+  }: { root: string; name: string; branch: string; targetHead: string; issue: string },
+  git: Git,
+  process: Pick<Process, "run">,
+) {
+  // Inspect the entire registry first: an owner outside the allowed roots
+  // still owns the branch. Absence from `env list` is not vacancy.
+  const roots = await environmentRoots(root, git)
+  const registrations = await registeredWorktrees(git)
+  const owners = registrations.filter((entry) => entry.branch === branch)
+  if (owners.length > 1) {
+    throw new Error(
+      `cannot reuse ${branch}: multiple registered worktrees ${owners.map((entry) => entry.path).join(", ")}`,
+    )
+  }
+  const occupied = owners[0]
+  if (occupied !== undefined) {
+    try {
+      const common = realpathSync((await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim())
+      const inspect = async (rows: typeof registrations) => {
+        const currentOwners = rows.filter((entry) => entry.branch === branch)
+        const current = currentOwners[0]
+        if (
+          currentOwners.length !== 1 ||
+          current === undefined ||
+          current.path !== occupied.path ||
+          current.head !== occupied.head ||
+          current.locked !== occupied.locked
+        ) {
+          throw new Error(
+            `registered identity changed; current owners: ${currentOwners.map((entry) => entry.path).join(", ") || "none"}`,
+          )
+        }
+        const path = realpathSync(current.path)
+        if (!withinEnvironmentRoots(path, roots)) {
+          throw new Error(`registered path ${path} is outside environment roots ${roots.join(" or ")}`)
+        }
+        const environmentGit = gitIn(path, process)
+        const top = realpathSync((await environmentGit(["rev-parse", "--show-toplevel"])).trim())
+        const repository = realpathSync(
+          (await environmentGit(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
+        )
+        const symbolicHead = (await environmentGit(["symbolic-ref", "HEAD"])).trim()
+        const head = (await environmentGit(["rev-parse", "HEAD"])).trim()
+        if (top !== path || repository !== common || symbolicHead !== `refs/heads/${branch}` || head !== current.head) {
+          throw new Error(
+            `repository/path/branch/HEAD identity changed: ${top}, ${repository}, ${symbolicHead}, ${head}; expected ${path}, ${common}, refs/heads/${branch}, ${String(current.head)}`,
+          )
+        }
+        return { path, head, environmentGit }
+      }
+      const before = await inspect(registrations)
+      const binding = await issueOf(before.environmentGit, branch, before.head, targetHead, issue)
+      if (binding?.source !== "binding" || binding.commit === undefined) {
+        throw new Error(
+          `no explicit issue binding to ${issue} at ${before.head}; occupied work cannot receive an initial binding`,
+        )
+      }
+      const after = await inspect(await registeredWorktrees(git))
+      if (after.path !== before.path || after.head !== before.head) {
+        throw new Error(`path or HEAD changed from ${before.path} at ${before.head} to ${after.path} at ${after.head}`)
+      }
+      return {
+        path: after.path,
+        head: after.head,
+        issue: binding.issue,
+        issueSource: binding.source,
+        issueCommit: binding.commit,
+      }
+    } catch (error) {
+      throw new Error(
+        `cannot inspect registered environment ${occupied.path}; all work is preserved: ${error instanceof Error ? error.message : String(error)}\nInspect git worktree list --porcelain before retrying.`,
+        { cause: error },
+      )
+    }
+  }
+  const candidates = roots.map((directory) => resolve(directory, name))
+  const other = registrations.find((entry) => candidates.includes(resolve(entry.path)))
+  const existing = other?.path ?? candidates.find((path) => existsSync(path))
+  if (existing !== undefined) {
+    throw new Error(
+      `cannot reuse environment ${existing}: it is not registered on ${branch}; inspect git worktree list and preserve its existing identity`,
+    )
+  }
+  return undefined
+}
+
+function reportReusedEnvironment(
+  existing: NonNullable<Awaited<ReturnType<typeof inspectOccupiedEnvironment>>>,
+  { name, branch, setup, json }: { name: string; branch: string; setup?: string; json?: boolean },
+  io: YrdCliIO,
+): YrdCliExitCode {
+  const result = {
+    ...existing,
+    branch,
+    name,
+    reused: true,
+    setup: setup === undefined ? "not-required" : "unverified",
+  }
+  if (setup !== undefined) {
+    const reason = `required setup is unverified in preserved environment ${existing.path}; reuse did not run setup`
+    const next = `Establish completion of the required setup in ${existing.path} before continuing; command: ${setup}. This reuse command cannot attest prior setup completion.`
+    if (json === true) io.stdout(`${JSON.stringify({ ...result, status: "partial", reason, next })}\n`)
+    io.stderr(`${reason}\n${next}\n`)
+    return 2
+  }
+  if (json === true) io.stdout(`${JSON.stringify(result)}\n`)
+  else {
+    io.stderr(
+      `${name} reused on ${branch} at ${existing.head.slice(0, 12)}, bound to ${existing.issue}; setup not required\n`,
+    )
+    io.stdout(`${existing.path}\n`)
+  }
+  return 0
+}
+
+/** Persist only the initial binding, preserving the exact tree and parent. */
+async function bindOpenedEnvironment(
+  path: string,
+  branch: string,
+  base: string,
+  issue: string,
+  process: Pick<Process, "run">,
+) {
+  let headSha: string
+  try {
+    const environmentGit = gitIn(path, process)
+    headSha = (await environmentGit(["rev-parse", "HEAD"])).trim()
+    const binding = await issueOf(environmentGit, branch, headSha, base, issue)
+    if (binding === undefined) throw new Error(`no issue resolved for requested binding ${issue}`)
+    if (binding.source !== "binding") {
+      const tree = (await environmentGit(["rev-parse", `${headSha}^{tree}`])).trim()
+      const bound = (
+        await environmentGit([
+          "commit-tree",
+          tree,
+          "-p",
+          headSha,
+          "-m",
+          `Bind work to ${binding.issue}\n\nRefs: ${binding.issue}`,
+        ])
+      ).trim()
+      await environmentGit(["update-ref", `refs/heads/${branch}`, bound, headSha])
+      headSha = bound
+    }
+    const issueCommit = binding.source === "binding" ? binding.commit : headSha
+    if (issueCommit === undefined) throw new Error(`explicit binding to ${binding.issue} has no carrying commit`)
+    const currentHead = (await environmentGit(["rev-parse", "HEAD"])).trim()
+    if (currentHead !== headSha) {
+      throw new Error(`HEAD changed from verified binding ${headSha} to ${currentHead}`)
+    }
+    return { head: currentHead, issue: binding.issue, issueSource: "binding" as const, issueCommit }
+  } catch (error) {
+    throw new Error(
+      `issue binding failed in preserved environment ${path}; setup has not run: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  }
 }
 
 /**
@@ -126,6 +305,16 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     )
   }
   const config = await readConfig(git, base, { remote: "origin", branch: target })
+  if (options.issue !== undefined && branch !== undefined) {
+    const existing = await inspectOccupiedEnvironment(
+      { root, name, branch, targetHead: base, issue: options.issue },
+      git,
+      process,
+    )
+    if (existing !== undefined) {
+      return reportReusedEnvironment(existing, { name, branch, setup: config?.setup, json: options.json }, io)
+    }
+  }
   let provisioned: { path: string; headSha: string; baseSha: string }
   if (branch === undefined) {
     const environments = join(resolve(root, await workdirOf(git)), "environments")
@@ -144,38 +333,11 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
   }
   const { path, baseSha } = provisioned
   let headSha = provisioned.headSha
+  let issueBinding: { issue: string; issueSource: "binding"; issueCommit: string } | undefined
   if (options.issue !== undefined && branch !== undefined) {
-    try {
-      const environmentGit = gitIn(path, process)
-      headSha = (await environmentGit(["rev-parse", "HEAD"])).trim()
-      const binding = await issueOf(environmentGit, branch, headSha, base, options.issue)
-      if (binding === undefined) throw new Error(`no issue resolved for requested binding ${options.issue}`)
-      if (binding.source !== "binding") {
-        const tree = (await environmentGit(["rev-parse", `${headSha}^{tree}`])).trim()
-        const bound = (
-          await environmentGit([
-            "commit-tree",
-            tree,
-            "-p",
-            headSha,
-            "-m",
-            `Bind work to ${binding.issue}\n\nRefs: ${binding.issue}`,
-          ])
-        ).trim()
-        await environmentGit(["update-ref", `refs/heads/${branch}`, bound, headSha])
-        headSha = bound
-      }
-      const currentHead = (await environmentGit(["rev-parse", "HEAD"])).trim()
-      if (currentHead !== headSha) {
-        throw new Error(`HEAD changed from verified binding ${headSha} to ${currentHead}`)
-      }
-      headSha = currentHead
-    } catch (error) {
-      throw new Error(
-        `issue binding failed in preserved environment ${path}; setup has not run: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      )
-    }
+    const binding = await bindOpenedEnvironment(path, branch, base, options.issue, process)
+    headSha = binding.head
+    issueBinding = { issue: binding.issue, issueSource: binding.issueSource, issueCommit: binding.issueCommit }
   }
   const setup = config?.setup
   if (setup !== undefined) {
@@ -193,15 +355,51 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
       const result = error.ran.result
       const output = readFileSync(result.log, "utf8").trim() || "(setup produced no output)"
       const why = result.why === undefined ? "" : ` (${result.why})`
-      throw new Error(
-        `environment setup ${result.result} in preserved bay ${path}: exit ${String(result.exit)}${why}\n` +
-          `command: ${setup}\n${output}\nlog ${result.log}`,
-        { cause: error },
+      const reason = `environment setup ${result.result} in preserved bay ${path}: exit ${String(result.exit)}${why}\ncommand: ${setup}\n${output}\nlog ${result.log}`
+      if (options.json === true) {
+        io.stdout(
+          `${JSON.stringify({
+            base: baseSha,
+            name,
+            path,
+            reused: false,
+            setup: "failed",
+            status: "partial",
+            reason,
+            next: `Resolve the setup failure in ${path}; command: ${setup}; inspect ${result.log}. Reusing this environment cannot attest setup completion.`,
+          })}\n`,
+        )
+      }
+      throw new Error(reason, { cause: error })
+    }
+  }
+  if (setup !== undefined && options.issue !== undefined && branch !== undefined) {
+    try {
+      const current = await inspectOccupiedEnvironment(
+        { root, name, branch, targetHead: base, issue: options.issue },
+        git,
+        process,
       )
+      if (current === undefined || current.path !== realpathSync(path)) {
+        throw new Error(`expected ${branch} to remain registered in ${path}; current path: ${current?.path ?? "none"}`)
+      }
+      headSha = current.head
+      issueBinding = { issue: current.issue, issueSource: "binding", issueCommit: current.issueCommit }
+    } catch (error) {
+      const reason = `environment identity verification failed after setup in preserved bay ${path}: ${error instanceof Error ? error.message : String(error)}`
+      const next = `Inspect git worktree list --porcelain and the branch/binding in ${path} before continuing; setup completed, but the requested work identity is unverified.`
+      if (options.json === true) {
+        io.stdout(
+          `${JSON.stringify({ base: baseSha, name, path, reused: false, setup: "passed", status: "partial", reason, next })}\n`,
+        )
+      }
+      throw new Error(`${reason}\n${next}`, { cause: error })
     }
   }
   if (options.json === true) {
-    io.stdout(`${JSON.stringify({ base: baseSha, branch, head: headSha, name, path })}\n`)
+    io.stdout(
+      `${JSON.stringify({ base: baseSha, branch, head: headSha, name, path, reused: false, ...issueBinding, setup: setup === undefined ? "not-required" : "passed" })}\n`,
+    )
   } else {
     io.stderr(
       `${name} ${branch === undefined ? "detached" : `on ${branch}`} at ${headSha.slice(0, 12)}, cut from ${target} ${baseSha.slice(0, 12)}\n`,
@@ -214,13 +412,8 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
 /** `yrd env list` — the environments this repository holds, as git holds them. */
 export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
-  const baysRoot = baysRootOf()
   await using process = createProcess({ cwd: root })
-  const roots = [
-    baysRoot,
-    legacyBaysRoot(root),
-    join(resolve(root, await workdirOf(gitIn(root, process))), "environments"),
-  ]
+  const roots = await environmentRoots(root, gitIn(root, process))
   const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
   const rows: EnvRow[] = (await registeredWorktrees(gitIn(root, process)))
     .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
@@ -258,7 +451,7 @@ export async function closeEnvironment(
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process)
   const workdir = resolve(root, await workdirOf(git))
-  const roots = [baysRootOf(), legacyBaysRoot(root), join(workdir, "environments")]
+  const roots = await environmentRoots(root, git)
   const requested = resolve(io.cwd ?? globalThis.process.cwd(), operand)
   let path: string
   try {
@@ -276,11 +469,7 @@ export async function closeEnvironment(
   if (registered === undefined) {
     throw new Error(`environment ${requested} is not registered in ${root}; inspect git worktree list`)
   }
-  const contained = roots.some((directory) => {
-    if (!existsSync(directory)) return false
-    const within = relative(realpathSync(directory), path)
-    return within !== "" && within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within)
-  })
+  const contained = withinEnvironmentRoots(path, roots)
   if (!contained) {
     throw new Error(
       `environment ${path} is outside environment roots ${roots.join(" or ")}; nothing was removed. Retire a worktree outside these roots with your repository's own worktree cleanup (git worktree remove), not yrd env close`,
