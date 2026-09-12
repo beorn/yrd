@@ -1,7 +1,10 @@
 import { resolve } from "node:path"
 import { adaptProcessGit, type Process } from "@yrd/process"
+import { worktreeHomeRoot } from "git-super"
 import { createGitWorktreeStore, type Git } from "git-super/worktree"
 import type { BayWorkspace, ProvisionBayInput, ProvisionedBay, WorkspaceResult } from "./workspace.ts"
+
+export { DEFAULT_WORKTREE_HOME, WORKTREE_HOME_ENV, worktreeHomeRoot } from "git-super"
 
 export type GitWorkspaceOptions = Readonly<{
   repo: string
@@ -53,7 +56,7 @@ function safeBayPath(root: string, bay: string): string {
 
 export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<BayWorkspace> {
   const repo = resolve(options.repo)
-  const baysRoot = resolve(options.baysRoot ?? `${repo}/.bays`)
+  const baysRoot = resolve(options.baysRoot ?? worktreeHomeRoot())
   const transport = adaptProcessGit(options.process, { timeoutMs: GIT_TIMEOUT_MS })
   const worktrees = createGitWorktreeStore({ ...options, gitProcess: transport })
   const { git } = worktrees

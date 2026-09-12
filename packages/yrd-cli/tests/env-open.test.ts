@@ -23,6 +23,7 @@ process.env.GIT_CONFIG_VALUE_0 = "always"
 const roots: string[] = []
 afterAll(() => {
   for (const root of roots) rmSync(root, { force: true, recursive: true })
+  delete process.env.HH_WORKTREE_HOME
 })
 
 function capture(cwd: string): Readonly<{ io: YrdCliIO; stderr(): string; stdout(): string }> {
@@ -55,6 +56,12 @@ async function command(
   return { exit, stderr, stdout }
 }
 
+function isolateHome(work: string): string {
+  const home = join(work, ".bays")
+  process.env.HH_WORKTREE_HOME = home
+  return home
+}
+
 async function world(setup: string): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), "yrd-cli-env-open-"))
   roots.push(root)
@@ -71,6 +78,7 @@ async function world(setup: string): Promise<World> {
   await git(["add", ".yrd.yml"])
   await git(["commit", "--quiet", "-m", "declare environment setup"])
   await git(["push", "--quiet", "origin", "main"])
+  isolateHome(work)
   return { git, work }
 }
 
@@ -208,7 +216,7 @@ describe("yrd env open prepares the retained environment", () => {
       0,
     )
 
-    const path = join(resumer, ".bays", "resume")
+    const path = join(isolateHome(w.work), "resume")
     expect(JSON.parse(run.stdout())).toMatchObject({ branch: "task/resume", head, path })
     expect((await gitIn(path)(["rev-parse", "HEAD"])).trim()).toBe(head)
     expect(readFileSync(join(path, "retained.txt"), "utf8")).toBe("keep this work\n")

@@ -3,8 +3,10 @@
  * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, Commands;
  * `yrd bay` is the same command's alias and "bay" its internal name).
  *
- * An environment is a git worktree under `.bays/`; that worktree is its whole
- * identity and lifecycle. Opening it runs the target's declared setup after
+ * An environment is a git worktree under the one worktree home
+ * (`/hh/var/wt` via `worktreeHomeRoot`); that worktree is its whole
+ * identity and lifecycle. Existing `.bays/` trees remain visible to list
+ * and close until they move. Opening it runs the target's declared setup after
  * materialization, through the same bounded executor as the queue, but never
  * creates an app, journal or job: the durable `Bay` record, its lifecycle
  * states, the PR mint and the receiver remote went with the old core at M6,
@@ -17,7 +19,7 @@
 
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
-import { createGitWorkspace } from "@yrd/bay"
+import { createGitWorkspace, worktreeHomeRoot } from "@yrd/bay"
 import {
   checkedTree,
   freshWorktree,
@@ -60,7 +62,11 @@ function requireRepository(io: YrdCliIO): string {
   return root
 }
 
-function baysRootOf(repo: string): string {
+function baysRootOf(): string {
+  return worktreeHomeRoot()
+}
+
+function legacyBaysRoot(repo: string): string {
   return join(repo, ".bays")
 }
 
@@ -123,7 +129,7 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
     await freshWorktree(git, root, base, path)
     provisioned = { path, headSha: base, baseSha: base }
   } else {
-    const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(root), process })
+    const workspace = await createGitWorkspace({ repo: root, baysRoot: baysRootOf(), process })
     const result = await workspace.provision({ bay: name, name, branch, base })
     if (result.conclusion !== "success") {
       throw new Error(`yrd: could not open environment '${name}': ${result.error.message}`)
@@ -168,9 +174,13 @@ export async function openEnvironment(options: EnvOpenOptions, io: YrdCliIO): Pr
 /** `yrd env list` — the environments this repository holds, as git holds them. */
 export async function listEnvironments(options: EnvListOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
   const root = requireRepository(io)
-  const baysRoot = baysRootOf(root)
+  const baysRoot = baysRootOf()
   await using process = createProcess({ cwd: root })
-  const roots = [baysRoot, join(resolve(root, await workdirOf(gitIn(root, process))), "environments")]
+  const roots = [
+    baysRoot,
+    legacyBaysRoot(root),
+    join(resolve(root, await workdirOf(gitIn(root, process))), "environments"),
+  ]
   const prefixes = roots.map((path) => `${existsSync(path) ? realpathSync(path) : resolve(path)}/`)
   const rows: EnvRow[] = (await registeredWorktrees(gitIn(root, process)))
     .filter(({ path }) => prefixes.some((prefix) => path.startsWith(prefix)))
@@ -208,7 +218,7 @@ export async function closeEnvironment(
   await using process = createProcess({ cwd: root })
   const git = gitIn(root, process)
   const workdir = resolve(root, await workdirOf(git))
-  const roots = [baysRootOf(root), join(workdir, "environments")]
+  const roots = [baysRootOf(), legacyBaysRoot(root), join(workdir, "environments")]
   const requested = resolve(io.cwd ?? globalThis.process.cwd(), operand)
   let path: string
   try {
