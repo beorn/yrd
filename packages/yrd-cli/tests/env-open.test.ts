@@ -375,10 +375,10 @@ describe("yrd env open explicitly verifies occupied work", () => {
           issue: "@project/work",
           issueSource: "binding",
         })
-        expect(result.issueCommit).toBe((await git(["rev-parse", "HEAD^"])).trim())
+        expect(result).toHaveProperty("issueCommit", (await git(["rev-parse", "HEAD^"])).trim())
       } else {
         expect(result).toMatchObject({ status: "partial" })
-        expect(result.reason).toContain(bay)
+        expect(result).toHaveProperty("reason", expect.stringContaining(bay))
         expect(result).not.toHaveProperty("head")
         expect(result).not.toHaveProperty("branch")
         expect(result).not.toHaveProperty("issueCommit")
@@ -453,8 +453,8 @@ describe("yrd env open explicitly verifies occupied work", () => {
       const result = JSON.parse(resumed.stdout())
       expect(result).toMatchObject({ path: bay, head, reused: true, setup: "unverified", status: "partial" })
       expect(result).not.toHaveProperty("base")
-      expect(result.next).toContain(setup)
-      expect(result.next).toContain(bay)
+      expect(result).toHaveProperty("next", expect.stringContaining(setup))
+      expect(result).toHaveProperty("next", expect.stringContaining(bay))
       expect(resumed.stderr()).toContain("unverified")
       expect(readFileSync(join(bay, "setup-attempts.txt"), "utf8")).toBe("attempt\n")
       expect((await gitIn(bay)(["rev-parse", "HEAD"])).trim()).toBe(head)
