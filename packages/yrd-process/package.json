@@ -9,7 +9,7 @@
   "dependencies": {
     "@silvery/scope": "^0.24.0",
     "git-super": "^0.1.0",
-    "loggily": "^0.10.2",
+    "loggily": "^0.11.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

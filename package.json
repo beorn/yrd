@@ -42,7 +42,7 @@
     "@silvery/ansi": "^0.24.0",
     "@silvery/commander": "^0.24.0",
     "@silvery/scope": "^0.24.0",
-    "loggily": "^0.10.2",
+    "loggily": "^0.11.0",
     "react": "^19.2.0",
     "silvery": "^0.24.1",
     "zod": "^4.4.3"
@@ -55,6 +55,6 @@
   },
   "overrides": {
     "git-super": "github:beorn/git-super#8345832bbdb917522bd87262c4db207d993d09ba",
-    "loggily": "github:beorn/loggily#d235700204414687adf6fc1449e73de10419656e"
+    "loggily": "^0.11.0"
   }
 }
