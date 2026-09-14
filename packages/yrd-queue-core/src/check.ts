@@ -20,8 +20,9 @@
  * An exit code is only a verdict when the driver got a clean reading. When
  * `@yrd/process` reports a stall, a descendant that outlived the check holding
  * its output open, a settlement signal that could not reach the process group,
- * or output dropped past the capture budget, the check was NOT measured: the
- * result is stuck, the queue's, whatever the child exited with.
+ * the check was NOT measured: the result is stuck, whatever the child exited
+ * with. Display overflow alone is acceptable only when the streamed log
+ * proves complete raw-byte retention at normal completion.
  *
  * The environment is built, never inherited (ruling A7), and it says what the
  * check is judging: `YRD_REPO` is the worktree the check runs in, its own
@@ -35,7 +36,7 @@
  * `setup:` included.
  */
 
-import { closeSync, mkdirSync, openSync, writeSync } from "node:fs"
+import { closeSync, fstatSync, mkdirSync, openSync, writeSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import type { JournalCheck } from "./log.ts"
@@ -422,11 +423,11 @@ function resultOfExit(exit: string | undefined): CheckRun["result"] {
  */
 type CheckLog = Readonly<{
   /** Append bytes, in the order they were observed. */
-  append: (chunk: Uint8Array) => void
+  append: (stream: "stdout" | "stderr", chunk: Uint8Array) => void
   /** One bracketed line of yrd's own, on a line of its own. */
   note: (text: string) => void
-  /** Stop writing, and say whether the file can be trusted. */
-  close: () => string | undefined
+  /** Verify normal-completion byte retention and close; no crash-durability promise. */
+  close: (result?: ProcessResult) => string | undefined
 }>
 
 function openCheckLog(path: string): CheckLog {
@@ -439,51 +440,91 @@ function openCheckLog(path: string): CheckLog {
       cause: error,
     })
   }
-  let written = 0
+  const observed = { stdout: 0, stderr: 0 }
+  const written = { stdout: 0, stderr: 0, notes: 0 }
   let failure: string | undefined
   const encoder = new TextEncoder()
-  const append = (chunk: Uint8Array): void => {
-    // The FIRST failure is the one that explains where the file stops; every
-    // later chunk against the same broken descriptor would only bury it.
-    if (failure !== undefined) return
+  const write = (chunk: Uint8Array, stream: keyof typeof written): void => {
     try {
       let offset = 0
       while (offset < chunk.byteLength) {
-        // A short write is ordinary, and dropping its remainder in silence is a
-        // log missing its middle — so loop. A write that moves nothing cannot be
-        // retried into progress, so it is an error here rather than a spin.
-        const count = writeSync(file, chunk, offset, chunk.byteLength - offset)
-        if (count <= 0) throw new Error(`wrote ${String(count)} of ${String(chunk.byteLength - offset)} bytes`)
+        const remaining = chunk.byteLength - offset
+        const count = writeSync(file, chunk, offset, remaining)
+        if (!Number.isSafeInteger(count) || count <= 0 || count > remaining) {
+          throw new Error(`wrote ${String(count)} of ${String(remaining)} bytes`)
+        }
         offset += count
+        // Count each successful partial write, even if the next write fails.
+        written[stream] += count
       }
-      written += chunk.byteLength
     } catch (error) {
-      failure = `its log at ${path} could not be written after ${String(written)} bytes: ${error instanceof Error ? error.message : String(error)}`
+      failure ??= `its log at ${path} could not write ${stream} after ${String(written[stream])} bytes: ${error instanceof Error ? error.message : String(error)}`
     }
   }
   return {
-    append,
-    note: (text) => {
-      append(encoder.encode(`\n[yrd: ${text}]\n`))
+    append: (stream, chunk) => {
+      observed[stream] += chunk.byteLength
+      if (failure === undefined) write(chunk, stream)
     },
-    close: () => {
-      if (failure !== undefined) {
-        try {
-          writeSync(file, encoder.encode(`\n[yrd: this log is INCOMPLETE — ${failure}]\n`))
-        } catch {
-          // silent-fallback-allow: best effort, and not a swallow. This is the
-          // attempt to write "this log is INCOMPLETE" into the very descriptor
-          // that just failed, so it may well fail again — and the durable, loud
-          // copy of this same failure is the check's own stuck verdict and
-          // `why`, which the caller returns. Throwing here would replace a
-          // reported failure with an unreported one.
+    note: (text) => {
+      if (failure === undefined) write(encoder.encode(`\n[yrd: ${text}]\n`), "notes")
+    },
+    close: (result) => {
+      const truncated = result?.outputTruncation ?? []
+      if (truncated.length > 0) {
+        // Only display-overflow acceptance needs this additional process
+        // receipt. Ordinary checks retain their existing verdict semantics.
+        for (const stream of ["stdout", "stderr"] as const) {
+          const total = result?.rawOutput?.[stream]?.totalBytes
+          const counts = `process=${String(total)}, observed=${observed[stream]}, written=${written[stream]}`
+          if (
+            total === undefined ||
+            !Number.isSafeInteger(total) ||
+            total < 0 ||
+            total !== observed[stream] ||
+            total !== written[stream]
+          ) {
+            failure ??= `its log at ${path} has no complete ${stream} raw-byte proof (${counts})`
+          }
+          const entries = truncated.filter((entry) => entry.stream === stream)
+          if (entries.length > 1) {
+            failure ??= `its log at ${path} has duplicate ${stream} truncation receipts (${counts})`
+          }
+          for (const entry of entries) {
+            const values = [entry.totalBytes, entry.keptBytes, entry.droppedBytes, entry.limitBytes]
+            if (
+              values.some((value) => !Number.isSafeInteger(value) || value < 0) ||
+              entry.totalBytes !== total ||
+              entry.keptBytes + entry.droppedBytes !== entry.totalBytes ||
+              entry.keptBytes > entry.limitBytes ||
+              entry.totalBytes <= entry.limitBytes ||
+              entry.droppedBytes === 0
+            ) {
+              failure ??= `its log at ${path} has an inconsistent ${stream} truncation receipt (${counts}; kept=${entry.keptBytes}, dropped=${entry.droppedBytes}, limit=${entry.limitBytes})`
+            }
+          }
         }
+        if (truncated.some((entry) => entry.stream !== "stdout" && entry.stream !== "stderr")) {
+          failure ??= `its log at ${path} has a truncation receipt for an unknown stream`
+        }
+      }
+      if (failure !== undefined) {
+        // Best effort annotation of an already-failed sink. The first failure
+        // remains in the returned stuck reason if this write also fails.
+        write(encoder.encode(`\n[yrd: this log is INCOMPLETE — ${failure}]\n`), "notes")
+      }
+      try {
+        const size = fstatSync(file).size
+        const expected = written.stdout + written.stderr + written.notes
+        if (size !== expected) {
+          failure ??= `its log at ${path} has size ${size}, expected ${expected} written bytes (stdout=${written.stdout}, stderr=${written.stderr}, notes=${written.notes})`
+        }
+      } catch (error) {
+        failure ??= `its log at ${path} could not be measured: ${error instanceof Error ? error.message : String(error)}`
       }
       try {
         closeSync(file)
       } catch (error) {
-        // A deferred flush fails here or nowhere, and it means the tail of the
-        // file never landed.
         failure ??= `its log at ${path} could not be closed: ${error instanceof Error ? error.message : String(error)}`
       }
       return failure
@@ -544,8 +585,9 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
       // which only a whole-file writer can do: it needs both streams complete
       // before it can write the first byte of either, and that wait was the
       // defect. Nothing read the rule (2026-09-09 sweep of this repository).
-      onOutput: ({ chunk }) => {
-        logFile.append(chunk)
+      captureRawOutput: true,
+      onOutput: ({ stream, chunk }) => {
+        logFile.append(stream, chunk)
       },
     })
   } catch (error) {
@@ -565,7 +607,7 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
         `and every byte its capture observed was streamed to this file`,
     )
   }
-  const logFailure = logFile.close()
+  const logFailure = logFile.close(result)
 
   const base = { durationMs, log, name: run.spec.name }
   /** A stuck reason, carrying a log that could not be written alongside it. */
@@ -584,7 +626,7 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   const unclean = unsettled(result)
   if (unclean !== undefined) return { ...base, exit: "unsettled", result: "stuck", why: why(unclean) }
   // A log that could not be written is a reading the driver did not get, the
-  // same as a dropped capture above: the exit code can be a clean 0 while the
+  // same as an incomplete raw capture: the exit code can be a clean 0 while the
   // only durable evidence for it stops mid-stream. Returning that as a pass is
   // exactly the partial log that reads as complete, so it is stuck, and it is
   // the queue's ground rather than the submitter's.
@@ -619,8 +661,8 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
 /**
  * What `@yrd/process` says went wrong with the RUN, as opposed to what the
  * check said: a stall, a descendant that outlived the check and held its output
- * open, a settlement signal that could not reach the process group, or output
- * dropped past the capture budget. Each is loud in the result and each means
+ * open, or a settlement signal that could not reach the process group.
+ * Each is loud in the result and each means
  * the check was not measured; reading its exit code anyway is how a wedged
  * check passes.
  */
@@ -632,10 +674,5 @@ function unsettled(result: ProcessResult): string | undefined {
     found.push("it stalled: no output progress within the bound")
   }
   if (result.sweepFailure !== undefined) found.push(result.sweepFailure)
-  const truncated = result.outputTruncation ?? []
-  if (truncated.length > 0) {
-    const dropped = truncated.reduce((total, entry) => total + entry.droppedBytes, 0)
-    found.push(`${String(dropped)} bytes of its output were dropped past the capture budget, so the log is partial`)
-  }
   return found.length === 0 ? undefined : found.join("; ")
 }

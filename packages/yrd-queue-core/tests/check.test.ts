@@ -10,13 +10,19 @@
  * happily against the defect.
  */
 
+import * as fs from "node:fs"
+import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import type { Process, ProcessRequest, ProcessResult } from "@yrd/process"
 import { checkLogPath, runCheck } from "../src/index.ts"
 import type { CheckedTree } from "../src/index.ts"
+
+// A mutable facade permits narrow faults at existing filesystem calls only.
+vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
+afterEach(() => vi.restoreAllMocks())
 
 const roots: string[] = []
 
@@ -134,11 +140,17 @@ describe("a check log is written once", () => {
  * needs, so the two things the file cannot show on its own — a capture budget
  * overrun, and where the log's bytes came from — can be asserted exactly.
  */
-function stubDriver(streamed: readonly string[], dropped?: ProcessResult["outputTruncation"]): Process {
+function stubDriver(
+  streamed: readonly (string | { stream: "stdout" | "stderr"; chunk: Uint8Array })[],
+  dropped?: ProcessResult["outputTruncation"],
+  result?: ProcessResult,
+): Process {
   const encoder = new TextEncoder()
   return {
     run: (request: ProcessRequest): Promise<ProcessResult> => {
-      for (const text of streamed) request.onOutput?.({ stream: "stdout", chunk: encoder.encode(text) })
+      for (const text of streamed) {
+        request.onOutput?.(typeof text === "string" ? { stream: "stdout", chunk: encoder.encode(text) } : text)
+      }
       return Promise.resolve({
         exitCode: 0,
         signal: null,
@@ -148,6 +160,7 @@ function stubDriver(streamed: readonly string[], dropped?: ProcessResult["output
         stderr: "",
         durationMs: 1,
         timedOut: false,
+        ...result,
         ...(dropped === undefined ? {} : { outputTruncation: dropped }),
       })
     },
@@ -239,6 +252,266 @@ describe("a queue-owned program root", () => {
 })
 
 describe("a check log and the text the queue read", () => {
+  // Complete raw evidence must preserve the child's verdict even when the
+  // bounded display loses its middle. The existing stub only proved refusal.
+  it.each([
+    ["stdout", 1, 0, "pass"],
+    ["stderr", 2, 1, "fail"],
+  ] as const)("retains every raw %s byte beyond 16 MiB", async (stream, fd, exit, verdict) => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const where = place(`raw-${stream}`)
+    const child = join(where.cwd, "emit.ts")
+    const chunk = Buffer.from(Array.from({ length: 65536 }, (_, i) => i % 251))
+    const repeats = 257
+    writeFileSync(
+      child,
+      [
+        'import { writeSync } from "node:fs"',
+        "const chunk = Buffer.from(Array.from({ length: 65536 }, (_, i) => i % 251))",
+        `for (let i = 0; i < ${repeats}; i++) {`,
+        "  let offset = 0",
+        `  while (offset < chunk.length) offset += writeSync(${fd}, chunk, offset, chunk.length - offset)`,
+        "}",
+        `process.exitCode = ${exit}`,
+      ].join("\n"),
+    )
+
+    const result = await runCheck({ ...where, spec: { name: "raw", run: `'${process.execPath}' '${child}'` } })
+    const written = readFileSync(result.log)
+    const bytes = chunk.byteLength * repeats
+    const expected = createHash("sha256")
+    for (let i = 0; i < repeats; i++) expected.update(chunk)
+    expect(createHash("sha256").update(written.subarray(0, bytes)).digest("hex")).toBe(expected.digest("hex"))
+    const note = `\n[yrd: ${stream} ran past the 16777216-byte capture budget: 65536 of ${bytes} bytes are missing from the text the queue read, and every byte its capture observed was streamed to this file]\n`
+    expect(written.subarray(bytes).toString()).toBe(note)
+    expect(written.byteLength).toBe(bytes + Buffer.byteLength(note))
+    expect(result, result.why).toMatchObject({ exit, result: verdict })
+    expect(warning).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("middle of the stream was dropped"),
+      expect.objectContaining({
+        stream,
+        totalBytes: bytes,
+        keptBytes: 16777216,
+        droppedBytes: 65536,
+        limitBytes: 16777216,
+      }),
+    )
+  })
+
+  // Overflow is admissible only when each raw stream has an independent,
+  // consistent receipt. Equal aggregate bytes and metadata cannot hide a gap.
+  it.each([
+    ["missing totals", undefined, 17],
+    ["reported 4096 versus observed 17", [4096, 0], 4096],
+    ["equal aggregate in the wrong streams", [16, 1], 16],
+    ["negative total", [-1, 0], 17],
+    ["fractional total", [17.5, 0], 17],
+    ["nonfinite total", [Infinity, 0], 17],
+  ] as const)("refuses %s despite a closed file", async (_name, totals, reported) => {
+    const where = place("raw-mismatch")
+    const result = await runCheck({
+      ...where,
+      spec: { name: "counts", run: "unused" },
+      process: stubDriver(
+        ["every byte of it\n"],
+        [{ stream: "stdout", totalBytes: reported, keptBytes: 8, droppedBytes: reported - 8, limitBytes: 8 }],
+        {
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+          ...(totals === undefined
+            ? {}
+            : {
+                rawOutput: {
+                  stdout: { head: new Uint8Array(4), tail: new Uint8Array(4), totalBytes: totals[0] },
+                  stderr: { head: new Uint8Array(), tail: new Uint8Array(), totalBytes: totals[1] },
+                },
+              }),
+        },
+      ),
+    })
+    expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
+    expect(result.why).toContain(result.log)
+    expect(result.why).toContain("stdout")
+    expect(result.why).toContain("observed=17, written=17")
+    expect(readFileSync(result.log, "utf8")).toContain("INCOMPLETE")
+  })
+
+  it("checks stderr independently when stdout reconciles", async () => {
+    const result = await runCheck({
+      ...place("stderr-counts"),
+      spec: { name: "stderr-counts", run: "unused" },
+      process: stubDriver(
+        ["12345678", { stream: "stderr", chunk: new TextEncoder().encode("é") }],
+        [{ stream: "stdout", totalBytes: 8, keptBytes: 4, droppedBytes: 4, limitBytes: 4 }],
+        {
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+          rawOutput: {
+            stdout: { head: new Uint8Array(2), tail: new Uint8Array(2), totalBytes: 8 },
+            stderr: { head: new Uint8Array(), tail: new Uint8Array(), totalBytes: 0 },
+          },
+        },
+      ),
+    })
+    expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
+    expect(result.why).toContain("stderr raw-byte proof (process=0, observed=2, written=2)")
+  })
+
+  it("refuses inconsistent truncation metadata even when raw totals reconcile", async () => {
+    const result = await runCheck({
+      ...place("receipt"),
+      spec: { name: "receipt", run: "unused" },
+      process: stubDriver(
+        ["12345678"],
+        [{ stream: "stdout", totalBytes: 8, keptBytes: 4, droppedBytes: 3, limitBytes: 4 }],
+        {
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+          rawOutput: {
+            stdout: { head: new Uint8Array(2), tail: new Uint8Array(2), totalBytes: 8 },
+            stderr: { head: new Uint8Array(), tail: new Uint8Array(), totalBytes: 0 },
+          },
+        },
+      ),
+    })
+    expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
+    expect(result.why).toContain("inconsistent stdout truncation receipt")
+  })
+
+  it("retains the remainder of short writes, counted as bytes rather than characters", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs")
+    const write = vi
+      .spyOn(fs, "writeSync")
+      .mockImplementation(((fd: number, chunk: Uint8Array, offset: number, length: number) =>
+        actual.writeSync(fd, chunk, offset, Math.min(length, 2))) as typeof fs.writeSync)
+    const text = "é\u0000中\n"
+    const result = await runCheck({
+      ...place("short"),
+      spec: { name: "short", run: "unused" },
+      process: stubDriver([text]),
+    })
+    expect(result).toMatchObject({ result: "pass", exit: 0 })
+    expect(readFileSync(result.log)).toEqual(Buffer.from(text))
+    expect(write.mock.calls.length).toBeGreaterThan(1)
+  })
+
+  it("reports the successful prefix when a later raw write fails, even if the metadata note succeeds", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs")
+    vi.spyOn(fs, "writeSync")
+      .mockImplementationOnce(((fd: number, chunk: Uint8Array, offset: number) =>
+        actual.writeSync(fd, chunk, offset, 2)) as typeof fs.writeSync)
+      .mockImplementationOnce(() => {
+        throw new Error("injected raw write failure")
+      })
+    const result = await runCheck({
+      ...place("write-fails"),
+      spec: { name: "write", run: "unused" },
+      process: stubDriver(["abcdef"]),
+    })
+    expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
+    expect(result.why).toContain("stdout after 2 bytes")
+    expect(result.why).toContain("injected raw write failure")
+    expect(readFileSync(result.log, "utf8")).toMatch(/^ab\n\[yrd: this log is INCOMPLETE/u)
+  })
+
+  it.each(["wrong size", "stat failure"])("refuses %s after all raw writes succeeded", async (fault) => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs")
+    vi.spyOn(fs, "fstatSync").mockImplementationOnce(((fd: number) => {
+      if (fault === "stat failure") throw new Error("injected stat failure")
+      const stat = actual.fstatSync(fd)
+      stat.size -= 1
+      return stat
+    }) as typeof fs.fstatSync)
+    const result = await runCheck({
+      ...place("size"),
+      spec: { name: "size", run: "unused" },
+      process: stubDriver(["abcdef"]),
+    })
+    expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
+    expect(result.why).toContain(fault === "wrong size" ? "size 5, expected 6" : "injected stat failure")
+  })
+
+  it("refuses a close failure even when the full raw file exists", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs")
+    vi.spyOn(fs, "closeSync").mockImplementationOnce((fd) => {
+      actual.closeSync(fd)
+      throw new Error("injected close failure")
+    })
+    const result = await runCheck({
+      ...place("close"),
+      spec: { name: "close", run: "unused" },
+      process: stubDriver(["abcdef"]),
+    })
+    expect(result).toMatchObject({ result: "stuck", exit: "unsettled" })
+    expect(result.why).toContain("could not be closed: injected close failure")
+    expect(readFileSync(result.log, "utf8")).toBe("abcdef")
+  })
+
+  it.each([
+    ["timeout", { timedOut: true }, "timeout"],
+    ["signal", { signal: "SIGTERM" }, "signal"],
+    ["escaped descendant", { escapedDescendant: true }, "unsettled"],
+    ["sweep failure", { sweepFailure: "injected sweep failure" }, "unsettled"],
+    ["stall", { verdict: "STALLED", stalled: true, lastProgressAtMs: 1, lastProgressBytes: 8 }, "unsettled"],
+  ] as const)("never rescues %s with complete raw counts and display overflow", async (_name, fields, exit) => {
+    const result = await runCheck({
+      ...place("settlement"),
+      spec: { name: "settlement", run: "unused" },
+      process: stubDriver(
+        ["12345678"],
+        [{ stream: "stdout", totalBytes: 8, keptBytes: 4, droppedBytes: 4, limitBytes: 4 }],
+        {
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+          ...fields,
+          rawOutput: {
+            stdout: { head: new Uint8Array(2), tail: new Uint8Array(2), totalBytes: 8 },
+            stderr: { head: new Uint8Array(), tail: new Uint8Array(), totalBytes: 0 },
+          },
+        },
+      ),
+    })
+    expect(result).toMatchObject({ result: "stuck", exit })
+    expect(readFileSync(result.log, "utf8")).toContain("12345678")
+    expect(result.why).not.toContain("raw-byte proof")
+  })
+
+  it("propagates a reader exception and closes its partial log", async () => {
+    const close = vi.spyOn(fs, "closeSync")
+    const driver = stubDriver([])
+    await expect(
+      runCheck({
+        ...place("reader"),
+        spec: { name: "reader", run: "unused" },
+        process: {
+          ...driver,
+          run: async (request) => {
+            request.onOutput?.({ stream: "stdout", chunk: new TextEncoder().encode("prefix") })
+            throw new Error("injected reader failure")
+          },
+        },
+      }),
+    ).rejects.toThrow("injected reader failure")
+    expect(close).toHaveBeenCalledOnce()
+  })
+
   it("holds the streamed bytes only, never a second copy written at the end", async () => {
     const where = place("streamed-only")
     const path = checkLogPath(where.logDir, "streamed")
