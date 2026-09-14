@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, type Git } from "@yrd/queue-core"
+import { gitIn, readJournals, type Git, type LogRecord } from "@yrd/queue-core"
 import { coreQueueCommand } from "../src/queue-core-commands.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
@@ -205,5 +205,163 @@ describe("yrd check judges HEAD, never the invoking tree", () => {
     ).rejects.toThrow(/is not a check the target declares/u)
     // Nothing was materialized for a name that was never going to run.
     expect(existsSync(join(w.workdir, "worktrees"))).toBe(false)
+  })
+})
+
+/**
+ * @failure An opted-in check refused without P, or could judge candidate code / publish its subject.
+ * @level l2: the actual command caller, real Git and shell children in the existing isolated world.
+ * @consumer Authors need the queue's protected P/C lifecycle without any merge possibility.
+ */
+async function protectedWorld(setup = "true"): Promise<World> {
+  const w = await world()
+  writeFileSync(
+    join(w.work, "program.sh"),
+    [
+      'test "$YRD_PROGRAM_ROOT" != "$YRD_REPO" || exit 41',
+      'test "$(git -C "$YRD_PROGRAM_ROOT" rev-parse HEAD)" = "$YRD_BASE_SHA" || exit 42',
+      'test "$(git rev-parse HEAD)" = "$YRD_CANDIDATE_SHA" || exit 43',
+      'test "$(cat program.sh)" = "exit 0" || exit 44',
+      'printf "protected-program-ran\\n"',
+      'test "$(cat value.txt)" = green',
+      "",
+    ].join("\n"),
+  )
+  writeFileSync(join(w.work, "value.txt"), "green\n")
+  writeFileSync(
+    join(w.work, ".yrd.yml"),
+    JSON.stringify({
+      setup: `printf '%s\\n' "$YRD_REPO" >> ${JSON.stringify(join(w.workdir, "setup-roots"))}; ${setup}`,
+      checks: [{ protected: { programRoot: true, run: 'sh "$YRD_PROGRAM_ROOT/program.sh"', scripts: ["program.sh"] } }],
+    }),
+  )
+  await w.git(["add", "."])
+  await w.git(["commit", "--quiet", "-m", "target declares protected check"])
+  await w.git(["push", "--quiet", "origin", "main"])
+  return w
+}
+
+function checkJournal(w: World): readonly LogRecord[] {
+  const files = readdirSync(join(w.workdir, "logs", "check")).filter((name) => name.endsWith(".jsonl"))
+  expect(files).toHaveLength(1)
+  return readFileSync(join(w.workdir, "logs", "check", files[0]!), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as LogRecord)
+}
+
+describe("yrd check uses the protected program without publishing", () => {
+  it.each([false, true])("judges committed candidate red=%s through P and never writes remote refs", async (red) => {
+    const w = await protectedWorld()
+    await w.git(["checkout", "--quiet", "-b", "task/control"])
+    writeFileSync(join(w.work, "program.sh"), "exit 0\n")
+    writeFileSync(join(w.work, "value.txt"), red ? "red\n" : "green\n")
+    await w.git(["add", "."])
+    await w.git(["commit", "--quiet", "-m", "candidate attempts to replace its judge"])
+    const refs = await w.git(["ls-remote", "origin"])
+    const localRefs = await w.git(["for-each-ref", "refs/yrd/"])
+    const selected = await installSelectedGit(w.work)
+    const run = capture(w.work)
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      { command: "check", names: ["protected"] },
+      {
+        workdir: w.workdir,
+        env: {
+          ...process.env,
+          YRD_PROGRAM_ROOT: "/candidate-forged",
+          YRD_REPO: "/candidate-forged",
+          YRD_CANDIDATE_SHA: "forged",
+        },
+      },
+    )
+    expect(exit).toBe(red ? 1 : 0)
+    expect(run.stdout()).toContain(red ? "protected fail" : "protected pass")
+    const log = /\(log ([^)]+)\)/u.exec(run.stdout())?.[1] ?? ""
+    expect(readFileSync(log, "utf8")).toContain("protected-program-ran")
+    const setupRoots = readFileSync(join(w.workdir, "setup-roots"), "utf8").trim().split("\n")
+    expect(setupRoots).toHaveLength(2)
+    expect(setupRoots.map((path) => path.split("/").at(-1))).toEqual(["P", "C"])
+    const rows = checkJournal(w)
+    for (const stage of [
+      "program-program-tree",
+      "program-subject-tree",
+      "program-program-source",
+      "program-subject-source",
+    ]) {
+      const witnesses = rows.filter((row) => row.kind === "judged" && row.stage === stage)
+      expect(witnesses).toHaveLength(2)
+      expect(witnesses.every((row) => row.same === true)).toBe(true)
+    }
+    expect(rows.some((row) => ["merge", "publish", "change"].includes(row.kind))).toBe(false)
+    expect(readJournals(join(w.workdir, "logs")).runs.size).toBe(0)
+    expect(await w.git(["ls-remote", "origin"])).toBe(refs)
+    expect(await w.git(["for-each-ref", "refs/yrd/"])).toBe(localRefs)
+    expect(selected.readCalls().some(({ args }) => args.includes("push") || args.includes("update-ref"))).toBe(false)
+    expect(readdirSync(join(w.workdir, "worktrees"))).toEqual([])
+    const trees = (await w.git(["worktree", "list", "--porcelain"]))
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+    expect(trees).toEqual([`worktree ${w.work}`])
+  })
+
+  // The shared lifecycle must remove all prepared roots on setup or identity refusal,
+  // before a check can report an exit-code verdict. Legacy tests never crossed P/C.
+  it.each([
+    ["target setup", "exit 1", /setup fail/u, 1],
+    ["subject setup", 'if [ "$YRD_CANDIDATE_SHA" != "$YRD_BASE_SHA" ]; then exit 1; fi', /setup fail/u, 2],
+    [
+      "source",
+      'if [ "$YRD_CANDIDATE_SHA" != "$YRD_BASE_SHA" ]; then echo mutated > program.sh; fi',
+      /subject source.*differs/u,
+      2,
+    ],
+    [
+      "program after preparation",
+      'if [ "$YRD_CANDIDATE_SHA" != "$YRD_BASE_SHA" ]; then echo mutated > ../P/program.sh; fi',
+      /program source.*differs/u,
+      2,
+    ],
+    [
+      "head",
+      'if [ "$YRD_CANDIDATE_SHA" != "$YRD_BASE_SHA" ]; then echo moved > moved.txt; git add moved.txt; git -c user.name=yrd -c user.email=yrd@test commit --quiet -m moved; fi',
+      /subject.*moved during setup/u,
+      2,
+    ],
+    [
+      "changed product",
+      'if [ "$YRD_CANDIDATE_SHA" != "$YRD_BASE_SHA" ]; then echo mutated > value.txt; fi',
+      /subject.*differs from its recorded candidate blobs/u,
+      2,
+    ],
+  ] as const)("cleans roots and retains evidence after %s failure", async (_name, setup, error, count) => {
+    const w = await protectedWorld(setup)
+    await w.git(["checkout", "--quiet", "-b", "task/control"])
+    writeFileSync(join(w.work, "value.txt"), "red\n")
+    await w.git(["add", "value.txt"])
+    await w.git(["commit", "--quiet", "-m", "candidate product"])
+    const refs = await w.git(["ls-remote", "origin"])
+    const run = capture(w.work)
+    await expect(
+      coreQueueCommand(w.work, run.io, { command: "check", names: ["protected"] }, { workdir: w.workdir }),
+    ).rejects.toThrow(error)
+    const setupRoots = readFileSync(join(w.workdir, "setup-roots"), "utf8").trim().split("\n")
+    expect(setupRoots).toHaveLength(count)
+    for (const path of setupRoots) expect(existsSync(path)).toBe(false)
+    expect(readdirSync(join(w.workdir, "worktrees"))).toEqual([])
+    expect(
+      (await w.git(["worktree", "list", "--porcelain"])).split("\n").filter((line) => line.startsWith("worktree ")),
+    ).toEqual([`worktree ${w.work}`])
+    expect(await w.git(["ls-remote", "origin"])).toBe(refs)
+    const rows = checkJournal(w)
+    expect(rows.some((row) => row.kind === "check" && row.name === "protected")).toBe(false)
+    if (_name === "target setup" || _name === "subject setup") {
+      const failed = rows.find((row) => row.kind === "check" && typeof row.end === "string")
+      expect(failed?.log).toEqual(expect.any(String))
+      expect(existsSync(String(failed?.log))).toBe(true)
+    } else {
+      expect(rows.some((row) => row.kind === "judged" && row.same === false)).toBe(true)
+    }
   })
 })

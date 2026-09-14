@@ -28,6 +28,9 @@ import {
   directMergeLine,
   pauseLine,
   prepareWorktree,
+  checkedTree,
+  programRootCheck,
+  openLog,
   gitIn,
   incidentLine,
   incidentLines,
@@ -41,7 +44,6 @@ import {
   readHistories,
   readQueue,
   remoteUrl,
-  runId,
   subjects,
   targetName,
   runCheck,
@@ -1058,7 +1060,25 @@ export async function coreQueueCommand(
       // on at the head it stands at, so a seat's own check and the queue's own
       // read of the same change sit at the same path. A detached HEAD says
       // `HEAD` and is still a name nothing else takes.
-      const run = runId()
+      // Local check witnesses are retained without creating a queue admission history.
+      const journal = openLog(join(workdir, "logs", "check"))
+      const run = journal.id
+      const gitOptions = {
+        env: options.env,
+        openOutput: journal.openGitOutput,
+        onInvocation: journal.writeGitInvocation,
+      }
+      const checkGit = gitIn(repo, undefined, selection, gitOptions)
+      const tree = await checkedTree(repo, captured.oid, undefined, selection, gitOptions)
+      if (tree.candidate !== head) throw new Error(`check subject moved: expected ${head}, read ${tree.candidate}`)
+      journal.write({
+        kind: "run",
+        command: "check",
+        target: targetLabel,
+        base: captured.oid,
+        config: config.blob,
+        head,
+      })
       const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       const logDir = join(workdir, "checks", changeName({ branch, head }), run, "check")
       // The worktrees root of this run, claimed before anything is made in it:
@@ -1069,32 +1089,64 @@ export async function coreQueueCommand(
       claimWorktrees(worktrees)
       // Prepared exactly as a queue run prepares one: materialized, the
       // declaration's setup run once, and told the same three values.
-      const prepared = await prepareWorktree(git, repo, head, join(worktrees, "check", head.slice(0, 12)), {
-        env: options.env,
-        populateReference: options.populateReference,
-        selection,
-        gitOptions: { env: options.env },
-        plumbing: options.log?.child("worktree"),
-        ...(config.setup === undefined ? {} : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
-        targetSha: captured.oid,
-      })
+      let prepared: Awaited<ReturnType<typeof prepareWorktree>> | undefined
       const results: CheckResult[] = []
       try {
         for (const spec of specs) {
-          const result = await runCheck({
-            cwd: prepared.path,
-            env: options.env,
-            logDir,
-            spec,
-            tmpdir: join(workdir, "tmp"),
-            tree: prepared.tree,
-          })
+          let result: CheckResult
+          if (spec.programRoot === true) {
+            result = await programRootCheck({
+              git: checkGit,
+              repo,
+              targetSha: captured.oid,
+              tree,
+              spec,
+              branch,
+              head,
+              phase: "check",
+              root: join(worktrees, "program", "check", head.slice(0, 12), spec.name),
+              logDir,
+              tmpdir: join(workdir, "tmp"),
+              log: journal,
+              env: options.env,
+              selection,
+              gitOptions,
+              populateReference: options.populateReference,
+              plumbing: options.log?.child("worktree"),
+              setup: config.setup,
+            })
+          } else {
+            // Legacy checks keep their existing shared HEAD tree and shell semantics.
+            // An opted-in-only invocation must not prepare an unused third root.
+            prepared ??= await prepareWorktree(checkGit, repo, head, join(worktrees, "check", head.slice(0, 12)), {
+              env: options.env,
+              populateReference: options.populateReference,
+              selection,
+              gitOptions,
+              plumbing: options.log?.child("worktree"),
+              targetSha: captured.oid,
+              ...(config.setup === undefined
+                ? {}
+                : { setup: { logDir, run: config.setup, tmpdir: join(workdir, "tmp") } }),
+            })
+            result = await runCheck({
+              cwd: prepared.path,
+              env: options.env,
+              logDir,
+              spec,
+              tmpdir: join(workdir, "tmp"),
+              tree: prepared.tree,
+            })
+          }
           results.push(result)
           if (result.result !== "pass") break
         }
       } finally {
-        await prepared.remove()
-        rmSync(worktrees, { force: true, recursive: true })
+        try {
+          if (prepared !== undefined) await prepared.remove()
+        } finally {
+          rmSync(worktrees, { force: true, recursive: true })
+        }
       }
       emit(
         io,
