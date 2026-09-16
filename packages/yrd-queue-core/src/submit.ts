@@ -10,6 +10,14 @@
  * The branch is always pushed with a lease, because a rebased branch is the
  * ordinary case and a lease is what stops it clobbering a head the submitter
  * never saw.
+ *
+ * A stopped line still takes work (the andon, operator 2026-09-16): a pause —
+ * a person's or a stuck change's — stops checking and merging, never
+ * submission. Nothing here needs a running or unpaused queue: submit runs no
+ * check (`on: submit` checks run in the queue run's judge step), and every
+ * write it makes is to the branch, its change ref and the submodule retention
+ * refs, never to the pause ref. So the stop is read only to be echoed, through
+ * the same derivation every other reader uses.
  */
 
 import { readdir } from "node:fs/promises"
@@ -18,7 +26,8 @@ import { targetName, type Target } from "./config.ts"
 import { ABSENT, appendRecord, type Git } from "./records.ts"
 import { gitIn, gitlinkRows, isAncestor, mergeBase, readRemoteCommit, refAt } from "./git.ts"
 import { changeRef } from "./refs.ts"
-import { requireResumed } from "./pause.ts"
+import type { PauseRecord } from "./pause.ts"
+import { readStop } from "./remote.ts"
 
 export type SubmitRequest = Readonly<{
   /** The branch being submitted: the change's own. */
@@ -50,6 +59,8 @@ export type Submitted = Readonly<{
   /** Gitlinks this change moved whose commits submit published to their submodule remotes (24454). */
   published: readonly PublishedGitlink[]
   issue?: IssueResolution
+  /** The stop the line stood under when this was accepted: the change waits behind it. */
+  stop?: PauseRecord
 }>
 
 export type PublishedGitlink = Readonly<{
@@ -180,6 +191,8 @@ export type SubmitInspection = Readonly<{
   base: string
   rebaseRequired: boolean
   issue?: IssueResolution
+  /** The stop the line stands under, echoed and never refused on. */
+  stop?: PauseRecord
 }>
 
 /** The bound on a courtesy check: this observation cannot reserve the target. */
@@ -190,13 +203,13 @@ export function freshnessLine(targetHead: string): string {
 /** The same read-only admission checks serve the action and its preview. */
 export async function inspectSubmit(git: Git, remote: string, request: SubmitRequest): Promise<SubmitInspection> {
   refuseTarget(request.branch, request.target.branch)
-  // This is the early courtesy refusal. The run is the enforcement point: a
-  // pause that races this read may let the change open, but it cannot let it
-  // be checked or merged while the pause stands.
-  await requireResumed(git, remote, request.target.branch)
   const head = (await git(["rev-parse", "--verify", `refs/heads/${request.branch}^{commit}`])).trim()
   const targetHead = await readRemoteCommit(git, request.target.remote, `refs/heads/${request.target.branch}`)
   if (targetHead === undefined) throw new Error(`${targetName(request.target)} has no advertised target branch`)
+  // The line's stop, read to be ECHOED: a stopped line accepts the change and
+  // the run is where the stop is enforced. It is read before the refusals
+  // below so a stale or rebased branch is told about the stop too.
+  const { stop } = await readStop(git, remote, request.target.branch, targetHead)
   const bound = freshnessLine(targetHead)
   if (await isAncestor(git, head, targetHead)) {
     throw new Error(
@@ -218,7 +231,14 @@ export async function inspectSubmit(git: Git, remote: string, request: SubmitReq
   const issue = await issueOf(git, request.branch, head, targetHead, request.issue)
   if (request.rebase === true) await requireRebaseWorktree(git, request.branch, bound)
   await refuseDivergedMovedPins(git, targetHead, head, request.branch)
-  return { head, targetHead, base, rebaseRequired, ...(issue === undefined ? {} : { issue }) }
+  return {
+    head,
+    targetHead,
+    base,
+    rebaseRequired,
+    ...(issue === undefined ? {} : { issue }),
+    ...(stop === undefined ? {} : { stop }),
+  }
 }
 
 /**
@@ -385,6 +405,7 @@ export async function submit(git: Git, remote: string, request: SubmitRequest): 
     retry,
     published,
     ...(issue === undefined ? {} : { issue }),
+    ...(inspected.stop === undefined ? {} : { stop: inspected.stop }),
   }
 }
 

@@ -38,7 +38,10 @@
  *
  * Exit 0 when nothing ended failed or stuck, 1 when a change ended failed,
  * 2 on stuck. A stuck change stays open and the run stops there: the queue
- * could not do its own job, and the next thing to happen is a person.
+ * could not do its own job, and the next thing to happen is a person. That is
+ * the andon (operator 2026-09-16): nothing behind a stuck change is judged or
+ * merged, and the pause ring stops the whole line on it until the change leaves
+ * the line or the queue is resumed.
  */
 
 import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
@@ -84,7 +87,7 @@ import {
   type GitSelection,
 } from "./git.ts"
 import { incidentTrailers, type Incident } from "./incident.ts"
-import type { PauseRecord } from "./pause.ts"
+import { stuckCures, type PauseRecord } from "./pause.ts"
 import { CHANGE_REF_DIAGNOSTICS, openLog, type LogRecord, type QueueRunLog } from "./log.ts"
 import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
@@ -193,6 +196,11 @@ export type Run = Readonly<{
   targetSha: string
   /** The pause record captured in the same remote advertisement as the queue. */
   pause: PauseRecord | undefined
+  /**
+   * The stop that stands, derived by `lineStop` from that same reading: the
+   * pause record, unless it is a stuck stop whose change has left the line.
+   */
+  lineStop: PauseRecord | undefined
   /** The target OID this run successfully pushed, or its captured starting OID. */
   targetAfter: { sha: string }
   /**
@@ -281,8 +289,8 @@ export type Steps = Readonly<{
    * One pass per entry before anything is judged: retires a moved-off or
    * deleted branch, catches ancestry up on a record, and ends an orphaned
    * merge honestly rather than let it be redone. `"stuck"` when the last of
-   * those ended the entry stuck; the loop then holds that entry out of the
-   * rest of the round and goes on past it (@i/10-yrd/24492).
+   * those ended the entry stuck, so the loop stops the round the same way a
+   * stuck judge or merge does.
    */
   bookkeep: (run: Run, entry: QueueEntry) => Promise<"stuck" | undefined>
   prepare: (run: Run, entry: QueueEntry, commit: string, path: string, phase: Phase) => Promise<PreparedWorktree>
@@ -302,6 +310,13 @@ export type Steps = Readonly<{
   /** The same, for a commit that went around the queue: there is no change to end. */
   direct: (run: Run, commit: DirectMerge) => Promise<void>
   observed: (run: Run, notice: ObservationNotice) => Promise<void>
+  /**
+   * A change ended this round stuck, and the round ends here, whatever answers.
+   * The bare loop stops only this round. A ring that keeps the WHOLE LINE
+   * stopped past it records that here and says what it stopped for, which the
+   * outcome carries.
+   */
+  stopLine: (run: Run, entry: QueueEntry) => Promise<Stopped | undefined>
 }>
 
 /** One ring of the onion: the same bundle, with the members it owns wrapped. */
@@ -462,6 +477,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     name,
     options,
     pause: queue.pause,
+    lineStop: queue.stop,
     // The caller's trace half, kept exactly as it was passed, plus this run's
     // journal, which is always wired: the two halves answer different questions
     // and only one of them is a git transcript nobody turned on.
@@ -540,46 +556,63 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
 
   // Bookkeeping at the edges of the records first, so every reader below reads
   // records and never reconciles. A bookkeeping pass can itself end an entry
-  // stuck (an orphaned merge recovery could not trust, @i/10-yrd/24344). That
-  // ends the ENTRY, never the round: the cure for whatever stuck it may be the
-  // next change in line, so the line is judged and merged past it
-  // (@i/10-yrd/24492). The set keeps the judge loop off the ended chain, whose
-  // reading below predates the ending — a decision appended onto it would be
-  // refused as a decision after an ending (@i/10-yrd/24635).
-  const bookkeptStuck = new Set<string>()
+  // stuck (an orphaned merge recovery could not trust, @i/10-yrd/24344), and
+  // that stops the round exactly like a stuck judge or merge does.
   for (const entry of entries) {
     if ((await run.steps.bookkeep(run, entry)) === "stuck") {
       stuck.push(entry.change.branch)
-      bookkeptStuck.add(entry.change.branch)
+      return finish(
+        run,
+        2,
+        { checkedWaiting: 0, directMerges, failed, merged, stuck },
+        await run.steps.stopLine(run, entry),
+      )
     }
   }
 
   // On-submit: every queued change, oldest first, in a fresh worktree of its
   // head. A stuck change kept its place, and this run takes it again from
-  // here; so does a checked change whose checks ran under a check config the
-  // target no longer declares (§ The queue run: a checked record is reused only
-  // while the config blob is the one it names). A judge that ends stuck ends
-  // that change alone — the round keeps judging the line behind it, each entry
-  // on its own ground and never on the head's (@i/10-yrd/24492).
+  // here, first among the changes still to judge; so does a checked change
+  // whose checks ran under a check config the target no longer declares
+  // (§ The queue run: a checked record is reused only while the config blob is
+  // the one it names). A judge that ends stuck ENDS THE ROUND: nothing behind
+  // it is judged, nothing is merged, and the line stops on it (the andon,
+  // operator 2026-09-16, which overruled @i/10-yrd/24492's step-over).
   for (const entry of ordered(entries, "queued", "stuck", "checked").filter(
-    (entry) =>
-      !bookkeptStuck.has(entry.change.branch) && (entry.reading.state !== "checked" || staleChecked(run, entry)),
+    (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
   )) {
     const outcome = await guarded(run, entry, () => run.steps.judge(run, entry))
-    if (outcome === "stuck") stuck.push(entry.change.branch)
+    if (outcome === "stuck") {
+      stuck.push(entry.change.branch)
+      return finish(
+        run,
+        2,
+        { checkedWaiting: 0, directMerges, failed, merged, stuck },
+        await run.steps.stopLine(run, entry),
+      )
+    }
     if (outcome === "failed") failed.push(entry.change.branch)
   }
 
   // On-merge: the first checked change in line, re-read so this run's own
-  // checked records count — its own stuck endings too, which is what keeps an
-  // entry ended above out of this line. A stuck row holds no place here: a
-  // checked change behind a stuck head merges past it (@i/10-yrd/24492).
-  const line = ordered((await read()).changes, "checked").filter((entry) => !staleChecked(run, entry))
+  // checked records count. The line is cut at its first stuck row: a checked
+  // change behind a stuck one never merges past it.
+  const reread = ordered((await read()).changes, "checked", "stuck")
+  const blocked = reread.findIndex((entry) => entry.reading.state === "stuck")
+  const line = (blocked === -1 ? reread : reread.slice(0, blocked)).filter((entry) => !staleChecked(run, entry))
   const checked = line[0]
   if (checked !== undefined) {
     const outcome = await guarded(run, checked, () => run.steps.merge(run, checked))
-    if (outcome === "stuck") stuck.push(checked.change.branch)
-    else if (outcome === "failed") failed.push(checked.change.branch)
+    if (outcome === "stuck") {
+      stuck.push(checked.change.branch)
+      return finish(
+        run,
+        2,
+        { checkedWaiting: 0, directMerges, failed, merged, stuck },
+        await run.steps.stopLine(run, checked),
+      )
+    }
+    if (outcome === "failed") failed.push(checked.change.branch)
     else if (outcome === "merged") merged.push(checked.change.branch)
   }
 
@@ -598,7 +631,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
  * wraps in order. Every one of them is reached through `Run.steps` and never by
  * name, so a ring that wraps one sees every call to it.
  */
-const BASE: Steps = { bookkeep, direct, observed, end, ended, judge, merge, open, prepare, push }
+const BASE: Steps = { bookkeep, direct, observed, end, ended, judge, merge, open, prepare, push, stopLine }
 
 /** A checked change whose checked record names a config blob the target no longer declares. */
 function staleChecked(run: Run, entry: QueueEntry): boolean {
@@ -647,6 +680,11 @@ async function reportDirectMerges(run: Run, entries: QueueRead): Promise<readonl
 
 /** Nothing stops the round: a queue with no ring on it runs every round it is given. */
 function open(): Promise<Stopped | undefined> {
+  return Promise.resolve(undefined)
+}
+
+/** The bare loop stops only the round a stuck ended; keeping the line stopped is a ring's. */
+function stopLine(): Promise<Stopped | undefined> {
   return Promise.resolve(undefined)
 }
 
@@ -2402,11 +2440,10 @@ function stuckWrite(
   }>,
 ): EndedWrite {
   const subject = cause.subject.replace(/\s+/gu, " ").trim()
-  // Every stuck record names BOTH escapes from the line, in words that cannot
-  // be read as "re-push the same content" (@i/10-yrd/24492 box 2).
-  const next =
-    `${cause.next}; two ways out of the line: yrd queue withdraw ${branch} (an operator ends the change), ` +
-    `or submit a replacement head for ${branch} that clears this reason — the same content sticks on the same ground`
+  // Every stuck record names ALL THREE ways out of the line, in words that
+  // cannot be read as "re-push the same content" (@i/10-yrd/24492 box 2; the
+  // third, resume, since the andon made a stuck stop the line).
+  const next = `${cause.next}; ${stuckCures(branch)}`
   const incident = {
     code: cause.code,
     subject,
