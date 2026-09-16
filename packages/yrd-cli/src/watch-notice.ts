@@ -30,7 +30,7 @@ export type Notice = Readonly<{
 }>
 
 /**
- * How each state reads in a notice. The core's five words plus `direct` stand
+ * How each state reads in a notice. The core's six words plus `direct` stand
  * as they are — renaming a state at the edge is how two surfaces come to
  * disagree about one change — and only the parenthetical is ours.
  */
@@ -41,6 +41,7 @@ const WORD: Readonly<Record<Row["state"], string>> = {
   merged: "merged",
   queued: "queued",
   stuck: "stuck",
+  withdrawn: "withdrawn",
 }
 
 export function watchNotice(row: Row, joinedRun = false): Notice {

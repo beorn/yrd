@@ -264,6 +264,7 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   submit: "submit",
   resume: "queue resume",
   up: "queue up",
+  withdraw: "queue withdraw",
 }
 
 /**

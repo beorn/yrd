@@ -34,6 +34,7 @@ export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
   switch (row.state) {
     case "merged":
     case "direct":
+    case "withdrawn":
       return "done"
     case "failed":
       return "failed"
