@@ -53,11 +53,18 @@ export class NothingToWithdraw extends Error {}
 export async function withdraw(git: Git, remote: string, request: WithdrawRequest): Promise<Withdrawn> {
   const queue = request.target.branch
   const prefix = queueRefPrefix(queue)
-  const listed = (await git(["ls-remote", "--refs", remote, `${prefix}/${request.branch}@*`]))
+  const branchRef = `refs/heads/${request.branch}`
+  const rows = (await git(["ls-remote", "--refs", remote, branchRef, `${prefix}/${request.branch}@*`]))
     .split("\n")
     .map((row) => row.trim())
     .filter((row) => row !== "")
     .map((row) => row.split(/\s+/u))
+  // Where the branch points now, read in the same listing as its changes: a
+  // head the branch no longer carries has already left the line by the
+  // reader's own derivation (state.ts: replaced, or deleted), and the next run
+  // records that ending itself — withdraw ends only what is still open.
+  const branchHead = rows.find(([, ref]) => ref === branchRef)?.[0]
+  const listed = rows.filter(([, ref]) => ref !== branchRef)
   if (listed.length === 0) {
     throw new NothingToWithdraw(
       `no change for ${request.branch} on ${queue}: nothing to withdraw` +
@@ -71,6 +78,16 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
     const change = parseChangeRef(queue, ref)
     if (change === undefined) {
       throw new Error(`${ref} matched ${request.branch}'s changes on ${queue} but is not a change ref`)
+    }
+    if (branchHead === undefined) {
+      alreadyEnded.push(`${change.head.slice(0, 12)} already ended withdrawn (deleted): the branch is gone`)
+      continue
+    }
+    if (branchHead !== change.head) {
+      alreadyEnded.push(
+        `${change.head.slice(0, 12)} already ended withdrawn (replaced): the branch moved on to ${branchHead.slice(0, 12)}`,
+      )
+      continue
     }
     const one = await withdrawOne(git, remote, queue, ref, change, request)
     if ("record" in one) withdrawn.push({ branch: change.branch, head: change.head, record: one.record })

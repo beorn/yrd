@@ -455,7 +455,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
    * today: red — the submit puts no branch at the yrd remote and writes no
    * change ref, so there is nothing to delete and nothing to end.
    */
-  it("a change whose branch is gone ends failed with the reason `deleted`, and sends nothing", async () => {
+  it("a change whose branch is gone ends withdrawn with the reason `deleted`, and sends nothing", async () => {
     const { repo, origin, hookLog } = await boundaryRepository({ exit: 0, hooks: true })
     await addYrdRemote(repo, origin)
     const branch = "24099-gone"
@@ -472,7 +472,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
     expect(run.exitCode, run.report).not.toBe(2)
     expect(await targetTip(repo), run.report).toBe(before)
     const tip = (await recordMessages(origin, changeRef("main", { branch: branch, head })))[0] ?? ""
-    expect(tip, run.report).toContain("failed")
+    expect(tip, run.report).toContain("withdrawn")
     expect(tip, run.report).toContain("deleted")
     expect(await hookRecords(hookLog), run.report).toBe("")
   })
@@ -485,7 +485,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
    *
    * today: red — the submit writes no change ref, so there is nothing to end.
    */
-  it("a change whose branch no longer points at its head ends failed with `replaced`, and sends nothing about it", async () => {
+  it("a change whose branch no longer points at its head ends withdrawn with `replaced`, and sends nothing about it", async () => {
     const { repo, origin, hookLog } = await boundaryRepository({ exit: 0, hooks: true })
     await addYrdRemote(repo, origin)
     const branch = "24099-moved"
@@ -502,7 +502,7 @@ describe("the branch, moved around the queue", { timeout: 120_000 }, () => {
 
     expect(run.exitCode, run.report).not.toBe(2)
     const tip = (await recordMessages(origin, changeRef("main", { branch: branch, head: head1 })))[0] ?? ""
-    expect(tip, run.report).toContain("failed")
+    expect(tip, run.report).toContain("withdrawn")
     expect(tip, run.report).toContain("replaced")
     expect(await hookRecords(hookLog), run.report).not.toContain(head1)
     // The new head is a bare push, so no change was opened for it (E2).

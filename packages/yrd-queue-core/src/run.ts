@@ -629,8 +629,8 @@ function open(): Promise<Stopped | undefined> {
 
 /**
  * One pass over one entry before anything is judged: a branch that is gone or
- * moved off a head ends that head's change failed with the reason and no
- * message (ruling B3); a head the target already carries gets its merged
+ * moved off a head ends that head's change withdrawn with the reason and no
+ * message (ruling B3; the one word the reader already derived, @i/10-yrd/24492); a head the target already carries gets its merged
  * record, so the tip catches up with ancestry; and a "checked" change whose
  * merge candidate was composed by a run that died before recording it is
  * settled or ended honestly, never left for a blind retry to redo
@@ -1941,7 +1941,7 @@ async function endFailing(
  */
 async function retire(run: Run, entry: QueueEntry): Promise<void> {
   const reason = entry.reading.reason
-  if (entry.reading.state !== "failed" || (reason !== "deleted" && reason !== "replaced")) return
+  if (entry.reading.state !== "withdrawn" || (reason !== "deleted" && reason !== "replaced")) return
   if (standsEnded(tipOf(entry.change))) return
   const { change } = entry
   const { branch, head } = change
@@ -1949,7 +1949,7 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
     run,
     {
       change,
-      kind: "failed",
+      kind: "withdrawn",
       subject:
         reason === "deleted"
           ? `${branch} was deleted by its submitter`
@@ -1959,7 +1959,7 @@ async function retire(run: Run, entry: QueueEntry): Promise<void> {
     tipOf(entry.change).sha,
   )
   if (retiredRecord === undefined) return
-  run.log.write({ branch, decision: "failed", head, kind: "change", reason })
+  run.log.write({ branch, decision: "withdrawn", head, kind: "change", reason })
 }
 
 /**

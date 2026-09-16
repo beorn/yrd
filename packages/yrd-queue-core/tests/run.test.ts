@@ -2844,6 +2844,37 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
   })
 
+  it("a superseded carrier: withdraw ends the head the branch still carries and leaves the replaced head to the reader", async () => {
+    const w = await world()
+    const first = await submitCommit(w, "task/one", "one.txt")
+    await w.git(["checkout", "--quiet", "task/one"])
+    writeFileSync(join(w.work, "more.txt"), "more\n")
+    await w.git(["add", "more.txt"])
+    await w.git(["commit", "--quiet", "-m", "more"])
+    const second = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", { branch: "task/one", submitter: "@dev/2", target: TARGET, issue: "@i/10-yrd/1" })
+
+    const taken = await withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET })
+
+    // Only the open head gets the record; the replaced head already reads
+    // withdrawn by derivation and the next run records that itself.
+    expect(taken.withdrawn.map((one) => one.head)).toEqual([second])
+    await fetchChanges(w)
+    const firstRef = changeRef("main", { branch: "task/one", head: first })
+    expect((await readRecords(w.git, (await refAt(w.git, firstRef))!)).map((record) => record.kind)).toEqual(["opened"])
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
+    await fetchChanges(w)
+    const retired = await readRecords(w.git, (await refAt(w.git, firstRef))!)
+    expect(retired.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
+    expect(trailer(retired[1]!, "Reason")).toBe("replaced")
+    const queue = await readQueue(w.git, "origin", "main", await remoteTarget(w))
+    const states = new Map(queue.changes.map((entry) => [entry.change.head, entry.reading]))
+    expect(states.get(first)).toMatchObject({ reason: "replaced", state: "withdrawn" })
+    expect(states.get(second)).toMatchObject({ state: "withdrawn" })
+  })
+
   it("a stuck record names both escapes: the operator verb, and a replacement that clears the reason", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")

@@ -122,11 +122,11 @@ export async function recordCommit(git: Git, write: WriteRecord, parent: string 
   // it would hide the ending from every tip reader (@i/10-yrd/24635, @cto
   // 2026-09-16). A retry's opened record re-opens a chain, a sent record only
   // repeats its ending, and a stuck chain is still open, so all of those pass.
-  if (write.kind === "checked" && parent !== undefined) {
+  if ((write.kind === "checked" || write.kind === "withdrawn") && parent !== undefined) {
     const ended = endingRecord(await readRecords(git, parent))
     if (ended !== undefined) {
       throw new Error(
-        `checked record refused for ${changeName(write.change)}: the chain already ended ${endedKind(ended)} at ${ended.sha.slice(0, 12)}; a decision cannot follow an ending (@i/10-yrd/24635)`,
+        `${write.kind} record refused for ${changeName(write.change)}: the chain already ended ${endedKind(ended)} at ${ended.sha.slice(0, 12)}; ${write.kind === "checked" ? "a decision cannot follow an ending (@i/10-yrd/24635)" : "a withdrawal cannot follow an ending (@i/10-yrd/24492)"}`,
       )
     }
   }

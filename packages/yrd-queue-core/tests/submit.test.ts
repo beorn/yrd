@@ -685,7 +685,7 @@ describe("the queue read is every submitted change at the remote", () => {
 
     const gone = reading.changes.find((entry) => entry.change.branch === "task/gone")
     expect(gone?.change.head).toBe(head)
-    expect(gone?.reading).toEqual({ reason: "deleted", state: "failed" })
+    expect(gone?.reading).toEqual({ reason: "deleted", state: "withdrawn" })
     expect(resumed).toBe(true)
     expect(reading.pause).toEqual(paused)
     expect(reading.observation.fence.refs).toContainEqual({ ref: pauseRef("main"), oid: paused.sha })
@@ -838,7 +838,7 @@ describe("the queue read is every submitted change at the remote", () => {
 
     const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
     const byHead = new Map(entries.map((entry) => [entry.change.head, entry]))
-    expect(byHead.get(one)?.reading).toMatchObject({ reason: "replaced", state: "failed" })
+    expect(byHead.get(one)?.reading).toMatchObject({ reason: "replaced", state: "withdrawn" })
     expect(byHead.get(oneAgain)?.reading.state).toBe("queued")
     // Position in line is the first opened record's time OF THE CHANGE: a new
     // head is a new change (§ The change), so the re-cut task/one takes its

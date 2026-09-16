@@ -485,7 +485,7 @@ describe("the state is derived, and ancestry wins over any record", () => {
     ).toBe("merged")
   })
 
-  it("a branch that moved off its head is failed, replaced; a branch that is gone, deleted", async () => {
+  it("a branch that moved off its head is withdrawn, replaced; a branch that is gone, deleted (one word, @i/10-yrd/24492)", async () => {
     const { git, head } = await repository()
     const opened = await appendRecord(git, "main", {
       change: { branch: "task/one", head },
@@ -501,7 +501,7 @@ describe("the state is derived, and ancestry wins over any record", () => {
       head,
       headOnTarget: false,
     })
-    expect(replaced).toMatchObject({ reason: "replaced", state: "failed" })
+    expect(replaced).toMatchObject({ reason: "replaced", state: "withdrawn" })
 
     const deleted = readChange({
       branch: "task/one",
@@ -510,7 +510,7 @@ describe("the state is derived, and ancestry wins over any record", () => {
       head,
       headOnTarget: false,
     })
-    expect(deleted).toMatchObject({ reason: "deleted", state: "failed" })
+    expect(deleted).toMatchObject({ reason: "deleted", state: "withdrawn" })
   })
 
   it("stuck leaves the change open and carries its why", async () => {

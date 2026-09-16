@@ -9,10 +9,11 @@
  * - `checked` — a checked record and no ended record after it;
  * - `stuck` — the chain stands on stuck; the change stays open;
  * - `merged` — the head is an ancestor of the target;
- * - `failed` — the chain's current ending is failed, or the branch no longer carries
- *   this head (`replaced`), or the branch is gone (`deleted`);
- * - `withdrawn` — an operator ended the change and it left the line; the branch
- *   itself is untouched and a resubmit re-opens it (@i/10-yrd/24492).
+ * - `failed` — the chain's current ending is failed: the queue's own verdict;
+ * - `withdrawn` — the submission was taken out of the line: an operator's
+ *   withdrawn record, or, with no record yet, the branch no longer carrying
+ *   this head (`replaced`) or being gone (`deleted`). One word for one state,
+ *   the way it went is content, and a resubmit re-opens it (@i/10-yrd/24492).
  *
  * "After it" is judged by the chain's CURRENT ENDING (`endingRecord`), never
  * the literal tip: a stray record appended after an ending cannot hide it, and
@@ -41,7 +42,7 @@
  * (@i/10-yrd/24098).
  */
 
-import { endedKind, endingRecord, type ChangeRecord } from "./records.ts"
+import { endedKind, endingRecord, standsEnded, type ChangeRecord } from "./records.ts"
 import { incidentFrom } from "./incident.ts"
 
 export const CHANGE_STATES = ["queued", "checked", "stuck", "merged", "failed", "withdrawn"] as const
@@ -107,13 +108,14 @@ export function readChange(change: ChangeRecords): ChangeReading {
   // exactly as it reads today; this is the one carve-out, and it only fires
   // once the branch has actually moved on AND reached the target
   // (@i/10-yrd/24098).
+  const ended = endedKind(last)
   if (
     change.headOnTarget &&
     change.branchHead !== undefined &&
     change.branchHead !== change.head &&
-    endedKind(last) === "failed"
+    (ended === "failed" || ended === "withdrawn")
   ) {
-    return { state: "failed", reason: "superseded", supersededBy: change.branchHead }
+    return { state: ended, reason: "superseded", supersededBy: change.branchHead }
   }
 
   // Ancestry first, and before anything else the records say. A change merged
@@ -121,9 +123,17 @@ export function readChange(change: ChangeRecords): ChangeReading {
   // here even though its last ending (if any) was never failed.
   if (change.headOnTarget) return { state: "merged" }
 
-  // The submitter's own doing, and neither carries a message.
-  if (change.branchHead === undefined) return { state: "failed", reason: "deleted" }
-  if (change.branchHead !== change.head) return { state: "failed", reason: "replaced" }
+  // A recorded ending is evidence of first resort: it governs before anything
+  // git says about the branch. The derived readings below are the fallback for
+  // a chain that ended without a record, and when the two ever disagree the
+  // record wins (@i/10-yrd/24492, ruled by @cto 2026-09-16).
+  if (!standsEnded(last)) {
+    // The submission is gone — the branch moved off this head or was deleted —
+    // and nothing has recorded it yet: the same ONE word an operator's withdraw
+    // writes, with the way it went as content. Neither carries a message.
+    if (change.branchHead === undefined) return { state: "withdrawn", reason: "deleted" }
+    if (change.branchHead !== change.head) return { state: "withdrawn", reason: "replaced" }
+  }
 
   switch (last.kind) {
     case "merged":

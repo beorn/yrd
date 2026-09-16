@@ -353,7 +353,7 @@ describe("the table is the queue read rendered", () => {
     const shown = show((await readQueue(w.git, "origin", "main", w.target)).changes, "task/one")
     expect(shown.map((entry) => [entry.row.head, entry.row.state, entry.row.reason])).toEqual([
       [second, "queued", undefined],
-      [first, "failed", "replaced"],
+      [first, "withdrawn", "replaced"],
     ])
   })
 
