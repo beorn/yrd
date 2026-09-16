@@ -36,7 +36,7 @@
  * `setup:` included.
  */
 
-import { closeSync, fstatSync, mkdirSync, openSync, writeSync } from "node:fs"
+import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import type { JournalCheck } from "./log.ts"
@@ -65,6 +65,15 @@ export type CheckSpec = Readonly<{
 }>
 
 export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000
+
+/**
+ * The line a check writes when it has already computed a pass/fail, before any
+ * extra work that may then outlive the bound. Same shape as YRD-BASE-NARROWING:
+ * one marker, a JSON payload, last line wins. On timeout the queue reads this
+ * and uses it as the round's result instead of discarding a finished comparison
+ * as `yrd-check-unresolved` (24623).
+ */
+export const CHECK_RESULT_MARKER = "YRD-CHECK-RESULT"
 
 /** The environment every check gets, by name; `LC_*` and the check's own `environmentPassthrough` join it. */
 const BASE_ENV = ["PATH", "HOME", "SHELL", "LANG", "USER", "LOGNAME"] as const
@@ -391,6 +400,36 @@ export function checksOf(
 }
 
 /**
+ * The last computed pass/fail a check named on its log, or nothing when it
+ * never did. A malformed line is absence, never an invented verdict: timeout
+ * then stays stuck, which is the existing bound path.
+ */
+export function readCheckResult(text: string): "pass" | "fail" | undefined {
+  const marked = text.split("\n").filter((line) => line.startsWith(`${CHECK_RESULT_MARKER} `))
+  const line = marked.at(-1)
+  if (line === undefined) return undefined
+  try {
+    const parsed: unknown = JSON.parse(line.slice(CHECK_RESULT_MARKER.length + 1).trim())
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined
+    const body = parsed as { result?: unknown; exit?: unknown }
+    if (body.result === "pass" || body.result === "fail") return body.result
+    if (body.exit === 0 || body.exit === "0") return "pass"
+    if (body.exit === 1 || body.exit === 3 || body.exit === "1" || body.exit === "3") return "fail"
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+function checkResultFromLog(log: string): "pass" | "fail" | undefined {
+  try {
+    return readCheckResult(readFileSync(log, "utf8"))
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * A trailer's own verdict, read off the exit `checkTrailer` packed onto it,
  * through the exact classifier `runCheck` judged the live run by: `0` is a
  * pass, `1` and `3` are fail (`3` = cannot-judge, bounced to the submitter),
@@ -613,6 +652,12 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
   /** A stuck reason, carrying a log that could not be written alongside it. */
   const why = (reason: string): string => (logFailure === undefined ? reason : `${reason}; ${logFailure}`)
   if (result.timedOut) {
+    // 24623: a comparison that already named pass/fail on this log is the
+    // round's result. The bound still killed leftover work; it must not throw
+    // the verdict away as yrd-check-unresolved. A check that named nothing
+    // stays stuck, which is the existing "past its bound" path.
+    const rescued = checkResultFromLog(log)
+    if (rescued !== undefined) return { ...base, exit: rescued === "pass" ? 0 : 1, result: rescued }
     return { ...base, exit: "timeout", result: "stuck", why: why(`ran past its bound of ${timeoutMs} ms`) }
   }
   if (result.signal !== null) {

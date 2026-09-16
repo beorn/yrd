@@ -1321,6 +1321,65 @@ describe("a queue run", () => {
     expect(String(logRecords(outcome).find((record) => record.kind === "message")?.text)).toMatch(/ran past its bound/u)
   })
 
+  it.each([
+    ["pass", "pass", 0, ["opened", "checked", "merged", "sent"]],
+    ["fail", "fail", 1, ["opened", "checked", "failed", "sent"]],
+  ] as const)(
+    "a %s comparison that finished before the bound is the round's result, not yrd-check-unresolved (24623)",
+    async (label, result, exit, kinds) => {
+      // Specimen q-20260916T050857704Z-35569921: the protected comparison printed
+      // NEW 0 / INHERITED 19 / FLAKE 0, then candidate-config kept running past
+      // 1800000ms and the queue discarded the verdict as stuck. The check names
+      // the computed result on its log the same way it already names a narrowing
+      // offer; the bound must not throw that away.
+      const w = await world()
+      const head = await submitCommit(w, "task/one", "one.txt")
+      const check = join(w.workdir, `finished-then-hang-${label}.sh`)
+      writeFileSync(
+        check,
+        [
+          "#!/bin/sh",
+          'echo "affected-tests: NEW (candidate-attributable), 0 ids"',
+          'echo "affected-tests: INHERITED (also red on base), 19 ids"',
+          'echo "affected-tests: FLAKE (failed in exactly one of two candidate runs, not judged), 0 ids"',
+          `echo 'YRD-CHECK-RESULT {"result":"${result}"}'`,
+          "sleep 3",
+          "exit 0",
+          "",
+        ].join("\n"),
+      )
+      chmodSync(check, 0o755)
+      const base = await w.options({ timeoutMs: 500 })
+
+      const outcome = await queueRun({
+        ...base,
+        checks: [{ ...base.checks[0]!, run: check, timeoutMs: 500 }],
+      })
+
+      expect(outcome.exitCode).toBe(exit)
+      expect(outcome.stuck).toEqual([])
+      if (result === "pass") {
+        expect(outcome.merged).toEqual(["task/one"])
+        expect(outcome.failed).toEqual([])
+      } else {
+        expect(outcome.failed).toEqual(["task/one"])
+        expect(outcome.merged).toEqual([])
+      }
+      await fetchChanges(w)
+      const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
+      expect(records.map((record) => record.kind)).toEqual([...kinds])
+      expect(trailer(records[2]!, "Check")).toMatch(result === "pass" ? /exit=0/u : /exit=1/u)
+      expect(trailer(records[2]!, "Check")).not.toMatch(/exit=timeout/u)
+      const again = await queueRun({
+        ...base,
+        checks: [{ ...base.checks[0]!, run: check, timeoutMs: 500 }],
+      })
+      expect(again.stuck).toEqual([])
+      expect(again.merged).toEqual([])
+      expect(again.failed).toEqual([])
+    },
+  )
+
   it("a check declaring a scripts: path the target does not carry is loud: the change ends stuck and names it (D5)", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
