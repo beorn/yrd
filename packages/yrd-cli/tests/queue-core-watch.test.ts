@@ -650,7 +650,10 @@ describe("what a watch says it looked at", () => {
     // relabelling it with the newest run's result.
     const w = await world()
     const control = join(w.workdir, "check.sh")
-    writeFileSync(control, "echo FIRST_RUN_MISSING\nexit 127\n")
+    // The check writes colors before it goes missing: the raw log below must
+    // keep them, while the pane's `output` must not (a chalk background inside
+    // a Text is a strict-render refusal).
+    writeFileSync(control, "printf 'FIRST_RUN_MISSING \\033[30m\\033[45m slow \\033[49m\\033[39m\\n'\nexit 127\n")
     writeFileSync(join(w.work, ".yrd.yml"), `checks:\n  - verify:\n      run: ${JSON.stringify(`sh ${control}`)}\n`)
     await w.git(["commit", "--quiet", "-am", "declare an external check the queue cannot run"])
     await w.git(["push", "--quiet", "origin", "main"])
@@ -670,7 +673,9 @@ describe("what a watch says it looked at", () => {
       (row) => row.branch === "task/history",
     )!
     expect(original.state).toBe("stuck")
-    expect(readFileSync(String(original.log), "utf8")).toBe("FIRST_RUN_MISSING\n")
+    expect(readFileSync(String(original.log), "utf8")).toBe(
+      "FIRST_RUN_MISSING \u001b[30m\u001b[45m slow \u001b[49m\u001b[39m\n",
+    )
 
     // The check script stays broken: 24623 does not re-run it, so repairing it
     // here would make the fixture claim a second check that never happens.
@@ -698,7 +703,9 @@ describe("what a watch says it looked at", () => {
     expect(rows.some((row) => "runResult" in row || "runOf" in row)).toBe(false)
     expect(old.endedAt).toBe(original.endedAt)
     expect(latest.incident).toBeUndefined()
-    expect(readFileSync(String(old.log), "utf8")).toBe("FIRST_RUN_MISSING\n")
+    expect(readFileSync(String(old.log), "utf8")).toBe(
+      "FIRST_RUN_MISSING \u001b[30m\u001b[45m slow \u001b[49m\u001b[39m\n",
+    )
     // The retire decided from the reading alone, so the newest run has no
     // artifact of its own and must not borrow the run before it.
     expect(latest.log).toBeUndefined()
@@ -741,7 +748,7 @@ describe("what a watch says it looked at", () => {
     expect(details.find((detail) => detail.row.run === firstId)?.checks[0]).toMatchObject({
       state: "stuck",
       log: original.log,
-      output: "FIRST_RUN_MISSING\n",
+      output: "FIRST_RUN_MISSING  slow \n",
     })
     // A decided change opens on its own records, not on one run's journal, and
     // the retire recorded no check: both rows show the single check the change
@@ -749,7 +756,7 @@ describe("what a watch says it looked at", () => {
     expect(details.find((detail) => detail.row.run === secondId)?.checks[0]).toMatchObject({
       state: "stuck",
       log: original.log,
-      output: "FIRST_RUN_MISSING\n",
+      output: "FIRST_RUN_MISSING  slow \n",
     })
   })
 })
