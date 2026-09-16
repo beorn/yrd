@@ -2556,6 +2556,12 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
     expect(incident.Subject).toContain(orphan.slice(0, 12))
     expect(incident.Subject).toContain("not absorbed")
     expect(incident.Via).toContain(worktreePath)
+    // The cure is the queue's recomposition, never a hand push: a reader who
+    // pushes the orphan moves main around the queue and resets G1's
+    // seven-day clock (@i/10-yrd/24344).
+    expect(incident.Next).toContain("yrd queue run")
+    expect(incident.Next).toContain("Never push")
+    expect(incident.Next).not.toContain("push it onto")
     expect(trailer(stuckRecord, "Orphan")).toBe(orphan)
     expect(trailer(stuckRecord, "Absorbed")).toBe("no")
     expect(messages(w).filter((entry) => entry.record === "stuck")).toHaveLength(1)

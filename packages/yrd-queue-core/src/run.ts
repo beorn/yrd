@@ -2075,7 +2075,7 @@ async function recoverOrphanedMerge(run: Run, entry: QueueEntry): Promise<"stuck
       code: "yrd-merge-orphaned",
       next: absorbed
         ? `${found.commit.slice(0, 12)} is already an ancestor of ${target} some other way; confirm ${branch} is truly done, close it by hand, then run yrd queue run`
-        : `read ${found.foundAt} and confirm ${found.commit.slice(0, 12)} raised no submodule gitlink that ${target} does not also carry yet; then either push it onto ${target} by hand or discard it, and run yrd queue run — the next run recomposes ${branch} from scratch otherwise`,
+        : `read ${found.foundAt} and note any submodule gitlink ${found.commit.slice(0, 12)} raised that ${target} does not carry yet — the recomposition raises it again; then discard the orphan and run yrd queue run, which recomposes ${branch} from scratch and merges it through the queue. Never push the orphan onto ${target} by hand: only the queue writes ${target}, and a hand push resets the unattended-window clock (@i/10-yrd/24344)`,
       subject: `${branch}: the run that composed merge ${found.commit.slice(0, 12)} died before recording it; ${absorbed ? "absorbed into" : "not absorbed into"} ${target}`,
       trailers: [
         ["Orphan", found.commit],
