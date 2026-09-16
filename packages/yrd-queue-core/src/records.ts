@@ -23,7 +23,8 @@
  *   `Target:` naming the branch it merges into, both on every record,
  *   `Opened:`, `Submitter:` and `Issue:` carried forward from the first
  *   record, a sent record naming who it went to (`To:`) and how it went
- *   (`Delivery: sent`, `logged` or `failed`), and an ended record's result
+ *   (`Delivery: sent`, `none` or `failed`) and, once a name is settled
+ *   untold, `Not-Told:` (`notToldValue`), and an ended record's result
  *   carried onto its sent record, so the tip has the whole state/result answer
  *   needed by `yrd queue list` and one `for-each-ref` answers it with no history
  *   walk. Phase-specific `Check:` evidence stays on the record where it ran;
@@ -419,6 +420,40 @@ export function mergedByRun(value: string | undefined): string | undefined {
 
 /** What a `Merged-By:` says when the merge went around the queue. */
 export const DIRECT_MERGE = "direct"
+
+/**
+ * One name an ending did not reach, and why, as a sent record's `Not-Told:`
+ * says it. `refused` is a transport that answered and refused the send: it is
+ * written once and that name is never sent this ending again. `undelivered` is
+ * a name that gave no receipt to its last attempt.
+ */
+export type NotTold = Readonly<
+  { to: string } & ({ refused: string; undelivered?: undefined } | { refused?: undefined; undelivered: string })
+>
+
+/**
+ * What one `Not-Told:` says: `<name> refused=<reason>` or `<name>
+ * undelivered=<reason>`. One formatter and one reader, because every later sent
+ * record of the same ending repeats the value and the tip is where it is read.
+ */
+export function notToldValue(
+  to: string,
+  why: Readonly<{ refused: string }> | Readonly<{ undelivered: string }>,
+): string {
+  return "refused" in why ? `${to} refused=${why.refused}` : `${to} undelivered=${why.undelivered}`
+}
+
+/**
+ * A `Not-Told:` value read back. A value this reader cannot split still says
+ * somebody was not told, so it degrades to that value as an undelivered name
+ * with the reason saying so, and never throws: a list read that dies on one
+ * record takes every other change down with it (24408).
+ */
+export function readNotTold(value: string): NotTold {
+  const [, to, why, reason] = /^(.*?) (refused|undelivered)=(.*)$/u.exec(value) ?? []
+  if (to === undefined || reason === undefined) return { to: value, undelivered: `unreadable Not-Told: ${value}` }
+  return why === "refused" ? { refused: reason, to } : { to, undelivered: reason }
+}
 
 /** The first value of a trailer, or undefined. */
 export function trailer(record: ChangeRecord, name: string): string | undefined {
