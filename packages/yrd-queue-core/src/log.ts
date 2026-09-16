@@ -128,10 +128,6 @@ export const LOG_KINDS = [
   // `scope` field, and a refusal that left no trace would be indistinguishable
   // from a check that never offered anything.
   "narrowing",
-  // A stuck the remote caused, taken once more inside the round before it is
-  // written (the andon's one transient retry, operator 2026-09-16): the first
-  // attempt leaves no record on the change, so this row is its only trace.
-  "retry",
   // git-super's descent into an Ahead parent (24454 row 2). One record per
   // parent, because an EQUAL nested child emits no settle row -- so without
   // this the commonest nested outcome is invisible in the journal and the only

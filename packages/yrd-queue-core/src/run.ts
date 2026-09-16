@@ -2447,15 +2447,19 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
   // stuck the remote caused is not written the first time: the loop takes the
   // change once more, and only a second stuck stops the line. The number is
   // one; a remote down for longer is a stopped line and a page, never a loop.
+  // Its trace is a `warning` row, the kind a compose that went to the network
+  // already writes, told apart by `reason`: a new row kind or decision would be
+  // a word every older running reader has never seen (@i/10-yrd/b-wrong/24735).
   const name = changeName(entry.change)
   if (kind === "stuck" && ended.remote !== undefined && !run.retried.has(name)) {
     run.retried.add(name)
     run.log.write({
       branch: entry.change.branch,
       head: entry.change.head,
-      kind: "retry",
-      reason: ended.subject,
+      kind: "warning",
+      reason: "retried",
       remote: ended.remote,
+      subject: ended.subject,
       ...(ended.incident === undefined ? {} : { code: ended.incident.code }),
     })
     throw new RetryOnce(name)

@@ -2950,7 +2950,12 @@ describe("a stuck change stops the line (the andon, operator 2026-09-16)", () =>
     // Never stopped: the only pause record is the one the merge's own fence writes.
     expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "resumed" })
     expect(logRecords(outcome)).toContainEqual(
-      expect.objectContaining({ branch: "task/one", code: "yrd-setup-unreachable", kind: "retry" }),
+      expect.objectContaining({
+        branch: "task/one",
+        code: "yrd-setup-unreachable",
+        kind: "warning",
+        reason: "retried",
+      }),
     )
   })
 
