@@ -167,13 +167,48 @@ describe("a run's journal, read back", () => {
         at,
       )
 
-      const read = () => readJournals(dir)
+      // `now: at` anchors the seven-day journal window to the fixture's own
+      // date; without it this test goes red by calendar once the hardcoded
+      // date ages out — which is exactly how it spent four days reading as a
+      // production regression (@i/10-yrd/24129).
+      const read = () => readJournals(dir, { now: at })
       expect(read).not.toThrow()
       const runs = read().runs.get(journalKey(branch, head))
       expect(runs?.[0]?.decision).toBe("merged")
       expect(runs?.[0]?.reason).toBeUndefined()
     },
   )
+
+  it("a non-terminal decision row cannot overwrite a terminal decision, and is named", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const branch = "task/one"
+    const head = "abc123"
+    const { dir, run } = journalDir(
+      [
+        { branch, decision: "merged", head, kind: "change" },
+        // No race reason: this is not the known diagnostic shape, it is a
+        // defective writer, and the fold must refuse it loudly rather than
+        // fold the merged run to sent (@i/10-yrd/24129).
+        { branch, decision: "sent", head, kind: "change", reason: "some-new-writer-defect" },
+      ],
+      at,
+    )
+    const runs = readJournals(dir, { now: at }).runs.get(journalKey(branch, head))
+    expect(runs?.[0]?.decision).toBe("merged")
+    expect(runs?.[0]?.malformed?.[0]).toContain("non-terminal decision")
+    expect(runs?.[0]?.malformed?.[0]).toContain("sent")
+    expect(runs?.[0]?.malformed?.[0]).toContain(run)
+  })
+
+  it("a run whose only decision row is non-terminal stays undecided — nothing is synthesised", () => {
+    const at = new Date("2026-09-03T20:00:00.000Z")
+    const branch = "task/one"
+    const head = "abc123"
+    const { dir } = journalDir([{ branch, decision: "sent", head, kind: "change", reason: "defect" }], at)
+    const runs = readJournals(dir, { now: at }).runs.get(journalKey(branch, head))
+    expect(runs?.[0]?.decision).toBeUndefined()
+    expect(runs?.[0]?.malformed?.[0]).toContain("non-terminal decision")
+  })
 
   // Was "still refuses a partial incident outside a change-ref race
   // diagnostic". 24408 supersedes the refusal, not the detection: a partial

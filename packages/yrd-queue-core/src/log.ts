@@ -47,6 +47,15 @@ import { join } from "node:path"
 import { incidentTrailers, type Incident } from "./incident.ts"
 import type { GitInvocation, GitInvocationOptions, GitOutputSink } from "./git.ts"
 
+/**
+ * The decisions a run can record about a change — the journal's type contract
+ * (`JournalRun.decision`). Any other string on a `kind=change` row is a
+ * defective writer: a refused bookkeeping write once logged `decision=sent`
+ * and folded a merged run to sent (@i/10-yrd/24129). The fold refuses it
+ * loudly and never synthesises a decision for the gap.
+ */
+const TERMINAL_DECISIONS: ReadonlySet<string> = new Set(["checked", "merged", "failed", "stuck"])
+
 /** Ref-write diagnostics emitted by run.ts's refused bookkeeping-write path. */
 export const CHANGE_REF_DIAGNOSTICS = {
   taken: "change-ref-taken",
@@ -593,8 +602,17 @@ function runsIn(records: readonly LogRecord[], id: string, startedAt: Date): rea
         continue
       }
       if (typeof record.decision === "string") {
-        change.decision = record.decision
-        change.reason = reason
+        // Only a terminal decision can become the run's decision; a stray
+        // non-terminal row must not overwrite a merged run, and no decision
+        // is invented for the gap (@i/10-yrd/24129).
+        if (TERMINAL_DECISIONS.has(record.decision)) {
+          change.decision = record.decision
+          change.reason = reason
+        } else {
+          ;(change.malformed ??= []).push(
+            `run journal ${id} has a non-terminal decision for ${journalKey(branch, head)}: ${record.decision}`,
+          )
+        }
       }
       if (claimed !== undefined) change.incident = claimed
     }
