@@ -1375,6 +1375,83 @@ describe("yrd queue show, one change's evidence", () => {
     })
   })
 
+  /**
+   * @failure  `show --json` emitted only at, kind, sha and subject per record,
+   *           so a JSON reader learned who withdrew a change, and why, only by
+   *           parsing the subject line back into fields the record already had
+   *           (@i/10-yrd/g-ergonomics/24666).
+   * @level    l3 — real records appended to a real chain, read back through the
+   *           real command
+   * @consumer anything reading the queue as data rather than as a page.
+   */
+  it("carries every record trailer into show --json, repeats included", async () => {
+    const w = await world()
+    const base = (await w.git(["rev-parse", "main"])).trim()
+    await w.git(["checkout", "--quiet", "-b", "task/withdrawn", "main"])
+    writeFileSync(join(w.work, "withdrawn.txt"), "withdrawn\n")
+    await w.git(["add", "withdrawn.txt"])
+    await w.git(["commit", "--quiet", "-m", "withdrawn"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    const change = { branch: "task/withdrawn", head }
+    await submit(w.git, "origin", {
+      branch: change.branch,
+      submitter: "@dev/3",
+      target: { branch: "main", remote: "origin" },
+    })
+    // A repeated name on one record: a run writes one `Check` per result, so
+    // any shape that maps a name to a single value loses all but one of them.
+    await appendRecord(w.git, "main", {
+      change,
+      kind: "checked",
+      subject: "on-submit checks passed",
+      trailers: [
+        ["Base", base],
+        ["Check", "typecheck exit=0 ms=12 log=/tmp/typecheck.log"],
+        ["Check", "affected-tests exit=0 ms=14 log=/tmp/affected.log"],
+      ],
+    })
+    await appendRecord(w.git, "main", {
+      change,
+      kind: "withdrawn",
+      subject: "withdrew task/withdrawn",
+      trailers: [
+        ["By", "@dev/9"],
+        ["Note", "superseded by task/two"],
+      ],
+    })
+    await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
+
+    const run = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        run.io,
+        { command: "show", branch: change.branch },
+        { json: true, workdir: w.workdir },
+      ),
+    ).toBe(0)
+    const shown = records(run)[0] as Readonly<{
+      changes: readonly Readonly<{
+        records: readonly Readonly<{ kind: string; trailers: Readonly<Record<string, readonly string[]>> }>[]
+      }>[]
+    }>
+    const rows = shown.changes[0]?.records ?? []
+
+    // The ending a person chose, as FIELDS rather than as prose to re-parse.
+    const withdrawn = rows.find((record) => record.kind === "withdrawn")
+    expect(withdrawn?.trailers.By).toEqual(["@dev/9"])
+    expect(withdrawn?.trailers.Note).toEqual(["superseded by task/two"])
+    // Every value of a repeated name survives, in record order.
+    expect(rows.find((record) => record.kind === "checked")?.trailers.Check).toEqual([
+      "typecheck exit=0 ms=12 log=/tmp/typecheck.log",
+      "affected-tests exit=0 ms=14 log=/tmp/affected.log",
+    ])
+    // Present and empty for a record that carries none, never absent: a reader
+    // must not have to tell "no trailers" from "this build does not send them".
+    expect(rows.every((record) => typeof record.trailers === "object")).toBe(true)
+  })
+
   it("keeps a merged change's submit evidence when this machine's own journal only names the merge phase", async () => {
     // Live specimen (@cto, 2026-09): `queue show` on an already-merged change
     // printed the correct merged verdict — "pass affected-tests" — and then

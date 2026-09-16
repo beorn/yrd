@@ -84,6 +84,7 @@ import {
   type RoundFacts,
   type RuntimeGitlinkOff,
   type StuckStreak,
+  type ChangeRecord,
   type Row,
 } from "@yrd/queue-core"
 import { clocksLine, noticeLine } from "./watch-notice.ts"
@@ -1303,6 +1304,7 @@ export async function coreQueueCommand(
               kind: record.kind,
               sha: record.sha,
               subject: record.subject,
+              trailers: trailerFields(record),
             })),
           })),
           journal: journalFact(journals),
@@ -1460,6 +1462,32 @@ function runOptions(
  * a logger root of this file's own would create spans the stage accounting
  * never counts.
  */
+/**
+ * A record's trailers as JSON, for `show --json`: every name, every value.
+ *
+ * `show --json` used to emit at, kind, sha and subject and nothing else, so a
+ * reader consuming the queue AS DATA learned who withdrew a change, and why, by
+ * parsing the subject line back into fields the record already carried
+ * (@i/10-yrd/g-ergonomics/24666).
+ *
+ * VALUES ARE ARRAYS BECAUSE NAMES REPEAT. A run writes one `Check` trailer per
+ * check result (queue-core run.ts `checkTrailers`), and three readers already
+ * use the plural accessor for exactly that. A name-to-value map would keep one
+ * `Check` and silently drop the rest, which is the failure this repo bans; a
+ * `string | string[]` union would push a type test onto every reader for a
+ * difference the record model does not make. So every name gets a list, and the
+ * two JSON reads are the twins of the two accessors in records.ts:
+ * `trailers.By[0]` is `trailer(record, "By")` and `trailers.Check` is
+ * `trailers(record, "Check")`. Names come in the order the record first carries
+ * them, values in record order. Always present, empty when there are none: a
+ * reader must not have to tell "no trailers" from "a build that omits them".
+ */
+function trailerFields(record: ChangeRecord): Readonly<Record<string, readonly string[]>> {
+  const fields: Record<string, string[]> = {}
+  for (const [name, value] of record.trailers) (fields[name] ??= []).push(value)
+  return fields
+}
+
 function renderer(root: ConditionalLogger | undefined): (record: LogRecord) => void {
   if (root === undefined) return () => {}
   const base = root.child("queue")
