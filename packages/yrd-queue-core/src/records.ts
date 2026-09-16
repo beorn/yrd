@@ -475,7 +475,7 @@ export function endedKind(tip: ChangeRecord): RecordKind {
  * keeps its place in line and the next queue run takes it again (state.ts) —
  * so stuck never ends one.
  */
-const ENDING_KINDS: ReadonlySet<RecordKind> = new Set(["merged", "failed"])
+const ENDING_KINDS: ReadonlySet<RecordKind> = new Set<RecordKind>(["merged", "failed"])
 
 /** Whether this record stands for an ending (`endedKind` reads a sent record's `State:`). */
 export function standsEnded(record: ChangeRecord): boolean {
