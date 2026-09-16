@@ -2996,6 +2996,60 @@ describe("a stuck change stops the line (the andon, operator 2026-09-16)", () =>
   })
 })
 
+/**
+ * @failure  An ended change is taken again: a failed or withdrawn chain goes
+ *           back into a round because main moved under it, so a conflict is
+ *           re-attempted on every new tip and judged, recorded and reported
+ *           round after round.
+ * @level    l2 (a real remote, a clone, the real notify entry)
+ * @consumer every submitter whose change ended · stuck-stops-the-line row 5
+ *           (@i/10-yrd/a-unattended/stuck-stops-the-line-revert-the-step-over-and-the-stuck-round-loop)
+ */
+describe("an ended change leaves the line for good", () => {
+  it("an ended change is never re-judged, whatever main does", async () => {
+    const w = await world()
+    // The change edits the target's own line, and main edits that line first:
+    // a conflict, the ending a moving main most invites the queue to retry.
+    await w.git(["checkout", "--quiet", "-b", "task/conflict", "main"])
+    writeFileSync(join(w.work, "target.txt"), "the change's line\n")
+    await w.git(["add", "target.txt"])
+    await w.git(["commit", "--quiet", "-m", "edit the target's line"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/conflict",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    writeFileSync(join(w.work, "target.txt"), "main's line\n")
+    await w.git(["commit", "--quiet", "-am", "main edits the same line"])
+    await w.git(["push", "--quiet", "origin", "main"])
+
+    const ended = await queueRun(await w.options({ exit: 0 }))
+    expect(ended).toMatchObject({ failed: ["task/conflict"], stuck: [] })
+    const records = await recordsOf(w, "task/conflict", head)
+    expect(trailer(records.find((record) => record.kind === "failed")!, "Reason")).toBe("conflict")
+    // A WORKING notifier told the ending once, so nothing is owed a resend.
+    expect(readFileSync(w.notifyLog, "utf8")).toContain("task/conflict")
+    const ref = changeRef("main", { branch: "task/conflict", head })
+    const endedAt = await refAt(w.git, ref)
+
+    for (const file of ["later-one.txt", "later-two.txt"]) {
+      await pushAroundQueue(w, file)
+      const round = await queueRun(await w.options({ exit: 0 }))
+      expect(round).toMatchObject({ failed: [], merged: [], stuck: [] })
+      expect(
+        logRecords(round).filter(
+          (row) => row.branch === "task/conflict" && ["change", "check", "result"].includes(String(row.kind)),
+        ),
+      ).toEqual([])
+    }
+    await fetchChanges(w)
+    expect(await refAt(w.git, ref)).toBe(endedAt)
+  })
+})
+
 describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
   const TARGET = { branch: "main", remote: "origin" } as const
 
