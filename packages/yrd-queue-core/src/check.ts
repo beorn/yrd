@@ -401,8 +401,9 @@ export function checksOf(
 
 /**
  * The last computed pass/fail a check named on its log, or nothing when it
- * never did. A malformed line is absence, never an invented verdict: timeout
- * then stays stuck, which is the existing bound path.
+ * never did. A malformed line is not a verdict: timeout then stays stuck,
+ * which is the existing bound path — and the failure is loud, so a stuck
+ * round is distinguishable from a rescued one (24623).
  */
 export function readCheckResult(text: string): "pass" | "fail" | undefined {
   const marked = text.split("\n").filter((line) => line.startsWith(`${CHECK_RESULT_MARKER} `))
@@ -410,12 +411,20 @@ export function readCheckResult(text: string): "pass" | "fail" | undefined {
   if (line === undefined) return undefined
   try {
     const parsed: unknown = JSON.parse(line.slice(CHECK_RESULT_MARKER.length + 1).trim())
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      console.error(`${CHECK_RESULT_MARKER} payload is not an object; not treating it as a verdict`)
+      return undefined
+    }
     const body = parsed as { result?: unknown; exit?: unknown }
     if (body.result === "pass" || body.result === "fail") return body.result
     if (body.exit === 0 || body.exit === "0") return "pass"
     if (body.exit === 1 || body.exit === 3 || body.exit === "1" || body.exit === "3") return "fail"
-  } catch {
+    console.error(`${CHECK_RESULT_MARKER} named neither pass/fail nor a known exit; not treating it as a verdict`)
+  } catch (error) {
+    console.error(
+      `${CHECK_RESULT_MARKER} is unreadable; not treating it as a verdict:`,
+      error instanceof Error ? error.message : String(error),
+    )
     return undefined
   }
   return undefined
@@ -424,7 +433,11 @@ export function readCheckResult(text: string): "pass" | "fail" | undefined {
 function checkResultFromLog(log: string): "pass" | "fail" | undefined {
   try {
     return readCheckResult(readFileSync(log, "utf8"))
-  } catch {
+  } catch (error) {
+    console.error(
+      `${CHECK_RESULT_MARKER}: check log ${log} could not be read; not treating it as a verdict:`,
+      error instanceof Error ? error.message : String(error),
+    )
     return undefined
   }
 }
@@ -658,7 +671,12 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
     // stays stuck, which is the existing "past its bound" path.
     const rescued = checkResultFromLog(log)
     if (rescued !== undefined) return { ...base, exit: rescued === "pass" ? 0 : 1, result: rescued }
-    return { ...base, exit: "timeout", result: "stuck", why: why(`ran past its bound of ${timeoutMs} ms`) }
+    return {
+      ...base,
+      exit: "timeout",
+      result: "stuck",
+      why: why(`ran past its bound of ${timeoutMs} ms; log named no usable ${CHECK_RESULT_MARKER}`),
+    }
   }
   if (result.signal !== null) {
     return { ...base, exit: "signal", result: "stuck", why: why(`ended by ${result.signal}`) }

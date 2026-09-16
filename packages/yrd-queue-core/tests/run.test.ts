@@ -1318,7 +1318,30 @@ describe("a queue run", () => {
     const outcome = await queueRun(await w.options({ sleep: 3, timeoutMs: 500 }))
 
     expect(outcome.exitCode).toBe(2)
-    expect(String(logRecords(outcome).find((record) => record.kind === "message")?.text)).toMatch(/ran past its bound/u)
+    expect(String(logRecords(outcome).find((record) => record.kind === "message")?.text)).toMatch(
+      /ran past its bound.*log named no usable YRD-CHECK-RESULT/u,
+    )
+  })
+
+  it("a malformed YRD-CHECK-RESULT on timeout is stuck, not rescued (24623)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const check = join(w.workdir, "malformed-then-hang.sh")
+    writeFileSync(check, ["#!/bin/sh", "echo 'YRD-CHECK-RESULT {not json}'", "sleep 3", "exit 0", ""].join("\n"))
+    chmodSync(check, 0o755)
+    const base = await w.options({ timeoutMs: 500 })
+
+    const outcome = await queueRun({
+      ...base,
+      checks: [{ ...base.checks[0]!, run: check, timeoutMs: 500 }],
+    })
+
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(outcome.merged).toEqual([])
+    expect(String(logRecords(outcome).find((record) => record.kind === "message")?.text)).toMatch(
+      /log named no usable YRD-CHECK-RESULT/u,
+    )
   })
 
   it.each([
