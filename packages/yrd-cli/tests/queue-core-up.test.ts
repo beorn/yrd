@@ -517,7 +517,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     ).toBe(0)
     expect(retried.stderr()).toContain("retry arrives while paused")
     expect(await w.git(["ls-remote", "--refs", "origin", ref])).not.toBe(beforeRetry)
-  })
+    // The budget of the service case above: accepted submits push where refused
+    // ones did not, and under a loaded host this case measured 4-6 s, at the
+    // 5 s default.
+  }, 15_000)
 
   // Accepted: a legacy protected declaration and its absent successor cannot
   // open a submission; malformed LOCAL hints still diagnose and reach a valid
