@@ -2666,6 +2666,97 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
   })
 })
 
+describe("a stuck head of line does not block the line behind it (@i/10-yrd/24492)", () => {
+  it("judges and merges an independent change waiting behind a stuck judge", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const headTwo = await submitCommit(w, "task/two", "two.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 2, on: ["submit"] }))
+
+    // The round still exits 2 — the head IS stuck — but the line moved past it.
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: ["task/two"], stuck: ["task/one"] })
+    expect(await remoteTarget(w)).not.toBe(w.target)
+    // Each judge ran in its own head's worktree; the candidate sha is the
+    // composed commit, so the worktree path is the per-head evidence.
+    const log = readFileSync(w.checkLog, "utf8")
+    expect(log).toContain(`submit/${headOne.slice(0, 12)}`)
+    expect(log).toContain(`submit/${headTwo.slice(0, 12)}`)
+    await fetchChanges(w)
+    const recordsOne = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/one", head: headOne })))!,
+    )
+    expect(recordsOne[0]?.kind).toBe("opened")
+    expect(recordsOne.map((record) => record.kind).slice(-2)).toEqual(["stuck", "sent"])
+    const recordsTwo = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/two", head: headTwo })))!,
+    )
+    expect(recordsTwo.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
+  })
+
+  it("never hands the line a free pass on ground it shares with the stuck head: every judge still runs", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const headTwo = await submitCommit(w, "task/two", "two.txt")
+
+    const outcome = await queueRun(await w.options({ everywhere: true, exit: 2, on: ["submit"] }))
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/one", "task/two"] })
+    expect(await remoteTarget(w)).toBe(w.target)
+    // The second verdict was earned, not assumed: its check ran in its own
+    // head's worktree too.
+    const log = readFileSync(w.checkLog, "utf8")
+    expect(log).toContain(`submit/${headOne.slice(0, 12)}`)
+    expect(log).toContain(`submit/${headTwo.slice(0, 12)}`)
+    await fetchChanges(w)
+    const recordsTwo = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/two", head: headTwo })))!,
+    )
+    const stuckTwo = recordsTwo.find((record) => record.kind === "stuck")
+    expect(incidentOf(stuckTwo).Subject).toContain("task/two")
+    expect(recordsTwo.map((record) => record.kind).slice(-2)).toEqual(["stuck", "sent"])
+  })
+
+  it("a bookkeeping stuck ends its own change alone: the line merges past it and the ended head is not judged again", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head: headOne })
+    // Checked under a config blob the target no longer declares, so after the
+    // recovery ends the chain only the round's own bookkept-stuck guard keeps
+    // the stale-checked reading out of the judge loop — a decision appended
+    // there would be refused as a decision after an ending (@i/10-yrd/24635).
+    const checkedRecord = await appendRecord(w.git, "main", {
+      change: { branch: "task/one", head: headOne },
+      kind: "checked",
+      subject: `task/one passed the on-submit checks at main ${w.target.slice(0, 12)}`,
+      trailers: [
+        ["Config", "stale-config"],
+        ["Base", w.target],
+      ],
+    })
+    await w.git(["push", "--quiet", "origin", `${checkedRecord}:${ref}`])
+    const orphan = await composeMergeCandidate(w, headOne, `merge task/one@${headOne.slice(0, 12)} into main`)
+    await deadMergeWorktree(w, "q-dead-merge", headOne, orphan, exitedPid())
+    const headTwo = await submitCommit(w, "task/two", "two.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: ["task/two"], stuck: ["task/one"] })
+    await fetchChanges(w)
+    const recordsOne = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(recordsOne.map((record) => record.kind)).toEqual(["opened", "checked", "stuck", "sent"])
+    expect(incidentOf(recordsOne[2]).Code).toBe("yrd-merge-orphaned")
+    const recordsTwo = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/two", head: headTwo })))!,
+    )
+    expect(recordsTwo.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
+  })
+})
+
 describe("the target's setup", () => {
   it("runs once in every worktree the run makes, before anything judges it", async () => {
     const w = await world()
