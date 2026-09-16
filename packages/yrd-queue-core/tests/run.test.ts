@@ -1323,6 +1323,28 @@ describe("a queue run", () => {
     )
   })
 
+  it("a second unresolved check of the same reason leaves the line like replaced (24623)", async () => {
+    // Specimen: three consecutive yrd-check-unresolved rounds on the same head.
+    // err=replaced already retires; the second identical unresolved must take
+    // that exit rather than re-run the bound.
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const options = await w.options({ sleep: 3, timeoutMs: 500 })
+
+    const first = await queueRun(options)
+    expect(first.stuck).toEqual(["task/one"])
+    expect(first.exitCode).toBe(2)
+
+    const second = await queueRun(options)
+    expect(second.stuck).toEqual([])
+    expect(second.failed).toEqual(["task/one"])
+    expect(second.exitCode).toBe(1)
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
+    expect(records.map((record) => record.kind)).toContain("failed")
+    expect(trailer(records.find((record) => record.kind === "failed")!, "Reason")).toBe("yrd-check-unresolved")
+  })
+
   it("a malformed YRD-CHECK-RESULT on timeout is stuck, not rescued (24623)", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
