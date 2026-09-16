@@ -1345,6 +1345,31 @@ describe("a queue run", () => {
     expect(trailer(records.find((record) => record.kind === "failed")!, "Reason")).toBe("yrd-check-unresolved")
   })
 
+  it("a timeout names the last YRD-CHECK-PROGRESS instead of only the bound constant (24623)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const check = join(w.workdir, "progress-then-hang.sh")
+    writeFileSync(
+      check,
+      ["#!/bin/sh", `echo 'YRD-CHECK-PROGRESS {"stage":"candidate-config","files":838}'`, "sleep 3", "exit 0", ""].join(
+        "\n",
+      ),
+    )
+    chmodSync(check, 0o755)
+    const base = await w.options({ timeoutMs: 500 })
+
+    const outcome = await queueRun({
+      ...base,
+      checks: [{ ...base.checks[0]!, run: check, timeoutMs: 500 }],
+    })
+
+    expect(outcome.exitCode).toBe(2)
+    expect(outcome.stuck).toEqual(["task/one"])
+    expect(String(logRecords(outcome).find((record) => record.kind === "message")?.text)).toMatch(
+      /last progress stage=candidate-config files=838/u,
+    )
+  })
+
   it("a malformed YRD-CHECK-RESULT on timeout is stuck, not rescued (24623)", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")

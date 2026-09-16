@@ -75,6 +75,13 @@ export const DEFAULT_CHECK_BOUND_MS = 30 * 60 * 1000
  */
 export const CHECK_RESULT_MARKER = "YRD-CHECK-RESULT"
 
+/**
+ * The line a check writes while extra work is still in flight, so a timeout
+ * can name what consumed the bound instead of only the constant (24623
+ * acceptance 3). Same shape: one marker, JSON, last line wins.
+ */
+export const CHECK_PROGRESS_MARKER = "YRD-CHECK-PROGRESS"
+
 /** The environment every check gets, by name; `LC_*` and the check's own `environmentPassthrough` join it. */
 const BASE_ENV = ["PATH", "HOME", "SHELL", "LANG", "USER", "LOGNAME"] as const
 
@@ -442,6 +449,45 @@ function checkResultFromLog(log: string): "pass" | "fail" | undefined {
   }
 }
 
+/** Compact last YRD-CHECK-PROGRESS on the log, or nothing. Never a verdict. */
+export function readCheckProgress(text: string): string | undefined {
+  const marked = text.split("\n").filter((line) => line.startsWith(`${CHECK_PROGRESS_MARKER} `))
+  const line = marked.at(-1)
+  if (line === undefined) return undefined
+  const payload = line.slice(CHECK_PROGRESS_MARKER.length + 1).trim()
+  try {
+    const parsed: unknown = JSON.parse(payload)
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return payload.slice(0, 200)
+    const body = parsed as Record<string, unknown>
+    const parts: string[] = []
+    for (const key of ["stage", "files", "done", "total", "suite"]) {
+      const value = body[key]
+      if (value === undefined || value === null) continue
+      if (typeof value !== "string" && typeof value !== "number") continue
+      parts.push(`${key}=${String(value)}`)
+    }
+    return parts.length > 0 ? parts.join(" ") : payload.slice(0, 200)
+  } catch (error) {
+    console.error(
+      `${CHECK_PROGRESS_MARKER} is unreadable; not naming it on the timeout:`,
+      error instanceof Error ? error.message : String(error),
+    )
+    return undefined
+  }
+}
+
+function checkProgressFromLog(log: string): string | undefined {
+  try {
+    return readCheckProgress(readFileSync(log, "utf8"))
+  } catch (error) {
+    console.error(
+      `${CHECK_PROGRESS_MARKER}: check log ${log} could not be read:`,
+      error instanceof Error ? error.message : String(error),
+    )
+    return undefined
+  }
+}
+
 /**
  * A trailer's own verdict, read off the exit `checkTrailer` packed onto it,
  * through the exact classifier `runCheck` judged the live run by: `0` is a
@@ -671,11 +717,13 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
     // stays stuck, which is the existing "past its bound" path.
     const rescued = checkResultFromLog(log)
     if (rescued !== undefined) return { ...base, exit: rescued === "pass" ? 0 : 1, result: rescued }
+    const progress = checkProgressFromLog(log)
+    const named = progress === undefined ? "" : `; last progress ${progress}`
     return {
       ...base,
       exit: "timeout",
       result: "stuck",
-      why: why(`ran past its bound of ${timeoutMs} ms; log named no usable ${CHECK_RESULT_MARKER}`),
+      why: why(`ran past its bound of ${timeoutMs} ms; log named no usable ${CHECK_RESULT_MARKER}${named}`),
     }
   }
   if (result.signal !== null) {
