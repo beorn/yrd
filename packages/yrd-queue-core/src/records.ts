@@ -116,6 +116,20 @@ export async function recordCommit(git: Git, write: WriteRecord, parent: string 
   if (merge !== undefined && parent === undefined) {
     throw new Error("checked record Merge: requires a prior record")
   }
+  // A decision cannot follow an ending. Round admission drops a chain that has
+  // ended (state.ts reads the same resolver), so a checked record arriving
+  // here on an ended chain is a defect — refused loudly, never appended where
+  // it would hide the ending from every tip reader (@i/10-yrd/24635, @cto
+  // 2026-09-16). A retry's opened record re-opens a chain, a sent record only
+  // repeats its ending, and a stuck chain is still open, so all of those pass.
+  if (write.kind === "checked" && parent !== undefined) {
+    const ended = endingRecord(await readRecords(git, parent))
+    if (ended !== undefined) {
+      throw new Error(
+        `checked record refused for ${changeName(write.change)}: the chain already ended ${endedKind(ended)} at ${ended.sha.slice(0, 12)}; a decision cannot follow an ending (@i/10-yrd/24635)`,
+      )
+    }
+  }
   const parents =
     parent === undefined ? [await genesis(git), write.change.head] : merge === undefined ? [parent] : [parent, merge]
   const carried =
@@ -454,6 +468,58 @@ export function endedKind(tip: ChangeRecord): RecordKind {
   if (tip.kind !== "sent") return tip.kind
   const state = trailer(tip, "State")
   return state === "merged" || state === "failed" || state === "stuck" ? state : "sent"
+}
+
+/**
+ * The kinds that END a chain: merged and failed. A stuck chain stays open — it
+ * keeps its place in line and the next queue run takes it again (state.ts) —
+ * so stuck never ends one.
+ */
+const ENDING_KINDS: ReadonlySet<RecordKind> = new Set(["merged", "failed"])
+
+/** Whether this record stands for an ending (`endedKind` reads a sent record's `State:`). */
+export function standsEnded(record: ChangeRecord): boolean {
+  return ENDING_KINDS.has(endedKind(record))
+}
+
+/**
+ * The chain's CURRENT ending record — the newest record standing for merged or
+ * failed — or undefined for a chain that is still open. A later `opened`
+ * record re-opens the chain: an unchanged head resubmitted after a failure is
+ * a retry (submit.ts), and the ending it follows no longer governs. A checked,
+ * stuck or sent record after an ending cannot hide it: reading the literal
+ * tip is how a stray checked record hid a merged ending and made the queue
+ * page its own merge as a direct merge (@i/10-yrd/24635).
+ */
+export function endingRecord(records: readonly ChangeRecord[]): ChangeRecord | undefined {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]
+    if (record === undefined) continue
+    if (record.kind === "opened") return undefined
+    if (standsEnded(record)) return record
+  }
+  return undefined
+}
+
+/**
+ * The chain's current ending through a possibly tip-only capture (remote.ts
+ * reads the queue tip-only on purpose). The held records answer when they are
+ * conclusive — they hold an ending, or they reach the chain's root, whose
+ * first record is always the opened one (E2). A rootless capture whose scan
+ * found nothing walks the stored chain from its captured tip instead; the
+ * queue read fetched those objects. Without the walk, a stray record on the
+ * tip hides the ending exactly as records.at(-1) did (@i/10-yrd/24635).
+ */
+export async function endingRecordThrough(
+  git: Git,
+  change: Readonly<{ records: readonly ChangeRecord[] }>,
+): Promise<ChangeRecord | undefined> {
+  const held = endingRecord(change.records)
+  if (held !== undefined) return held
+  if (change.records[0]?.kind === "opened") return undefined
+  const tip = change.records.at(-1)
+  if (tip === undefined || tip.kind === "opened") return undefined
+  return endingRecord(await readRecords(git, tip.sha))
 }
 
 /** Parse Git's already-isolated, unfolded trailer block into ordered pairs. */

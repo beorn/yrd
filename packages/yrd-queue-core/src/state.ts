@@ -7,10 +7,15 @@
  *
  * - `queued` — an opened record and no checked record after it;
  * - `checked` — a checked record and no ended record after it;
- * - `stuck` — the last record ended with stuck; the change stays open;
+ * - `stuck` — the chain stands on stuck; the change stays open;
  * - `merged` — the head is an ancestor of the target;
- * - `failed` — the last record ended with failed, or the branch no longer carries
+ * - `failed` — the chain's current ending is failed, or the branch no longer carries
  *   this head (`replaced`), or the branch is gone (`deleted`).
+ *
+ * "After it" is judged by the chain's CURRENT ENDING (`endingRecord`), never
+ * the literal tip: a stray record appended after an ending cannot hide it, and
+ * a later opened record — a resubmit retry — re-opens the chain
+ * (@i/10-yrd/24635).
  *
  * **Ancestry wins over any record — for a change with no failed ending.** A
  * change whose head is on the target reads merged even when no merged record
@@ -34,7 +39,7 @@
  * (@i/10-yrd/24098).
  */
 
-import { endedKind, type ChangeRecord } from "./records.ts"
+import { endedKind, endingRecord, type ChangeRecord } from "./records.ts"
 import { incidentFrom } from "./incident.ts"
 
 export const CHANGE_STATES = ["queued", "checked", "stuck", "merged", "failed"] as const
@@ -57,11 +62,13 @@ export type ChangeRecords = Readonly<{
   /** The change's own branch. Never the target: that one is `QueueRunOptions.target`. */
   branch: string
   /**
-   * The change's records, oldest first, or only its tip: every reading here uses
-   * the last one, whose trailers are the whole derived state. Never empty, and
-   * the type says so: a change exists only when submitted, and the submit is
-   * its first record (E2). Every reader used to ask anyway and invent an answer
-   * for a case no constructor can build.
+   * The change's records, oldest first, or only its tip: every reading here
+   * uses the chain's current ending when one exists, else the last record
+   * (@i/10-yrd/24635). Never empty, and the type says so: a change exists only
+   * when submitted, and the submit is its first record (E2). Every reader used
+   * to ask anyway and invent an answer for a case no constructor can build.
+   * A tip-only capture cannot see a buried ending; the queue read expands the
+   * captures that could hold one (remote.ts, readObscuredEndings).
    */
   records: readonly [ChangeRecord, ...ChangeRecord[]]
   /** Whether the head is an ancestor of the target, read from git. */
@@ -86,7 +93,9 @@ export function tipOf(change: ChangeRecords): ChangeRecord {
 
 /** Read one change's state. Pure: every input is a record or a git reading. */
 export function readChange(change: ChangeRecords): ChangeReading {
-  const last = tipOf(change)
+  // The chain's current ending governs even when a stray later record sits on
+  // the literal tip (@i/10-yrd/24635); a chain that is still open reads its tip.
+  const last = endingRecord(change.records) ?? tipOf(change)
 
   // This head's own last ending was failed, the branch has since moved on to
   // a different head, and ancestry reaches the target only through that: the

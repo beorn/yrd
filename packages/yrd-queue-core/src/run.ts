@@ -89,7 +89,14 @@ import { narrowingOf } from "./narrowing.ts"
 import { directMergeCommits, type DirectMerge } from "./direct.ts"
 import { changeName, changeRef } from "./refs.ts"
 import { composed, type RingOptions } from "./rings.ts"
-import { CapturedQueueObjectsUnavailable, readQueue, remoteUrl, type QueueEntry, type QueueRead } from "./remote.ts"
+import {
+  CapturedQueueObjectsUnavailable,
+  readObscuredEndings,
+  readQueue,
+  remoteUrl,
+  type QueueEntry,
+  type QueueRead,
+} from "./remote.ts"
 import { GitlinkNotOnRemote, ReferenceUnpopulated } from "./reference.ts"
 import { setupStuckCode, setupStuckNext, transportFaultIn } from "./setup-transport.ts"
 import { inLine, tipOf } from "./state.ts"
@@ -395,6 +402,11 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     }
   }
   const queue = await read()
+  // A captured tip alone cannot say whether its chain has ended, and a chain
+  // that has ended leaves the candidate set: admission, bookkeeping and the
+  // direct-merge reader below all judge the chain's ending, never its literal
+  // tip (@i/10-yrd/24635, @cto 2026-09-16).
+  const changes = await readObscuredEndings(git, queue.changes, options.target.remote, options.target.branch)
   const url = await remoteUrl(git, options.target.remote)
   const name = queueName(options.target, url)
   // The run row: the gitlink (the target's commit) and the config blob the checks
@@ -430,7 +442,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     // journal, which is always wired: the two halves answer different questions
     // and only one of them is a git transcript nobody turned on.
     plumbing: { ...options.plumbing, journal: log.write },
-    queue: queue.changes,
+    queue: changes,
     reaped: { list: [] },
     steps: composed(BASE),
     stop: (said) => {
@@ -449,7 +461,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const failed: string[] = []
   const stuck: string[] = []
 
-  const entries = queue.changes
+  const entries = changes
 
   log.write({
     kind: "observation",

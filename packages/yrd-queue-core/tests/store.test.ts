@@ -16,6 +16,7 @@ import {
   gitIn,
   incidentFrom,
   incidentTrailers,
+  mergedBy,
   readChange,
   readRecord,
   readRecords,
@@ -559,6 +560,167 @@ describe("the state is derived, and ancestry wins over any record", () => {
     expect(() =>
       readChange({ branch: "task/one", branchHead: head, records: written(records), head, headOnTarget: false }),
     ).toThrow(/carries 0 Subject: trailers; a queue incident needs exactly one non-empty value/u)
+  })
+})
+
+describe("the ending governs the reading, never the literal tip (@i/10-yrd/24635)", () => {
+  /**
+   * A record some defective writer appended after the chain had ended. The
+   * production specimen was a checked decision from a round judging against a
+   * stale target; the store refuses it now, so the reading tests hold it as a
+   * captured literal.
+   */
+  const lateChecked = (head: string): ChangeRecord => ({
+    at: new Date(),
+    kind: "checked",
+    sha: "f".repeat(40),
+    subject: "re-judged after the target moved",
+    trailers: [
+      ["Record", "checked"],
+      ["Change", `task/one@${head}`],
+      ["Reason", "target-moved"],
+    ],
+  })
+
+  it("a checked record after a merged ending does not hide the merge from the reading", async () => {
+    const { git, head, target } = await repository()
+    const change = { branch: "task/one", head }
+    await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    await appendRecord(git, "main", { change, kind: "checked", subject: "checks passed" })
+    const merged = await appendRecord(git, "main", {
+      change,
+      kind: "merged",
+      subject: "task/one merged",
+      trailers: [
+        ["Merge", target],
+        ["Merged-By", mergedBy("main", "q-1")],
+      ],
+    })
+    // The exact specimen shape: the ending exists, a stray checked sits on the
+    // literal tip, and ancestry reads false because the round held a stale
+    // target. The records alone must still say merged.
+    const records = written([...(await readRecords(git, merged)), lateChecked(head)])
+    expect(readChange({ branch: "task/one", branchHead: head, records, head, headOnTarget: false }).state).toBe(
+      "merged",
+    )
+  })
+
+  it("a checked record after a failed ending does not hide the failure", async () => {
+    const { git, head } = await repository()
+    const change = { branch: "task/one", head }
+    await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    const failed = await appendRecord(git, "main", {
+      change,
+      kind: "failed",
+      subject: "task/one failed",
+      trailers: [["Reason", "check"]],
+    })
+    const records = written([...(await readRecords(git, failed)), lateChecked(head)])
+    expect(readChange({ branch: "task/one", branchHead: head, records, head, headOnTarget: false })).toMatchObject({
+      reason: "check",
+      state: "failed",
+    })
+  })
+
+  it("an opened retry re-opens a failed chain, and its judgement reads checked", async () => {
+    const { git, head } = await repository()
+    const change = { branch: "task/one", head }
+    await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    await appendRecord(git, "main", {
+      change,
+      kind: "failed",
+      subject: "task/one failed",
+      trailers: [["Reason", "check"]],
+    })
+    // An unchanged head resubmitted is a retry: a new opened record on the
+    // existing change (submit.ts), which the ending no longer governs.
+    const retried = await appendRecord(git, "main", { change, kind: "opened", subject: "resubmitted" })
+    expect(
+      readChange({
+        branch: "task/one",
+        branchHead: head,
+        records: written(await readRecords(git, retried)),
+        head,
+        headOnTarget: false,
+      }).state,
+    ).toBe("queued")
+    const checked = await appendRecord(git, "main", { change, kind: "checked", subject: "checks passed" })
+    expect(
+      readChange({
+        branch: "task/one",
+        branchHead: head,
+        records: written(await readRecords(git, checked)),
+        head,
+        headOnTarget: false,
+      }).state,
+    ).toBe("checked")
+  })
+
+  it("a stuck chain stays open: the next round's checked record is the recovery, not a defect", async () => {
+    const { git, head } = await repository()
+    const change = { branch: "task/one", head }
+    await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    await appendRecord(git, "main", {
+      change,
+      kind: "stuck",
+      subject: "the queue could not judge this change",
+      trailers: incidentTrailers({
+        code: "yrd-check-unresolved",
+        subject: "the queue could not judge this change",
+        via: "verify during merge",
+        evidence: "/tmp/q-one.jsonl",
+        next: "repair verify, then run yrd queue run",
+        owner: "the queue operator",
+      }),
+    })
+    const checked = await appendRecord(git, "main", { change, kind: "checked", subject: "checks passed on retake" })
+    expect(
+      readChange({
+        branch: "task/one",
+        branchHead: head,
+        records: written(await readRecords(git, checked)),
+        head,
+        headOnTarget: false,
+      }).state,
+    ).toBe("checked")
+  })
+
+  it("refuses a checked record on a chain that has ended, loudly; delivery still lands", async () => {
+    const { git, head, target } = await repository()
+    const change = { branch: "task/one", head }
+    await appendRecord(git, "main", { change, kind: "opened", subject: "submitted" })
+    await appendRecord(git, "main", {
+      change,
+      kind: "merged",
+      subject: "task/one merged",
+      trailers: [
+        ["Merge", target],
+        ["Merged-By", mergedBy("main", "q-1")],
+      ],
+    })
+    await expect(
+      appendRecord(git, "main", { change, kind: "checked", subject: "re-judged after the target moved" }),
+    ).rejects.toThrow(/already ended merged at [0-9a-f]{12}; a decision cannot follow an ending \(@i\/10-yrd\/24635\)/u)
+    // A sent record only repeats the ending it delivers, so it still lands.
+    const sent = await appendRecord(git, "main", {
+      change,
+      kind: "sent",
+      subject: "told the submitter",
+      trailers: [
+        ["State", "merged"],
+        ["To", "@dev/2"],
+        ["Delivery", "sent"],
+      ],
+    })
+    expect(
+      readChange({
+        branch: "task/one",
+        branchHead: head,
+        records: written(await readRecords(git, sent)),
+        head,
+        headOnTarget: false,
+      }).state,
+    ).toBe("merged")
   })
 })
 
