@@ -26,6 +26,7 @@
  * nothing.
  */
 
+import { transportFaultIn } from "./setup-transport.ts"
 import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import type { Git } from "./records.ts"
@@ -81,6 +82,13 @@ export class ReferenceUnpopulated extends Error {
      */
     readonly path: string | undefined,
     readonly why: string,
+    /**
+     * Set when the store could not be given because its REMOTE could not be
+     * reached — the `ls-remote` answered nothing, or a clone failed on a
+     * transport signature — rather than because the store itself is wrong. A
+     * queue run takes such a stuck once more before it writes it.
+     */
+    readonly unreachable?: string,
   ) {
     super(
       path === undefined
@@ -201,10 +209,13 @@ export async function populateReferenceStores(options: PopulateReference): Promi
             store,
           ])
         } catch (error) {
+          const why = error instanceof Error ? error.message : String(error)
+          const fault = transportFaultIn(why)
           throw new ReferenceUnpopulated(
             root,
             named,
-            `cloning ${url} into ${store} failed: ${error instanceof Error ? error.message : String(error)}`,
+            `cloning ${url} into ${store} failed: ${why}`,
+            fault === undefined ? undefined : `cloning ${url} could not reach it (${fault.signature})`,
           )
         }
         const populated: ReferenceStore = { ms: Date.now() - started, path: named, sha, url }
@@ -227,7 +238,12 @@ export async function populateReferenceStores(options: PopulateReference): Promi
         // which is what happened on 2026-09-03.
         const unresolved = async (why: string): Promise<never> => {
           if (await remoteAnswers(storeGit)) throw new GitlinkNotOnRemote(named, sha, url)
-          throw new ReferenceUnpopulated(root, named, `${why}; ${url} could not be reached either`)
+          throw new ReferenceUnpopulated(
+            root,
+            named,
+            `${why}; ${url} could not be reached either`,
+            `ls-remote of ${url} answered nothing`,
+          )
         }
         try {
           await storeGit([

@@ -41,7 +41,9 @@
  * could not do its own job, and the next thing to happen is a person. That is
  * the andon (operator 2026-09-16): nothing behind a stuck change is judged or
  * merged, and the pause ring stops the whole line on it until the change leaves
- * the line or the queue is resumed.
+ * the line or the queue is resumed. A stuck the remote caused — a setup that
+ * could not fetch, a submodule remote that did not answer — is taken once more
+ * inside the round before it is written, and its record says so.
  */
 
 import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
@@ -201,6 +203,12 @@ export type Run = Readonly<{
    * pause record, unless it is a stuck stop whose change has left the line.
    */
   lineStop: PauseRecord | undefined
+  /**
+   * The changes this round has already taken a second time after a stuck the
+   * remote caused. One retry per change per round, and the stuck record written
+   * after it carries `Retried: 1`.
+   */
+  retried: Set<string>
   /** The target OID this run successfully pushed, or its captured starting OID. */
   targetAfter: { sha: string }
   /**
@@ -244,6 +252,13 @@ type EndedWrite = Readonly<{
   incident?: Incident
   detail?: string
   worktree?: string
+  /**
+   * Why a stuck is the remote's rather than the change's or the queue's own
+   * ground: set only where the queue could not reach a remote (a setup that
+   * could not fetch, a submodule remote that did not answer). Such a stuck is
+   * taken once more before it is written.
+   */
+  remote?: string
 }>
 
 /**
@@ -369,6 +384,19 @@ export class QueueAuthorityUnreadable extends Error {
   }
 }
 
+/**
+ * A stuck the remote caused, before its record is written: the loop takes the
+ * change once more in this same round. Thrown by `end`, caught only by the
+ * loop, and passed through `guarded` like an unreadable authority, so the
+ * judgement it interrupts leaves no record and no message behind.
+ */
+class RetryOnce extends Error {
+  constructor(readonly change: string) {
+    super(`${change}: the remote could not be reached; taking the change once more in this round`)
+    this.name = "RetryOnce"
+  }
+}
+
 function gitInvocationOptions(options: QueueRunOptions, log: QueueRunLog): GitInvocationOptions {
   return {
     ...(options.env === undefined ? {} : { env: options.env }),
@@ -478,6 +506,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
     options,
     pause: queue.pause,
     lineStop: queue.stop,
+    retried: new Set<string>(),
     // The caller's trace half, kept exactly as it was passed, plus this run's
     // journal, which is always wired: the two halves answer different questions
     // and only one of them is a git transcript nobody turned on.
@@ -581,7 +610,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   for (const entry of ordered(entries, "queued", "stuck", "checked").filter(
     (entry) => entry.reading.state !== "checked" || staleChecked(run, entry),
   )) {
-    const outcome = await guarded(run, entry, () => run.steps.judge(run, entry))
+    const outcome = await judged(run, entry, () => run.steps.judge(run, entry))
     if (outcome === "stuck") {
       stuck.push(entry.change.branch)
       return finish(
@@ -602,7 +631,7 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const line = (blocked === -1 ? reread : reread.slice(0, blocked)).filter((entry) => !staleChecked(run, entry))
   const checked = line[0]
   if (checked !== undefined) {
-    const outcome = await guarded(run, checked, () => run.steps.merge(run, checked))
+    const outcome = await judged(run, checked, () => run.steps.merge(run, checked))
     if (outcome === "stuck") {
       stuck.push(checked.change.branch)
       return finish(
@@ -689,6 +718,20 @@ function stopLine(): Promise<Stopped | undefined> {
 }
 
 /**
+ * One judgement or merge of one change, guarded, taken ONCE more when it ended
+ * on a stuck the remote caused. The second attempt's ending is final whatever
+ * it is: a stuck is written then, carrying `Retried: 1` (`end`).
+ */
+async function judged(run: Run, entry: QueueEntry, step: () => Promise<Ended>): Promise<Ended> {
+  try {
+    return await guarded(run, entry, step)
+  } catch (error) {
+    if (!(error instanceof RetryOnce)) throw error
+    return guarded(run, entry, step)
+  }
+}
+
+/**
  * One pass over one entry before anything is judged: a branch that is gone or
  * moved off a head ends that head's change withdrawn with the reason and no
  * message (ruling B3; the one word the reader already derived, @i/10-yrd/24492); a head the target already carries gets its merged
@@ -724,7 +767,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
   try {
     return await step()
   } catch (error) {
-    if (error instanceof QueueAuthorityUnreadable) throw error
+    if (error instanceof QueueAuthorityUnreadable || error instanceof RetryOnce) throw error
     // A candidate's setup that did not pass is the one crash whose owner the
     // queue can read rather than assume: `attributedSetupFailure` runs the same
     // setup on the settled base and bills whoever the ground names.
@@ -756,6 +799,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
         stuckWrite(run, entry.change.branch, {
           code: setupStuckCode(fault),
           next: setupStuckNext(fault),
+          ...(fault === undefined ? {} : { remote: `setup could not reach a remote (${fault.signature})` }),
           subject:
             `the queue could not prepare a worktree for ${entry.change.branch}: ${message}` +
             (fault === undefined ? "" : `; unreachable remote (${fault.signature}): ${fault.line}`) +
@@ -802,6 +846,9 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
         "stuck",
         stuckWrite(run, entry.change.branch, {
           code: "yrd-reference-unpopulated",
+          // The `ls-remote` that separates a missing pin from a remote that
+          // cannot be asked found the second: the remote's, retried once.
+          ...(error.unreachable === undefined ? {} : { remote: error.unreachable }),
           next:
             error.path === undefined
               ? `populate the queue's reference repository ${error.repo} with the command the refusal in this incident names, then run yrd queue run`
@@ -1439,6 +1486,7 @@ async function attributedSetupFailure(run: Run, entry: QueueEntry, failure: Cand
     stuckWrite(run, entry.change.branch, {
       code: setupStuckCode(fault),
       next: setupStuckNext(fault),
+      ...(fault === undefined ? {} : { remote: `setup could not reach a remote (${fault.signature})` }),
       subject:
         `the queue could not prepare a worktree for ${entry.change.branch}: ${message}` +
         (fault === undefined ? "" : `; unreachable remote (${fault.signature}): ${fault.line}`) +
@@ -2254,7 +2302,13 @@ async function restoreScripts(run: Run, spec: CheckSpec, cwd: string): Promise<v
  * share the directory, and both used to spell it out for themselves.
  */
 function checkLogDir(run: Run, entry: QueueEntry, phase: Phase): string {
-  return join(run.options.workdir, "checks", changeName(entry.change), run.log.id, phase)
+  const change = changeName(entry.change)
+  // A change taken once more after a stuck the remote caused writes its logs
+  // beside the first attempt's, never over them: the first attempt's logs are
+  // the only evidence of the fault the retry cleared (a check log is opened
+  // create-only, so a shared path would crash the retry instead).
+  const attempt = run.retried.has(change) ? ["retry-1"] : []
+  return join(run.options.workdir, "checks", change, run.log.id, ...attempt, phase)
 }
 
 async function runPhase(
@@ -2389,6 +2443,23 @@ async function narrowedBase(
 }
 
 async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended: EndedWrite): Promise<Ended> {
+  // ONE TRANSIENT RETRY, INSIDE THE ROUND (the andon, operator 2026-09-16). A
+  // stuck the remote caused is not written the first time: the loop takes the
+  // change once more, and only a second stuck stops the line. The number is
+  // one; a remote down for longer is a stopped line and a page, never a loop.
+  const name = changeName(entry.change)
+  if (kind === "stuck" && ended.remote !== undefined && !run.retried.has(name)) {
+    run.retried.add(name)
+    run.log.write({
+      branch: entry.change.branch,
+      head: entry.change.head,
+      kind: "retry",
+      reason: ended.subject,
+      remote: ended.remote,
+      ...(ended.incident === undefined ? {} : { code: ended.incident.code }),
+    })
+    throw new RetryOnce(name)
+  }
   // Who is billed follows from the kind, once: a fail is the submitter's, and
   // says so; a stuck is always the queue's, so its record says nothing about
   // fault (a constant trailer says nothing). A `replaced` or `deleted` change
@@ -2397,6 +2468,7 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
     ...ended.trailers,
     ...(kind === "failed" ? [["Fault", "submitter"] as const] : []),
     ...(ended.remedy === undefined ? [] : [["Remedy", ended.remedy] as const]),
+    ...(kind === "stuck" && run.retried.has(name) ? [["Retried", "1"] as const] : []),
   ]
   const record = await writeRecord(
     run,
@@ -2437,6 +2509,8 @@ function stuckWrite(
     detail?: string
     worktree?: string
     trailers?: readonly (readonly [string, string])[]
+    /** Set only where the queue could not reach a remote: the stuck is taken once more before it is written. */
+    remote?: string
   }>,
 ): EndedWrite {
   const subject = cause.subject.replace(/\s+/gu, " ").trim()
@@ -2457,6 +2531,7 @@ function stuckWrite(
     incident,
     ...(cause.detail === undefined ? {} : { detail: cause.detail }),
     ...(cause.worktree === undefined ? {} : { worktree: cause.worktree }),
+    ...(cause.remote === undefined ? {} : { remote: cause.remote }),
     trailers: [...incidentTrailers(incident), ...(cause.trailers ?? [])],
   }
 }

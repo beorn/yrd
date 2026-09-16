@@ -105,11 +105,16 @@ export function setupStuckCode(fault: TransportFault | undefined): string {
  * A transport fault names no branch and no author on purpose: nothing about the
  * change is wrong, and telling a submitter to repair their work would send them
  * looking for a defect that is not there.
+ *
+ * It promises no later round, because there is none: the round already took
+ * the change a second time, and a stuck stops the line until an act lifts it
+ * (the andon, operator 2026-09-16). A record that said "the next round
+ * retries" would send its reader to wait for a timer that no longer exists.
  */
 export function setupStuckNext(fault: TransportFault | undefined): string {
   if (fault === undefined) return "repair the queue setup, then run yrd queue run"
   return (
-    `nothing here is the change's fault: setup could not reach a remote (${fault.signature}). ` +
-    "The next round retries on the queue's own cadence; repair the remote or wait it out."
+    `nothing here is the change's fault: setup could not reach a remote (${fault.signature}), ` +
+    "and the round's one retry could not either; once the remote answers, run yrd queue run or resume the queue"
   )
 }

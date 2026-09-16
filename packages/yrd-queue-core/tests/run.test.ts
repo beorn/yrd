@@ -2729,8 +2729,18 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
  * A setup that fails wherever it runs while its marker exists, printing `line`
  * where the queue's classifier reads it. It records every run in the check log
  * beside the check's own rows, so a case can count judgements.
+ *
+ * With `once`, the settled base's own run — the second setup one failed
+ * judgement makes, after the candidate's — clears the marker: a remote that
+ * answers again by the time the round takes the change a second time. The
+ * base is the worktree whose candidate IS its base, because nothing is composed
+ * on top of the target there.
  */
-function faultySetup(w: World, line: string): Readonly<{ command: string; clear: () => void }> {
+function faultySetup(
+  w: World,
+  line: string,
+  plan: Readonly<{ once?: boolean }> = {},
+): Readonly<{ command: string; clear: () => void }> {
   const marker = join(w.workdir, "..", `fault-${String(Math.random()).slice(2)}`)
   const script = `${marker}.sh`
   writeFileSync(marker, "the fault holds\n")
@@ -2740,6 +2750,7 @@ function faultySetup(w: World, line: string): Readonly<{ command: string; clear:
       "#!/bin/sh",
       `echo "setup cwd=$(pwd) repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${w.checkLog}"`,
       `if [ -f "${marker}" ]; then`,
+      ...(plan.once === true ? [`  if [ "$YRD_CANDIDATE_SHA" = "$YRD_BASE_SHA" ]; then rm -f "${marker}"; fi`] : []),
       `  echo '${line}' >&2`,
       "  exit 128",
       "fi",
@@ -2753,6 +2764,17 @@ function faultySetup(w: World, line: string): Readonly<{ command: string; clear:
 
 /** A repository break the classifier must not read as an outage. */
 const BROKEN_SETUP = "error: lockfile had changes, but lockfile is frozen"
+/** Git's own line for a code host that is down: the transport signature the queue retries once. */
+const UNREACHABLE_SETUP = "fatal: unable to access 'https://example.invalid/': The requested URL returned error: 504"
+
+/**
+ * How many times the queue ran its setup to JUDGE something, as the setup
+ * recorded itself: the notify environment an ending prepares runs the same
+ * setup, and it judges nothing.
+ */
+function setupRuns(w: World): number {
+  return ranPrograms(w).filter((ran) => ran.program === "setup" && !ran.cwd.endsWith("/notify")).length
+}
 
 /** One change's records at the remote, oldest first. */
 async function recordsOf(w: World, branch: string, head: string): Promise<readonly ChangeRecord[]> {
@@ -2892,6 +2914,51 @@ describe("a stuck change stops the line (the andon, operator 2026-09-16)", () =>
     // The record shows the count: one stuck record per time it stopped the line.
     const kinds = (await recordsOf(w, "task/one", headOne)).map((record) => record.kind)
     expect(kinds.filter((kind) => kind === "stuck")).toHaveLength(2)
+  })
+
+  it("a remote that fails once is retried inside the round, and the change never sticks", async () => {
+    const w = await world()
+    const fault = faultySetup(w, UNREACHABLE_SETUP, { once: true })
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+
+    expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/one"], stuck: [] })
+    expect((await recordsOf(w, "task/one", head)).some((record) => record.kind === "stuck")).toBe(false)
+    // Never stopped: the only pause record is the one the merge's own fence writes.
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "resumed" })
+    expect(logRecords(outcome)).toContainEqual(
+      expect.objectContaining({ branch: "task/one", code: "yrd-setup-unreachable", kind: "retry" }),
+    )
+  })
+
+  it("a remote that fails twice sticks once, and its record says it was retried", async () => {
+    const w = await world()
+    const fault = faultySetup(w, UNREACHABLE_SETUP)
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+
+    expect(outcome).toMatchObject({ exitCode: 2, merged: [], stuck: ["task/one"] })
+    // Two judgements, each a candidate setup and its settled base: one retry, never a third.
+    expect(setupRuns(w)).toBe(4)
+    const stuckRecords = (await recordsOf(w, "task/one", head)).filter((record) => record.kind === "stuck")
+    expect(stuckRecords).toHaveLength(1)
+    expect(incidentOf(stuckRecords[0]).Code).toBe("yrd-setup-unreachable")
+    expect(trailer(stuckRecords[0]!, "Retried")).toBe("1")
+  })
+
+  it("a stuck the remote did not cause is never retried", async () => {
+    const w = await world()
+    const fault = faultySetup(w, BROKEN_SETUP)
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    await queueRun(await w.options({ exit: 0, setup: fault.command }))
+
+    expect(setupRuns(w)).toBe(2)
+    const stuckRecord = (await recordsOf(w, "task/one", head)).find((record) => record.kind === "stuck")
+    expect(incidentOf(stuckRecord).Code).toBe("yrd-setup-unusable")
+    expect(trailer(stuckRecord!, "Retried")).toBeUndefined()
   })
 })
 
