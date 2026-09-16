@@ -643,16 +643,18 @@ describe("what a watch says it looked at", () => {
   })
 
   it("keeps each historical run's result and output in JSON, text, and interactive detail", async () => {
-    // One real change, decided twice on one head: the check goes stuck (exit
-    // 127, so yrd-check-unresolved), then 24623 retires that same unresolved
-    // reason, failing the change without re-running the check. The old
-    // artifact survives; historical-run-rows-use-latest-result was the reader
-    // relabelling it with the newest run's result.
+    // One real change, judged twice on one head: the check goes stuck (exit
+    // 127, so yrd-check-unresolved) and stops the line, then an operator's
+    // explicit run judges it again and it sticks again, with a log of its own
+    // (the andon, operator 2026-09-16: no guard retires a second unresolved
+    // check any more). Each run's row must keep its own result and artifact;
+    // historical-run-rows-use-latest-result was the reader relabelling the old
+    // row with the newest run's.
     const w = await world()
     const control = join(w.workdir, "check.sh")
-    // The check writes colors before it goes missing: the raw log below must
-    // keep them, while the pane's `output` must not (a chalk background inside
-    // a Text is a strict-render refusal).
+    // The first run's check writes colors before it goes missing: the raw log
+    // below must keep them, while the pane's `output` must not (a chalk
+    // background inside a Text is a strict-render refusal).
     writeFileSync(control, "printf 'FIRST_RUN_MISSING \\033[30m\\033[45m slow \\033[49m\\033[39m\\n'\nexit 127\n")
     writeFileSync(join(w.work, ".yrd.yml"), `checks:\n  - verify:\n      run: ${JSON.stringify(`sh ${control}`)}\n`)
     await w.git(["commit", "--quiet", "-am", "declare an external check the queue cannot run"])
@@ -677,10 +679,12 @@ describe("what a watch says it looked at", () => {
       "FIRST_RUN_MISSING \u001b[30m\u001b[45m slow \u001b[49m\u001b[39m\n",
     )
 
-    // The check script stays broken: 24623 does not re-run it, so repairing it
-    // here would make the fixture claim a second check that never happens.
+    // Still missing, and saying so differently: the second judgement writes a
+    // log of its own, so a reader that borrowed the first run's artifact for the
+    // newest row, or the newest for the old one, is caught either way.
+    writeFileSync(control, "printf 'SECOND_RUN_MISSING\\n'\nexit 127\n")
     const second = capture(w.work)
-    expect(await coreQueueCommand(w.work, second.io, { command: "run" }, runOptions)).toBe(1)
+    expect(await coreQueueCommand(w.work, second.io, { command: "run" }, runOptions)).toBe(2)
     const secondId = (JSON.parse(second.stdout()) as { run: string }).run
     const listed = capture(w.work)
     await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })
@@ -691,40 +695,35 @@ describe("what a watch says it looked at", () => {
     const old = rows.find((row) => row.run === firstId)!
     const latest = rows.find((row) => row.run === secondId)!
     expect(old, listed.stdout()).toMatchObject({
-      state: "failed",
+      state: "stuck",
       run: firstId,
       result: original.result,
       log: original.log,
     })
-    // No check decided the newest run, so it reads a bare "fail"; the retire's
-    // own reason is what keeps the two rows apart for a relabelling reader.
-    expect(latest).toMatchObject({ state: "failed", run: secondId, result: "fail" })
-    expect(String(latest.reason)).toMatch(/could not be judged twice/u)
+    expect(latest, listed.stdout()).toMatchObject({ state: "stuck", run: secondId })
     expect(rows.some((row) => "runResult" in row || "runOf" in row)).toBe(false)
     expect(old.endedAt).toBe(original.endedAt)
-    expect(latest.incident).toBeUndefined()
     expect(readFileSync(String(old.log), "utf8")).toBe(
       "FIRST_RUN_MISSING \u001b[30m\u001b[45m slow \u001b[49m\u001b[39m\n",
     )
-    // The retire decided from the reading alone, so the newest run has no
-    // artifact of its own and must not borrow the run before it.
-    expect(latest.log).toBeUndefined()
+    // The newest run judged the change itself, so its artifact is its own and
+    // never the run's before it.
+    expect(latest.log).not.toBe(old.log)
+    expect(readFileSync(String(latest.log), "utf8")).toBe("SECOND_RUN_MISSING\n")
 
     const plain = capture(w.work)
     await coreQueueCommand(w.work, plain.io, { command: "list" }, { workdir: w.workdir })
-    // Each historical run keeps its own row on the page, named by its failure
-    // in the status suffix (two runs started in one second share a `main#HHMMSS`).
+    // Each historical run keeps its own row on the page, named by its reason in
+    // the status suffix (two runs started in one second share a `main#HHMMSS`).
+    // Table rows only: while the line is stopped, the runner box names the
+    // change it stopped for too.
     const historyLines = plain
       .stdout()
       .split("\n")
-      .filter((line) => line.includes("task/history"))
+      .filter((line) => /^\d\d:\d\d:\d\d /u.test(line) && line.includes("task/history"))
     expect(historyLines, plain.stdout()).toHaveLength(2)
     expect(
-      historyLines.some((line) => line.includes(`err=${String(original.reason)}`)),
-      plain.stdout(),
-    ).toBe(true)
-    expect(
-      historyLines.some((line) => line.includes("could not be judged twice")),
+      historyLines.every((line) => line.includes(`stuck=${String(original.reason)}`)),
       plain.stdout(),
     ).toBe(true)
     expect(plain.stdout()).toContain(runShortName("main", secondId))
@@ -750,13 +749,12 @@ describe("what a watch says it looked at", () => {
       log: original.log,
       output: "FIRST_RUN_MISSING  slow \n",
     })
-    // A decided change opens on its own records, not on one run's journal, and
-    // the retire recorded no check: both rows show the single check the change
-    // ever ran. The ROWS stay per-run, which is what this test guards.
+    // The second judgement ran the check again, so its row opens on that run's
+    // own check and never on the first run's.
     expect(details.find((detail) => detail.row.run === secondId)?.checks[0]).toMatchObject({
       state: "stuck",
-      log: original.log,
-      output: "FIRST_RUN_MISSING  slow \n",
+      log: latest.log,
+      output: "SECOND_RUN_MISSING\n",
     })
   })
 })

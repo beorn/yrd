@@ -921,16 +921,6 @@ async function prepare(
 async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
   const { change } = entry
   const { branch, head } = change
-  // 24623: an unresolved check retried forever. err=replaced already leaves
-  // the line; the second identical yrd-check-unresolved takes that exit
-  // rather than re-run the bound. The first stuck still names the queue.
-  if (entry.reading.state === "stuck" && entry.reading.reason === "yrd-check-unresolved") {
-    return run.steps.end(run, entry, "failed", {
-      remedy: `replace or delete ${branch} and submit again; the queue will not re-run this unresolved check`,
-      subject: `${branch} could not be judged twice (${entry.reading.reason}); waiting for its submitter to replace it`,
-      trailers: [["Reason", "yrd-check-unresolved"]],
-    })
-  }
   // The built-in check: the head shares ancestry with the target. The target
   // moves under every queued change by design, so "descends from the tip" would
   // fail every change behind a merge; an unrelated history is what a merge

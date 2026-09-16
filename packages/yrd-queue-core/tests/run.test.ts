@@ -1374,30 +1374,37 @@ describe("a queue run", () => {
     )
   })
 
-  it("a second unresolved check of the same reason leaves the line like replaced (24623)", async () => {
-    // Specimen: three consecutive yrd-check-unresolved rounds on the same head.
-    // err=replaced already retires; the second identical unresolved must take
-    // that exit rather than re-run the bound.
+  it("a stuck change that sticks again on resume stops the line again, counted", async () => {
+    // Specimen (24623): three yrd-check-unresolved rounds in a row on one head.
+    // Those rounds came from the loop that re-ran a stuck change every round,
+    // and a guard ended the second identical unresolved check failed without
+    // running it. The andon (operator 2026-09-16) removed the loop, and the
+    // guard with it: a stuck change is judged again only when someone resumes
+    // the line, it runs its check again, and if it sticks again the line stops
+    // again with both stuck records on the change.
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const options = await w.options({ sleep: 3, timeoutMs: 500 })
 
     const first = await queueRun(options)
-    expect(first.stuck).toEqual(["task/one"])
-    expect(first.exitCode).toBe(2)
+    expect(first).toMatchObject({ exitCode: 2, failed: [], stuck: ["task/one"] })
 
-    // The first stuck stopped the line (the andon, operator 2026-09-16), so the
-    // second judgement is an operator's explicit round on the stopped line.
-    const second = await queueRun({ ...options, foreground: true })
-    expect(second.stuck).toEqual([])
-    expect(second.failed).toEqual(["task/one"])
-    expect(second.exitCode).toBe(1)
-    await fetchChanges(w)
-    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
-    expect(records.map((record) => record.kind)).toContain("failed")
-    expect(trailer(records.find((record) => record.kind === "failed")!, "Reason")).toBe("yrd-check-unresolved")
-    // The change the stop named has ended, so the line runs again by itself.
-    expect((await queueRun(options)).stopped).toBeUndefined()
+    await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "the check's bound was raised" })
+    const second = await queueRun(options)
+
+    expect(second).toMatchObject({ exitCode: 2, failed: [], stuck: ["task/one"] })
+    // Judged, not retired from the reading: the check ran again in this round.
+    expect(logRecords(second)).toContainEqual(
+      expect.objectContaining({ branch: "task/one", kind: "check", name: "verify" }),
+    )
+    const kinds = (await recordsOf(w, "task/one", head)).map((record) => record.kind)
+    expect(kinds).not.toContain("failed")
+    expect(kinds.filter((kind) => kind === "stuck")).toHaveLength(2)
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({
+      cause: "stuck",
+      change: { branch: "task/one", head },
+      kind: "paused",
+    })
   })
 
   it("a timeout names the last YRD-CHECK-PROGRESS instead of only the bound constant (24623)", async () => {

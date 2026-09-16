@@ -68,6 +68,8 @@ import {
   QueuePaused,
   QueueNotPaused,
   writePause,
+  readCheckTrailer,
+  trailers,
   type CheckResult,
   type CheckSpec,
   type CheckView,
@@ -1713,8 +1715,16 @@ export async function openDetail(
   const own = entries.filter((entry) => entry.change.branch === row.branch && entry.change.head === row.head)
   const histories = own.length === 0 ? [] : await readHistories(git, own, config.target.remote, config.target.branch)
   const shown = histories.flatMap((entry) => show([entry], entry.change.branch))
-  const packed = shown.flatMap((change) => change.checks)
   const records = shown.flatMap((change) => change.records)
+  // ONE JUDGEMENT PER ROW. A change judged more than once has one row per run
+  // — a stuck change the line re-took after a resume and that stuck again (the
+  // andon) — and every run's `Check:` trailers sit on its records. Folding them
+  // all opened the OLD row on the newest run's checks. So a row opens on the
+  // judgement its own run ended, found by that run's id in each trailer's
+  // create-only log path; within it, the records stay the full account (a
+  // merged change's submit-phase checks can come from an earlier run,
+  // 1fca452c). A row whose run no judgement names keeps the whole fold.
+  const packed = judgementOf(records, row.run).flatMap((record) => trailers(record, "Check"))
   const declared = await declarationFor(git, config, row.base)
   const ending = endingOf(row)
   // A DECIDED change's records are its full account: `packed` (folded from
@@ -1747,6 +1757,32 @@ export async function openDetail(
     ...about,
     ...(declared.note === undefined ? {} : { note: declared.note }),
   }
+}
+
+/**
+ * The records of the one judgement a history row's run ended: the change's
+ * records cut after each record that ends a judgement (anything but opened,
+ * checked or the `sent` that reports an ending), and the piece whose `Check:`
+ * trailers log under that run. Every record when the run is unknown or no piece
+ * names it, which is exactly the fold the detail read before.
+ */
+function judgementOf(records: readonly ChangeRecord[], run: string | undefined): readonly ChangeRecord[] {
+  if (run === undefined) return records
+  const endsJudgement = (record: ChangeRecord) =>
+    record.kind !== "opened" && record.kind !== "checked" && record.kind !== "sent"
+  const pieces: ChangeRecord[][] = []
+  for (const record of records) {
+    const current = pieces.at(-1)
+    if (current === undefined || (current.some(endsJudgement) && record.kind !== "sent")) pieces.push([record])
+    else current.push(record)
+  }
+  const marker = `/${run}/`
+  const named = pieces.find((piece) =>
+    piece.some((record) =>
+      trailers(record, "Check").some((packed) => readCheckTrailer(packed).log?.includes(marker) === true),
+    ),
+  )
+  return named ?? records
 }
 
 /** The base a change's own commits are counted and diffed from: the record's, else the target as it stands. */

@@ -1693,11 +1693,11 @@ describe("yrd queue show names the queue it read (@i/10-yrd/24050)", () => {
 describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)", () => {
   it("names the same branch and cure whichever of the three commands reports it", async () => {
     const w = await world()
-    // A setup fault, not a check that exits 2: an unresolved check is retired
-    // on its SECOND judge (@i/10-yrd/24623, run.ts `judge`), so `up`'s first
-    // round after `run` would end the change failed and print no cure at
-    // all. A setup that cannot reach its remote sticks the same way on every
-    // round, and that is the ground the three commands must agree on.
+    // A setup that cannot reach its remote: it sticks the same way on every
+    // judgement, retried once inside the round and then written, and that is
+    // the ground the three commands must agree on. (This fixture once avoided an
+    // unresolved check because a guard retired the second one; the andon removed
+    // that guard, and the fixture keeps the fault whose cure text is literal.)
     const fault = faultySetup(w.workdir)
     await redeclare(w, `setup: ${fault.command}\n`)
     await w.git(["checkout", "--quiet", "-b", "task/stuck", "main"])
