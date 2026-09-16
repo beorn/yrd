@@ -15,8 +15,8 @@
  * - a row is what ONE run said about one change; its verdict is read by the
  *   pane's own `rowDecision` (or the journal run's decision when the row was
  *   split by one). `decisions` counts those verdicts per run — the STATS
- *   pane's numbers, replaced heads counted as the failed verdicts the queue
- *   recorded for them.
+ *   pane's numbers; a withdrawn head (replaced, deleted, or an operator's
+ *   withdraw) is no verdict and is not counted among them.
  * - merged / byAncestry / failed / stuck / inLine count CHANGES (distinct
  *   `branch@head`) by the queue's own current state, the one `queue list`
  *   shows: merged includes a head the target carries by ancestry (a replaced

@@ -157,7 +157,11 @@ function runRow(current: Row, run: JournalRun, newest: boolean): Row {
   const check = run.decision === "failed" ? run.checks.findLast((check) => check.result === "fail") : run.checks.at(-1)
   const result =
     run.incident === undefined
-      ? run.decision === "checked" || run.decision === "merged" || run.decision === "failed" || run.decision === "stuck"
+      ? run.decision === "checked" ||
+        run.decision === "merged" ||
+        run.decision === "failed" ||
+        run.decision === "stuck" ||
+        run.decision === "withdrawn"
         ? resultOf(run.decision, check?.name)
         : check?.result === undefined
           ? undefined

@@ -29,7 +29,12 @@ export type WithdrawRequest = Readonly<{
   target: Readonly<{ remote: string; branch: string }>
   /** Who withdrew it, written as the record's `By:`. */
   by: string
-  /** Why, written as the record's `Reason:` and into its subject. */
+  /**
+   * Why, in the operator's words: written into the subject and as a `Note:`
+   * trailer. Never `Reason:` — that trailer is the vocabulary the reader and
+   * the run branch on (replaced, deleted, a check's code), and free text is
+   * content nobody branches on.
+   */
   reason?: string
 }>
 
@@ -59,10 +64,9 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
     .map((row) => row.trim())
     .filter((row) => row !== "")
     .map((row) => row.split(/\s+/u))
-  // Where the branch points now, read in the same listing as its changes: a
-  // head the branch no longer carries has already left the line by the
-  // reader's own derivation (state.ts: replaced, or deleted), and the next run
-  // records that ending itself — withdraw ends only what is still open.
+  // Where the branch points now, read in the same listing as its changes;
+  // withdrawOne judges it after the records, so a recorded ending is reported
+  // as what it is and only an open head the branch still carries is ended.
   const branchHead = rows.find(([, ref]) => ref === branchRef)?.[0]
   const listed = rows.filter(([, ref]) => ref !== branchRef)
   if (listed.length === 0) {
@@ -79,17 +83,7 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
     if (change === undefined) {
       throw new Error(`${ref} matched ${request.branch}'s changes on ${queue} but is not a change ref`)
     }
-    if (branchHead === undefined) {
-      alreadyEnded.push(`${change.head.slice(0, 12)} already ended withdrawn (deleted): the branch is gone`)
-      continue
-    }
-    if (branchHead !== change.head) {
-      alreadyEnded.push(
-        `${change.head.slice(0, 12)} already ended withdrawn (replaced): the branch moved on to ${branchHead.slice(0, 12)}`,
-      )
-      continue
-    }
-    const one = await withdrawOne(git, remote, queue, ref, change, request)
+    const one = await withdrawOne(git, remote, queue, ref, change, branchHead, request)
     if ("record" in one) withdrawn.push({ branch: change.branch, head: change.head, record: one.record })
     else alreadyEnded.push(one.ended)
   }
@@ -102,7 +96,10 @@ export async function withdraw(git: Git, remote: string, request: WithdrawReques
 /**
  * End one change ref, or report the ending it already stands on. The fetch
  * before every read keeps the judgement on the remote's truth, never a stale
- * local mirror; the lease keeps the push honest about it.
+ * local mirror; the lease keeps the push honest about it. Records are read
+ * FIRST and the branch second, in the reader's own order (state.ts): a
+ * recorded ending is what the change is, and only a chain with no record is
+ * judged by where its branch points.
  */
 async function withdrawOne(
   git: Git,
@@ -110,6 +107,7 @@ async function withdrawOne(
   queue: string,
   ref: string,
   change: Change,
+  branchHead: string | undefined,
   request: WithdrawRequest,
 ): Promise<Readonly<{ record: string }> | Readonly<{ ended: string }>> {
   await git(["fetch", "--quiet", remote, `+${ref}:${ref}`])
@@ -124,6 +122,17 @@ async function withdrawOne(
           ` at ${stands.sha.slice(0, 12)} and only a new submit re-opens it`,
       }
     }
+    // No record: the branch decides, in the reader's own order (state.ts) —
+    // a head the branch no longer carries already reads withdrawn by
+    // derivation, and the next run records that itself.
+    if (branchHead === undefined) {
+      return { ended: `${change.head.slice(0, 12)} already ended withdrawn (deleted): the branch is gone` }
+    }
+    if (branchHead !== change.head) {
+      return {
+        ended: `${change.head.slice(0, 12)} already ended withdrawn (replaced): the branch moved on to ${branchHead.slice(0, 12)}`,
+      }
+    }
     const subject = `${request.by} withdrew ${change.branch} from ${queue}${
       request.reason === undefined ? "" : `: ${request.reason}`
     }`
@@ -133,7 +142,7 @@ async function withdrawOne(
       change,
       kind: "withdrawn",
       subject,
-      trailers: [["By", request.by], ...(request.reason === undefined ? [] : ([["Reason", request.reason]] as const))],
+      trailers: [["By", request.by], ...(request.reason === undefined ? [] : ([["Note", request.reason]] as const))],
     }
     const record = await recordCommit(git, write, onto)
     try {

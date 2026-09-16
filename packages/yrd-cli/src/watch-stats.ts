@@ -74,7 +74,7 @@ export type RowVerdict = RowDecision | typeof UNCLASSIFIED
  *    `<code>: …` with that code in `reason` — is a stuck run; any other
  *    sentence is {@link UNCLASSIFIED}, counted apart, never stuck;
  * 3. no `result`: the change's `state` when it is a decision (a replaced or
- *    deleted change reads failed with no run of its own), else nothing.
+ *    deleted change reads withdrawn with no run of its own), else nothing.
  * `runRow` (queue core, table.ts) writes exactly these fields from a journal
  * run, so a split row answers as that run and an unsplit row as its change.
  */
@@ -151,9 +151,13 @@ export function verdictOfRow(item: WatchRow): RowVerdict | undefined {
   if (run !== undefined) {
     const decision = run.decision
     // The records a run writes about a change: `opened` and `sent` are not
-    // verdicts (the opening, and the notice delivered after an ending); the
-    // four verdicts count; any other word is one this reader does not know.
-    if (decision === undefined || decision === "opened" || decision === "sent") return undefined
+    // verdicts (the opening, and the notice delivered after an ending), and
+    // neither is `withdrawn` (a submission taken out of the line judged no
+    // content, @i/10-yrd/24492); the four verdicts count; any other word is
+    // one this reader does not know.
+    if (decision === undefined || decision === "opened" || decision === "sent" || decision === "withdrawn") {
+      return undefined
+    }
     if (decision !== "merged" && decision !== "failed" && decision !== "stuck" && decision !== "checked") {
       return UNCLASSIFIED
     }

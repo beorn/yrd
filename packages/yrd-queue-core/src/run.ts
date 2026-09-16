@@ -1935,8 +1935,9 @@ async function endFailing(
 
 /**
  * A change whose branch is gone, or whose branch moved off its head, ends
- * failed with the reason `deleted` or `replaced` and no message: the
- * submitter did it (§ The change). Written once; a change that already ended
+ * withdrawn with the reason `deleted` or `replaced` and no message: the
+ * submitter did it (§ The change), and it is the one word the reader already
+ * derived for it (@i/10-yrd/24492). Written once; a change that already ended
  * is left as it ended.
  */
 async function retire(run: Run, entry: QueueEntry): Promise<void> {

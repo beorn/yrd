@@ -98,7 +98,7 @@ export function headlineOf(row: Row, joinedRun = false): string {
   if (row.live !== undefined) return notice.word.replace(/^change /u, "")
   if (joinedRun && notice.cause !== undefined) return `${notice.word}, ${notice.cause}`
   if (
-    (row.state === "failed" || row.state === "stuck") &&
+    (row.state === "failed" || row.state === "stuck" || row.state === "withdrawn") &&
     row.reason !== undefined &&
     !notice.word.includes(row.reason)
   ) {

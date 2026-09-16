@@ -1896,13 +1896,15 @@ function readOutput(check: CheckView): CheckPanel {
  * The code a watched set of changes ended with, or undefined while any of them
  * is still in line. It is `yrd check`'s own ladder — stuck beats failed beats
  * merged — because a watch is the same question asked over time, and the two
- * answering differently for one change is the whole failure this mirrors.
+ * answering differently for one change is the whole failure this mirrors. A
+ * withdrawn change stands on the failed rung: it did not land, and the next
+ * move is its submitter's (@i/10-yrd/24492).
  */
 function endingCode(rows: readonly WatchRow[]): YrdCliExitCode | undefined {
   const states = rows.map((row) => row.row.state)
   if (states.some((state) => state === "queued" || state === "checked")) return undefined
   if (states.some((state) => state === "stuck")) return 2
-  if (states.some((state) => state === "failed")) return 1
+  if (states.some((state) => state === "failed" || state === "withdrawn")) return 1
   return 0
 }
 

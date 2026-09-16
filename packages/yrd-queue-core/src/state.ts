@@ -20,7 +20,7 @@
  * a later opened record — a resubmit retry — re-opens the chain
  * (@i/10-yrd/24635).
  *
- * **Ancestry wins over any record — for a change with no failed ending.** A
+ * **Ancestry wins over any record — for a change with no failed or withdrawn ending.** A
  * change whose head is on the target reads merged even when no merged record
  * was ever written — a direct merge in the garage still shows as merged, and a
  * queue run never re-checks content the target already carries. Measured
@@ -192,9 +192,10 @@ export function openedAt(change: ChangeRecords): number {
 }
 
 /**
- * A failed record's `Reason` (a check's name, conflict, config-invalid,
- * unrelated-history, replaced, deleted). A stuck record has
- * the complete incident shape instead, and its code is read above.
+ * A failed or withdrawn record's `Reason` (a check's name, conflict,
+ * config-invalid, unrelated-history, replaced, deleted) — a vocabulary, never
+ * free text: an operator's withdraw writes its words as `Note:`. A stuck
+ * record has the complete incident shape instead, and its code is read above.
  */
 function reasonOf(record: ChangeRecord): string | undefined {
   return record.trailers.find(([name]) => name === "Reason")?.[1]
@@ -237,6 +238,11 @@ export function nextOwner(
     case "failed":
       return {
         because: `it failed${reading.reason === undefined ? "" : ` (${reading.reason})`}, and only the branch's author can move it`,
+        owner: about.submitter ?? "the submitter",
+      }
+    case "withdrawn":
+      return {
+        because: `it was withdrawn${reading.reason === undefined ? "" : ` (${reading.reason})`}; resubmitting the branch re-opens it`,
         owner: about.submitter ?? "the submitter",
       }
     case "stuck":

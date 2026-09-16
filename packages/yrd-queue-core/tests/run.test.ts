@@ -2788,7 +2788,10 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     )
     expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
     expect(trailer(records[1]!, "By")).toBe("@chief")
-    expect(trailer(records[1]!, "Reason")).toBe("superseded by task/two")
+    // The operator's words are content: a Note, never the Reason vocabulary
+    // the reader and the run branch on.
+    expect(trailer(records[1]!, "Note")).toBe("superseded by task/two")
+    expect(trailer(records[1]!, "Reason")).toBeUndefined()
   })
 
   it("refuses a change whose chain already ended, naming the ending", async () => {
@@ -2800,6 +2803,28 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     await expect(withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET })).rejects.toThrow(
       /already ended merged/u,
     )
+  })
+
+  it("reports a merged change as merged, never withdrawn, once its branch has moved on", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    expect((await queueRun(await w.options({ exit: 0 }))).merged).toEqual(["task/one"])
+    // The ordinary push after a merge: the branch moves on, the head stays merged.
+    await w.git(["checkout", "--quiet", "task/one"])
+    writeFileSync(join(w.work, "after.txt"), "after\n")
+    await w.git(["add", "after.txt"])
+    await w.git(["commit", "--quiet", "-m", "after"])
+    await w.git(["push", "--quiet", "origin", "task/one"])
+    await w.git(["checkout", "--quiet", "main"])
+
+    const refused = await withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET }).then(
+      () => "withdrew",
+      (error: unknown) => String(error),
+    )
+
+    // The record is read before the branch, in the reader's own order.
+    expect(refused).toMatch(/already ended merged at [0-9a-f]{12}/u)
+    expect(refused).not.toMatch(/withdrawn \(replaced\)/u)
   })
 
   it("refuses a branch with no change at all, and says where it looked", async () => {

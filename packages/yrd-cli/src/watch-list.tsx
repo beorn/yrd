@@ -92,6 +92,8 @@ export function changesSuffix(row: Row): Readonly<{ text: string; color: string 
   if (row.live !== undefined) return { color: "$fg-info", text: row.live.check }
   if (row.state === "failed" && row.reason !== undefined) return { color: "$fg-error", text: `err=${row.reason}` }
   if (row.state === "stuck" && row.reason !== undefined) return { color: "$fg-warning", text: `stuck=${row.reason}` }
+  if (row.state === "withdrawn" && row.reason !== undefined)
+    return { color: "$fg-muted", text: `withdrawn=${row.reason}` }
   return undefined
 }
 

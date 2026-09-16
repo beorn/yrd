@@ -640,13 +640,14 @@ function Table({
 
 /**
  * The code every watched change ended with, or undefined while any is still in
- * line — `yrd check`'s own ladder, where stuck beats failed beats merged.
+ * line — `yrd check`'s own ladder, where stuck beats failed beats merged, and
+ * a withdrawn change stands on the failed rung (@i/10-yrd/24492).
  */
 function endingOf(rows: readonly WatchRow[]): 0 | 1 | 2 | undefined {
   const states: readonly Row["state"][] = rows.map((row) => row.row.state)
   if (states.length === 0) return undefined
   if (states.some((state) => state === "queued" || state === "checked")) return undefined
   if (states.some((state) => state === "stuck")) return 2
-  if (states.some((state) => state === "failed")) return 1
+  if (states.some((state) => state === "failed" || state === "withdrawn")) return 1
   return 0
 }
