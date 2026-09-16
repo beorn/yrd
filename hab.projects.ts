@@ -22,13 +22,14 @@ export type YrdQueueRunnerDeclaration = Readonly<{
 }>
 
 export const yrdQueueRunnerDeclarations: readonly YrdQueueRunnerDeclaration[] = Object.freeze([
-  // OWNER, changed 2026-09-11 on @cto's own recommendation. Item 5 of
-  // @i/10-yrd/24395 made this declaration bite: before it, an unhealthy page
-  // went to the fleet default whatever this said, so a misdeclaration here cost
-  // nothing. Now it decides who is woken. @cto authors nothing and cannot
-  // unstick a round; the cure for a stuck queue is queue operation, so the page
-  // goes to the seat that can act on it.
-  { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@ci" },
+  // OWNER, changed 2026-09-16 by the andon design (@cto, approved by the
+  // operator). Item 5 of @i/10-yrd/24395 made this declaration bite: it decides
+  // who is woken. A stuck change now STOPS THE LINE, and the page stays open
+  // until an act lifts the stop — withdraw the change, merge its fix, or resume
+  // the repaired queue. Deciding which is a stop-line call, and @chief owns the
+  // stop-line; it was @ci while a stuck round retried itself on a ladder and the
+  // page cleared on its own.
+  { serviceName: "yrd-service", repository: { name: "code", path: "." }, queue: { base: "main" }, owner: "@chief" },
 ])
 
 export default {
@@ -66,21 +67,21 @@ export default {
         // round, so there is exactly one opinion and it is the loop's. No
         // network, no declaration read, no judgement of the queue.
         //
-        // This is where the stuck ALARM now lives. A stuck round used to end
-        // the process, which made the alarm and the stop one event and took
-        // delivery offline with relaunch disabled for a fault the next round
-        // would have cleared. Now a stuck round leaves an unhealthy document,
-        // the supervisor pages on unhealthy-while-running WITHOUT restarting,
-        // and it drops the page by itself when a round comes back clear.
+        // This is where the stuck ALARM lives. A stuck change stops the line —
+        // the queue pauses itself naming it — and the service stays up holding
+        // the stop, so the supervisor pages on unhealthy-while-running WITHOUT
+        // restarting. The page clears when an act lifts the stop (the change
+        // withdrawn or merged, or `yrd queue resume`), never by itself.
         health: { command: "bun tools/yrd-runtime.mjs yrd queue health" },
         // The loop relaunches only after an ending it chose: 0 for a clean
-        // round/gitlink recycle, or 1 for a candidate failure. Exit 2 is now
-        // reserved for what NO round can fix — a declaration that is absent or
-        // unreadable, a runtime gitlink that is absent — so it stays off the
-        // allowlist and still pages non-relaunchable.
+        // round/gitlink recycle, or 1 for a candidate failure. Exit 2 is
+        // reserved for what the loop cannot hold a line on — a declaration that
+        // is absent or unreadable, a runtime gitlink that is absent, a round
+        // that could not read its queue at all — so it stays off the allowlist
+        // and still pages non-relaunchable.
         // Signal decision: any signal observed by Hab is an unplanned host-level
-        // interruption, so it stays down and pages the declared owner — @ci
-        // today — with every unlisted code.
+        // interruption, so it stays down and pages the declared owner with every
+        // unlisted code.
         restart: "on-codes" as const,
         relaunchExitCodes: [0, 1],
         // 24147: eligibility lives on the service, never the /garage table.
@@ -91,8 +92,9 @@ export default {
         },
         // `HabServiceDefinition.owner` is a recognized service key in
         // ag/packages/hab-config. Spreading the registry row's owner here makes
-        // a terminal-ending andon page reach the declared owner — @ci today —
-        // instead of falling back to the fleet-wide @chief default.
+        // every page of this service — the stopped line's and a terminal
+        // ending's — reach the declared owner, named rather than left to the
+        // fleet-wide default.
         owner,
       },
     ]),

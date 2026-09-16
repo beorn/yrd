@@ -1,8 +1,12 @@
 /**
- * @failure `yrd queue pause --help` and `resume --help` describe only checking
- *          and merging, and say nothing about ADMISSION — while the only place
- *          the pause is actually ENFORCED is `submit`. Two readers built
- *          opposite plans on that silence.
+ * @failure `yrd queue pause --help` and `resume --help` say one thing about
+ *          SUBMISSIONS while the queue does another. Once, the help was silent
+ *          and the queue refused; two readers built opposite plans on that
+ *          silence and the fleet's queue sat down for thirteen minutes
+ *          (2026-09-11). Since the andon (operator 2026-09-16) a stopped line
+ *          ACCEPTS submissions — they wait behind the stop — so help that still
+ *          promised a refusal would send a submitter to wait for a resume that
+ *          nothing needs.
  * @level   l1 (pure help rendering, no queue and no network)
  * @consumer anyone planning work around a paused queue
  */
@@ -44,31 +48,25 @@ function description(text: string): string {
 }
 
 /**
- * A pause refuses `submit` — `requireResumed` is called from exactly one place,
- * `submit.ts`, and the refusal's own text already says "to admit and merge work
- * again". The help said only "checking and merging", so a plan of the shape
- * "submit while paused, resume when it lands" reads as supported and deadlocks:
- * the submit is refused by the very pause that is waiting for it.
- *
- * Measured 2026-09-11: thirteen minutes of fleet-wide queue downtime, two
- * readers, one sentence.
+ * A pause stops checking and merging and ADMITS submissions: `submit` reads the
+ * stop only to echo it (who, why, and what lifts it). The help must say both
+ * halves, in the words a planner reads before choosing to wait.
  */
-describe("the pause help says what a pause actually refuses", () => {
+describe("the pause help says what a pause does to submissions", () => {
   // Matched on the PROMISE, not on a keyword. A bare /submit|admit/ alternation
-  // passes on any sentence that happens to contain the word — mutation control
-  // caught exactly that: stripping "refuse new submissions" left a later clause
-  // mentioning submit, and the test stayed green over a description that no
-  // longer said what a pause does.
-  it("pause states that submissions are REFUSED, not only that checking and merging stop", async () => {
+  // passes on any sentence that happens to contain the word, and mutation
+  // control caught exactly that on 2026-09-11.
+  it("pause states that submissions are still ACCEPTED while checking and merging stop", async () => {
     const text = description(await help("queue", "pause"))
-    expect(text).toMatch(/refuses?\s+new\s+submissions/iu)
+    expect(text).toMatch(/accepts?\s+(new\s+)?submissions/iu)
+    expect(text).not.toMatch(/refuses?\s+(new\s+)?submissions/iu)
     expect(text).toContain("checking and merging")
   })
 
-  it("resume states that submissions are ADMITTED again, so the pair reads the same way", async () => {
+  it("resume states that checking and merging start again, and never that submissions were refused", async () => {
     const text = description(await help("queue", "resume"))
-    expect(text).toMatch(/admits?\s+submissions|admit\s+submissions/iu)
     expect(text).toContain("checking and merging")
+    expect(text).not.toMatch(/admits?\s+submissions\s+again/iu)
   })
 
   it("NEGATIVE CONTROL: a command a pause does NOT refuse says nothing about admission", async () => {

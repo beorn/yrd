@@ -74,7 +74,7 @@ const QUEUE_HELP = "a branch at origin or <repo>#<branch> address; defaults to o
 const SUBMIT_HELP: [string, string][] = [
   [
     "1. Inspect",
-    "read this branch and fetch the configured target's advertised commit objects without pulling or integrating; refuse the target branch or a paused queue",
+    "read this branch and fetch the configured target's advertised commit objects without pulling or integrating; refuse the target branch; a stopped line still accepts the change, and says who stopped it and what lifts it",
   ],
   ["2. Validate", "require shared history and the captured target in this branch; refuse stale branches by default"],
   [
@@ -184,13 +184,13 @@ function buildProgram(
   queue
     .command("pause")
     .description(
-      "refuse new submissions AND stop checking and merging, while the service keeps the queue visible; " +
-        "submit is the command a pause actually refuses, so work cannot be queued up during one",
+      "stop checking and merging, while the service keeps the queue visible; the line still accepts new " +
+        "submissions, which wait in line behind the stop and are judged once it is resumed",
     )
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who paused the queue")
     .option("--queue <value>", QUEUE_HELP)
-    .requiredOption("--reason <text>", "why submissions are refused and checking and merging are paused")
+    .requiredOption("--reason <text>", "why checking and merging are paused")
     .action(async (options) => {
       const declared = options as PauseOptions & { reason: string }
       const location = await resolveQueueLocation(cwd(), declared.queue, env)
@@ -221,9 +221,10 @@ function buildProgram(
     .addHelpSection(
       "On withdraw:",
       "Appends a withdrawn record to the change - an ending like merged or failed - so the queue drops the " +
-        "change from the line and never judges it again; resubmitting the branch re-opens it. The other way " +
-        "out of the line is the submitter's: replace the branch with a head that clears the stuck reason - " +
-        "resubmitting the same content sticks on the same ground.",
+        "change from the line and never judges it again; resubmitting the branch re-opens it. Withdrawing the " +
+        "change a stuck stop names lifts that stop, and the line behind it runs again. The other way out of the " +
+        "line is the submitter's: replace the branch with a head that clears the stuck reason - resubmitting " +
+        "the same content sticks on the same ground.",
     )
     .action(async (branch, options) => {
       const declared = options as PauseOptions
@@ -252,7 +253,10 @@ function buildProgram(
     })
   queue
     .command("resume")
-    .description("admit submissions again immediately, and resume checking and merging on the next service interval")
+    .description(
+      "resume checking and merging on the next service interval; a stop the queue put on a stuck change also " +
+        "lifts when that change is withdrawn or merged",
+    )
     .option("--json", "emit stable JSON")
     .option("--notify <seat>", "name who resumed the queue")
     .option("--queue <value>", QUEUE_HELP)

@@ -23,7 +23,6 @@ import {
   appendRecord,
   changeRef,
   gitIn,
-  nextStuckStreak,
   readConfig,
   readRecords,
   readRemoteCommit,
@@ -34,11 +33,10 @@ import {
   watchRows,
   type Git,
   type QueueHealthDocument,
-  type QueueRunOutcome,
   type GitRunner,
 } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
-import { coreQueueCommand, openDetail, readListing, roundFacts } from "../src/queue-core-commands.ts"
+import { coreQueueCommand, openDetail, readListing } from "../src/queue-core-commands.ts"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
@@ -403,7 +401,11 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(records(run)[0]).toMatchObject({ issue: "24472", issueSource: "legacy-branch" })
   })
 
-  it("pause is visible, refuses live and dry-run submit, and resume admits the same branch", async () => {
+  // THE OPERATOR'S CONDITION (2026-09-16): submits are accepted while the line
+  // is stopped, echoing who stopped it, why, and what lifts it. This case used
+  // to assert the refusal; its subject — what a pause does to a submit, said
+  // where the submitter reads it — is unchanged.
+  it("pause is visible, submit is accepted with the pause echoed, and resume lets the queue take it", async () => {
     const w = await world()
     await w.git(["checkout", "--quiet", "-b", "task/one", "main"])
     writeFileSync(join(w.work, "one.txt"), "one\n")
@@ -421,7 +423,12 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         { json: true, workdir: w.workdir },
       ),
     ).toBe(0)
-    expect(records(opened)[0]).toMatchObject({ by: "@chief", kind: "paused", reason: "49 new failures on main" })
+    expect(records(opened)[0]).toMatchObject({
+      by: "@chief",
+      cause: "operator",
+      kind: "paused",
+      reason: "49 new failures on main",
+    })
 
     const duplicatePause = capture(w.work)
     expect(
@@ -436,20 +443,22 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(duplicatePause.stderr()).toContain("49 new failures on main")
 
     for (const dryRun of [true, false]) {
-      const refused = capture(w.work)
+      const accepted = capture(w.work)
       expect(
         await coreQueueCommand(
           w.work,
-          refused.io,
+          accepted.io,
           { branch: "task/one", command: "submit", dryRun, submitter: "@dev/2" },
           { workdir: w.workdir },
         ),
-      ).toBe(1)
-      expect(refused.stderr()).toContain("paused by @chief")
-      expect(refused.stderr()).toContain("49 new failures on main")
-      expect(refused.stderr()).toContain("yrd queue resume")
+        accepted.stderr(),
+      ).toBe(0)
+      expect(accepted.stderr()).toContain("paused by @chief")
+      expect(accepted.stderr()).toContain("49 new failures on main")
+      expect(accepted.stderr()).toContain("yrd queue resume")
     }
-    expect(await w.git(["ls-remote", "--heads", "origin", "task/one"])).toBe("")
+    const ref = changeRef("main", { branch: "task/one", head })
+    expect(await w.git(["ls-remote", "--refs", "origin", ref])).toContain(ref)
 
     const listed = capture(w.work)
     expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
@@ -464,8 +473,9 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,
     )
-    expect(records(listedJson)[0]).toMatchObject({
-      changes: [],
+    const pausedList = records(listedJson)[0]
+    expect(pausedList).toMatchObject({
+      changes: [{ branch: "task/one" }],
       pause: { by: "@chief", kind: "paused", reason: "49 new failures on main" },
     })
 
@@ -478,41 +488,24 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         { workdir: w.workdir },
       ),
     ).toBe(0)
-    const submitted = capture(w.work)
-    expect(
-      await coreQueueCommand(
-        w.work,
-        submitted.io,
-        { branch: "task/one", command: "submit", submitter: "@dev/2" },
-        { workdir: w.workdir },
-      ),
-    ).toBe(0)
     const listedResumed = capture(w.work)
     expect(
       await coreQueueCommand(w.work, listedResumed.io, { command: "list" }, { json: true, workdir: w.workdir }),
     ).toBe(0)
     const resumedList = records(listedResumed)[0]
     expect(resumedList).toMatchObject({ changes: [{ branch: "task/one" }], pause: null })
-    const ref = changeRef("main", { branch: "task/one", head })
+    expect(resumedList?.changes).toEqual(pausedList?.changes)
+
+    // A retry on a paused line is accepted too, and appends to the change it retries.
     const beforeRetry = await w.git(["ls-remote", "--refs", "origin", ref])
-    const pausedAgain = capture(w.work)
     expect(
       await coreQueueCommand(
         w.work,
-        pausedAgain.io,
-        { by: "@chief", command: "pause", reason: "retry must wait too" },
+        capture(w.work).io,
+        { by: "@chief", command: "pause", reason: "retry arrives while paused" },
         { workdir: w.workdir },
       ),
     ).toBe(0)
-    const listedPausedAgain = capture(w.work)
-    expect(
-      await coreQueueCommand(w.work, listedPausedAgain.io, { command: "list" }, { json: true, workdir: w.workdir }),
-    ).toBe(0)
-    const pausedAgainList = records(listedPausedAgain)[0]
-    expect(pausedAgainList).toMatchObject({
-      pause: { by: "@chief", kind: "paused", reason: "retry must wait too" },
-    })
-    expect(pausedAgainList?.changes).toEqual(resumedList?.changes)
     const retried = capture(w.work)
     expect(
       await coreQueueCommand(
@@ -521,9 +514,9 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
         { branch: "task/one", command: "submit", submitter: "@dev/2" },
         { workdir: w.workdir },
       ),
-    ).toBe(1)
-    expect(retried.stderr()).toContain("retry must wait too")
-    expect(await w.git(["ls-remote", "--refs", "origin", ref])).toBe(beforeRetry)
+    ).toBe(0)
+    expect(retried.stderr()).toContain("retry arrives while paused")
+    expect(await w.git(["ls-remote", "--refs", "origin", ref])).not.toBe(beforeRetry)
   })
 
   // Accepted: a legacy protected declaration and its absent successor cannot
@@ -1588,6 +1581,45 @@ describe("yrd queue show, one change's evidence", () => {
  * a CONDITION here, exactly as a code host being unreachable is, and the test
  * clears the condition at the moment it wants to.
  */
+/**
+ * A setup that fails while its marker exists with a line that is NOT a
+ * transport signature, so the queue reads a broken repository rather than an
+ * outage: stuck, and never retried. Every run is counted, so a case can say
+ * how many judgements the queue made.
+ */
+function brokenSetup(dir: string): Readonly<{ command: string; clear: () => void; runs: () => number }> {
+  const marker = join(dir, "setup-broken")
+  const counter = join(dir, "setup-runs.log")
+  const script = join(dir, "broken-setup.sh")
+  writeFileSync(marker, "the lockfile does not match\n")
+  writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      `echo "$(pwd)" >> ${counter}`,
+      `if [ -f ${marker} ]; then`,
+      "  echo 'error: lockfile had changes, but lockfile is frozen' >&2",
+      "  exit 1",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"),
+  )
+  chmodSync(script, 0o755)
+  return {
+    command: script,
+    clear: () => rmSync(marker, { force: true }),
+    runs: () => {
+      try {
+        return readFileSync(counter, "utf8").split("\n").filter(Boolean).length
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0
+        throw error
+      }
+    },
+  }
+}
+
 function faultySetup(dir: string): Readonly<{ command: string; clear: () => void }> {
   const marker = join(dir, "code-host-unreachable")
   const script = join(dir, "faulty-setup.sh")
@@ -1690,15 +1722,16 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     expect(ranRun.stderr()).toContain("stuck task/stuck:")
     expect(ranRun.stderr()).toContain(cure)
 
-    // AC3: `up`, pointed at the same still-stuck change, CLASSIFIES exactly as
-    // `run` just did — it names the same branch and the same cure.
+    // AC3: `up`, pointed at the same still-stuck change, names the same branch
+    // and the same cure.
     //
-    // What it no longer does is exit (@i/10-yrd/24395). This block used to
-    // assert exit 2, and that assertion was the defect written down: it made
-    // the stuck ALARM and the service STOP one event, so a routine recoverable
-    // fault took delivery offline with relaunch disabled. The round is stuck;
-    // the loop is not. 24141's subject — the three commands agreeing on the
-    // branch and the cure — is untouched, and is what is asserted here.
+    // It does so without judging it again: `run` stopped the line (the andon,
+    // operator 2026-09-16), so every `up` round HOLDS the stop, and the branch
+    // and the cure arrive on the stop's own line and on the page. This block
+    // once asserted exit 2, then (@i/10-yrd/24395) a backoff ladder climbing
+    // across stuck rounds; both were the step-over written down. 24141's
+    // subject — the three commands agreeing on the branch and the cure — is
+    // what is asserted here.
     const ranUp = capture(w.work)
     const stop = new AbortController()
     const documents: QueueHealthDocument[] = []
@@ -1719,13 +1752,11 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
         { workdir: w.workdir },
       ),
     ).toBe(0)
-    expect(ranUp.stderr()).toContain("stuck task/stuck:")
+    expect(ranUp.stderr()).toContain("task/stuck")
     expect(ranUp.stderr()).toContain(cure)
-    // The alarm the exit used to carry, now carried by the document — and the
-    // ladder proves the loop treated these as two rounds, not one.
     expect(documents.map((document) => document.state)).toEqual(["unhealthy", "unhealthy"])
-    expect(documents.map((document) => document.facts?.stuckRounds)).toEqual([1, 2])
     expect(documents[0]?.error?.cause).toContain("task/stuck")
+    expect(documents[0]?.error?.resolution.join("\n")).toContain(cure)
     expect(documents[0]?.verdict).toEqual({ kind: "running" })
     // And the same document is on disk where the declared probe reads it.
     expect(await readQueueHealth(w.workdir, SERVICE)).toEqual(documents[1])
@@ -1860,28 +1891,29 @@ describe("yrd watch's own detail pane (openDetail), one change's evidence", () =
 })
 
 /**
- * @failure  A stuck round ends the SERVICE. The stuck alarm and the stop are one
- *           event, so a routine, recoverable, submitter-independent fault — a
- *           code-host 504 during setup — takes the only fleet delivery mechanism
- *           offline with automatic relaunch disabled, and delivery stays down
- *           until a person notices. Measured 2026-09-11: run
- *           q-20260911T063507008Z-500ae413, about 24 minutes down for a fault the
- *           next round cleared (@i/10-yrd/24395, @cto ruling).
+ * @failure  A stuck change is stepped over by the service: the loop re-runs the
+ *           fault on a backoff ladder, the page promises to clear itself when a
+ *           round comes back clear, and a fault that clears by itself resumes
+ *           the line with nobody having looked. The operator's ruling
+ *           (2026-09-16) is the andon: STUCK means fail loud and fix — the line
+ *           stops, the service stays up and pages, and only an act lifts it
+ *           (@i/10-yrd/a-unattended/stuck-stops-the-line).
  * @level    l2 (a real remote and a clone under a temporary root; the loop driven
  *           directly, no process boundary)
  * @consumer the supervisor, which reads the declared health probe and pages on
- *           unhealthy-while-running without restarting · everyone waiting on a
- *           change behind a transient fault
+ *           unhealthy-while-running without restarting · the seat that page wakes
  */
-describe("a stuck round ends the round, not the service (@i/10-yrd/24395)", () => {
+describe("a stuck change stops the line; the service stays up and pages (the andon, operator 2026-09-16)", () => {
   /** One change waiting in the line, so a round has something to merge. */
-  async function oneChange(w: World, branch: string): Promise<void> {
+  async function oneChange(w: World, branch: string): Promise<string> {
     await w.git(["checkout", "--quiet", "-b", branch, "main"])
     writeFileSync(join(w.work, `${branch.replace("/", "-")}.txt`), "work\n")
     await w.git(["add", "-A"])
     await w.git(["commit", "--quiet", "-m", branch])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
     await w.git(["checkout", "--quiet", "main"])
     await submit(w.git, "origin", { branch, submitter: "@dev/4", target: { branch: "main", remote: "origin" } })
+    return head
   }
 
   /** Catch the local clone up to a target the service has since advanced. */
@@ -1890,14 +1922,14 @@ describe("a stuck round ends the round, not the service (@i/10-yrd/24395)", () =
     await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
   }
 
-  // ACCEPTANCE (a) and (b): the process never exits, a later round merges, and
-  // the probe reads unhealthy then healthy — which is exactly the pair the
-  // supervisor turns into a page and then drops, with no restart between them.
-  it("survives a setup fault, merges once it clears, and its health goes unhealthy then healthy", async () => {
+  // ACCEPTANCE: one round judges the stuck change and stops the line; every
+  // later round holds it — no setup runs again, nothing is judged or merged —
+  // while the process stays alive and the page stays open with the cures.
+  it("one round judges the stuck change, later rounds hold the line, and the page names the cures", async () => {
     const w = await world()
-    const fault = faultySetup(w.workdir)
+    const fault = brokenSetup(w.workdir)
     await redeclare(w, `setup: ${fault.command}\n`)
-    await oneChange(w, "task/after-the-fault")
+    const head = await oneChange(w, "task/stuck")
 
     const run = capture(w.work)
     const stop = new AbortController()
@@ -1911,42 +1943,127 @@ describe("a stuck round ends the round, not the service (@i/10-yrd/24395)", () =
         stop: stop.signal,
         afterHealth: (document) => {
           seen.push(document)
-          // The outage ends after the service has already been stuck by it —
-          // so the recovery is the loop's, not the fixture's timing.
-          if (seen.length === 2) fault.clear()
-          if (document.state === "healthy") stop.abort()
+          // Three rounds: the one that stuck, and two intervals of holding.
+          if (seen.length === 3) stop.abort()
         },
       },
-      // `json: true` so the rounds this test reads back are machine-readable;
-      // the stuck lines it does not read stay on stderr either way.
       { json: true, workdir: w.workdir },
     )
 
-    // Exit 0: the loop was STOPPED, never ended by the fault. Before this
-    // change the first stuck round returned 2 and the service went down.
+    // Exit 0: the loop was STOPPED by the test, never ended by the fault.
+    expect(exit, run.stderr()).toBe(0)
+    // ONE judgement: the candidate's setup and its settled base's, and nothing after.
+    expect(fault.runs()).toBe(2)
+    const rounds = records(run)
+    expect(rounds).toHaveLength(3)
+    expect(rounds[0]).toMatchObject({ exitCode: 2, merged: [], stuck: ["task/stuck"] })
+    for (const later of rounds.slice(1)) {
+      expect(later).toMatchObject({
+        merged: [],
+        stuck: [],
+        stopped: { ring: "pause", what: { cause: "stuck", change: { branch: "task/stuck", head } } },
+      })
+    }
+    // THE PAGE, every round, and never one that promises to clear by itself.
+    expect(seen.map((document) => document.state)).toEqual(["unhealthy", "unhealthy", "unhealthy"])
+    for (const document of seen) {
+      expect(document.verdict).toEqual({ kind: "running" })
+      expect(document.error?.code).toBe("queue-round-stuck")
+      expect(document.error?.cause).toContain(`task/stuck@${head}`)
+      const body = document.error?.resolution.join("\n") ?? ""
+      expect(body).toContain("yrd queue withdraw task/stuck")
+      expect(body).toContain("clears this reason")
+      expect(body).toContain("yrd queue resume")
+      expect(body).not.toMatch(/clears on its own|next round|resets the spacing/u)
+      expect(document.facts).toMatchObject({ stopped: { by: "yrd", cause: "stuck", change: `task/stuck@${head}` } })
+      expect(document.facts?.stuckRounds).toBeUndefined()
+    }
+    expect(await readQueueHealth(w.workdir, SERVICE)).toEqual(seen.at(-1))
+  })
+
+  // NO TIMER EVER RESUMES A STOPPED LINE. The fault clears while the line is
+  // stopped, and the line stays stopped; `yrd queue resume` is the act, the
+  // page clears on it, and the change merges in the round after.
+  it("a fault that clears does not resume the line by itself; resume does, and the next round merges", async () => {
+    const w = await world()
+    const fault = brokenSetup(w.workdir)
+    await redeclare(w, `setup: ${fault.command}\n`)
+    await oneChange(w, "task/after-the-fault")
+
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterHealth: async (document) => {
+          seen.push(document)
+          if (seen.length === 1) fault.clear()
+          if (seen.length === 3) {
+            const resumed = capture(w.work)
+            expect(
+              await coreQueueCommand(
+                w.work,
+                resumed.io,
+                { by: "@chief", command: "resume", reason: "setup repaired" },
+                { workdir: w.workdir },
+              ),
+            ).toBe(0)
+          }
+          if (document.state === "healthy") stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+
     expect(exit, run.stderr()).toBe(0)
     const states = seen.map((document) => document.state)
-    expect(states.length, JSON.stringify(states)).toBeGreaterThanOrEqual(3)
-    expect(states.slice(0, 2)).toEqual(["unhealthy", "unhealthy"])
+    expect(states.slice(0, 3), JSON.stringify(states)).toEqual(["unhealthy", "unhealthy", "unhealthy"])
     expect(states.at(-1)).toBe("healthy")
-    expect(states.slice(0, -1).every((state) => state === "unhealthy")).toBe(true)
-    // unhealthy + RUNNING is the combination that pages without a restart. A
-    // stuck round reporting `stopped` would be claiming the loop had died.
-    expect(seen[0]?.verdict).toEqual({ kind: "running" })
-    expect(seen[0]?.error?.code).toBe("queue-round-stuck")
-    // The ladder climbed while the fault held: proof these were separate rounds.
-    expect(seen[0]?.facts?.stuckRounds).toBe(1)
-    expect(seen[1]?.facts?.stuckRounds).toBe(2)
-    // The page clears because the document says healthy, not because anything
-    // restarted: same process, same loop, a later round.
-    expect(seen.at(-1)?.error).toBeUndefined()
-    expect(seen.at(-1)?.verdict).toEqual({ kind: "running" })
-    // And a round did the work the stuck ones could not.
-    const merged = records(run).filter((row) => Array.isArray(row.merged) && (row.merged as unknown[]).length > 0)
+    // The cleared fault ran nothing while the line was stopped.
+    expect(fault.runs()).toBeGreaterThanOrEqual(2)
+    const rounds = records(run)
+    const merged = rounds.filter((row) => Array.isArray(row.merged) && (row.merged as unknown[]).length > 0)
     expect(merged, run.stdout()).toHaveLength(1)
     expect(merged[0]?.merged).toEqual(["task/after-the-fault"])
-    // The declared probe reads the same document off disk that the loop wrote.
-    expect(await readQueueHealth(w.workdir, SERVICE)).toEqual(seen.at(-1))
+    // Only after the resume: the three rounds before it held the line.
+    expect(rounds.indexOf(merged[0]!)).toBeGreaterThanOrEqual(3)
+  })
+
+  // What no round can fix still ends the service: a round that cannot even
+  // read its queue has no change to stop the line on, so the loop has nothing
+  // to hold and ends 2, which stays down and pages non-relaunchable.
+  it("a round that cannot read its own queue ends the service with exit 2", async () => {
+    const w = await world()
+    const run = capture(w.work)
+    const stop = new AbortController()
+    let rounds = 0
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        afterHealth: () => {
+          rounds += 1
+          // A stray hook in the queue-owned hooks path: every later round refuses to start.
+          if (rounds === 1) {
+            mkdirSync(join(w.workdir, "hooks-disabled"), { recursive: true })
+            writeFileSync(join(w.workdir, "hooks-disabled", "pre-push"), "#!/bin/sh\n")
+          }
+          if (rounds === 3) stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    expect(exit, run.stderr()).toBe(2)
+    expect(rounds).toBe(1)
+    expect(run.stdout()).toContain("hooks path")
   })
 
   // ACCEPTANCE (c), the NEGATIVE CONTROL. Exit 2 must survive for what no round
@@ -2007,6 +2124,127 @@ describe("a stuck round ends the round, not the service (@i/10-yrd/24395)", () =
     const left = await readQueueHealth(w.workdir, SERVICE)
     expect(left.state).toBe("healthy")
     expect(left.verdict).toEqual({ kind: "running" })
+  })
+})
+
+/**
+ * @failure  A stopped line refuses work, so a fix that would unstick it cannot
+ *           even be queued behind the stop, and a plan of the shape "submit
+ *           while stopped, resume when it lands" deadlocks. The operator's
+ *           condition (2026-09-16): submits are accepted while the line is
+ *           stopped IFF that causes no problem — so a submit runs no check, and
+ *           the change is judged only once the stop lifts.
+ * @level    l2 (a real remote and a clone; the commands driven directly)
+ * @consumer every submitter whose change arrives while the line is stopped
+ */
+describe("a stopped line still takes work (the andon, operator 2026-09-16)", () => {
+  it("a submit on a stuck-stopped line is accepted, echoes the stop, runs no check, and is judged once the stop lifts", async () => {
+    const w = await world()
+    const fault = brokenSetup(w.workdir)
+    await redeclare(w, `setup: ${fault.command}\n`)
+    for (const name of ["stuck", "late"]) {
+      await w.git(["checkout", "--quiet", "-b", `task/${name}`, "main"])
+      writeFileSync(join(w.work, `${name}.txt`), `${name}\n`)
+      await w.git(["add", `${name}.txt`])
+      await w.git(["commit", "--quiet", "-m", name])
+      await w.git(["checkout", "--quiet", "main"])
+    }
+    const stuckHead = (await w.git(["rev-parse", "task/stuck"])).trim()
+    const lateHead = (await w.git(["rev-parse", "task/late"])).trim()
+    await submit(w.git, "origin", {
+      branch: "task/stuck",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    expect(await coreQueueCommand(w.work, capture(w.work).io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+    const judgedBefore = fault.runs()
+
+    for (const dryRun of [true, false]) {
+      const accepted = capture(w.work)
+      expect(
+        await coreQueueCommand(
+          w.work,
+          accepted.io,
+          { branch: "task/late", command: "submit", dryRun, submitter: "@dev/3" },
+          { json: true, workdir: w.workdir },
+        ),
+        accepted.stderr(),
+      ).toBe(0)
+      // The echo: who stopped the line, why, and what lifts it.
+      expect(records(accepted)[0]).toMatchObject({
+        stopped: { by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` },
+      })
+      expect(accepted.stderr()).toContain(`task/stuck@${stuckHead}`)
+      expect(accepted.stderr()).toContain("yrd queue withdraw task/stuck")
+      expect(accepted.stderr()).toContain("yrd queue resume")
+    }
+    // Opened, and nothing more: no check ran at submit.
+    const lateRef = changeRef("main", { branch: "task/late", head: lateHead })
+    expect(await w.git(["ls-remote", "--refs", "origin", lateRef])).toContain(lateRef)
+    expect(fault.runs()).toBe(judgedBefore)
+
+    // The stop lifts by an act — the stuck change withdrawn — and the late change is judged normally.
+    fault.clear()
+    expect(
+      await coreQueueCommand(
+        w.work,
+        capture(w.work).io,
+        { branch: "task/stuck", by: "@chief", command: "withdraw" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(0)
+    const ran = capture(w.work)
+    expect(await coreQueueCommand(w.work, ran.io, { command: "run" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(records(ran)[0]).toMatchObject({ merged: ["task/late"], stuck: [] })
+    await w.git(["fetch", "--quiet", "origin", `+${lateRef}:${lateRef}`])
+    const history = await readRecords(w.git, (await w.git(["rev-parse", "--verify", `${lateRef}^{commit}`])).trim())
+    expect(history.map((record) => record.kind).slice(0, 3)).toEqual(["opened", "checked", "merged"])
+  })
+
+  it("list --json says stopped: null while the line runs, and names the stop while it is stopped", async () => {
+    const w = await world()
+    const fault = brokenSetup(w.workdir)
+
+    const running = capture(w.work)
+    expect(await coreQueueCommand(w.work, running.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect(records(running)[0]).toHaveProperty("stopped", null)
+
+    await redeclare(w, `setup: ${fault.command}\n`)
+    await w.git(["checkout", "--quiet", "-b", "task/stuck", "main"])
+    writeFileSync(join(w.work, "stuck.txt"), "stuck\n")
+    await w.git(["add", "stuck.txt"])
+    await w.git(["commit", "--quiet", "-m", "stuck"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/stuck",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    expect(await coreQueueCommand(w.work, capture(w.work).io, { command: "run" }, { workdir: w.workdir })).toBe(2)
+
+    const stuck = capture(w.work)
+    expect(await coreQueueCommand(w.work, stuck.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    const stopped = (records(stuck)[0] as { stopped: Record<string, unknown> }).stopped
+    expect(stopped).toEqual({ by: "yrd", cause: "stuck", change: `task/stuck@${head}`, since: expect.any(String) })
+    expect(Number.isNaN(Date.parse(String(stopped.since)))).toBe(false)
+
+    // An operator's stop names nobody's change.
+    await coreQueueCommand(w.work, capture(w.work).io, { by: "@chief", command: "resume" }, { workdir: w.workdir })
+    await coreQueueCommand(
+      w.work,
+      capture(w.work).io,
+      { by: "@chief", command: "pause", reason: "inspecting" },
+      { workdir: w.workdir },
+    )
+    const paused = capture(w.work)
+    expect(await coreQueueCommand(w.work, paused.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
+    expect((records(paused)[0] as { stopped: unknown }).stopped).toEqual({
+      by: "@chief",
+      cause: "operator",
+      change: null,
+      since: expect.any(String),
+    })
   })
 })
 
@@ -2088,105 +2326,5 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
     const line = "error: GET https://api.github.com/repos/beorn/x/tarball/deadbeef - 404"
     await roundWithSetup(w, "task/answered-404", failingSetup(w.workdir, "answered-404", line))
     expect((await reasonFor(w, "task/answered-404")).reason).toBe("yrd-setup-unusable")
-  })
-})
-
-/**
- * @failure  The ladder is keyed on the reason TEXT, and two of the reasons
- *           embed something that changes every round — the run id, and a raw
- *           error message — so `nextStuckStreak` starts over each time and the
- *           spacing never climbs for the two faults most likely to repeat. The
- *           pure ladder tests pass anyway, because they hand the ladder a
- *           stable string themselves: they prove the MECHANISM and never ask
- *           whether its real producer emits a stable key (@cto follow-up F3,
- *           2026-09-11).
- * @level    l1 (the producer, against constructed outcomes)
- * @consumer the loop's own spacing, and therefore the host it stops hammering
- */
-describe("the producer emits a STABLE streak key (@i/10-yrd/24395 F3)", () => {
-  const outcome = (over: Partial<QueueRunOutcome>): QueueRunOutcome =>
-    ({
-      observation: {} as QueueRunOutcome["observation"],
-      exitCode: 2,
-      log: "/w/log",
-      run: "q-20260911T120000000Z-aaaaaaaa",
-      base: "a".repeat(40),
-      config: "b".repeat(40),
-      target: "c".repeat(40),
-      merged: [],
-      failed: [],
-      stuck: [],
-      directMerges: [],
-      checkedWaiting: 0,
-      ...over,
-    }) as QueueRunOutcome
-
-  // THE TEST @cto ASKED FOR. Two rounds of the SAME fault, whose prose differs
-  // because it names the run — the key must not.
-  it("a round stuck without naming a change keys the same across rounds", () => {
-    const first = roundFacts(outcome({ run: "q-20260911T120000000Z-aaaaaaaa" }))
-    const second = roundFacts(outcome({ run: "q-20260911T120200000Z-bbbbbbbb" }))
-    expect(first.stuck?.key).toBe(second.stuck?.key)
-    // And the prose still names this round's run, so nothing was lost.
-    expect(first.stuck?.reason).not.toBe(second.stuck?.reason)
-    expect(first.stuck?.reason).toContain("aaaaaaaa")
-    // The ladder therefore CLIMBS, which is the behaviour the key exists for.
-    const one = nextStuckStreak(undefined, first)
-    expect(nextStuckStreak(one, second)?.consecutive).toBe(2)
-  })
-
-  it("a round that could not judge keys the same across rounds", () => {
-    const first = roundFacts({ why: "the queue run could not judge: connect ETIMEDOUT 140.82.121.3:443" })
-    const second = roundFacts({ why: "the queue run could not judge: connect ETIMEDOUT 140.82.121.4:443" })
-    expect(first.stuck?.key).toBe(second.stuck?.key)
-    expect(first.stuck?.reason).not.toBe(second.stuck?.reason)
-    expect(nextStuckStreak(nextStuckStreak(undefined, first), second)?.consecutive).toBe(2)
-  })
-
-  it("the same stuck change keys the same however the round names it", () => {
-    const first = roundFacts(outcome({ stuck: ["task/one"], run: "q-1" }))
-    const second = roundFacts(outcome({ stuck: ["task/one"], run: "q-2" }))
-    expect(first.stuck?.key).toBe(second.stuck?.key)
-    expect(nextStuckStreak(nextStuckStreak(undefined, first), second)?.consecutive).toBe(2)
-  })
-
-  // NEGATIVE CONTROLS: the key must still SEPARATE genuinely different faults,
-  // or the ladder would count unrelated rounds together and space out a fault
-  // that just appeared.
-  it("different stuck changes key differently", () => {
-    expect(roundFacts(outcome({ stuck: ["task/one"] })).stuck?.key).not.toBe(
-      roundFacts(outcome({ stuck: ["task/two"] })).stuck?.key,
-    )
-  })
-
-  it("a could-not-judge round and a stuck-change round key differently", () => {
-    expect(roundFacts({ why: "boom" }).stuck?.key).not.toBe(roundFacts(outcome({ stuck: ["task/one"] })).stuck?.key)
-  })
-
-  it("the same changes in a different order key the same", () => {
-    expect(roundFacts(outcome({ stuck: ["task/a", "task/b"] })).stuck?.key).toBe(
-      roundFacts(outcome({ stuck: ["task/b", "task/a"] })).stuck?.key,
-    )
-  })
-
-  // No key may carry a run id, a sha, a path or an error message — the rule the
-  // type states, asserted rather than trusted.
-  it("no key embeds anything that changes between rounds", () => {
-    const keys = [
-      roundFacts(outcome({})).stuck?.key,
-      roundFacts(outcome({ stuck: ["task/one"] })).stuck?.key,
-      roundFacts({ why: "the queue run could not judge: /tmp/x/y failed at deadbeefdeadbeef" }).stuck?.key,
-    ]
-    for (const key of keys) {
-      expect(key).toBeDefined()
-      // No run id, and no sha. A branch name may contain a slash, so paths are
-      // not banned outright — only the two things that actually move per round.
-      expect(key).not.toMatch(/q-\d{8}T/u)
-      expect(key).not.toMatch(/\b[0-9a-f]{12,}\b/u)
-    }
-  })
-
-  it("a clear round produces no stuck fact at all", () => {
-    expect(roundFacts(outcome({ exitCode: 0, merged: ["task/one"] })).stuck).toBeUndefined()
   })
 })

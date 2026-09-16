@@ -56,13 +56,15 @@ import {
   submit,
   withdraw,
   NothingToWithdraw,
-  nextStuckStreak,
+  liftLine,
+  pauseStop,
   QUEUE_HEALTH_DOCUMENT,
   ROUND_BUDGET_MS,
   relaunchStalledHealthDocument,
   roundHealthDocument,
   runtimeGitlinkPath,
-  stuckBackoffMs,
+  readStop,
+  stopFact,
   QueuePaused,
   QueueNotPaused,
   writePause,
@@ -81,9 +83,8 @@ import {
   type QueueConfig,
   type QueueHealthDocument,
   type QueueRunOutcome,
-  type RoundFacts,
+  type PauseRecord,
   type RuntimeGitlinkOff,
-  type StuckStreak,
   type ChangeRecord,
   type Row,
 } from "@yrd/queue-core"
@@ -208,14 +209,14 @@ export type CoreQueueCommand =
       /** Awaited after each round, before the gitlink is read; a test mutates the world or stops the service here. */
       afterRound?: (outcome: QueueRunOutcome) => void | Promise<void>
       /**
-       * Awaited after EVERY round, stuck ones included, with the document that
-       * round wrote.
+       * Awaited after EVERY round, including every round that holds a stopped
+       * line, with the document that round wrote.
        *
-       * `afterRound` cannot serve here: it takes an outcome, and a round that
-       * could not judge has none. It is also the only seam that can stop a
-       * service which — deliberately, as of @i/10-yrd/24395 — no longer ends
-       * itself on a stuck round. A test without it would run forever, which is
-       * the correct new behaviour and an untestable one.
+       * It is the seam that sees the PAGE: a stuck change stops the line and the
+       * service stays up holding it (the andon, operator 2026-09-16), so a test
+       * reads the page here and stops the service through `stop`. A test
+       * without it would hold a stopped line forever, which is the correct
+       * behaviour and an untestable one.
        */
       afterHealth?: (document: QueueHealthDocument) => void | Promise<void>
     }>
@@ -363,17 +364,12 @@ export async function coreQueueCommand(
     return 2
   }
   /**
-   * One queue run, emitted. A run that could not even judge — a bad
-   * invocation, a remote that cannot be read — comes back as {@link RoundStuck}
-   * carrying WHY, and has already said so.
-   *
-   * It carries the reason rather than `undefined` because the service now
-   * survives this: a stuck round is a round outcome, and the loop's health
-   * document has to name the fault it is unhealthy for. `undefined` could only
-   * ever become "stuck for reasons unknown", which is the silent half of the
-   * alarm this bead exists to remove.
+   * One queue run, emitted. Undefined is the one exit site from the caller's
+   * side: a run that could not even judge — a bad invocation, a remote that
+   * cannot be read — is stuck, has no change to stop the line on, and has
+   * already said so.
    */
-  const oneRound = async (declared: CapturedDeclaration): Promise<QueueRunOutcome | RoundStuck> => {
+  const oneRound = async (declared: CapturedDeclaration): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
       outcome = await queueRun({
@@ -381,9 +377,9 @@ export async function coreQueueCommand(
         foreground: request.command === "run",
       })
     } catch (error) {
-      const why = `the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`
-      stuck(why)
-      return { why }
+      stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
+      // silent-fallback-allow: stuck() emitted the full run failure; undefined only makes the command exit 2.
+      return undefined
     }
     emit(io, options.json, outcome, describeRun(outcome))
     // Naming the branch is `describeRun`'s; naming what fixes it is this
@@ -393,18 +389,45 @@ export async function coreQueueCommand(
     // stderr, so "stuck task/one" is never the whole story a person gets
     // (@i/10-yrd/24141 AC2).
     for (const line of stuckCureLines(outcome)) io.stderr(`yrd: ${line}\n`)
+    // A round that HOLDS a stuck stop judged nothing, so it has no stuck line
+    // of its own; it names the stop it held and the cures, so a service log
+    // read at any round says what the line waits on and what lifts it.
+    const held = pauseStop(outcome.stopped)
+    if (outcome.stuck.length === 0 && held?.change !== undefined) {
+      io.stderr(`yrd: ${liftLine(held, config.target.remote, config.target.branch)}\n`)
+    }
     return outcome
+  }
+
+  /** The stop a submit is accepted under, said where the submitter reads it: who, why, and what lifts it. */
+  const echoStop = (stop: PauseRecord | undefined): void => {
+    if (stop === undefined) return
+    io.stderr(
+      `yrd: accepted while the line is stopped — ${pauseLine(stop)}; ` +
+        `the change waits in line and is judged once the stop lifts; ${liftLine(stop, config.target.remote, config.target.branch)}\n`,
+    )
   }
 
   switch (request.command) {
     case "pause":
     case "resume": {
       try {
-        const pause = await writePause(git, config.target.remote, config.target.branch, {
-          by: request.by,
-          kind: request.command === "pause" ? "paused" : "resumed",
-          reason: request.command === "pause" ? request.reason : (request.reason ?? "pause lifted"),
-        })
+        // Whether a stop STANDS is the one derivation's answer, never the tip's
+        // kind alone: a stuck stop whose change has left the line is over, so a
+        // pause may follow it and there is nothing for a resume to end.
+        const { pause: tip, stop } = await readStop(git, config.target.remote, config.target.branch, captured.oid)
+        const lifted = tip?.kind === "paused" && stop === undefined ? tip : undefined
+        const pause = await writePause(
+          git,
+          config.target.remote,
+          config.target.branch,
+          {
+            by: request.by,
+            kind: request.command === "pause" ? "paused" : "resumed",
+            reason: request.command === "pause" ? request.reason : (request.reason ?? "pause lifted"),
+          },
+          lifted,
+        )
         emit(io, options.json, pause, pauseLine(pause))
         return 0
       } catch (error) {
@@ -453,86 +476,79 @@ export async function coreQueueCommand(
         ...(request.issue === undefined ? {} : { issue: request.issue }),
         ...(request.rebase === true ? { rebase: true } : {}),
       }
-      try {
-        if (request.dryRun === true) {
-          const inspected = await inspectSubmit(git, config.target.remote, submission)
-          const { head, targetHead, rebaseRequired } = inspected
-          const issue = inspected.issue
-          emit(
-            io,
-            options.json,
-            {
-              ...(rebaseRequired
-                ? { branch, headBeforeRebase: head, rebaseRequired }
-                : { change: changeName({ branch, head }) }),
-              dryRun: true,
-              submitter: request.submitter,
-              target: targetName(config.target),
-              targetHead,
-              freshness: freshnessLine(targetHead),
-              ...issueOutput(io, branch, issue),
-            },
-            (rebaseRequired
-              ? `would rebase ${branch} at ${head} onto ${targetHead}, then open its new head (unknown until rebase)`
-              : `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}`) +
-              `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}`,
-          )
-          return 0
-        }
-        const submitted = await submit(git, config.target.remote, submission)
+      // A stopped line ACCEPTS the submit (the andon, operator 2026-09-16): the
+      // stop is echoed — who, why, and what lifts it — and never refused on.
+      if (request.dryRun === true) {
+        const inspected = await inspectSubmit(git, config.target.remote, submission)
+        const { head, targetHead, rebaseRequired } = inspected
+        const issue = inspected.issue
         emit(
           io,
           options.json,
-          { ...submitted, ...issueOutput(io, branch, submitted.issue) },
-          `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}; ${freshnessLine(submitted.targetHead)}` +
-            // 24454: a moved gitlink's commit went to its submodule remote first; say where.
-            submitted.published
-              .map((row) => `\n${row.state} ${row.path}@${row.sha.slice(0, 12)} at ${row.remote} ${row.ref}`)
-              .join(""),
+          {
+            ...(rebaseRequired
+              ? { branch, headBeforeRebase: head, rebaseRequired }
+              : { change: changeName({ branch, head }) }),
+            dryRun: true,
+            submitter: request.submitter,
+            target: targetName(config.target),
+            targetHead,
+            freshness: freshnessLine(targetHead),
+            stopped: stopFact(inspected.stop),
+            ...issueOutput(io, branch, issue),
+          },
+          (rebaseRequired
+            ? `would rebase ${branch} at ${head} onto ${targetHead}, then open its new head (unknown until rebase)`
+            : `would open ${changeName({ branch, head })} on ${targetName(config.target)} for ${request.submitter}`) +
+            `${issue === undefined ? "" : ` (issue ${issue.issue})`}; nothing was pushed; ${freshnessLine(targetHead)}`,
         )
+        echoStop(inspected.stop)
         return 0
-      } catch (error) {
-        if (error instanceof QueuePaused) {
-          io.stderr(`yrd: ${error.message}\n`)
-          return 1
-        }
-        throw error
       }
+      const submitted = await submit(git, config.target.remote, submission)
+      const { stop: acceptedUnder, ...accepted } = submitted
+      emit(
+        io,
+        options.json,
+        { ...accepted, stopped: stopFact(acceptedUnder), ...issueOutput(io, branch, submitted.issue) },
+        `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}; ${freshnessLine(submitted.targetHead)}` +
+          // 24454: a moved gitlink's commit went to its submodule remote first; say where.
+          submitted.published
+            .map((row) => `\n${row.state} ${row.path}@${row.sha.slice(0, 12)} at ${row.remote} ${row.ref}`)
+            .join(""),
+      )
+      echoStop(acceptedUnder)
+      return 0
     }
     case "run": {
       // One round, exactly `up`'s own (0 pass, 1 fail, 2 stuck): `outcome.exitCode`
       // already carries that ladder, so forwarding it verbatim is the whole of
       // the contract — a round a stuck change stopped, doing no other work,
-      // ends 2 here exactly as it ends `up`'s loop (run.ts's on-submit and
-      // on-merge steps set `exitCode: 2` the moment anything comes back stuck,
-      // never 0). A run that could not even judge is `undefined` here, and
-      // `?? 2` is that same stuck, already said by `stuck()` above
-      // (@i/10-yrd/24141 AC1).
+      // ends 2 here (run.ts's on-submit and on-merge steps set `exitCode: 2`
+      // the moment anything comes back stuck, never 0). A run that could not
+      // even judge is `undefined` here, and `?? 2` is that same stuck, already
+      // said by `stuck()` above (@i/10-yrd/24141 AC1).
       const outcome = await oneRound(captured)
-      return isRoundStuck(outcome) ? 2 : outcome.exitCode
+      return outcome?.exitCode ?? 2
     }
     case "up": {
-      // The service: the same round on a loop, what hab runs. It has ONE
-      // permanent exit, 2, and as of @i/10-yrd/24395 it is reserved for what NO
-      // round can fix: the target's declaration can no longer be read or is no
-      // longer there at all, or the runtime gitlink is absent. A STUCK ROUND is
-      // not one of those — the round ends, the loop sleeps and runs the next
-      // one, and the alarm is carried by the health document instead of by the
-      // process ending. Everything else it does on purpose — an explicit
-      // AbortSignal stop request or a gitlink moving under it — exits 0, which is
-      // on Hab's relaunch allowlist. A process signal bypasses this return path and
-      // stays terminal under the service's `restart: "on-codes"` declaration.
+      // The service: the same round on a loop, what hab runs. A STUCK CHANGE
+      // STOPS THE LINE and the service stays up holding it (the andon, operator
+      // 2026-09-16): the round that stuck pauses the queue naming the change,
+      // every later round stops at that pause and judges nothing, and the
+      // health document pages until an act lifts it — the change withdrawn or
+      // merged, or `yrd queue resume`. No timer resumes it. Its ONE permanent
+      // exit, 2, is for what no round can hold the line on: the target's
+      // declaration can no longer be read or is no longer there at all, the
+      // runtime gitlink is absent, or a round could not even read its queue and
+      // so has no change to stop on. Everything else it does on purpose — an
+      // explicit AbortSignal stop request or a gitlink moving under it — exits 0,
+      // which is on Hab's relaunch allowlist. A process signal bypasses this
+      // return path and stays terminal under the service's `restart: "on-codes"`
+      // declaration.
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
-      /**
-       * Consecutive same-reason stuck rounds, carried across the loop.
-       *
-       * `undefined` is healthy. It lives out here rather than inside the round
-       * because the whole value of the ladder is that it remembers: a stuck
-       * reason that survives a retry is a different fact from one that does not.
-       */
-      let streak: StuckStreak | undefined
       /**
        * Leave the document where the declared health probe reads it.
        *
@@ -656,7 +672,7 @@ export async function coreQueueCommand(
               waitingCheckout: gitlink.checkout,
               waitingCheckoutHead: checkout,
             }
-            const alive = roundHealthDocument(SERVICE, {}, undefined, waitCapMs, new Date())
+            const alive = roundHealthDocument(SERVICE, undefined, waitCapMs, new Date())
             writeHealth({ ...alive, facts: { ...alive.facts, ...waitingFacts } })
             emit(
               io,
@@ -705,9 +721,7 @@ export async function coreQueueCommand(
             log?.warn?.(why, { checkout: gitlink.checkout, gitlink: gitlink.path, projected, target: now })
             // `running` is TRUE here and that is the whole point: this process is
             // alive and still waiting, which is what makes the page a page rather
-            // than a tombstone. The stuck KEY is stable — the path, never the sha
-            // — or the ladder would restart its backoff every time the target
-            // moves, which is exactly when it should be climbing.
+            // than a tombstone.
             stalls += 1
             // ITS OWN DOCUMENT, not `roundHealthDocument`'s stuck branch. That
             // branch's prose is about ROUNDS — read the round's record, the next
@@ -783,29 +797,14 @@ export async function coreQueueCommand(
         const before = await reload(current.oid)
         if (before !== undefined) return before
         const outcome = await oneRound(current)
+        if (outcome === undefined) return 2
 
-        // STUCK IS A ROUND OUTCOME, NOT A PROCESS OUTCOME (@cto 2026-09-11,
-        // @i/10-yrd/24395). This used to `return 2`, which made the alarm and
-        // the stop one event: a routine, recoverable, submitter-independent
-        // fault took the only fleet delivery mechanism offline with automatic
-        // restart disabled. Measured: a code-host 504 during setup cost about
-        // 24 minutes of delivery for a fault the next round cleared.
-        //
-        // The round ends; the loop does not. The alarm moves to the health
-        // document written below, which the supervisor already turns into a
-        // page it drops again on its own when a round comes back clear.
-        const facts = roundFacts(outcome)
-        streak = nextStuckStreak(streak, facts)
-        // A streak exists exactly when the round was stuck, because `roundFacts`
-        // names a reason for every stuck round and `nextStuckStreak` keeps one
-        // for every reason. The third branch is that invariant stated rather
-        // than a fallback: a silent `interval` there would turn a broken
-        // invariant into a service that merely sleeps oddly.
-        let sleepMs: number
-        if (streak !== undefined) sleepMs = stuckBackoffMs(streak.consecutive, interval)
-        else if (!isRoundStuck(outcome)) sleepMs = sleepAfter(outcome, interval)
-        else throw new Error(`a stuck round left no streak to space it out: ${outcome.why}`)
-        const base = roundHealthDocument(SERVICE, facts, streak, sleepMs, new Date())
+        // THE PAGE READS THE STOP. The round derived whether the line is stopped
+        // (pause.ts `lineStop`) and said so on its outcome; the document states
+        // that and nothing more. A stuck stop is unhealthy for every round that
+        // holds it and clears on the first round after an act lifts it.
+        const sleepMs = sleepAfter(outcome, interval)
+        const base = roundHealthDocument(SERVICE, pauseStop(outcome.stopped), sleepMs, new Date())
         // The disarmed exit, carried where a reader already looks. A warning is
         // read once, at the moment nobody is watching; a fact in the health
         // document is read every time anyone asks how this service is.
@@ -814,13 +813,11 @@ export async function coreQueueCommand(
         await request.afterHealth?.(document)
         if (stopped()) return 0
 
-        if (!isRoundStuck(outcome)) {
-          await request.afterRound?.(outcome)
-          // The gitlink, at the target as this round left it: the round that merged
-          // the change moving this yrd's own gitlink is the last one this code runs.
-          const after = await reload(outcome.target)
-          if (after !== undefined) return after
-        }
+        await request.afterRound?.(outcome)
+        // The gitlink, at the target as this round left it: the round that merged
+        // the change moving this yrd's own gitlink is the last one this code runs.
+        const after = await reload(outcome.target)
+        if (after !== undefined) return after
         if (stopped()) return 0
         await new Promise((resolve) => {
           setTimeout(resolve, sleepMs)
@@ -872,7 +869,9 @@ export async function coreQueueCommand(
           watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
           request.terms ?? [],
         )
-        const pause = queue.pause?.kind === "paused" ? queue.pause : undefined
+        // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
+        // change has left the line is over, and a reader must not see it.
+        const pause = queue.stop
         // What was queried, where it looked, and what it left out — said on the
         // screen, not left for the reader to infer from an empty table. Zero
         // rows also names the fields the term was checked against, so a state
@@ -891,6 +890,9 @@ export async function coreQueueCommand(
             changes: rows.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
+            // The everyday reader of a stopped line: always present, null while
+            // the line runs, so a stop can never be read as absent.
+            stopped: stopFact(pause),
             ...(scope === undefined ? {} : { scope }),
           },
           entries: queue.changes,
@@ -1657,53 +1659,9 @@ export const READY_SLEEP_MS = 1000
  * A round that merged, or that left checked changes it did not act on (the
  * queue merges the first checked change and no more), has more to do NOW, and
  * goes again at {@link READY_SLEEP_MS}. Never longer than the interval, so a
- * short interval stays a short interval.
+ * short interval stays a short interval. A round that held a stopped line did
+ * neither, and waits the interval.
  */
-/** A round that could not judge at all, carrying why. */
-export type RoundStuck = Readonly<{ why: string }>
-
-export function isRoundStuck(outcome: QueueRunOutcome | RoundStuck): outcome is RoundStuck {
-  return "why" in outcome
-}
-
-/**
- * What a finished round tells the loop's health: whether it was stuck, and
- * what it saw in the line.
- *
- * The fingerprint is every change the round touched plus how many it left
- * checked and waiting. It answers exactly one question — did new work arrive
- * since the last stuck round — so it is deliberately absent, never empty, when
- * the round never got far enough to read the line. An empty fingerprint would
- * compare equal to another empty one and claim the line had not moved, on
- * exactly the rounds that know nothing about the line at all.
- */
-export function roundFacts(outcome: QueueRunOutcome | RoundStuck): RoundFacts {
-  // EVERY `key` BELOW IS STABLE ACROSS ROUNDS and every `reason` is free to
-  // name this round's specifics. The first version used one string for both,
-  // and two of these embed something that changes every round — the run id and
-  // a raw error message — so the ladder started over each time and never
-  // climbed for the two faults most likely to repeat (@cto 2026-09-11).
-  if (isRoundStuck(outcome)) return { stuck: { key: "could-not-judge", reason: outcome.why } }
-  const fingerprint = `${[...outcome.merged, ...outcome.failed, ...outcome.stuck]
-    .slice()
-    .sort()
-    .join(" ")}+${String(outcome.checkedWaiting)}`
-  if (outcome.exitCode !== 2) return { fingerprint }
-  // The branch names ARE stable while the same change stays stuck, which is
-  // exactly the case the ladder is for; the run id is not, and stays in prose.
-  const stuck =
-    outcome.stuck.length > 0
-      ? {
-          key: `stuck-changes:${[...outcome.stuck].sort().join(",")}`,
-          reason: `the round stopped on ${outcome.stuck.join(", ")}`,
-        }
-      : {
-          key: "stuck-unnamed",
-          reason: `the round ended stuck without naming a change (run ${outcome.run})`,
-        }
-  return { stuck, fingerprint }
-}
-
 export function sleepAfter(outcome: QueueRunOutcome, intervalMs: number): number {
   const ready = outcome.merged.length > 0 || outcome.checkedWaiting > 0
   return ready ? Math.min(intervalMs, READY_SLEEP_MS) : intervalMs

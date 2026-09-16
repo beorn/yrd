@@ -3,151 +3,90 @@ import { describe, expect, test } from "vitest"
 import {
   absentHealthDocument,
   believableHealthDocument,
-  nextStuckStreak,
   parseQueueHealthDocument,
   QUEUE_HEALTH_SCHEMA,
   queueHealthExitCode,
   ROUND_BUDGET_MS,
   roundHealthDocument,
-  STUCK_BACKOFF_CAP_MS,
   STUCK_RECORD_CODE,
-  STUCK_RECORD_NEXT,
-  stuckBackoffMs,
   unreadableHealthDocument,
-  type StuckStreak,
 } from "../src/service-health.ts"
+import type { PauseRecord } from "../src/pause.ts"
 
-// Stuck is a ROUND outcome, not a process outcome. These assert the two halves
-// that make that safe: the spacing ladder, and the document that carries the
-// alarm the process exit used to carry.
+// A stuck change STOPS THE LINE (the andon, operator 2026-09-16): the queue
+// pauses itself naming the change, the service stays up holding the stop, and
+// the document is the page. These assert the page reads the stop, names the
+// stuck record's cures, and never promises to clear by itself.
 
 const INTERVAL = 120_000
 const NOW = new Date("2026-09-11T12:00:00.000Z")
+const HEAD = "a".repeat(40)
 
-/** A stuck fact with a stable key, as every real producer must emit. */
-const stuck = (key: string, reason = key): { key: string; reason: string } => ({ key, reason })
+/** A stop the queue put on itself for task/one, carrying its stuck record's cures. */
+const stuckStop: PauseRecord = {
+  at: new Date("2026-09-11T11:58:00.000Z"),
+  by: "yrd",
+  cause: "stuck",
+  change: { branch: "task/one", head: HEAD },
+  kind: "paused",
+  next: "repair the queue setup, then run yrd queue run; three ways out of the line: yrd queue withdraw task/one",
+  reason: "the queue could not prepare a worktree for task/one: setup exited 1",
+  sha: "b".repeat(40),
+}
 
-describe("stuck spacing", () => {
-  // The load-bearing one. A transient fault — a code-host 504 during setup —
-  // must be retried by the very next round at the normal cadence. A ladder that
-  // starts climbing on the first stuck round reintroduces the outage it exists
-  // to remove, just with a shorter duration.
-  test("the FIRST stuck round sleeps the plain interval", () => {
-    expect(stuckBackoffMs(1, INTERVAL)).toBe(INTERVAL)
-  })
-
-  test("consecutive same-reason rounds double", () => {
-    expect(stuckBackoffMs(2, INTERVAL)).toBe(2 * INTERVAL)
-    expect(stuckBackoffMs(3, INTERVAL)).toBe(4 * INTERVAL)
-  })
-
-  test("the ladder is capped near thirty minutes", () => {
-    expect(stuckBackoffMs(50, INTERVAL)).toBe(STUCK_BACKOFF_CAP_MS)
-    expect(STUCK_BACKOFF_CAP_MS).toBe(30 * 60 * 1000)
-  })
-
-  // Never silently: a nonsense streak or interval is a caller defect.
-  test.each([0, -1])("a streak of %i is refused, not clamped", (consecutive) => {
-    expect(() => stuckBackoffMs(consecutive, INTERVAL)).toThrow(/at least one round/u)
-  })
-
-  test("a negative interval is refused", () => {
-    expect(() => stuckBackoffMs(1, -1)).toThrow(/cannot be negative/u)
-  })
-
-  // `--interval 0` is how the service is asked to run rounds back to back, and
-  // the whole existing up-loop suite drives it that way. Refusing zero here
-  // turned a stuck round into a THROWN service — the exact "one fault ends the
-  // process" shape this bead removes, reintroduced by its own guard.
-  test("zero is a real interval and spaces out to nothing", () => {
-    expect(stuckBackoffMs(1, 0)).toBe(0)
-    expect(stuckBackoffMs(9, 0)).toBe(0)
-  })
-})
-
-describe("the streak", () => {
-  const stuckOn = (key: string, fingerprint?: string): StuckStreak | undefined =>
-    nextStuckStreak(undefined, { stuck: stuck(key), ...(fingerprint === undefined ? {} : { fingerprint }) })
-
-  test("a clear round ends the streak", () => {
-    const three = { key: "504", reason: "504 from the code host", consecutive: 3 }
-    expect(nextStuckStreak(three, {})).toBeUndefined()
-  })
-
-  test("three same-reason rounds space out (acceptance d)", () => {
-    // The PROSE changes every round here and the KEY does not — which is the
-    // exact case the first version got wrong, so the ladder is asserted while
-    // the reason text moves underneath it.
-    let streak = nextStuckStreak(undefined, { stuck: stuck("504", "504 at 12:00"), fingerprint: "a" })
-    expect(stuckBackoffMs(streak!.consecutive, INTERVAL)).toBe(INTERVAL)
-    streak = nextStuckStreak(streak, { stuck: stuck("504", "504 at 12:02"), fingerprint: "a" })
-    expect(stuckBackoffMs(streak!.consecutive, INTERVAL)).toBe(2 * INTERVAL)
-    streak = nextStuckStreak(streak, { stuck: stuck("504", "504 at 12:06"), fingerprint: "a" })
-    expect(stuckBackoffMs(streak!.consecutive, INTERVAL)).toBe(4 * INTERVAL)
-    // And the document shows the LATEST prose, not the first round's.
-    expect(streak?.reason).toBe("504 at 12:06")
-  })
-
-  test("a new change in the line resets the spacing (acceptance d)", () => {
-    const third = { key: "504", reason: "504", consecutive: 3, fingerprint: "a" }
-    const after = nextStuckStreak(third, { stuck: stuck("504"), fingerprint: "a+b" })
-    expect(after?.consecutive).toBe(1)
-    expect(stuckBackoffMs(after!.consecutive, INTERVAL)).toBe(INTERVAL)
-  })
-
-  test("a different reason starts its own ladder", () => {
-    const third = { key: "504", reason: "504", consecutive: 3, fingerprint: "a" }
-    expect(nextStuckStreak(third, { stuck: stuck("the-remote-refused"), fingerprint: "a" })?.consecutive).toBe(1)
-  })
-
-  // Negative control, and the reason `fingerprint` is optional rather than
-  // defaulted: a round that never read the line has no opinion about whether
-  // work arrived. Treating its absence as a changed line would reset the ladder
-  // on exactly the deterministic stuck the ladder exists for.
-  test("an unread line neither resets nor is compared", () => {
-    const third = { key: "504", reason: "504", consecutive: 3, fingerprint: "a" }
-    expect(nextStuckStreak(third, { stuck: stuck("504") })?.consecutive).toBe(4)
-    const unread = { key: "504", reason: "504", consecutive: 3 }
-    expect(nextStuckStreak(unread, { stuck: stuck("504"), fingerprint: "a" })?.consecutive).toBe(4)
-  })
-
-  test("the same line does not reset", () => {
-    expect(nextStuckStreak(stuckOn("504", "a"), { stuck: stuck("504"), fingerprint: "a" })?.consecutive).toBe(2)
-  })
-})
+/** A person's pause: deliberate, and nobody's page. */
+const operatorStop: PauseRecord = {
+  at: new Date("2026-09-11T11:58:00.000Z"),
+  by: "@chief",
+  cause: "operator",
+  kind: "paused",
+  reason: "49 new failures on main",
+  sha: "c".repeat(40),
+}
 
 describe("the health document", () => {
-  test("a clear round is healthy and running", () => {
-    const doc = roundHealthDocument("yrd-service", {}, undefined, INTERVAL, NOW)
+  test("a running line is healthy and running, and says it is not stopped", () => {
+    const doc = roundHealthDocument("yrd-service", undefined, INTERVAL, NOW)
     expect(doc).toMatchObject({ schema: QUEUE_HEALTH_SCHEMA, state: "healthy", verdict: { kind: "running" } })
     expect(doc.error).toBeUndefined()
+    expect(doc.facts).toMatchObject({ stopped: null })
     expect(queueHealthExitCode(doc.state)).toBe(0)
   })
 
-  // unhealthy + RUNNING is the combination the supervisor turns into a page it
-  // later drops — and the whole point is that it pages without restarting. A
-  // stuck round that reported `stopped` would be claiming the loop had died.
-  test("a stuck round is unhealthy and still running, with a typed cause", () => {
-    const streak = { key: "setup-504", reason: "the code host answered 504 during setup", consecutive: 2, fingerprint: "a" }
-    const doc = roundHealthDocument("yrd-service", { stuck: stuck(streak.key, streak.reason), fingerprint: "a" }, streak, 2 * INTERVAL, NOW)
+  // unhealthy + RUNNING is the combination the supervisor pages on without a
+  // restart — the service is alive and HOLDING the stop. A stuck stop that
+  // reported `stopped` would be claiming the loop had died.
+  test("a stuck stop is unhealthy and still running, names the change and its cures, and never clears by itself", () => {
+    const doc = roundHealthDocument("yrd-service", stuckStop, INTERVAL, NOW)
     expect(doc.state).toBe("unhealthy")
     expect(doc.verdict).toEqual({ kind: "running" })
     expect(doc.error?.code).toBe("queue-round-stuck")
-    // F4: the page names the stuck RECORD's code as well as the prose, so a
-    // reader who has not got the journal open still gets the cure.
-    expect(doc.error?.cause).toContain(streak.reason)
+    // The page names the stuck RECORD's code, the change and the reason, so a
+    // reader who has not got the journal open still knows what stopped.
     expect(doc.error?.cause).toContain(STUCK_RECORD_CODE)
-    expect(doc.error?.resolution).toContain(STUCK_RECORD_NEXT)
-    expect(doc.facts).toMatchObject({ reasonKey: "setup-504" })
-    expect(doc.error?.resolution.join(" ")).toMatch(/No restart is needed/u)
-    expect(doc.facts).toMatchObject({ stuckRounds: 2, nextRoundInMs: 2 * INTERVAL })
+    expect(doc.error?.cause).toContain(`task/one@${HEAD}`)
+    expect(doc.error?.cause).toContain(stuckStop.reason)
+    // The body IS the stuck record's cures, carried on the stop, verbatim.
+    expect(doc.error?.resolution[0]).toBe(stuckStop.next)
+    const body = doc.error?.resolution.join(" ") ?? ""
+    expect(body).toMatch(/No restart is needed/u)
+    expect(body).toContain("yrd queue show task/one")
+    expect(body).not.toMatch(/clears on its own|next round|resets the spacing|Consecutive rounds/u)
+    expect(doc.facts).toMatchObject({
+      nextRoundInMs: INTERVAL,
+      stopped: { by: "yrd", cause: "stuck", change: `task/one@${HEAD}`, since: stuckStop.at.toISOString() },
+    })
+    expect(doc.facts?.stuckRounds).toBeUndefined()
     expect(queueHealthExitCode(doc.state)).toBe(2)
   })
 
-  test("a round that never read the line says so in its facts", () => {
-    const streak = { key: "could-not-judge", reason: "the remote cannot be read", consecutive: 1 }
-    const doc = roundHealthDocument("yrd-service", { stuck: stuck(streak.key, streak.reason) }, streak, INTERVAL, NOW)
-    expect(doc.facts).toMatchObject({ lineRead: false })
+  // A person's pause is deliberate: it stops the line and pages nobody, and
+  // the document still says who stopped it.
+  test("an operator's pause is healthy, and names who stopped the line", () => {
+    const doc = roundHealthDocument("yrd-service", operatorStop, INTERVAL, NOW)
+    expect(doc.state).toBe("healthy")
+    expect(doc.error).toBeUndefined()
+    expect(doc.facts).toMatchObject({ stopped: { by: "@chief", cause: "operator", change: null } })
   })
 
   // absent + stopped, never unhealthy: nothing claimed this service. Reporting
@@ -160,22 +99,22 @@ describe("the health document", () => {
   })
 
   test("a broken document is unknown/unparsed and quotes what it saw", () => {
-    const doc = unreadableHealthDocument("yrd-service", "trailing garbage", "{\"schema\":")
+    const doc = unreadableHealthDocument("yrd-service", "trailing garbage", '{"schema":')
     expect(doc.state).toBe("unknown")
-    expect(doc.verdict).toEqual({ kind: "unknown", reason: "unparsed", observed: "{\"schema\":" })
+    expect(doc.verdict).toEqual({ kind: "unknown", reason: "unparsed", observed: '{"schema":' })
     expect(queueHealthExitCode(doc.state)).toBe(3)
   })
 
   test("the exit ladder is exactly the supervisor's", () => {
-    expect(
-      (["healthy", "absent", "unhealthy", "unknown"] as const).map((state) => queueHealthExitCode(state)),
-    ).toEqual([0, 1, 2, 3])
+    expect((["healthy", "absent", "unhealthy", "unknown"] as const).map((state) => queueHealthExitCode(state))).toEqual(
+      [0, 1, 2, 3],
+    )
   })
 })
 
 describe("reading a stored document", () => {
   test("round-trips what the loop wrote", () => {
-    const written = roundHealthDocument("yrd-service", {}, undefined, INTERVAL, NOW)
+    const written = roundHealthDocument("yrd-service", stuckStop, INTERVAL, NOW)
     expect(parseQueueHealthDocument(JSON.stringify(written))).toEqual(written)
   })
 
@@ -203,7 +142,7 @@ describe("reading a stored document", () => {
  * @consumer the supervisor, which pages on unhealthy-while-running
  */
 describe("a document expires", () => {
-  const written = (sleepMs: number) => roundHealthDocument("yrd-service", {}, undefined, sleepMs, NOW)
+  const written = (sleepMs: number) => roundHealthDocument("yrd-service", undefined, sleepMs, NOW)
   const at = (ms: number) => new Date(NOW.getTime() + ms)
 
   test("carries when it was written and when it stops being believable", () => {
@@ -215,11 +154,12 @@ describe("a document expires", () => {
   })
 
   // The deadline is the loop's OWN sleep plus a budget, never a fixed cadence a
-  // reader assumed — so a deliberate thirty-minute backoff is not overdue at
+  // reader assumed — so a deliberate thirty-minute interval is not overdue at
   // minute eleven.
-  test("a long deliberate backoff is not overdue", () => {
-    const doc = written(STUCK_BACKOFF_CAP_MS)
-    const stillFine = believableHealthDocument(doc, at(STUCK_BACKOFF_CAP_MS + ROUND_BUDGET_MS - 1))
+  test("a long deliberate interval is not overdue", () => {
+    const long = 30 * 60 * 1000
+    const doc = written(long)
+    const stillFine = believableHealthDocument(doc, at(long + ROUND_BUDGET_MS - 1))
     expect(stillFine).toEqual(doc)
   })
 
@@ -241,8 +181,7 @@ describe("a document expires", () => {
   })
 
   test("overdue outranks a stale unhealthy too — the interesting fact is that nothing has finished", () => {
-    const streak = { key: "setup-504", reason: "the code host answered 504", consecutive: 2 }
-    const doc = roundHealthDocument("yrd-service", { stuck: stuck(streak.key, streak.reason) }, streak, INTERVAL, NOW)
+    const doc = roundHealthDocument("yrd-service", stuckStop, INTERVAL, NOW)
     expect(doc.error?.code).toBe("queue-round-stuck")
     const overdue = believableHealthDocument(doc, at(INTERVAL + ROUND_BUDGET_MS + 1))
     expect(overdue.error?.code).toBe("queue-round-overdue")
@@ -252,7 +191,12 @@ describe("a document expires", () => {
   // reader-side assumption: a document from a loop that predates this change
   // has no deadline, and the ABSENCE of one is not evidence that one passed.
   test("a document with no deadline is passed through, never declared overdue", () => {
-    const old = { schema: QUEUE_HEALTH_SCHEMA, service: "yrd-service", state: "healthy", verdict: { kind: "running" } } as const
+    const old = {
+      schema: QUEUE_HEALTH_SCHEMA,
+      service: "yrd-service",
+      state: "healthy",
+      verdict: { kind: "running" },
+    } as const
     expect(believableHealthDocument(old, at(10 * 365 * 24 * 60 * 60 * 1000))).toEqual(old)
   })
 

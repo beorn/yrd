@@ -120,7 +120,6 @@ export { remoteUrl } from "./remote.ts"
 export {
   absentHealthDocument,
   believableHealthDocument,
-  nextStuckStreak,
   parseQueueHealthDocument,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
@@ -128,21 +127,10 @@ export {
   relaunchStalledHealthDocument,
   ROUND_BUDGET_MS,
   roundHealthDocument,
-  STUCK_BACKOFF_CAP_MS,
   STUCK_RECORD_CODE,
-  STUCK_RECORD_NEXT,
-  stuckBackoffMs,
   unreadableHealthDocument,
 } from "./service-health.ts"
-export type {
-  QueueHealthDocument,
-  QueueHealthFailure,
-  QueueHealthState,
-  QueueHealthVerdict,
-  RoundFacts,
-  StuckFact,
-  StuckStreak,
-} from "./service-health.ts"
+export type { QueueHealthDocument, QueueHealthFailure, QueueHealthState, QueueHealthVerdict } from "./service-health.ts"
 
 export {
   SETUP_UNREACHABLE_CODE,

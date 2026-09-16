@@ -53,20 +53,26 @@ function capture(): Readonly<{ io: YrdCliIO; stdout: () => string }> {
 describe("the declared health probe", () => {
   it("prints what the last round wrote, and exits on its state", async () => {
     const dir = workdir()
-    const written = roundHealthDocument(SERVICE, {}, undefined, 120_000, NOW)
+    const written = roundHealthDocument(SERVICE, undefined, 120_000, NOW)
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), `${JSON.stringify(written, undefined, 2)}\n`)
     const run = capture()
     expect(await queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(0)
     expect(JSON.parse(run.stdout())).toEqual(written)
   })
 
-  it("reports a stuck round as unhealthy-and-running, exit 2", async () => {
+  it("reports a line a stuck change stopped as unhealthy-and-running, exit 2", async () => {
     const dir = workdir()
-    const streak = { key: "stuck-changes:task/one", reason: "the code host answered 504 during setup", consecutive: 2 }
     const written = roundHealthDocument(
       SERVICE,
-      { stuck: { key: streak.key, reason: streak.reason } },
-      streak,
+      {
+        at: NOW,
+        by: "yrd",
+        cause: "stuck",
+        change: { branch: "task/one", head: "a".repeat(40) },
+        kind: "paused",
+        reason: "the code host answered 504 during setup",
+        sha: "b".repeat(40),
+      },
       240_000,
       NOW,
     )
@@ -145,7 +151,7 @@ describe("the probe applies the document's deadline", () => {
     writeFileSync(join(dir, "logs", "q-20260911T120200000Z-abcdef12.jsonl"), "{}\n")
     utimesSync(journal, NOW, NOW)
     writeFileSync(join(dir, "worktrees", id, ".pid"), String(process.pid))
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
     const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
     const child = Bun.spawn([process.execPath, "-e", 'console.log("ready"); setInterval(() => {}, 1000)'], {
       cwd: tree,
@@ -202,7 +208,7 @@ describe("the probe applies the document's deadline", () => {
       `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: 2_147_483_647 })}\n` +
         `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: join(dir, "logs", id, "git", "1.stdout.bin.json") })}\n`,
     )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
     const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
     const health = await readQueueHealth(dir, SERVICE, late)
     expect(health.error?.code).toBe("queue-round-unstarted")
@@ -232,7 +238,7 @@ describe("the probe applies the document's deadline", () => {
       `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: process.pid })}\n` +
         `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: "x" })}\n`,
     )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
     const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
     const health = await readQueueHealth(dir, SERVICE, late)
     expect(health.error?.code).not.toBe("queue-round-unstarted")
@@ -249,7 +255,7 @@ describe("the probe applies the document's deadline", () => {
       join(dir, "logs", `${id}.jsonl`),
       `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: "x" })}\n`,
     )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
     const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
     const health = await readQueueHealth(dir, SERVICE, late)
     expect(health.error?.code).toBe("queue-round-unstarted")
@@ -265,7 +271,7 @@ describe("the probe applies the document's deadline", () => {
     mkdirSync(join(dir, "logs"), { recursive: true })
     mkdirSync(join(dir, "worktrees"), { recursive: true })
     writeFileSync(join(dir, "logs", `${id}.jsonl`), "{}\n")
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
     const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
     const health = await readQueueHealth(dir, SERVICE, late)
     expect(health.error?.code).not.toBe("queue-round-unstarted")
@@ -293,7 +299,7 @@ describe("the probe applies the document's deadline", () => {
       `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: 2_147_483_647 })}\n` +
         `${JSON.stringify({ kind: "queue", run: id, at: NOW.toISOString(), queue: "main on origin" })}\n`,
     )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
     const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
     const health = await readQueueHealth(dir, SERVICE, late)
     expect(health.error?.code).toBe("queue-round-overdue")
@@ -325,7 +331,7 @@ describe("the probe applies the document's deadline", () => {
       `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: process.pid })}\n` +
         `${JSON.stringify({ kind: "queue", run: id, at: NOW.toISOString(), queue: "main on origin" })}\n`,
     )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
     const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
     const health = await readQueueHealth(dir, SERVICE, late)
     expect(health.error?.code).toBe("queue-round-overdue")
@@ -335,7 +341,7 @@ describe("the probe applies the document's deadline", () => {
 
   it("prints OVERDUE and exits 2 when the loop stopped writing", async () => {
     const dir = workdir()
-    const written = roundHealthDocument(SERVICE, {}, undefined, 120_000, NOW)
+    const written = roundHealthDocument(SERVICE, undefined, 120_000, NOW)
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(written))
     // Long past the instant the loop itself declared its next round due by.
     const late = new Date(NOW.getTime() + 120_000 + ROUND_BUDGET_MS + 60_000)
@@ -351,7 +357,7 @@ describe("the probe applies the document's deadline", () => {
   // the expiry cannot be mistaken for a probe that distrusts every document.
   it("prints the stored verdict unchanged while the deadline holds", async () => {
     const dir = workdir()
-    const written = roundHealthDocument(SERVICE, {}, undefined, 120_000, NOW)
+    const written = roundHealthDocument(SERVICE, undefined, 120_000, NOW)
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(written))
     const run = capture()
     expect(await queueHealthCommand(dir, SERVICE, run.io, new Date(NOW.getTime() + 60_000))).toBe(0)
