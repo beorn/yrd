@@ -173,11 +173,18 @@ export function readChange(change: ChangeRecords): ChangeReading {
  */
 export function inLine(changes: readonly ChangeRecords[]): readonly ChangeRecords[] {
   return [...changes]
-    .filter((change) => {
-      const state = readChange(change).state
-      return state === "queued" || state === "checked" || state === "stuck"
-    })
+    .filter((change) => holdsPlaceInLine(readChange(change).state))
     .sort((left, right) => openedAt(left) - openedAt(right))
+}
+
+/**
+ * Whether a change in this state holds a place in line: queued, checked or
+ * stuck. The one definition of "open in line" — `inLine` selects by it, and a
+ * stuck stop (pause.ts `lineStop`) lifts the moment its change no longer
+ * satisfies it, whatever ending took it out.
+ */
+export function holdsPlaceInLine(state: ChangeState): boolean {
+  return state === "queued" || state === "checked" || state === "stuck"
 }
 
 /** When the change was first opened, carried on every record as `Opened:`. A change with no records has no place in line, and no existence (E2). */

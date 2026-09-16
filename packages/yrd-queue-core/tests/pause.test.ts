@@ -25,6 +25,7 @@ import {
   type Git,
   type PauseRecord,
 } from "../src/index.ts"
+import { pauseFence } from "../src/pause.ts"
 import type { ChangeState } from "../src/state.ts"
 
 const PAUSE_REF = pauseRef("main")
@@ -214,6 +215,44 @@ describe("a pause names its cause", () => {
 
     expect(read).toEqual(written)
     expect(read).toMatchObject({ by: "yrd", cause: "stuck", change: { branch: "task/one", head: HEAD } })
+  })
+
+  // The merge fence is the one other writer of a stop: an explicit round
+  // admitted under a stuck stop carries it forward in its merge's atomic push.
+  // A fence that dropped the cause or the change would turn the andon into an
+  // operator's pause that no ending of the change could ever lift.
+  it("the merge fence carries a stuck stop forward whole: its cause, its change and its cures", async () => {
+    const w = await world()
+    const admitted = await writePause(w.git, "origin", "main", {
+      by: "yrd",
+      cause: "stuck",
+      change: { branch: "task/one", head: HEAD },
+      kind: "paused",
+      next: "withdraw task/one, replace its head with a fix, or resume the repaired queue",
+      reason: "the queue could not judge task/one",
+    } as Parameters<typeof writePause>[3])
+
+    const fence = await pauseFence(w.git, "origin", "main", { by: "q-merge", reason: "merge task/two" }, admitted)
+    expect(fence.previous).toEqual(admitted)
+    await w.git([
+      "push",
+      "--quiet",
+      `--force-with-lease=${PAUSE_REF}:${fence.expected}`,
+      "origin",
+      `${fence.sha}:${PAUSE_REF}`,
+    ])
+
+    const carried = await readPause(w.other, "origin", "main")
+    expect(carried?.sha).toBe(fence.sha)
+    expect(carried).toMatchObject({
+      at: admitted.at,
+      by: "yrd",
+      cause: "stuck",
+      change: { branch: "task/one", head: HEAD },
+      kind: "paused",
+      next: admitted.next,
+      reason: admitted.reason,
+    })
   })
 
   it("fails closed on a cause nobody defined", async () => {

@@ -2894,6 +2894,28 @@ describe("a stuck change stops the line (the andon, operator 2026-09-16)", () =>
     expect(after.merged).toEqual(["task/two"])
   })
 
+  it("a stuck change that ends failed lifts the stop too: any ending takes it out of line", async () => {
+    const w = await world()
+    const fault = faultySetup(w, BROKEN_SETUP)
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const stuck = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+    expect(stuck.stuck).toEqual(["task/one"])
+
+    // The repair, then an operator's round on the stopped line in which the
+    // change's own check fails: an ending that is neither a merge nor a withdrawal.
+    fault.clear()
+    const judged = await queueRun({ ...(await w.options({ exit: 1, setup: fault.command })), foreground: true })
+    expect(judged).toMatchObject({ failed: ["task/one"], stuck: [] })
+    expect((await recordsOf(w, "task/one", headOne)).map((record) => record.kind)).toContain("failed")
+
+    // Nothing holds the line now: a change submitted after the ending is
+    // judged and merged by the next automatic round.
+    await submitCommit(w, "task/two", "two.txt")
+    const after = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+    expect(after.stopped).toBeUndefined()
+    expect(after.merged).toEqual(["task/two"])
+  })
+
   it("resume lifts a stuck stop; the line re-takes the stuck change first, and a second stuck stops it again", async () => {
     const w = await world()
     const fault = faultySetup(w, BROKEN_SETUP)

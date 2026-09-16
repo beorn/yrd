@@ -34,7 +34,7 @@ import {
 import { readRemoteCommit } from "./git.ts"
 
 import { changeName, parseChangeName, pauseRef, type Change } from "./refs.ts"
-import type { ChangeState } from "./state.ts"
+import { holdsPlaceInLine, type ChangeState } from "./state.ts"
 
 export type PauseKind = "paused" | "resumed"
 
@@ -95,19 +95,18 @@ export class QueueNotPaused extends Error {
   }
 }
 
-/** The line states a stuck stop holds for: the change is still waiting in line. */
-const IN_LINE: ReadonlySet<ChangeState> = new Set<ChangeState>(["queued", "checked", "stuck"])
-
 /**
  * The stop that stands, or undefined while the line runs: THE ONE DERIVATION.
  *
  * `named` is the queue read's entry for the change a stuck stop names, with its
  * record history — `readQueue` expands exactly that one entry. An operator's
  * stop stands until a resume record replaces it. A stuck stop stands while its
- * change is still in line AND no ending has been recorded on it since it last
- * stuck: a same-head retry re-opens the chain without curing anything, while an
- * ending followed by a resubmit is a new submission this stop never named, and
- * must never stop the line a second time. A change the read cannot find at all
+ * change still holds a place in line (state.ts `holdsPlaceInLine`, the predicate
+ * `inLine` selects by) AND no ending has been recorded on it since it last
+ * stuck. So ANY ending lifts it — merged, withdrawn, failed, a replaced head —
+ * with no list of ending kinds kept here. A same-head retry re-opens the chain
+ * without curing anything, while an ending followed by a resubmit is a new
+ * submission this stop never named, and must never stop the line a second time. A change the read cannot find at all
  * keeps the line stopped — nothing says it left — and `yrd queue resume` cures
  * that. The record itself is never rewritten here: a stop that lifted leaves its
  * record in place until the next write to the pause ref replaces it, which the
@@ -121,7 +120,7 @@ export function lineStop(
 ): PauseRecord | undefined {
   if (pause?.kind !== "paused") return undefined
   if (pause.cause === "operator" || named === undefined) return pause
-  if (!IN_LINE.has(named.reading.state)) return undefined
+  if (!holdsPlaceInLine(named.reading.state)) return undefined
   const records = named.change.records
   const stuckAt = records.findLastIndex((record) => endedKind(record) === "stuck")
   return records.slice(stuckAt + 1).some((record) => standsEnded(record)) ? undefined : pause
