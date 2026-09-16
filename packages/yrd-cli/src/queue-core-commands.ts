@@ -54,6 +54,8 @@ import {
   refAt,
   queueRefPrefix,
   submit,
+  withdraw,
+  NothingToWithdraw,
   nextStuckStreak,
   QUEUE_HEALTH_DOCUMENT,
   ROUND_BUDGET_MS,
@@ -180,6 +182,7 @@ export type CoreQueueCommand =
     }>
   | Readonly<{ command: "pause"; by: string; reason: string }>
   | Readonly<{ command: "resume"; by: string; reason?: string }>
+  | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "run" }>
   | Readonly<{
       command: "up"
@@ -404,6 +407,35 @@ export async function coreQueueCommand(
         return 0
       } catch (error) {
         if (error instanceof QueuePaused || error instanceof QueueNotPaused) {
+          io.stderr(`yrd: ${error.message}\n`)
+          return 1
+        }
+        throw error
+      }
+    }
+    case "withdraw": {
+      try {
+        const taken = await withdraw(git, config.target.remote, {
+          branch: request.branch,
+          by: request.by,
+          target: config.target,
+          ...(request.reason === undefined ? {} : { reason: request.reason }),
+        })
+        emit(
+          io,
+          options.json,
+          taken,
+          taken.withdrawn
+            .map(
+              (one) =>
+                `withdrew ${changeName({ branch: one.branch, head: one.head })} from ${taken.queue}` +
+                ` (record ${one.record.slice(0, 12)}); yrd submit re-opens it`,
+            )
+            .join("\n"),
+        )
+        return 0
+      } catch (error) {
+        if (error instanceof NothingToWithdraw) {
           io.stderr(`yrd: ${error.message}\n`)
           return 1
         }

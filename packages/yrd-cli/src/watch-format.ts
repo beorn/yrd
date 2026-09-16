@@ -62,6 +62,7 @@ export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
   merged: "✓",
   queued: "○",
   stuck: "◌",
+  withdrawn: "⊘",
 }
 
 /** The glyph a check running RIGHT NOW overlays on any state: the overlay reads live, the word still reads the state. */
@@ -80,6 +81,7 @@ export const STATE_COLOR: Readonly<Record<Row["state"], string>> = {
   merged: "$fg-success",
   queued: "$fg-accent",
   stuck: "$fg-warning",
+  withdrawn: "$fg-muted",
 }
 
 /** The working color a live check overlays on any state. */

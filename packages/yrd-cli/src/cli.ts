@@ -212,6 +212,45 @@ function buildProgram(
       )
     })
   queue
+    .command("withdraw <branch>")
+    .description("end the branch's open change and take it out of the line; the branch itself is untouched")
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", "name who withdrew the change")
+    .option("--queue <value>", QUEUE_HELP)
+    .option("--reason <text>", "why the change leaves the line, written on the record")
+    .addHelpSection(
+      "On withdraw:",
+      "Appends a withdrawn record to the change - an ending like merged or failed - so the queue drops the " +
+        "change from the line and never judges it again; resubmitting the branch re-opens it. The other way " +
+        "out of the line is the submitter's: replace the branch with a head that clears the stuck reason - " +
+        "resubmitting the same content sticks on the same ground.",
+    )
+    .action(async (branch, options) => {
+      const declared = options as PauseOptions
+      const location = await resolveQueueLocation(cwd(), declared.queue, env)
+      setExit(
+        await coreQueueCommand(
+          location.repo,
+          io,
+          {
+            branch: branch as string,
+            by: resolveSubmitter(declared.notify, env),
+            command: "withdraw",
+            ...(declared.reason === undefined ? {} : { reason: declared.reason }),
+          },
+          {
+            json: declared.json,
+            env,
+            log: log(),
+            selection: location.selection,
+            populateReference: location.owned,
+            queue: location.queue,
+            workdir: location.workdir,
+          },
+        ),
+      )
+    })
+  queue
     .command("resume")
     .description("admit submissions again immediately, and resume checking and merging on the next service interval")
     .option("--json", "emit stable JSON")

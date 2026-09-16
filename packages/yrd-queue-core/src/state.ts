@@ -2,7 +2,7 @@
  * A change's state, derived and never stored
  * ([plan](../../../../pm/@i/10-yrd/plan.md) § The final design, The change).
  *
- * Five words, and every one of them is a reading of git plus the change's own
+ * Six words, and every one of them is a reading of git plus the change's own
  * records at the moment you ask:
  *
  * - `queued` — an opened record and no checked record after it;
@@ -10,7 +10,9 @@
  * - `stuck` — the chain stands on stuck; the change stays open;
  * - `merged` — the head is an ancestor of the target;
  * - `failed` — the chain's current ending is failed, or the branch no longer carries
- *   this head (`replaced`), or the branch is gone (`deleted`).
+ *   this head (`replaced`), or the branch is gone (`deleted`);
+ * - `withdrawn` — an operator ended the change and it left the line; the branch
+ *   itself is untouched and a resubmit re-opens it (@i/10-yrd/24492).
  *
  * "After it" is judged by the chain's CURRENT ENDING (`endingRecord`), never
  * the literal tip: a stray record appended after an ending cannot hide it, and
@@ -42,7 +44,7 @@
 import { endedKind, endingRecord, type ChangeRecord } from "./records.ts"
 import { incidentFrom } from "./incident.ts"
 
-export const CHANGE_STATES = ["queued", "checked", "stuck", "merged", "failed"] as const
+export const CHANGE_STATES = ["queued", "checked", "stuck", "merged", "failed", "withdrawn"] as const
 
 export type ChangeState = (typeof CHANGE_STATES)[number]
 
@@ -130,6 +132,8 @@ export function readChange(change: ChangeRecords): ChangeReading {
       return { state: "failed", reason: reasonOf(last) }
     case "stuck":
       return { state: "stuck", reason: incidentFrom(last).code }
+    case "withdrawn":
+      return { state: "withdrawn", reason: reasonOf(last) }
     case "checked":
       return { state: "checked" }
     case "opened":
@@ -141,6 +145,7 @@ export function readChange(change: ChangeRecords): ChangeReading {
       if (state === "merged") return { state: "merged" }
       if (state === "failed") return { state: "failed", reason: reasonOf(last) }
       if (state === "stuck") return { state: "stuck", reason: incidentFrom(last).code }
+      if (state === "withdrawn") return { state: "withdrawn", reason: reasonOf(last) }
       throw new Error(`sent record ${last.sha.slice(0, 12)} names no ended state (State: ${state ?? "absent"})`)
     }
   }

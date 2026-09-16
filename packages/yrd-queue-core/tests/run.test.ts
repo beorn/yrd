@@ -43,6 +43,7 @@ import {
   submit,
   trailer,
   trailers,
+  withdraw,
   writePause,
 } from "../src/index.ts"
 import type { ChangeRecord, CheckedTree, Git, PauseRecord, QueueRunOptions, QueueRunOutcome } from "../src/index.ts"
@@ -2754,6 +2755,118 @@ describe("a stuck head of line does not block the line behind it (@i/10-yrd/2449
       (await refAt(w.git, changeRef("main", { branch: "task/two", head: headTwo })))!,
     )
     expect(recordsTwo.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
+  })
+})
+
+describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
+  const TARGET = { branch: "main", remote: "origin" } as const
+
+  it("ends the open change; the next run never judges it and merges the line behind", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const headTwo = await submitCommit(w, "task/two", "two.txt")
+
+    const taken = await withdraw(w.git, "origin", {
+      branch: "task/one",
+      by: "@chief",
+      reason: "superseded by task/two",
+      target: TARGET,
+    })
+
+    expect(taken.withdrawn).toHaveLength(1)
+    expect(taken.withdrawn[0]).toMatchObject({ branch: "task/one", head: headOne })
+    // FAKE_EXIT=2 would stick task/one the moment it were judged, so a clean
+    // exit 0 with task/two merged is the proof the withdrawn change left the
+    // line rather than being stepped over.
+    const outcome = await queueRun(await w.options({ exit: 2, on: ["submit"] }))
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/two"], stuck: [] })
+    expect(readFileSync(w.checkLog, "utf8")).not.toContain(`submit/${headOne.slice(0, 12)}`)
+    await fetchChanges(w)
+    const records = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/one", head: headOne })))!,
+    )
+    expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
+    expect(trailer(records[1]!, "By")).toBe("@chief")
+    expect(trailer(records[1]!, "Reason")).toBe("superseded by task/two")
+  })
+
+  it("refuses a change whose chain already ended, naming the ending", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+    expect(outcome.merged).toEqual(["task/one"])
+
+    await expect(
+      withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET }),
+    ).rejects.toThrow(/already ended merged/u)
+  })
+
+  it("refuses a branch with no change at all, and says where it looked", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    await expect(
+      withdraw(w.git, "origin", { branch: "task/ghost", by: "@chief", target: TARGET }),
+    ).rejects.toThrow(/no change for task\/ghost/u)
+  })
+
+  it("a resubmit after a withdrawal re-opens the chain and lands", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    await withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET })
+
+    await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: TARGET,
+      issue: "@i/10-yrd/1",
+    })
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    expect(outcome.merged).toEqual(["task/one"])
+    await fetchChanges(w)
+    const records = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!,
+    )
+    expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn", "opened", "checked", "merged", "sent"])
+  })
+
+  it("a branch deleted after its withdrawal is left as it ended, never retired on top", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    await withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET })
+    await w.git(["push", "--quiet", "origin", ":refs/heads/task/one"])
+
+    const outcome = await queueRun(await w.options({ exit: 0 }))
+
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
+    await fetchChanges(w)
+    const records = await readRecords(
+      w.git,
+      (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!,
+    )
+    expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
+  })
+
+  it("a stuck record names both escapes: the operator verb, and a replacement that clears the reason", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 2, on: ["submit"] }))
+
+    expect(outcome.stuck).toEqual(["task/one"])
+    await fetchChanges(w)
+    const records = await readRecords(
+      w.git,
+      (await refAt(w.git, (await w.git(["ls-remote", "--refs", "origin", `${CHANGES}/task/one@*`])).trim().split(/\s+/u)[1]!))!,
+    )
+    const stuckRecord = records.find((record) => record.kind === "stuck")
+    const incident = incidentOf(stuckRecord)
+    expect(incident.Next).toContain("yrd queue withdraw task/one")
+    expect(incident.Next).toContain("clears this reason")
+    expect(incident.Next).toContain("the same content sticks on the same ground")
   })
 })
 

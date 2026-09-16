@@ -41,7 +41,7 @@ import { refAt } from "./git.ts"
 import { changeName, changeRef, type Change } from "./refs.ts"
 
 /** The kinds a record can be. The vocabulary is closed. */
-export const RECORD_KINDS = ["opened", "checked", "merged", "failed", "stuck", "sent"] as const
+export const RECORD_KINDS = ["opened", "checked", "merged", "failed", "stuck", "withdrawn", "sent"] as const
 
 export type RecordKind = (typeof RECORD_KINDS)[number]
 
@@ -454,7 +454,7 @@ export function tipRecord(record: ChangeRecord | undefined, sha: string, where: 
     return record
   }
   throw new Error(
-    `${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|sent trailer`,
+    `${where} at ${sha.slice(0, 12)} carries no valid Record: opened|checked|merged|failed|stuck|withdrawn|sent trailer`,
   )
 }
 
@@ -467,15 +467,16 @@ export function trailers(record: ChangeRecord, name: string): readonly string[] 
 export function endedKind(tip: ChangeRecord): RecordKind {
   if (tip.kind !== "sent") return tip.kind
   const state = trailer(tip, "State")
-  return state === "merged" || state === "failed" || state === "stuck" ? state : "sent"
+  return state === "merged" || state === "failed" || state === "stuck" || state === "withdrawn" ? state : "sent"
 }
 
 /**
- * The kinds that END a chain: merged and failed. A stuck chain stays open — it
- * keeps its place in line and the next queue run takes it again (state.ts) —
- * so stuck never ends one.
+ * The kinds that END a chain: merged, failed and withdrawn (an operator's own
+ * ending, @i/10-yrd/24492). A stuck chain stays open — it keeps its place in
+ * line and the next queue run takes it again (state.ts) — so stuck never ends
+ * one.
  */
-const ENDING_KINDS: ReadonlySet<RecordKind> = new Set<RecordKind>(["merged", "failed"])
+const ENDING_KINDS: ReadonlySet<RecordKind> = new Set<RecordKind>(["merged", "failed", "withdrawn"])
 
 /** Whether this record stands for an ending (`endedKind` reads a sent record's `State:`). */
 export function standsEnded(record: ChangeRecord): boolean {

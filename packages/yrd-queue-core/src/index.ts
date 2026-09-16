@@ -90,6 +90,8 @@ export { readHistories, readQueue, resolveRemote } from "./remote.ts"
 export { directMergeCommits, directMergeLine } from "./direct.ts"
 export { refuseTarget, inspectSubmit, refuseDivergedMovedPins, freshnessLine, submit, issueOf } from "./submit.ts"
 export type { IssueResolution } from "./submit.ts"
+export { withdraw, NothingToWithdraw } from "./withdraw.ts"
+export type { WithdrawRequest, Withdrawn, WithdrawnChange } from "./withdraw.ts"
 export { QueuePaused, QueueNotPaused, activePause, pauseLine, readPause, requireResumed, writePause } from "./pause.ts"
 export type { PauseRecord, PauseKind, WritePause } from "./pause.ts"
 

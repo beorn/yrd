@@ -61,6 +61,7 @@ import {
   commitTrailers,
   endedKind,
   recordCommit,
+  standsEnded,
   mergedBy,
   mergedByRun,
   trailer,
@@ -691,7 +692,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
         run,
         entry,
         "stuck",
-        stuckWrite(run, {
+        stuckWrite(run, entry.change.branch, {
           code: setupStuckCode(fault),
           next: setupStuckNext(fault),
           subject:
@@ -738,7 +739,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
         run,
         entry,
         "stuck",
-        stuckWrite(run, {
+        stuckWrite(run, entry.change.branch, {
           code: "yrd-reference-unpopulated",
           next:
             error.path === undefined
@@ -754,7 +755,7 @@ async function guarded(run: Run, entry: QueueEntry, step: () => Promise<Ended>):
       run,
       entry,
       "stuck",
-      stuckWrite(run, {
+      stuckWrite(run, entry.change.branch, {
         code: "yrd-queue-crash",
         next: "repair the queue fault, then run yrd queue run",
         subject: `the queue crashed judging ${entry.change.branch}: ${message}`,
@@ -844,7 +845,7 @@ async function judge(run: Run, entry: QueueEntry): Promise<Ended> {
         run,
         entry,
         "stuck",
-        stuckWrite(run, {
+        stuckWrite(run, entry.change.branch, {
           code: "yrd-check-unresolved",
           next: `repair ${stuckOne.name} or its queue environment, then run yrd queue run`,
           subject: `the queue could not judge ${branch}: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
@@ -1259,7 +1260,7 @@ async function candidateFailure(
     })
   }
   return run.steps.end(run, entry, "stuck", {
-    ...stuckWrite(run, {
+    ...stuckWrite(run, entry.change.branch, {
       code: "yrd-merge-unresolved",
       detail: detail.message,
       next: detail.next ?? "repair the queue fault, then run yrd queue run",
@@ -1294,7 +1295,7 @@ async function attributedFailure(
         run,
         entry,
         "stuck",
-        stuckWrite(run, {
+        stuckWrite(run, entry.change.branch, {
           code: "yrd-check-unresolved",
           next: `repair ${unresolved.name} or its queue environment, then run yrd queue run`,
           subject:
@@ -1311,7 +1312,7 @@ async function attributedFailure(
       run,
       entry,
       "stuck",
-      stuckWrite(run, {
+      stuckWrite(run, entry.change.branch, {
         code: "yrd-submodule-main-regression",
         next: `fix or revert ${gitlinks} on submodule main, then run yrd queue run`,
         subject: `${gitlinks} breaks the root at the settled base`,
@@ -1374,7 +1375,7 @@ async function attributedSetupFailure(run: Run, entry: QueueEntry, failure: Cand
     run,
     entry,
     "stuck",
-    stuckWrite(run, {
+    stuckWrite(run, entry.change.branch, {
       code: setupStuckCode(fault),
       next: setupStuckNext(fault),
       subject:
@@ -1752,7 +1753,7 @@ async function merge(run: Run, entry: QueueEntry): Promise<Ended> {
         run,
         entry,
         "stuck",
-        stuckWrite(run, {
+        stuckWrite(run, entry.change.branch, {
           code: "yrd-check-unresolved",
           next: `repair ${stuckOne.name} or its queue environment, then run yrd queue run`,
           subject: `the queue could not judge ${branch} at merge: ${stuckOne.name} ${stuckOne.why ?? ""}`.trim(),
@@ -1941,8 +1942,7 @@ async function endFailing(
 async function retire(run: Run, entry: QueueEntry): Promise<void> {
   const reason = entry.reading.reason
   if (entry.reading.state !== "failed" || (reason !== "deleted" && reason !== "replaced")) return
-  const endedAs = endedKind(tipOf(entry.change))
-  if (endedAs === "failed" || endedAs === "merged") return
+  if (standsEnded(tipOf(entry.change))) return
   const { change } = entry
   const { branch, head } = change
   const retiredRecord = await writeRecord(
@@ -2078,7 +2078,7 @@ async function recoverOrphanedMerge(run: Run, entry: QueueEntry): Promise<"stuck
     run,
     entry,
     "stuck",
-    stuckWrite(run, {
+    stuckWrite(run, entry.change.branch, {
       code: "yrd-merge-orphaned",
       next: absorbed
         ? `${found.commit.slice(0, 12)} is already an ancestor of ${target} some other way; confirm ${branch} is truly done, close it by hand, then run yrd queue run`
@@ -2366,6 +2366,7 @@ async function end(run: Run, entry: QueueEntry, kind: "failed" | "stuck", ended:
 /** One constructor for queue-owned failures, with this run's real evidence and remedy. */
 function stuckWrite(
   run: Run,
+  branch: string,
   cause: Readonly<{
     code: Incident["code"]
     subject: string
@@ -2377,12 +2378,17 @@ function stuckWrite(
   }>,
 ): EndedWrite {
   const subject = cause.subject.replace(/\s+/gu, " ").trim()
+  // Every stuck record names BOTH escapes from the line, in words that cannot
+  // be read as "re-push the same content" (@i/10-yrd/24492 box 2).
+  const next =
+    `${cause.next}; two ways out of the line: yrd queue withdraw ${branch} (an operator ends the change), ` +
+    `or submit a replacement head for ${branch} that clears this reason — the same content sticks on the same ground`
   const incident = {
     code: cause.code,
     subject,
     via: `${cause.via} in yrd queue ${run.name} [${run.log.id}]`,
     evidence: run.log.path,
-    next: cause.next,
+    next,
     owner: "the queue operator",
   }
   return {
