@@ -40,6 +40,7 @@ import {
   readQueue,
   readPause,
   runCheck,
+  runDiedInPreamble,
   submit,
   trailer,
   trailers,
@@ -724,6 +725,41 @@ describe("a queue run", () => {
     )
   })
 
+  /**
+   * @failure  A run that THREW in its Git preamble left a journal with no header
+   *           at all — the census over 2309 journals found the header never at
+   *           line 1 — and both readers called that a malformed journal rather
+   *           than a run that died early (@i/10-yrd/24470 AC1). Red-first holds
+   *           by construction: before this branch this exact run wrote no header
+   *           anywhere in the file, so line 1 could not be one.
+   * @level    l3 — a real remote, a real `ls-remote`, a real throw
+   */
+  it("a run that throws in its Git preamble still leaves a header, its Git rows, and no queue record", async () => {
+    const w = await world()
+    const options = await w.options({ exit: 0 })
+    // `origin` is configured and `nowhere` is not, so readQueue's own
+    // `ls-remote --refs` fails for real, after its one retry. Nothing is
+    // stubbed: this is the preamble failing where it actually fails.
+    await expect(queueRun({ ...options, target: { ...options.target, remote: "nowhere" } })).rejects.toThrow()
+
+    const logs = join(w.workdir, "logs")
+    const journals = readdirSync(logs).filter((name) => name.endsWith(".jsonl"))
+    expect(journals).toHaveLength(1)
+    const records = readFileSync(join(logs, journals[0] ?? ""), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+
+    expect(records[0]).toMatchObject({ kind: "run", target: "main" })
+    expect(records.slice(1).every((record) => record.kind === "git")).toBe(true)
+    expect(records.some((record) => record.kind === "queue")).toBe(false)
+    // The Git rows ARE the diagnosis, which is why journaling the preamble was
+    // worth keeping: the run got far enough to try, and the last row says what
+    // it tried.
+    expect(records.length).toBeGreaterThan(1)
+    expect(runDiedInPreamble(records as never)).toBe(true)
+  })
+
   it("pass: the change is checked, merged, the target moves by one merge commit, and the submitter is told to close their bead", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
@@ -796,6 +832,20 @@ describe("a queue run", () => {
         .filter(Boolean)
         .map((line) => (JSON.parse(line) as { kind: string }).kind),
     ).toEqual(expect.arrayContaining(["run", "change", "check", "result", "merge", "message"]))
+    // 24470: THE JOURNAL OPENS WITH ITS HEADER. Every field the header carries
+    // is known from the run's options, so it is written before the first
+    // journaled Git call and a headerless journal is structurally impossible.
+    // The queue name is the one value that is not option-known, so it follows
+    // as its own record once the remote is read — and that record doubles as
+    // the mark that the Git preamble completed.
+    const kinds = logRecords(outcome).map((record) => record.kind)
+    expect(kinds[0]).toBe("run")
+    expect(kinds.indexOf("queue")).toBeGreaterThan(0)
+    expect(kinds.indexOf("queue")).toBeLessThan(kinds.indexOf("change"))
+    expect(logRecords(outcome)[kinds.indexOf("queue")]).toMatchObject({ kind: "queue", queue: expect.any(String) })
+    // The preamble's Git rows are still journaled: they sit between the header
+    // and the queue record, which is where a died-in-preamble run's evidence is.
+    expect(kinds.slice(1, kinds.indexOf("queue")).every((kind) => kind === "git")).toBe(true)
     // Addendum 2/T1: every ordinary run invocation is linked before the run
     // summarizes it, including successful calls rebound to a worktree.
     const runRecords = logRecords(outcome)
@@ -2297,7 +2347,11 @@ describe("a queue run", () => {
     // the merge commit, so the two can never say different things.
     const by = trailer(merged, "Merged-By") ?? ""
     expect(by).toBe(`yrd queue main [${outcome.run}]`)
-    expect(logRecords(outcome).find((record) => record.kind === "run")).toMatchObject({ queue: `${w.remote}#main` })
+    // 24470 moved the queue's name off the header, which is now written before
+    // any Git call, and onto its own record written the instant the remote
+    // resolves. The name itself is unchanged, and this is still the journal's
+    // one statement of which queue merged the change.
+    expect(logRecords(outcome).find((record) => record.kind === "queue")).toMatchObject({ queue: `${w.remote}#main` })
     expect(mergedByRun(by)).toBe(outcome.run)
     expect(await trailerOn(w, merge, "Merged-By")).toBe(by)
     // The queue commits as itself, so a reader tells its merges from a person's

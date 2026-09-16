@@ -167,6 +167,100 @@ describe("the probe applies the document's deadline", () => {
     expect(ended.error?.cause).toContain(join(dir, "worktrees"))
   })
 
+  /**
+   * @failure  A run threw in its Git preamble, before it could write its run
+   *           header. The probe found the round overdue, found no live process
+   *           holding a worktree (the dead run never claimed one), and reported
+   *           the generic "no live process holds a round worktree" — a tolerated
+   *           absence. The journal that names the failing Git call was sitting
+   *           right there, unread (@i/10-yrd/24470 AC2).
+   * @level    l1 (a directory and two files)
+   * @consumer Hab's page: "the queue died before it could start a round" and
+   *           "a round is hung" need different hands.
+   */
+  it("names a run that died in its Git preamble, distinct from a malformed journal", async () => {
+    const dir = workdir()
+    const id = "q-20260911T120100000Z-deadbeef"
+    mkdirSync(join(dir, "logs"), { recursive: true })
+    // An empty census root: the run threw before it claimed a worktree, so
+    // nothing holds one and the round is definitively over.
+    mkdirSync(join(dir, "worktrees"), { recursive: true })
+    const journal = join(dir, "logs", `${id}.jsonl`)
+    // 2147483647 is the largest pid Linux can hand out and is not a live one.
+    writeFileSync(
+      journal,
+      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: 2_147_483_647 })}\n` +
+        `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: join(dir, "logs", id, "git", "1.stdout.bin.json") })}\n`,
+    )
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
+    const health = await readQueueHealth(dir, SERVICE, late)
+    expect(health.error?.code).toBe("queue-round-unstarted")
+    expect(health.state).toBe("unhealthy")
+    // It names the journal, so the reader goes straight to the failing Git row,
+    // and the evidence it actually took rather than one it could have.
+    expect(health.error?.cause).toContain(journal)
+    expect(health.error?.cause).toContain("pid 2147483647) is not running")
+  })
+
+  /**
+   * @failure  THE FALSE ALARM. A run claims its worktree only after the whole
+   *           Git preamble, so for the entire window this state exists in there
+   *           is no worktree and no `.pid` file. Deriving "it died" from that
+   *           absence pages `unhealthy`/exit 2 about a run three seconds into a
+   *           perfectly healthy preamble (@i/10-yrd/24470, caught in review).
+   */
+  it("will not call a run unstarted while its own runner is still executing", async () => {
+    const dir = workdir()
+    const id = "q-20260911T120100000Z-aaaabbbb"
+    mkdirSync(join(dir, "logs"), { recursive: true })
+    mkdirSync(join(dir, "worktrees"), { recursive: true })
+    // Header, one Git row, no queue record, no worktree — and the runner it
+    // names is this very process, so the round is mid-preamble, not over.
+    writeFileSync(
+      join(dir, "logs", `${id}.jsonl`),
+      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: process.pid })}\n` +
+        `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: "x" })}\n`,
+    )
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
+    const health = await readQueueHealth(dir, SERVICE, late)
+    expect(health.error?.code).not.toBe("queue-round-unstarted")
+  })
+
+  // A journal from before the header-first writer carries no pid, so the older
+  // and weaker evidence still answers — and the document says which it used.
+  it("falls back to worktree absence for a legacy journal, and says so", async () => {
+    const dir = workdir()
+    const id = "q-20260911T120100000Z-ccccdddd"
+    mkdirSync(join(dir, "logs"), { recursive: true })
+    mkdirSync(join(dir, "worktrees"), { recursive: true })
+    writeFileSync(
+      join(dir, "logs", `${id}.jsonl`),
+      `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: "x" })}\n`,
+    )
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
+    const health = await readQueueHealth(dir, SERVICE, late)
+    expect(health.error?.code).toBe("queue-round-unstarted")
+    expect(health.error?.cause).toContain("names no runner pid")
+  })
+
+  // The negative control on the same distinction: a journal whose records
+  // cannot be read is a WRITER DEFECT, not a run that died early, and it keeps
+  // the `unparsed` verdict and exit 3 it has always had.
+  it("keeps an unreadable journal unparsed rather than calling it unstarted", async () => {
+    const dir = workdir()
+    const id = "q-20260911T120100000Z-12345678"
+    mkdirSync(join(dir, "logs"), { recursive: true })
+    mkdirSync(join(dir, "worktrees"), { recursive: true })
+    writeFileSync(join(dir, "logs", `${id}.jsonl`), "{}\n")
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
+    const health = await readQueueHealth(dir, SERVICE, late)
+    expect(health.error?.code).not.toBe("queue-round-unstarted")
+  })
+
   it("prints OVERDUE and exits 2 when the loop stopped writing", async () => {
     const dir = workdir()
     const written = roundHealthDocument(SERVICE, {}, undefined, 120_000, NOW)

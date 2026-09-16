@@ -6,7 +6,7 @@
  * needed, including when those resources are the service's fault.
  */
 
-import { readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, relative, sep } from "node:path"
 import { inspectPathHolderCensus } from "@yrd/process"
 
@@ -17,6 +17,7 @@ import {
   QUEUE_HEALTH_DOCUMENT,
   queueHealthExitCode,
   readRunLog,
+  runDiedInPreamble,
   runStartedAt,
   unreadableHealthDocument,
   type QueueHealthDocument,
@@ -92,6 +93,30 @@ export async function readQueueHealth(
           },
         }
       }
+      // NO LIVE PROCESS HOLDS A ROUND. Before reporting that as something the
+      // census could not measure, read the newest journal: a run that threw in
+      // its Git preamble never claimed a worktree at all, so there is nothing
+      // for a census to have missed about it and its own records say both that
+      // the round is over and which Git call ended it (@i/10-yrd/24470). This
+      // sits ABOVE the coverage check on purpose — the evidence is the journal,
+      // not the process table, so an incomplete census cannot withhold it.
+      const unstarted = unstartedRound(workdir)
+      if (unstarted !== undefined) {
+        return {
+          ...judged,
+          state: "unhealthy" as const,
+          error: {
+            code: "queue-round-unstarted",
+            cause:
+              `${judged.error.cause}; run ${unstarted.id} died in its Git preamble (${unstarted.how}): ` +
+              `${unstarted.journal} holds its Git evidence and no run could be started from it`,
+            resolution: [
+              `Read the last Git record in ${unstarted.journal}; it names the call that failed.`,
+              "This clears when a round starts and writes its own header.",
+            ],
+          },
+        }
+      }
       if (!census.coverage.complete) {
         throw new Error(`process ownership under ${trees} could not be fully read: ${JSON.stringify(census.coverage)}`)
       }
@@ -135,6 +160,76 @@ export async function readQueueHealth(
     `the health document at ${path} is not a ${"hab-service-health/2"} document`,
     text.trim().slice(0, MAX_OBSERVED) || null,
   )
+}
+
+/**
+ * The newest run journal, when what it holds is a run that died in its Git
+ * preamble: the id and the path, so the caller can name both.
+ *
+ * DEFINITE WITHOUT THE PROCESS CENSUS, which is the point of reading it here:
+ * the journal names the run's own pid and one `kill -0` settles it, so a census
+ * that cannot read every process on the host is not consulted and cannot
+ * withhold the answer.
+ *
+ * Says what it looked at and where. A missing log directory means no run has
+ * ever journaled here, which the caller's own overdue fault already covers; any
+ * OTHER failure to list it is thrown, because a caller deciding whether the
+ * queue died early must not be handed "it did not" by a directory nobody could
+ * read.
+ */
+function unstartedRound(workdir: string): Readonly<{ id: string; journal: string; how: string }> | undefined {
+  const logs = join(workdir, "logs")
+  let names: readonly string[]
+  try {
+    names = readdirSync(logs)
+  } catch (error) {
+    // silent-fallback-allow: no log directory means no run ever journaled, and the caller's overdue fault already names that; every other listing failure throws below.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw new Error(
+      `run journals under ${logs} could not be listed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  }
+  const id = names
+    .filter((name) => name.endsWith(".jsonl"))
+    .map((name) => name.slice(0, -".jsonl".length))
+    .filter((name) => runStartedAt(name) !== undefined)
+    .sort()
+    .at(-1)
+  if (id === undefined) return undefined
+  const records = readRunLog(logs, id)
+  if (!runDiedInPreamble(records)) return undefined
+  const journal = join(logs, `${id}.jsonl`)
+  // THE HEADER'S PID DECIDES IT, and nothing else can. A run claims its worktree
+  // only after the whole Git preamble (queue-core run.ts:476), so for the entire
+  // window in which "executing a preamble" and "died in one" must be told apart,
+  // there is no `.pid` file and no worktree to read. Probing the one pid the
+  // header names is the difference between naming a fault and paging about a
+  // healthy run three seconds old.
+  const pid = records.find((record) => record.kind === "run")?.pid
+  if (typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0) {
+    return running(pid) ? undefined : { how: `its runner (pid ${String(pid)}) is not running`, id, journal }
+  }
+  // A journal from before 24470 carries no pid, so the weaker evidence is all
+  // there is. It is sound for a FINISHED run and stated as what it is, never
+  // dressed up as a liveness probe that was not taken.
+  if (existsSync(join(workdir, "worktrees", id))) return undefined
+  return {
+    how: "its header names no runner pid (written before the header-first writer) and it claimed no worktree",
+    id,
+    journal,
+  }
+}
+
+/** Does this one process exist: `kill -0`, never a census. */
+function running(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    // silent-fallback-allow: ESRCH and EPERM both answer the only question asked — this pid is not a process we can signal, so it is not a live runner.
+    return false
+  }
 }
 
 /**

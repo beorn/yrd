@@ -1096,14 +1096,11 @@ export async function coreQueueCommand(
       // Local check witnesses are retained without creating a queue admission history.
       const journal = openLog(join(workdir, "logs", "check"))
       const run = journal.id
-      const gitOptions = {
-        env: options.env,
-        openOutput: journal.openGitOutput,
-        onInvocation: journal.writeGitInvocation,
-      }
-      const checkGit = gitIn(repo, undefined, selection, gitOptions)
-      const tree = await checkedTree(repo, captured.oid, undefined, selection, gitOptions)
-      if (tree.candidate !== head) throw new Error(`check subject moved: expected ${head}, read ${tree.candidate}`)
+      // THE HEADER FIRST, as a queue run writes its own (@i/10-yrd/24470). All
+      // five fields are known before the log is even open, so a check that
+      // throws while materializing its tree leaves a journal that still says
+      // which change at which base it was for, rather than one a reader has to
+      // call malformed.
       journal.write({
         kind: "run",
         command: "check",
@@ -1112,6 +1109,14 @@ export async function coreQueueCommand(
         config: config.blob,
         head,
       })
+      const gitOptions = {
+        env: options.env,
+        openOutput: journal.openGitOutput,
+        onInvocation: journal.writeGitInvocation,
+      }
+      const checkGit = gitIn(repo, undefined, selection, gitOptions)
+      const tree = await checkedTree(repo, captured.oid, undefined, selection, gitOptions)
+      if (tree.candidate !== head) throw new Error(`check subject moved: expected ${head}, read ${tree.candidate}`)
       const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).trim()
       const logDir = join(workdir, "checks", changeName({ branch, head }), run, "check")
       // The worktrees root of this run, claimed before anything is made in it:

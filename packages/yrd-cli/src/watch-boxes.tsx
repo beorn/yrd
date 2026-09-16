@@ -8,13 +8,16 @@
  *   │   progress 17:04:45 · 2s ago                                    │    the marker's gutter (29, 29a)
  *   ╰─────────────────────────────────────────────────────────────────╯
  *
- * Four words drive it, from `runnerHealth` and nothing else (27: severity is
+ * Five words drive it, from `runnerHealth` and nothing else (27: severity is
  * never muted): `running` blue and pulsing, `idle` grey and pulsing slowly,
- * `silent` solid red with the reason on its own line, `absent` grey with the
- * sentence that says where the journal was looked for. One `RUNNER` frame,
- * as item 37 rules; per-queue lines arrive with M8's queues.
+ * `silent` solid red with the reason on its own line, `unstarted` solid red for
+ * a run that threw in its Git preamble, naming the journal that holds the
+ * failing call (24470), and `absent` grey with the sentence that says where the
+ * journal was looked for. One `RUNNER` frame, as item 37 rules; per-queue lines
+ * arrive with M8's queues.
  */
 
+import { join } from "node:path"
 import { Box, Pulse, Text } from "silvery"
 import { useMinute, useNow } from "./watch-clock.ts"
 import { boundedHangingLines, clock, mediaDuration, runShortName } from "./watch-format.ts"
@@ -37,12 +40,14 @@ const RUNNER_CHROME = 6
 const PAUSE_MAX_ROWS = 4
 const ABSENT_MAX_ROWS = 3
 const SILENT_MAX_ROWS = 3
+const UNSTARTED_MAX_ROWS = 3
 
 const HEALTH_COLOR: Readonly<Record<RunnerHealth, string>> = {
   absent: "$fg-muted",
   idle: "$fg-muted",
   processing: "$fg-info",
   silent: "$fg-error",
+  unstarted: "$fg-error",
 }
 
 /**
@@ -113,15 +118,16 @@ export function RunnerBox({
     latest === undefined
       ? undefined
       : health === "processing"
-        // ITEM 1 -- THE WORD. Every other health renders its own word beside its
-        // duration; this one said `run`, so the marker never actually showed the
-        // state it was in. The word is the spec's, and it names the predicate
-        // above it. The DURATION still differs on purpose: for `processing` the
-        // useful age is how long the run has been going, not how long since the
-        // last write.
-        ? `processing ${mediaDuration(now.getTime() - latest.startedAt.getTime())}`
+        ? // ITEM 1 -- THE WORD. Every other health renders its own word beside its
+          // duration; this one said `run`, so the marker never actually showed the
+          // state it was in. The word is the spec's, and it names the predicate
+          // above it. The DURATION still differs on purpose: for `processing` the
+          // useful age is how long the run has been going, not how long since the
+          // last write.
+          `processing ${mediaDuration(now.getTime() - latest.startedAt.getTime())}`
         : `${health} ${mediaDuration(sinceWrite ?? 0)}`
-  const border = health === "silent" ? "$fg-error" : pause === undefined ? undefined : "$fg-warning"
+  const border =
+    health === "silent" || health === "unstarted" ? "$fg-error" : pause === undefined ? undefined : "$fg-warning"
   const command =
     latest === undefined
       ? "yrd queue up"
@@ -149,6 +155,18 @@ export function RunnerBox({
           }; is yrd-service up? (hab ps yrd-service)`,
           railWidth,
           SILENT_MAX_ROWS,
+        )
+      : []
+  // 24470: the run threw before it reached the queue it was for. Name the state
+  // and point at the evidence — the journal's last Git row IS the failing call,
+  // which is a different hand from the one `hab ps` sends you to for silence.
+  const unstartedRows =
+    latest !== undefined && health === "unstarted"
+      ? boundedHangingLines(
+          `RUNNER UNSTARTED — run ${latest.id} died in its Git preamble before it could read its queue; ` +
+            `its last Git row names the call that failed (${join(facts.journalDir, `${latest.id}.jsonl`)})`,
+          railWidth,
+          UNSTARTED_MAX_ROWS,
         )
       : []
   const pauseRows = pause === undefined ? [] : boundedHangingLines(pause, railWidth, PAUSE_MAX_ROWS)
@@ -199,6 +217,15 @@ export function RunnerBox({
           {silentRows.length === 0 ? null : (
             <MarkerRow>
               {silentRows.map((row) => (
+                <Text key={row} color="$fg-error" bold wrap="truncate" minWidth={0}>
+                  {row}
+                </Text>
+              ))}
+            </MarkerRow>
+          )}
+          {unstartedRows.length === 0 ? null : (
+            <MarkerRow>
+              {unstartedRows.map((row) => (
                 <Text key={row} color="$fg-error" bold wrap="truncate" minWidth={0}>
                   {row}
                 </Text>

@@ -22,7 +22,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { runStartedAt } from "@yrd/queue-core"
+import { runDiedInPreamble, runStartedAt, type LogRecord } from "@yrd/queue-core"
 
 /** The run's `.pid` file name, as `claimWorktrees` in the core spells it. */
 const RUN_PID = ".pid"
@@ -41,6 +41,12 @@ export type RunnerRun = Readonly<{
   pid?: number
   /** True when that process answers `kill -0`: the run is executing right now. */
   alive: boolean
+  /**
+   * The run threw in its Git preamble: it is not executing and it never reached
+   * the queue it was for. A terminal outcome with its own cure, and deliberately
+   * not the malformed-journal refusal it used to read as (24470).
+   */
+  unstarted?: true
 }>
 
 export type RunnerFacts = Readonly<{
@@ -74,16 +80,19 @@ export function readRunnerFacts(workdir: string): RunnerFacts {
   }
   const path = join(journalDir, `${id}.jsonl`)
   const lastWriteAt = statSync(path).mtime
-  // Liveness BEFORE the header read. A run that is still executing has
-  // legitimately not written its header yet: the header carries `queue`, which
-  // the writer can only compute after Git reads that are themselves journaled
-  // (yrd-queue-core/src/run.ts), so a Git preamble always precedes it. Reading
-  // the header first turned "not written yet" into "malformed journal", and
-  // `latest` selects the NEWEST journal — the one most likely to be in flight.
+  // THE HEADER'S PID OUTRANKS THE WORKTREE'S, and during a preamble it is the
+  // only one there is: `claimWorktrees` does not run until after the whole Git
+  // preamble (yrd-queue-core/src/run.ts:476), so for the entire window in which
+  // "executing its preamble" and "died in its preamble" have to be told apart,
+  // no `.pid` file exists. Reading liveness from that absence would call a run
+  // three seconds old dead. The worktree pid still answers for journals written
+  // before 24470, and for a run past its preamble it is the same process.
+  const read = readRunHeader(path)
   const pidPath = join(workdir, "worktrees", id, RUN_PID)
-  const pid = existsSync(pidPath) ? readPid(pidPath) : undefined
+  const claimed = existsSync(pidPath) ? readPid(pidPath) : undefined
+  const pid = read.pid ?? claimed
   const alive = pid !== undefined && running(pid)
-  const header = readRunHeader(path, alive)
+  const header = journalVerdict(path, read, alive)
   return {
     journalDir,
     latest: {
@@ -97,17 +106,33 @@ export function readRunnerFacts(workdir: string): RunnerFacts {
   }
 }
 
+/** What one journal's opening says, before anything is known about liveness. */
+type JournalHead = Readonly<{
+  /** The header's own fields, empty when there is no header to read. */
+  fields: Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks">
+  /** Was a `run` record found at all. */
+  headed: boolean
+  /** The process the HEADER names, which is the only pid a run in its preamble has. */
+  pid?: number
+  /** The run never reached its queue — true of one still in its preamble as much as one that died there. */
+  died: boolean
+}>
+
 /**
- * Read the run header after any Git evidence written while resolving its queue.
+ * Read the run header, and the queue record that says its Git preamble finished.
  *
- * `alive` says whether the run is executing RIGHT NOW. A live run that has not
- * reached its header yet is IN PROGRESS, not malformed, and returns no header
- * fields — every one of them is optional on `RunnerRun` for exactly this case.
- * A run that is NOT alive and still has no header is a real defect and throws,
- * as loudly as before: the guard keeps its teeth, it just stops mistaking
- * "not yet" for "absent". Every malformed-record refusal below is unchanged.
+ * Since 24470 the header is written FIRST, before any Git call, so its absence
+ * from a journal a run is no longer writing means that run threw before it could
+ * write anything at all. The queue name follows as its own record once the
+ * remote resolves, which is why `queue` is read from there rather than from the
+ * header — a legacy journal that carries it on the header still reads.
+ *
+ * READS, NEVER JUDGES. Whether a run that has not reached its queue is dying or
+ * merely slow is decided by {@link journalVerdict} from a pid this cannot know
+ * it needs — which is why the header's own `pid` comes back with the fields.
+ * Every malformed record below still refuses as loudly as it ever did.
  */
-function readRunHeader(path: string, alive: boolean): Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks"> {
+function readRunHeader(path: string): JournalHead {
   let text: string
   try {
     text = readFileSync(path, "utf8")
@@ -118,7 +143,29 @@ function readRunHeader(path: string, alive: boolean): Pick<RunnerRun, "target" |
   }
   const lines = text.split("\n")
   if (lines.at(-1) === "") lines.pop()
+  const records: LogRecord[] = []
+  let header: Record<string, unknown> | undefined
   for (const [index, line] of lines.entries()) {
+    if (header !== undefined) {
+      // PAST THE HEADER the journal is the run's ordinary business, which this
+      // reader neither validates nor understands. It wants one more record, the
+      // `queue` row that closes the preamble, and reads the rest the way
+      // `readRunLog` does: a line that is not a record is skipped, never guessed
+      // at. Making those fatal here would refuse journals this box has always
+      // rendered.
+      let after: unknown
+      try {
+        after = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (typeof after !== "object" || after === null) continue
+      const record = after as Record<string, unknown>
+      if (typeof record.kind !== "string") continue
+      records.push(record as unknown as LogRecord)
+      if (record.kind === "queue") break
+      continue
+    }
     const where = `run journal ${path}: record ${index + 1} before the run header`
     if (line.trim() === "") throw new Error(`${where} is empty`)
     let parsed: unknown
@@ -135,25 +182,63 @@ function readRunHeader(path: string, alive: boolean): Pick<RunnerRun, "target" |
       if (typeof record.run !== "string" || typeof record.at !== "string" || typeof record.evidence !== "string") {
         throw new Error(`${where}: Git evidence requires run, at and evidence strings`)
       }
+      records.push(record as unknown as LogRecord)
       continue
     }
     if (record.kind !== "run") {
       throw new Error(`${where} must have kind "run" or "git", got ${JSON.stringify(record.kind)}`)
     }
-    return {
-      ...(typeof record.target === "string" ? { target: record.target } : {}),
-      ...(typeof record.gitlink === "string" ? { gitlink: record.gitlink } : {}),
-      ...(typeof record.queue === "string" ? { queue: record.queue } : {}),
-      ...(Array.isArray(record.checks) && record.checks.every((check) => typeof check === "string")
-        ? { checks: record.checks as string[] }
-        : {}),
-    }
+    header = record
+    records.push(record as unknown as LogRecord)
   }
-  if (alive) return {}
-  throw new Error(
-    `run journal ${path}: required run header was not found, and the run is not executing — ` +
-      "a finished run must have written its header after its Git preamble",
-  )
+  // The one derivation, shared with the health probe so the two readers cannot
+  // disagree about one journal. Ungated here on purpose: it is true of a run
+  // still IN its preamble as well as one that died there, and only a pid tells
+  // those apart.
+  const died = runDiedInPreamble(records)
+  if (header === undefined) return { died, fields: {}, headed: false }
+  const resolved = records.find((record) => record.kind === "queue")?.queue ?? header.queue
+  const pid = header.pid
+  return {
+    died,
+    headed: true,
+    ...(typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? { pid } : {}),
+    fields: {
+      ...(typeof header.target === "string" ? { target: header.target } : {}),
+      ...(typeof header.gitlink === "string" ? { gitlink: header.gitlink } : {}),
+      ...(typeof resolved === "string" ? { queue: resolved } : {}),
+      ...(Array.isArray(header.checks) && header.checks.every((check) => typeof check === "string")
+        ? { checks: header.checks as string[] }
+        : {}),
+    },
+  }
+}
+
+/**
+ * What the journal MEANS, once the run's liveness is known.
+ *
+ * `alive` is the only thing separating "has not got there yet" from "never
+ * will". A live run mid-preamble is IN PROGRESS and keeps whatever header
+ * fields it has written; every one of them is optional on `RunnerRun` for
+ * exactly this case (24478). A run that is NOT alive and stopped short of its
+ * queue is `unstarted`, a named terminal outcome rather than the
+ * malformed-journal refusal it used to draw.
+ */
+function journalVerdict(
+  path: string,
+  read: JournalHead,
+  alive: boolean,
+): Pick<RunnerRun, "target" | "gitlink" | "queue" | "checks" | "unstarted"> {
+  const unstarted = !alive && read.died
+  if (!read.headed) {
+    if (alive) return {}
+    if (unstarted) return { unstarted: true }
+    throw new Error(
+      `run journal ${path}: required run header was not found, and the run is not executing — ` +
+        "a finished run must have written its header before its Git preamble",
+    )
+  }
+  return { ...read.fields, ...(unstarted ? { unstarted: true as const } : {}) }
 }
 
 function readPid(path: string): number | undefined {
@@ -200,7 +285,7 @@ function running(pid: number): boolean {
  * is nearly always, so it separated nothing; the operator's question is whether
  * a change is under a check RIGHT NOW.
  */
-export type RunnerHealth = "processing" | "idle" | "silent" | "absent"
+export type RunnerHealth = "processing" | "idle" | "silent" | "absent" | "unstarted"
 
 /**
  * The fleet's own ceiling: a request older than ten minutes is broken, not
@@ -211,9 +296,9 @@ export const SILENT_AFTER_MS = 10 * 60 * 1000
 
 /**
  * ONE derivation of the service's health. `absent` when there is no journal on
- * this machine at all; `silent` when nothing has written for
- * {@link SILENT_AFTER_MS}; `processing` when a change is under a check right
- * now; `idle` otherwise.
+ * this machine at all; `unstarted` when the newest run threw in its Git preamble
+ * and stopped; `silent` when nothing has written for {@link SILENT_AFTER_MS};
+ * `processing` when a change is under a check right now; `idle` otherwise.
  *
  * THE PREDICATE IS NOT "THE PROCESS EXISTS" (items 1 and 5). It used to be
  * `facts.latest.alive`, and because the service is a long-running
@@ -246,6 +331,12 @@ export const SILENT_AFTER_MS = 10 * 60 * 1000
  */
 export function runnerHealth(facts: RunnerFacts, now: Date, underCheck: boolean): RunnerHealth {
   if (facts.latest === undefined) return "absent"
+  // A DEFINITE OUTCOME OUTRANKS A MEASUREMENT OF SILENCE (24470). The newest
+  // run threw in its Git preamble and is not executing: that is not a queue
+  // that has gone quiet, it is a queue that could not start, and the cure is in
+  // the journal's last Git row rather than in `hab ps`. Reporting it as silence
+  // would be true of the symptom and useless about the cause.
+  if (facts.latest.unstarted === true) return "unstarted"
   // SILENCE OUTRANKS PROCESSING, and the order is the whole safety argument.
   // `underCheck` is read off the rows, and a service that died mid-check leaves
   // a row still marked live; taking that at face value would announce

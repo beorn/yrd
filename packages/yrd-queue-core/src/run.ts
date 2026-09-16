@@ -365,6 +365,36 @@ function gitInvocationOptions(options: QueueRunOptions, log: QueueRunLog): GitIn
 export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcome> {
   await using resources = new AsyncDisposableStack()
   const log = openLog(join(options.workdir, "logs"), undefined, options.render)
+  // THE JOURNAL OPENS WITH ITS HEADER, before the first journaled Git call and
+  // before anything here can throw. Every field below is known from the run's
+  // options, so there is nothing to wait for: the run row carries the gitlink
+  // (the target's commit) and the config blob the checks were read from. Each
+  // change CONSIDERED writes its own row with its decision when the run has
+  // made one; a change that ended in an earlier run is history, and this run
+  // claims nothing about it.
+  //
+  // The header used to be written after the Git preamble because it carried
+  // `queue`, which is computable only once the remote URL is read — so every
+  // run that threw in that preamble left a journal with no header at all, and
+  // both readers called that a malformed journal rather than a run that died
+  // early (@i/10-yrd/24470). The queue name is now its own record below, which
+  // also marks the preamble complete, and a headerless journal is structurally
+  // impossible.
+  // `pid` is here because the run's OTHER pid, the one `claimWorktrees` writes,
+  // does not exist yet and will not until line ~476 — after the whole Git
+  // preamble. A reader asking "did this run die in its preamble, or is it
+  // executing one right now?" has nothing else to ask during exactly the window
+  // the question matters in, and answering it from the absence of a worktree
+  // would call a healthy run three seconds old a dead one.
+  log.write({
+    base: options.targetSha,
+    checks: options.checks.map((check) => check.name),
+    config: options.configBlob,
+    kind: "run",
+    gitlink: options.targetSha,
+    pid: process.pid,
+    target: options.target.branch,
+  })
   const selected = gitIn(options.repo, options.process, options.selection, gitInvocationOptions(options, log))
   const git = options.git ?? selected
   const hooksPath = join(options.workdir, "hooks-disabled")
@@ -410,19 +440,12 @@ export async function queueRun(options: QueueRunOptions): Promise<QueueRunOutcom
   const changes = await readObscuredEndings(git, queue.changes, options.target.remote, options.target.branch)
   const url = await remoteUrl(git, options.target.remote)
   const name = queueName(options.target, url)
-  // The run row: the gitlink (the target's commit) and the config blob the checks
-  // were read from. Each change CONSIDERED writes its own row with its decision
-  // when the run has made one; a change that ended in an earlier run is history,
-  // and this run claims nothing about it.
-  log.write({
-    base: targetSha,
-    checks: options.checks.map((check) => check.name),
-    config: options.configBlob,
-    kind: "run",
-    gitlink: targetSha,
-    queue: name,
-    target: options.target.branch,
-  })
+  // The queue's name, and with it the mark that the Git preamble completed. It
+  // is the one value the header cannot carry, because it is readable only once
+  // the target's remote URL has been. A journal whose header has no `queue`
+  // record after it is a run that died in that preamble, and its Git rows above
+  // name the call that failed (@i/10-yrd/24470).
+  log.write({ kind: "queue", queue: name })
 
   const observation = await selected.observe({
     version: 1,

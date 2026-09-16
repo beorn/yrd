@@ -96,10 +96,6 @@ describe("readRunnerFacts", () => {
     ["an empty record", "\n"],
     ["the wrong record kind", `${JSON.stringify({ kind: "message" })}\n`],
     ["an incomplete Git record", `${JSON.stringify({ kind: "git" })}\n`],
-    [
-      "Git evidence without a run header",
-      `${JSON.stringify({ kind: "git", run: "q-test", at: NOW.toISOString(), evidence: "/logs/git/1.json" })}\n`,
-    ],
   ])("refuses a required run journal with %s", (_case, header) => {
     const workdir = workdirWith({ ageMs: 60_000, header })
     expect(() => readRunnerFacts(workdir)).toThrow(/run journal .* (record|header)/u)
@@ -119,9 +115,9 @@ describe("readRunnerFacts", () => {
    * @failure A close verb read the NEWEST journal while its run was still
    *          executing, before the run header had been appended, and reported
    *          "required run header was not found" — a live run reading as a
-   *          malformed one. The header cannot come first: it carries `queue`,
-   *          which the writer computes only after Git reads that are themselves
-   *          journaled, so a Git preamble always precedes it (24478).
+   *          malformed one (24478). Since 24470 the header comes FIRST and a
+   *          new run cannot reach this state, but a journal written before that
+   *          landed still can, so the tolerance stays and keeps its own proof.
    */
   it("reads a live run that has not reached its header yet as in progress, not malformed", () => {
     const facts = readRunnerFacts(workdirWith({ ageMs: 1_000, gitBeforeHeader: true, header: "", pid: process.pid }))
@@ -135,10 +131,66 @@ describe("readRunnerFacts", () => {
     expect(facts.latest?.checks).toBeUndefined()
   })
 
-  it("still refuses loudly when a run that is NOT executing has no header", () => {
-    expect(() => readRunnerFacts(workdirWith({ ageMs: 1_000, gitBeforeHeader: true, header: "" }))).toThrow(
-      /required run header was not found, and the run is not executing/u,
-    )
+  /**
+   * @failure  A run that threw in its Git preamble left a journal of Git rows
+   *           and no header, and the reader called that a malformed journal —
+   *           the same words a writer defect gets. A terminal outcome with its
+   *           own cure was reported as a tolerated absence (@i/10-yrd/24470 AC2).
+   */
+  it("names a run that died in its Git preamble UNSTARTED, not malformed", () => {
+    const facts = readRunnerFacts(workdirWith({ ageMs: 1_000, gitBeforeHeader: true, header: "" }))
+    expect(facts.latest?.unstarted).toBe(true)
+    expect(facts.latest?.alive).toBe(false)
+    // No header fields, and that is now a NAMED state rather than a refusal.
+    expect(facts.latest?.queue).toBeUndefined()
+    expect(runnerHealth(facts, NOW, false)).toBe("unstarted")
+  })
+
+  /**
+   * Since 24470 the header is written before the first journaled Git call, so a
+   * run that dies after it reads unstarted by the MISSING QUEUE RECORD instead.
+   * Both eras of journal reach the same word through the same predicate.
+   */
+  it("names a headed run that never resolved its queue UNSTARTED too", () => {
+    const header = `${JSON.stringify({ at: NOW.toISOString(), checks: ["typecheck"], gitlink: "3c285a41af46".padEnd(40, "0"), kind: "run", run: "q-test", target: "main" })}\n`
+    const facts = readRunnerFacts(workdirWith({ ageMs: 1_000, header }))
+    expect(facts.latest?.unstarted).toBe(true)
+    expect(facts.latest?.target).toBe("main")
+    expect(facts.latest?.queue).toBeUndefined()
+  })
+
+  /**
+   * @failure  THE FALSE ALARM. `claimWorktrees` does not run until after the
+   *           whole Git preamble (queue-core run.ts:476), so throughout the
+   *           window this state exists in there is no `.pid` file to read. A
+   *           reader taking liveness from that absence calls a run three seconds
+   *           into a healthy preamble dead. The header's own pid is the only one
+   *           there is, and it is why the header carries one.
+   */
+  it("reads liveness from the header's pid while no worktree has been claimed", () => {
+    const header = `${JSON.stringify({ at: NOW.toISOString(), kind: "run", pid: process.pid, run: "q-test", target: "main" })}\n`
+    const facts = readRunnerFacts(workdirWith({ ageMs: 1_000, header }))
+    expect(facts.latest?.alive).toBe(true)
+    expect(facts.latest?.pid).toBe(process.pid)
+    // Mid-preamble, so no queue yet — and emphatically not a dead run.
+    expect(facts.latest?.queue).toBeUndefined()
+    expect(facts.latest?.unstarted).toBeUndefined()
+    expect(runnerHealth(facts, NOW, false)).not.toBe("unstarted")
+  })
+
+  // The control: a run whose queue record IS there is an ordinary run, and the
+  // legacy header that carries `queue` on itself is one too.
+  it("reads a resolved queue from the queue record, and from a legacy header", () => {
+    const id = "q-test"
+    const header =
+      `${JSON.stringify({ at: NOW.toISOString(), checks: ["typecheck"], gitlink: "3c285a41af46".padEnd(40, "0"), kind: "run", run: id, target: "main" })}\n` +
+      `${JSON.stringify({ at: NOW.toISOString(), kind: "queue", queue: "main on origin", run: id })}\n`
+    const resolved = readRunnerFacts(workdirWith({ ageMs: 1_000, header }))
+    expect(resolved.latest?.unstarted).toBeUndefined()
+    expect(resolved.latest?.queue).toBe("main on origin")
+    const legacy = readRunnerFacts(workdirWith({ ageMs: 1_000, gitBeforeHeader: true }))
+    expect(legacy.latest?.unstarted).toBeUndefined()
+    expect(legacy.latest?.queue).toBe("main")
   })
 
   it("refuses malformed and unreadable run pid files instead of calling the runner idle", () => {
@@ -196,7 +248,9 @@ describe("runnerHealth, the one word", () => {
     expect(runnerHealth({ journalDir: "/w/logs", absent: "none" }, NOW, false)).toBe("absent")
     const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
     expect(runnerHealth(quiet, NOW, false)).toBe("silent")
-    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), NOW, false)).toBe("idle")
+    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), NOW, false)).toBe(
+      "idle",
+    )
   })
 
   /**

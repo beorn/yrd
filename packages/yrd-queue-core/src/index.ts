@@ -61,7 +61,16 @@ export {
 } from "./git.ts"
 export { checkLogPath, checkTrailer, checksOf, readCheckTrailer, runCheck } from "./check.ts"
 export type { CheckedNow, CheckedTree, CheckResult, CheckRun, CheckSpec, CheckView } from "./check.ts"
-export { CHANGE_REF_DIAGNOSTICS, journalKey, openLog, readJournals, readRunLog, runId, runStartedAt } from "./log.ts"
+export {
+  CHANGE_REF_DIAGNOSTICS,
+  journalKey,
+  openLog,
+  readJournals,
+  readRunLog,
+  runDiedInPreamble,
+  runId,
+  runStartedAt,
+} from "./log.ts"
 export type { JournalCheck, JournalRun, Journals, LogRecord } from "./log.ts"
 export {
   checkedTree,

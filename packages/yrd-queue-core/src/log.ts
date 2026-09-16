@@ -77,6 +77,13 @@ export function runId(started: Date = new Date()): string {
 
 export const LOG_KINDS = [
   "run",
+  // The queue this run is for, written the instant its remote URL resolves
+  // (24470). It is a record of its own rather than a header field because the
+  // header is written FIRST, before any Git call, and the queue name is the one
+  // thing that cannot be known that early. Its presence is therefore also the
+  // mark that the Git preamble completed: a header with no `queue` record after
+  // it is a run that died before it could read its own target.
+  "queue",
   "pause",
   "change",
   "check",
@@ -137,6 +144,29 @@ export type LogRecord = Readonly<{
   check?: string
   [field: string]: string | number | boolean | undefined | readonly string[]
 }>
+
+/**
+ * Did this run die in its Git preamble, before it could name its queue?
+ *
+ * A NAMED TERMINAL OUTCOME, and the reason it needs one: such a run leaves a
+ * journal its readers used to call malformed, which is a writer defect with a
+ * different cure. The run's own Git rows are right there and name the call that
+ * failed. Both eras of journal reach the word through this one predicate, so
+ * `yrd watch` and the health probe can never disagree about it (24470).
+ *
+ * Says nothing about WHEN: a run still executing its preamble looks exactly
+ * like one that died in it, so every caller must gate this on the run not being
+ * alive. That is the caller's evidence to hold, never this function's to guess.
+ */
+export function runDiedInPreamble(records: readonly LogRecord[]): boolean {
+  const header = records.find((record) => record.kind === "run")
+  // Before 24470 the header came last and carried `queue` itself, so a journal
+  // of nothing but Git rows is the old shape of this same death, and a legacy
+  // header that names its queue resolved it and did not die here.
+  if (header === undefined) return records.length > 0 && records.every((record) => record.kind === "git")
+  if (typeof header.queue === "string") return false
+  return !records.some((record) => record.kind === "queue")
+}
 
 /** A record as the run writes it; the log adds `run` and `at`. */
 export type LogWrite = Readonly<{
