@@ -64,7 +64,10 @@ export type LinuxPathHolderCoverage = Readonly<{
   /** Linux filters numeric proc entries to the caller's UID before inspecting holder sources. */
   scope: "same-uid"
   procRoot: string
-  /** False only when permission denial may have hidden a same-UID holder. Exited entries are not gaps. */
+  /** False only when permission denial may have hidden a same-UID holder. Exited entries are not
+   * gaps. Always justified beside itself: an incomplete census carries a nonzero
+   * `processes.unavailable.denied` or `processes.sourceDenied`, so no projection of the head can
+   * read "incomplete with nothing unavailable" (24638). */
   complete: boolean
   processes: Readonly<{
     enumerated: number
@@ -88,6 +91,15 @@ export type LinuxPathHolderCoverage = Readonly<{
      * state Z, every one denying only `fd`.
      */
     zombie: number
+    /**
+     * Live same-uid procs whose entry was readable but at least one holder
+     * source (cwd/exe/root/maps/fd) was denied — exactly the procs `unreadable`
+     * names. Declared BEFORE the per-source breakdown so it serializes into the
+     * head of the census: a hab page truncated this JSON mid-`sources`, leaving
+     * a head that read `complete:false` beside all-zero counters and named no
+     * gap (24638). A bounded prefix must carry the nonzero reason.
+     */
+    sourceDenied: number
     unavailable: PathHolderUnavailableCoverage
   }>
   sources: Readonly<Record<"cwd" | "exe" | "root" | "maps" | "fd", PathHolderSourceCoverage>>
@@ -212,6 +224,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
     sameUid: 0,
     otherUid: 0,
     zombie: 0,
+    sourceDenied: 0,
     unavailable: { exited: 0, denied: 0 },
   }
   const sourceCoverage: Record<"cwd" | "exe" | "root" | "maps" | "fd", MutableSourceCoverage> = {
@@ -273,6 +286,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
         .filter(([, availability]) => availability === "denied")
         .map(([name]) => name)
       if (deniedSources.length > 0) {
+        processCoverage.sourceDenied += 1
         unreadable.push({ pid, ...identity, denied: deniedSources })
       }
       const holders: PathHolder[] = []
@@ -296,9 +310,10 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       return holders
     }),
   )
-  const complete =
-    processCoverage.unavailable.denied === 0 &&
-    Object.values(sourceCoverage).every((coverage) => coverage.unavailable.denied === 0)
+  // One derivation from the process-level counters. Equivalent to scanning the
+  // per-source table: a source records a denial exactly when some live same-uid
+  // proc had that source denied, which is exactly when `sourceDenied` counted it.
+  const complete = processCoverage.unavailable.denied === 0 && processCoverage.sourceDenied === 0
   return {
     holders: uniquePathHolders(matches.flat()),
     coverage: {

@@ -48,6 +48,11 @@ describe("inspectPathHolderCensus", () => {
     const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
     expect(census.holders).toEqual([{ pid: 4242, source: "root", target: ownedPath }])
     expect(kill).not.toHaveBeenCalled()
+    // Every process readable ⇒ complete, with zero gap counters (24638).
+    expect(census.coverage).toMatchObject({
+      complete: true,
+      processes: { sourceDenied: 0, unavailable: { exited: 0, denied: 0 } },
+    })
   })
 
   test.runIf(process.platform === "linux")("reports mapped files below the owned path", async () => {
@@ -95,7 +100,7 @@ describe("inspectPathHolderCensus", () => {
         platform: "linux",
         scope: "same-uid",
         complete: false,
-        processes: { enumerated: 1, sameUid: 1, otherUid: 0, unavailable: { exited: 0, denied: 0 } },
+        processes: { enumerated: 1, sameUid: 1, otherUid: 0, sourceDenied: 1, unavailable: { exited: 0, denied: 0 } },
         sources: {
           cwd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
           exe: { readable: 1, unavailable: { exited: 0, denied: 0 } },
@@ -108,6 +113,35 @@ describe("inspectPathHolderCensus", () => {
       expect(census.coverage).toMatchObject({
         unreadable: [{ pid: 4242, comm: "probe", ppid: 1, denied: ["maps"] }],
       })
+    },
+  )
+
+  test.runIf(process.platform === "linux")(
+    "an incomplete census names its gap in the serialized head, before the per-source tail",
+    async () => {
+      // 24638: a hab page truncated this census's JSON mid-`sources`, leaving a
+      // head that read complete:false beside all-zero process counters — the
+      // reason lived only in the tail the evidence bound cut off. The nonzero
+      // gap counter must precede `sources` in serialization order so any
+      // bounded prefix of the census still names why it is incomplete.
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-head-"))
+      temporary.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      const processRoot = join(procRoot, "4242")
+      mkdirSync(ownedPath)
+      mkdirSync(join(processRoot, "fd"), { recursive: true })
+      symlinkSync("/", join(processRoot, "cwd"))
+      symlinkSync("/bin/sh", join(processRoot, "exe"))
+      symlinkSync("/", join(processRoot, "root"))
+      writeFileSync(join(processRoot, "maps"), "")
+      writeFileSync(join(processRoot, "stat"), "4242 (probe) S 1 0 0 0\n")
+      chmodSync(join(processRoot, "maps"), 0o000)
+
+      const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+      const json = JSON.stringify(census.coverage)
+      expect(json).toContain('"sourceDenied":1')
+      expect(json.indexOf('"sourceDenied"')).toBeLessThan(json.indexOf('"sources"'))
     },
   )
 
@@ -158,44 +192,41 @@ describe("inspectPathHolderCensus", () => {
       // The live one is the only thing left blocking.
       expect(census.coverage).toMatchObject({
         complete: false,
-        processes: { enumerated: 2, sameUid: 2, otherUid: 0, zombie: 1 },
+        processes: { enumerated: 2, sameUid: 2, otherUid: 0, zombie: 1, sourceDenied: 1 },
         unreadable: [{ pid: 4243, comm: "probe", state: "S", denied: ["maps"] }],
       })
     },
   )
 
-  test.runIf(process.platform === "linux")(
-    "a census whose ONLY denials are zombies is COMPLETE",
-    async () => {
-      // The other direction, and the one that actually unblocks a caller: with
-      // the live sibling removed, nothing is hiding a holder and the census may
-      // say so. Without this the fix above is unobservable — `complete` would
-      // stay false for a different reason and no caller would ever notice.
-      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-zombies-only-"))
-      temporary.push(fixture)
-      const ownedPath = join(fixture, "owned")
-      const procRoot = join(fixture, "proc")
-      mkdirSync(ownedPath)
-      for (const pid of [4242, 4243]) {
-        const processRoot = join(procRoot, String(pid))
-        mkdirSync(join(processRoot, "fd"), { recursive: true })
-        symlinkSync("/", join(processRoot, "cwd"))
-        symlinkSync("/bin/sh", join(processRoot, "exe"))
-        symlinkSync("/", join(processRoot, "root"))
-        writeFileSync(join(processRoot, "maps"), "")
-        writeFileSync(join(processRoot, "stat"), `${pid} (probe) Z 1 0 0 0\n`)
-        chmodSync(join(processRoot, "maps"), 0o000)
-      }
+  test.runIf(process.platform === "linux")("a census whose ONLY denials are zombies is COMPLETE", async () => {
+    // The other direction, and the one that actually unblocks a caller: with
+    // the live sibling removed, nothing is hiding a holder and the census may
+    // say so. Without this the fix above is unobservable — `complete` would
+    // stay false for a different reason and no caller would ever notice.
+    const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-zombies-only-"))
+    temporary.push(fixture)
+    const ownedPath = join(fixture, "owned")
+    const procRoot = join(fixture, "proc")
+    mkdirSync(ownedPath)
+    for (const pid of [4242, 4243]) {
+      const processRoot = join(procRoot, String(pid))
+      mkdirSync(join(processRoot, "fd"), { recursive: true })
+      symlinkSync("/", join(processRoot, "cwd"))
+      symlinkSync("/bin/sh", join(processRoot, "exe"))
+      symlinkSync("/", join(processRoot, "root"))
+      writeFileSync(join(processRoot, "maps"), "")
+      writeFileSync(join(processRoot, "stat"), `${pid} (probe) Z 1 0 0 0\n`)
+      chmodSync(join(processRoot, "maps"), 0o000)
+    }
 
-      const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
-      expect(census.holders).toEqual([])
-      expect(census.coverage).toMatchObject({
-        complete: true,
-        processes: { enumerated: 2, sameUid: 2, otherUid: 0, zombie: 2 },
-      })
-      expect(census.coverage).not.toHaveProperty("unreadable")
-    },
-  )
+    const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+    expect(census.holders).toEqual([])
+    expect(census.coverage).toMatchObject({
+      complete: true,
+      processes: { enumerated: 2, sameUid: 2, otherUid: 0, zombie: 2, sourceDenied: 0 },
+    })
+    expect(census.coverage).not.toHaveProperty("unreadable")
+  })
 
   test.runIf(process.platform === "linux")(
     "a gap whose proc exited between the denied read and the identity read clears itself",
@@ -344,7 +375,14 @@ describe("inspectPathHolderCensus", () => {
           scope: "same-uid",
           procRoot,
           complete: true,
-          processes: { enumerated: 0, sameUid: 0, otherUid: 0, zombie: 0, unavailable: { exited: 0, denied: 0 } },
+          processes: {
+            enumerated: 0,
+            sameUid: 0,
+            otherUid: 0,
+            zombie: 0,
+            sourceDenied: 0,
+            unavailable: { exited: 0, denied: 0 },
+          },
           sources: {
             cwd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
             exe: { readable: 0, unavailable: { exited: 0, denied: 0 } },
