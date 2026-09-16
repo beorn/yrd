@@ -78,6 +78,20 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
       const reason = trailer(record, "Reason") ?? trailer(record, "Code")
       return { at: record.at, text: reason === undefined ? "stuck" : `stuck ${reason}` }
     }
+    case "withdrawn": {
+      // The one ending a PERSON chose, so it names them the way `opened` names
+      // a submitter, and their reason reads as the detail the way a failure's
+      // does. Both trailers are the withdraw call's own (`By`, `Note` in
+      // queue-core withdraw.ts); only `Note` is optional there, and a record
+      // missing either still says the change was withdrawn.
+      const by = trailer(record, "By")
+      const note = trailer(record, "Note")
+      return {
+        at: record.at,
+        text: by === undefined ? "withdrawn" : `withdrawn by ${by}`,
+        ...(note === undefined ? {} : { detail: note }),
+      }
+    }
     case "sent": {
       // A message that went where it should is not news (item 31's echo rule).
       const delivery = trailer(record, "Delivery")
@@ -85,9 +99,17 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
       const to = trailer(record, "To")
       return { at: record.at, text: `message to ${to ?? "the submitter"} failed` }
     }
-    default:
-      return undefined
   }
+  // EVERY RECORD KIND IS ENUMERATED ABOVE, and the compiler is what holds that
+  // open. `withdrawn` fell through a `default: return undefined` here for as
+  // long as the kind has existed, so the history silently omitted the one
+  // ending a person chose (@i/10-yrd/24492). A default cannot tell "a kind we
+  // decided not to draw" from "a kind nobody noticed", and it answered both
+  // with a blank line. A new kind now fails to COMPILE instead of rendering
+  // nothing; reaching this at runtime is impossible, because `recordFrom`
+  // refuses a commit whose `Record` trailer is not a known kind.
+  const unreachable: never = record.kind
+  throw new Error(`change record kind ${JSON.stringify(unreachable)} has no history line`)
 }
 
 /** One `KEY value` row of the metadata block. */

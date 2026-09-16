@@ -131,6 +131,32 @@ describe("HISTORY and METADATA (watch-change)", () => {
     ])
   })
 
+  /**
+   * @failure  `historyEntry` enumerated six of the seven record kinds and let
+   *           `withdrawn` fall through its `default: return undefined`, so the
+   *           one ending a PERSON chose was the one ending the history did not
+   *           show: a withdrawn change read as a chain that simply stopped
+   *           (@i/10-yrd/24492 ripple).
+   */
+  it("renders a withdrawn record, naming who withdrew it and the note they left", () => {
+    const entries = historyEntries([
+      record("opened", 0, [["Submitter", "@dev/9"]]),
+      record("withdrawn", 1_000, [
+        ["By", "@dev/9"],
+        ["Note", "superseded by task/two"],
+      ]),
+    ])
+    expect(entries[0]?.text).toBe("withdrawn by @dev/9")
+    expect(entries[0]?.detail).toBe("superseded by task/two")
+    // The note is optional; the ending and its actor are not.
+    expect(historyEntries([record("withdrawn", 0, [["By", "@chief"]])])[0]).toEqual({
+      at: new Date(NOW_MS - 3_600_000),
+      text: "withdrawn by @chief",
+    })
+    // And a record with neither still says the change was withdrawn.
+    expect(historyEntries([record("withdrawn", 0, [])])[0]?.text).toBe("withdrawn")
+  })
+
   it("says a direct merge went around the queue, says nothing about the queue's own merges, and carries a failure's detail", () => {
     const entries = historyEntries([
       record("merged", 0, [
