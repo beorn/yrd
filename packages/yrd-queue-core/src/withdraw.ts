@@ -116,10 +116,7 @@ async function withdrawOne(
       change,
       kind: "withdrawn",
       subject,
-      trailers: [
-        ["By", request.by],
-        ...(request.reason === undefined ? [] : ([["Reason", request.reason]] as const)),
-      ],
+      trailers: [["By", request.by], ...(request.reason === undefined ? [] : ([["Reason", request.reason]] as const))],
     }
     const record = await recordCommit(git, write, onto)
     try {

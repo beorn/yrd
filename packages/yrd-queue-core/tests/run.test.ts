@@ -2764,7 +2764,7 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
   it("ends the open change; the next run never judges it and merges the line behind", async () => {
     const w = await world()
     const headOne = await submitCommit(w, "task/one", "one.txt")
-    const headTwo = await submitCommit(w, "task/two", "two.txt")
+    await submitCommit(w, "task/two", "two.txt")
 
     const taken = await withdraw(w.git, "origin", {
       branch: "task/one",
@@ -2797,18 +2797,18 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     const outcome = await queueRun(await w.options({ exit: 0 }))
     expect(outcome.merged).toEqual(["task/one"])
 
-    await expect(
-      withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET }),
-    ).rejects.toThrow(/already ended merged/u)
+    await expect(withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: TARGET })).rejects.toThrow(
+      /already ended merged/u,
+    )
   })
 
   it("refuses a branch with no change at all, and says where it looked", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
 
-    await expect(
-      withdraw(w.git, "origin", { branch: "task/ghost", by: "@chief", target: TARGET }),
-    ).rejects.toThrow(/no change for task\/ghost/u)
+    await expect(withdraw(w.git, "origin", { branch: "task/ghost", by: "@chief", target: TARGET })).rejects.toThrow(
+      /no change for task\/ghost/u,
+    )
   })
 
   it("a resubmit after a withdrawal re-opens the chain and lands", async () => {
@@ -2826,10 +2826,7 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
 
     expect(outcome.merged).toEqual(["task/one"])
     await fetchChanges(w)
-    const records = await readRecords(
-      w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!,
-    )
+    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn", "opened", "checked", "merged", "sent"])
   })
 
@@ -2843,10 +2840,7 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
 
     expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
     await fetchChanges(w)
-    const records = await readRecords(
-      w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!,
-    )
+    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "withdrawn"])
   })
 
@@ -2860,7 +2854,10 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     await fetchChanges(w)
     const records = await readRecords(
       w.git,
-      (await refAt(w.git, (await w.git(["ls-remote", "--refs", "origin", `${CHANGES}/task/one@*`])).trim().split(/\s+/u)[1]!))!,
+      (await refAt(
+        w.git,
+        (await w.git(["ls-remote", "--refs", "origin", `${CHANGES}/task/one@*`])).trim().split(/\s+/u)[1]!,
+      ))!,
     )
     const stuckRecord = records.find((record) => record.kind === "stuck")
     const incident = incidentOf(stuckRecord)
