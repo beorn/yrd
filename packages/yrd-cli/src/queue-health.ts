@@ -1,28 +1,14 @@
 /**
- * The declared health probe: print the document the service's last round wrote.
- *
- * This re-derives NOTHING. The M7 objection to a health probe (2026-09-03) was
- * that shelling the CLI every tick is noise plus a second opinion, and it was
- * right: a probe that re-reads the remote and judges for itself can disagree
- * with the loop about the very thing the loop is authoritative on. This one
- * reads a file, so there is exactly one opinion and it is the loop's.
- *
- * That is also why it touches no network and never captures a declaration. A
- * declaration that cannot be read is precisely one of the states the service is
- * allowed to be in, and a probe that threw on it would be unable to report the
- * condition it exists to report.
- *
- * MEASURED against the supervisor's bound, because a slow probe counts as a
- * TIMEOUT, which becomes `unknown`, which pages (@cto follow-up F6). Five runs
- * through the real entry point on the live host at load average 8.9:
- * 1.34, 1.36, 1.43, 1.37, 1.45 seconds — against a 15-second default limit, so
- * roughly ten times the headroom, and nearly all of it is Bun's own start-up
- * rather than this file. The number to watch is the START-UP cost: this reads
- * one small file, so the work here cannot grow with the queue.
+ * The declared health probe reads the last completed round's document.
+ * Past its deadline, the existing process census distinguishes an open round
+ * from missing work. Journals can stay silent throughout a long check: their
+ * timestamps never establish process liveness. No network or declaration is
+ * needed, including when those resources are the service's fault.
  */
 
 import { readFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, relative, sep } from "node:path"
+import { inspectPathHolderCensus } from "@yrd/process"
 
 import {
   absentHealthDocument,
@@ -30,6 +16,8 @@ import {
   parseQueueHealthDocument,
   QUEUE_HEALTH_DOCUMENT,
   queueHealthExitCode,
+  readRunLog,
+  runStartedAt,
   unreadableHealthDocument,
   type QueueHealthDocument,
 } from "@yrd/queue-core"
@@ -57,7 +45,11 @@ const MAX_OBSERVED = 2_000
  * health document (a defect in the writer), and a document (the loop's own
  * verdict). Collapsing any two of these is the silent-error shape.
  */
-export function readQueueHealth(workdir: string, service: string, now: Date = new Date()): QueueHealthDocument {
+export async function readQueueHealth(
+  workdir: string,
+  service: string,
+  now: Date = new Date(),
+): Promise<QueueHealthDocument> {
   const path = join(workdir, QUEUE_HEALTH_DOCUMENT)
   let text: string
   try {
@@ -72,7 +64,72 @@ export function readQueueHealth(workdir: string, service: string, now: Date = ne
   // would be asserting a measurement nobody took — and the longer a round hangs
   // the more confident that assertion gets (@cto 2026-09-11). The loop wrote
   // the deadline; this only reads it.
-  if (document !== undefined) return believableHealthDocument(document, now)
+  if (document !== undefined) {
+    const judged = believableHealthDocument(document, now)
+    if (judged.error?.code !== "queue-round-overdue") return judged
+    const trees = join(workdir, "worktrees")
+    let consulted = trees
+    try {
+      const census = await inspectPathHolderCensus(trees)
+      // Search all rounds: a newer submission journal must not hide an older
+      // merge check. A loop PID alone is not evidence of work in a round.
+      for (const holder of census.holders) {
+        const id = relative(trees, holder.target).split(sep)[0]
+        if (id === undefined || runStartedAt(id) === undefined) continue
+        consulted = join(workdir, "logs", `${id}.jsonl`)
+        const records = readRunLog(join(workdir, "logs"), id)
+        if (!records.some((record) => record.kind === "run" && record.run === id)) {
+          throw new Error(`required run header is absent from ${consulted}`)
+        }
+        return {
+          ...document,
+          facts: {
+            ...document.facts,
+            activeRound: id,
+            observedAt: now.toISOString(),
+            holder,
+            coverage: census.coverage,
+          },
+        }
+      }
+      if (!census.coverage.complete) {
+        throw new Error(`process ownership under ${trees} could not be fully read: ${JSON.stringify(census.coverage)}`)
+      }
+      return {
+        ...judged,
+        error: {
+          ...judged.error,
+          cause: `${judged.error.cause}; no live process holds a round worktree under ${trees}`,
+          resolution: [
+            `Read the run journals under ${join(workdir, "logs")} and the process census under ${trees}.`,
+            "This clears when a round finishes or live work is observed in a round's worktree.",
+          ],
+        },
+        facts: { ...judged.facts, coverage: census.coverage },
+      }
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error)
+      const absent = consulted === trees && (error as NodeJS.ErrnoException).code === "ENOENT"
+      return {
+        ...judged,
+        ...(absent
+          ? {}
+          : {
+              state: "unknown" as const,
+              verdict: { kind: "unknown" as const, reason: "unparsed" as const, observed: why },
+            }),
+        error: {
+          ...judged.error,
+          code: absent ? judged.error.code : "queue-round-unobserved",
+          cause: `${judged.error.cause}; could not establish round ownership from ${consulted}: ${why}`,
+          resolution: [
+            `Inspect ${consulted} and restore access to the round's process evidence.`,
+            "The last completed round is overdue; whether a round is open could not be measured.",
+          ],
+        },
+      }
+    }
+  }
   return unreadableHealthDocument(
     service,
     `the health document at ${path} is not a ${"hab-service-health/2"} document`,
@@ -87,13 +144,13 @@ export function readQueueHealth(workdir: string, service: string, now: Date = ne
  * mapping ({@link queueHealthExitCode}), so the probe can never print one claim
  * and exit with another.
  */
-export function queueHealthCommand(
+export async function queueHealthCommand(
   workdir: string,
   service: string,
   io: YrdCliIO,
   now: Date = new Date(),
-): YrdCliExitCode {
-  const document = readQueueHealth(workdir, service, now)
+): Promise<YrdCliExitCode> {
+  const document = await readQueueHealth(workdir, service, now)
   io.stdout(`${JSON.stringify(document)}\n`)
   return queueHealthExitCode(document.state)
 }

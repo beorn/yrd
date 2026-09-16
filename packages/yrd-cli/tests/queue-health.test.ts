@@ -9,7 +9,7 @@
  *           the state and the exit code agreeing
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -45,32 +45,38 @@ function capture(): Readonly<{ io: YrdCliIO; stdout: () => string }> {
 }
 
 describe("the declared health probe", () => {
-  it("prints what the last round wrote, and exits on its state", () => {
+  it("prints what the last round wrote, and exits on its state", async () => {
     const dir = workdir()
     const written = roundHealthDocument(SERVICE, {}, undefined, 120_000, NOW)
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), `${JSON.stringify(written, undefined, 2)}\n`)
     const run = capture()
-    expect(queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(0)
+    expect(await queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(0)
     expect(JSON.parse(run.stdout())).toEqual(written)
   })
 
-  it("reports a stuck round as unhealthy-and-running, exit 2", () => {
+  it("reports a stuck round as unhealthy-and-running, exit 2", async () => {
     const dir = workdir()
     const streak = { key: "stuck-changes:task/one", reason: "the code host answered 504 during setup", consecutive: 2 }
-    const written = roundHealthDocument(SERVICE, { stuck: { key: streak.key, reason: streak.reason } }, streak, 240_000, NOW)
+    const written = roundHealthDocument(
+      SERVICE,
+      { stuck: { key: streak.key, reason: streak.reason } },
+      streak,
+      240_000,
+      NOW,
+    )
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(written))
     const run = capture()
     // unhealthy + running is the pair the supervisor pages on WITHOUT a restart.
-    expect(queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(2)
+    expect(await queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(2)
     expect(JSON.parse(run.stdout())).toMatchObject({ state: "unhealthy", verdict: { kind: "running" } })
   })
 
   // The two failure modes must stay distinguishable: they have different cures
   // and only one of them is a defect. Collapsing them is the silent-error shape.
-  it("says ABSENT when no round has written one, exit 1", () => {
+  it("says ABSENT when no round has written one, exit 1", async () => {
     const run = capture()
     const dir = workdir()
-    expect(queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(1)
+    expect(await queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(1)
     const printed = JSON.parse(run.stdout()) as Record<string, unknown>
     expect(printed).toMatchObject({ state: "absent", verdict: { kind: "stopped" } })
     // NO `error`: hab-service-health/2 refuses the whole document if `absent`
@@ -83,11 +89,11 @@ describe("the declared health probe", () => {
     expect(String((printed.facts as Record<string, unknown>).why)).toContain(QUEUE_HEALTH_DOCUMENT)
   })
 
-  it("says UNKNOWN and quotes the text when the document is broken, exit 3", () => {
+  it("says UNKNOWN and quotes the text when the document is broken, exit 3", async () => {
     const dir = workdir()
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), '{"schema":"hab-servi')
     const run = capture()
-    expect(queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(3)
+    expect(await queueHealthCommand(dir, SERVICE, run.io, NOW)).toBe(3)
     expect(JSON.parse(run.stdout())).toMatchObject({
       state: "unknown",
       verdict: { kind: "unknown", observed: '{"schema":"hab-servi', reason: "unparsed" },
@@ -96,15 +102,15 @@ describe("the declared health probe", () => {
 
   // Negative control on the same distinction: valid JSON that is not OUR
   // document is a writer defect too, not an absent service.
-  it("treats someone else's JSON as unreadable, never as absent", () => {
+  it("treats someone else's JSON as unreadable, never as absent", async () => {
     const dir = workdir()
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), '{"status":"ok"}')
-    expect(readQueueHealth(dir, SERVICE).state).toBe("unknown")
+    expect((await readQueueHealth(dir, SERVICE)).state).toBe("unknown")
   })
 
-  it("speaks the supervisor's schema, so the document is read rather than guessed at", () => {
+  it("speaks the supervisor's schema, so the document is read rather than guessed at", async () => {
     const dir = workdir()
-    expect(readQueueHealth(dir, SERVICE).schema).toBe(QUEUE_HEALTH_SCHEMA)
+    expect((await readQueueHealth(dir, SERVICE)).schema).toBe(QUEUE_HEALTH_SCHEMA)
     expect(QUEUE_HEALTH_SCHEMA).toBe("hab-service-health/2")
   })
 })
@@ -118,14 +124,57 @@ describe("the declared health probe", () => {
  * @level    l1
  */
 describe("the probe applies the document's deadline", () => {
-  it("prints OVERDUE and exits 2 when the loop stopped writing", () => {
+  // @failure An open round pages throughout a long, journal-silent check.
+  // @level l2 — real child holding the round's own worktree
+  // @consumer Hab's overdue page; a live loop PID alone must not suppress it.
+  it("keeps a journal-silent round open only while its worktree has a live process", async () => {
+    const dir = workdir()
+    const id = "q-20260911T120100000Z-12345678"
+    const tree = join(dir, "worktrees", id, "merge")
+    mkdirSync(tree, { recursive: true })
+    mkdirSync(join(dir, "logs"))
+    const journal = join(dir, "logs", `${id}.jsonl`)
+    writeFileSync(journal, `${JSON.stringify({ kind: "run", target: "main", run: id, at: NOW.toISOString() })}\n`)
+    // A newer submission can finish while this older merge round is running.
+    writeFileSync(join(dir, "logs", "q-20260911T120200000Z-abcdef12.jsonl"), "{}\n")
+    utimesSync(journal, NOW, NOW)
+    writeFileSync(join(dir, "worktrees", id, ".pid"), String(process.pid))
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
+    const child = Bun.spawn([process.execPath, "-e", 'console.log("ready"); setInterval(() => {}, 1000)'], {
+      cwd: tree,
+      stdout: "pipe",
+      stderr: "inherit",
+    })
+    try {
+      const reader = child.stdout.getReader()
+      await reader.read()
+      reader.releaseLock()
+      const health = await readQueueHealth(dir, SERVICE, late)
+      expect(health.state).toBe("healthy")
+      expect(health.facts?.activeRound).toBe(id)
+      writeFileSync(journal, "{}\n")
+      const unreadable = await readQueueHealth(dir, SERVICE, late)
+      expect(unreadable.state).toBe("unknown")
+      expect(unreadable.error?.cause).toContain(journal)
+    } finally {
+      child.kill()
+      await child.exited
+    }
+    const ended = await readQueueHealth(dir, SERVICE, late)
+    expect(["queue-round-overdue", "queue-round-unobserved"]).toContain(ended.error?.code)
+    expect(ended.facts?.activeRound).toBeUndefined()
+    expect(ended.error?.cause).toContain(join(dir, "worktrees"))
+  })
+
+  it("prints OVERDUE and exits 2 when the loop stopped writing", async () => {
     const dir = workdir()
     const written = roundHealthDocument(SERVICE, {}, undefined, 120_000, NOW)
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(written))
     // Long past the instant the loop itself declared its next round due by.
     const late = new Date(NOW.getTime() + 120_000 + ROUND_BUDGET_MS + 60_000)
     const run = capture()
-    expect(queueHealthCommand(dir, SERVICE, run.io, late)).toBe(2)
+    expect(await queueHealthCommand(dir, SERVICE, run.io, late)).toBe(2)
     const printed = JSON.parse(run.stdout()) as { state: string; error: { code: string; cause: string } }
     expect(printed.state).toBe("unhealthy")
     expect(printed.error.code).toBe("queue-round-overdue")
@@ -134,12 +183,12 @@ describe("the probe applies the document's deadline", () => {
 
   // The control: inside the deadline the stored verdict stands unaltered, so
   // the expiry cannot be mistaken for a probe that distrusts every document.
-  it("prints the stored verdict unchanged while the deadline holds", () => {
+  it("prints the stored verdict unchanged while the deadline holds", async () => {
     const dir = workdir()
     const written = roundHealthDocument(SERVICE, {}, undefined, 120_000, NOW)
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(written))
     const run = capture()
-    expect(queueHealthCommand(dir, SERVICE, run.io, new Date(NOW.getTime() + 60_000))).toBe(0)
+    expect(await queueHealthCommand(dir, SERVICE, run.io, new Date(NOW.getTime() + 60_000))).toBe(0)
     expect(JSON.parse(run.stdout())).toEqual(written)
   })
 })

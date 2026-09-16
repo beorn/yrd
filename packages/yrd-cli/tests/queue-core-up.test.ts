@@ -1571,7 +1571,7 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     expect(documents[0]?.error?.cause).toContain("task/stuck")
     expect(documents[0]?.verdict).toEqual({ kind: "running" })
     // And the same document is on disk where the declared probe reads it.
-    expect(readQueueHealth(w.workdir, SERVICE)).toEqual(documents[1])
+    expect(await readQueueHealth(w.workdir, SERVICE)).toEqual(documents[1])
 
     // AC3: `list` already named this branch and this cure before `run` and
     // `up` did (this file's "renders one stored lossless incident" case); the
@@ -1819,7 +1819,7 @@ describe("a stuck round ends the round, not the service (@i/10-yrd/24395)", () =
     expect(merged, run.stdout()).toHaveLength(1)
     expect(merged[0]?.merged).toEqual(["task/after-the-fault"])
     // The declared probe reads the same document off disk that the loop wrote.
-    expect(readQueueHealth(w.workdir, SERVICE)).toEqual(seen.at(-1))
+    expect(await readQueueHealth(w.workdir, SERVICE)).toEqual(seen.at(-1))
   })
 
   // ACCEPTANCE (c), the NEGATIVE CONTROL. Exit 2 must survive for what no round
@@ -1877,7 +1877,7 @@ describe("a stuck round ends the round, not the service (@i/10-yrd/24395)", () =
       { workdir: w.workdir },
     )
     expect(rounds).toBe(1)
-    const left = readQueueHealth(w.workdir, SERVICE)
+    const left = await readQueueHealth(w.workdir, SERVICE)
     expect(left.state).toBe("healthy")
     expect(left.verdict).toEqual({ kind: "running" })
   })
