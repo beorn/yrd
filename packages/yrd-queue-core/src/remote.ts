@@ -12,12 +12,23 @@
  * relevant branch heads without moving a local ref or writing `FETCH_HEAD`.
  * One no-walk log reads the tip records, then ancestry is asked once per
  * distinct submitted head. A detail view expands only its selected entries
- * through `readHistories` to recover phase-specific check evidence. A remote
- * with thousands of unrelated branches therefore supplies no unrelated object
+ * through `readHistories` to recover phase-specific check evidence, and the
+ * queue run expands exactly the entries whose tip could hide an ending
+ * (`readObscuredEndings`, @i/10-yrd/24635). A remote with thousands of
+ * unrelated branches therefore supplies no unrelated object
  * (E3; measured 2026-09-02: fetching 7,387 branches cost 17 s a round).
  */
 
-import { changeOf, readRecords, recordFrom, tipRecord, trailer, type ChangeRecord, type Git } from "./records.ts"
+import {
+  changeOf,
+  readRecords,
+  recordFrom,
+  standsEnded,
+  tipRecord,
+  trailer,
+  type ChangeRecord,
+  type Git,
+} from "./records.ts"
 import { GitExit, isAncestor } from "./git.ts"
 import { parsePause, type PauseRecord } from "./pause.ts"
 import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
@@ -213,9 +224,36 @@ export async function readHistories(git: Git, entries: QueueRead, remote: string
     if (expandedTip !== tip) {
       throw new Error(`${changeName(change)} history ended at ${expandedTip}, not its captured tip ${tip}`)
     }
-    hydrated.push({ ...entry, change })
+    // The full history can change the reading: an ending buried under a stray
+    // later record is invisible to the captured tip (@i/10-yrd/24635), so a
+    // kept tip-only reading would contradict the records beside it.
+    hydrated.push({ ...entry, change, reading: readChange(change) })
   }
   return hydrated
+}
+
+/**
+ * Expand only the entries whose captured tip cannot answer whether the chain
+ * has ended: a tip that is neither an ending nor an opened record may be a
+ * stray record appended after one, and a reader that trusts it re-judges — or
+ * pages — a change whose chain is over (@i/10-yrd/24635). Everything else
+ * keeps its tip-only capture, which is the queue-wide read's economy.
+ */
+export async function readObscuredEndings(
+  git: Git,
+  entries: QueueRead,
+  remote: string,
+  queue: string,
+): Promise<QueueRead> {
+  const suspect = entries.filter((entry) => {
+    const tip = tipOf(entry.change)
+    return tip.kind !== "opened" && !standsEnded(tip)
+  })
+  if (suspect.length === 0) return entries
+  const expanded = new Map(
+    (await readHistories(git, suspect, remote, queue)).map((entry) => [changeName(entry.change), entry]),
+  )
+  return entries.map((entry) => expanded.get(changeName(entry.change)) ?? entry)
 }
 
 /** Captured change-tip records, by advertised ref, without resolving a moving name. */

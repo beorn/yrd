@@ -15,6 +15,7 @@ import {
   gitIn,
   list,
   directMergeCommits,
+  mergedBy,
   readCheckTrailer,
   readConfig,
   readHistories,
@@ -25,6 +26,7 @@ import {
   watchRows,
 } from "../src/index.ts"
 import type { Git } from "../src/index.ts"
+import { recordMessage } from "../src/records.ts"
 
 const roots: string[] = []
 const MAIN = { branch: "main", remote: "origin" } as const
@@ -231,6 +233,108 @@ describe("the table is the queue read rendered", () => {
     ).toEqual(["queued"])
   })
 
+  it("a checked record appended after the merged ending does not page the queue's own merge (@i/10-yrd/24635)", async () => {
+    const w = await world("{}\n")
+    const head = await submitCommit(w, "task/one", "one.txt")
+    // The queue's own merge: --no-ff, with the Change: and Merged-By: trailers
+    // run.ts writes.
+    const run = "q-20260916T122543688Z-dd7b7b5b"
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git([
+      "merge",
+      "--quiet",
+      "--no-ff",
+      "-m",
+      `merge task/one\n\nChange: task/one@${head}\nMerged-By: ${mergedBy("main", run)}`,
+      head,
+    ])
+    const merge = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["push", "--quiet", "origin", "main"])
+    const ref = changeRef("main", { branch: "task/one", head })
+    await appendRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind: "merged",
+      subject: "task/one merged",
+      trailers: [
+        ["Merge", merge],
+        ["Merged-By", mergedBy("main", run)],
+      ],
+    })
+    // The specimen's failed delivery attempt, between the ending and the stray.
+    await appendRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind: "sent",
+      subject: "could not tell the submitter",
+      trailers: [
+        ["State", "merged"],
+        ["Merge", merge],
+        ["Merged-By", mergedBy("main", run)],
+        ["To", "@dev/5"],
+        ["Delivery", "failed"],
+      ],
+    })
+    // The stray decision the specimen's stale round appended (measured chain,
+    // @i/10-yrd/24635). The store refuses it through appendRecord now, so
+    // write the record commit the way that defective run did — with git.
+    const tip = (await w.git(["rev-parse", ref])).trim()
+    const stray = (
+      await w.git([
+        "commit-tree",
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "-p",
+        tip,
+        "-m",
+        recordMessage({
+          change: { branch: "task/one", head },
+          kind: "checked",
+          subject: "re-judged after the target moved",
+          trailers: [["Reason", "target-moved"]],
+        }),
+      ])
+    ).trim()
+    await w.git(["update-ref", ref, stray, tip])
+    // The rest of the measured specimen: the catch-up's second merged record,
+    // then its delivered notice.
+    await appendRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind: "merged",
+      subject: "task/one already on the target",
+      trailers: [
+        ["Merge", merge],
+        ["Merged-By", mergedBy("main", "q-20260916T123506349Z-06365f3f")],
+      ],
+    })
+    await appendRecord(w.git, "main", {
+      change: { branch: "task/one", head },
+      kind: "sent",
+      subject: "told the submitter",
+      trailers: [
+        ["State", "merged"],
+        ["Merge", merge],
+        ["Merged-By", mergedBy("main", run)],
+        ["To", "@dev/5"],
+        ["Delivery", "sent"],
+      ],
+    })
+    await w.git(["push", "--quiet", "--force", "origin", `${ref}:${ref}`])
+
+    const entries = (await readQueue(w.git, "origin", "main", merge)).changes
+    // The chain's ending accounts for the queue's own merge: no page.
+    expect(await directMergeCommits(w.git, "main", merge, entries)).toEqual([])
+
+    // And the fix does not blind the detector: a commit main truly gained
+    // around the queue is still its own row.
+    writeFileSync(join(w.work, "direct.txt"), "direct\n")
+    await w.git(["add", "direct.txt"])
+    await w.git(["commit", "--quiet", "-m", "direct.txt around the queue"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    const direct = (await w.git(["rev-parse", "HEAD"])).trim()
+    const after = (await readQueue(w.git, "origin", "main", direct)).changes
+    expect(
+      (await directMergeCommits(w.git, "main", direct, after)).map((commit) => [commit.commit, commit.why]),
+    ).toEqual([[direct, "it is one commit, not a merge of a change"]])
+  })
+
   it("shows one branch's changes newest first", async () => {
     const w = await world("{}\n")
     const first = await submitCommit(w, "task/one", "one.txt")
@@ -296,6 +400,9 @@ describe("the table is the queue read rendered", () => {
       const ending = { change, kind, subject: `${kind} task/one`, trailers: endingTrailers }
       if (kind === "failed") {
         await appendRecord(gitAt(new Date(endedAt.getTime() - 30_000)), "main", ending)
+        // A retry is an opened record on the existing change (submit.ts); only
+        // then may a round judge it again (@i/10-yrd/24635).
+        await appendRecord(w.git, "main", { change, kind: "opened", subject: "resubmitted" })
         await appendRecord(w.git, "main", { change, kind: "checked", subject: "retry checked" })
         await w.git(["push", "--quiet", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
         const retry = await readHistories(

@@ -36,6 +36,7 @@ export type { Change } from "./refs.ts"
 export {
   appendRecord,
   DIRECT_MERGE,
+  endingRecord,
   mergedBy,
   mergedByRun,
   readRecord,

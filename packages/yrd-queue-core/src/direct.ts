@@ -39,7 +39,7 @@
  * at-least-once, the plan's shape for every message.
  */
 
-import { endedKind, mergedByRun, trailer, type ChangeRecord, type Git } from "./records.ts"
+import { endedKind, endingRecordThrough, mergedByRun, trailer, type ChangeRecord, type Git } from "./records.ts"
 import { gitlinkRows } from "./git.ts"
 import { changeName } from "./refs.ts"
 import type { QueueRead } from "./remote.ts"
@@ -75,10 +75,16 @@ export async function directMergeCommits(
   // No records anywhere: this queue has judged nothing, so it has no history of
   // its own and nothing on the target is yet its business to report.
   if (started === undefined) return []
-  const byName = new Map(entries.map((entry) => [changeName(entry.change), entry.change.records.at(-1)]))
+  // Each change's ENDING record, never its literal tip: a stray record
+  // appended after a merged ending must not hide the merge, however shallow
+  // the caller's capture was (@i/10-yrd/24635).
+  const byName = new Map<string, ChangeRecord | undefined>()
+  for (const entry of entries) {
+    byName.set(changeName(entry.change), await endingRecordThrough(git, entry.change))
+  }
   const accounted = new Set<string>()
-  for (const tip of byName.values()) {
-    const merge = tip === undefined || endedKind(tip) !== "merged" ? undefined : trailer(tip, "Merge")
+  for (const ending of byName.values()) {
+    const merge = ending === undefined || endedKind(ending) !== "merged" ? undefined : trailer(ending, "Merge")
     if (merge !== undefined) accounted.add(merge)
   }
   // Newest first, each commit as one record: sha, parents, committer date,
@@ -162,11 +168,11 @@ function notTheQueues(
   if (names.length > 1) return `it carries ${names.length} Change: trailers`
   const name = names[0] ?? ""
   if (!byName.has(name)) return `it names the change ${name}, which the queue does not know`
-  const tip = byName.get(name)
-  if (tip === undefined || endedKind(tip) !== "merged" || trailer(tip, "Merge") !== commit) {
+  const ending = byName.get(name)
+  if (ending === undefined || endedKind(ending) !== "merged" || trailer(ending, "Merge") !== commit) {
     return `it names the change ${name}, whose records do not say it merged there`
   }
-  if (mergedByRun(trailer(tip, "Merged-By")) === undefined) {
+  if (mergedByRun(trailer(ending, "Merged-By")) === undefined) {
     return `it names the change ${name}, which was merged around the queue`
   }
   return undefined
