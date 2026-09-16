@@ -643,13 +643,16 @@ describe("what a watch says it looked at", () => {
   })
 
   it("keeps each historical run's result and output in JSON, text, and interactive detail", async () => {
-    // One real change, first stuck then failed. The old artifact survives;
-    // historical-run-rows-use-latest-result was the reader relabelling it.
+    // One real change, decided twice on one head: the check goes stuck (exit
+    // 127, so yrd-check-unresolved), then 24623 retires that same unresolved
+    // reason, failing the change without re-running the check. The old
+    // artifact survives; historical-run-rows-use-latest-result was the reader
+    // relabelling it with the newest run's result.
     const w = await world()
     const control = join(w.workdir, "check.sh")
     writeFileSync(control, "echo FIRST_RUN_MISSING\nexit 127\n")
     writeFileSync(join(w.work, ".yrd.yml"), `checks:\n  - verify:\n      run: ${JSON.stringify(`sh ${control}`)}\n`)
-    await w.git(["commit", "--quiet", "-am", "declare a repairable external check"])
+    await w.git(["commit", "--quiet", "-am", "declare an external check the queue cannot run"])
     await w.git(["push", "--quiet", "origin", "main"])
     await change(w, "task/history", false)
 
@@ -669,7 +672,8 @@ describe("what a watch says it looked at", () => {
     expect(original.state).toBe("stuck")
     expect(readFileSync(String(original.log), "utf8")).toBe("FIRST_RUN_MISSING\n")
 
-    writeFileSync(control, "printf 'SECOND_RUN_FAIL \\033[30m\\033[45m slow \\033[49m\\033[39m\\n'\nexit 1\n")
+    // The check script stays broken: 24623 does not re-run it, so repairing it
+    // here would make the fixture claim a second check that never happens.
     const second = capture(w.work)
     expect(await coreQueueCommand(w.work, second.io, { command: "run" }, runOptions)).toBe(1)
     const secondId = (JSON.parse(second.stdout()) as { run: string }).run
@@ -687,15 +691,17 @@ describe("what a watch says it looked at", () => {
       result: original.result,
       log: original.log,
     })
-    expect(latest).toMatchObject({ state: "failed", run: secondId, result: "fail verify" })
+    // No check decided the newest run, so it reads a bare "fail"; the retire's
+    // own reason is what keeps the two rows apart for a relabelling reader.
+    expect(latest).toMatchObject({ state: "failed", run: secondId, result: "fail" })
+    expect(String(latest.reason)).toMatch(/could not be judged twice/u)
     expect(rows.some((row) => "runResult" in row || "runOf" in row)).toBe(false)
     expect(old.endedAt).toBe(original.endedAt)
     expect(latest.incident).toBeUndefined()
     expect(readFileSync(String(old.log), "utf8")).toBe("FIRST_RUN_MISSING\n")
-    // The raw log keeps its colors; the pane never sees them (a chalk background inside a Text is a strict-render refusal).
-    expect(readFileSync(String(latest.log), "utf8")).toBe(
-      "SECOND_RUN_FAIL \u001b[30m\u001b[45m slow \u001b[49m\u001b[39m\n",
-    )
+    // The retire decided from the reading alone, so the newest run has no
+    // artifact of its own and must not borrow the run before it.
+    expect(latest.log).toBeUndefined()
 
     const plain = capture(w.work)
     await coreQueueCommand(w.work, plain.io, { command: "list" }, { workdir: w.workdir })
@@ -711,7 +717,7 @@ describe("what a watch says it looked at", () => {
       plain.stdout(),
     ).toBe(true)
     expect(
-      historyLines.some((line) => line.includes("failed verify")),
+      historyLines.some((line) => line.includes("could not be judged twice")),
       plain.stdout(),
     ).toBe(true)
     expect(plain.stdout()).toContain(runShortName("main", secondId))
@@ -737,10 +743,13 @@ describe("what a watch says it looked at", () => {
       log: original.log,
       output: "FIRST_RUN_MISSING\n",
     })
+    // A decided change opens on its own records, not on one run's journal, and
+    // the retire recorded no check: both rows show the single check the change
+    // ever ran. The ROWS stay per-run, which is what this test guards.
     expect(details.find((detail) => detail.row.run === secondId)?.checks[0]).toMatchObject({
-      state: "failed",
-      log: latest.log,
-      output: "SECOND_RUN_FAIL  slow \n",
+      state: "stuck",
+      log: original.log,
+      output: "FIRST_RUN_MISSING\n",
     })
   })
 })
