@@ -13,7 +13,13 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { QUEUE_HEALTH_DOCUMENT, QUEUE_HEALTH_SCHEMA, ROUND_BUDGET_MS, roundHealthDocument } from "@yrd/queue-core"
+import {
+  QUEUE_HEALTH_DOCUMENT,
+  QUEUE_HEALTH_SCHEMA,
+  ROUND_BUDGET_MS,
+  queueHealthExitCode,
+  roundHealthDocument,
+} from "@yrd/queue-core"
 import { queueHealthCommand, readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
@@ -162,7 +168,11 @@ describe("the probe applies the document's deadline", () => {
       await child.exited
     }
     const ended = await readQueueHealth(dir, SERVICE, late)
-    expect(["queue-round-overdue", "queue-round-unobserved"]).toContain(ended.error?.code)
+    // Was `toContain(["queue-round-overdue", "queue-round-unobserved"])`: the
+    // code depended on whether this host's census happened to be complete, and
+    // on a host with a systemd user session it never is. Since 24665 the verdict
+    // no longer rides on that, so the expectation is one code again.
+    expect(ended.error?.code).toBe("queue-round-overdue")
     expect(ended.facts?.activeRound).toBeUndefined()
     expect(ended.error?.cause).toContain(join(dir, "worktrees"))
   })
@@ -259,6 +269,68 @@ describe("the probe applies the document's deadline", () => {
     const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
     const health = await readQueueHealth(dir, SERVICE, late)
     expect(health.error?.code).not.toBe("queue-round-unstarted")
+  })
+
+  /**
+   * @failure  On any host with a systemd user session, three same-uid processes
+   *           are non-dumpable every time, so the holder census is never
+   *           `complete` and the completeness check threw FIRST: every overdue
+   *           round read `queue-round-unobserved` / unparsed / exit 3 instead of
+   *           `queue-round-overdue` / exit 2. The verdict was unreachable
+   *           exactly when it mattered (@i/10-yrd/b-wrong/24665).
+   * @level    l1 against the real census of this host's own process table
+   * @consumer Hab's page, which gates on the state and the exit code agreeing.
+   */
+  it("reads an overdue round as overdue whether or not the holder census is complete", async () => {
+    const dir = workdir()
+    const id = "q-20260911T120100000Z-eeeeffff"
+    mkdirSync(join(dir, "logs"), { recursive: true })
+    mkdirSync(join(dir, "worktrees"), { recursive: true })
+    // A finished run: header, queue record, so it is neither unstarted nor in
+    // its preamble. Its runner is long gone.
+    writeFileSync(
+      join(dir, "logs", `${id}.jsonl`),
+      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: 2_147_483_647 })}\n` +
+        `${JSON.stringify({ kind: "queue", run: id, at: NOW.toISOString(), queue: "main on origin" })}\n`,
+    )
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
+    const health = await readQueueHealth(dir, SERVICE, late)
+    expect(health.error?.code).toBe("queue-round-overdue")
+    expect(health.state).toBe("unhealthy")
+    expect(queueHealthExitCode(health.state)).toBe(2)
+    // The incompleteness survives as a FACT rather than as the verdict, and the
+    // cause carries the census's own count of what it could not read. On a host
+    // with a systemd user session that count is nonzero, which is the case this
+    // bead exists for; the assertion holds either way.
+    const coverage = health.facts?.coverage as { complete: boolean; processes?: { sourceDenied: number } } | undefined
+    expect(coverage).toBeDefined()
+    if (coverage?.complete === false) {
+      expect(health.error?.cause).toContain(`${String(coverage.processes?.sourceDenied ?? 0)} same-uid process`)
+    }
+    // And the runner the header names is reported, alive or not.
+    expect(health.error?.cause).toContain("2147483647")
+  })
+
+  // The other half of the same claim: a runner that IS alive but has stopped
+  // making progress is still overdue. Liveness explains the fault; it never
+  // excuses it.
+  it("still reads overdue when the runner named by the header is alive", async () => {
+    const dir = workdir()
+    const id = "q-20260911T120100000Z-11112222"
+    mkdirSync(join(dir, "logs"), { recursive: true })
+    mkdirSync(join(dir, "worktrees"), { recursive: true })
+    writeFileSync(
+      join(dir, "logs", `${id}.jsonl`),
+      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: process.pid })}\n` +
+        `${JSON.stringify({ kind: "queue", run: id, at: NOW.toISOString(), queue: "main on origin" })}\n`,
+    )
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, {}, undefined, 0, NOW)))
+    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
+    const health = await readQueueHealth(dir, SERVICE, late)
+    expect(health.error?.code).toBe("queue-round-overdue")
+    expect(health.state).toBe("unhealthy")
+    expect(health.error?.cause).toContain("is still running")
   })
 
   it("prints OVERDUE and exits 2 when the loop stopped writing", async () => {

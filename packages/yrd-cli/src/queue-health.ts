@@ -8,7 +8,7 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, relative, sep } from "node:path"
-import { inspectPathHolderCensus } from "@yrd/process"
+import { inspectPathHolderCensus, type PathHolderCensus } from "@yrd/process"
 
 import {
   absentHealthDocument,
@@ -100,7 +100,8 @@ export async function readQueueHealth(
       // the round is over and which Git call ended it (@i/10-yrd/24470). This
       // sits ABOVE the coverage check on purpose — the evidence is the journal,
       // not the process table, so an incomplete census cannot withhold it.
-      const unstarted = unstartedRound(workdir)
+      const newest = newestRun(workdir)
+      const unstarted = unstartedRound(newest)
       if (unstarted !== undefined) {
         return {
           ...judged,
@@ -117,14 +118,27 @@ export async function readQueueHealth(
           },
         }
       }
-      if (!census.coverage.complete) {
-        throw new Error(`process ownership under ${trees} could not be fully read: ${JSON.stringify(census.coverage)}`)
-      }
+      // AN OVERDUE ROUND READS OVERDUE WHETHER OR NOT THE CENSUS IS COMPLETE
+      // (@i/10-yrd/b-wrong/24665). Completeness proves "no holder exists
+      // anywhere", which this verdict never needed: overdue means the runner is
+      // not making progress, and since 24470 the header names the runner, so
+      // the one question that matters has a direct answer. A live-but-stalled
+      // runner is overdue; a dead one is overdue and dead. Both are exit 2.
+      //
+      // What the completeness check used to do was turn a fact about the CENSUS
+      // into a verdict about the ROUND. On any host with a systemd user session
+      // three same-uid processes are non-dumpable every time, so the census is
+      // never complete and every overdue round read `unobserved`/exit 3 — the
+      // verdict was unreachable exactly when it mattered. The counters now go
+      // in the cause as facts, where a reader can see the gap without it
+      // deciding anything.
       return {
         ...judged,
         error: {
           ...judged.error,
-          cause: `${judged.error.cause}; no live process holds a round worktree under ${trees}`,
+          cause:
+            `${judged.error.cause}; no live process holds a round worktree under ${trees}; ` +
+            `${runnerFact(newest)}; ${coverageFact(census.coverage)}`,
           resolution: [
             `Read the run journals under ${join(workdir, "logs")} and the process census under ${trees}.`,
             "This clears when a round finishes or live work is observed in a round's worktree.",
@@ -133,6 +147,13 @@ export async function readQueueHealth(
         facts: { ...judged.facts, coverage: census.coverage },
       }
     } catch (error) {
+      // WHAT `queue-round-unobserved` MEANS NOW: the evidence could not be READ
+      // AT ALL. Three things still land here and each is a genuine "we could not
+      // look" — the census itself failing (an I/O error reading the process
+      // table), a journal whose records cannot be parsed, and a live round whose
+      // journal has no header. An INCOMPLETE census no longer does (24665); it
+      // is a gap in one measurement, not an inability to take it, and it goes in
+      // the overdue cause as a fact instead.
       const why = error instanceof Error ? error.message : String(error)
       const absent = consulted === trees && (error as NodeJS.ErrnoException).code === "ENOENT"
       return {
@@ -162,22 +183,33 @@ export async function readQueueHealth(
   )
 }
 
+/** The newest run journal, and what it says about the run and its runner. */
+type NewestRun = Readonly<{
+  id: string
+  journal: string
+  /** The runner the header names — journals written since 24470 carry one. */
+  pid?: number
+  /** Whether that pid answers `kill -0`. Absent when there is no pid to ask about. */
+  alive?: boolean
+  /** The run never reached its queue: it died in its Git preamble, or is still in one. */
+  died: boolean
+  /** Did the run claim a worktree — the older, weaker evidence, for journals with no pid. */
+  claimed: boolean
+}>
+
 /**
- * The newest run journal, when what it holds is a run that died in its Git
- * preamble: the id and the path, so the caller can name both.
+ * The newest run journal, read once and shared by every verdict below it.
  *
- * DEFINITE WITHOUT THE PROCESS CENSUS, which is the point of reading it here:
- * the journal names the run's own pid and one `kill -0` settles it, so a census
- * that cannot read every process on the host is not consulted and cannot
- * withhold the answer.
+ * WITHOUT THE PROCESS CENSUS, which is the point: the journal names the run's
+ * own pid and one `kill -0` settles it, so a census that cannot read every
+ * process on the host is never consulted here and cannot withhold an answer.
  *
  * Says what it looked at and where. A missing log directory means no run has
  * ever journaled here, which the caller's own overdue fault already covers; any
- * OTHER failure to list it is thrown, because a caller deciding whether the
- * queue died early must not be handed "it did not" by a directory nobody could
- * read.
+ * OTHER failure to list it is thrown, because a caller deciding what became of
+ * the queue must not be handed a verdict by a directory nobody could read.
  */
-function unstartedRound(workdir: string): Readonly<{ id: string; journal: string; how: string }> | undefined {
+function newestRun(workdir: string): NewestRun | undefined {
   const logs = join(workdir, "logs")
   let names: readonly string[]
   try {
@@ -198,27 +230,74 @@ function unstartedRound(workdir: string): Readonly<{ id: string; journal: string
     .at(-1)
   if (id === undefined) return undefined
   const records = readRunLog(logs, id)
-  if (!runDiedInPreamble(records)) return undefined
-  const journal = join(logs, `${id}.jsonl`)
-  // THE HEADER'S PID DECIDES IT, and nothing else can. A run claims its worktree
-  // only after the whole Git preamble (queue-core run.ts:476), so for the entire
-  // window in which "executing a preamble" and "died in one" must be told apart,
-  // there is no `.pid` file and no worktree to read. Probing the one pid the
-  // header names is the difference between naming a fault and paging about a
-  // healthy run three seconds old.
   const pid = records.find((record) => record.kind === "run")?.pid
-  if (typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0) {
-    return running(pid) ? undefined : { how: `its runner (pid ${String(pid)}) is not running`, id, journal }
+  const named = typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
+  return {
+    claimed: existsSync(join(workdir, "worktrees", id)),
+    died: runDiedInPreamble(records),
+    id,
+    journal: join(logs, `${id}.jsonl`),
+    ...(named === undefined ? {} : { alive: running(named), pid: named }),
   }
-  // A journal from before 24470 carries no pid, so the weaker evidence is all
-  // there is. It is sound for a FINISHED run and stated as what it is, never
-  // dressed up as a liveness probe that was not taken.
-  if (existsSync(join(workdir, "worktrees", id))) return undefined
+}
+
+/**
+ * The newest run, when it is one that died in its Git preamble, and how we know.
+ *
+ * THE HEADER'S PID DECIDES IT, and nothing else can. A run claims its worktree
+ * only after the whole Git preamble (queue-core run.ts:476), so for the entire
+ * window in which "executing a preamble" and "died in one" must be told apart,
+ * there is no `.pid` file and no worktree to read. Probing the one pid the
+ * header names is the difference between naming a fault and paging about a
+ * healthy run three seconds old. A journal from before 24470 carries no pid, so
+ * the weaker evidence is all there is: sound for a FINISHED run, and stated as
+ * what it is rather than dressed up as a liveness probe nobody took.
+ */
+function unstartedRound(
+  newest: NewestRun | undefined,
+): Readonly<{ id: string; journal: string; how: string }> | undefined {
+  if (newest === undefined || !newest.died) return undefined
+  const { id, journal } = newest
+  if (newest.pid !== undefined) {
+    return newest.alive === true
+      ? undefined
+      : { how: `its runner (pid ${String(newest.pid)}) is not running`, id, journal }
+  }
+  if (newest.claimed) return undefined
   return {
     how: "its header names no runner pid (written before the header-first writer) and it claimed no worktree",
     id,
     journal,
   }
+}
+
+/** What the newest run says about its own runner, for an overdue round's cause. */
+function runnerFact(newest: NewestRun | undefined): string {
+  if (newest === undefined) return "there is no run journal to name a runner"
+  if (newest.pid === undefined) {
+    return `the newest run ${newest.id} names no runner pid (written before the header-first writer)`
+  }
+  return `the newest run ${newest.id} names runner pid ${String(newest.pid)}, which ${
+    newest.alive === true ? "is still running" : "is not running"
+  }`
+}
+
+/**
+ * What the census managed to see, as a FACT rather than as a verdict.
+ *
+ * An incomplete census is a statement about the host's process table, not about
+ * the round, and conflating the two made every overdue round on a host with a
+ * systemd user session unreadable (24665). The count goes in the sentence so a
+ * reader can weigh the gap themselves.
+ */
+function coverageFact(coverage: PathHolderCensus["coverage"]): string {
+  if (coverage.complete) return "the process census was complete"
+  if (!("processes" in coverage)) return "the process census was incomplete"
+  const denied = coverage.processes.sourceDenied + coverage.processes.unavailable.denied
+  return (
+    `the process census could not read ${String(denied)} same-uid process(es), so it is incomplete — ` +
+    "a fact about the census, not about this round"
+  )
 }
 
 /** Does this one process exist: `kill -0`, never a census. */
