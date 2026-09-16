@@ -1279,10 +1279,15 @@ export async function coreQueueCommand(
           ...(declared.note === undefined ? {} : { note: declared.note }),
         })
       }
+      // What was queried, and where: an empty answer that names only the branch
+      // it did not find leaves the reader to guess which queue at which remote
+      // was read (@i/10-yrd/24050). The same identity `stats` prints.
+      const name = queueName(config.target, await remoteUrl(git, config.target.remote))
       emit(
         io,
         options.json,
         {
+          queue: name,
           changes: changes.map((change) => ({
             ...change.row,
             queue: config.target.branch,
@@ -1298,7 +1303,7 @@ export async function coreQueueCommand(
           journal: journalFact(journals),
         },
         changes.length === 0
-          ? `no change for ${request.branch}`
+          ? `no change for ${request.branch} on ${name}`
           : changes
               .map((change) => {
                 const view = views.get(change.row.head)

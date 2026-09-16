@@ -1531,6 +1531,56 @@ function faultySetup(dir: string): Readonly<{ command: string; clear: () => void
   return { command: script, clear: () => rmSync(marker, { force: true }) }
 }
 
+describe("yrd queue show names the queue it read (@i/10-yrd/24050)", () => {
+  it("an empty answer says which queue at which remote was read, on the page and in --json", async () => {
+    const w = await world()
+    await w.git(["checkout", "--quiet", "-b", "task/one", "main"])
+    writeFileSync(join(w.work, "one.txt"), "one\n")
+    await w.git(["add", "one.txt"])
+    await w.git(["commit", "--quiet", "-m", "one"])
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/one",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+
+    const page = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, page.io, { command: "show", branch: "task/ghost" }, { workdir: w.workdir }),
+    ).toBe(0)
+    const json = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        json.io,
+        { command: "show", branch: "task/ghost" },
+        { json: true, workdir: w.workdir },
+      ),
+    ).toBe(0)
+
+    const shown = records(json)[0] as { queue?: unknown; changes: unknown[] }
+    expect(shown.changes).toEqual([])
+    expect(typeof shown.queue).toBe("string")
+    expect(String(shown.queue)).toContain("main")
+    // The same identity on the page as in the JSON, beside the branch it did not find.
+    expect(`${page.stdout()}${page.stderr()}`).toContain(`no change for task/ghost on ${String(shown.queue)}`)
+
+    // A found change carries the same top-level identity, so a reader never
+    // has to look inside a row to learn what was queried.
+    const found = capture(w.work)
+    expect(
+      await coreQueueCommand(
+        w.work,
+        found.io,
+        { command: "show", branch: "task/one" },
+        { json: true, workdir: w.workdir },
+      ),
+    ).toBe(0)
+    expect((records(found)[0] as { queue?: unknown }).queue).toBe(shown.queue)
+  })
+})
+
 describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)", () => {
   it("names the same branch and cure whichever of the three commands reports it", async () => {
     const w = await world()
