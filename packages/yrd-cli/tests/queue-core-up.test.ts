@@ -1501,16 +1501,46 @@ describe("yrd queue show, one change's evidence", () => {
  * `task/stuck`, its state is `stuck`, and its cure is the same sentence
  * wherever it is read.
  */
+/**
+ * A setup that fails for as long as a fault marker exists.
+ *
+ * Deliberately NOT "fails the first N times": a round runs setup more than
+ * once — a candidate's failure is re-run on the settled base to decide whose
+ * failure it is — so a counting fixture encodes an implementation detail and
+ * silently stops reproducing the fault when that detail changes. The fault is
+ * a CONDITION here, exactly as a code host being unreachable is, and the test
+ * clears the condition at the moment it wants to.
+ */
+function faultySetup(dir: string): Readonly<{ command: string; clear: () => void }> {
+  const marker = join(dir, "code-host-unreachable")
+  const script = join(dir, "faulty-setup.sh")
+  writeFileSync(marker, "the code host is down\n")
+  writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      `if [ -f ${marker} ]; then`,
+      "  echo 'fatal: unable to access https://example.invalid/: The requested URL returned error: 504' >&2",
+      "  exit 128",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"),
+  )
+  chmodSync(script, 0o755)
+  return { command: script, clear: () => rmSync(marker, { force: true }) }
+}
+
 describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)", () => {
   it("names the same branch and cure whichever of the three commands reports it", async () => {
     const w = await world()
-    const check = join(w.workdir, "always-stuck.sh")
-    writeFileSync(check, "#!/bin/sh\nexit 2\n")
-    chmodSync(check, 0o755)
-    // `on: submit` so the on-submit judge writes the "stuck" ending directly
-    // (run.ts `judge`'s own `yrd-check-unresolved`), the same incident code
-    // every re-judge of this change will keep writing.
-    await redeclare(w, `checks:\n  - verify:\n      run: ${check}\n      on: submit\n`)
+    // A setup fault, not a check that exits 2: an unresolved check is retired
+    // on its SECOND judge (@i/10-yrd/24623, run.ts `judge`), so `up`'s first
+    // round after `run` would end the change failed and print no cure at
+    // all. A setup that cannot reach its remote sticks the same way on every
+    // round, and that is the ground the three commands must agree on.
+    const fault = faultySetup(w.workdir)
+    await redeclare(w, `setup: ${fault.command}\n`)
     await w.git(["checkout", "--quiet", "-b", "task/stuck", "main"])
     writeFileSync(join(w.work, "stuck.txt"), "stuck\n")
     await w.git(["add", "stuck.txt"])
@@ -1521,10 +1551,10 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
       submitter: "@dev/2",
       target: { branch: "main", remote: "origin" },
     })
-    // `judge`'s own literal, reproduced rather than imported: a change here
-    // that silently drifts from run.ts's wording is exactly the disagreement
-    // this test exists to catch.
-    const cure = "repair verify or its queue environment, then run yrd queue run"
+    // setup-transport.ts's own literal, reproduced rather than imported: a
+    // change here that silently drifts from its wording is exactly the
+    // disagreement this test exists to catch.
+    const cure = "nothing here is the change's fault: setup could not reach a remote"
 
     // AC1 + AC2: `run` takes the change, cannot get past it, ends 2, and
     // names the branch and the cure on stderr.
@@ -1580,7 +1610,7 @@ describe("yrd queue run, up and list agree on a stuck change (@i/10-yrd/24141)",
     expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(0)
     const rows = (records(listed)[0] as { changes: readonly Record<string, unknown>[] }).changes
     const row = rows.find((entry) => entry.branch === "task/stuck")
-    expect(row, JSON.stringify(rows)).toMatchObject({ state: "stuck", reason: "yrd-check-unresolved" })
+    expect(row, JSON.stringify(rows)).toMatchObject({ state: "stuck", reason: "yrd-setup-unreachable" })
     expect(String(row?.result)).toContain(cure)
   })
 })
@@ -1717,36 +1747,6 @@ describe("yrd watch's own detail pane (openDetail), one change's evidence", () =
  *           change behind a transient fault
  */
 describe("a stuck round ends the round, not the service (@i/10-yrd/24395)", () => {
-  /**
-   * A setup that fails for as long as a fault marker exists.
-   *
-   * Deliberately NOT "fails the first N times": a round runs setup more than
-   * once — a candidate's failure is re-run on the settled base to decide whose
-   * failure it is — so a counting fixture encodes an implementation detail and
-   * silently stops reproducing the fault when that detail changes. The fault is
-   * a CONDITION here, exactly as a code host being unreachable is, and the test
-   * clears the condition at the moment it wants to.
-   */
-  function faultySetup(dir: string): Readonly<{ command: string; clear: () => void }> {
-    const marker = join(dir, "code-host-unreachable")
-    const script = join(dir, "faulty-setup.sh")
-    writeFileSync(marker, "the code host is down\n")
-    writeFileSync(
-      script,
-      [
-        "#!/bin/sh",
-        `if [ -f ${marker} ]; then`,
-        "  echo 'fatal: unable to access https://example.invalid/: The requested URL returned error: 504' >&2",
-        "  exit 128",
-        "fi",
-        "exit 0",
-        "",
-      ].join("\n"),
-    )
-    chmodSync(script, 0o755)
-    return { command: script, clear: () => rmSync(marker, { force: true }) }
-  }
-
   /** One change waiting in the line, so a round has something to merge. */
   async function oneChange(w: World, branch: string): Promise<void> {
     await w.git(["checkout", "--quiet", "-b", branch, "main"])
