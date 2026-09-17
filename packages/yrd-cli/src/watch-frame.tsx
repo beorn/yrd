@@ -24,7 +24,7 @@ import type { ReactNode } from "react"
 import { Box, Text } from "silvery"
 import type { Row } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
-import { STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
+import { RUNNER_GLYPH, STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
 import { RunnerRow, bucketOf, clockOf, type ListLayout } from "./watch-list.tsx"
 import { runnerLine } from "./watch-runner.ts"
 import type { WatchSnapshot } from "./watch-pane.tsx"
@@ -277,7 +277,12 @@ export function runnerOf(snapshot: WatchSnapshot, now: Date) {
   })
 }
 
-/** One break, drawn: the band rules that open here, then the runner's own row when this is its place. */
+/**
+ * One break, drawn: the runner's own row when this is its place, THEN the band
+ * rules that open here. The runner comes first because the only rule that can
+ * share its index is `done`'s — drafts and waiting have already advanced past
+ * it — and the runner stands between waiting and done, never under done.
+ */
 export function BandBreakRows({
   brk,
   snapshot,
@@ -291,25 +296,52 @@ export function BandBreakRows({
   if (brk === undefined) return null
   return (
     <Box flexDirection="column" flexShrink={0} minWidth={0}>
+      {brk.runner ? (
+        <>
+          <RunnerRow line={runnerOf(snapshot, now)} layout={layout} />
+          <RunnerDetail snapshot={snapshot} layout={layout} />
+        </>
+      ) : null}
       {brk.rules.map((rule) => (
         <Text key={rule} color="$fg-muted" wrap="truncate">
           {rule}
         </Text>
       ))}
-      {brk.runner ? <RunnerRow line={runnerOf(snapshot, now)} layout={layout} /> : null}
     </Box>
   )
 }
 
-/** The runner's second line: host-only detail, hung under the row it belongs to, and never blank. */
-export function RunnerDetail({ snapshot, layout }: { snapshot: WatchSnapshot; layout: ListLayout }) {
+/**
+ * The runner's second line: host-only detail, hung under the row it belongs to,
+ * and NEVER blank — off the queue's machine it says where it looked and that
+ * nothing is published, because a blank line where a fact belongs reads as a
+ * queue with nothing to say.
+ *
+ * `named` when the row above is a CHANGE's row: the runner holds it, so that
+ * row is the runner's row and nothing else on it says so. Under the runner's
+ * own row the word is already in the cell above, and saying it twice is noise.
+ */
+export function RunnerDetail({
+  snapshot,
+  layout,
+  named = false,
+}: {
+  snapshot: WatchSnapshot
+  layout: ListLayout
+  named?: boolean
+}) {
   const now = useNow()
+  const line = runnerOf(snapshot, now)
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
       <Box width={layout.timeWidth + layout.statusWidth + 1} flexShrink={0} />
-      <Box flexGrow={1} flexBasis={0} minWidth={0} overflow="hidden">
-        <Text color="$fg-muted" wrap="truncate">
-          {runnerOf(snapshot, now).detail}
+      <Box flexGrow={1} flexBasis={0} minWidth={0} overflow="hidden" flexDirection="row">
+        <Text color={STATE_WORDS[line.state].color} flexShrink={0}>
+          {RUNNER_GLYPH}
+          {named ? ` ${STATE_WORDS.runner.word} ·` : ""}{" "}
+        </Text>
+        <Text color="$fg-muted" wrap="truncate" minWidth={0}>
+          {line.detail}
         </Text>
       </Box>
     </Box>

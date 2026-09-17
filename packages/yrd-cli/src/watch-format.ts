@@ -104,8 +104,13 @@ export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
 /** The glyph a check running RIGHT NOW overlays on any state: the overlay reads live, the word still reads the state. */
 export const RUNNING_GLYPH = "◉"
 
-/** The runner's own marker, on its own row: the one row in the table that is not a change. */
-export const RUNNER_GLYPH = "▶"
+/**
+ * The runner's own marker, on its own row: the one row in the table that is not
+ * a change. U+25B8 and not the solid U+25B6, which is an emoji base: a terminal
+ * with an emoji font draws that one two cells wide and every cell to its right
+ * on that row lands one column off the column above it.
+ */
+export const RUNNER_GLYPH = "▸"
 
 /** The glyph for a row: the running one while a check runs on it, else its state's. */
 export function stateGlyph(row: Pick<Row, "state" | "live">): string {

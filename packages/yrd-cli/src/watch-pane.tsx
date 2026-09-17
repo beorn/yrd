@@ -757,7 +757,7 @@ function Table({
                 )}
                 {row}
                 {/* The runner's second line hangs under the row that IS the runner. */}
-                {plan.holding === index ? <RunnerDetail snapshot={snapshot} layout={layout} /> : null}
+                {plan.holding === index ? <RunnerDetail snapshot={snapshot} layout={layout} named /> : null}
               </Box>
             )
           }}
