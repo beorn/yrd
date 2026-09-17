@@ -1529,7 +1529,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(drawn).toEqual({ loud: true, shown: true })
   })
 
-  it("? opens the help as an overlay centred over the pane, which keeps its footer, with the legend: every state's word, what it means and what happens next, and direct apart as not a change", async () => {
+  it("? opens the help as an overlay centred over the pane, which keeps its footer, with the legend unclipped at 160x48 and 100x31: every state's word, what it means and what happens next, and direct apart as not a change", async () => {
     const W = await words()
     const full = snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER })
     const closed = await lines(full, 160, 48)
@@ -1546,28 +1546,44 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         .at(-1)
         ?.trimEnd() ?? ""
     // The legend, read over a pane with nothing else on it, so no table text beside the dialog can answer
-    // for it. Wrapped legend lines are joined back: this reads what the legend says, the overlay's shape
-    // is read above.
+    // for it, at the widest and the narrowest size of the tier ladder: the help must not clip at either.
+    // Wrapped legend lines are joined back: this reads what the legend says, the overlay's shape is read
+    // above.
     const bare = snapshot({ rows: [] })
-    const bareClosed = await lines(bare, 160, 48)
-    const band = (await lines(bare, 160, 48, ["?"]))
-      .filter((line, index) => line.trimEnd() !== bareClosed[index]?.trimEnd())
-      .join(" ")
-      .replace(/\s+/gu, " ")
-    const said = (entry: Entry): boolean => {
-      const word = band.indexOf(`${entry.word} `)
-      const means = entry.means === undefined || word < 0 ? -1 : band.indexOf(entry.means, word)
-      const next = entry.next === undefined || means < 0 ? -1 : band.indexOf(entry.next, means + entry.means!.length)
-      return word >= 0 && means >= 0 && next >= 0 && next - word < 200
+    const bandAt = async (cols: number, rows: number): Promise<string> => {
+      const shut = await lines(bare, cols, rows)
+      return (await lines(bare, cols, rows, ["?"]))
+        .filter((line, index) => line.trimEnd() !== shut[index]?.trimEnd())
+        .join(" ")
+        .replace(/\s+/gu, " ")
     }
+    const band = await bandAt(160, 48)
+    const narrowBand = await bandAt(100, 31)
+    // A state's entry is its word, then what it means, then what happens next: the meaning is found first
+    // and must follow the word directly, so a word said inside another state's line never answers for it.
+    const said = (text: string, entry: Entry): boolean => {
+      if (entry.means === undefined || entry.next === undefined) return false
+      const means = text.indexOf(entry.means)
+      if (
+        means < 0 ||
+        !text
+          .slice(0, means)
+          .replace(/[\s:—–-]+$/u, "")
+          .endsWith(entry.word)
+      )
+        return false
+      const next = text.indexOf(entry.next, means + entry.means.length)
+      return next >= 0 && next - means < 200
+    }
+    const missing = (text: string) => [...STATES, "direct" as const].filter((key) => !said(text, W[key]))
     const apart = band.indexOf("not a change")
 
     expect({
       centred: first > 0 && last < 48 - 1 && Math.abs((first + last) / 2 - (48 - 1) / 2) <= 2,
       directApart: apart >= 0 && band.indexOf(`${W.direct.word} `, apart) > apart,
       footerKept: footer(open) === footer(closed),
-      legendMissing: [...STATES, "direct" as const].filter((key) => !said(W[key])),
-    }).toEqual({ centred: true, directApart: true, footerKept: true, legendMissing: [] })
+      legendMissing: { "100x31": missing(narrowBand), "160x48": missing(band) },
+    }).toEqual({ centred: true, directApart: true, footerKept: true, legendMissing: { "100x31": [], "160x48": [] } })
   })
 
   it("one change to the word table changes every surface that draws a state word, both helps included", async () => {
@@ -1622,7 +1638,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       head: "3".repeat(40),
       position: 2,
       state: "queued",
-      subject: "not checked yet",
+      subject: "not judged yet",
     })
     const cancelled = row({
       at: ago(30 * MINUTE),
@@ -1648,11 +1664,11 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       "notice word, submitted": noticeWord(submitted),
       "page row, cancelled": tableRow(page, "task/w a newer"),
       "page row, pending": tableRow(page, "task/y1 passed"),
-      "page row, submitted": tableRow(page, "task/z not checked"),
+      "page row, submitted": tableRow(page, "task/z not judged"),
       "page top line": page[page.findIndex((line) => line.includes("YRD QUEUES")) + 1] ?? "",
       "pane row, cancelled": tableRow(pane, "task/w a newer"),
       "pane row, pending": tableRow(pane, "task/y1 passed"),
-      "pane row, submitted": tableRow(pane, "task/z not checked"),
+      "pane row, submitted": tableRow(pane, "task/z not judged"),
       "pane top line": topLineOf(pane).line,
       "queue show line, cancelled": rowLine({ row: cancelled }),
       "queue show line, pending": rowLine({ row: pending }),
