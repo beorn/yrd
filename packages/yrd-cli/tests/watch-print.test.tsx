@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from "vitest"
 import { render } from "silvery/test"
-import type { Row } from "@yrd/queue-core"
+import { journalKey, watchRows, type Journals, type JournalRun, type Row } from "@yrd/queue-core"
 import { ListingPage, printListing } from "../src/watch-print.tsx"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
 
@@ -176,5 +176,134 @@ describe("a one-shot render when a row's check is running right now", () => {
     const text = await printListing(snapshot({ rows: [{ row: liveRow }], runner }), { color: false, columns: 120 })
 
     expect(text).toContain("RUNNER")
+  })
+})
+
+/**
+ * The operator's 09:25 screen, read on the queue's own machine: a draft, three
+ * changes waiting, one of them checked twice, and two changes done. The whole
+ * page is rendered — never assembled by the test — and the assertions are the
+ * two facts the flow page exists for: the bands are in one order, and a change
+ * is one row however many runs touched it.
+ */
+const READ_AT = new Date("2026-09-17T16:25:00.000Z")
+
+function change(over: Partial<Row>): Row {
+  return {
+    branch: "task/x",
+    head: "0".repeat(40),
+    state: "queued",
+    since: new Date(READ_AT.getTime() - 3_600_000),
+    submitter: "@dev/1",
+    subject: "does its work",
+    ...over,
+  } as Row
+}
+
+function runOfChange(branch: string, head: string, id: string, at: Date): JournalRun {
+  return { at, branch, checks: [], head, id, startedAt: at }
+}
+
+/** The core rows in `list()`'s own order: in line by position, then the ended newest first, then the drafts. */
+function flowRows(): readonly Row[] {
+  const ago = (minutes: number): Date => new Date(READ_AT.getTime() - minutes * 60_000)
+  return [
+    change({ branch: "task/next", head: "1".repeat(40), position: 1, since: ago(50) }),
+    change({ branch: "task/twice", head: "2".repeat(40), position: 2, since: ago(40), state: "checked" }),
+    change({ branch: "task/late", head: "3".repeat(40), position: 3, since: ago(10) }),
+    change({ at: ago(5), branch: "task/merged", endedAt: ago(5), head: "4".repeat(40), state: "merged" }),
+    change({
+      at: ago(20),
+      branch: "task/broke",
+      endedAt: ago(20),
+      head: "5".repeat(40),
+      reason: "test",
+      result: "fail test",
+      state: "failed",
+    }),
+    change({ at: ago(2), author: "ada", branch: "task/draft", head: "6".repeat(40), state: "draft" }),
+  ]
+}
+
+/** Two runs checked `task/twice`, which is why it printed twice on the operator's screen. */
+function flowJournals(): Journals {
+  const twice = journalKey("task/twice", "2".repeat(40))
+  return {
+    dir: "/w/logs",
+    malformed: [],
+    runs: new Map([
+      [
+        twice,
+        [
+          runOfChange("task/twice", "2".repeat(40), "q-20260917T161500000Z-22222222", new Date(READ_AT.getTime() - 600_000)),
+          runOfChange("task/twice", "2".repeat(40), "q-20260917T160000000Z-11111111", new Date(READ_AT.getTime() - 1_500_000)),
+        ],
+      ],
+    ]),
+  }
+}
+
+function flowSnapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
+  return snapshot({
+    at: READ_AT,
+    drafts: { unread: 0, window: "7d" },
+    rows: [...watchRows(flowRows(), { journals: flowJournals() })],
+    runner: {
+      journalDir: "/w/logs",
+      latest: {
+        alive: true,
+        id: RUN_ID,
+        lastWriteAt: new Date(READ_AT.getTime() - 20_000),
+        startedAt: new Date(READ_AT.getTime() - 120_000),
+      },
+    },
+    ...over,
+  })
+}
+
+describe("the flow page: four bands, one row per change", () => {
+  it("draws drafts, waiting, the runner and done in that order, with each change on one row", async () => {
+    const text = await paint(flowSnapshot())
+    const lines = text.split("\n").filter((line) => line.trim() !== "")
+    const drafts = lines.findIndex((line) => line.includes("pushed, not submitted"))
+    const waiting = lines.findIndex((line) => line.includes("the bottom row goes next"))
+    const runner = lines.findIndex((line) => line.includes("RUNNER"))
+    const done = lines.findIndex((line) => line.includes("done, newest first"))
+
+    expect(drafts, text).toBeGreaterThanOrEqual(0)
+    expect(waiting, text).toBeGreaterThan(drafts)
+    expect(runner, text).toBeGreaterThan(waiting)
+    expect(done, text).toBeGreaterThan(runner)
+    // The whole bug: two runs checked this change, and the page is about changes.
+    expect(lines.filter((line) => line.includes("task/twice")), text).toHaveLength(1)
+  })
+
+  it("puts the front of the line at the bottom of waiting, against the runner, and the newest done at the top of done", async () => {
+    const text = await paint(flowSnapshot())
+    const lines = text.split("\n").filter((line) => line.trim() !== "")
+    const index = (needle: string): number => lines.findIndex((line) => line.includes(needle))
+    const runner = index("RUNNER")
+
+    // Distance from the runner is distance from now, in both directions.
+    expect(index("task/late"), text).toBeLessThan(index("task/twice"))
+    expect(index("task/twice"), text).toBeLessThan(index("task/next"))
+    expect(index("task/next"), text).toBeLessThan(runner)
+    expect(index("task/merged"), text).toBeGreaterThan(runner)
+    expect(index("task/merged"), text).toBeLessThan(index("task/broke"))
+    // A draft is no change, and it is the furthest thing from the line.
+    expect(index("task/draft"), text).toBeLessThan(index("task/late"))
+  })
+
+  it("draws the runner in the table's own columns and says `?` where no status is published", async () => {
+    const text = await paint(flowSnapshot({ runner: undefined }))
+    const lines = text.split("\n").filter((line) => line.trim() !== "")
+    const runner = lines.find((line) => line.includes("RUNNER"))
+
+    expect(runner, text).toBeDefined()
+    // S1 does not invent a status source: the runner publishes nothing until S2.
+    expect(runner).toContain("?")
+    expect(text).not.toContain("╭─ RUNNER")
+    // The RUN column is gone from every row.
+    expect(lines.find((line) => line.includes("CHANGES"))).not.toContain("RUN")
   })
 })
