@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "vitest"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createLogger, type Event as LogEvent } from "loggily"
 import { createProcess, type Spawn } from "../src/index.ts"
 
 const temporary: string[] = []
@@ -16,7 +17,14 @@ afterEach(() => {
 
 const bunExe = process.execPath
 
-/** Poll until `pid` is gone or `ms` elapses; true = dead. */
+/**
+ * Poll until `pid` is dead or `ms` elapses; true = dead. A zombie IS dead: it
+ * has released everything it held and waits only for its parent's reap. A
+ * grandchild outlives its parent, so that reap belongs to whichever subreaper
+ * adopted it, and `kill(pid, 0)` still succeeds on the zombie. Under a
+ * supervisor that reaps adopted orphans on a 15 s tick, the kill-only check read
+ * a SIGKILLed grandchild as a survivor in 9 of 12 runs (24821, 2026-09-16).
+ */
 async function waitDead(pid: number, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms
   while (Date.now() < deadline) {
@@ -25,9 +33,20 @@ async function waitDead(pid: number, ms: number): Promise<boolean> {
     } catch {
       return true // ESRCH — gone
     }
+    if (isZombie(pid)) return true
     await new Promise((r) => setTimeout(r, 100))
   }
   return false
+}
+
+/** State `Z` as `ps` reports it on Linux and macOS alike. A pid that exits
+ * between the two reads prints nothing, and the next `kill(pid, 0)` says ESRCH. */
+function isZombie(pid: number): boolean {
+  const listed = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)])
+  const stderr = new TextDecoder().decode(listed.stderr).trim()
+  // NO SILENT ERRORS: a state read that failed must not decide dead or alive.
+  if (stderr !== "") throw new Error(`ps -p ${pid} failed (exit ${String(listed.exitCode)}): ${stderr}`)
+  return new TextDecoder().decode(listed.stdout).trim().startsWith("Z")
 }
 
 describe("createProcess — full process-tree settlement (21012 S1)", () => {
@@ -192,7 +211,12 @@ describe("createProcess — explicit output-progress lease (21057)", () => {
         close: () => stop(),
       },
     })
-    await using proc = createProcess({ inject: { spawn }, killGraceMs: 10 })
+    // The stalled run abandons a descriptor that never reaches EOF and says so
+    // twice, by design. Those warnings belong to the verdict, so they are
+    // captured and asserted, never printed (24822).
+    const entries: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (entry: LogEvent) => entries.push(entry) }])
+    await using proc = createProcess({ inject: { spawn, log }, killGraceMs: 10 })
     try {
       const result = await proc.run({
         argv: ["fake-test"],
@@ -203,8 +227,19 @@ describe("createProcess — explicit output-progress lease (21057)", () => {
       expect(result).toMatchObject({ stalled: true, lastProgressBytes: 8, stdout: "started\n" })
       expect(result.extraStdio?.totalBytes).toBeGreaterThan(1)
       expect(result.extraStdio?.eof).toBe(false)
+      const warnings = entries.filter(
+        (entry): entry is Extract<LogEvent, { kind: "log" }> => entry.kind === "log" && entry.level === "warn",
+      )
+      expect(warnings.map(({ namespace, message }) => ({ namespace, message }))).toEqual([
+        {
+          namespace: "yrd:process",
+          message: "fake-test exited, but a child process kept its output open; stopped waiting for more output.",
+        },
+        { namespace: "yrd:process", message: "yrd: descriptor 3: drain was abandoned before EOF" },
+      ])
     } finally {
       clearInterval(timer)
+      log.end()
     }
   })
 
