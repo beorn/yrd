@@ -543,19 +543,21 @@ describe("the clocks", () => {
     expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000 })
   })
 
-  // 24196 decisions 5 and 6: a row shows ONE clock, the instant it entered the state it is in, and one
-  // duration beside it. Both are named fields derived here once, never a renderer's relabel of `ageMs`:
-  // `enteredAt` is the change's opening while queued, its check passing while checked, the check starting
-  // while one runs, and its ending record once it ended; `waitingMs` is how long a change in line has been
-  // in that state, and nothing while a check runs on it or once it ended; `tookMs` is an ended change's
-  // whole time, submit to ending. The fields are read through a cast only until they exist, so this file
-  // compiles red-first.
-  it("names the one clock a row shows, when it entered its state, how long a change in line has waited there, and how long an ended change took from submit to its end", () => {
+  // 24196 (A2-set-v2 item 2, superseding decisions 5 and 6's basis): a row shows ONE clock, the instant its
+  // place in the table is ordered by, and one duration whose word names its basis. Both are named fields
+  // derived here once, never a renderer's relabel of `ageMs`: `clockAt` is the submit instant while the
+  // change is in line and its ending record's instant once it ended (never the notice sent after it);
+  // `waitingMs` is now less the submit, for a change in line that is neither being checked nor stuck;
+  // `checkingMs` is how long the check running now has run; `stuckMs` is how long a stuck change has
+  // stopped the line; `tookMs` is an ended change's submit to its end. The fields are read through a cast
+  // only until they exist, so this file compiles red-first.
+  it("names the one clock a row is ordered by, and the one duration its word names: waiting since submit, this check's run time, stuck since the stop, took from submit to end", () => {
     const opened = new Date("2026-09-03T19:48:00.000Z")
     const stuckAt = new Date("2026-09-03T19:50:00.000Z")
     const withdrawnAt = new Date("2026-09-03T19:40:00.000Z")
     const passed = new Date("2026-09-03T19:57:00.000Z")
     const noticed = new Date("2026-09-03T19:59:00.000Z")
+    const checkStarted = new Date("2026-09-03T19:56:30.000Z")
     const queued: Row = { at: opened, branch: "task/queued", head: "abc", since: opened, state: "queued" }
     const checked: Row = {
       at: passed,
@@ -566,7 +568,7 @@ describe("the clocks", () => {
       state: "checked",
     }
     const stuck: Row = { at: stuckAt, branch: "task/stuck", endedAt: stuckAt, head: "abe", since, state: "stuck" }
-    const running: Row = { ...checked, live: { check: "test", phase: "merge", run: "q-1", since: started } }
+    const running: Row = { ...checked, live: { check: "test", phase: "merge", run: "q-1", since: checkStarted } }
     // The tip is the notice sent after the merge: the ending is the merged record's instant, not the notice's.
     const merged: Row = { ...checked, at: noticed, endedAt: passed, state: "merged" }
     const withdrawn: Row = {
@@ -579,9 +581,16 @@ describe("the clocks", () => {
     }
     const read = (row: Row) => {
       const measured = clocks(row, now) as Readonly<Record<string, unknown>>
-      return { enteredAt: measured["enteredAt"], tookMs: measured["tookMs"], waitingMs: measured["waitingMs"] }
+      return {
+        checkingMs: measured["checkingMs"],
+        clockAt: measured["clockAt"],
+        stuckMs: measured["stuckMs"],
+        tookMs: measured["tookMs"],
+        waitingMs: measured["waitingMs"],
+      }
     }
     const minutes = (count: number): number => count * 60 * 1000
+    const none = { checkingMs: undefined, stuckMs: undefined, tookMs: undefined, waitingMs: undefined }
 
     expect({
       checked: read(checked),
@@ -591,12 +600,12 @@ describe("the clocks", () => {
       stuck: read(stuck),
       withdrawn: read(withdrawn),
     }).toEqual({
-      checked: { enteredAt: passed, tookMs: undefined, waitingMs: minutes(3) },
-      merged: { enteredAt: passed, tookMs: minutes(57), waitingMs: undefined },
-      queued: { enteredAt: opened, tookMs: undefined, waitingMs: minutes(12) },
-      running: { enteredAt: started, tookMs: undefined, waitingMs: undefined },
-      stuck: { enteredAt: stuckAt, tookMs: undefined, waitingMs: minutes(10) },
-      withdrawn: { enteredAt: withdrawnAt, tookMs: minutes(40), waitingMs: undefined },
+      checked: { ...none, clockAt: since, waitingMs: minutes(60) },
+      merged: { ...none, clockAt: passed, tookMs: minutes(57) },
+      queued: { ...none, clockAt: opened, waitingMs: minutes(12) },
+      running: { ...none, checkingMs: minutes(3) + 30_000, clockAt: since },
+      stuck: { ...none, clockAt: since, stuckMs: minutes(10) },
+      withdrawn: { ...none, clockAt: withdrawnAt, tookMs: minutes(40) },
     })
   })
 })
@@ -716,10 +725,10 @@ describe("the table's one order (24196)", () => {
       },
     ]
     // The drafts' input is named here as phase A assumes it: the branch, its head, and its head commit's
-    // committer and instant. Phase B may name it otherwise; the order is the requirement.
+    // author and instant (A2-set-v2 item 1). Phase B may name it otherwise; the order is the requirement.
     const drafts = [
-      { branch: "task/h-draft-older", committedAt: ago(120), committer: "ada", head: sha() },
-      { branch: "task/i-draft-newer", committedAt: ago(30), committer: "grace", head: sha() },
+      { author: "ada", branch: "task/h-draft-older", committedAt: ago(120), head: sha() },
+      { author: "grace", branch: "task/i-draft-newer", committedAt: ago(30), head: sha() },
     ]
 
     const rows = list([withdrawn, submitted, merged, held, failed, stuck, pending], {
