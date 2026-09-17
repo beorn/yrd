@@ -120,6 +120,8 @@ export { remoteUrl } from "./remote.ts"
 export {
   absentHealthDocument,
   believableHealthDocument,
+  HEARTBEAT_GRACE_MS,
+  HEARTBEAT_INTERVAL_MS,
   parseQueueHealthDocument,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
@@ -129,8 +131,16 @@ export {
   roundHealthDocument,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,
+  writtenHealthDocument,
 } from "./service-health.ts"
-export type { QueueHealthDocument, QueueHealthFailure, QueueHealthState, QueueHealthVerdict } from "./service-health.ts"
+export type {
+  HealthHeartbeat,
+  HealthWriter,
+  QueueHealthDocument,
+  QueueHealthFailure,
+  QueueHealthState,
+  QueueHealthVerdict,
+} from "./service-health.ts"
 
 export {
   SETUP_UNREACHABLE_CODE,

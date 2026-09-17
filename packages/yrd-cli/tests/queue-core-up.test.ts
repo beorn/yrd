@@ -910,9 +910,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       expect(resolution).toContain("No restart, and nothing to delete")
       // AND IT DOES NOT OVER-PROMISE. The page does not clear when the checkout
       // lands — the process exits 0 then and THIS document stays on disk until
-      // the relaunched service finishes its first round. I had written the
-      // easier, wrong version of that line and @cto caught it.
-      expect(resolution).toContain("clears after the relaunched service finishes its first round")
+      // the relaunched service writes its own, which it does as it starts
+      // (24523 F1). I had written the easier, wrong version of that line and
+      // @cto caught it.
+      expect(resolution).toContain("clears when the relaunched service starts and writes its own document")
       // No prefix: a reader grepping the stuck-round code must not land here.
       expect(paged.error?.cause).not.toContain("yrd-round-stuck")
       expect(paged.facts).not.toHaveProperty("nextRoundInMs")
