@@ -24,12 +24,14 @@
 import { lstatSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs"
 import { join, relative, resolve, sep } from "node:path"
 import type { Process } from "@yrd/process"
+import type { GitProcess } from "git-super/process"
+import { createGitWorktreeStore } from "git-super/worktree"
 import { checkLogPath, DEFAULT_CHECK_BOUND_MS, runCheck, type CheckedTree, type CheckResult } from "./check.ts"
 import { frozenLockfileDiagnosis } from "./lockfile-diagnosis.ts"
 import type { LogWrite } from "./log.ts"
 import { GIT_SUPER_ABSENT_STORE, populateReferenceStores, ReferenceUnpopulated } from "./reference.ts"
 import type { Git } from "./records.ts"
-import { gitIn, mergeBase, refAt, type GitInvocationOptions, type GitSelection } from "./git.ts"
+import { GitExit, gitIn, mergeBase, refAt, type GitInvocationOptions, type GitSelection } from "./git.ts"
 
 /**
  * What the worktree plumbing narrates to.
@@ -246,12 +248,13 @@ export type Reaped = Readonly<{
  * would break a run mid-judgement.
  *
  * Removal is the one `Worktree.remove` already does — the directory first,
- * then `git worktree prune` to forget the registration — because `git worktree
- * remove` refuses a tree with untracked files it did not make, which is every
- * tree a dead run left a check to write in. `prune` runs once, and runs whether
- * or not a run died, because a registration whose directory is gone is stale
- * however it got that way. The dead run's own directory goes with its
- * worktrees, so whatever git never registered under it goes too.
+ * then a prune through git-super's worktree store to forget the registration —
+ * because `git worktree remove` refuses a tree with untracked files it did not
+ * make, which is every tree a dead run left a check to write in. The prune runs
+ * once, and runs whether or not a run died, because a registration whose
+ * directory is gone is stale however it got that way. The dead run's own
+ * directory goes with its worktrees, so whatever git never registered under it
+ * goes too.
  */
 export async function reapWorktrees(git: Git, root: string, thisRun: string): Promise<readonly Reaped[]> {
   const dead = new Map<string, string>()
@@ -272,8 +275,8 @@ export async function reapWorktrees(git: Git, root: string, thisRun: string): Pr
     for (const run of dead.keys()) rmSync(join(root, run), { force: true, recursive: true })
   }
   // Always, dead runs or none: a registration whose directory is gone is stale
-  // however it got that way, and forgetting it is one cheap git call.
-  await git(["worktree", "prune"])
+  // however it got that way, and forgetting it is one cheap prune.
+  await pruneWorktrees(git)
   return reaped
 }
 
@@ -658,7 +661,59 @@ async function removeWorktree(git: Git, path: string): Promise<void> {
   // make; a check may have written anything, so the directory goes first and
   // git is told to forget the entry afterwards.
   rmSync(path, { force: true, recursive: true })
-  await git(["worktree", "prune"])
+  await pruneWorktrees(git)
+}
+
+/**
+ * Forget every registration whose directory is gone, through git-super's
+ * worktree store (@hh/tooling/24807).
+ *
+ * The store prunes only while it holds the repository's worktree mutation
+ * lock, the lock every other git-super worktree mutation of that repository
+ * takes — bay provisioning's add among them — so a prune never runs beside one.
+ * Git itself still runs through `git`, this package's one seam: the selected
+ * executable, its protocol and the run's invocation evidence cover every call
+ * the store makes.
+ */
+async function pruneWorktrees(git: Git): Promise<void> {
+  // The store names its repository in every request it makes, and the seam
+  // answers for exactly one, so the seam is asked which rather than told.
+  const repo = resolve((await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim())
+  await createGitWorktreeStore({ gitProcess: seamProcess(git, repo), repo }).prune()
+}
+
+/**
+ * git-super's Git port, answered by the seam.
+ *
+ * The store reads some answers from an exit code — `config --get` exits 1 for
+ * an unset key — while the seam throws `GitExit` for every non-zero exit, so
+ * an exit Git itself gave goes back as the result the store reads. Anything
+ * else is thrown as it came: an invocation that did not settle, a protocol
+ * refusal, an error that was never Git's. Handed back as a result, the store
+ * could not tell it from an answer.
+ *
+ * The seam is rooted already and carries its own environment, bound and
+ * signal, so a request's own are not applied; a request naming another
+ * repository is refused rather than run wherever the seam is rooted.
+ */
+function seamProcess(git: Git, repo: string): GitProcess {
+  return {
+    async run(request) {
+      if (resolve(request.repo) !== repo) {
+        throw new Error(`git-super's worktree store asked Git about ${request.repo}; its seam answers for ${repo} only`)
+      }
+      try {
+        return { code: 0, stderr: "", stdout: await git(request.args, request.stdin) }
+      } catch (error) {
+        const evidence = error instanceof GitExit ? error.evidence : undefined
+        const answered = evidence?.result
+        if (answered === undefined || evidence?.failure !== undefined || evidence?.protocol?.refusal !== undefined) {
+          throw error
+        }
+        return { code: answered.exitCode, stderr: answered.stderr, stdout: answered.stdout }
+      }
+    },
+  }
 }
 
 /**
