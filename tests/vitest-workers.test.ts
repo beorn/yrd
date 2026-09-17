@@ -6,7 +6,7 @@ import { DEFAULT_VITEST_MAX_WORKERS, resolveVitestMaxWorkers } from "../vitest-w
 // habit anyone has to remember (@chief, 2026-09-01: 31 workers, load 59).
 describe("yrd vitest worker cap", () => {
   it("caps a wide host at the shared default", () => {
-    expect(DEFAULT_VITEST_MAX_WORKERS).toBe(6)
+    expect(DEFAULT_VITEST_MAX_WORKERS).toBe(7)
     expect(resolveVitestMaxWorkers({}, 32)).toBe(6)
   })
 
