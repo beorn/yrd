@@ -37,6 +37,7 @@ export type Notice = Readonly<{
 const WORD: Readonly<Record<Row["state"], string>> = {
   checked: "checked",
   direct: "went around the queue",
+  draft: "draft",
   failed: "failed",
   merged: "merged",
   queued: "queued",

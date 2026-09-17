@@ -58,6 +58,7 @@ export function diagnosticLines(
 export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
   checked: "◉",
   direct: "→",
+  draft: "◇",
   failed: "×",
   merged: "✓",
   queued: "○",
@@ -77,6 +78,7 @@ export function stateGlyph(row: Pick<Row, "state" | "live">): string {
 export const STATE_COLOR: Readonly<Record<Row["state"], string>> = {
   checked: "$fg-warning",
   direct: "$fg-muted",
+  draft: "$fg-muted",
   failed: "$fg-error",
   merged: "$fg-success",
   queued: "$fg-accent",

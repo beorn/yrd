@@ -26,6 +26,7 @@
 import { endedKind, mergedByRun, trailer, trailers, type ChangeRecord } from "./records.ts"
 import { readCheckTrailer } from "./check.ts"
 import { directMergeLine, type DirectMerge } from "./direct.ts"
+import type { Draft } from "./drafts.ts"
 import { journalKey, type Journals, type JournalRun, type LogRecord } from "./log.ts"
 import { incidentFrom, incidentLine, type Incident } from "./incident.ts"
 import type { Git } from "./records.ts"
@@ -37,8 +38,11 @@ export type Row = Readonly<{
   branch: string
   /** The change's head; for a `direct` row, that commit itself. */
   head: string
-  /** A change's state, or `direct` for a commit on the target the queue did not put there (E5). */
-  state: ChangeState | "direct"
+  /**
+   * A change's state; `direct` for a commit on the target the queue did not put there (E5); `draft` for a
+   * head at the remote nobody submitted (drafts.ts), which has no record and is no change.
+   */
+  state: ChangeState | "direct" | "draft"
   /** 1-based place in line for queued, checked and stuck rows; absent otherwise. */
   position?: number
   /** The result of the run named by `run`: pass, fail or stuck, with its deciding check. */
@@ -87,6 +91,16 @@ export type Row = Readonly<{
   startedAt?: Date
   /** When the actual ending record was written; absent when only its sent notice was read, while queued or checked, or for an ending git read (`replaced`, `deleted`, a direct ancestor). */
   endedAt?: Date
+  /**
+   * When the change ended, as the table times and orders it: the ending record's instant, read through
+   * the notice's `For:` when the tip is the notice sent after it ({@link endingInstants}). A display fact:
+   * `--json` prints `endedAt` as the tip read gives it and leaves this out.
+   */
+  endingAt?: Date
+  /** A draft's head commit author; absent for a change, and for a draft whose head is not read here. */
+  author?: string
+  /** A draft whose branch was submitted before at another head: its head moved since its last submit. */
+  movedSinceSubmit?: boolean
   /**
    * The check running on this change RIGHT NOW, from the run journal. An
    * overlay on {@link Row.state}, never a state of its own: a change under a
@@ -237,13 +251,21 @@ export type ListOptions = Readonly<{
   journals?: Journals
   /** Each head's commit subject, by full sha (`subjects`); a head not in the map has none. */
   subjects?: ReadonlyMap<string, string>
+  /** Each ending record's instant, by its sha (`endingInstants`): what a tip that is the notice sent after it cannot say. */
+  endings?: ReadonlyMap<string, Date>
+  /** The drafts of the same reading (`readDrafts`), listed after everything else: newest first, then the undated. */
+  drafts?: readonly Draft[]
 }>
 
 /**
- * Every change in line with its position, then every ended change within
- * `sinceMs` (the plan's default is seven days), failed and merged included,
- * and among them every commit that went around the queue, as recent as it was
- * committed.
+ * THE ONE ORDER, the order the queue takes things (@i/10-yrd/24196): the
+ * change a check holds right now first, then every other change in line by
+ * its position, stuck where it stands; then every ended change within
+ * `sinceMs` (the plan's default is seven days), and among them every commit
+ * that went around the queue, newest ending first; then the drafts, newest
+ * first, the ones not read here last. Each group is ordered by the instant its
+ * rows show as their one clock ({@link clocks}' `clockAt`), so the times on
+ * screen agree with the rows' order.
  */
 export function list(entries: QueueRead, options: ListOptions = {}): readonly Row[] {
   const now = options.now ?? new Date()
@@ -251,18 +273,28 @@ export function list(entries: QueueRead, options: ListOptions = {}): readonly Ro
   const live = inLine(entries.map((entry) => entry.change)).map((change) => change.head)
   const position = new Map(live.map((head, index) => [head, index + 1]))
   const rows = entries.map((entry) => row(entry, position.get(entry.change.head), options))
+  const held = (candidate: Row): number => (candidate.live === undefined ? 1 : 0)
   const inLineRows = rows
     .filter((candidate) => candidate.position !== undefined)
-    .sort((left, right) => (left.position ?? 0) - (right.position ?? 0))
+    .sort((left, right) => held(left) - held(right) || (left.position ?? 0) - (right.position ?? 0))
   // The window is about when a change ENDED, not when it was opened: a change
-  // opened long ago and merged today is today's news.
+  // opened long ago and merged today is today's news. The ending is the ending
+  // record's, never the notice sent after it, which a later telling moves.
+  const ended = (candidate: Row): Date | undefined => clocks(candidate, now).clockAt
   const endedRows = [
     ...rows.filter((candidate) => candidate.position === undefined),
     ...(options.directMerges ?? []).map(directMergeRow),
   ]
-    .filter((candidate) => candidate.at === undefined || now.getTime() - candidate.at.getTime() <= sinceMs)
-    .sort((left, right) => (right.at?.getTime() ?? 0) - (left.at?.getTime() ?? 0))
-  return [...inLineRows, ...endedRows]
+    .filter((candidate) => {
+      const at = ended(candidate)
+      return at === undefined || now.getTime() - at.getTime() <= sinceMs
+    })
+    .sort((left, right) => (ended(right)?.getTime() ?? 0) - (ended(left)?.getTime() ?? 0))
+  const committed = (candidate: Row): number => candidate.at?.getTime() ?? Number.NEGATIVE_INFINITY
+  const drafts = (options.drafts ?? [])
+    .map(draftRow)
+    .sort((left, right) => (committed(right) === committed(left) ? 0 : committed(right) > committed(left) ? 1 : -1))
+  return [...inLineRows, ...endedRows, ...drafts]
 }
 
 /** One branch's changes, newest first, each with every check's result and log. */
@@ -297,6 +329,23 @@ export type Clocks = Readonly<{
   waitMs?: number
   /** How long checking has run, or ran; unknown when an ending has no recorded instant. */
   runtimeMs?: number
+  /**
+   * The ONE clock a row shows, the instant its place in the table is ordered by: when it was submitted, for
+   * a change in line (the held and the stuck included); when it ended, for an ended change; when it was
+   * committed, for a draft and for a commit that went around the queue.
+   */
+  clockAt?: Date
+  /** How long the check running on it now has run. */
+  checkingMs?: number
+  /** How long a change in line has waited since it was submitted; absent while its check runs and once it ended. */
+  waitingMs?: number
+  /**
+   * How long a stuck change has been stuck, from its OWN stuck record: never the stop record, which a round
+   * writes after it and which a second stuck change under an older stop does not have.
+   */
+  stuckMs?: number
+  /** How long an ended change took, from when it was submitted to when it ended. */
+  tookMs?: number
 }>
 
 export function clocks(row: Row, now: Date = new Date()): Clocks {
@@ -319,11 +368,62 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
     row.startedAt === undefined || until === undefined
       ? undefined
       : Math.max(0, until.getTime() - row.startedAt.getTime())
+  const since = (at: Date | undefined): number | undefined =>
+    at === undefined ? undefined : Math.max(0, now.getTime() - at.getTime())
+  const inLineState = row.state === "queued" || row.state === "checked" || row.state === "stuck"
+  const ended = row.state === "merged" || row.state === "failed" || row.state === "withdrawn"
+  const endedWhen = row.endingAt ?? row.endedAt
+  const clockAt = inLineState ? (row.since ?? row.at) : ended ? (endedWhen ?? row.at) : row.at
+  const checkingMs = since(row.live?.since)
+  const waitingMs = inLineState && row.live === undefined ? since(row.since) : undefined
+  const stuckMs = row.state === "stuck" && row.live === undefined ? since(endedWhen) : undefined
+  const tookMs =
+    ended && row.since !== undefined && endedWhen !== undefined
+      ? Math.max(0, endedWhen.getTime() - row.since.getTime())
+      : undefined
   return {
     ...(ageMs === undefined ? {} : { ageMs }),
     ...(waitMs === undefined ? {} : { waitMs }),
     ...(runtimeMs === undefined ? {} : { runtimeMs }),
+    ...(clockAt === undefined ? {} : { clockAt }),
+    ...(checkingMs === undefined ? {} : { checkingMs }),
+    ...(waitingMs === undefined ? {} : { waitingMs }),
+    ...(stuckMs === undefined ? {} : { stuckMs }),
+    ...(tookMs === undefined ? {} : { tookMs }),
   }
+}
+
+/**
+ * The instant of every ending record a tip-only reading hides behind a notice:
+ * a tip that is the sent record after an ending names that ending in `For:`,
+ * and this reads each such record's commit instant in ONE no-walk log for the
+ * whole table. The queue read's own no-walk log cannot carry them, because it
+ * reads the tips before it knows which ones are notices. An ending record the
+ * log does not answer for is loud: the fetch that brought the tip brought it.
+ */
+export async function endingInstants(git: Git, entries: QueueRead): Promise<ReadonlyMap<string, Date>> {
+  const wanted = [
+    ...new Set(
+      entries.flatMap((entry) => {
+        const tip = tipOf(entry.change)
+        const ending = tip.kind === "sent" ? trailer(tip, "For") : undefined
+        return ending === undefined || endedKind(tip) === "sent" ? [] : [ending]
+      }),
+    ),
+  ]
+  const found = new Map<string, Date>()
+  if (wanted.length === 0) return found
+  const out = await git(["log", "--no-walk=unsorted", "--stdin", "--format=%H %cI"], `${wanted.join("\n")}\n`)
+  for (const line of out.split("\n")) {
+    const [sha, at] = line.trim().split(" ")
+    if (sha === undefined || at === undefined) continue
+    const instant = new Date(at)
+    if (Number.isNaN(instant.getTime())) throw new Error(`ending record ${sha}: git returned an invalid instant ${at}`)
+    found.set(sha, instant)
+  }
+  const missing = wanted.filter((sha) => !found.has(sha))
+  if (missing.length > 0) throw new Error(`git log gave no instant for ending record(s) ${missing.join(", ")}`)
+  return found
 }
 
 /**
@@ -361,6 +461,12 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
   const endedAt =
     ended === "merged" || ended === "failed" || ended === "stuck"
       ? entry.change.records.findLast((record) => record.kind === ended)?.at
+      : undefined
+  const noticed = tip.kind === "sent" ? trailer(tip, "For") : undefined
+  const endingAt =
+    ended === "merged" || ended === "failed" || ended === "stuck" || ended === "withdrawn"
+      ? (entry.change.records.findLast((record) => record.kind === ended)?.at ??
+        (noticed === undefined ? undefined : options.endings?.get(noticed)))
       : undefined
   const submitter = trailer(tip, "Submitter")
   const runs = options.journals?.runs.get(journalKey(entry.change.branch, entry.change.head)) ?? []
@@ -421,6 +527,7 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
     // A sent record inherits state, not the ending instant. A tip-only read
     // cannot name that instant; hydrated history finds the actual ending.
     ...(endedAt === undefined ? {} : { endedAt }),
+    ...(endingAt === undefined ? {} : { endingAt }),
     ...(live === undefined || running === undefined
       ? {}
       : {
@@ -449,6 +556,18 @@ function checkingBegan(runs: readonly JournalRun[], tip: ChangeRecord, ended: Ch
   const starts = runs.flatMap((run) => run.checks.map((check) => check.startedAt.getTime()))
   if (starts.length > 0) return new Date(Math.min(...starts))
   return ended === "checked" ? tip.at : undefined
+}
+
+/** A draft: its head's branch, author and commit instant, and nothing a record would say (drafts.ts). */
+function draftRow(draft: Draft): Row {
+  return {
+    branch: draft.branch,
+    head: draft.head,
+    state: "draft",
+    ...(draft.committedAt === undefined ? {} : { at: draft.committedAt }),
+    ...(draft.author === undefined ? {} : { author: draft.author }),
+    ...(draft.movedSinceSubmit === true ? { movedSinceSubmit: true } : {}),
+  }
 }
 
 /** A direct merge: `<target> moved around the queue at <sha12> (<subject>)`, and the gitlinks it moved. */

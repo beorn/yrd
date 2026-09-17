@@ -41,6 +41,7 @@ export function bucketOf(row: Pick<Row, "state" | "live">): StatusBucket {
     case "queued":
     case "checked":
     case "stuck":
+    case "draft":
       return "open"
   }
 }
