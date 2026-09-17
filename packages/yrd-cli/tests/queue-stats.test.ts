@@ -19,17 +19,18 @@
  * by its successor (state merged, last verdict failed), a stuck run whose
  * result is an incident sentence, and runs that recorded no decision.
  */
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
-import type { Row, WatchRow } from "@yrd/queue-core"
+import { afterAll, describe, expect, it } from "vitest"
+import { gitIn, readDrafts, readQueue, submit } from "@yrd/queue-core"
+import type { Draft, Row, WatchRow } from "@yrd/queue-core"
 import {
   decisionsOfRows,
   formatQueueStats,
   parseSince,
   queueStats,
   sinceLine,
-  type PushedRef,
   type StatsGroup,
 } from "../src/queue-stats.ts"
 import { statsBuckets } from "../src/watch-stats.ts"
@@ -377,20 +378,24 @@ describe("the window and the pushed refs", () => {
     )
   })
 
-  it("counts refs pushed and never submitted inside the window, oldest first, and says how many it could not date", () => {
-    const refs: PushedRef[] = [
-      { branch: "task/a", committedAt: at("2026-09-05T04:00:00Z"), head: "1".repeat(40), submitted: true },
-      { branch: "task/pushed-only", committedAt: at("2026-09-05T01:36:00Z"), head: "4".repeat(40), submitted: false },
-      { branch: "task/pushed-later", committedAt: at("2026-09-05T06:00:00Z"), head: "5".repeat(40), submitted: false },
+  it("says the drafts it is handed oldest first, and how many it could not date", () => {
+    // As the one derivation hands them over: already read over the window, the undated after the dated.
+    const drafts: Draft[] = [
       {
-        branch: "task/pushed-long-ago",
-        committedAt: at("2026-08-01T00:00:00Z"),
-        head: "6".repeat(40),
-        submitted: false,
+        branch: "task/pushed-later",
+        committedAt: at("2026-09-05T06:00:00Z"),
+        head: "5".repeat(40),
+        movedSinceSubmit: false,
       },
-      { branch: "task/never-fetched", head: "7".repeat(40), submitted: false },
+      {
+        branch: "task/pushed-only",
+        committedAt: at("2026-09-05T01:36:00Z"),
+        head: "4".repeat(40),
+        movedSinceSubmit: false,
+      },
+      { branch: "task/never-fetched", head: "7".repeat(40), movedSinceSubmit: false },
     ]
-    const stats = queueStats(COMPACT, refs, { now: NOW, since: parseSince("1d", NOW)?.at })
+    const stats = queueStats(COMPACT, drafts, { now: NOW, since: parseSince("1d", NOW)?.at })
     expect(stats.pushedNeverSubmitted.count).toBe(2)
     expect(stats.pushedNeverSubmitted.ageBasis).toBe("tip committer date")
     expect(stats.pushedNeverSubmitted.oldestCommitAgeMs).toBe(5 * 3_600_000)
@@ -404,6 +409,105 @@ describe("the window and the pushed refs", () => {
     const text = formatQueueStats(stats, "q")
     expect(text).toContain(
       "pushed, never submitted: 2 (oldest tip committed 5h00m ago; ages are tip committer dates, not push times); 1 more whose tip is not fetched here, age unknown",
+    )
+  })
+})
+
+/**
+ * @failure  24196's draft rows need the pushed branches nobody submitted, and `yrd queue stats` already
+ *           derived them its own way: a second `ls-remote` (queue-core-commands.ts `pushedRefs`) whose
+ *           lenient parse skipped a row the queue read would refuse, counting by branch, with the queue's
+ *           own `yrd/*` pins, `preserve/*` keeps and heads already on the target inside the count. The KPI
+ *           ruling on 24163 (A2-set-v3) moves `pushedNeverSubmitted` onto the one definition of a draft:
+ *           keyed by head, off the target, outside `yrd/*` and `preserve/*`, inside the `--since` window,
+ *           with a head this repository never read counted as `ageUnknown`. The document keeps its keys
+ *           and its shape until the rename; stats fetches nothing.
+ * @level    l2 (a real remote, real branches and a real submit, read by the real queue read)
+ * @consumer pm-metrics, and every `yrd queue stats --json` reader
+ */
+describe("the pushed refs are the drafts, read through the one shared derivation (24196, A2-set-v3)", () => {
+  const roots: string[] = []
+  afterAll(() => {
+    for (const root of roots) rmSync(root, { force: true, recursive: true })
+  })
+
+  it("counts `pushedNeverSubmitted` as the drafts under the one definition, with the same keys and shape", async () => {
+    const now = new Date("2026-09-03T12:00:00.000Z")
+    const hour = 3_600_000
+    const ago = (ms: number): Date => new Date(now.getTime() - ms)
+    const root = mkdtempSync(join(tmpdir(), "yrd-cli-stats-shared-"))
+    roots.push(root)
+    const remote = join(root, "remote.git")
+    const work = join(root, "work")
+    const other = join(root, "other")
+    const seed = gitIn(root)
+    await seed(["init", "--quiet", "--bare", "--initial-branch=main", remote])
+    await seed(["clone", "--quiet", remote, work])
+    // Every commit is dated, so every age the stats print is exact.
+    const dated = (dir: string, at: Date) =>
+      gitIn(dir, undefined, undefined, {
+        env: { ...process.env, GIT_AUTHOR_DATE: at.toISOString(), GIT_COMMITTER_DATE: at.toISOString() },
+      })
+    const git = gitIn(work)
+    await git(["config", "user.email", "queue@yrd.test"])
+    await git(["config", "user.name", "yrd"])
+    await git(["checkout", "--quiet", "-b", "main"])
+    writeFileSync(join(work, ".yrd.yml"), "{}\n")
+    await git(["add", ".yrd.yml"])
+    await dated(work, ago(5 * hour))(["commit", "--quiet", "-m", "declare the queue"])
+    await git(["push", "--quiet", "origin", "main"])
+    const target = (await git(["rev-parse", "HEAD"])).trim()
+    const pushed = async (name: string, at: Date): Promise<string> => {
+      await git(["checkout", "--quiet", "-b", name, "main"])
+      writeFileSync(join(work, `${name.replaceAll("/", "-")}.txt`), `${name}\n`)
+      await git(["add", "."])
+      await dated(work, at)(["commit", "--quiet", "-m", name])
+      const head = (await git(["rev-parse", "HEAD"])).trim()
+      await git(["checkout", "--quiet", "main"])
+      await git(["push", "--quiet", "origin", `${head}:refs/heads/${name}`])
+      return head
+    }
+    await pushed("task/submitted", ago(2 * hour))
+    await submit(git, "origin", {
+      branch: "task/submitted",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+    })
+    const recent = await pushed("task/pushed-recent", ago(hour))
+    await pushed("task/pushed-old", ago(10 * 24 * hour))
+    // The queue's own and the kept namespaces, and a head already on the target: no draft, so no count.
+    await pushed("yrd/kept-pin", ago(3 * hour))
+    await pushed("preserve/kept", ago(4 * hour))
+    await git(["push", "--quiet", "origin", `${target}:refs/heads/task/on-target`])
+    // A head this clone never fetched: it cannot be dated here.
+    await seed(["clone", "--quiet", remote, other])
+    const elsewhere = gitIn(other)
+    await elsewhere(["config", "user.email", "queue@yrd.test"])
+    await elsewhere(["config", "user.name", "yrd"])
+    await elsewhere(["checkout", "--quiet", "-b", "task/elsewhere", "origin/main"])
+    writeFileSync(join(other, "elsewhere.txt"), "elsewhere\n")
+    await elsewhere(["add", "."])
+    await dated(other, ago(hour / 2))(["commit", "--quiet", "-m", "elsewhere"])
+    await elsewhere(["push", "--quiet", "origin", "task/elsewhere"])
+    const absent = (await elsewhere(["rev-parse", "HEAD"])).trim()
+
+    // The shared derivation the stats command reads, over the stats' own default window.
+    const read = await readQueue(git, "origin", "main", target)
+    const drafts = await readDrafts(git, read, { since: new Date(now.getTime() - 7 * 24 * hour), targetSha: target })
+    const stats = queueStats([], [...drafts.dated, ...drafts.undated], { now })
+
+    // One draft in the window, one head never read here; the keys and their order are today's.
+    expect(JSON.stringify(stats.pushedNeverSubmitted)).toBe(
+      JSON.stringify({
+        ageBasis: "tip committer date",
+        ageUnknown: 1,
+        count: 1,
+        oldestCommitAgeMs: hour,
+        refs: [
+          { branch: "task/pushed-recent", commitAgeMs: hour, head: recent },
+          { branch: "task/elsewhere", head: absent },
+        ],
+      }),
     )
   })
 })

@@ -33,12 +33,15 @@ function row(over: Partial<Row> = {}): Row {
 }
 
 function snapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
+  const rows = over.rows ?? [{ row: row() }]
   return {
     at: NOW,
     queue: "example.test/repo#main",
     queues: [{ branch: "main", label: "main", path: "/repo" }],
-    rows: [{ row: row() }],
     ...over,
+    rows,
+    // A snapshot built from its rows alone is a reading nothing was selected from.
+    unfiltered: over.unfiltered ?? rows,
   }
 }
 
@@ -156,7 +159,8 @@ describe("a one-shot render when a row's check is running right now", () => {
     const text = await printListing(snapshot({ rows: [{ row: liveRow }] }), { color: false, columns: 120 })
 
     expect(text).toContain("task/one")
-    expect(text).toContain("checked")
+    // A check running now reads checking whatever the records say (24196).
+    expect(text).toContain("◉ checking")
   })
 
   it("still leaves the RUNNER box's own marker crash-free while a run is active", async () => {

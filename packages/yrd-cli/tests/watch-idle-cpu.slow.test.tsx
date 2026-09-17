@@ -48,6 +48,7 @@ function snapshot(): WatchSnapshot {
     queue: "example.test/repo#main",
     queues: [{ branch: "main", label: "main", path: "/repo" }],
     rows: rows.map((row) => ({ row })),
+    unfiltered: rows.map((row) => ({ row })),
   }
 }
 

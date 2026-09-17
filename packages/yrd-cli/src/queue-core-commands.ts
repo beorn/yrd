@@ -55,7 +55,9 @@ import {
   freshnessLine,
   readRemoteCommit,
   refAt,
-  queueRefPrefix,
+  readDrafts,
+  DRAFT_WINDOW_MS,
+  endingInstants,
   submit,
   withdraw,
   NothingToWithdraw,
@@ -97,24 +99,34 @@ import {
   type RuntimeGitlinkOff,
   type ChangeRecord,
   type Change,
+  type DraftReading,
   type Row,
+  type StopFact,
 } from "@yrd/queue-core"
-import { clocksLine, noticeLine } from "./watch-notice.ts"
+import { noticeLine } from "./watch-notice.ts"
 import { FILTER_FIELDS, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 
-import type { WatchQueue } from "./watch-list.tsx"
+import type { DraftWindow, WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
-import { CHECK_GLYPH, clock, diagnosticLines, firstLine, mediaDuration } from "./watch-format.ts"
+import {
+  CHECK_GLYPH,
+  STATE_WORDS,
+  clock,
+  diagnosticLines,
+  firstLine,
+  mediaDuration,
+  timingLine,
+} from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
+  DEFAULT_WINDOW_MS,
   formatQueueStats,
   parseSince,
   queueStats,
-  type PushedRef,
   type SinceOrigin,
   type StatsBy,
 } from "./queue-stats.ts"
@@ -1251,9 +1263,14 @@ export async function coreQueueCommand(
        */
       const round = async (
         declared: CapturedDeclaration,
+        draftWindow: DraftWindow = "7d",
       ): Promise<
         Readonly<{
           rows: readonly WatchRow[]
+          /** Every row of the reading in the same lens, whatever the selector narrowed `rows` to. */
+          unfiltered: readonly WatchRow[]
+          /** The rows that are changes: every row but the drafts, which the document, the selector and the ending never count. */
+          changes: readonly WatchRow[]
           observation: GitObservation
           data: unknown
           queue: string
@@ -1269,14 +1286,25 @@ export async function coreQueueCommand(
           /** The queue read the rows came from, so a detail opened later reads the same tip. */
           entries: QueueEntries
           journals: Journals
+          /** The stop that stands, as the reading derived it. */
+          stopped: StopFact | null
+          /** Which drafts the rows list, and the heads of the drafts this repository has not read. */
+          drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
         }>
       > => {
-        const { queue, journals, all, observation } = await readListing(git, declared.config, workdir, declared.oid)
-        if (options.json !== true) narrateMalformed(io, journals, said)
-        const rows = filterRows(
-          watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
-          request.terms ?? [],
+        // The ending instants a notice hides and the drafts are what a person
+        // reads; `--json` reads neither, so its document is the one it was.
+        const { queue, journals, all, drafts, observation } = await readListing(
+          git,
+          declared.config,
+          workdir,
+          declared.oid,
+          options.json === true ? {} : { shown: { draftWindow } },
         )
+        if (options.json !== true) narrateMalformed(io, journals, said)
+        const unfiltered = watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) })
+        const rows = filterRows(unfiltered, request.terms ?? [])
+        const changes = rows.filter((item) => item.row.state !== "draft")
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = queue.stop
@@ -1289,13 +1317,13 @@ export async function coreQueueCommand(
         const scope =
           request.terms === undefined || request.terms.length === 0
             ? undefined
-            : `${String(rows.length)} of ${String(all.length)} change(s) match ${request.terms.join(" or ")}` +
-              (rows.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
+            : `${String(changes.length)} of ${String(all.filter((row) => row.state !== "draft").length)} change(s) match ${request.terms.join(" or ")}` +
+              (changes.length === 0 ? `. Checked ${FILTER_FIELDS}.` : "")
         return {
           observation,
           data: {
             observation,
-            changes: rows.map((row) => row.row),
+            changes: changes.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
             // The everyday reader of a stopped line: always present, null while
@@ -1316,7 +1344,82 @@ export async function coreQueueCommand(
           ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
           ...(scope === undefined ? {} : { scope }),
           rows,
+          unfiltered,
+          changes,
+          stopped: stopFact(pause),
+          ...(drafts === undefined
+            ? {}
+            : { drafts: { unread: drafts.undated.map((draft) => draft.head), window: draftWindow } }),
         }
+      }
+      /**
+       * The first sight of the draft heads this repository has not read:
+       * fetched ONCE, here in the watch's loader and never in a redraw, so the
+       * next round can say who pushed them and when. A head is tried once
+       * whether the fetch works or not, so one that cannot be fetched stays
+       * "not yet read" rather than failing every round.
+       *
+       * The heads go in one fetch. One head the remote will not serve (a
+       * branch deleted since the round read it) fails that whole fetch, so a
+       * failed batch is split in two and each half fetched apart, down to one
+       * head: that head alone stays unread, at about two fetches per halving.
+       * Two halves that both fail may be the remote's failure rather than a
+       * head's, so the remote is asked whether it answers at all before either
+       * is split again: a remote that went away costs three fetches and one
+       * question, however many heads there are. What stays unread is thrown as
+       * ONE error, for the caller to say once. `yrd list` and `yrd queue stats`
+       * fetch nothing.
+       */
+      const sighted = new Set<string>()
+      const sightDrafts = async (one: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }>) => {
+        const fresh = (one.drafts?.unread ?? []).filter((head) => !sighted.has(head))
+        if (fresh.length === 0) return
+        for (const head of fresh) sighted.add(head)
+        let why: unknown
+        const worked = async (argv: readonly string[]): Promise<boolean> => {
+          try {
+            await git(argv)
+            return true
+          } catch (error) {
+            why = error
+            return false
+          }
+        }
+        const fetched = (heads: readonly string[]): Promise<boolean> =>
+          worked([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--refmap=",
+            config.target.remote,
+            ...heads,
+          ])
+        const answers = (): Promise<boolean> =>
+          worked(["ls-remote", "--refs", config.target.remote, `refs/heads/${config.target.branch}`])
+        /** The heads of a batch that failed which the remote will not serve, each half tried on its own. */
+        const refused = async (heads: readonly string[]): Promise<readonly string[]> => {
+          if (heads.length === 1) return heads
+          const middle = Math.ceil(heads.length / 2)
+          const failed: (readonly string[])[] = []
+          for (const half of [heads.slice(0, middle), heads.slice(middle)]) {
+            if (!(await fetched(half))) failed.push(half)
+          }
+          if (failed.length === 2 && !(await answers())) return heads
+          const unread: string[] = []
+          for (const half of failed) unread.push(...(await refused(half)))
+          return unread
+        }
+        if (await fetched(fresh)) return
+        const unread = await refused(fresh)
+        if (unread.length === 0) return
+        const named = unread.slice(0, 3).map((head) => head.slice(0, 12))
+        throw new Error(
+          `${String(unread.length)} draft head(s) could not be fetched and stay not yet read ` +
+            `(${named.join(", ")}${unread.length > named.length ? ", …" : ""}): ${firstLine(why)}`,
+          { cause: why },
+        )
       }
       /**
        * The page a human reads, drawn by the watch's own components once
@@ -1328,14 +1431,16 @@ export async function coreQueueCommand(
       const page = async (one: Awaited<ReturnType<typeof round>>): Promise<string> => {
         const { printListing } = await import("./watch-print.tsx")
         const single = one.rows.length === 1 ? one.rows[0] : undefined
-        const listing = await printListing(snapshotOf(one), {
+        const snapshot = snapshotOf(one)
+        const listing = await printListing(snapshot, {
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
           ...(single === undefined
             ? {}
             : {
-                trailer: [noticeLine(single.row, single.run !== undefined), clocksLine(single.row)].filter(
+                // Timed at the reading's own instant, as the row's cell is, so the two say one number.
+                trailer: [noticeLine(single.row, single.run !== undefined), timingLine(single.row, snapshot.at)].filter(
                   (part) => part !== "",
                 ),
               }),
@@ -1355,7 +1460,7 @@ export async function coreQueueCommand(
         // backward compatible, and reversible with one flag rather than a
         // silent break for every existing caller. `--require-match` is that
         // flag, opting a caller into treating the same zero as failure.
-        if (request.requireMatch === true && selectedNothing(request.terms, one.rows)) return 1
+        if (request.requireMatch === true && selectedNothing(request.terms, one.changes)) return 1
         return 0
       }
 
@@ -1370,8 +1475,8 @@ export async function coreQueueCommand(
           io.stderr(`${first.observation.message}\n`)
           return 2
         }
-        if (selectedNothing(request.terms, first.rows)) {
-          io.stderr(missedSelector(request.terms ?? [], first.queue, first.rows.length))
+        if (selectedNothing(request.terms, first.changes)) {
+          io.stderr(missedSelector(request.terms ?? [], first.queue, first.changes.length))
           return 2
         }
         const { WatchPane } = await import("./watch-pane.tsx")
@@ -1383,13 +1488,16 @@ export async function coreQueueCommand(
         // reads the same tips the table shows, never a fresher or staler one.
         let entries: QueueEntries = first.entries
         let journals = first.journals
+        let seen: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }> = first
         const app = await run(
           createElement(WatchPane, {
             intervalMs: Math.max(1, request.intervalSeconds ?? 5) * 1000,
-            load: async () => {
+            load: async (asked) => {
               const refreshed = await declaration()
               if (refreshed === undefined) throw new Error(`${targetLabel} no longer carries a .yrd.yml`)
-              const next = await round(refreshed)
+              await sightDrafts(seen)
+              const next = await round(refreshed, asked?.draftWindow)
+              seen = next
               if (next.observation.contract === "root-v1" && next.observation.outcome === "invalid") {
                 ending = 2
                 app.unmount()
@@ -1431,8 +1539,8 @@ export async function coreQueueCommand(
         // A selector that matches nothing would otherwise wait forever for a
         // change that is not there. It is refused loudly, with what was asked
         // for and where it was looked for.
-        if (first && selectedNothing(request.terms, one.rows)) {
-          io.stderr(missedSelector(request.terms ?? [], one.queue, one.rows.length))
+        if (first && selectedNothing(request.terms, one.changes)) {
+          io.stderr(missedSelector(request.terms ?? [], one.queue, one.changes.length))
           return 2
         }
         first = false
@@ -1446,7 +1554,7 @@ export async function coreQueueCommand(
         else io.stdout(`${stampRound(await page(one), one.queue, new Date())}\n`)
         if (one.observation.contract === "root-v1" && one.observation.outcome === "invalid") return 2
         if (selected) {
-          const ending = endingCode(one.rows.map((row) => row.row.state))
+          const ending = endingCode(one.changes.map((row) => row.row.state))
           if (ending !== undefined) return ending
         }
         if (stopped()) return 0
@@ -1457,6 +1565,11 @@ export async function coreQueueCommand(
         const refreshed = await declaration()
         if (refreshed === undefined) return noQueueOnTarget(targetLabel)
         declared = refreshed
+        // The drafts are not what a selector waits on: a head that cannot be
+        // fetched is said, once, and never ends the watch or changes its code.
+        await sightDrafts(one).catch((error: unknown) => {
+          io.stderr(`yrd: ${firstLine(error)}\n`)
+        })
       }
     }
     case "check": {
@@ -1632,13 +1745,19 @@ export async function coreQueueCommand(
           window = { since: committed, sinceFrom: { asked: request.since, kind: "commit" } }
         }
       }
-      const { journals, all } = await readListing(git, config, workdir, captured.oid)
+      const { journals, all, queue } = await readListing(git, config, workdir, captured.oid)
       // The counts below are read from the same rows; a row the journal could
       // not be read for must not make an understated stat look measured.
       if (options.json !== true) narrateMalformed(io, journals, new Set())
       const rows = watchRows(all, { journals })
-      const refs = await pushedRefs(git, config.target.remote, config.target.branch)
-      const stats = queueStats(rows, refs, {
+      // Pushed, never submitted: the drafts (the KPI ruling on 24163), from the
+      // one derivation over this same reading and the same window. Nothing is
+      // fetched, so a head never read here counts as undated.
+      const drafts = await readDrafts(git, queue, {
+        since: window?.since ?? new Date(now.getTime() - DEFAULT_WINDOW_MS),
+        targetSha: captured.oid,
+      })
+      const stats = queueStats(rows, [...drafts.dated, ...drafts.undated], {
         now,
         ...window,
         ...(request.by === undefined ? {} : { by: request.by }),
@@ -1988,9 +2107,9 @@ function describeRun(
 ): string {
   const words = ["pass", "fail", "stuck"][outcome.exitCode] ?? String(outcome.exitCode)
   const parts = [
-    outcome.merged.length > 0 ? `merged ${outcome.merged.join(", ")}` : undefined,
-    outcome.failed.length > 0 ? `failed ${outcome.failed.join(", ")}` : undefined,
-    outcome.stuck.length > 0 ? `stuck ${outcome.stuck.join(", ")}` : undefined,
+    outcome.merged.length > 0 ? `${STATE_WORDS.merged.word} ${outcome.merged.join(", ")}` : undefined,
+    outcome.failed.length > 0 ? `${STATE_WORDS.failed.word} ${outcome.failed.join(", ")}` : undefined,
+    outcome.stuck.length > 0 ? `${STATE_WORDS.stuck.word} ${outcome.stuck.join(", ")}` : undefined,
     outcome.directMerges.length > 0
       ? `${String(outcome.directMerges.length)} ${outcome.directMerges.length === 1 ? "commit" : "commits"} around the queue at ${outcome.directMerges.map((sha) => sha.slice(0, 12)).join(", ")}`
       : undefined,
@@ -2259,6 +2378,7 @@ async function readDiff(git: Git, config: QueueConfig, item: WatchRow): Promise<
 function snapshotOf(
   round: Readonly<{
     rows: readonly WatchRow[]
+    unfiltered: readonly WatchRow[]
     queue: string
     queues: readonly WatchQueue[]
     pause?: string
@@ -2266,6 +2386,8 @@ function snapshotOf(
     observation: GitObservation
     runner: RunnerFacts
     decisions: readonly RunDecision[]
+    stopped: StopFact | null
+    drafts?: Readonly<{ window: DraftWindow; unread: readonly string[] }>
   }>,
 ): WatchSnapshot {
   return {
@@ -2275,7 +2397,12 @@ function snapshotOf(
     queue: round.queue,
     queues: round.queues,
     rows: round.rows,
+    unfiltered: round.unfiltered,
     runner: round.runner,
+    stopped: round.stopped,
+    ...(round.drafts === undefined
+      ? {}
+      : { drafts: { unread: round.drafts.unread.length, window: round.drafts.window } }),
     ...(round.pause === undefined ? {} : { pause: round.pause }),
     ...(round.journalAbsent === undefined ? {} : { journalAbsent: round.journalAbsent }),
   }
@@ -2555,17 +2682,26 @@ function checkLines(check: CheckView): readonly string[] {
  * machine that runs no queue has no journal, and `journals.absent` is the
  * sentence that says so rather than a row that reads as if nothing were
  * running. Nothing here derives a state: `list()` does, once, for everyone.
+ *
+ * `shown` asks for what only a person reads (@i/10-yrd/24196): the instants of
+ * the endings a notice hides, which the table times and orders ended rows by,
+ * and the drafts of one window (queue-core drafts.ts), both in batched reads
+ * made here and never in a redraw. `--json` and `yrd queue stats` ask for
+ * neither.
  */
 export async function readListing(
   git: GitRunner,
   config: QueueConfig,
   workdir: string,
   targetOid: string,
+  options: Readonly<{ shown?: Readonly<{ draftWindow: DraftWindow }> }> = {},
 ): Promise<
   Readonly<{
     queue: Awaited<ReturnType<typeof readQueue>>
     journals: Journals
     all: readonly Row[]
+    /** The drafts of the window asked for; absent when none was. */
+    drafts?: DraftReading
     observation: GitObservation
   }>
 > {
@@ -2580,6 +2716,14 @@ export async function readListing(
     ...queue.observation,
   })
   const journals = readJournals(join(workdir, "logs"))
+  const window = options.shown?.draftWindow
+  const drafts =
+    window === undefined
+      ? undefined
+      : await readDrafts(git, queue, {
+          targetSha: targetOid,
+          ...(window === "7d" ? { since: new Date(Date.now() - DRAFT_WINDOW_MS) } : {}),
+        })
   const all = list(queue.changes, {
     directMerges: await directMergeCommits(git, config.target.branch, targetOid, queue.changes),
     journals,
@@ -2587,8 +2731,11 @@ export async function readListing(
       git,
       queue.changes.map((entry) => entry.change.head),
     ),
+    ...(options.shown === undefined ? {} : { endings: await endingInstants(git, queue.changes) }),
+    // Seven days lists the drafts it can date and counts the rest; every draft lists them all, marked.
+    ...(drafts === undefined ? {} : { drafts: window === "all" ? [...drafts.dated, ...drafts.undated] : drafts.dated }),
   })
-  return { all, journals, queue, observation }
+  return { all, journals, queue, observation, ...(drafts === undefined ? {} : { drafts }) }
 }
 
 /** A commit's committer instant; undefined only when the name is absent, while unreadable or malformed commits throw. */
@@ -2605,56 +2752,6 @@ async function instantOfCommit(git: Git, text: string): Promise<Date | undefined
     throw new Error(`commit ${commit}: git returned invalid committer timestamp ${JSON.stringify(seconds)}`)
   }
   return instant
-}
-
-/**
- * Every branch at the remote but the target, with whether a change ref names it
- * (plan E2: a push without a submit is not a change) and the tip's committer
- * instant when the commit is here — the queue read fetches the submitted heads
- * and the target, never the rest, so an unsubmitted tip is dated only when
- * some earlier fetch brought it, and the stats say how many it could not date.
- * One `ls-remote`, the same list the queue read itself starts from.
- */
-async function pushedRefs(git: Git, remote: string, target: string): Promise<readonly PushedRef[]> {
-  const listed = (await git(["ls-remote", "--refs", remote])).split("\n")
-  const heads = new Map<string, string>()
-  const submitted = new Set<string>()
-  for (const line of listed) {
-    const [sha, ref] = line.trim().split(/\s+/u)
-    if (sha === undefined || ref === undefined) continue
-    if (ref.startsWith("refs/heads/")) heads.set(ref.slice("refs/heads/".length), sha)
-    else if (ref.startsWith(`${queueRefPrefix(target)}/`)) {
-      const name = ref.slice(`${queueRefPrefix(target)}/`.length)
-      const at = name.lastIndexOf("@")
-      submitted.add(at === -1 ? name : name.slice(0, at))
-    }
-  }
-  heads.delete(target)
-  // The committer instants of the tips this repository has, in one batched
-  // read; a sha git does not have answers `missing` and stays undated.
-  const dated = new Map<string, Date>()
-  const shas = [...new Set(heads.values())]
-  if (shas.length > 0) {
-    const answer = await git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], `${shas.join("\n")}\n`)
-    const present = answer
-      .split("\n")
-      .map((line) => line.trim().split(" "))
-      .filter((parts) => parts[1] === "commit")
-      .map((parts) => parts[0] ?? "")
-    if (present.length > 0) {
-      const stamps = await git(["log", "--no-walk=unsorted", "--format=%H %ct", ...present, "--"])
-      for (const line of stamps.split("\n")) {
-        const [sha, seconds] = line.trim().split(" ")
-        if (sha !== undefined && seconds !== undefined && seconds !== "") {
-          dated.set(sha, new Date(Number(seconds) * 1000))
-        }
-      }
-    }
-  }
-  return [...heads.entries()].map(([branch, head]) => {
-    const committedAt = dated.get(head)
-    return { branch, head, submitted: submitted.has(branch), ...(committedAt === undefined ? {} : { committedAt }) }
-  })
 }
 
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {

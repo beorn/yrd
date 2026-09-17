@@ -6,7 +6,9 @@
  *
  * HISTORY: one line per record, newest first, a human verb only where a
  * human acted (`submitted by @chief`); machine rows read as what the queue
- * did (`checked at 3c285a41`, `merged as b234234a`). The `sent` echo renders
+ * did (`pending at 3c285a41`, `merged as b234234a`), each record in the one
+ * word table's word for the state it put the change in (watch-words.ts: the
+ * record `checked` reads pending, `withdrawn` reads cancelled). The `sent` echo renders
  * only when delivery FAILED, the way item 31 keeps the `check requested` echo
  * only when it failed or drifted: a message that went where it should is not
  * news. No status is fused onto a history row; the current state lives in the
@@ -18,7 +20,7 @@
  */
 
 import { DIRECT_MERGE, trailer, type ChangeRecord, type Row } from "@yrd/queue-core"
-import { clock, mediaDuration } from "./watch-format.ts"
+import { STATE_WORDS, clock, mediaDuration } from "./watch-format.ts"
 
 export type HistoryEntry = Readonly<{
   at: Date
@@ -45,13 +47,14 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
     case "opened": {
       // The same head submitted again is a retry (a submit at an unchanged
       // head appends an opened record): the human acted twice, and says so.
-      const verb = earlierOpenings === 0 ? "submitted" : "resubmitted"
+      const verb = earlierOpenings === 0 ? STATE_WORDS.submitted.word : "resubmitted"
       const by = trailer(record, "Submitter")
       return { at: record.at, text: by === undefined ? verb : `${verb} by ${by}` }
     }
     case "checked": {
       const base = trailer(record, "Base")
-      return { at: record.at, text: base === undefined ? "checked" : `checked at ${short(base)}` }
+      const word = STATE_WORDS.pending.word
+      return { at: record.at, text: base === undefined ? word : `${word} at ${short(base)}` }
     }
     case "merged": {
       const merge = trailer(record, "Merge")
@@ -61,7 +64,7 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
       const direct = trailer(record, "Merged-By") === DIRECT_MERGE
       return {
         at: record.at,
-        text: merge === undefined ? "merged" : `merged as ${short(merge)}`,
+        text: merge === undefined ? STATE_WORDS.merged.word : `${STATE_WORDS.merged.word} as ${short(merge)}`,
         ...(direct ? { detail: "a direct merge, around the queue" } : {}),
       }
     }
@@ -70,13 +73,16 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
       const detail = trailer(record, "Detail") ?? trailer(record, "Remedy")
       return {
         at: record.at,
-        text: reason === undefined ? "failed" : `failed ${reason}`,
+        text: reason === undefined ? STATE_WORDS.failed.word : `${STATE_WORDS.failed.word} ${reason}`,
         ...(detail === undefined ? {} : { detail }),
       }
     }
     case "stuck": {
       const reason = trailer(record, "Reason") ?? trailer(record, "Code")
-      return { at: record.at, text: reason === undefined ? "stuck" : `stuck ${reason}` }
+      return {
+        at: record.at,
+        text: reason === undefined ? STATE_WORDS.stuck.word : `${STATE_WORDS.stuck.word} ${reason}`,
+      }
     }
     case "withdrawn": {
       // The one ending a PERSON chose, so it names them the way `opened` names
@@ -88,7 +94,7 @@ function historyEntry(record: ChangeRecord, earlierOpenings: number): HistoryEnt
       const note = trailer(record, "Note")
       return {
         at: record.at,
-        text: by === undefined ? "withdrawn" : `withdrawn by ${by}`,
+        text: by === undefined ? STATE_WORDS.cancelled.word : `${STATE_WORDS.cancelled.word} by ${by}`,
         ...(note === undefined ? {} : { detail: note }),
       }
     }

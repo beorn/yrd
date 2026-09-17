@@ -7,10 +7,11 @@
  * these decide only what is on screen.
  */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { Journals, Row } from "@yrd/queue-core"
 import { journalKey } from "@yrd/queue-core"
-import { clocksLine, noticeLine, watchNotice } from "../src/watch-notice.ts"
+import * as format from "../src/watch-format.ts"
+import { noticeLine, watchNotice } from "../src/watch-notice.ts"
 import { filterRows, rowLine, watchRows, watchRowKey } from "../src/watch-rows.ts"
 
 const since = new Date("2026-09-03T19:00:00.000Z")
@@ -164,14 +165,15 @@ describe("the filter terms", () => {
 describe("the one row renderer", () => {
   it("draws the plain list's line unchanged when there is no subject, run or live check to add", () => {
     const current = row({ head: "abcdef0123456789", issue: "@i/1", position: 1, result: "pass" })
-    expect(rowLine({ row: current })).toBe(" 1 queued  task/one abcdef012345 pass @i/1")
+    // The state in the one word table's word (24196), in a column as wide as the longest.
+    expect(rowLine({ row: current })).toBe(" 1 submitted task/one abcdef012345 pass @i/1")
     // Joined and record-only rows share fixed columns; only the run suffix differs.
     expect(
       rowLine({
         row: current,
         run: { id: "q-1", branch: current.branch, head: current.head, startedAt: now, at: now, checks: [] },
       }),
-    ).toBe(" 1 queued  task/one abcdef012345 pass @i/1 [q-1]")
+    ).toBe(" 1 submitted task/one abcdef012345 pass @i/1 [q-1]")
   })
 
   it("adds the subject, the run and the check running now when there is something to put there", () => {
@@ -212,21 +214,54 @@ describe("the notice", () => {
       row({ live: { check: "typecheck", phase: "merge", run: "q-1", since: now }, position: 1 }),
     )
 
-    expect(notice.word).toBe("queued #1, checking typecheck")
+    expect(notice.word).toBe("submitted #1, checking typecheck")
   })
 
   it("carries the queue position in the notice, where a live fact belongs", () => {
-    expect(watchNotice(row({ position: 3 })).word).toBe("queued #3")
+    expect(watchNotice(row({ position: 3 })).word).toBe("submitted #3")
     const historical = row({ state: "failed", position: 1, result: "stuck verify", run: "q-1" })
     expect(watchNotice(historical, true)).toMatchObject({ word: "change failed #1", cause: "run result: stuck verify" })
     // The join is a caller's fact, not inferred from a result or run identifier.
     expect(watchNotice(historical).word).toBe("failed #1")
   })
+
+  /**
+   * @failure  The notice kept a state-to-word map of its own beside the one table's (@i/10-yrd/24196, review
+   *           finding 1): the two agreed only because each was typed out, so a change to which word a state
+   *           reads would reach the table and leave the notice saying the old one.
+   */
+  it("reads every state's word from the one word table, so it cannot drift from the table; direct apart", () => {
+    // Every state a row can have, each its own value: a state the core adds fails to compile here until listed.
+    const states = Object.values({
+      checked: "checked",
+      direct: "direct",
+      draft: "draft",
+      failed: "failed",
+      merged: "merged",
+      queued: "queued",
+      stuck: "stuck",
+      withdrawn: "withdrawn",
+    } as const satisfies { readonly [S in Row["state"]]: S })
+    // The table answers with a word no second map could hold, so a notice reading a map of its own cannot match.
+    const table = vi.spyOn(format, "stateWord").mockImplementation(({ state }) => `the table's word for ${state}`)
+    try {
+      expect(Object.fromEntries(states.map((state) => [state, watchNotice(row({ state })).word]))).toEqual(
+        Object.fromEntries(
+          states.map((state) => [
+            state,
+            state === "direct" ? "went around the queue" : `the table's word for ${state}`,
+          ]),
+        ),
+      )
+    } finally {
+      table.mockRestore()
+    }
+  })
 })
 
-describe("the clocks line", () => {
-  it("reads Age, Runtime and Wait time in the operator's own order and duration form (item 1)", () => {
-    const line = clocksLine(
+describe("the timing line", () => {
+  it("reads the row's one duration as its table cell does, then the attempt's runtime under its own name (24196)", () => {
+    const line = format.timingLine(
       row({
         endedAt: new Date("2026-09-03T19:45:00.000Z"),
         startedAt: new Date("2026-09-03T19:30:00.000Z"),
@@ -235,12 +270,12 @@ describe("the clocks line", () => {
       now,
     )
 
-    // Age freezes at the ending record (19:45 − 19:00 = 45m), same as runtime
-    // already does, rather than counting to `now` (20:00, which read 1h00m).
-    expect(line).toBe("Age 45:00 · Runtime 15:00 · Wait time 30:00")
+    // Took stops at the ending record (19:45 − 19:00 = 45m), and so does the
+    // attempt's runtime, rather than counting on to `now` (20:00).
+    expect(line).toBe("took 45:00 · runtime 15:00")
   })
 
   it("leaves out a clock nothing measured rather than printing it as zero", () => {
-    expect(clocksLine(row(), now)).toBe("Age 1h00m")
+    expect(format.timingLine(row(), now)).toBe("waiting 1h00m")
   })
 })

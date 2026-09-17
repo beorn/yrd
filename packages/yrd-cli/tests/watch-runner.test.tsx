@@ -292,7 +292,6 @@ describe("the RUNNER box", () => {
             inLine={inLine}
             underCheck={underCheck}
             columns={70}
-            live={false}
             {...(pause === undefined ? {} : { pause })}
           />
         </MinuteContext.Provider>
@@ -357,7 +356,6 @@ describe("the RUNNER box", () => {
     expect(text).toContain("silent 12:00")
     expect(rail).toContain("RUNNER SILENT — no journal write for 12:00")
     expect(rail).toContain("nothing is in line, so a change submitted now would not be picked up")
-    expect(rail).toContain("is yrd-service up? (hab ps yrd-service)")
     // Never the in-line sentence, which would be a lie at zero.
     expect(rail).not.toContain("wait in line")
   })
@@ -368,8 +366,7 @@ describe("the RUNNER box", () => {
     expect(text).toContain("silent 12:00")
     // The banner is pre-wrapped into rows under its marker (never a live wrap): read it row by row.
     expect(text).toContain("RUNNER SILENT — no journal write for 12:00 while 3 changes wait")
-    expect(text).toContain("in line; is yrd-service up? (hab ps yrd-service)")
-    expect(text).toContain("hab ps yrd-service")
+    expect(text).toContain("in line")
   })
 
   it("says where the journal was looked for when there is none, never a blank", async () => {
@@ -401,7 +398,6 @@ describe("the RUNNER box", () => {
             inLine={1}
             underCheck
             columns={30}
-            live={false}
           />
         </MinuteContext.Provider>
       </NowContext.Provider>,

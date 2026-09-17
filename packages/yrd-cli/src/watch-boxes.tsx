@@ -3,22 +3,26 @@
  * 27, 29, 29a, 37) and STATS (items 18–22).
  *
  *   ╭─ RUNNER ──────────────────────────────────────────── run 0:42 ─╮
- *   │ $ yrd queue run · main#170406 [pid 1712479]                     │  ← blue, `$` pulses while a run executes;
- *   │   target main · gitlink 3c285a41af46 · checks typecheck, tests  │    the other rails muted (14), hanging off
- *   │   progress 17:04:45 · 2s ago                                    │    the marker's gutter (29, 29a)
+ *   │ $ yrd queue run · main#170406 [pid 1712479]                     │  ← blue while a run executes; the other
+ *   │   target main · gitlink 3c285a41af46 · checks typecheck, tests  │    rails muted (14), hanging off the
+ *   │   progress 17:04:45 · 2s ago                                    │    marker's gutter (29, 29a)
  *   ╰─────────────────────────────────────────────────────────────────╯
  *
  * Five words drive it, from `runnerHealth` and nothing else (27: severity is
- * never muted): `running` blue and pulsing, `idle` grey and pulsing slowly,
+ * never muted): `running` blue, `idle` grey,
  * `silent` solid red with the reason on its own line, `unstarted` solid red for
  * a run that threw in its Git preamble, naming the journal that holds the
  * failing call (24470), and `absent` grey with the sentence that says where the
  * journal was looked for. One `RUNNER` frame, as item 37 rules; per-queue lines
  * arrive with M8's queues.
+ *
+ * The `$` never pulses (@i/10-yrd/24196): the one thing on screen that pulses
+ * is the marker of the change a check holds, on its own row, so the eye goes
+ * to the change and not to the process.
  */
 
 import { join } from "node:path"
-import { Box, Pulse, Text } from "silvery"
+import { Box, Text } from "silvery"
 import { useMinute, useNow } from "./watch-clock.ts"
 import { boundedHangingLines, clock, mediaDuration, runShortName } from "./watch-format.ts"
 import { MarkerRow, TitledBox } from "./watch-primitives.tsx"
@@ -50,31 +54,9 @@ const HEALTH_COLOR: Readonly<Record<RunnerHealth, string>> = {
   unstarted: "$fg-error",
 }
 
-/**
- * The one health marker, `$`, colored and pulsed by the word (item 13). Both
- * live branches swing foreground-vs-BACKGROUND (`$bg-surface-default`), never
- * foreground-vs-foreground: two foreground tokens read too close in lightness
- * to actually flicker (the running branch's old `$fg-muted` second color
- * measured ~1.12:1 against `$fg-info`, imperceptible), while a background
- * token behind the glyph reliably clears a visible swing. `intervalMs={900}`
- * restores the pre-port rate (item 13's own ag-code reference).
- */
-function HealthMarker({ health, live }: { health: RunnerHealth; live: boolean }) {
+/** The one health marker, `$`, colored by the word (item 13), and still. */
+function HealthMarker({ health }: { health: RunnerHealth }) {
   const color = HEALTH_COLOR[health]
-  if (live && health === "processing") {
-    return (
-      <Pulse synchronized colors={["$fg-info", "$bg-surface-default"]} intervalMs={900} bold flexShrink={0}>
-        $
-      </Pulse>
-    )
-  }
-  if (live && health === "idle") {
-    return (
-      <Pulse synchronized colors={["$fg-muted", "$bg-surface-default"]} intervalMs={900} flexShrink={0}>
-        $
-      </Pulse>
-    )
-  }
   return (
     <Text color={color} bold={health === "silent"} flexShrink={0}>
       $
@@ -89,12 +71,15 @@ export function RunnerBox({
   underCheck,
   columns,
   pause,
-  live = true,
 }: {
   facts: RunnerFacts
   /** The queue's name, for the run's short form. */
   label: string
-  /** How many changes wait in line. Silence is decided without it; the rail says which of the two silences this is. */
+  /**
+   * How many changes wait in line, counted as the queue line counts them (watch-frame.tsx `lineOf`): once
+   * each, the one a check holds apart. Silence is decided without it; the rail says which of the two
+   * silences this is.
+   */
   inLine: number
   /**
    * Is a change under a check RIGHT NOW — the marker's actual predicate (items
@@ -107,7 +92,6 @@ export function RunnerBox({
   columns: number
   /** The pause line, when the queue is paused: the box's border and its last rail say so (item 27). */
   pause?: string
-  live?: boolean
 }) {
   const now = useNow()
   const health = runnerHealth(facts, now, underCheck)
@@ -152,14 +136,13 @@ export function RunnerBox({
             inLine === 0
               ? " and nothing is in line, so a change submitted now would not be picked up"
               : ` while ${String(inLine)} ${inLine === 1 ? "change waits" : "changes wait"} in line`
-          }; is yrd-service up? (hab ps yrd-service)`,
+          }`,
           railWidth,
           SILENT_MAX_ROWS,
         )
       : []
   // 24470: the run threw before it reached the queue it was for. Name the state
-  // and point at the evidence — the journal's last Git row IS the failing call,
-  // which is a different hand from the one `hab ps` sends you to for silence.
+  // and point at the evidence — the journal's last Git row IS the failing call.
   const unstartedRows =
     latest !== undefined && health === "unstarted"
       ? boundedHangingLines(
@@ -179,7 +162,7 @@ export function RunnerBox({
       {...(timer === undefined ? {} : { titleRight: timer })}
       {...(border === undefined ? {} : { borderColor: border })}
     >
-      <MarkerRow marker={<HealthMarker health={health} live={live} />}>
+      <MarkerRow marker={<HealthMarker health={health} />}>
         {commandRows.map((row) => (
           <Text key={row} color={color} wrap="truncate" minWidth={0}>
             {row}

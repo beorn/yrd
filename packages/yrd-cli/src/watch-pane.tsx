@@ -7,7 +7,8 @@
  *
  * Three loaders, and the pane reads nothing itself:
  *
- * - `load()` — the table, every interval.
+ * - `load({ draftWindow })` — the table, every interval, with the drafts of
+ *   the window the reader chose; `w` asks for the other window at once.
  * - `open(row)` — one change's detail, for the row under the cursor only.
  *   Called again every round while that change is in line or under a check
  *   (its journal advances under an unmoving tip, so a key on the tip alone
@@ -16,6 +17,10 @@
  *   by `watchRowKey`, because the default table has one row per run and two
  *   rows of one change open two details.
  * - `loadDiff(row)` — the unified diff, only when the fold opens.
+ *
+ * A draft (a head at the remote nobody submitted) has no records, no checks
+ * and no diff to read: its row and its detail are drawn from the snapshot
+ * alone, and none of the three loaders is called for it (@i/10-yrd/24196).
  *
  * Nothing here writes; nothing here derives a change's state, which
  * `readChange` alone does. The 1-second clock lives in `NowProvider` and is
@@ -41,7 +46,8 @@
  * Keys: `q` leaves · `Enter`/`Space` opens the change · `Escape` closes it ·
  * `Home` follows the newest rows again · `←`/`→` move between the detail's tabs ·
  * `v` folds the diff · `o r d f` show one status bucket, `O R D F` toggle one,
- * `a` shows everything · `1`–`9` toggle a queue's pill · `?` this help. The
+ * `a` shows everything · `w` lists the drafts of the last seven days or every
+ * draft · `1`–`9` toggle a queue's pill · `?` this help. The
  * cancel key is NOT ported: a running change is stopped by moving its branch
  * or pausing the queue (S2.2).
  */
@@ -51,6 +57,7 @@ import {
   Box,
   ListView,
   ModalDialog,
+  ModalOverlay,
   SplitPane,
   Text,
   clampSplitPaneRatio,
@@ -60,9 +67,9 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import type { GitObservation, Row } from "@yrd/queue-core"
+import type { GitObservation, Row, StopFact } from "@yrd/queue-core"
 import { NowProvider, useMinute } from "./watch-clock.ts"
-import { clock, firstLine, runShortName } from "./watch-format.ts"
+import { STATE_WORDS, clock, firstLine, legendLines, runShortName, stateGlyph } from "./watch-format.ts"
 import { WatchDetail, type ChangeDetail, type DiffText } from "./watch-detail.tsx"
 import {
   BUCKETS,
@@ -73,12 +80,13 @@ import {
   bucketOf,
   listLayout,
   separatorBefore,
+  type DraftWindow,
   type StatusBucket,
   type WatchQueue,
 } from "./watch-list.tsx"
 import { watchRowKey, type WatchRow } from "./watch-rows.ts"
 import { StatsBox } from "./watch-boxes.tsx"
-import { ListStack, LoudPause } from "./watch-frame.tsx"
+import { ListStack, LoudPause, QueueLine } from "./watch-frame.tsx"
 import type { RunnerFacts } from "./watch-runner.ts"
 import type { RunDecision } from "./watch-stats.ts"
 
@@ -95,12 +103,21 @@ export type WatchSnapshot = Readonly<{
   /** Where the run journal was looked for and why there was none — never a blank where a fact belongs. */
   journalAbsent?: string
   rows: readonly WatchRow[]
+  /**
+   * Every row of the reading, whatever a selector narrowed `rows` to: the queue line and the RUNNER box count the
+   * queue, not the view, as STATS does. The same rows as `rows` when nothing was selected.
+   */
+  unfiltered: readonly WatchRow[]
   /** What the RUNNER box shows: the newest run journal and its process, read on the queue's own machine. */
   runner?: RunnerFacts
   /** What the STATS box counts: every decision the run journals on this machine recorded. */
   decisions?: readonly RunDecision[]
   /** The instant this reading was made; every age on screen counts from it. */
   at: Date
+  /** The stop that stands, as the reading derived it (queue-core `stopFact`); null or absent while the line runs. */
+  stopped?: StopFact | null
+  /** Which drafts the rows list, and how many drafts have a head this repository has not read. */
+  drafts?: Readonly<{ window: DraftWindow; unread: number }>
 }>
 
 // The natural sizes the monitor used, and the ratio it settled on: 0.65 is the
@@ -122,6 +139,10 @@ export type WatchTier = "right" | "below" | "full"
 // list keeps them all, below 44 the box drops its TIME rows (item 21).
 const STATS_MIN_ROWS = 30
 const STATS_TIME_MIN_ROWS = 44
+// Below this many rows the status pills give way first, so the table keeps a
+// row under the title, the queue line, a five-row RUNNER box, the header and
+// the footer (1 + 1 + 5 + 1 + 1 + 1 = 10, and the pills make 11).
+const PILLS_MIN_ROWS = 11
 
 export function watchTier(columns: number, rows: number): WatchTier {
   const layout = resolveSplitPaneLayout({
@@ -135,22 +156,20 @@ export function watchTier(columns: number, rows: number): WatchTier {
   return layout === "row" ? "right" : layout === "column" ? "below" : "full"
 }
 
-// Short enough that the modal never wraps a line off its own bottom edge at
-// the narrowest terminal the pane runs in.
+// Keys in two columns and the legend under them: short and few enough that
+// the overlay neither clips nor runs off its own bottom edge at 100x31, the
+// narrowest size of the tier ladder.
+/** The help dialog's width: the terminal less a margin, and never wider than its longest legend entry needs. */
+const HELP_MAX_WIDTH = 120
+
 const HELP = [
-  "q            leave the watch",
-  "Enter/Space  open the change",
-  "Escape       close it, or this help",
-  "Home         follow the newest rows again",
-  "←/→          move between the tabs",
-  "v            fold the diff open or shut",
-  "o r d f      show one status; O R D F toggle",
-  "a            show everything",
-  "1-9          toggle a queue",
-  "?            this help",
-  "",
-  "The watch writes nothing. Stop a change",
-  "by moving its ref or pausing the queue.",
+  "q            leave the watch                   ?        this help",
+  "Enter/Space  open the change                   Escape   close it, or this help",
+  "Home         follow the newest rows again      ←/→      move between the tabs",
+  "v            fold the diff open or shut        1-9      toggle a queue",
+  "o r d f      show one status; O R D F toggle   a        show everything",
+  "w            drafts of the last 7 days, or every draft",
+  "The watch writes nothing. Stop a change by moving its ref or pausing the queue.",
 ]
 
 /** A row's detail, read at one instant; held while the change is ended, re-read while it moves. */
@@ -168,8 +187,8 @@ export function WatchPane({
   onEnding,
 }: {
   snapshot: WatchSnapshot
-  /** One reading of the queue. The pane calls it on a timer and never reads anything itself. */
-  load?: () => Promise<WatchSnapshot>
+  /** One reading of the queue, with the drafts of the window asked for. The pane calls it on a timer and on `w`, and never reads anything itself. */
+  load?: (request?: Readonly<{ draftWindow: DraftWindow }>) => Promise<WatchSnapshot>
   /** One change's detail, for the row under the cursor. Absent in a test of the table alone. */
   open?: (row: WatchRow) => Promise<ChangeDetail>
   /** The unified diff of one change, read only when its fold opens. */
@@ -182,6 +201,7 @@ export function WatchPane({
 }) {
   const { columns, rows: terminalRows } = useWindowSize()
   const tier = watchTier(columns, terminalRows)
+  const helpWidth = Math.min(columns - 4, HELP_MAX_WIDTH)
   const [shown, setShown] = useState(snapshot)
   const [failure, setFailure] = useState<Error | undefined>(undefined)
   const [readFailure, setReadFailure] = useState<ReadFailure | undefined>(undefined)
@@ -200,10 +220,14 @@ export function WatchPane({
   const [diffOpen, setDiffOpen] = useState(false)
   const [diffs, setDiffs] = useState<ReadonlyMap<string, DiffText>>(new Map())
   const listRef = useRef<ListViewHandle | null>(null)
+  /** The drafts the reader asked for, read by every round: a round begun before `w` must not undo it. */
+  const draftWindow = useRef<DraftWindow>(snapshot.drafts?.window ?? "7d")
 
   const refresh = useCallback(async () => {
     if (load === undefined) return
-    const next = await load()
+    const asked = draftWindow.current
+    const next = await load({ draftWindow: asked })
+    if (asked !== draftWindow.current) return
     setShown(next)
     const code = endingOf(next.rows)
     if (code !== undefined) onEnding?.(code)
@@ -258,6 +282,8 @@ export function WatchPane({
   const selected = visible[at]
   const selectedKey = selected === undefined ? undefined : watchRowKey(selected)
   const label = shown.queues[0]?.label ?? shown.queue
+  // A draft has nothing to load: its detail is drawn from its row.
+  const draft = selected?.row.state === "draft" ? selected.row : undefined
 
   // The detail for the row under the cursor, read only while the detail is
   // open, re-read while the change moves or gains a warning, otherwise held once it ended.
@@ -272,6 +298,7 @@ export function WatchPane({
       JSON.stringify(heldDetail.detail.row.diagnostics) !== JSON.stringify(selected.row.diagnostics))
   useEffect(() => {
     if (!opened || open === undefined || selected === undefined || selectedKey === undefined || !stale) return
+    if (draft !== undefined) return
     let cancelled = false
     void (async () => {
       try {
@@ -300,7 +327,7 @@ export function WatchPane({
   // The diff, read once per row when its fold opens.
   useEffect(() => {
     if (!diffOpen || loadDiff === undefined || selected === undefined || selectedKey === undefined) return
-    if (diffs.has(selectedKey)) return
+    if (draft !== undefined || diffs.has(selectedKey)) return
     let cancelled = false
     void (async () => {
       try {
@@ -317,7 +344,7 @@ export function WatchPane({
     return () => {
       cancelled = true
     }
-  }, [diffOpen, loadDiff, selected, selectedKey, diffs])
+  }, [diffOpen, draft, loadDiff, selected, selectedKey, diffs])
 
   const toTop = (): void => {
     setCursor(0)
@@ -389,6 +416,21 @@ export function WatchPane({
     if (character === "D") toggleBucket("done")
     if (character === "F") toggleBucket("failed")
     if (character === "a") showAll()
+    if (character === "w" && load !== undefined) {
+      // The other window, read now rather than at the next round, outside any redraw.
+      const asked: DraftWindow = draftWindow.current === "7d" ? "all" : "7d"
+      draftWindow.current = asked
+      void load({ draftWindow: asked }).then(
+        (next) => {
+          if (asked !== draftWindow.current) return
+          setShown(next)
+          setReadFailure(undefined)
+        },
+        (error: unknown) => {
+          setReadFailure({ at: new Date(), message: firstLine(error) })
+        },
+      )
+    }
     if (character !== undefined && /^[1-9]$/u.test(character)) {
       const queue = shown.queues[Number(character) - 1]
       if (queue !== undefined) toggleQueue(queue.label)
@@ -402,31 +444,33 @@ export function WatchPane({
   if (failure !== undefined) throw failure
 
   const detail = heldDetail?.detail
-  const detailPane = (
-    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
-        <Text bold color="$fg-warning" wrap="truncate">
-          {readFailureLine(
-            "this change's read",
-            detailFailure,
-            heldDetail === undefined ? "" : "; the detail shown is the last good read",
-          )}
-        </Text>
-      )}
-      <WatchDetail
-        detail={detail}
-        joinedRun={selected?.run !== undefined}
-        live={live}
-        {...(tab === undefined ? {} : { selected: tab })}
-        onSelect={setTab}
-        diffOpen={diffOpen}
-        {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
-        onToggleDiff={() => {
-          setDiffOpen((was) => !was)
-        }}
-      />
-    </Box>
-  )
+  const detailPane =
+    draft !== undefined ? (
+      <DraftDetail row={draft} />
+    ) : (
+      <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+        {detailFailure === undefined || detailFailure.key !== selectedKey ? null : (
+          <Text bold color="$fg-warning" wrap="truncate">
+            {readFailureLine(
+              "this change's read",
+              detailFailure,
+              heldDetail === undefined ? "" : "; the detail shown is the last good read",
+            )}
+          </Text>
+        )}
+        <WatchDetail
+          detail={detail}
+          joinedRun={selected?.run !== undefined}
+          {...(tab === undefined ? {} : { selected: tab })}
+          onSelect={setTab}
+          diffOpen={diffOpen}
+          {...(selectedKey === undefined || !diffs.has(selectedKey) ? {} : { diff: diffs.get(selectedKey) })}
+          onToggleDiff={() => {
+            setDiffOpen((was) => !was)
+          }}
+        />
+      </Box>
+    )
   // The width the list pane gets: the whole terminal, or its share of a split.
   const listColumns = opened && tier === "right" ? Math.floor(columns * DEFAULT_SPLIT_RATIO) - DIVIDER_SIZE : columns
   const list = (
@@ -434,9 +478,12 @@ export function WatchPane({
       snapshot={shown}
       label={label}
       columns={listColumns - 2}
-      live={live}
       paddingX={1}
-      pills={<StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />}
+      pills={
+        terminalRows < PILLS_MIN_ROWS ? null : (
+          <StatusPills buckets={buckets} allOn={allOn} onSelectOnly={selectOnly} onAll={showAll} />
+        )
+      }
       stats={
         shown.decisions === undefined || terminalRows < STATS_MIN_ROWS ? null : (
           <StatsBox
@@ -451,6 +498,7 @@ export function WatchPane({
         rows={visible}
         empty={shown.rows.length === 0 ? "nothing in line" : "no change matches the filters"}
         label={label}
+        draftWindow={shown.drafts?.window ?? "7d"}
         cursor={at}
         listRef={listRef}
         active={!opened || tier !== "full"}
@@ -497,6 +545,7 @@ export function WatchPane({
           allOn={allOn}
           {...(live ? { onShowAll: showAll } : {})}
         />
+        <QueueLine snapshot={shown} columns={columns} />
         {/* Where the journal was looked for, when there was none. A watch that
             showed no running check because it had no journal to read must say
             so, or it reads as a queue with nothing to do. */}
@@ -531,19 +580,38 @@ export function WatchPane({
         <Box height={1} flexShrink={0}>
           <Text color="$fg-muted" wrap="truncate">
             {cursorRow === undefined ? "" : "Home follows the newest again · "}
-            {String(visible.length)} of {String(shown.rows.length)} change(s) · ? for help · q leaves
+            {/* A draft is a row and no change: the queue line counts the drafts. */}
+            {String(changesIn(visible))} of {String(changesIn(shown.rows))} change(s) · ? for help · q leaves
           </Text>
         </Box>
         {helpOpen ? (
-          <ModalDialog title="yrd watch">
-            {HELP.map((line) => (
-              <Text key={line}>{line}</Text>
-            ))}
-          </ModalDialog>
+          // An overlay, so the help covers the pane where it stands and moves nothing under it.
+          <ModalOverlay
+            onClose={() => {
+              setHelpOpen(false)
+            }}
+          >
+            <ModalDialog title="yrd watch" width={helpWidth}>
+              {HELP.map((line) => (
+                <Text key={line}>{line}</Text>
+              ))}
+              <Text> </Text>
+              <Text bold>States</Text>
+              {/* Wrapped to the dialog's inside, its padding taken off, so no entry wraps a second time. */}
+              {legendLines(helpWidth - 4).map((line, index) => (
+                <Text key={`${String(index)}:${line}`}>{line === "" ? " " : line}</Text>
+              ))}
+            </ModalDialog>
+          </ModalOverlay>
         ) : null}
       </Box>
     </NowProvider>
   )
+}
+
+/** How many of these rows are changes: every row but a draft's. */
+function changesIn(rows: readonly WatchRow[]): number {
+  return rows.filter((item) => item.row.state !== "draft").length
 }
 
 /** One read that failed: when, and the first line of why. */
@@ -560,11 +628,41 @@ function readFailureLine(what: string, failure: ReadFailure, still = ""): string
   return `⚠︎ ${what} failed at ${clock(failure.at, { seconds: true })}, retrying${still} — ${why}`
 }
 
+/**
+ * A draft, opened: what its row knows and what would make it a change. Drawn
+ * from the row alone; a draft has no records, checks or diff to read.
+ */
+function DraftDetail({ row }: { row: Row }) {
+  return (
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}>
+      <Text bold wrap="truncate">
+        {stateGlyph(row)} {STATE_WORDS.draft.word} {row.branch}@{row.head.slice(0, 12)}
+      </Text>
+      <Text color="$fg-muted" wrap="wrap">
+        {STATE_WORDS.draft.means}
+      </Text>
+      {row.movedSinceSubmit === true ? <Text wrap="wrap">the head moved since its last submit</Text> : null}
+      {row.at === undefined ? (
+        <Text wrap="wrap">
+          not yet read: this repository has not fetched the head, so its author and time are unknown
+        </Text>
+      ) : (
+        <Text wrap="wrap">
+          committed {clock(row.at, { seconds: true })}
+          {row.author === undefined ? "" : ` by ${row.author}`}
+        </Text>
+      )}
+      <Text wrap="wrap">run yrd submit {row.branch} to queue this head</Text>
+    </Box>
+  )
+}
+
 /** The table: header, then the virtualized rows with a date separator between days. */
 function Table({
   rows,
   empty,
   label,
+  draftWindow,
   cursor,
   listRef,
   active,
@@ -575,6 +673,8 @@ function Table({
   /** What an empty table says: an empty queue and a filter that hides everything are different facts. */
   empty: string
   label: string
+  /** Which drafts the rows list, named on the header. */
+  draftWindow: DraftWindow
   cursor: number
   listRef: RefObject<ListViewHandle | null>
   active: boolean
@@ -589,7 +689,7 @@ function Table({
   const layout = listLayout(rows, label, columns, minute)
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      <ListHeader layout={layout} />
+      <ListHeader layout={layout} draftWindow={draftWindow} />
       {rows.length === 0 ? (
         <Text color="$fg-muted">{empty}</Text>
       ) : (
@@ -644,7 +744,8 @@ function Table({
  * a withdrawn change stands on the failed rung (@i/10-yrd/24492).
  */
 function endingOf(rows: readonly WatchRow[]): 0 | 1 | 2 | undefined {
-  const states: readonly Row["state"][] = rows.map((row) => row.row.state)
+  // A draft is no change, so it neither holds the watch open nor ends it.
+  const states: readonly Row["state"][] = rows.map((row) => row.row.state).filter((state) => state !== "draft")
   if (states.length === 0) return undefined
   if (states.some((state) => state === "queued" || state === "checked")) return undefined
   if (states.some((state) => state === "stuck")) return 2

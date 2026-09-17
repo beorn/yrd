@@ -11,9 +11,19 @@
  *           reading the live table
  */
 
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { execFileSync } from "node:child_process"
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
-import { delimiter, join, resolve } from "node:path"
+import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { gitIn, readJournals, readRunLog, submit, type Git, type LogRecord } from "@yrd/queue-core"
 import { openLog } from "../../yrd-queue-core/src/log.ts"
@@ -27,7 +37,7 @@ import type { WatchRow } from "../src/watch-rows.ts"
 type PaneProps = Readonly<{
   snapshot: WatchSnapshot
   open?: (row: WatchRow) => Promise<ChangeDetail>
-  load?: () => Promise<WatchSnapshot>
+  load?: (request?: Readonly<{ draftWindow: "7d" | "all" }>) => Promise<WatchSnapshot>
   onEnding?: (code: 0 | 1 | 2) => void
 }>
 const rendered: {
@@ -756,5 +766,313 @@ describe("what a watch says it looked at", () => {
       log: latest.log,
       output: "SECOND_RUN_MISSING\n",
     })
+  })
+})
+
+/**
+ * @failure  A branch pushed and never submitted was nowhere in `yrd list` or the watch (@i/10-yrd/24196,
+ *           A2-set-v3 Q1 and F3). The page and the watch's loader now read the drafts through the one
+ *           derivation: the drafts of the last seven days this clone can date are rows, and a head it has
+ *           never read is counted apart. `w` asks the loader for every draft, the unread ones as marked rows.
+ *           The first sight of an unread head fetches it ONCE, in the watch's loader and never in a redraw,
+ *           so the next round can say who pushed it; `yrd list` fetches nothing; `--json` carries no draft.
+ * @level    l2 (a real remote, a second clone pushing heads this clone never fetched, the pane's own loader)
+ * @consumer the operator reading the draft rows, and every `yrd list --json` reader
+ */
+describe("the drafts a watch reads (24196)", () => {
+  it("counts a head it has not read, fetches it once before the next round and dates it then, lists every draft marked when asked, and leaves --json without a draft", async () => {
+    const w = await world()
+    await change(w, "task/one", true)
+    // A draft this clone holds: pushed, never submitted.
+    await w.git(["checkout", "--quiet", "-b", "task/here", "main"])
+    writeFileSync(join(w.work, "here.txt"), "here\n")
+    await w.git(["add", "."])
+    await w.git(["commit", "--quiet", "-m", "task/here waits for a submit"])
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git(["push", "--quiet", "origin", "task/here"])
+    // Drafts pushed from a second clone, whose heads this clone never fetched.
+    const root = dirname(w.work)
+    const other = join(root, "other")
+    await gitIn(root)(["clone", "--quiet", join(root, "remote.git"), other])
+    const elsewhere = gitIn(other)
+    await elsewhere(["config", "user.email", "grace@yrd.test"])
+    await elsewhere(["config", "user.name", "grace"])
+    const pushElsewhere = async (branch: string): Promise<string> => {
+      await elsewhere(["checkout", "--quiet", "-b", branch, "origin/main"])
+      writeFileSync(join(other, `${branch.replaceAll("/", "-")}.txt`), `${branch}\n`)
+      await elsewhere(["add", "."])
+      await elsewhere(["commit", "--quiet", "-m", `${branch} from elsewhere`])
+      await elsewhere(["push", "--quiet", "origin", branch])
+      return (await elsewhere(["rev-parse", "HEAD"])).trim()
+    }
+    const firstSeen = await pushElsewhere("task/first-seen")
+    const readHere = async (sha: string): Promise<boolean> =>
+      w.git(["cat-file", "-e", `${sha}^{commit}`]).then(
+        () => true,
+        () => false,
+      )
+
+    const page = capture(w.work)
+    expect(await coreQueueCommand(w.work, page.io, { command: "list" }, { workdir: w.workdir }), page.stderr()).toBe(0)
+    const json = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, json.io, { command: "list" }, { json: true, workdir: w.workdir }),
+      json.stderr(),
+    ).toBe(0)
+    const listed = {
+      draftRow: page
+        .stdout()
+        .split("\n")
+        .some((line) => line.includes("◇ draft") && line.includes("task/here")),
+      fetched: await readHere(firstSeen),
+      json: (JSON.parse(json.stdout()) as { changes: readonly { branch: string }[] }).changes.map(
+        (entry) => entry.branch,
+      ),
+      queueLine: page.stdout().includes("1 draft (7d), 1 not yet read"),
+    }
+
+    const drafts = (snapshot: WatchSnapshot | undefined) => ({
+      counted: snapshot?.drafts,
+      rows: (snapshot?.rows ?? [])
+        .filter((item) => item.row.state === "draft")
+        .map((item) => ({ author: item.row.author, branch: item.row.branch }))
+        .sort((left, right) => left.branch.localeCompare(right.branch)),
+    })
+    const watched: Record<string, unknown> = {}
+    rendered.onWait = async () => {
+      const load = rendered.load
+      if (load === undefined) throw new Error("the watch did not supply its refresh loader")
+      watched["first"] = drafts(rendered.snapshot)
+      // Pushed after the first round, so its first sight is the next round.
+      await pushElsewhere("task/later")
+      watched["all"] = drafts(await load({ draftWindow: "all" }))
+      watched["week"] = drafts(await load({ draftWindow: "7d" }))
+    }
+    const pane = capture(w.work)
+    try {
+      expect(
+        await coreQueueCommand(
+          w.work,
+          pane.io,
+          { command: "list", watch: true },
+          { interactive: true, workdir: w.workdir },
+        ),
+        pane.stderr(),
+      ).toBe(0)
+    } finally {
+      rendered.onWait = undefined
+    }
+
+    const here = { author: "yrd", branch: "task/here" }
+    expect({ listed, watched }).toEqual({
+      listed: { draftRow: true, fetched: false, json: ["task/one"], queueLine: true },
+      watched: {
+        // Seven days: the draft this clone can date is a row; the head it never read is counted apart.
+        first: { counted: { unread: 1, window: "7d" }, rows: [here] },
+        // Every draft: the head first seen a round ago was fetched before this round and is dated now;
+        // the one pushed since is a marked row, not yet read.
+        all: {
+          counted: { unread: 1, window: "all" },
+          rows: [{ author: "grace", branch: "task/first-seen" }, here, { author: undefined, branch: "task/later" }],
+        },
+        // Back to seven days: every head has been seen once and read, so nothing is left unread.
+        week: {
+          counted: { unread: 0, window: "7d" },
+          rows: [{ author: "grace", branch: "task/first-seen" }, here, { author: "grace", branch: "task/later" }],
+        },
+      },
+    })
+  })
+})
+
+/**
+ * @failure  24196 times an ended row by its ending record, never the notice sent after it, and carried that
+ *           instant on the row as `endingAt`. `yrd queue show --json` spreads the row into its document, so the
+ *           display fact became a new JSON field, where A2-set-v3 holds every `--json` document byte-identical.
+ * @level    l2 (a real remote, a real queue round, both JSON documents a row reaches)
+ * @consumer every `yrd list --json` and `yrd queue show --json` reader
+ */
+describe("the ending instant the table times a row by (24196)", () => {
+  it("is never a field of a --json document: neither list nor show carries endingAt", async () => {
+    const w = await world()
+    await change(w, "task/good", true)
+    await drain(w)
+
+    const documents: { command: string; endingAt: unknown; state: unknown }[] = []
+    for (const request of [
+      { command: "list" as const, terms: ["task/good"] },
+      { command: "show" as const, branch: "task/good" },
+    ]) {
+      const json = capture(w.work)
+      expect(await coreQueueCommand(w.work, json.io, request, { json: true, workdir: w.workdir }), json.stderr()).toBe(
+        0,
+      )
+      const [row] = (JSON.parse(json.stdout()) as { changes: Record<string, unknown>[] }).changes
+      documents.push({ command: request.command, endingAt: row?.["endingAt"], state: row?.["state"] })
+    }
+
+    expect(documents).toEqual([
+      { command: "list", endingAt: undefined, state: "merged" },
+      { command: "show", endingAt: undefined, state: "merged" },
+    ])
+  })
+})
+
+/**
+ * @failure  A one-row page, which `yrd list <branch>` prints and a plain `yrd watch <branch>` prints every round,
+ *           put `Age · Runtime · Wait time` under its row, each on a basis of its own, while the row's own cell
+ *           said `waiting` (@i/10-yrd/24196, review finding 3). One word, one basis: the page's timing is the cell's.
+ * @level    l2 (a real remote and a clone; the list command's own page)
+ * @consumer a seat reading its own change under `yrd watch <branch>`, live or in a log
+ */
+describe("the timing a one-row page prints under its row (24196)", () => {
+  it("is the row's own duration, in the cell's word and on its basis, never Age or Wait time", async () => {
+    const w = await world()
+    await change(w, "task/good", true)
+    const page = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, page.io, { command: "list", terms: ["task/good"] }, { workdir: w.workdir }),
+      page.stderr(),
+    ).toBe(0)
+
+    const lines = page.stdout().split("\n")
+    const row = lines.find((line) => /^\d\d:\d\d:\d\d /u.test(line) && line.includes("task/good")) ?? ""
+    const cell = /\S+ \d+:\d\d$/u.exec(row.trimEnd())?.[0] ?? ""
+    const notice = lines.findIndex((line) => line.includes("next: "))
+    expect({ cell, trailer: lines[notice + 1]?.trim() }, page.stdout()).toEqual({
+      cell: expect.stringMatching(/^waiting \d/u),
+      trailer: cell,
+    })
+  })
+})
+
+/**
+ * @failure  Under a selector, the queue line and the RUNNER rail counted the view, while the stop, the unread
+ *           drafts and STATS counted the whole queue (@i/10-yrd/24196, review finding 4): `yrd list task/x`,
+ *           how a seat looks at its own change, read `1 waiting: 1 submitted` with other changes ahead of it,
+ *           and dropped the drafts clause because the selector filtered the draft rows away.
+ * @level    l2 (a real remote and a clone; the list command's own page, run journal written in place)
+ * @consumer a seat waiting on its own change, reading how long the line ahead of it is
+ */
+describe("the queue line under a selector (24196)", () => {
+  it("counts the whole line and every draft, and so does the RUNNER rail, whatever the selector shows", async () => {
+    const w = await world()
+    await change(w, "task/one", true)
+    await change(w, "task/two", true)
+    // A draft this clone holds, so it is dated: pushed, never submitted, and no selector term matches it.
+    await w.git(["checkout", "--quiet", "-b", "task/here", "main"])
+    writeFileSync(join(w.work, "here.txt"), "here\n")
+    await w.git(["add", "."])
+    await w.git(["commit", "--quiet", "-m", "task/here waits for a submit"])
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git(["push", "--quiet", "origin", "task/here"])
+    // A run journal that has not moved for twenty minutes: the RUNNER rail then says how many changes wait.
+    const journal = openLog(join(w.workdir, "logs"))
+    journal.write({ base: "aaa", checks: ["verify"], kind: "run", queue: "test", target: "main" })
+    const quiet = new Date(Date.now() - 20 * 60 * 1000)
+    utimesSync(journal.path, quiet, quiet)
+
+    const page = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, page.io, { command: "list", terms: ["task/one"] }, { workdir: w.workdir }),
+      page.stderr(),
+    ).toBe(0)
+
+    const lines = page.stdout().split("\n")
+    expect(
+      {
+        queueLine: lines[lines.findIndex((line) => line.includes("YRD QUEUES")) + 1]?.trim(),
+        rail: /while \d+ changes? waits? in line/u.exec(page.stdout())?.[0],
+        scope: lines.some((line) => line.includes("1 of 2 change(s) match task/one")),
+      },
+      page.stdout(),
+    ).toEqual({
+      queueLine: "2 waiting: 2 submitted · 1 draft (7d)",
+      rail: "while 2 changes wait in line",
+      scope: true,
+    })
+  })
+})
+
+/**
+ * @failure  A plain `yrd watch <branch>` fetched the draft heads it had not read with nothing around the fetch, so
+ *           a head the remote would not serve ended the watch the way a stuck change does, whatever became of the
+ *           change the seat was waiting on. The loader also marked the whole batch read before its one fetch, so
+ *           that one head left every head beside it unread (@i/10-yrd/24196, review finding 9).
+ * @level    l2 (a real remote, two clones, and the plain watch loop over a Git that refuses one head)
+ * @consumer a seat scripting `yrd watch my-branch && deploy`
+ */
+describe("a draft fetch that fails under a plain watch (24196)", () => {
+  it("is said once, still fetches the heads the remote serves, and the watch exits with its own change's ending", async () => {
+    const w = await world()
+    await change(w, "task/good", true)
+    // Two drafts pushed from a second clone, so this clone has read neither.
+    const root = dirname(w.work)
+    const other = join(root, "other")
+    await gitIn(root)(["clone", "--quiet", join(root, "remote.git"), other])
+    const elsewhere = gitIn(other)
+    await elsewhere(["config", "user.email", "grace@yrd.test"])
+    await elsewhere(["config", "user.name", "grace"])
+    const pushElsewhere = async (branch: string): Promise<string> => {
+      await elsewhere(["checkout", "--quiet", "-b", branch, "origin/main"])
+      writeFileSync(join(other, `${branch.replaceAll("/", "-")}.txt`), `${branch}\n`)
+      await elsewhere(["add", "."])
+      await elsewhere(["commit", "--quiet", "-m", `${branch} from elsewhere`])
+      await elsewhere(["push", "--quiet", "origin", branch])
+      return (await elsewhere(["rev-parse", "HEAD"])).trim()
+    }
+    const served = await pushElsewhere("task/served")
+    const refused = await pushElsewhere("task/refused")
+    // The Git the watch runs: any call naming the refused head fails, as a remote that no longer has it answers.
+    const realGit = Bun.which("git")
+    if (realGit === null) throw new Error("no git on PATH for the fixture's wrapper")
+    const executable = join(w.workdir, "refuses-one-head.sh")
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+case " $* " in
+  *" ${refused} "*) echo "fatal: remote error: upload-pack: not our ref ${refused}" >&2; exit 128 ;;
+esac
+exec '${realGit}' "$@"
+`,
+    )
+    chmodSync(executable, 0o755)
+    const readHere = async (sha: string): Promise<boolean> =>
+      w.git(["cat-file", "-e", `${sha}^{commit}`]).then(
+        () => true,
+        () => false,
+      )
+
+    // Once the first round has printed, the watched change's branch is deleted, so a later round reads it ended.
+    const watched = capture(w.work)
+    let printed = false
+    const io: YrdCliIO = {
+      ...watched.io,
+      stdout(text) {
+        watched.io.stdout(text)
+        if (printed) return
+        printed = true
+        execFileSync(realGit, ["--git-dir", join(root, "remote.git"), "update-ref", "-d", "refs/heads/task/good"])
+      },
+    }
+    const exit = await coreQueueCommand(
+      w.work,
+      io,
+      { command: "list", intervalSeconds: 1, terms: ["task/good"], watch: true },
+      { selection: { contract: "native", executable, origin: "fixture", scope: "local" }, workdir: w.workdir },
+    ).catch((error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`)
+
+    expect(
+      {
+        exit,
+        refused: await readHere(refused),
+        said: watched
+          .stderr()
+          .split("\n")
+          .filter((line) => line.includes(refused.slice(0, 12))).length,
+        served: await readHere(served),
+      },
+      watched.stderr(),
+    ).toEqual({ exit: 1, refused: false, said: 1, served: true })
   })
 })
