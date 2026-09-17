@@ -25,7 +25,7 @@ import {
   journalKey,
   watchRows,
 } from "../src/index.ts"
-import type { Git } from "../src/index.ts"
+import type { Git, Row } from "../src/index.ts"
 import { recordMessage } from "../src/records.ts"
 
 const roots: string[] = []
@@ -449,6 +449,74 @@ describe("the table is the queue read rendered", () => {
       ])
     },
   )
+
+  it("says who an ending was not told to, and why, in the line a reader acts on", async () => {
+    const w = await world("{}\n")
+    const refusal = "tribe refused (24581)"
+    const refusedError = "the notify entry submitter in /queue/notify exited 4: yrd-notify: daemon refused the send"
+    const legacyError = "the notify entry submitter in /queue/notify exited 1: yrd-notify: No daemon running"
+    /** A failed ending, then its one sent record, pushed as the queue writes them. */
+    async function failAndTell(branch: string, delivery: readonly (readonly [string, string])[]): Promise<void> {
+      const change = { branch, head: await submitCommit(w, branch, `${branch.slice("task/".length)}.txt`) }
+      await appendRecord(w.git, "main", {
+        change,
+        kind: "failed",
+        subject: `${branch} failed verify`,
+        trailers: [["Reason", "verify"]],
+      })
+      await appendRecord(w.git, "main", {
+        change,
+        kind: "sent",
+        subject: "send it back",
+        trailers: [["To", "submitter"], ["State", "failed"], ...delivery, ["Reason", "verify"]],
+      })
+      await w.git(["push", "--quiet", "--force", "origin", `${changeRef("main", change)}:${changeRef("main", change)}`])
+    }
+    await failAndTell("task/refused", [
+      ["Delivery", "failed"],
+      ["Delivery-Error", refusedError],
+      ["Not-Told", `submitter refused=${refusal}`],
+    ])
+    // Written before any record carried Not-Told: the tip's own failure says it.
+    await failAndTell("task/legacy", [
+      ["Delivery", "failed"],
+      ["Delivery-Error", legacyError],
+    ])
+    await failAndTell("task/told", [["Delivery", "sent"]])
+
+    const entries = (await readQueue(w.git, "origin", "main", w.target)).changes
+    const rows = new Map(list(entries).map((row) => [row.branch, row]))
+    const hydrated = await readHistories(w.git, entries, "origin", "main")
+    const telling = (row: Row | undefined) => ({
+      next: row?.next,
+      refused: row?.refused,
+      told: row?.told,
+      undelivered: row?.undelivered,
+    })
+
+    expect(telling(rows.get("task/refused"))).toEqual({
+      next: { because: `submitter not told: ${refusal}`, owner: "the queue's operator" },
+      refused: refusal,
+      told: false,
+      undelivered: undefined,
+    })
+    expect(telling(rows.get("task/legacy"))).toEqual({
+      next: { because: `submitter not told: ${legacyError}`, owner: "the queue's operator" },
+      refused: undefined,
+      told: false,
+      undelivered: legacyError,
+    })
+    expect(telling(rows.get("task/told"))).toEqual({
+      next: { because: "it failed (verify), and only the branch's author can move it", owner: "@dev/2" },
+      refused: undefined,
+      told: true,
+      undelivered: undefined,
+    })
+    // `show` reads the full history and says the same thing.
+    for (const branch of ["task/refused", "task/legacy", "task/told"]) {
+      expect(telling(show(hydrated, branch)[0]?.row)).toEqual(telling(rows.get(branch)))
+    }
+  })
 })
 
 describe("a packed Check: trailer", () => {

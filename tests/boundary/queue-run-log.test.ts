@@ -397,18 +397,20 @@ describe("the queue run's log", { timeout: 120_000 }, () => {
   describe("a queue run with nothing submitted", () => {
     /** The run records that it looked, with evidence for the Git reads that established it. */
     it("writes one run header and retains the Git evidence for an empty queue", async () => {
-      const { repo } = await boundaryRepository({ exit: 0, hooks: true })
+      const { origin, repo } = await boundaryRepository({ exit: 0, hooks: true })
 
       const run = await queueRunOnce(repo)
       const { records } = await logOfQueueRun(run)
 
       // An honest zero: one run record, saying the queue run ran and what it read
       // the queue from. "I found nothing" and "I never looked" must not be the
-      // same bytes.
+      // same bytes. The queue record between them names the queue and marks
+      // the Git preamble complete (24470).
       expect(
         records.filter((record) => record.kind !== "git"),
         run.report,
-      ).toEqual([theOne(records, "run"), theOne(records, "observation")])
+      ).toEqual([theOne(records, "run"), theOne(records, "queue"), theOne(records, "observation")])
+      expect(theOne(records, "queue"), run.report).toMatchObject({ queue: `${origin}#main` })
       expect(theOne(records, "observation"), run.report).toMatchObject({
         contract: "native",
         message: expect.stringContaining("native Git observes the root queue only"),

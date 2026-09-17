@@ -412,6 +412,16 @@ function messages(w: World): readonly Record<string, string>[] {
 }
 
 /**
+ * A notify entry whose transport answered and refused: exit 4, the reason on
+ * its last stdout line and the daemon's words on stderr, as the root's
+ * notifier says a deaf mailbox refused the send (24581).
+ */
+const REFUSING_NOTIFIER = `sh -c 'echo "tribe refused (24581)"; echo daemon refused the send >&2; exit 4'`
+
+/** The one line a refused entry's reason is, as the refusing notifier above prints it. */
+const REFUSAL = "tribe refused (24581)"
+
+/**
  * A process id that named a process and does not any more: a child run to
  * completion and reaped. The only honest way to write a dead run's pid file,
  * since any number picked out of the air could be a process that is running.
@@ -1453,6 +1463,22 @@ describe("a queue run", () => {
     )
   })
 
+  it("a YRD-CHECK-RESULT naming exit 3 on timeout is stuck, not rescued as a fail (@cto 7645ec3a)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const check = join(w.workdir, "cannot-judge-then-hang.sh")
+    writeFileSync(check, ["#!/bin/sh", `echo 'YRD-CHECK-RESULT {"exit":3}'`, "sleep 3", "exit 0", ""].join("\n"))
+    chmodSync(check, 0o755)
+    const base = await w.options({ timeoutMs: 500 })
+
+    const outcome = await queueRun({
+      ...base,
+      checks: [{ ...base.checks[0]!, run: check, timeoutMs: 500 }],
+    })
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/one"] })
+  })
+
   it.each([
     ["pass", "pass", 0, ["opened", "checked", "merged", "sent"]],
     ["fail", "fail", 1, ["opened", "checked", "failed", "sent"]],
@@ -2027,7 +2053,7 @@ describe("a queue run", () => {
     const head = await submitCommit(w, "task/one", "one.txt")
 
     // The first recipient is down and the second accepts the same ending. The
-    // later success must not hide the earlier delivery still owed (ruling D9).
+    // later success must not hide the earlier delivery still owed.
     const down = await queueRun({
       ...(await w.options({ exit: 0 })),
       notify: [
@@ -2056,16 +2082,17 @@ describe("a queue run", () => {
     expect(await refAt(gitIn(w.remote), ref)).toBe(appendTip.sha)
     expect(messages(w)).toHaveLength(1)
 
-    // The failed recipient is back. A poisoned local ref cannot replace either
-    // the immutable ending id or the captured sent tip used as append parent.
+    // The failed recipient is still down for its one more attempt. A poisoned
+    // local ref cannot replace either the immutable ending id or the captured
+    // sent tip used as append parent.
     await w.git(["update-ref", ref, head])
-    const healthy = [
-      { name: "recovering", on: ["merged"] as const, run: w.notifier },
+    const stillDown = [
+      { name: "recovering", on: ["merged"] as const, run: "sh -c 'echo the notifier is down >&2; exit 3'" },
       { name: "recorder", on: ["merged"] as const, run: w.notifier },
     ]
     const again = await queueRun({
       ...(await w.options({ exit: 0 })),
-      notify: healthy,
+      notify: stillDown,
     })
     expect(again.exitCode).toBe(0)
     expect(await refAt(w.git, ref)).toBe(head)
@@ -2073,27 +2100,223 @@ describe("a queue run", () => {
       logRecords(again)
         .filter((record) => record.kind === "message")
         .map(({ delivered, id, to }) => ({ delivered, id, to })),
-    ).toEqual([{ delivered: true, id: merged.sha, to: "recovering" }])
+    ).toEqual([{ delivered: false, id: merged.sha, to: "recovering" }])
     await w.git(["fetch", "--quiet", "origin", "+refs/yrd/main/*:refs/yrd/main/*"])
     records = await readRecords(w.git, (await refAt(w.git, ref))!)
     expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent", "sent"])
-    expect(records.at(-1)?.trailers).toEqual(
+    const exhausted = records.at(-1)!
+    expect(exhausted.trailers).toEqual(
       expect.arrayContaining([
         ["To", "recovering"],
-        ["Delivery", "sent"],
+        ["Delivery", "failed"],
         ["For", merged.sha],
         ["Message-Id", merged.sha],
       ]),
     )
-    expect((await w.git(["rev-parse", `${records.at(-1)!.sha}^`])).trim()).toBe(appendTip.sha)
-    expect(messages(w)).toHaveLength(2)
-    expect(messages(w).map((message) => message.record)).toEqual(["merged", "merged"])
+    // The second failed attempt is the last: the record says so, and why.
+    expect(trailers(exhausted, "Not-Told")).toEqual([
+      expect.stringMatching(/^recovering undelivered=.*the notifier is down/u),
+    ])
+    expect((await w.git(["rev-parse", `${exhausted.sha}^`])).trim()).toBe(appendTip.sha)
+    expect(messages(w)).toHaveLength(1)
 
-    const repairedTip = records.at(-1)!
+    // Every notifier is healthy now, and the ending is still not told again.
+    const healthy = [
+      { name: "recovering", on: ["merged"] as const, run: w.notifier },
+      { name: "recorder", on: ["merged"] as const, run: w.notifier },
+    ]
     const settled = await queueRun({ ...(await w.options({ exit: 0 })), notify: healthy })
     expect(logRecords(settled).filter((record) => record.kind === "message")).toEqual([])
-    expect(await refAt(gitIn(w.remote), ref)).toBe(repairedTip.sha)
-    expect(messages(w)).toHaveLength(2)
+    expect(await refAt(gitIn(w.remote), ref)).toBe(exhausted.sha)
+    expect(messages(w)).toHaveLength(1)
+  })
+
+  it("a recipient the transport refused is recorded once, never counted told, and never sent again", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    const refusing = [{ name: "submitter", on: ["merged"] as const, run: REFUSING_NOTIFIER }]
+
+    const first = await queueRun({ ...(await w.options({ exit: 0 })), notify: refusing })
+    expect(first).toMatchObject({ exitCode: 0, merged: ["task/one"], stuck: [] })
+    expect(
+      logRecords(first)
+        .filter((record) => record.kind === "message")
+        .map(({ delivered, refused, to }) => ({ delivered, refused, to })),
+    ).toEqual([{ delivered: false, refused: REFUSAL, to: "submitter" }])
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
+    const refusal = records.at(-1)!
+    expect(["To", "Delivery"].map((name) => trailer(refusal, name))).toEqual(["submitter", "failed"])
+    expect(trailers(refusal, "Not-Told")).toEqual([`submitter refused=${REFUSAL}`])
+    expect(trailer(refusal, "Delivery-Error")).toContain("daemon refused the send")
+
+    // The same refusal next round: it is a receipt, so nothing runs or is written.
+    const second = await queueRun({ ...(await w.options({ exit: 0 })), notify: refusing })
+    expect(logRecords(second).filter((record) => record.kind === "message")).toEqual([])
+    expect(await refAt(gitIn(w.remote), ref)).toBe(refusal.sha)
+
+    // A notifier that would take it now does not undo the refusal either.
+    const third = await queueRun({
+      ...(await w.options({ exit: 0 })),
+      notify: [{ name: "submitter", on: ["merged"], run: w.notifier }],
+    })
+    expect(logRecords(third).filter((record) => record.kind === "message")).toEqual([])
+    expect(await refAt(gitIn(w.remote), ref)).toBe(refusal.sha)
+    expect(messages(w)).toEqual([])
+  })
+
+  it("a notifier that gave no receipt gets exactly one more attempt, and a timeout is never a refusal", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    // A timed-out notifier that happens to exit 4 and print a refusal: the
+    // bound killed it, so nothing answered, and it must read as no receipt.
+    let round = 1
+    await using runner = createProcess({ cwd: w.work })
+    const slowNotifiers = {
+      ...runner,
+      run: async (request: Parameters<typeof runner.run>[0]) => {
+        const command = request.argv.join(" ")
+        const late =
+          (command.includes(`${w.notifier} flaky`) && round === 1) ||
+          (command.includes(`${w.notifier} slow`) && round <= 2)
+        if (!late) return runner.run(request)
+        const killed = await runner.run({ ...request, argv: ["sh", "-c", `echo "${REFUSAL}"; exit 4`] })
+        return { ...killed, stalled: false as const, timedOut: true as const, verdict: "TIMED_OUT" as const }
+      },
+    }
+    const notify = [
+      { name: "flaky", on: ["merged"] as const, run: `${w.notifier} flaky` },
+      { name: "slow", on: ["merged"] as const, run: `${w.notifier} slow` },
+    ]
+
+    const first = await queueRun({ ...(await w.options({ exit: 0 })), notify, process: slowNotifiers })
+    expect(first.merged).toEqual(["task/one"])
+    await fetchChanges(w)
+    let records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
+    expect(records.slice(-2).map((record) => [trailer(record, "To"), trailer(record, "Delivery")])).toEqual([
+      ["flaky", "failed"],
+      ["slow", "failed"],
+    ])
+    expect(records.slice(-2).flatMap((record) => trailers(record, "Not-Told"))).toEqual([])
+
+    round = 2
+    const second = await queueRun({ ...(await w.options({ exit: 0 })), notify, process: slowNotifiers })
+    expect(
+      logRecords(second)
+        .filter((record) => record.kind === "message")
+        .map(({ delivered, refused, to }) => ({ delivered, refused, to })),
+    ).toEqual([
+      { delivered: true, refused: undefined, to: "flaky" },
+      { delivered: false, refused: undefined, to: "slow" },
+    ])
+    await fetchChanges(w)
+    records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.map((record) => record.kind)).toEqual([
+      "opened",
+      "checked",
+      "merged",
+      "sent",
+      "sent",
+      "sent",
+      "sent",
+    ])
+    const [told, lastTry] = [records.at(-2)!, records.at(-1)!]
+    expect([trailer(told, "To"), trailer(told, "Delivery")]).toEqual(["flaky", "sent"])
+    expect([trailer(lastTry, "To"), trailer(lastTry, "Delivery")]).toEqual(["slow", "failed"])
+    expect(trailers(lastTry, "Not-Told")).toEqual([
+      expect.stringMatching(/^slow undelivered=the notify entry slow .* ran past its 60000ms bound and exited 4: /u),
+    ])
+
+    round = 3
+    const third = await queueRun({ ...(await w.options({ exit: 0 })), notify, process: slowNotifiers })
+    expect(logRecords(third).filter((record) => record.kind === "message")).toEqual([])
+    expect(await refAt(gitIn(w.remote), ref)).toBe(lastTry.sha)
+    expect(messages(w)).toHaveLength(1)
+  })
+
+  it("an ending whose telling never ran is still told on the next round", async () => {
+    // A crash between the ended record and its first sent record leaves no
+    // receipt at all: the repair pass owes every declared name.
+    const w = await world()
+    const head = await submitCommit(w, "task/unsent", "unsent.txt")
+    const change = { branch: "task/unsent", head }
+    const failed = await appendRecord(w.git, "main", {
+      change,
+      kind: "failed",
+      subject: "task/unsent failed verify",
+      trailers: [["Reason", "verify"]],
+    })
+    await w.git(["push", "--quiet", "origin", `${failed}:${changeRef("main", change)}`])
+
+    const repaired = await queueRun(await w.options({ exit: 0 }))
+
+    expect(
+      logRecords(repaired)
+        .filter((record) => record.kind === "message")
+        .map(({ delivered, id, to }) => ({ delivered, id, to })),
+    ).toEqual([{ delivered: true, id: failed, to: "recorder" }])
+    expect(messages(w)).toMatchObject([{ change: changeName(change), record: "failed" }])
+  })
+
+  it("a newly named recipient is still told past a refusal, and its record carries the refusal", async () => {
+    const w = await world()
+    const head = await submitCommit(w, "task/one", "one.txt")
+    const ref = changeRef("main", { branch: "task/one", head })
+    const refusing = { name: "submitter", on: ["merged"] as const, run: REFUSING_NOTIFIER }
+    await queueRun({ ...(await w.options({ exit: 0 })), notify: [refusing] })
+    await fetchChanges(w)
+    const refusal = (await readRecords(w.git, (await refAt(w.git, ref))!)).at(-1)!
+    expect(trailers(refusal, "Not-Told")).toEqual([`submitter refused=${REFUSAL}`])
+
+    const added = await queueRun({
+      ...(await w.options({ exit: 0 })),
+      notify: [refusing, { name: "board", on: ["merged"], run: w.notifier }],
+    })
+
+    expect(
+      logRecords(added)
+        .filter((record) => record.kind === "message")
+        .map(({ delivered, to }) => ({ delivered, to })),
+    ).toEqual([{ delivered: true, to: "board" }])
+    await fetchChanges(w)
+    const records = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(records.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent", "sent"])
+    const board = records.at(-1)!
+    expect([trailer(board, "To"), trailer(board, "Delivery")]).toEqual(["board", "sent"])
+    // The tip alone still says who was not told.
+    expect(trailers(board, "Not-Told")).toEqual([`submitter refused=${REFUSAL}`])
+    expect((await w.git(["rev-parse", `${board.sha}^`])).trim()).toBe(refusal.sha)
+    expect(messages(w)).toHaveLength(1)
+  })
+
+  it("a refused notice about a direct merge goes out once, however many runs find the commit again (E5)", async () => {
+    const w = await world()
+    // As in the E5 case above: one change merged through the queue first, so
+    // the direct commit below has a queue history to be found against and
+    // nothing of the queue's ever lands on top of it.
+    await submitCommit(w, "task/one", "one.txt")
+    expect((await queueRun(await w.options({ exit: 0 }))).merged).toEqual(["task/one"])
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git(["merge", "--quiet", "--ff-only", "origin/main"])
+    const direct = await pushAroundQueue(w, "direct.txt")
+    const refusing = [{ name: "board", on: ["merged-direct"] as const, run: REFUSING_NOTIFIER }]
+    const directNotices = (outcome: QueueRunOutcome) =>
+      logRecords(outcome).filter((record) => record.kind === "message" && record.says === "merged-direct")
+
+    const first = await queueRun({ ...(await w.options({ exit: 0 })), notify: refusing })
+    expect(first.directMerges).toEqual([direct])
+    expect(directNotices(first).map(({ delivered, head, refused, to }) => ({ delivered, head, refused, to }))).toEqual([
+      { delivered: false, head: direct, refused: REFUSAL, to: "board" },
+    ])
+
+    const second = await queueRun({ ...(await w.options({ exit: 0 })), notify: refusing })
+    expect(second.directMerges).toEqual([direct])
+    expect(directNotices(second)).toEqual([])
   })
 
   it("a change merged around the queue reads merged, its catch-up record says a direct merge did it, and the direct merge is reported once (E5)", async () => {
@@ -2185,7 +2408,7 @@ describe("a queue run", () => {
     const head = await submitCommit(w, "task/one", "one.txt")
 
     // It failed its check, and the notifier was down, so the send-back is owed:
-    // exactly what makes the next run try to deliver it again (ruling D9).
+    // exactly what makes the next run try to deliver it once more.
     const down = await queueRun({
       ...(await w.options({ exit: 1 })),
       notify: [{ name: "recorder", on: ["failed"], run: "sh -c 'exit 3'" }],
@@ -2832,6 +3055,29 @@ describe("a stuck change stops the line (the andon, operator 2026-09-16)", () =>
     expect(readFileSync(w.checkLog, "utf8")).toBe(log)
   })
 
+  it("a check that exits 3, cannot-judge, stops the line too: the change is not billed and nothing behind it merges", async () => {
+    // @cto 7645ec3a ruling 1: exit 3 used to end the change `failed` and keep
+    // merging the line behind it, billing the submitter for a check that never
+    // judged the change. It is stuck like any other could-not-judge.
+    const w = await world()
+    const head = await submitCommit(w, "task/cannot-judge", "one.txt")
+    await submitCommit(w, "task/two", "two.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 3, on: ["submit"] }))
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/cannot-judge"] })
+    expect(await remoteTarget(w)).toBe(w.target)
+    const records = await recordsOf(w, "task/cannot-judge", head)
+    expect(records.map((record) => record.kind)).not.toContain("failed")
+    expect(records.flatMap((record) => record.trailers).filter(([name]) => name === "Fault")).toEqual([])
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({
+      by: "yrd",
+      cause: "stuck",
+      change: { branch: "task/cannot-judge", head },
+      kind: "paused",
+    })
+  })
+
   it("a bookkeeping stuck stops the line too, before the first judge", async () => {
     const w = await world()
     const headOne = await submitCommit(w, "task/one", "one.txt")
@@ -3346,19 +3592,6 @@ describe("the target's setup", () => {
    * the settled base, so the queue's ground was never broken — one change's
    * content was, and every other change in line waited for a person.
    */
-  it("bounces cannot-judge (exit 3) to the submitter and keeps judging the line", async () => {
-    const w = await world()
-    await submitCommit(w, "task/cannot-judge", "one.txt")
-    await submitCommit(w, "task/two", "two.txt")
-
-    const outcome = await queueRun(await w.options({ exit: 3, on: ["submit"] }))
-
-    expect(outcome.exitCode).toBe(1)
-    expect(outcome.failed).toEqual(["task/cannot-judge"])
-    expect(outcome.stuck).toEqual([])
-    expect(outcome.merged).toEqual(["task/two"])
-  })
-
   it("bills the submitter when the setup fails only with the candidate's own content", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/breaks-setup", "BREAK_SETUP")

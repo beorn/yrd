@@ -30,7 +30,7 @@ import { journalKey, type Journals, type JournalRun, type LogRecord } from "./lo
 import { incidentFrom, incidentLine, type Incident } from "./incident.ts"
 import type { Git } from "./records.ts"
 import type { QueueEntry, QueueRead } from "./remote.ts"
-import { inLine, nextOwner, tipOf, type ChangeState, type NextOwner } from "./state.ts"
+import { inLine, nextOwner, tellingOf, tipOf, type ChangeState, type NextOwner, type Telling } from "./state.ts"
 
 export type Row = Readonly<{
   /** The change's branch; for a `direct` row, the target that commit moved. */
@@ -94,6 +94,15 @@ export type Row = Readonly<{
    * records' answer, not a display bug.
    */
   live?: Readonly<{ run: string; check: string; phase: string; since: Date; log?: string }>
+  /**
+   * Whether the ending's telling reached every name its tip says it tried
+   * (`tellingOf`, state.ts); absent until a sent record tried somebody.
+   */
+  told?: boolean
+  /** Why a transport refused this ending's telling, one reason per name, `; `-joined. */
+  refused?: string
+  /** Why a name got no receipt from this ending's telling, one reason per name, `; `-joined. */
+  undelivered?: string
   /** Who acts next and why, derived once beside `readChange` (state.ts). Absent for a merged change: nobody. */
   next?: NextOwner
 }>
@@ -148,6 +157,21 @@ function malformedNext(run: JournalRun | undefined): NextOwner | undefined {
   if (run?.malformed === undefined || run.malformed.length === 0) return undefined
   return {
     because: `run journal ${run.id} has a malformed row for this change (${run.malformed.join("; ")}); the row was skipped — fix the writer (24408)`,
+    owner: "the queue's operator",
+  }
+}
+
+/**
+ * Who acts on an ending somebody was not told, and why: `submitter not told:
+ * tribe refused (24581)`. Undefined when the telling reached everyone it
+ * tried. The queue will not tell them again, so the move is its operator's.
+ */
+function untoldNext(telling: Telling | undefined): NextOwner | undefined {
+  if (telling === undefined || telling.told) return undefined
+  return {
+    because: telling.notTold
+      .map((name) => `${name.to} not told: ${name.refused === undefined ? name.undelivered : name.refused}`)
+      .join("; "),
     owner: "the queue's operator",
   }
 }
@@ -349,11 +373,16 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
   const subject = options.subjects?.get(entry.change.head)
   const run = latest?.id ?? mergedByRun(trailer(tip, "Merged-By"))
   const live = running?.running
+  const telling = tellingOf(tip)
+  const refused = telling?.notTold.flatMap((name) => (name.refused === undefined ? [] : [name.refused])) ?? []
+  const undelivered = telling?.notTold.flatMap((name) => (name.refused === undefined ? [name.undelivered] : [])) ?? []
   // The newest run's own defect outranks the state's next owner: a reader told
   // only "the queue acts next" would never learn that part of what the queue
-  // recorded about this change could not be read (24408).
+  // recorded about this change could not be read (24408). An ending somebody
+  // was not told outranks it too, because the queue will not tell them again.
   const next =
     malformedNext(latest) ??
+    untoldNext(telling) ??
     (incident === undefined
       ? nextOwner(entry.reading, {
           ...(submitter === undefined ? {} : { submitter }),
@@ -403,6 +432,9 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
             ...(live.log === undefined ? {} : { log: live.log }),
           },
         }),
+    ...(telling === undefined ? {} : { told: telling.told }),
+    ...(refused.length === 0 ? {} : { refused: refused.join("; ") }),
+    ...(undelivered.length === 0 ? {} : { undelivered: undelivered.join("; ") }),
     ...(next === undefined ? {} : { next }),
   }
 }

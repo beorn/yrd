@@ -42,7 +42,16 @@
  * (@i/10-yrd/24098).
  */
 
-import { endedKind, endingRecord, standsEnded, type ChangeRecord } from "./records.ts"
+import {
+  endedKind,
+  endingRecord,
+  readNotTold,
+  standsEnded,
+  trailer,
+  trailers,
+  type ChangeRecord,
+  type NotTold,
+} from "./records.ts"
 import { incidentFrom } from "./incident.ts"
 
 export const CHANGE_STATES = ["queued", "checked", "stuck", "merged", "failed", "withdrawn"] as const
@@ -258,4 +267,31 @@ export function nextOwner(
         owner: "the queue's operator",
       }
   }
+}
+
+/** Whether a change's ending reached everyone its tip names, and who it did not. */
+export type Telling = Readonly<{ told: boolean; notTold: readonly NotTold[] }>
+
+/**
+ * How the telling of a change's ending went, read off its tip alone, because
+ * a queue read keeps only tips. Undefined unless the tip is a sent record that
+ * tried somebody (`Delivery: sent` or `failed`).
+ *
+ * The tip's `Not-Told:` values name every name its ending settled untold. A
+ * failed tip that names no value for its own `To:` is a name still owed one
+ * more attempt, or one from before `Not-Told:` existed, and it was not told
+ * either, for the reason its `Delivery-Error:` gives.
+ */
+export function tellingOf(tip: ChangeRecord): Telling | undefined {
+  const delivery = trailer(tip, "Delivery")
+  if (tip.kind !== "sent" || (delivery !== "sent" && delivery !== "failed")) return undefined
+  const notTold = trailers(tip, "Not-Told").map(readNotTold)
+  const to = trailer(tip, "To")
+  if (delivery === "failed" && to !== undefined && !notTold.some((name) => name.to === to)) {
+    notTold.push({
+      to,
+      undelivered: trailer(tip, "Delivery-Error") ?? `sent record ${tip.sha.slice(0, 12)} carries no Delivery-Error`,
+    })
+  }
+  return { notTold, told: notTold.length === 0 }
 }

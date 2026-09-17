@@ -7,12 +7,15 @@
  * writes one sent record per entry that fired, so a reader can see who the queue
  * reached and who it did not.
  *
- * Delivery is at-least-once and never authoritative. A command that fails
- * changes nothing about the change — the ended record stands — and `resend`
- * hands the same record over on the next round, keyed by the ended record's sha,
- * so whoever hears it sees one message however many times it is sent. That
- * repair pass is this ring's own and rides on `bookkeep`; without the ring
- * there is no delivery to repair.
+ * Delivery is bounded and never authoritative. A command that fails changes
+ * nothing about the change — the ended record stands. Any receipt settles a name
+ * for that ending: delivered is told, and a transport that answered and refused
+ * is written down once as `Not-Told:` and never sent again. A command that gave
+ * no receipt is handed the same record once more by `resend` on the next round,
+ * keyed by the ended record's sha, so whoever hears it sees one message however
+ * many times it is sent; that last attempt's record says `Not-Told:` too if it
+ * fails. That repair pass is this ring's own and rides on `bookkeep`; without
+ * the ring there is no delivery to repair.
  *
  * Take this file and its line out of rings.ts and the queue merges, fails and
  * gets stuck exactly as it does now, in silence, and no `sent` record is ever
@@ -30,6 +33,8 @@ import { INCIDENT_TRAILERS } from "./incident.ts"
 import { recordsMatching } from "./log.ts"
 import {
   endedKind,
+  notToldValue,
+  readNotTold,
   readRecord,
   readRecords,
   trailer,
@@ -100,8 +105,9 @@ export const withNotify: Ring = (steps) => ({
  * receipts on its own ref (`told`, just below); a direct merge has no change
  * and so no ref, and its receipts are its own prior "message" rows instead,
  * read back from this machine's run journals (log.ts). Only entries still
- * owed run again, mirroring `told`'s own resend logic, and a commit already
- * told in full runs nothing at all.
+ * owed run again, mirroring `told`'s own resend logic: a row that delivered or
+ * was refused settles its name, and failed rows count its attempts. A commit
+ * already settled in full runs nothing at all.
  */
 async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
   const target = run.options.target.branch
@@ -109,16 +115,21 @@ async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
     join(run.options.workdir, "logs"),
     (record) => record.kind === "message" && record.says === DIRECT && record.head === commit.commit,
   )
-  const successful = new Set<string>()
+  const settled = new Set<string>()
+  const failures = new Map<string, number>()
   for (const record of priorMessages) {
-    if (record.delivered === true && typeof record.to === "string" && record.to !== "") successful.add(record.to)
+    if (typeof record.to !== "string" || record.to === "") continue
+    if (record.delivered === true || typeof record.refused === "string") settled.add(record.to)
+    else failures.set(record.to, (failures.get(record.to) ?? 0) + 1)
   }
-  const owed = (run.options.notify ?? []).filter((entry) => entry.on.includes(DIRECT) && !successful.has(entry.name))
+  const owed = (run.options.notify ?? []).filter(
+    (entry) => entry.on.includes(DIRECT) && !settled.has(entry.name) && (failures.get(entry.name) ?? 0) < ATTEMPTS,
+  )
   if (priorMessages.length > 0 && owed.length === 0) return
   const text = `${directMergeLine(commit)}: ${commit.why}. The queue goes on from the new base; a rollback is a git revert, pushed through the queue.`
   // A direct merge has no change, so the commit that went around the queue stands
   // where a change's name would (`NotifyRecord`).
-  for (const { name, delivery, failure } of await notifyAll(
+  for (const { name, delivery, failure, refused } of await notifyAll(
     run,
     DIRECT,
     { change: commit.commit, record: DIRECT },
@@ -132,6 +143,7 @@ async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
       head: commit.commit,
       id: commit.commit,
       kind: "message",
+      ...(refused === undefined ? {} : { refused }),
       says: DIRECT,
       text,
       to: name,
@@ -142,7 +154,8 @@ async function toldDirect(run: Run, commit: DirectMerge): Promise<void> {
 /**
  * Repair the current ending's delivery: a successful sent tip can cover an
  * earlier failed recipient. `told` reads this ending's receipts, not just its
- * tip, and retries only the names still owed (ruling D9).
+ * tip, and retries only the names still owed: not told, not settled untold, and
+ * short of their last attempt.
  */
 async function resend(run: Run, entry: QueueEntry): Promise<void> {
   const tip = tipOf(entry.change)
@@ -203,18 +216,39 @@ async function told(
       : (await readRecords(run.git, `${endedRecord}..${initialAppendTip}`)).filter(
           (record) => record.kind === "sent" && trailer(record, "For") === endedRecord,
         )
+  // Any receipt settles a name: `Delivery: sent` told it, and a `Not-Told:`
+  // says it will not be. A failed attempt settles nothing, and is counted.
   const successful = new Set<string>()
+  const notTold = new Map<string, string>()
+  const failures = new Map<string, Readonly<{ attempts: number; error: string }>>()
   for (const receipt of receipts) {
-    if (trailer(receipt, "Delivery") !== "sent") continue
+    for (const value of trailers(receipt, "Not-Told")) notTold.set(readNotTold(value).to, value)
+    const delivery = trailer(receipt, "Delivery")
     const name = trailer(receipt, "To")
+    if (delivery === "failed" && name !== undefined && name !== "") {
+      const error =
+        trailer(receipt, "Delivery-Error") ?? `sent record ${receipt.sha.slice(0, 12)} carries no Delivery-Error`
+      failures.set(name, { attempts: (failures.get(name)?.attempts ?? 0) + 1, error })
+    }
+    if (delivery !== "sent") continue
     if (name === undefined || name === "") {
       throw new Error(`${entry.change.branch}: successful sent record ${receipt.sha.slice(0, 12)} names no recipient`)
     }
     successful.add(name)
   }
-  const owed = (run.options.notify ?? []).filter((entry) => entry.on.includes(kind) && !successful.has(entry.name))
-  // An absent name runs nothing; a newly declared name is owed this ending.
-  // Only the first telling can record `none`, never a completed repair pass.
+  // A chain from before `Not-Told:` resent a failing name every round; out of
+  // attempts, it is settled by its own count.
+  for (const [name, { attempts, error }] of failures) {
+    if (attempts >= ATTEMPTS && !successful.has(name) && !notTold.has(name)) {
+      notTold.set(name, notToldValue(name, { undelivered: error }))
+    }
+  }
+  const owed = (run.options.notify ?? []).filter(
+    (entry) => entry.on.includes(kind) && !successful.has(entry.name) && !notTold.has(entry.name),
+  )
+  // An absent name runs nothing; a newly declared name is owed this ending, and
+  // a settled one never is. Only the first telling can record `none`, never a
+  // completed repair pass.
   if (receipts.length > 0 && owed.length === 0) return
   const written = await readRecord(run.git, endedRecord)
   const text = messageFor(kind, {
@@ -249,7 +283,14 @@ async function told(
     owed,
   )
   let appendTip: string | undefined = initialAppendTip
-  for (const { name, delivery, failure } of handed) {
+  for (const { name, delivery, failure, refused } of handed) {
+    // A refusal is settled on its own record, and a name out of attempts on its
+    // last one. Every later record of this ending repeats what is settled, for
+    // the same reason it repeats the result: the tip alone says who was not told.
+    if (refused !== undefined) notTold.set(name, notToldValue(name, { refused }))
+    else if (failure !== undefined && (failures.get(name)?.attempts ?? 0) + 1 >= ATTEMPTS) {
+      notTold.set(name, notToldValue(name, { undelivered: oneLine(failure) }))
+    }
     // One sent record per entry that fired, so a reader can see which of them the
     // queue reached. The sent record repeats the ended state/result, so
     // fixed-cost list reads stay complete after delivery. Earlier-phase check
@@ -265,6 +306,7 @@ async function told(
         ["For", endedRecord],
         ["Delivery", delivery],
         ...(failure === undefined ? [] : [["Delivery-Error", oneLine(failure)] as const]),
+        ...[...notTold.values()].map((value) => ["Not-Told", value] as const),
         ...written.trailers.filter(([key]) => RESULT_TRAILERS.has(key)),
       ],
     }
@@ -290,6 +332,7 @@ async function told(
       head: entry.change.head,
       id: endedRecord,
       kind: "message",
+      ...(refused === undefined ? {} : { refused }),
       says: kind,
       text,
       to: name,
@@ -460,8 +503,25 @@ async function failuresOf(run: Run, entry: QueueEntry, endedRecord: string): Pro
 /** How one notify entry went: it took the record, there was none to take it, or it exited non-zero. */
 type Delivery = "sent" | "none" | "failed"
 
-/** One entry's turn: which entry, and how it went. */
-type Handed = Readonly<{ name: string; delivery: Delivery; failure?: string }>
+/**
+ * The notify exit that says the transport answered and refused the send, with
+ * the reason on the entry's last non-empty stdout line: never send this ending
+ * to that name again. Not 3, which a check uses for cannot-judge.
+ */
+const REFUSED_EXIT = 4
+
+/**
+ * How many times one ending is handed to a name that gives no receipt: the
+ * first telling and exactly one more round. Counted from the ending's own
+ * records, so nothing new is stored.
+ */
+const ATTEMPTS = 2
+
+/** How long one notify entry may run before the queue stops waiting for its answer. */
+const NOTIFY_TIMEOUT_MS = 60_000
+
+/** One entry's turn: which entry, how it went, and the reason when the transport refused it. */
+type Handed = Readonly<{ name: string; delivery: Delivery; failure?: string; refused?: string }>
 
 /**
  * Give one record to every `notify:` entry that wants this ending, in the order
@@ -488,16 +548,16 @@ async function notifyAll(
 /**
  * Run one notify entry's command, the record a JSON object on its stdin, and
  * say how it went: `sent` when it accepted the record, `failed` with why when it
- * exited non-zero. A command that fails changes nothing about what a change IS:
- * the ended record stands and the failed delivery is recorded under that
- * immutable identity (ruling D9). Nothing here throws, so a failed notifier can
- * never end a merged change stuck.
+ * exited non-zero, and `refused` beside that when it exited {@link REFUSED_EXIT}.
+ * A command that fails changes nothing about what a change IS: the ended record
+ * stands and the failed delivery is recorded under that immutable identity.
+ * Nothing here throws, so a failed notifier can never end a merged change stuck.
  */
 async function deliver(
   run: Run,
   entry: Notifier,
   record: NotifyRecord,
-): Promise<Readonly<{ delivery: Delivery; failure?: string }>> {
+): Promise<Readonly<{ delivery: Delivery; failure?: string; refused?: string }>> {
   try {
     const { cwd, runner } = await notificationEnvironment(run)
     const result = await runner.run({
@@ -505,16 +565,25 @@ async function deliver(
       cwd,
       env: run.options.env,
       stdin: `${JSON.stringify(record)}\n`,
-      timeoutMs: 60_000,
+      timeoutMs: NOTIFY_TIMEOUT_MS,
     })
     if (result.exitCode === 0) return { delivery: "sent" }
+    const bound = result.timedOut ? ` ran past its ${String(NOTIFY_TIMEOUT_MS)}ms bound and` : ""
+    const failure =
+      `the notify entry ${entry.name} in ${cwd}${bound} exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`.replace(
+        /\s+/gu,
+        " ",
+      )
+    // An entry the bound killed gave no answer, whatever it printed first.
+    if (result.exitCode !== REFUSED_EXIT || result.timedOut) return { delivery: "failed", failure }
+    const reason = result.stdout
+      .split(/\r\n|\n|\r/u)
+      .map((line) => line.trim())
+      .findLast((line) => line !== "")
     return {
       delivery: "failed",
-      failure:
-        `the notify entry ${entry.name} in ${cwd} exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`.replace(
-          /\s+/gu,
-          " ",
-        ),
+      failure,
+      refused: reason ?? `exited ${String(REFUSED_EXIT)}, the refusal exit, and printed no reason on stdout`,
     }
   } catch (error) {
     return {
