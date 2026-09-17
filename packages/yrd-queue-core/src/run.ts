@@ -2522,9 +2522,9 @@ function stuckWrite(
   }>,
 ): EndedWrite {
   const subject = cause.subject.replace(/\s+/gu, " ").trim()
-  // Every stuck record names ALL THREE ways out of the line, in words that
-  // cannot be read as "re-push the same content" (@i/10-yrd/24492 box 2; the
-  // third, resume, since the andon made a stuck stop the line).
+  // Every stuck record names ALL FOUR ways out of the line, in words that
+  // cannot be read as "re-push the same content" (@i/10-yrd/24492 box 2; resume
+  // since the andon made a stuck stop the line; yrd merge for a queued fix).
   const next = `${cause.next}; ${stuckCures(branch)}`
   const incident = {
     code: cause.code,

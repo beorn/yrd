@@ -226,7 +226,7 @@ export function pauseLine(record: PauseRecord): string {
 /**
  * What lifts a stop, as one sentence for a refusal or an echo.
  *
- * A stuck stop leads with its own record's cures, which already name all three
+ * A stuck stop leads with its own record's cures, which already name all four
  * acts; the resume command is spelled out for the queue this reader selected,
  * because that one act needs the selector.
  */
@@ -241,14 +241,15 @@ export function liftLine(pause: PauseRecord, remote: string, queue: string): str
 }
 
 /**
- * The three acts that take a stuck change out of the line, in the words its
+ * The four acts that take a stuck change out of the line, in the words its
  * stuck record's `Next` carries and every surface after it repeats: the page,
  * the refusal and the submit echo read them from there.
  */
 export function stuckCures(branch: string): string {
   return (
-    `three ways out of the line: yrd queue withdraw ${branch} (an operator ends the change), ` +
+    `four ways out of the line: yrd queue withdraw ${branch} (an operator ends the change), ` +
     `submit a replacement head for ${branch} that clears this reason (the same content sticks on the same ground), ` +
+    `merge a queued fix with yrd merge <its branch> (it runs alone on the stopped line, then ${branch} is judged once more), ` +
     "or yrd queue resume once the queue itself is repaired; until one of them, the line stays stopped"
   )
 }

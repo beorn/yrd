@@ -30,7 +30,7 @@ const stuckStop: PauseRecord = {
   cause: "stuck",
   change: { branch: "task/one", head: HEAD },
   kind: "paused",
-  next: "repair the queue setup, then run yrd queue run; three ways out of the line: yrd queue withdraw task/one",
+  next: "repair the queue setup, then run yrd queue run; four ways out of the line: yrd queue withdraw task/one",
   reason: "the queue could not prepare a worktree for task/one: setup exited 1",
   sha: "b".repeat(40),
 }

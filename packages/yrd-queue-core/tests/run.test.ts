@@ -3438,7 +3438,7 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     expect(states.get(second)).toMatchObject({ state: "withdrawn" })
   })
 
-  it("a stuck record names its three cures: withdraw it, replace its head with a fix, or resume the repaired queue", async () => {
+  it("a stuck record names its four cures: withdraw it, replace its head with a fix, merge a queued fix, or resume the repaired queue", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
 
@@ -3458,7 +3458,10 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     expect(incident.Next).toContain("yrd queue withdraw task/one")
     expect(incident.Next).toContain("clears this reason")
     expect(incident.Next).toContain("the same content sticks on the same ground")
-    // The third cure is the operator's, for a stop the queue itself caused.
+    // The third cure is a fix already in line: merged on its own, and the stuck change judged again after it.
+    expect(incident.Next).toContain("merge a queued fix with yrd merge <its branch>")
+    expect(incident.Next).toContain("then task/one is judged once more")
+    // The fourth cure is the operator's, for a stop the queue itself caused.
     expect(incident.Next).toContain("yrd queue resume")
   })
 })
