@@ -1374,11 +1374,15 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const open = await lines(full, 160, 48, ["?"])
     // An overlay repaints one band between the top row and the footer and moves nothing else; a dialog in
     // the pane's flow reflows every row (measured: all 48) and lands under the footer. The band is every
-    // row the open help changed.
-    const changed = open.flatMap((line, index) => (line === closed[index] ? [] : [index]))
+    // row the open help changed. Trailing blanks are not a change: an overlay pads the rows it spans.
+    const changed = open.flatMap((line, index) => (line.trimEnd() === closed[index]?.trimEnd() ? [] : [index]))
     const first = changed[0] ?? -1
     const last = changed.at(-1) ?? -1
-    const footer = (painted: readonly string[]): string => painted.filter((line) => line.trim() !== "").at(-1) ?? ""
+    const footer = (painted: readonly string[]): string =>
+      painted
+        .filter((line) => line.trim() !== "")
+        .at(-1)
+        ?.trimEnd() ?? ""
     // The States entries, read inside the dialog only: from its `States` heading's column, so no word the
     // table rows or the pills draw beside the dialog can answer for the section.
     const heading = open.findIndex((line) => /\bStates\b/u.test(line))
