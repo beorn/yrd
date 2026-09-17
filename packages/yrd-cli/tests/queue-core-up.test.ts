@@ -2956,9 +2956,10 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
 
   /**
    * A check the target declares at submit whose verdict the tree decides: it
-   * cannot judge (exit 2, stuck) until the tree carries `repaired.txt`, and
-   * never while the tree carries `sticks-again.txt`. Every judgement appends the
-   * worktree it ran in, so a case can count how often one head was judged.
+   * fails (exit 1) while the tree carries `fails.txt`, cannot judge (exit 2,
+   * stuck) until the tree carries `repaired.txt`, and never while the tree
+   * carries `sticks-again.txt`. Every judgement appends the worktree it ran in,
+   * so a case can count how often one head was judged.
    */
   function gate(w: World): Readonly<{ declaration: string; judgements: (head: string) => number }> {
     const log = join(dirname(w.workdir), "gate-judgements.log")
@@ -2969,6 +2970,7 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
       [
         "#!/bin/sh",
         `pwd >> "${log}"`,
+        "if [ -f fails.txt ]; then echo 'this tree fails the gate' >&2; exit 1; fi",
         "if [ -f repaired.txt ] && [ ! -f sticks-again.txt ]; then exit 0; fi",
         "echo 'the gate cannot judge this tree: it needs repaired.txt and no sticks-again.txt' >&2",
         "exit 2",
@@ -3113,6 +3115,78 @@ describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
     expect((await kindsOf(w, "task/stuck", stuckHead)).filter((kind) => kind === "stuck")).toHaveLength(2)
     expect(await stopOf(w)).toMatchObject({ by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` })
     expect(merged.exitCode, merged.report).toBe(0)
+  })
+
+  // ACCEPTANCE (rows 2 and 4 together, @chief c5c33f8e): the verdict merge keeps
+  // is keyed on the head, never on the branch. A branch that moved on after its
+  // change was checked is submitted again at its new head, and that head is
+  // judged before anything merges: the old verdict never lands the new head.
+  it("a head that moved after its change was checked is judged again, and never merges on the old verdict", async () => {
+    const w = await verbWorld()
+    const check = gate(w)
+    await redeclare(w, check.declaration)
+    await submitted(w, "task/first", "repaired.txt")
+    const checkedHead = await submitted(w, "task/moved", "repaired.txt")
+    // One round merges the first change in line and leaves this one checked.
+    const round = await yrd(w, "queue", "run", "--json")
+    expect(round.exitCode, round.report).toBe(0)
+    expect(await kindsOf(w, "task/moved", checkedHead)).toEqual(["opened", "checked"])
+    expect(check.judgements(checkedHead)).toBe(1)
+    // The branch moves on after its verdict, the way the workflow says: onto the
+    // target as it is now, then one commit more, whose tree fails the gate.
+    await w.git(["fetch", "--quiet", "origin", "main"])
+    await w.git(["checkout", "--quiet", "task/moved"])
+    await w.git(["rebase", "--quiet", "FETCH_HEAD"])
+    writeFileSync(join(w.work, "fails.txt"), "fails.txt\n")
+    await w.git(["add", "fails.txt"])
+    await w.git(["commit", "--quiet", "-m", "task/moved: fails.txt"])
+    const movedHead = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+
+    const merged = await yrd(w, "merge", "task/moved")
+
+    expect(check.judgements(movedHead), merged.report).toBe(1)
+    expect(await kindsOf(w, "task/moved", movedHead), merged.report).toContain("failed")
+    expect(await onMain(w, movedHead), merged.report).toBe(false)
+    expect(await onMain(w, checkedHead), merged.report).toBe(false)
+    expect(merged.exitCode, merged.report).toBe(1)
+  })
+
+  // ACCEPTANCE (row 7): a merge that fails on a stopped line ends failed, goes
+  // back to the submitter through the notify entry that wants failed, and the
+  // stop stays where it was: main does not move and the stuck head is not judged
+  // again.
+  it("a fix that fails on a stopped line ends failed, is sent back to its submitter, and the line stays stopped", async () => {
+    const w = await verbWorld()
+    const check = gate(w)
+    const told = join(dirname(w.workdir), "told.jsonl")
+    const notifier = join(dirname(w.workdir), "notifier.sh")
+    writeFileSync(told, "")
+    writeFileSync(notifier, ["#!/bin/sh", `cat >> "${told}"`, ""].join("\n"))
+    chmodSync(notifier, 0o755)
+    await redeclare(w, `${check.declaration}notify:\n  - submitter:\n      on: [failed]\n      run: ${notifier}\n`)
+    const stuckHead = await submitted(w, "task/stuck", "stuck.txt")
+    const fixHead = await branchWith(w, "task/fix", "fails.txt")
+    const stuck = await yrd(w, "queue", "run", "--json")
+    expect(stuck.exitCode, stuck.report).toBe(2)
+    const stop = { by: "yrd", cause: "stuck", change: `task/stuck@${stuckHead}` }
+    expect(await stopOf(w)).toMatchObject(stop)
+    const mainBefore = await mainAt(w)
+
+    const merged = await yrd(w, "merge", "task/fix", "--notify", "@dev/4")
+
+    expect(await kindsOf(w, "task/fix", fixHead), merged.report).toContain("failed")
+    expect(merged.exitCode, merged.report).toBe(1)
+    const messages = readFileSync(told, "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(messages, merged.report).toEqual([
+      expect.objectContaining({ change: `task/fix@${fixHead}`, record: "failed", submitter: "@dev/4" }),
+    ])
+    expect(await stopOf(w)).toMatchObject(stop)
+    expect(check.judgements(stuckHead), merged.report).toBe(1)
+    expect(await mainAt(w), merged.report).toBe(mainBefore)
   })
 
   // ACCEPTANCE (Q6): a merge that loses the target at the lease is not retried

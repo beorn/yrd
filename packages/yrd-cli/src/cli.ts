@@ -153,6 +153,45 @@ function buildProgram(
     .option("-v, --verbose", "raise the log level; repeat for more", (_value, previous: number) => previous + 1, 0)
     .option("-q, --quiet", "lower the log level; repeat for less", (_value, previous: number) => previous + 1, 0)
 
+  const WITHDRAW_DESCRIPTION =
+    "end the branch's open change and take it out of the line; the branch itself is untouched"
+  const WITHDRAW_HELP =
+    "Appends a withdrawn record to the change - an ending like merged or failed - so the queue drops the " +
+    "change from the line and never judges it again; resubmitting the branch re-opens it. Withdrawing the " +
+    "change a stuck stop names lifts that stop, and the line behind it runs again. The other way out of the " +
+    "line is the submitter's: replace the branch with a head that clears the stuck reason - resubmitting " +
+    "the same content sticks on the same ground."
+  const withdrawOptions = <T extends { option: (flags: string, description: string) => T }>(command: T): T =>
+    command
+      .option("--json", "emit stable JSON")
+      .option("--notify <seat>", "name who withdrew the change")
+      .option("--queue <value>", QUEUE_HELP)
+      .option("--reason <text>", "why the change leaves the line, written on the record")
+  const queueWithdraw = async (branch: string, options: PauseOptions): Promise<void> => {
+    const location = await resolveQueueLocation(cwd(), options.queue, env)
+    setExit(
+      await coreQueueCommand(
+        location.repo,
+        io,
+        {
+          branch,
+          by: resolveSubmitter(options.notify, env),
+          command: "withdraw",
+          ...(options.reason === undefined ? {} : { reason: options.reason }),
+        },
+        {
+          json: options.json,
+          env,
+          log: log(),
+          selection: location.selection,
+          populateReference: location.owned,
+          queue: location.queue,
+          workdir: location.workdir,
+        },
+      ),
+    )
+  }
+
   const queueSubmit = async (branch: string | undefined, options: SubmitOptions): Promise<void> => {
     const location = await resolveQueueLocation(cwd(), options.queue, env, "submit")
     const taken = await coreQueueCommand(
@@ -242,46 +281,9 @@ function buildProgram(
         ),
       )
     })
-  queue
-    .command("withdraw <branch>")
-    .description("end the branch's open change and take it out of the line; the branch itself is untouched")
-    .option("--json", "emit stable JSON")
-    .option("--notify <seat>", "name who withdrew the change")
-    .option("--queue <value>", QUEUE_HELP)
-    .option("--reason <text>", "why the change leaves the line, written on the record")
-    .addHelpSection(
-      "On withdraw:",
-      "Appends a withdrawn record to the change - an ending like merged or failed - so the queue drops the " +
-        "change from the line and never judges it again; resubmitting the branch re-opens it. Withdrawing the " +
-        "change a stuck stop names lifts that stop, and the line behind it runs again. The other way out of the " +
-        "line is the submitter's: replace the branch with a head that clears the stuck reason - resubmitting " +
-        "the same content sticks on the same ground.",
-    )
-    .action(async (branch, options) => {
-      const declared = options as PauseOptions
-      const location = await resolveQueueLocation(cwd(), declared.queue, env)
-      setExit(
-        await coreQueueCommand(
-          location.repo,
-          io,
-          {
-            branch: branch as string,
-            by: resolveSubmitter(declared.notify, env),
-            command: "withdraw",
-            ...(declared.reason === undefined ? {} : { reason: declared.reason }),
-          },
-          {
-            json: declared.json,
-            env,
-            log: log(),
-            selection: location.selection,
-            populateReference: location.owned,
-            queue: location.queue,
-            workdir: location.workdir,
-          },
-        ),
-      )
-    })
+  withdrawOptions(queue.command("withdraw <branch>").description(WITHDRAW_DESCRIPTION))
+    .addHelpSection("On withdraw:", WITHDRAW_HELP)
+    .action(async (branch, options) => queueWithdraw(branch as string, options as PauseOptions))
   queue
     .command("resume")
     .description(
@@ -623,6 +625,16 @@ function buildProgram(
     .addHelpSection("On merge:", MERGE_HELP)
     .action(async (branch, options) => queueMerge(branch as string, options as MergeOptions))
 
+  // `yrd withdraw` is `yrd queue withdraw` (24824, absorbing design 3b § 1: the
+  // verb beside submit and merge), registered the way `yrd submit` and `yrd
+  // list` are — one action and one option table, with the alias in `--help`, so
+  // neither spelling can grow a flag the other lacks.
+  withdrawOptions(
+    program.command("withdraw <branch>").description(`${WITHDRAW_DESCRIPTION} (the same as ${name} queue withdraw)`),
+  )
+    .addHelpSection("On withdraw:", WITHDRAW_HELP)
+    .action(async (branch, options) => queueWithdraw(branch as string, options as PauseOptions))
+
   program
     .command("check <name...>")
     .description("run one of the queue's checks here, now, in a fresh worktree of HEAD")
@@ -694,6 +706,7 @@ function addExamples(program: CliCommand, name: string): void {
   ])
   program.addHelpSection("Aliases:", [
     [`${name} submit`, `${name} queue submit`],
+    [`${name} withdraw`, `${name} queue withdraw`],
     [`${name} list`, `${name} queue list`],
     [`${name} bay`, `${name} env (today's word)`],
   ])
