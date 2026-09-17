@@ -154,6 +154,9 @@ export function watchTier(columns: number, rows: number): WatchTier {
 // Keys in two columns and the legend under them: short and few enough that
 // the overlay neither clips nor runs off its own bottom edge at 100x31, the
 // narrowest size of the tier ladder.
+/** The help dialog's width: the terminal less a margin, and never wider than its longest legend entry needs. */
+const HELP_MAX_WIDTH = 120
+
 const HELP = [
   "q            leave the watch                   ?        this help",
   "Enter/Space  open the change                   Escape   close it, or this help",
@@ -193,6 +196,7 @@ export function WatchPane({
 }) {
   const { columns, rows: terminalRows } = useWindowSize()
   const tier = watchTier(columns, terminalRows)
+  const helpWidth = Math.min(columns - 4, HELP_MAX_WIDTH)
   const [shown, setShown] = useState(snapshot)
   const [failure, setFailure] = useState<Error | undefined>(undefined)
   const [readFailure, setReadFailure] = useState<ReadFailure | undefined>(undefined)
@@ -583,13 +587,14 @@ export function WatchPane({
               setHelpOpen(false)
             }}
           >
-            <ModalDialog title="yrd watch">
+            <ModalDialog title="yrd watch" width={helpWidth}>
               {HELP.map((line) => (
                 <Text key={line}>{line}</Text>
               ))}
               <Text> </Text>
               <Text bold>States</Text>
-              {legendLines(columns - 4).map((line, index) => (
+              {/* Wrapped to the dialog's inside, its padding taken off, so no entry wraps a second time. */}
+              {legendLines(helpWidth - 4).map((line, index) => (
                 <Text key={`${String(index)}:${line}`}>{line === "" ? " " : line}</Text>
               ))}
             </ModalDialog>

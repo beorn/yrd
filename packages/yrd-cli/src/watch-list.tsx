@@ -3,7 +3,7 @@
  * pills (watch-redesign items 3, 28, 30–33, 38):
  *
  *   YRD QUEUES   1 /hh ⎇ main                              ← the top line: title + queue pills, nothing else (30, 32b, 33)
- *   TIME      STATUS      RUN          CHANGES · in line order, then newest first · drafts 7d    BY
+ *   TIME      STATUS      RUN          CHANGES · drafts 7d · in line order, then newest first    BY
  *   17:02:11  ◉ checking  main#170206  task/bar  add a check (typecheck)         @chief   checking 1:02
  *   17:04:06  ○ submitted —            task/foo  fix the parser                  @ci       waiting 0:37
  *   16:55:40  ✓ merged    main#165540  task/baz  drop a flag                     @dev/2     took 14:20
@@ -230,7 +230,8 @@ export function ListHeader({ layout, draftWindow = "7d" }: { layout: ListLayout;
     <Cells layout={layout}>
       {{
         by: label("BY"),
-        changes: label(`CHANGES · ${STATE_WORDS.order.word} · ${STATE_WORDS.draft.word}s ${draftWindow}`),
+        // The draft window first: at 100 columns it is the order phrase that truncates.
+        changes: label(`CHANGES · ${STATE_WORDS.draft.word}s ${draftWindow} · ${STATE_WORDS.order.word}`),
         duration: label(""),
         run: label("RUN"),
         status: label("STATUS"),

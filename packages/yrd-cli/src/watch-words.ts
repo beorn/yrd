@@ -59,7 +59,7 @@ export const STATE_WORDS: Record<DisplayState | "waiting" | "took" | "order", Wo
     word: "cancelled",
   },
   direct: {
-    means: "a commit on the target that went around the queue",
+    means: "a commit on the target, around the queue",
     next: "nothing; said, never prevented",
     word: "direct",
   },
