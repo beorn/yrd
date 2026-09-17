@@ -16,7 +16,16 @@
 
 import React from "react"
 import { Box, Text, renderString } from "silvery"
-import { ListStack, LoudPause, QueueLine } from "./watch-frame.tsx"
+import {
+  BandBreakRows,
+  ListStack,
+  LoudPause,
+  QueueLine,
+  RunnerDetail,
+  bandPlan,
+  bandedRows,
+  runnerOf,
+} from "./watch-frame.tsx"
 import { NowProvider } from "./watch-clock.ts"
 import { ListHeader, ListRow, TopLine, listLayout, separatorBefore } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
@@ -34,10 +43,14 @@ export type ListingPrintOptions = Readonly<{
 
 /** The page as one React tree, so a test can render it into a terminal and a print can render it to a string. */
 export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; options: ListingPrintOptions }) {
-  const { rows, queues } = snapshot
-  const label = queues[0]?.label ?? "main"
+  const { queues } = snapshot
   const columns = Math.max(40, options.columns)
-  const layout = listLayout(rows, label, columns, snapshot.at)
+  // The bands, their order and their rules all come from watch-frame.tsx: a
+  // page that spelled them here is how the pane drifted last time.
+  const rows = bandedRows(snapshot.rows)
+  const runner = runnerOf(snapshot, snapshot.at)
+  const layout = listLayout(rows, columns, snapshot.at, runner)
+  const plan = bandPlan(rows, columns - 2, snapshot.drafts?.window ?? "7d")
   return (
     <NowProvider readAt={snapshot.at} live={false}>
       <Box flexDirection="column" width={columns} minWidth={0}>
@@ -57,34 +70,28 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
             {options.scope}
           </Text>
         )}
-        {/* RUNNER above the table, as the retired page had it (24169-old-list.md §1.3), then the rows. */}
-        <ListStack snapshot={snapshot} label={label} columns={columns - 2}>
-          <ListHeader layout={layout} draftWindow={snapshot.drafts?.window ?? "7d"} />
-          {rows.length === 0 ? (
-            <Text color="$fg-muted">nothing in line</Text>
-          ) : (
-            rows.map((item, index) => {
-              const separator = separatorBefore(rows, index)
-              const key = `${item.row.branch}@${item.row.head}#${item.run?.id ?? item.row.run ?? String(index)}`
-              return (
-                <Box key={key} flexDirection="column" minWidth={0}>
-                  {separator === undefined ? null : (
-                    <Text bold color="$fg-muted">
-                      {separator}
-                    </Text>
-                  )}
-                  <ListRow
-                    item={item}
-                    previous={rows[index - 1]}
-                    label={label}
-                    layout={layout}
-                    cursor={false}
-                    live={false}
-                  />
-                </Box>
-              )
-            })
-          )}
+        {/* Drafts, waiting, the runner, done — the one band order (watch-frame.tsx). */}
+        <ListStack snapshot={snapshot}>
+          <ListHeader layout={layout} />
+          {rows.map((item, index) => {
+            const separator = separatorBefore(rows, index)
+            const key = `${item.row.branch}@${item.row.head}#${item.run?.id ?? item.row.run ?? String(index)}`
+            return (
+              <Box key={key} flexDirection="column" minWidth={0}>
+                <BandBreakRows brk={plan.before.get(index)} snapshot={snapshot} layout={layout} />
+                {separator === undefined ? null : (
+                  <Text bold color="$fg-muted">
+                    {separator}
+                  </Text>
+                )}
+                <ListRow item={item} layout={layout} cursor={false} live={false} />
+                {/* The runner's second line hangs under the row that IS the runner. */}
+                {plan.holding === index ? <RunnerDetail snapshot={snapshot} layout={layout} /> : null}
+              </Box>
+            )
+          })}
+          <BandBreakRows brk={plan.after} snapshot={snapshot} layout={layout} />
+          {rows.length === 0 ? <Text color="$fg-muted">nothing in line</Text> : null}
           {(options.trailer ?? []).map((line) => (
             <Text key={line} wrap="truncate">
               {line}
@@ -92,7 +99,7 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
           ))}
           {options.scope === undefined ? (
             // A draft is a row and no change: the queue line counts the drafts.
-            <Text color="$fg-muted">{`${String(rows.filter((item) => item.row.state !== "draft").length)} change(s) · one row per run per change`}</Text>
+            <Text color="$fg-muted">{`${String(rows.filter((item) => item.row.state !== "draft").length)} change(s) · one row each`}</Text>
           ) : null}
         </ListStack>
       </Box>

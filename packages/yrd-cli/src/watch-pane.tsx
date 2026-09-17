@@ -86,7 +86,18 @@ import {
 } from "./watch-list.tsx"
 import { watchRowKey, type WatchRow } from "./watch-rows.ts"
 import { StatsBox } from "./watch-boxes.tsx"
-import { ListStack, LoudPause, QueueLine } from "./watch-frame.tsx"
+import {
+  BandBreakRows,
+  ListStack,
+  LoudPause,
+  QueueLine,
+  RunnerDetail,
+  bandHeight,
+  bandPlan,
+  bandedRows,
+  runnerOf,
+  type BandPlan,
+} from "./watch-frame.tsx"
 import type { RunnerFacts } from "./watch-runner.ts"
 import type { RunDecision } from "./watch-stats.ts"
 
@@ -263,11 +274,15 @@ export function WatchPane({
   )
 
   // The rows on screen: the status buckets and the queue pills are ON/OFF
-  // filters over the one table (items 9, 32); `all` is every one of both.
-  const visible = shown.rows.filter(
-    (item) =>
-      buckets.has(bucketOf(item.row)) &&
-      (visibleQueues === undefined || shown.queues.length === 0 || visibleQueues.has(shown.queues[0]?.label ?? "")),
+  // filters over the one table (items 9, 32); `all` is every one of both. The
+  // bands are applied HERE, before the cursor and the detail read an index, so
+  // every one of them addresses the sequence the reader is looking at.
+  const visible = bandedRows(
+    shown.rows.filter(
+      (item) =>
+        buckets.has(bucketOf(item.row)) &&
+        (visibleQueues === undefined || shown.queues.length === 0 || visibleQueues.has(shown.queues[0]?.label ?? "")),
+    ),
   )
   const allOn = buckets.size === BUCKETS.length && visibleQueues === undefined
   // Where the cursor's row is NOW; when it left the table, the cursor stays
@@ -476,8 +491,6 @@ export function WatchPane({
   const list = (
     <ListStack
       snapshot={shown}
-      label={label}
-      columns={listColumns - 2}
       paddingX={1}
       pills={
         terminalRows < PILLS_MIN_ROWS ? null : (
@@ -496,9 +509,8 @@ export function WatchPane({
     >
       <Table
         rows={visible}
+        snapshot={shown}
         empty={shown.rows.length === 0 ? "nothing in line" : "no change matches the filters"}
-        label={label}
-        draftWindow={shown.drafts?.window ?? "7d"}
         cursor={at}
         listRef={listRef}
         active={!opened || tier !== "full"}
@@ -657,12 +669,19 @@ function DraftDetail({ row }: { row: Row }) {
   )
 }
 
-/** The table: header, then the virtualized rows with a date separator between days. */
+/**
+ * The table: header, then the virtualized rows with their band rules, the
+ * runner's row and a date separator between days.
+ *
+ * The bands come from `bandPlan` (watch-frame.tsx) and nowhere else. A break
+ * costs rows, so `estimateHeight` budgets for it: a virtualized list that
+ * under-reports a row's height lays every box below it that many rows too
+ * high, which is how the STATS border landed on the footer once already.
+ */
 function Table({
   rows,
+  snapshot,
   empty,
-  label,
-  draftWindow,
   cursor,
   listRef,
   active,
@@ -670,11 +689,10 @@ function Table({
   live,
 }: {
   rows: readonly WatchRow[]
+  /** The whole reading: the runner's row is the queue's, never the selector's. */
+  snapshot: WatchSnapshot
   /** What an empty table says: an empty queue and a filter that hides everything are different facts. */
   empty: string
-  label: string
-  /** Which drafts the rows list, named on the header. */
-  draftWindow: DraftWindow
   cursor: number
   listRef: RefObject<ListViewHandle | null>
   active: boolean
@@ -686,12 +704,16 @@ function Table({
   // minute at most; the seconds belong to the cells, not to the table.
   const minute = useMinute()
   const { columns } = useWindowSize()
-  const layout = listLayout(rows, label, columns, minute)
+  const layout = listLayout(rows, columns, minute, runnerOf(snapshot, minute))
+  const plan: BandPlan = bandPlan(rows, columns - 4, snapshot.drafts?.window ?? "7d")
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      <ListHeader layout={layout} draftWindow={draftWindow} />
+      <ListHeader layout={layout} />
       {rows.length === 0 ? (
-        <Text color="$fg-muted">{empty}</Text>
+        <>
+          <BandBreakRows brk={plan.before.get(0) ?? plan.after} snapshot={snapshot} layout={layout} />
+          <Text color="$fg-muted">{empty}</Text>
+        </>
       ) : (
         <ListView
           ref={listRef}
@@ -701,7 +723,11 @@ function Table({
           nav
           active={active}
           virtualization="index"
-          estimateHeight={(index: number) => (separatorBefore(rows, index) === undefined ? 1 : 2)}
+          estimateHeight={(index: number) =>
+            (separatorBefore(rows, index) === undefined ? 1 : 2) +
+            bandHeight(plan.before.get(index)) +
+            (plan.holding === index ? 1 : 0)
+          }
           // Hover is an affordance, not a selection: the row under the pointer
           // is tinted (`meta.isHovered` below) and the cursor stays put, so a
           // detail open on one change is not switched by a passing mouse. A
@@ -710,30 +736,35 @@ function Table({
           onCursor={onCursor}
           renderItem={(item: WatchRow, index: number, meta: { isHovered: boolean }) => {
             const separator = separatorBefore(rows, index)
+            const brk = plan.before.get(index)
             const row = (
               <ListRow
                 item={item}
-                previous={rows[index - 1]}
-                label={label}
                 layout={layout}
                 cursor={index === cursor}
                 hovered={meta.isHovered}
                 live={live}
               />
             )
-            return separator === undefined ? (
-              row
-            ) : (
+            if (separator === undefined && brk === undefined && plan.holding !== index) return row
+            return (
               <Box flexDirection="column">
-                <Text bold color="$fg-muted">
-                  {separator}
-                </Text>
+                <BandBreakRows brk={brk} snapshot={snapshot} layout={layout} />
+                {separator === undefined ? null : (
+                  <Text bold color="$fg-muted">
+                    {separator}
+                  </Text>
+                )}
                 {row}
+                {/* The runner's second line hangs under the row that IS the runner. */}
+                {plan.holding === index ? <RunnerDetail snapshot={snapshot} layout={layout} /> : null}
               </Box>
             )
           }}
         />
       )}
+      {/* Nothing is done yet, so the runner's row follows the last one. */}
+      <BandBreakRows brk={rows.length === 0 ? undefined : plan.after} snapshot={snapshot} layout={layout} />
     </Box>
   )
 }

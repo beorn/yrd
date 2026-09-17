@@ -12,7 +12,15 @@ import { homedir } from "node:os"
 import { clocks, runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
 import { STATE_WORDS, type DisplayState } from "./watch-words.ts"
 
-export { LEGEND_STATES, STATE_WORDS, legendLines, type DisplayState, type WordEntry } from "./watch-words.ts"
+export {
+  LEGEND_STATES,
+  RUNNER_STATES,
+  STATE_WORDS,
+  legendLines,
+  type DisplayState,
+  type RunnerState,
+  type WordEntry,
+} from "./watch-words.ts"
 
 /**
  * The word a row's state reads as (watch-words.ts): a check running on it now
@@ -96,25 +104,13 @@ export const STATE_GLYPH: Readonly<Record<Row["state"], string>> = {
 /** The glyph a check running RIGHT NOW overlays on any state: the overlay reads live, the word still reads the state. */
 export const RUNNING_GLYPH = "◉"
 
+/** The runner's own marker, on its own row: the one row in the table that is not a change. */
+export const RUNNER_GLYPH = "▶"
+
 /** The glyph for a row: the running one while a check runs on it, else its state's. */
 export function stateGlyph(row: Pick<Row, "state" | "live">): string {
   return row.live === undefined ? STATE_GLYPH[row.state] : RUNNING_GLYPH
 }
-
-/** The one severity color per state: the retired presentation's ladder, kept — open is accent, working is info, done is success, fail is error, stuck is warning. */
-export const STATE_COLOR: Readonly<Record<Row["state"], string>> = {
-  checked: "$fg-warning",
-  direct: "$fg-muted",
-  draft: "$fg-muted",
-  failed: "$fg-error",
-  merged: "$fg-success",
-  queued: "$fg-accent",
-  stuck: "$fg-warning",
-  withdrawn: "$fg-muted",
-}
-
-/** The working color a live check overlays on any state. */
-export const RUNNING_COLOR = "$fg-info"
 
 /** The one glyph per check state, so the tab strip, the step lines and the one-shot print cannot disagree about a check. */
 export const CHECK_GLYPH: Readonly<Record<CheckView["state"], string>> = {
@@ -136,9 +132,16 @@ export const CHECK_COLOR: Readonly<Record<CheckView["state"], string>> = {
   unmeasured: "$fg-warning",
 }
 
-/** The color for a row: the working one while a check runs on it, else its state's. */
+/**
+ * The colour for a row, read from the SAME entry its word came from
+ * (watch-words.ts): the retired presentation's ladder, kept — open is accent,
+ * working is info, done is success, fail is error, stuck is warning. A check
+ * running now carries the working colour because it carries the word
+ * `checking`, rather than through a second overlay nobody could see in the
+ * table beside it.
+ */
 export function stateColor(row: Pick<Row, "state" | "live">): string {
-  return row.live === undefined ? STATE_COLOR[row.state] : RUNNING_COLOR
+  return STATE_WORDS[displayState(row)].color
 }
 
 /**

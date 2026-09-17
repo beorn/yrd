@@ -1338,8 +1338,11 @@ export async function coreQueueCommand(
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
           runner: readRunnerFacts(workdir),
-          // Every row, per run, whatever the filter and the lens: the box counts the queue, not the view.
-          decisions: decisionsOfRows(watchRows(all, { journals })),
+          // Every row, per RUN, whatever the filter and the lens: the box counts
+          // decisions and a change checked twice made two, so it asks for the
+          // per-run lens by name now that the table's own lens is one row per
+          // change. It counts the queue, not the view.
+          decisions: decisionsOfRows(watchRows(all, { journals, perRun: true })),
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
           ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
           ...(scope === undefined ? {} : { scope }),
@@ -1749,7 +1752,8 @@ export async function coreQueueCommand(
       // The counts below are read from the same rows; a row the journal could
       // not be read for must not make an understated stat look measured.
       if (options.json !== true) narrateMalformed(io, journals, new Set())
-      const rows = watchRows(all, { journals })
+      // Per RUN: `queue stats` counts decisions, and one change can carry several.
+      const rows = watchRows(all, { journals, perRun: true })
       // Pushed, never submitted: the drafts (the KPI ruling on 24163), from the
       // one derivation over this same reading and the same window. Nothing is
       // fetched, so a head never read here counts as undated.

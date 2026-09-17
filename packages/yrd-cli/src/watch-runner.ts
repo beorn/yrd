@@ -1,6 +1,6 @@
 /**
- * What the RUNNER box knows about the service (watch-redesign items 13, 14,
- * 16, 17, 27, 29, 37), read from yrd's own files and nothing else:
+ * What the page knows about the runner (watch-redesign items 13, 14, 16, 17,
+ * 27, 29, 37), read from yrd's own files and nothing else:
  *
  * - the newest run journal under `<workdir>/logs/`: its id (the start
  *   instant is in the name), its header record (target, gitlink, checks) and
@@ -10,19 +10,25 @@
  *   is alive.
  *
  * The queue core has no resident status wire (deleted at M6) and the watch
- * depends on no supervisor, so this is the whole instrument. ONE pure
- * function, {@link runnerHealth}, turns it into one of four words with one
- * named threshold; the box renders the word and never recomputes the
- * conditions. It is about the SERVICE and never competes with `Row.live`,
- * which alone says whether a change is under a check.
+ * depends on no supervisor, so this is the whole instrument. TWO pure
+ * functions turn it into the runner's row on the flow page: {@link runnerWord}
+ * picks one word from THE ONE WORD TABLE against one named threshold, and
+ * {@link runnerLine} says what it holds, since when and whether it is alive.
+ * The row renders them and never recomputes the conditions. Both are about the
+ * SERVICE and never compete with `Row.live`, which alone says whether a change
+ * is under a check.
  *
  * Off the queue's own machine there is no journal, and {@link RunnerFacts.absent}
- * carries the sentence that says where it looked. Never a blank, never a zero.
+ * carries the sentence that says where it looked. Never a blank, never a zero —
+ * and never an invented status: the runner publishes none of its own yet, so
+ * the row reads `?` there rather than a guess dressed as a reading.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { runDiedInPreamble, runStartedAt, type LogRecord } from "@yrd/queue-core"
+import { runDiedInPreamble, runStartedAt, type LogRecord, type StopFact } from "@yrd/queue-core"
+import { clock, mediaDuration } from "./watch-format.ts"
+import { STATE_WORDS, type RunnerState } from "./watch-words.ts"
 
 /** The run's `.pid` file name, as `claimWorktrees` in the core spells it. */
 const RUN_PID = ".pid"
@@ -58,7 +64,7 @@ export type RunnerFacts = Readonly<{
   latest?: RunnerRun
 }>
 
-/** Read what the runner box shows. Nothing here writes; one readdir, one stat, one header read, one pid probe. */
+/** Read what the runner's row shows. Nothing here writes; one readdir, one stat, one header read, one pid probe. */
 export function readRunnerFacts(workdir: string): RunnerFacts {
   const journalDir = join(workdir, "logs")
   let names: readonly string[]
@@ -277,17 +283,6 @@ function running(pid: number): boolean {
 }
 
 /**
- * The one word the box renders.
- *
- * `processing` REPLACES `running`, and the word follows the predicate rather
- * than the other way round (spec items 1 and 5, ruled by @chief 2026-09-11).
- * The ported marker said `running` whenever the service PROCESS was up, which
- * is nearly always, so it separated nothing; the operator's question is whether
- * a change is under a check RIGHT NOW.
- */
-export type RunnerHealth = "processing" | "idle" | "silent" | "absent" | "unstarted"
-
-/**
  * The fleet's own ceiling: a request older than ten minutes is broken, not
  * slow (CLAUDE.md), and a queue with changes in line whose journal has not
  * moved for that long is the same thing.
@@ -295,23 +290,43 @@ export type RunnerHealth = "processing" | "idle" | "silent" | "absent" | "unstar
 export const SILENT_AFTER_MS = 10 * 60 * 1000
 
 /**
- * ONE derivation of the service's health. `absent` when there is no journal on
- * this machine at all; `unstarted` when the newest run threw in its Git preamble
- * and stopped; `silent` when nothing has written for {@link SILENT_AFTER_MS};
- * `processing` when a change is under a check right now; `idle` otherwise.
+ * ONE derivation of the runner's word, in THE ONE WORD TABLE's vocabulary
+ * (watch-words.ts), because the flow page draws the runner as a row in the
+ * same STATUS column as every change.
  *
- * THE PREDICATE IS NOT "THE PROCESS EXISTS" (items 1 and 5). It used to be
- * `facts.latest.alive`, and because the service is a long-running
- * `yrd queue up --interval 120` under hab, that was true nearly always: the
- * marker said `running` in every state it existed to tell apart. It also
- * short-circuited ABOVE the silence check, so a live process whose journal had
- * stopped moving still read healthy -- the wedged case, masked by the very
- * process that was wedged.
+ * The ladder, and its order is the whole safety argument:
  *
- * `underCheck` is supplied by the caller from the SAME derivation the status
- * pills use (`bucketOf(row) === "running"`, i.e. `row.live !== undefined`), so
- * "a change is under a check" has one home and the marker cannot drift from the
- * list beside it. It is not a proxy: it is the fact itself, already on the row.
+ * 1. `unstarted` — A DEFINITE OUTCOME OUTRANKS A MEASUREMENT OF SILENCE
+ *    (@i/10-yrd/24470). The newest run threw in its Git preamble and is not
+ *    executing: that is not a queue that has gone quiet, it is a queue that
+ *    could not start, and the cure is in the journal's last Git row rather
+ *    than in `hab ps`. Reporting it as silence would be true of the symptom
+ *    and useless about the cause.
+ * 2. `silent` — nothing has written for {@link SILENT_AFTER_MS}. SILENCE
+ *    OUTRANKS EVERY LIVE WORD. `underCheck` is read off the rows, and a
+ *    service that died mid-check leaves a row still marked live; taking that
+ *    at face value would announce a check running over a dead queue — a worse
+ *    lie than the one being removed, and precisely the failure 24486 exists to
+ *    prevent. It outranks the stop for the same reason: a round still opens
+ *    and records through a PAUSE, so a paused queue whose journal has stopped
+ *    moving is a SERVICE that is down on top of a pause, which is the louder
+ *    and the more actionable of the two.
+ * 3. `stopped` / `paused` — the line is not moving BY DECISION, which is the
+ *    answer to the question the reader is asking. The stop is the reading's
+ *    own (queue-core `stopFact`), a git fact, so it is the one word this row
+ *    can still say off the queue's machine.
+ * 4. `checking` — a change is under a check RIGHT NOW. THE PREDICATE IS NOT
+ *    "THE PROCESS EXISTS" (items 1 and 5): it used to be `facts.latest.alive`,
+ *    and because the service is a long-running `yrd queue up --interval 120`
+ *    under hab, that was true nearly always, so the marker said `running` in
+ *    every state it existed to tell apart. `underCheck` is supplied by the
+ *    caller from the SAME derivation the status pills use (`bucketOf(row) ===
+ *    "running"`), so "a change is under a check" has one home and this cannot
+ *    drift from the rows below it.
+ * 5. `idle` — a journal that is moving and nothing under a check.
+ * 6. `unpublished` — no run journal on this machine at all, and no stop to
+ *    report. The runner does not publish its own status yet, so `?` is the
+ *    honest answer and no source is invented to avoid printing it.
  *
  * SILENCE DOES NOT WAIT FOR A QUEUE (@i/10-yrd/24486). It used to also require
  * a change in line, on the reading that silence only matters while something
@@ -325,25 +340,137 @@ export const SILENT_AFTER_MS = 10 * 60 * 1000
  * The journal is a heartbeat and that is what makes the weaker condition
  * sound: a round writes one whether or not it has work, so the newest mtime
  * moves on the service's own cadence — measured at about 2:05 on the live
- * queue, nearly five times inside this ceiling — and it keeps moving through a
- * PAUSE, where a round still opens and records before it stops. So an idle
- * healthy queue is never called silent, whatever is or is not in line.
+ * queue, nearly five times inside this ceiling. So an idle healthy queue is
+ * never called silent, whatever is or is not in line.
  */
-export function runnerHealth(facts: RunnerFacts, now: Date, underCheck: boolean): RunnerHealth {
-  if (facts.latest === undefined) return "absent"
-  // A DEFINITE OUTCOME OUTRANKS A MEASUREMENT OF SILENCE (24470). The newest
-  // run threw in its Git preamble and is not executing: that is not a queue
-  // that has gone quiet, it is a queue that could not start, and the cure is in
-  // the journal's last Git row rather than in `hab ps`. Reporting it as silence
-  // would be true of the symptom and useless about the cause.
-  if (facts.latest.unstarted === true) return "unstarted"
-  // SILENCE OUTRANKS PROCESSING, and the order is the whole safety argument.
-  // `underCheck` is read off the rows, and a service that died mid-check leaves
-  // a row still marked live; taking that at face value would announce
-  // `processing` over a dead queue -- a worse lie than the one being removed,
-  // and precisely the failure 24486 exists to prevent. A journal that has not
-  // moved for the ceiling is silent whatever the rows claim.
-  if (now.getTime() - facts.latest.lastWriteAt.getTime() > SILENT_AFTER_MS) return "silent"
-  if (underCheck) return "processing"
+export function runnerWord(
+  facts: RunnerFacts | undefined,
+  now: Date,
+  underCheck: boolean,
+  stopped?: StopFact | null,
+): RunnerState {
+  const latest = facts?.latest
+  if (latest !== undefined) {
+    if (latest.unstarted === true) return "unstarted"
+    if (now.getTime() - latest.lastWriteAt.getTime() > SILENT_AFTER_MS) return "silent"
+  }
+  if (stopped !== undefined && stopped !== null) return stopped.change === null ? "paused" : "stopped"
+  if (latest === undefined) return "unpublished"
+  if (underCheck) return "checking"
   return "idle"
+}
+
+/** The change a check holds right now, as the runner's row draws it. */
+export type HeldChange = Readonly<{ branch: string; subject?: string; submitter?: string; since: Date }>
+
+/**
+ * The runner's row, in the table's own columns: TIME is the round's start,
+ * STATUS the word above, CHANGES what it holds OR why it holds nothing, BY the
+ * held change's submitter, and the last cell the word and how long.
+ *
+ * {@link RunnerLine.detail} is the second, indented line, and it is NEVER
+ * blank: off the queue's machine it says so and says where it looked, because
+ * a blank line where a fact belongs reads as a queue with nothing to say.
+ */
+export type RunnerLine = Readonly<{
+  state: RunnerState
+  /** When this round started; absent when no journal was read on this machine. */
+  at?: Date
+  /** What it holds, or why it holds nothing. */
+  holds: string
+  /** The held change's submitter. */
+  by?: string
+  /** The duration cell: the word and how long it has been true. */
+  duration?: string
+  /** Host-only detail, and the sentence that says so when there is none. */
+  detail: string
+}>
+
+/**
+ * Everything the runner's row says, derived once. Pure: every input was read
+ * by the round that drew the page, and nothing here opens a file or a ref.
+ */
+export function runnerLine(
+  facts: RunnerFacts | undefined,
+  now: Date,
+  options: Readonly<{ held?: HeldChange; waiting?: number; stopped?: StopFact | null; pause?: string }> = {},
+): RunnerLine {
+  const { held, waiting = 0, stopped, pause } = options
+  const state = runnerWord(facts, now, held !== undefined, stopped)
+  const latest = facts?.latest
+  const word = STATE_WORDS[state].word
+  const since = (at: Date): string => mediaDuration(now.getTime() - at.getTime())
+  const beat = latest === undefined ? undefined : since(latest.lastWriteAt)
+  const at = latest === undefined ? {} : { at: latest.startedAt }
+  // Never a blank: with a journal this says the beat, the round and the
+  // checks; without one it says where it looked and that nothing is published.
+  const detail =
+    latest === undefined
+      ? `${facts?.absent ?? "no run journal was read on this machine"} · the runner publishes no status of its own yet, so this row says only what this machine can see`
+      : [
+          `${latest.alive ? "alive" : "no process"}: beat ${String(beat)} ago`,
+          `this round since ${clock(latest.startedAt, { seconds: true })}`,
+          `${latest.checks === undefined ? "the run's header record was not read" : latest.checks.join(", ")}, output ${String(beat)} ago (this machine only)`,
+        ].join(" · ")
+  switch (state) {
+    case "checking":
+    case "merging": {
+      const holding = held as HeldChange
+      return {
+        ...at,
+        detail,
+        duration: `${word} ${since(holding.since)}`,
+        holds: `${holding.branch}${holding.subject === undefined ? "" : ` ${holding.subject}`}`,
+        state,
+        ...(holding.submitter === undefined ? {} : { by: holding.submitter }),
+      }
+    }
+    case "stopped":
+    case "paused": {
+      const stop = stopped as StopFact
+      const at2 = new Date(stop.since)
+      const change = stop.change === null ? undefined : stop.change.slice(0, stop.change.lastIndexOf("@"))
+      return {
+        ...at,
+        detail: pause ?? detail,
+        duration: `${word} ${since(at2)}`,
+        holds:
+          change === undefined
+            ? `the line is stopped${stop.by === "" ? "" : ` by ${stop.by}`} since ${clock(at2)} — resume with yrd queue resume`
+            : `the line stopped at ${change} since ${clock(at2)} — merge the fix, yrd queue withdraw ${change}, or yrd queue resume`,
+        state,
+      }
+    }
+    case "silent": {
+      return {
+        ...at,
+        detail,
+        duration: `${word} ${String(beat)}`,
+        holds: `no journal write for ${String(beat)}${waiting === 0 ? ", and nothing is in line, so a change submitted now would not be picked up" : ` while ${String(waiting)} ${waiting === 1 ? "change waits" : "changes wait"} in line`}`,
+        state,
+      }
+    }
+    case "unstarted": {
+      const run = latest as RunnerRun
+      return {
+        ...at,
+        detail: `${join(facts?.journalDir ?? "", `${run.id}.jsonl`)} — its last Git row names the call that failed`,
+        duration: `${word} ${String(beat)}`,
+        holds: `run ${run.id} died in its Git preamble before it could read its queue`,
+        state,
+      }
+    }
+    case "unpublished": {
+      return { detail, holds: "no runner status is published for this queue", state }
+    }
+    default: {
+      return {
+        ...at,
+        detail,
+        ...(beat === undefined ? {} : { duration: `${word} ${beat}` }),
+        holds: waiting === 0 ? "nothing in line" : `nothing under a check, and ${String(waiting)} in line`,
+        state,
+      }
+    }
+  }
 }

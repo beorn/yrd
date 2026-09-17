@@ -130,8 +130,20 @@ export type WatchRow = Readonly<{
 }>
 
 export type WatchRowOptions = Readonly<{
-  /** One row per change instead of one per run: the opt-in lens (S2.13). */
+  /**
+   * Accepted and INERT: one row per change is what {@link watchRows} does now,
+   * so `--latest` asks for the only behaviour there is. It stays accepted
+   * because removing it breaks every script that passes it for no gain, and it
+   * stays inert because keeping it DOING something would keep two row models
+   * alive. Delete it when no caller passes it.
+   */
   latest?: boolean
+  /**
+   * One row per RUN of each change instead of one per change. STATS counts
+   * decisions, and a change checked twice made two of them, so the box and
+   * `yrd queue stats` ask for this lens by name; the TABLE never does.
+   */
+  perRun?: boolean
   /** What the run journals on this machine say; absent leaves one row per change. */
   journals?: Journals
 }>
@@ -144,12 +156,24 @@ export function watchRowKey(row: WatchRow): string {
 
 /**
  * The rows a watch shows, in the order `list()` already put them: in line
- * first by position, then the ended, newest first. A change with runs keeps
- * that place and its runs follow it newest first, so the reading order is
- * still "what is in line, then what happened".
+ * first by position, then the ended, newest first.
+ *
+ * ONE ROW PER CHANGE. The page is about changes, and a change checked twice is
+ * one change: the operator read their own queue on 2026-09-17 and saw two rows
+ * for one branch, which is what this used to do BY DESIGN wherever a run
+ * journal could be read. That made the duplicate host-only by construction —
+ * invisible from any other clone, where `journals` is undefined and the early
+ * return already fired — and it answered "what has the queue DONE" on a page
+ * whose question is "where does each change stand". The two lenses both still
+ * exist; S1 swapped which one is the default.
+ *
+ * {@link WatchRowOptions.perRun} is the other lens, and it is not a flag
+ * anybody types: no `--runs` spelling exists (D2). Its one consumer is STATS,
+ * which counts a DECISION per run and would silently understate retries and
+ * lose every superseded run's verdict if it were folded away.
  */
 export function watchRows(rows: readonly Row[], options: WatchRowOptions = {}): readonly WatchRow[] {
-  if (options.latest === true || options.journals === undefined) return rows.map((row) => ({ row }))
+  if (options.perRun !== true || options.journals === undefined) return rows.map((row) => ({ row }))
   const journals = options.journals
   return rows.flatMap((row) => {
     const runs = journals.runs.get(journalKey(row.branch, row.head)) ?? []

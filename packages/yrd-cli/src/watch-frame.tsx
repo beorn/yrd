@@ -1,13 +1,19 @@
 /**
- * The frame the watch and the printed page share — spelled ONCE.
+ * The frame the watch and the printed page share — spelled ONCE — and THE ONE
+ * BAND ORDER of the flow page, which is the reason this file exists.
  *
- * The retired surface stacked, top to bottom: the loud pause line only when
- * there is no RUNNER rail to carry it, the title line, the RUNNER box with the
- * pause on its last rail, the table header and rows, the STATS box, the pills
- * (24169-old-watch.md §1, 24169-old-list.md §1). The pane and `yrd list` each
- * spelled that order by hand and drifted apart (2026-09-05: the pane got RUNNER
- * back above the table while the page still printed it last), so the order
- * lives here and both render it.
+ * Down the screen: **drafts · waiting · the runner · done**. Within each band
+ * the rows are newest first, so TIME decreases going down on both sides of the
+ * runner and DISTANCE FROM THE RUNNER IS DISTANCE IN TIME FROM NOW, in both
+ * directions. The bottom waiting row is the oldest submission and the front of
+ * the line — it goes next; the top done row is what just came out.
+ *
+ * The order lives here and both surfaces render it through {@link bandPlan},
+ * because the last order they each spelled by hand drifted apart within
+ * eighteen months: the pane got RUNNER back above the table while `yrd list`
+ * still printed it last (2026-09-05). An edit that changes the bands in
+ * `watch-print.tsx` alone has done half the change, and the half it skipped is
+ * the half that regresses.
  *
  * Under the title, both draw the queue line (@i/10-yrd/24196): how many
  * changes wait and why the line is not moving, read from the whole reading
@@ -17,24 +23,24 @@
 import type { ReactNode } from "react"
 import { Box, Text } from "silvery"
 import type { Row } from "@yrd/queue-core"
-import { RunnerBox } from "./watch-boxes.tsx"
 import { useNow } from "./watch-clock.ts"
 import { STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
-import { bucketOf, clockOf } from "./watch-list.tsx"
+import { RunnerRow, bucketOf, clockOf, type ListLayout } from "./watch-list.tsx"
+import { runnerLine } from "./watch-runner.ts"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import type { WatchRow } from "./watch-rows.ts"
 
-/** The pause when nothing else will carry it: RUNNER owns the rail whenever a run journal exists. */
-export function pauseWithoutRunner(snapshot: Pick<WatchSnapshot, "pause" | "runner">): string | undefined {
-  return snapshot.runner === undefined ? snapshot.pause : undefined
-}
-
-/** One loud line above the title — only when there is no RUNNER box to say it. */
-export function LoudPause({ snapshot }: { snapshot: Pick<WatchSnapshot, "pause" | "runner"> }) {
-  const pause = pauseWithoutRunner(snapshot)
-  return pause === undefined ? null : (
+/**
+ * One loud line above the title. The retired box carried the pause on its own
+ * rail and this line only spoke when there was no box; the runner's row is
+ * always there now, and it says the WORD `paused` and what lifts the stop, not
+ * the record's own sentence — so the sentence still appears exactly once, and
+ * it appears where the loudest state on the page belongs.
+ */
+export function LoudPause({ snapshot }: { snapshot: Pick<WatchSnapshot, "pause"> }) {
+  return snapshot.pause === undefined ? null : (
     <Text bold color="$fg-warning" wrap="truncate">
-      {pause}
+      {snapshot.pause}
     </Text>
   )
 }
@@ -142,36 +148,194 @@ export function QueueLine({ snapshot, columns }: { snapshot: WatchSnapshot; colu
 }
 
 /**
- * RUNNER, then the rows, then the pills row, then STATS — the one order (the
- * retired pane's items 2–6). The rows are whatever the caller renders: the
- * pane's virtualised Table, the page's static list. `pills` and `stats` are
- * absent on the page, which prints the rows and nothing interactive.
+ * THE ONE BAND ORDER, top to bottom. `runner` is the only band that is always
+ * drawn: an empty queue still has a runner, and a page that says nothing about
+ * it reads as a page with nothing to say.
+ */
+export const BANDS = ["drafts", "waiting", "runner", "done"] as const
+export type Band = (typeof BANDS)[number]
+
+/**
+ * Which band a row falls in. THE CHANGE A CHECK HOLDS RIGHT NOW *IS* THE
+ * RUNNER'S ROW — it is not drawn again above it, and it is not dropped either:
+ * dropping it would take the one row an operator most wants to open out of the
+ * pane's reach, and drawing it twice is the duplication the band replaced.
+ */
+export function bandOf(row: Pick<Row, "state" | "position" | "live">): Band {
+  if (row.live !== undefined) return "runner"
+  if (row.state === "draft") return "drafts"
+  if (row.position !== undefined) return "waiting"
+  return "done"
+}
+
+/**
+ * The rows in band order, each band newest first.
+ *
+ * Waiting is the one band whose order is not already the reading's: `list()`
+ * puts the line in position order, front first, and the flow page puts the
+ * front of the line at the BOTTOM, against the runner, because that is the row
+ * that goes next. A stuck change stopped the line, so it stands at the front
+ * and lands directly above the runner without a rule of its own.
+ */
+export function bandedRows(rows: readonly WatchRow[]): readonly WatchRow[] {
+  const of = (band: Band): readonly WatchRow[] => rows.filter((item) => bandOf(item.row) === band)
+  const waiting = [...of("waiting")].sort((left, right) => (right.row.position ?? 0) - (left.row.position ?? 0))
+  return [...of("drafts"), ...waiting, ...of("runner"), ...of("done")]
+}
+
+/** A band's rule: the legend that opens it, drawn to the table's width. */
+export function bandRule(band: Band, count: number, width: number, draftWindow = "7d"): string {
+  const said =
+    band === "drafts"
+      ? `${STATE_WORDS.draft.word}s (${draftWindow}): ${STATE_WORDS.draft.means ?? ""} · TIME = pushed`
+      : band === "waiting"
+        ? `${String(count)} ${STATE_WORDS.waiting.word}, newest first; the bottom row goes next · TIME = submitted`
+        : "done, newest first · TIME = ended"
+  const rule = `── ${said} `
+  return rule.padEnd(Math.max(rule.length, width), "─")
+}
+
+/** What is drawn at one point in the table that is not a change's row. */
+export type BandBreak = Readonly<{
+  /** The band rules opening here, top to bottom. */
+  rules: readonly string[]
+  /** The runner's own row is drawn here, because no row of this table is it. */
+  runner: boolean
+}>
+
+/**
+ * The plan both surfaces draw the bands from: what opens above each row, and
+ * what follows the last one. Give it rows already in {@link bandedRows} order.
+ *
+ * The runner is placed whether or not it holds a change: when it holds one,
+ * that row IS the runner's row ({@link BandPlan.holding}) and nothing extra is
+ * drawn above it; when it holds none, a row of its own is drawn where the band
+ * stands — before the first done row, or after them all when nothing is done.
+ */
+export type BandPlan = Readonly<{
+  before: ReadonlyMap<number, BandBreak>
+  after: BandBreak | undefined
+  /** The index of the row the runner holds, when this table has it. */
+  holding: number | undefined
+}>
+
+export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow = "7d"): BandPlan {
+  const before = new Map<number, BandBreak>()
+  const opening = new Map<number, string[]>()
+  let after: BandBreak | undefined
+  let holding: number | undefined
+  let cursor = 0
+  let runnerAt: number | undefined
+  for (const band of BANDS) {
+    const count = rows.filter((item) => bandOf(item.row) === band).length
+    if (band === "runner") {
+      if (count === 0) runnerAt = cursor
+      else holding = cursor
+      cursor += count
+      continue
+    }
+    if (count === 0) continue
+    const rules = opening.get(cursor) ?? []
+    rules.push(bandRule(band, count, width, draftWindow))
+    opening.set(cursor, rules)
+    cursor += count
+  }
+  for (const [index, rules] of opening) {
+    before.set(index, { rules, runner: index === runnerAt })
+  }
+  if (runnerAt !== undefined && !before.has(runnerAt)) {
+    if (runnerAt < rows.length) before.set(runnerAt, { rules: [], runner: true })
+    else after = { rules: [], runner: true }
+  }
+  return { after, before, holding }
+}
+
+/** How many terminal rows a break costs, so a virtualized list can budget for it. */
+export function bandHeight(brk: BandBreak | undefined): number {
+  if (brk === undefined) return 0
+  // The runner is two rows: its own, and the indented line of host-only detail.
+  return brk.rules.length + (brk.runner ? 2 : 0)
+}
+
+/** The runner's line, read from the WHOLE reading: the queue's runner, never the selector's. */
+export function runnerOf(snapshot: WatchSnapshot, now: Date) {
+  const { held, waiting } = lineOf(snapshot.unfiltered)
+  return runnerLine(snapshot.runner, now, {
+    ...(held?.live === undefined
+      ? {}
+      : {
+          held: {
+            branch: held.branch,
+            since: held.live.since,
+            ...(held.subject === undefined ? {} : { subject: held.subject }),
+            ...(held.submitter === undefined ? {} : { submitter: held.submitter }),
+          },
+        }),
+    ...(snapshot.pause === undefined ? {} : { pause: snapshot.pause }),
+    ...(snapshot.stopped === undefined ? {} : { stopped: snapshot.stopped }),
+    waiting: waiting.length,
+  })
+}
+
+/** One break, drawn: the band rules that open here, then the runner's own row when this is its place. */
+export function BandBreakRows({
+  brk,
+  snapshot,
+  layout,
+}: {
+  brk: BandBreak | undefined
+  snapshot: WatchSnapshot
+  layout: ListLayout
+}) {
+  const now = useNow()
+  if (brk === undefined) return null
+  return (
+    <Box flexDirection="column" flexShrink={0} minWidth={0}>
+      {brk.rules.map((rule) => (
+        <Text key={rule} color="$fg-muted" wrap="truncate">
+          {rule}
+        </Text>
+      ))}
+      {brk.runner ? <RunnerRow line={runnerOf(snapshot, now)} layout={layout} /> : null}
+    </Box>
+  )
+}
+
+/** The runner's second line: host-only detail, hung under the row it belongs to, and never blank. */
+export function RunnerDetail({ snapshot, layout }: { snapshot: WatchSnapshot; layout: ListLayout }) {
+  const now = useNow()
+  return (
+    <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+      <Box width={layout.timeWidth + layout.statusWidth + 1} flexShrink={0} />
+      <Box flexGrow={1} flexBasis={0} minWidth={0} overflow="hidden">
+        <Text color="$fg-muted" wrap="truncate">
+          {runnerOf(snapshot, now).detail}
+        </Text>
+      </Box>
+    </Box>
+  )
+}
+
+/**
+ * The bands, then the pills row, then STATS — the one order (the retired
+ * pane's items 2–6). The bands are whatever the caller renders: the pane's
+ * virtualised Table, the page's static list, both planned by {@link bandPlan}.
+ * `pills` and `stats` are absent on the page, which prints the rows and
+ * nothing interactive.
  */
 export function ListStack({
   snapshot,
-  label,
-  columns,
   children,
   pills,
   stats,
   paddingX = 0,
 }: {
   snapshot: WatchSnapshot
-  label: string
-  /** The inner width the boxes lay out to. */
-  columns: number
   children: ReactNode
   pills?: ReactNode
   stats?: ReactNode
   paddingX?: number
 }) {
-  // The marker's predicate, item 5: a change is under a check RIGHT NOW, never
-  // "the service process exists". Read through `bucketOf` so this and the
-  // status pills answer the question from one definition -- a second predicate
-  // here would drift from the list sitting directly below the box. Like the
-  // rail's count, it reads the whole reading: RUNNER is the queue's, not the
-  // selector's, and must not say idle while the queue line says checking.
-  const underCheck = snapshot.unfiltered.some((item) => bucketOf(item.row) === "running")
   // Nothing to say is said by nothing: the native contract observes the root
   // queue only, every round, and a clean root-v1 round has no notice. A
   // reading that failed is loud.
@@ -185,16 +349,6 @@ export function ListStack({
   const failed = said?.contract === "root-v1" && said.outcome !== "observed"
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={paddingX}>
-      {snapshot.runner === undefined ? null : (
-        <RunnerBox
-          facts={snapshot.runner}
-          label={label}
-          inLine={lineOf(snapshot.unfiltered).waiting.length}
-          underCheck={underCheck}
-          columns={columns}
-          {...(snapshot.pause === undefined ? {} : { pause: snapshot.pause })}
-        />
-      )}
       {said === undefined ? null : (
         <Box flexDirection="column" flexShrink={0}>
           <Text {...(failed ? { bold: true, color: "$fg-error" } : {})}>{said.message}</Text>
