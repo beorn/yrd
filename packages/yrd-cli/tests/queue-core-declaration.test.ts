@@ -205,18 +205,24 @@ describe("a queue is the selected origin branch carrying config", () => {
     expect(await git(["remote", "get-url", "origin"])).toBe(`${origin}\n`)
     expect(await git(["ls-remote", "--refs", "origin", "refs/heads/task/addressed", "refs/yrd/main/*"])).toBe("")
     expect((await git(["ls-remote", "--refs", destination, "refs/heads/task/addressed"])).split("\t")[0]).toBe(head)
+    // A paused destination still takes the submit (the andon, operator
+    // 2026-09-16), and the echo names the ADDRESSED queue's resume command.
     await writePause(git, destination, "main", { by: "@dev/3", kind: "paused", reason: "inspect destination" })
-    const refused = capture(repo)
+    const accepted = capture(repo)
     expect(
       await runYrdProcess(
         ["bun", "yrd", "submit", "--queue", `${destination}#main`, "--dry-run", "--json"],
-        refused.io,
+        accepted.io,
       ),
-    ).toBe(1)
-    expect(refused.stderr()).toContain("inspect destination")
-    expect(refused.stderr()).toContain("paused by @dev/3 since")
-    expect(refused.stderr()).toContain(`yrd queue resume --queue '${destination}#main' --reason '<text>'`)
-    expect(refused.stdout()).toBe("")
+      accepted.stderr(),
+    ).toBe(0)
+    expect(accepted.stderr()).toContain("inspect destination")
+    expect(accepted.stderr()).toContain("paused by @dev/3 since")
+    expect(accepted.stderr()).toContain(`yrd queue resume --queue '${destination}#main' --reason '<text>'`)
+    expect(JSON.parse(accepted.stdout())).toMatchObject({
+      dryRun: true,
+      stopped: { by: "@dev/3", cause: "operator", change: null },
+    })
   })
 
   it("list/show/watch preserve their subjects while selecting a different queue from a nested cwd", async () => {

@@ -198,7 +198,7 @@ describe("`yrd list` prints the watch's page, once", () => {
     expect(colored.stdout).toBe(plain.stdout)
     expect(plain.stdout).not.toContain(ESC)
     const document = JSON.parse(plain.stdout) as Record<string, unknown>
-    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "pause"])
+    expect(Object.keys(document).sort()).toEqual(["changes", "journal", "observation", "pause", "stopped"])
     expect((document as { observation: unknown }).observation).toMatchObject({ contract: "native", notices: [] })
     const [row] = document["changes"] as readonly Record<string, unknown>[]
     expect(row).toMatchObject({ branch: "task/one", position: 1, state: "queued", submitter: "@dev/10" })
@@ -316,7 +316,14 @@ describe("`--status` is a spelling of a filter term (@yrd/core/21096-cli-ux/2230
     // breakage of it, so it is made on BOTH spellings rather than one. `scope`
     // joins the shape here (AC1): a zero-row filter is exactly the case that
     // must say what it matched against, and JSON gets the same notice the page does.
-    expect(Object.keys(documentOf(flagged)).sort()).toEqual(["changes", "journal", "observation", "pause", "scope"])
+    expect(Object.keys(documentOf(flagged)).sort()).toEqual([
+      "changes",
+      "journal",
+      "observation",
+      "pause",
+      "scope",
+      "stopped",
+    ])
     expect(documentOf(flagged)["changes"], flagged.report).toEqual([])
     expect(documentOf(positional)["changes"], positional.report).toEqual([])
     // And 22301's own specimen, the other way round: a non-matching state must

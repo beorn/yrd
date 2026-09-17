@@ -1374,26 +1374,37 @@ describe("a queue run", () => {
     )
   })
 
-  it("a second unresolved check of the same reason leaves the line like replaced (24623)", async () => {
-    // Specimen: three consecutive yrd-check-unresolved rounds on the same head.
-    // err=replaced already retires; the second identical unresolved must take
-    // that exit rather than re-run the bound.
+  it("a stuck change that sticks again on resume stops the line again, counted", async () => {
+    // Specimen (24623): three yrd-check-unresolved rounds in a row on one head.
+    // Those rounds came from the loop that re-ran a stuck change every round,
+    // and a guard ended the second identical unresolved check failed without
+    // running it. The andon (operator 2026-09-16) removed the loop, and the
+    // guard with it: a stuck change is judged again only when someone resumes
+    // the line, it runs its check again, and if it sticks again the line stops
+    // again with both stuck records on the change.
     const w = await world()
     const head = await submitCommit(w, "task/one", "one.txt")
     const options = await w.options({ sleep: 3, timeoutMs: 500 })
 
     const first = await queueRun(options)
-    expect(first.stuck).toEqual(["task/one"])
-    expect(first.exitCode).toBe(2)
+    expect(first).toMatchObject({ exitCode: 2, failed: [], stuck: ["task/one"] })
 
+    await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "the check's bound was raised" })
     const second = await queueRun(options)
-    expect(second.stuck).toEqual([])
-    expect(second.failed).toEqual(["task/one"])
-    expect(second.exitCode).toBe(1)
-    await fetchChanges(w)
-    const records = await readRecords(w.git, (await refAt(w.git, changeRef("main", { branch: "task/one", head })))!)
-    expect(records.map((record) => record.kind)).toContain("failed")
-    expect(trailer(records.find((record) => record.kind === "failed")!, "Reason")).toBe("yrd-check-unresolved")
+
+    expect(second).toMatchObject({ exitCode: 2, failed: [], stuck: ["task/one"] })
+    // Judged, not retired from the reading: the check ran again in this round.
+    expect(logRecords(second)).toContainEqual(
+      expect.objectContaining({ branch: "task/one", kind: "check", name: "verify" }),
+    )
+    const kinds = (await recordsOf(w, "task/one", head)).map((record) => record.kind)
+    expect(kinds).not.toContain("failed")
+    expect(kinds.filter((kind) => kind === "stuck")).toHaveLength(2)
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({
+      cause: "stuck",
+      change: { branch: "task/one", head },
+      kind: "paused",
+    })
   })
 
   it("a timeout names the last YRD-CHECK-PROGRESS instead of only the bound constant (24623)", async () => {
@@ -2721,68 +2732,110 @@ describe("an orphaned merge (@i/10-yrd/24344)", () => {
   })
 })
 
-describe("a stuck head of line does not block the line behind it (@i/10-yrd/24492)", () => {
-  it("judges and merges an independent change waiting behind a stuck judge", async () => {
+/**
+ * A setup that fails wherever it runs while its marker exists, printing `line`
+ * where the queue's classifier reads it. It records every run in the check log
+ * beside the check's own rows, so a case can count judgements.
+ *
+ * With `once`, the settled base's own run — the second setup one failed
+ * judgement makes, after the candidate's — clears the marker: a remote that
+ * answers again by the time the round takes the change a second time. The
+ * base is the worktree whose candidate IS its base, because nothing is composed
+ * on top of the target there.
+ */
+function faultySetup(
+  w: World,
+  line: string,
+  plan: Readonly<{ once?: boolean }> = {},
+): Readonly<{ command: string; clear: () => void }> {
+  const marker = join(w.workdir, "..", `fault-${String(Math.random()).slice(2)}`)
+  const script = `${marker}.sh`
+  writeFileSync(marker, "the fault holds\n")
+  writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      `echo "setup cwd=$(pwd) repo=\${YRD_REPO:-none} candidate=\${YRD_CANDIDATE_SHA:-none} base=\${YRD_BASE_SHA:-none}" >> "${w.checkLog}"`,
+      `if [ -f "${marker}" ]; then`,
+      ...(plan.once === true ? [`  if [ "$YRD_CANDIDATE_SHA" = "$YRD_BASE_SHA" ]; then rm -f "${marker}"; fi`] : []),
+      `  echo '${line}' >&2`,
+      "  exit 128",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"),
+  )
+  chmodSync(script, 0o755)
+  return { command: script, clear: () => rmSync(marker, { force: true }) }
+}
+
+/** A repository break the classifier must not read as an outage. */
+const BROKEN_SETUP = "error: lockfile had changes, but lockfile is frozen"
+/** Git's own line for a code host that is down: the transport signature the queue retries once. */
+const UNREACHABLE_SETUP = "fatal: unable to access 'https://example.invalid/': The requested URL returned error: 504"
+
+/**
+ * How many times the queue ran its setup to JUDGE something, as the setup
+ * recorded itself: the notify environment an ending prepares runs the same
+ * setup, and it judges nothing.
+ */
+function setupRuns(w: World): number {
+  return ranPrograms(w).filter((ran) => ran.program === "setup" && !ran.cwd.endsWith("/notify")).length
+}
+
+/** One change's records at the remote, oldest first. */
+async function recordsOf(w: World, branch: string, head: string): Promise<readonly ChangeRecord[]> {
+  await fetchChanges(w)
+  return readRecords(w.git, (await refAt(w.git, changeRef("main", { branch, head })))!)
+}
+
+/**
+ * @failure  A stuck head is stepped over: the round keeps judging and merging
+ *           the line behind a change the queue could not judge, on ground nobody
+ *           has judged since the fault, and the service keeps re-running the
+ *           fault on a backoff until it clears itself. The operator's ruling
+ *           (2026-09-16) is the andon: STUCK means fail loud and fix — stop the
+ *           line, fix it (@i/10-yrd/a-unattended/stuck-stops-the-line).
+ * @level    l2 (a real remote, a clone, a real check and setup)
+ * @consumer every submitter behind a stuck change · the seat the page wakes
+ */
+describe("a stuck change stops the line (the andon, operator 2026-09-16)", () => {
+  it("ends the round at the stuck head: nothing behind it is judged or merged, and the queue pauses naming the head", async () => {
     const w = await world()
     const headOne = await submitCommit(w, "task/one", "one.txt")
     const headTwo = await submitCommit(w, "task/two", "two.txt")
 
     const outcome = await queueRun(await w.options({ exit: 2, on: ["submit"] }))
 
-    // The round still exits 2 — the head IS stuck — but the line moved past it.
-    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: ["task/two"], stuck: ["task/one"] })
-    expect(await remoteTarget(w)).not.toBe(w.target)
-    // Each judge ran in its own head's worktree; the candidate sha is the
-    // composed commit, so the worktree path is the per-head evidence.
-    const log = readFileSync(w.checkLog, "utf8")
-    expect(log).toContain(`submit/${headOne.slice(0, 12)}`)
-    expect(log).toContain(`submit/${headTwo.slice(0, 12)}`)
-    await fetchChanges(w)
-    const recordsOne = await readRecords(
-      w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/one", head: headOne })))!,
-    )
-    expect(recordsOne[0]?.kind).toBe("opened")
-    expect(recordsOne.map((record) => record.kind).slice(-2)).toEqual(["stuck", "sent"])
-    const recordsTwo = await readRecords(
-      w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/two", head: headTwo })))!,
-    )
-    expect(recordsTwo.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
-  })
-
-  it("never hands the line a free pass on ground it shares with the stuck head: every judge still runs", async () => {
-    const w = await world()
-    const headOne = await submitCommit(w, "task/one", "one.txt")
-    const headTwo = await submitCommit(w, "task/two", "two.txt")
-
-    const outcome = await queueRun(await w.options({ everywhere: true, exit: 2, on: ["submit"] }))
-
-    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/one", "task/two"] })
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/one"] })
     expect(await remoteTarget(w)).toBe(w.target)
-    // The second verdict was earned, not assumed: its check ran in its own
-    // head's worktree too.
+    // task/two was never even judged: no check ran in its head's worktree.
     const log = readFileSync(w.checkLog, "utf8")
     expect(log).toContain(`submit/${headOne.slice(0, 12)}`)
-    expect(log).toContain(`submit/${headTwo.slice(0, 12)}`)
-    await fetchChanges(w)
-    const recordsTwo = await readRecords(
-      w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/two", head: headTwo })))!,
-    )
-    const stuckTwo = recordsTwo.find((record) => record.kind === "stuck")
-    expect(incidentOf(stuckTwo).Subject).toContain("task/two")
-    expect(recordsTwo.map((record) => record.kind).slice(-2)).toEqual(["stuck", "sent"])
+    expect(log).not.toContain(`submit/${headTwo.slice(0, 12)}`)
+    expect((await recordsOf(w, "task/one", headOne)).map((record) => record.kind).slice(-2)).toEqual(["stuck", "sent"])
+    expect((await recordsOf(w, "task/two", headTwo)).map((record) => record.kind)).toEqual(["opened"])
+    // THE STOP IS A RECORD: the queue paused itself, and says for which change.
+    const pause = await readPause(w.git, "origin", "main")
+    expect(pause).toMatchObject({
+      by: "yrd",
+      cause: "stuck",
+      change: { branch: "task/one", head: headOne },
+      kind: "paused",
+    })
+    expect(outcome.stopped).toMatchObject({ ring: "pause", what: { cause: "stuck", sha: pause?.sha } })
+
+    // And it holds: the next automatic round judges nothing, merges nothing.
+    const held = await queueRun(await w.options({ exit: 2, on: ["submit"] }))
+    expect(held).toMatchObject({ exitCode: 0, failed: [], merged: [], stuck: [] })
+    expect(held.stopped?.what).toEqual(pause)
+    expect(readFileSync(w.checkLog, "utf8")).toBe(log)
   })
 
-  it("a bookkeeping stuck ends its own change alone: the line merges past it and the ended head is not judged again", async () => {
+  it("a bookkeeping stuck stops the line too, before the first judge", async () => {
     const w = await world()
     const headOne = await submitCommit(w, "task/one", "one.txt")
     const ref = changeRef("main", { branch: "task/one", head: headOne })
-    // Checked under a config blob the target no longer declares, so after the
-    // recovery ends the chain only the round's own bookkept-stuck guard keeps
-    // the stale-checked reading out of the judge loop — a decision appended
-    // there would be refused as a decision after an ending (@i/10-yrd/24635).
     const checkedRecord = await appendRecord(w.git, "main", {
       change: { branch: "task/one", head: headOne },
       kind: "checked",
@@ -2799,16 +2852,201 @@ describe("a stuck head of line does not block the line behind it (@i/10-yrd/2449
 
     const outcome = await queueRun(await w.options({ exit: 0 }))
 
-    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: ["task/two"], stuck: ["task/one"] })
-    await fetchChanges(w)
-    const recordsOne = await readRecords(w.git, (await refAt(w.git, ref))!)
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/one"] })
+    expect(await remoteTarget(w)).toBe(w.target)
+    const recordsOne = await recordsOf(w, "task/one", headOne)
     expect(recordsOne.map((record) => record.kind)).toEqual(["opened", "checked", "stuck", "sent"])
     expect(incidentOf(recordsOne[2]).Code).toBe("yrd-merge-orphaned")
-    const recordsTwo = await readRecords(
-      w.git,
-      (await refAt(w.git, changeRef("main", { branch: "task/two", head: headTwo })))!,
+    expect((await recordsOf(w, "task/two", headTwo)).map((record) => record.kind)).toEqual(["opened"])
+    expect(whereRan(w)).toEqual([])
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({
+      cause: "stuck",
+      change: { branch: "task/one", head: headOne },
+      kind: "paused",
+    })
+  })
+
+  it("withdrawing the stuck change lifts the stop: the next round judges and merges the change behind it", async () => {
+    const w = await world()
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const headTwo = await submitCommit(w, "task/two", "two.txt")
+    await queueRun(await w.options({ exit: 2, on: ["submit"] }))
+
+    await withdraw(w.git, "origin", { branch: "task/one", by: "@chief", target: { branch: "main", remote: "origin" } })
+    const outcome = await queueRun(await w.options({ exit: 2, on: ["submit"] }))
+
+    expect(outcome.stopped).toBeUndefined()
+    expect(outcome).toMatchObject({ exitCode: 0, failed: [], merged: ["task/two"], stuck: [] })
+    expect(readFileSync(w.checkLog, "utf8")).toContain(`submit/${headTwo.slice(0, 12)}`)
+    expect((await recordsOf(w, "task/one", headOne)).map((record) => record.kind).at(-1)).toBe("withdrawn")
+  })
+
+  it("merging the stuck change lifts the stop: it reaches the target, and the line behind it runs", async () => {
+    const w = await world()
+    const fault = faultySetup(w, BROKEN_SETUP)
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    await submitCommit(w, "task/two", "two.txt")
+    const stuck = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+    expect(stuck.stuck).toEqual(["task/one"])
+
+    // The repair, then the one round an operator may run on a stopped line.
+    fault.clear()
+    const repaired = await queueRun({ ...(await w.options({ exit: 0, setup: fault.command })), foreground: true })
+    expect(repaired.merged).toEqual(["task/one"])
+    expect(await w.git(["merge-base", "--is-ancestor", headOne, await remoteTarget(w)])).toBe("")
+
+    // The change the stop named has left the line, so nothing holds it now.
+    const after = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+    expect(after.stopped).toBeUndefined()
+    expect(after.merged).toEqual(["task/two"])
+  })
+
+  it("a stuck change that ends failed lifts the stop too: any ending takes it out of line", async () => {
+    const w = await world()
+    const fault = faultySetup(w, BROKEN_SETUP)
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const stuck = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+    expect(stuck.stuck).toEqual(["task/one"])
+
+    // The repair, then an operator's round on the stopped line in which the
+    // change's own check fails: an ending that is neither a merge nor a withdrawal.
+    fault.clear()
+    const judged = await queueRun({ ...(await w.options({ exit: 1, setup: fault.command })), foreground: true })
+    expect(judged).toMatchObject({ failed: ["task/one"], stuck: [] })
+    expect((await recordsOf(w, "task/one", headOne)).map((record) => record.kind)).toContain("failed")
+
+    // Nothing holds the line now: a change submitted after the ending is
+    // judged and merged by the next automatic round.
+    await submitCommit(w, "task/two", "two.txt")
+    const after = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+    expect(after.stopped).toBeUndefined()
+    expect(after.merged).toEqual(["task/two"])
+  })
+
+  it("resume lifts a stuck stop; the line re-takes the stuck change first, and a second stuck stops it again", async () => {
+    const w = await world()
+    const fault = faultySetup(w, BROKEN_SETUP)
+    const headOne = await submitCommit(w, "task/one", "one.txt")
+    const headTwo = await submitCommit(w, "task/two", "two.txt")
+    await queueRun(await w.options({ exit: 0, setup: fault.command }))
+    const first = await readPause(w.git, "origin", "main")
+    expect(first).toMatchObject({ cause: "stuck", kind: "paused" })
+
+    await writePause(w.git, "origin", "main", { by: "@chief", kind: "resumed", reason: "setup repaired" })
+    const again = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+
+    expect(again).toMatchObject({ exitCode: 2, merged: [], stuck: ["task/one"] })
+    expect(ranPrograms(w).some((ran) => ran.cwd.includes(headTwo.slice(0, 12)))).toBe(false)
+    const second = await readPause(w.git, "origin", "main")
+    expect(second).toMatchObject({ cause: "stuck", change: { branch: "task/one", head: headOne }, kind: "paused" })
+    expect(second?.sha).not.toBe(first?.sha)
+    // The record shows the count: one stuck record per time it stopped the line.
+    const kinds = (await recordsOf(w, "task/one", headOne)).map((record) => record.kind)
+    expect(kinds.filter((kind) => kind === "stuck")).toHaveLength(2)
+  })
+
+  it("a remote that fails once is retried inside the round, and the change never sticks", async () => {
+    const w = await world()
+    const fault = faultySetup(w, UNREACHABLE_SETUP, { once: true })
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+
+    expect(outcome).toMatchObject({ exitCode: 0, merged: ["task/one"], stuck: [] })
+    expect((await recordsOf(w, "task/one", head)).some((record) => record.kind === "stuck")).toBe(false)
+    // Never stopped: the only pause record is the one the merge's own fence writes.
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({ kind: "resumed" })
+    expect(logRecords(outcome)).toContainEqual(
+      expect.objectContaining({
+        branch: "task/one",
+        code: "yrd-setup-unreachable",
+        kind: "warning",
+        reason: "retried",
+      }),
     )
-    expect(recordsTwo.map((record) => record.kind)).toEqual(["opened", "checked", "merged", "sent"])
+  })
+
+  it("a remote that fails twice sticks once, and its record says it was retried", async () => {
+    const w = await world()
+    const fault = faultySetup(w, UNREACHABLE_SETUP)
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 0, setup: fault.command }))
+
+    expect(outcome).toMatchObject({ exitCode: 2, merged: [], stuck: ["task/one"] })
+    // Two judgements, each a candidate setup and its settled base: one retry, never a third.
+    expect(setupRuns(w)).toBe(4)
+    const stuckRecords = (await recordsOf(w, "task/one", head)).filter((record) => record.kind === "stuck")
+    expect(stuckRecords).toHaveLength(1)
+    expect(incidentOf(stuckRecords[0]).Code).toBe("yrd-setup-unreachable")
+    expect(trailer(stuckRecords[0]!, "Retried")).toBe("1")
+  })
+
+  it("a stuck the remote did not cause is never retried", async () => {
+    const w = await world()
+    const fault = faultySetup(w, BROKEN_SETUP)
+    const head = await submitCommit(w, "task/one", "one.txt")
+
+    await queueRun(await w.options({ exit: 0, setup: fault.command }))
+
+    expect(setupRuns(w)).toBe(2)
+    const stuckRecord = (await recordsOf(w, "task/one", head)).find((record) => record.kind === "stuck")
+    expect(incidentOf(stuckRecord).Code).toBe("yrd-setup-unusable")
+    expect(trailer(stuckRecord!, "Retried")).toBeUndefined()
+  })
+})
+
+/**
+ * @failure  An ended change is taken again: a failed or withdrawn chain goes
+ *           back into a round because main moved under it, so a conflict is
+ *           re-attempted on every new tip and judged, recorded and reported
+ *           round after round.
+ * @level    l2 (a real remote, a clone, the real notify entry)
+ * @consumer every submitter whose change ended · stuck-stops-the-line row 5
+ *           (@i/10-yrd/a-unattended/stuck-stops-the-line-revert-the-step-over-and-the-stuck-round-loop)
+ */
+describe("an ended change leaves the line for good", () => {
+  it("an ended change is never re-judged, whatever main does", async () => {
+    const w = await world()
+    // The change edits the target's own line, and main edits that line first:
+    // a conflict, the ending a moving main most invites the queue to retry.
+    await w.git(["checkout", "--quiet", "-b", "task/conflict", "main"])
+    writeFileSync(join(w.work, "target.txt"), "the change's line\n")
+    await w.git(["add", "target.txt"])
+    await w.git(["commit", "--quiet", "-m", "edit the target's line"])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", {
+      branch: "task/conflict",
+      submitter: "@dev/2",
+      target: { branch: "main", remote: "origin" },
+      issue: "@i/10-yrd/1",
+    })
+    writeFileSync(join(w.work, "target.txt"), "main's line\n")
+    await w.git(["commit", "--quiet", "-am", "main edits the same line"])
+    await w.git(["push", "--quiet", "origin", "main"])
+
+    const ended = await queueRun(await w.options({ exit: 0 }))
+    expect(ended).toMatchObject({ failed: ["task/conflict"], stuck: [] })
+    const records = await recordsOf(w, "task/conflict", head)
+    expect(trailer(records.find((record) => record.kind === "failed")!, "Reason")).toBe("conflict")
+    // A WORKING notifier told the ending once, so nothing is owed a resend.
+    expect(readFileSync(w.notifyLog, "utf8")).toContain("task/conflict")
+    const ref = changeRef("main", { branch: "task/conflict", head })
+    const endedAt = await refAt(w.git, ref)
+
+    for (const file of ["later-one.txt", "later-two.txt"]) {
+      await pushAroundQueue(w, file)
+      const round = await queueRun(await w.options({ exit: 0 }))
+      expect(round).toMatchObject({ failed: [], merged: [], stuck: [] })
+      expect(
+        logRecords(round).filter(
+          (row) => row.branch === "task/conflict" && ["change", "check", "result"].includes(String(row.kind)),
+        ),
+      ).toEqual([])
+    }
+    await fetchChanges(w)
+    expect(await refAt(w.git, ref)).toBe(endedAt)
   })
 })
 
@@ -2954,7 +3192,7 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     expect(states.get(second)).toMatchObject({ state: "withdrawn" })
   })
 
-  it("a stuck record names both escapes: the operator verb, and a replacement that clears the reason", async () => {
+  it("a stuck record names its three cures: withdraw it, replace its head with a fix, or resume the repaired queue", async () => {
     const w = await world()
     await submitCommit(w, "task/one", "one.txt")
 
@@ -2974,6 +3212,8 @@ describe("withdraw takes one change out of the line (@i/10-yrd/24492)", () => {
     expect(incident.Next).toContain("yrd queue withdraw task/one")
     expect(incident.Next).toContain("clears this reason")
     expect(incident.Next).toContain("the same content sticks on the same ground")
+    // The third cure is the operator's, for a stop the queue itself caused.
+    expect(incident.Next).toContain("yrd queue resume")
   })
 })
 

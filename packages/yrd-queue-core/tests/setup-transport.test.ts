@@ -54,7 +54,9 @@ describe("what IS an unreachable remote", () => {
   })
 
   test("it finds the fault anywhere in a long log, and quotes only that line", () => {
-    const log = ["$ bun install", "resolving 412 packages", "connect ECONNREFUSED 140.82.121.3:443", "exit 1"].join("\n")
+    const log = ["$ bun install", "resolving 412 packages", "connect ECONNREFUSED 140.82.121.3:443", "exit 1"].join(
+      "\n",
+    )
     expect(transportFaultIn(log)).toEqual({ signature: "connect", line: "connect ECONNREFUSED 140.82.121.3:443" })
   })
 
@@ -71,7 +73,7 @@ describe("row 3, the negative control: what is NOT an unreachable remote", () =>
     ["a frozen lockfile", "error: lockfile had changes, but lockfile is frozen"],
     ["a missing module", "error: Cannot find module '@yrd/queue-core'"],
     ["a failing test", "FAIL packages/yrd-cli/tests/queue-core-up.test.ts > 3 failed"],
-    ["a bare exit", "error: script \"setup\" exited with code 1"],
+    ["a bare exit", 'error: script "setup" exited with code 1'],
     ["a type error", "src/index.ts(12,3): error TS2345: Argument of type 'string'"],
     ["a permission problem", "EACCES: permission denied, open '/nix/store/x'"],
     ["a full disk", "ENOSPC: no space left on device"],
@@ -118,11 +120,15 @@ describe("what the record tells a person", () => {
   // It names no branch and no author on purpose: nothing about the change is
   // wrong, and sending a submitter to look for a defect that is not there is
   // how a transient outage becomes somebody's afternoon.
-  test("a transport fault says the change is not at fault, and names the signature", () => {
+  // It promises no later round: the andon (operator 2026-09-16) retries once
+  // inside the round and then stops the line, so "the next round retries" would
+  // send the reader to wait for a timer that no longer exists.
+  test("a transport fault says the change is not at fault, names the signature, and promises no timer", () => {
     const next = setupStuckNext({ signature: "http-5xx", line: "... - 504" })
     expect(next).toContain("nothing here is the change's fault")
     expect(next).toContain("http-5xx")
-    expect(next).toContain("retries on the queue's own cadence")
+    expect(next).toContain("one retry")
+    expect(next).not.toMatch(/own cadence|wait it out|next round/u)
     expect(next).not.toMatch(/repair the queue setup/u)
   })
 })

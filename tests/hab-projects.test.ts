@@ -63,9 +63,10 @@ describe("Yrd Hab runner declarations", () => {
     expect(service?.relaunchExitCodes).toContain(0)
     // 1 is a candidate failure — the next round clears it.
     expect(service?.relaunchExitCodes).toContain(1)
-    // 2 must NOT be here. It is reserved for what no round can fix — an absent
-    // or unreadable declaration, an absent runtime gitlink — because 24395 made
-    // a stuck ROUND a round outcome rather than a process one. Listing 2 would
+    // 2 must NOT be here. It is reserved for what the loop cannot hold a line
+    // on — an absent or unreadable declaration, an absent runtime gitlink, a
+    // round that could not read its queue — while a stuck CHANGE stops the line
+    // and keeps the service up (the andon, operator 2026-09-16). Listing 2 would
     // restart the service into the same unfixable state forever.
     expect(service?.relaunchExitCodes).not.toContain(2)
   })
@@ -74,5 +75,12 @@ describe("Yrd Hab runner declarations", () => {
     // The owner decides who is PAGED. An undeclared owner silently resolves to
     // the fleet-wide default, so a service that means to name someone must.
     expect(hab.services["yrd-service"]?.owner).toBeDefined()
+  })
+
+  it("pages the seat that owns the stop-line: a stuck change stops the line and pages @chief", () => {
+    // The andon (operator 2026-09-16): a stuck change stops the line and the
+    // service stays up with an unhealthy page whose owner is @chief, the seat
+    // that decides stop-line matters. The page reaches whoever this names.
+    expect(hab.services["yrd-service"]?.owner).toBe("@chief")
   })
 })

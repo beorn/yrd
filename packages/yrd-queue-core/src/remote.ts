@@ -30,7 +30,7 @@ import {
   type Git,
 } from "./records.ts"
 import { GitExit, isAncestor } from "./git.ts"
-import { parsePause, type PauseRecord } from "./pause.ts"
+import { lineStop, parsePause, readPause, type PauseRecord } from "./pause.ts"
 import { changeName, parseChangeRef, pauseRef, queueRefPrefix, type Change } from "./refs.ts"
 import { readChange, tipOf, type ChangeRecords, type ChangeReading } from "./state.ts"
 
@@ -84,7 +84,15 @@ export async function readQueue(
   remote: string,
   target: string,
   targetSha: string,
-): Promise<Readonly<{ changes: QueueRead; pause: PauseRecord | undefined; observation: QueueObservation }>> {
+): Promise<
+  Readonly<{
+    changes: QueueRead
+    pause: PauseRecord | undefined
+    /** The stop that stands, derived from this same reading ({@link lineStop}); undefined while the line runs. */
+    stop: PauseRecord | undefined
+    observation: QueueObservation
+  }>
+> {
   const pause = pauseRef(target)
   // Where every branch and every change stands at the remote, in one reading.
   // Every later operation uses these captured object ids, never a tracking or
@@ -188,9 +196,21 @@ export async function readQueue(
     }
     entries.push({ change, reading: readChange(change) })
   }
+  // THE STOP, derived once per reading and never by a reader of its own
+  // (pause.ts lineStop). A stuck stop is judged against its named change's
+  // history, so exactly that one entry is expanded; every other entry keeps
+  // the tip-only economy.
+  const stuckOn = capturedPause?.kind === "paused" ? capturedPause.change : undefined
+  const stuckEntry =
+    stuckOn === undefined ? undefined : entries.find((entry) => changeName(entry.change) === changeName(stuckOn))
+  const stop = lineStop(
+    capturedPause,
+    stuckEntry === undefined ? undefined : (await readHistories(git, [stuckEntry], remote, target))[0],
+  )
   return {
     changes: entries,
     pause: capturedPause,
+    stop,
     observation: {
       checked,
       fence: {
@@ -201,6 +221,25 @@ export async function readQueue(
       },
     },
   }
+}
+
+/**
+ * The pause record and the stop it derives, for a command that reads no queue
+ * of its own (submit's echo, `queue pause` and `queue resume`). An operator's
+ * record answers by itself; a stuck stop needs its change's reading, so only
+ * then is the queue read, and the answer is that reading's own `stop` — the
+ * same derivation a round makes, never a second one.
+ */
+export async function readStop(
+  git: Git,
+  remote: string,
+  queue: string,
+  targetSha: string,
+): Promise<Readonly<{ pause: PauseRecord | undefined; stop: PauseRecord | undefined }>> {
+  const pause = await readPause(git, remote, queue)
+  if (pause?.kind !== "paused" || pause.cause !== "stuck") return { pause, stop: lineStop(pause, undefined) }
+  const read = await readQueue(git, remote, queue, targetSha)
+  return { pause: read.pause, stop: read.stop }
 }
 
 /**
