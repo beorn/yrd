@@ -12,13 +12,15 @@
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import {
+  believableHealthDocument,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
   ROUND_BUDGET_MS,
   queueHealthExitCode,
   roundHealthDocument,
+  type QueueHealthDocument,
 } from "@yrd/queue-core"
 import { queueHealthCommand, readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -362,5 +364,50 @@ describe("the probe applies the document's deadline", () => {
     const run = capture()
     expect(await queueHealthCommand(dir, SERVICE, run.io, new Date(NOW.getTime() + 60_000))).toBe(0)
     expect(JSON.parse(run.stdout())).toEqual(written)
+  })
+
+  /**
+   * @failure  Past the deadline the probe formed a SECOND OPINION: a process
+   *           census over the round worktrees and a bare `kill -0` on the pid a
+   *           journal names. That is a second liveness reader beside the
+   *           supervisor's, and its EPERM means dead where hab's means alive
+   *           (@i/4-supervision/24523 D1, @cto amendment 2: deleted, not demoted
+   *           to text). Overdue now means the writer stopped writing, and the
+   *           supervisor alone asks whether that writer lives.
+   * @level    l1 (a directory and three files)
+   * @consumer hab, which gates a start on the writer's identity and relays this
+   *           verdict as the page
+   */
+  it("relays the stored overdue verdict unchanged, consulting no process census and no kill -0", async () => {
+    const dir = workdir()
+    const id = "q-20260911T120100000Z-11112222"
+    // Everything a second opinion would reach for: a round worktree, and a
+    // journal whose header names a runner that is alive — this very process.
+    mkdirSync(join(dir, "worktrees", id), { recursive: true })
+    mkdirSync(join(dir, "logs"), { recursive: true })
+    writeFileSync(
+      join(dir, "logs", `${id}.jsonl`),
+      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: process.pid })}\n` +
+        `${JSON.stringify({ kind: "queue", run: id, at: NOW.toISOString(), queue: "main on origin" })}\n`,
+    )
+    // Written out rather than built, so the deadline is this test's and not a builder's formula.
+    const stored: QueueHealthDocument = {
+      schema: QUEUE_HEALTH_SCHEMA,
+      service: SERVICE,
+      state: "healthy",
+      verdict: { kind: "running" },
+      facts: {
+        writtenAt: NOW.toISOString(),
+        staleAfter: new Date(NOW.getTime() + 30_000).toISOString(),
+        stopped: null,
+      },
+    }
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(stored))
+    const late = new Date(NOW.getTime() + 90_000)
+    using kill = vi.spyOn(process, "kill")
+    // The probe's answer IS the document's own deadline applied to it: nothing
+    // appended to the cause, no resolution swapped, no state re-derived.
+    expect(await readQueueHealth(dir, SERVICE, late)).toEqual(believableHealthDocument(stored, late))
+    expect(kill).not.toHaveBeenCalled()
   })
 })
