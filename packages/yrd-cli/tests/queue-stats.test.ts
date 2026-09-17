@@ -23,15 +23,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { gitIn, readQueue, submit } from "@yrd/queue-core"
-import type { Row, WatchRow } from "@yrd/queue-core"
+import { gitIn, readDrafts, readQueue, submit } from "@yrd/queue-core"
+import type { Draft, Row, WatchRow } from "@yrd/queue-core"
 import {
   decisionsOfRows,
   formatQueueStats,
   parseSince,
   queueStats,
   sinceLine,
-  type PushedRef,
   type StatsGroup,
 } from "../src/queue-stats.ts"
 import { statsBuckets } from "../src/watch-stats.ts"
@@ -379,20 +378,24 @@ describe("the window and the pushed refs", () => {
     )
   })
 
-  it("counts refs pushed and never submitted inside the window, oldest first, and says how many it could not date", () => {
-    const refs: PushedRef[] = [
-      { branch: "task/a", committedAt: at("2026-09-05T04:00:00Z"), head: "1".repeat(40), submitted: true },
-      { branch: "task/pushed-only", committedAt: at("2026-09-05T01:36:00Z"), head: "4".repeat(40), submitted: false },
-      { branch: "task/pushed-later", committedAt: at("2026-09-05T06:00:00Z"), head: "5".repeat(40), submitted: false },
+  it("says the drafts it is handed oldest first, and how many it could not date", () => {
+    // As the one derivation hands them over: already read over the window, the undated after the dated.
+    const drafts: Draft[] = [
       {
-        branch: "task/pushed-long-ago",
-        committedAt: at("2026-08-01T00:00:00Z"),
-        head: "6".repeat(40),
-        submitted: false,
+        branch: "task/pushed-later",
+        committedAt: at("2026-09-05T06:00:00Z"),
+        head: "5".repeat(40),
+        movedSinceSubmit: false,
       },
-      { branch: "task/never-fetched", head: "7".repeat(40), submitted: false },
+      {
+        branch: "task/pushed-only",
+        committedAt: at("2026-09-05T01:36:00Z"),
+        head: "4".repeat(40),
+        movedSinceSubmit: false,
+      },
+      { branch: "task/never-fetched", head: "7".repeat(40), movedSinceSubmit: false },
     ]
-    const stats = queueStats(COMPACT, refs, { now: NOW, since: parseSince("1d", NOW)?.at })
+    const stats = queueStats(COMPACT, drafts, { now: NOW, since: parseSince("1d", NOW)?.at })
     expect(stats.pushedNeverSubmitted.count).toBe(2)
     expect(stats.pushedNeverSubmitted.ageBasis).toBe("tip committer date")
     expect(stats.pushedNeverSubmitted.oldestCommitAgeMs).toBe(5 * 3_600_000)
@@ -488,20 +491,9 @@ describe("the pushed refs are the drafts, read through the one shared derivation
     await elsewhere(["push", "--quiet", "origin", "task/elsewhere"])
     const absent = (await elsewhere(["rev-parse", "HEAD"])).trim()
 
-    // The shared derivation the stats command reads, over the stats' own default window. Read through the
-    // module namespace so this file compiles before it exists.
+    // The shared derivation the stats command reads, over the stats' own default window.
     const read = await readQueue(git, "origin", "main", target)
-    const shared = ((await import("@yrd/queue-core")) as unknown as Readonly<Record<string, unknown>>)["readDrafts"]
-    const drafts =
-      typeof shared === "function"
-        ? await (
-            shared as (
-              git: unknown,
-              read: unknown,
-              options: unknown,
-            ) => Promise<Readonly<{ dated: readonly PushedRef[]; undated: readonly PushedRef[] }>>
-          )(git, read, { since: new Date(now.getTime() - 7 * 24 * hour), targetSha: target })
-        : { dated: [], undated: [] }
+    const drafts = await readDrafts(git, read, { since: new Date(now.getTime() - 7 * 24 * hour), targetSha: target })
     const stats = queueStats([], [...drafts.dated, ...drafts.undated], { now })
 
     // One draft in the window, one head never read here; the keys and their order are today's.

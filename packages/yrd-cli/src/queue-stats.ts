@@ -9,7 +9,7 @@
  * own reader, {@link decisionsOfRows} in watch-stats.ts — one source and one
  * classification — so the two surfaces can never disagree about what a merge
  * or a failure is. Nothing here opens a file or talks to git: the caller reads
- * the rows and the remote's branch list and hands both in, with the moment `now`.
+ * the rows and the drafts (`readDrafts`) and hands both in, with the moment `now`.
  *
  * Definitions, because a number nobody can derive is a number nobody trusts:
  * - a row is what ONE run said about one change; its verdict is read by the
@@ -27,10 +27,13 @@
  *   records name both as runs and so does this.
  * - re-pushed branches: branches with more than one distinct head in the rows;
  *   `rePushes` is the number of heads beyond the first, summed.
- * - pushed, never submitted: branches at the remote that no change ref names —
- *   a push without a `yrd submit` (plan E2) — restricted to the window by the
- *   tip's committer date when the commit is here, and counted apart as
- *   `ageUnknown` when it is not (a tip nobody fetched has no date to read).
+ * - pushed, never submitted: the DRAFTS, under the one definition queue-core's
+ *   drafts.ts holds (the KPI ruling on @i/10-yrd/24163): a head at the remote
+ *   no change ref names AT THAT HEAD, off the target, outside `yrd/*` and
+ *   `preserve/*`, committed inside the window; a head this repository has not
+ *   read is counted apart as `ageUnknown` (a tip nobody fetched has no date to
+ *   read, and stats fetches nothing). The caller hands them in already read
+ *   over the window; nothing here filters them again.
  *   Every age is a COMMIT age (`ageBasis`): git records no push time. A tip
  *   is ordinarily committed before it is pushed, so its commit age is at most
  *   an upper bound on how long the push has waited — and committer dates are
@@ -39,24 +42,14 @@
  * - latency: per merged change (its last merged row), from the change's
  *   `since` (opened) to that row's `at` (merged); median and p90 over them.
  * - the window: a row is inside when its decision (`at`) is at or after
- *   `since`, or when it has none yet (still in line); a pushed ref when its
- *   tip's committer date is. Absent `since`, the read's own seven-day horizon.
+ *   `since`, or when it has none yet (still in line); a draft when its head's
+ *   committer date is. Absent `since`, the read's own seven-day horizon.
  */
 
-import type { Row, WatchRow } from "@yrd/queue-core"
+import type { Draft, Row, WatchRow } from "@yrd/queue-core"
 import { decisionsOfRows, unclassifiedRows } from "./watch-stats.ts"
 
 export { decisionsOfRows } from "./watch-stats.ts"
-
-/** One branch at the remote, as `ls-remote` lists it, with the tip's committer date when the commit is here. */
-export type PushedRef = Readonly<{
-  branch: string
-  head: string
-  /** The tip's committer date; absent when the object is not in this repository. */
-  committedAt?: Date
-  /** True when a change ref `refs/yrd/changes/<branch>@*` names the branch: it was submitted at least once. */
-  submitted: boolean
-}>
 
 export type StatsBy = "submitter" | "branch"
 
@@ -70,7 +63,7 @@ export type SinceOrigin = Readonly<{
 
 export type QueueStatsOptions = Readonly<{
   now: Date
-  /** Rows whose decision is before this instant, and refs whose tip is older, are outside the window; absent, {@link DEFAULT_WINDOW_MS} back from `now`. */
+  /** Rows whose decision is before this instant are outside the window, which the drafts were read over too; absent, {@link DEFAULT_WINDOW_MS} back from `now`. */
   since?: Date
   /** Where `since` came from; the default when `since` is absent. */
   sinceFrom?: SinceOrigin
@@ -141,7 +134,7 @@ export type PushedNeverSubmitted = Readonly<{
   count: number
   /** The oldest tip in the window: `now` minus its committer date, in ms. Not a waiting time since the push. */
   oldestCommitAgeMs?: number
-  /** Branches at the remote with no change ref whose tip could not be dated here. */
+  /** Drafts whose head is not in this repository, so it could not be dated here. */
   ageUnknown: number
   /** Oldest first; complete, so `--json` to a file is the whole answer. */
   refs: readonly Readonly<{ branch: string; head: string; commitAgeMs?: number }>[]
@@ -258,35 +251,33 @@ function groupOf(key: string, rows: readonly WatchRow[]): StatsGroup {
   }
 }
 
-function pushedNeverSubmitted(refs: readonly PushedRef[], options: QueueStatsOptions): PushedNeverSubmitted {
-  const never = refs.filter((ref) => !ref.submitted)
-  const dated = never.filter((ref) => ref.committedAt !== undefined && inWindow(ref.committedAt, options.since))
-  const listed = dated
-    .map((ref) => ({
-      branch: ref.branch,
-      commitAgeMs: options.now.getTime() - (ref.committedAt?.getTime() ?? options.now.getTime()),
-      head: ref.head,
-    }))
+/** The drafts as this document has always said them: the dated oldest first, then the undated. */
+function pushedNeverSubmitted(drafts: readonly Draft[], now: Date): PushedNeverSubmitted {
+  const listed = drafts
+    .flatMap((draft) =>
+      draft.committedAt === undefined
+        ? []
+        : [{ branch: draft.branch, commitAgeMs: now.getTime() - draft.committedAt.getTime(), head: draft.head }],
+    )
     .sort((a, b) => b.commitAgeMs - a.commitAgeMs)
-  const undated = never.filter((ref) => ref.committedAt === undefined)
+  const undated = drafts.filter((draft) => draft.committedAt === undefined)
   return {
     ageBasis: PUSH_AGE_BASIS,
     ageUnknown: undated.length,
     count: listed.length,
     ...(listed[0] === undefined ? {} : { oldestCommitAgeMs: listed[0].commitAgeMs }),
-    refs: [...listed, ...undated.map((ref) => ({ branch: ref.branch, head: ref.head }))],
+    refs: [...listed, ...undated.map((draft) => ({ branch: draft.branch, head: draft.head }))],
   }
 }
 
-/** The stats for the whole queue and per group, over the rows inside the window. */
+/** The stats for the whole queue and per group, over the rows inside the window, and the drafts read over it. */
 export function queueStats(
   rows: readonly WatchRow[],
-  refs: readonly PushedRef[],
+  drafts: readonly Draft[],
   options: QueueStatsOptions,
 ): QueueStats {
   const by = options.by ?? "submitter"
   const since = options.since ?? new Date(options.now.getTime() - DEFAULT_WINDOW_MS)
-  const windowed = { ...options, since }
   // A row still in line has no decision instant and is always in view; an ended row is inside by its decision's instant.
   const inside = rows.filter(({ row }) => row.at === undefined || inWindow(row.at, since))
   const grouped = new Map<string, WatchRow[]>()
@@ -304,7 +295,7 @@ export function queueStats(
     by,
     defaultWindow: options.since === undefined,
     groups,
-    pushedNeverSubmitted: pushedNeverSubmitted(refs, windowed),
+    pushedNeverSubmitted: pushedNeverSubmitted(drafts, options.now),
     since,
     sinceFrom: options.since === undefined ? { kind: "default" } : (options.sinceFrom ?? { kind: "instant" }),
     total: groupOf("queue", inside),

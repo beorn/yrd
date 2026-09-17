@@ -52,7 +52,7 @@ import {
   freshnessLine,
   readRemoteCommit,
   refAt,
-  queueRefPrefix,
+  readDrafts,
   submit,
   withdraw,
   NothingToWithdraw,
@@ -106,10 +106,10 @@ import { CHECK_GLYPH, clock, diagnosticLines, firstLine, mediaDuration } from ".
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
+  DEFAULT_WINDOW_MS,
   formatQueueStats,
   parseSince,
   queueStats,
-  type PushedRef,
   type SinceOrigin,
   type StatsBy,
 } from "./queue-stats.ts"
@@ -1311,13 +1311,19 @@ export async function coreQueueCommand(
           window = { since: committed, sinceFrom: { asked: request.since, kind: "commit" } }
         }
       }
-      const { journals, all } = await readListing(git, config, workdir, captured.oid)
+      const { journals, all, queue } = await readListing(git, config, workdir, captured.oid)
       // The counts below are read from the same rows; a row the journal could
       // not be read for must not make an understated stat look measured.
       if (options.json !== true) narrateMalformed(io, journals, new Set())
       const rows = watchRows(all, { journals })
-      const refs = await pushedRefs(git, config.target.remote, config.target.branch)
-      const stats = queueStats(rows, refs, {
+      // Pushed, never submitted: the drafts (the KPI ruling on 24163), from the
+      // one derivation over this same reading and the same window. Nothing is
+      // fetched, so a head never read here counts as undated.
+      const drafts = await readDrafts(git, queue, {
+        since: window?.since ?? new Date(now.getTime() - DEFAULT_WINDOW_MS),
+        targetSha: captured.oid,
+      })
+      const stats = queueStats(rows, [...drafts.dated, ...drafts.undated], {
         now,
         ...window,
         ...(request.by === undefined ? {} : { by: request.by }),
@@ -2201,56 +2207,6 @@ async function instantOfCommit(git: Git, text: string): Promise<Date | undefined
     throw new Error(`commit ${commit}: git returned invalid committer timestamp ${JSON.stringify(seconds)}`)
   }
   return instant
-}
-
-/**
- * Every branch at the remote but the target, with whether a change ref names it
- * (plan E2: a push without a submit is not a change) and the tip's committer
- * instant when the commit is here — the queue read fetches the submitted heads
- * and the target, never the rest, so an unsubmitted tip is dated only when
- * some earlier fetch brought it, and the stats say how many it could not date.
- * One `ls-remote`, the same list the queue read itself starts from.
- */
-async function pushedRefs(git: Git, remote: string, target: string): Promise<readonly PushedRef[]> {
-  const listed = (await git(["ls-remote", "--refs", remote])).split("\n")
-  const heads = new Map<string, string>()
-  const submitted = new Set<string>()
-  for (const line of listed) {
-    const [sha, ref] = line.trim().split(/\s+/u)
-    if (sha === undefined || ref === undefined) continue
-    if (ref.startsWith("refs/heads/")) heads.set(ref.slice("refs/heads/".length), sha)
-    else if (ref.startsWith(`${queueRefPrefix(target)}/`)) {
-      const name = ref.slice(`${queueRefPrefix(target)}/`.length)
-      const at = name.lastIndexOf("@")
-      submitted.add(at === -1 ? name : name.slice(0, at))
-    }
-  }
-  heads.delete(target)
-  // The committer instants of the tips this repository has, in one batched
-  // read; a sha git does not have answers `missing` and stays undated.
-  const dated = new Map<string, Date>()
-  const shas = [...new Set(heads.values())]
-  if (shas.length > 0) {
-    const answer = await git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], `${shas.join("\n")}\n`)
-    const present = answer
-      .split("\n")
-      .map((line) => line.trim().split(" "))
-      .filter((parts) => parts[1] === "commit")
-      .map((parts) => parts[0] ?? "")
-    if (present.length > 0) {
-      const stamps = await git(["log", "--no-walk=unsorted", "--format=%H %ct", ...present, "--"])
-      for (const line of stamps.split("\n")) {
-        const [sha, seconds] = line.trim().split(" ")
-        if (sha !== undefined && seconds !== undefined && seconds !== "") {
-          dated.set(sha, new Date(Number(seconds) * 1000))
-        }
-      }
-    }
-  }
-  return [...heads.entries()].map(([branch, head]) => {
-    const committedAt = dated.get(head)
-    return { branch, head, submitted: submitted.has(branch), ...(committedAt === undefined ? {} : { committedAt }) }
-  })
 }
 
 function emit(io: YrdCliIO, json: boolean | undefined, data: unknown, human: string): void {
