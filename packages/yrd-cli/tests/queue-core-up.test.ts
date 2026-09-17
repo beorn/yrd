@@ -2855,3 +2855,71 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
     expect((await reasonFor(w, "task/answered-404")).reason).toBe("yrd-setup-unusable")
   })
 })
+
+/**
+ * @failure  Two rounds run at once in one queue workdir: the service's round and
+ *           a foreground `yrd queue run` or `yrd merge` beside it judge the same
+ *           change twice, race each other's records and lose at the lease, and a
+ *           round that lost can exit 0 having merged nothing. Exclusion was prose
+ *           in a skill, never a lock (andon phase 2 plan, finding D).
+ * @level    l2 (a real remote and a clone; two rounds driven concurrently through
+ *           `coreQueueCommand`, sharing one workdir as the service and a
+ *           foreground command do)
+ * @consumer the service and every seat that runs `yrd merge` or `yrd queue run`
+ *           while it is up
+ */
+describe("one round at a time in a queue workdir (andon phase 2, the queue lock)", () => {
+  it("two rounds started together never overlap, and each merges the first change it finds", async () => {
+    const w = await world()
+    const root = dirname(w.workdir)
+    const inside = join(root, "a-round-is-inside")
+    const holds = join(root, "holds.log")
+    const overlaps = join(root, "overlaps.log")
+    const hold = join(root, "hold.sh")
+    writeFileSync(holds, "")
+    writeFileSync(overlaps, "")
+    // A merge-phase check that holds its round for a while and records any other
+    // round's check that arrives while it is inside.
+    writeFileSync(
+      hold,
+      [
+        "#!/bin/sh",
+        `pwd >> "${holds}"`,
+        `if ! mkdir "${inside}" 2>/dev/null; then pwd >> "${overlaps}"; exit 0; fi`,
+        "sleep 3",
+        `rmdir "${inside}"`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(hold, 0o755)
+    await redeclare(w, `checks:\n  - hold:\n      run: ${hold}\n`)
+    for (const name of ["one", "two"]) {
+      await w.git(["checkout", "--quiet", "-b", `task/${name}`, "main"])
+      writeFileSync(join(w.work, `${name}.txt`), `${name}\n`)
+      await w.git(["add", `${name}.txt`])
+      await w.git(["commit", "--quiet", "-m", name])
+      await w.git(["checkout", "--quiet", "main"])
+      await submit(w.git, "origin", {
+        branch: `task/${name}`,
+        submitter: "@dev/4",
+        target: { branch: "main", remote: "origin" },
+      })
+    }
+
+    const runs = [capture(w.work), capture(w.work)]
+    const exits = await Promise.all(
+      runs.map((run) => coreQueueCommand(w.work, run.io, { command: "run" }, { json: true, workdir: w.workdir })),
+    )
+    const said = runs.map((run) => `${run.stdout()}${run.stderr()}`).join("\n---\n")
+
+    expect(readFileSync(overlaps, "utf8"), said).toBe("")
+    // Positive control: each round did a round's work in turn, one merge check and one merge each.
+    expect(readFileSync(holds, "utf8").split("\n").filter(Boolean), said).toHaveLength(2)
+    expect(exits, said).toEqual([0, 0])
+    expect(runs.flatMap((run) => (records(run)[0]?.merged ?? []) as string[]).sort(), said).toEqual([
+      "task/one",
+      "task/two",
+    ])
+  }, 60_000)
+})
