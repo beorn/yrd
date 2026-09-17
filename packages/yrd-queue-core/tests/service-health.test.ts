@@ -204,6 +204,26 @@ describe("a document expires", () => {
     const doc = { ...written(INTERVAL), facts: { writtenAt: "x", staleAfter: "not a date" } }
     expect(believableHealthDocument(doc, at(999_999_999))).toEqual(doc)
   })
+
+  // R5 (@i/4-supervision/24523). Only the service writes this document. A page
+  // promising that ANY finished round clears it sends its reader to run one by
+  // hand, and a hand `yrd queue run` writes nothing here, so the page stands and
+  // the reader concludes the queue itself is broken.
+  test("the overdue page says a hand yrd queue run does not write this document", () => {
+    // Written out rather than built, so the deadline is this test's and not a builder's formula.
+    const doc = {
+      schema: QUEUE_HEALTH_SCHEMA,
+      service: "yrd-service",
+      state: "healthy",
+      verdict: { kind: "running" },
+      facts: { writtenAt: NOW.toISOString(), staleAfter: at(INTERVAL).toISOString(), stopped: null },
+    } as const
+    const overdue = believableHealthDocument(doc, at(INTERVAL + 1))
+    expect(overdue.error?.code).toBe("queue-round-overdue")
+    const body = overdue.error?.resolution.join("\n") ?? ""
+    expect(body).toMatch(/a hand `yrd queue run` does not write this document/iu)
+    expect(body).not.toContain("any round finishes")
+  })
 })
 
 // THE CONTRACT TEST THAT USED TO SIT HERE HAS MOVED TO THE ROOT, to
