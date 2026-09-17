@@ -1974,15 +1974,17 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     ])
   })
 
-  it("marks the change the runner holds now, and only it: its row in the working colour with a pulsing marker, and nothing else on screen pulses", async () => {
+  /**
+   * What pulses on a live pane, read across more than one 900 ms period. The cursor starts on the top row,
+   * which is the held one; `cursorOff` steps off it, so the held row shows the colour it has on its own.
+   */
+  async function onePulse(cols: number, height: number, cursorOff: boolean) {
     const { live: _running, ...before } = running()
     const rows: WatchRow[] = [
       split(running(), RUN_ID),
       split({ ...before, at: ago(40 * MINUTE) }, EARLIER_RUN),
       ...EVERY_STATE.slice(1),
     ]
-    const cols = 100
-    const height = 31
     // `autoRender`: a live pane repaints on its own timers (the clock, the pulse), not only on a key.
     const app = render(<WatchPane snapshot={snapshot({ decisions: DECISIONS, rows, runner: RUNNER })} live />, {
       autoRender: true,
@@ -1990,10 +1992,10 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       rows: height,
     })
     await settle(app)
-    // The cursor starts on the top row, which is the held one, and a cursor row wears the selection's
-    // colours: step off it, so this reads the marker and the colour the held row has on its own.
-    app.press("j")
-    await settle(app)
+    if (cursorOff) {
+      app.press("j")
+      await settle(app)
+    }
     const read = () =>
       Array.from({ length: height }, (_, y) =>
         Array.from({ length: cols }, (_, x) => {
@@ -2035,13 +2037,27 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       "task/z",
     )
     app.unmount()
-
-    expect({
+    return {
       heldTextStandsOut: heldBranch !== undefined && waitingBranch !== undefined && heldBranch !== waitingBranch,
       markers,
       onlyTheHeldRow: pulsingRows.size === 1 && pulsingRows.has(held),
-    }).toEqual({ heldTextStandsOut: true, markers: 1, onlyTheHeldRow: true })
+    }
+  }
+
+  it("marks the change the runner holds now, and only it: its row in the working colour with a pulsing marker, and nothing else on screen pulses", async () => {
+    expect(await onePulse(100, 31, true)).toEqual({ heldTextStandsOut: true, markers: 1, onlyTheHeldRow: true })
   }, 10_000)
+
+  // The pane opens with the cursor on the held row. That row still carries the one pulse, in the selection's
+  // colours, and an open detail's markers hold still (24196 P1): 100x31 shows no detail, 160x40 shows it below.
+  it("keeps the one pulse on the held row when the cursor sits on it, with or without its detail open", async () => {
+    const full = await onePulse(100, 31, false)
+    const withDetail = await onePulse(160, 40, false)
+    expect({
+      full: [full.markers, full.onlyTheHeldRow],
+      withDetail: [withDetail.markers, withDetail.onlyTheHeldRow],
+    }).toEqual({ full: [1, true], withDetail: [1, true] })
+  }, 15_000)
 
   it("says a silent runner without naming a supervisor: yrd does not depend on hab (24869)", async () => {
     const painted = await lines(snapshot({ rows: [{ row: row({ position: 1 }) }], runner: SILENT }), 120, 40)

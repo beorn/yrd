@@ -6,7 +6,8 @@
  *           box's `$` marker (watch-boxes.test.tsx), just never restored here.
  *           And a naive restoration would let the pulse fight the cursor
  *           row's forced selection color, since `forced` otherwise
- *           unconditionally overrides every cell color.
+ *           unconditionally overrides every cell color; the cursor row
+ *           pulses in the selection's own pair instead (24196 P1).
  * @level    l2 (a real silvery render, real wall-clock across one pulse period)
  * @consumer the operator watching a change check run from the list, cursor
  *           on it or off it
@@ -65,11 +66,15 @@ describe("ListRow STATUS cell pulse, live (item 13 archaeology)", () => {
     expect(first.fg).not.toEqual(second.fg)
   }, 10_000)
 
-  it("exempts the cursor row: the forced selection color stays put, never overridden by a pulse", async () => {
+  // Item 13 exempted the cursor row. The held row sorts first, so the cursor starts on it, and the
+  // exemption hid the only live marker on screen (24196 P1). The cursor row pulses in the selection's
+  // own pair: its glyph's colour moves while the row keeps the selection background.
+  it("pulses the cursor row too, in the selection's pair: the glyph moves, the selection background holds", async () => {
     const { first, second } = await paint(true)
     expect(first.char).toBe("◉")
     expect(second.char).toBe("◉")
-    expect(first.fg).toEqual(second.fg)
+    expect(first.fg).not.toEqual(second.fg)
+    expect(first.bg).toEqual(second.bg)
   }, 10_000)
 })
 
