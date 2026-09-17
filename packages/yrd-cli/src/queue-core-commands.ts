@@ -1032,28 +1032,73 @@ export async function coreQueueCommand(
         }
       }
       /**
-       * The first sight of a draft head this repository has not read: fetched
-       * ONCE, here in the watch's loader and never in a redraw, so the next
-       * round can say who pushed it and when. A head is tried once whether the
-       * fetch works or not: one that cannot be fetched stays "not yet read"
-       * rather than failing every round, and its failure is said once, as the
-       * round's. `yrd list` and `yrd queue stats` fetch nothing.
+       * The first sight of the draft heads this repository has not read:
+       * fetched ONCE, here in the watch's loader and never in a redraw, so the
+       * next round can say who pushed them and when. A head is tried once
+       * whether the fetch works or not, so one that cannot be fetched stays
+       * "not yet read" rather than failing every round.
+       *
+       * The heads go in one fetch. One head the remote will not serve (a
+       * branch deleted since the round read it) fails that whole fetch, so a
+       * failed batch is split in two and each half fetched apart, down to one
+       * head: that head alone stays unread, at about two fetches per halving.
+       * Two halves that both fail may be the remote's failure rather than a
+       * head's, so the remote is asked whether it answers at all before either
+       * is split again: a remote that went away costs three fetches and one
+       * question, however many heads there are. What stays unread is thrown as
+       * ONE error, for the caller to say once. `yrd list` and `yrd queue stats`
+       * fetch nothing.
        */
       const sighted = new Set<string>()
       const sightDrafts = async (one: Readonly<{ drafts?: Readonly<{ unread: readonly string[] }> }>) => {
         const fresh = (one.drafts?.unread ?? []).filter((head) => !sighted.has(head))
         if (fresh.length === 0) return
         for (const head of fresh) sighted.add(head)
-        await git([
-          "fetch",
-          "--quiet",
-          "--no-tags",
-          "--no-recurse-submodules",
-          "--no-write-fetch-head",
-          "--refmap=",
-          config.target.remote,
-          ...fresh,
-        ])
+        let why: unknown
+        const worked = async (argv: readonly string[]): Promise<boolean> => {
+          try {
+            await git(argv)
+            return true
+          } catch (error) {
+            why = error
+            return false
+          }
+        }
+        const fetched = (heads: readonly string[]): Promise<boolean> =>
+          worked([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--refmap=",
+            config.target.remote,
+            ...heads,
+          ])
+        const answers = (): Promise<boolean> =>
+          worked(["ls-remote", "--refs", config.target.remote, `refs/heads/${config.target.branch}`])
+        /** The heads of a batch that failed which the remote will not serve, each half tried on its own. */
+        const refused = async (heads: readonly string[]): Promise<readonly string[]> => {
+          if (heads.length === 1) return heads
+          const middle = Math.ceil(heads.length / 2)
+          const failed: (readonly string[])[] = []
+          for (const half of [heads.slice(0, middle), heads.slice(middle)]) {
+            if (!(await fetched(half))) failed.push(half)
+          }
+          if (failed.length === 2 && !(await answers())) return heads
+          const unread: string[] = []
+          for (const half of failed) unread.push(...(await refused(half)))
+          return unread
+        }
+        if (await fetched(fresh)) return
+        const unread = await refused(fresh)
+        if (unread.length === 0) return
+        const named = unread.slice(0, 3).map((head) => head.slice(0, 12))
+        throw new Error(
+          `${String(unread.length)} draft head(s) could not be fetched and stay not yet read ` +
+            `(${named.join(", ")}${unread.length > named.length ? ", …" : ""}): ${firstLine(why)}`,
+          { cause: why },
+        )
       }
       /**
        * The page a human reads, drawn by the watch's own components once
@@ -1199,7 +1244,11 @@ export async function coreQueueCommand(
         const refreshed = await declaration()
         if (refreshed === undefined) return noQueueOnTarget(targetLabel)
         declared = refreshed
-        await sightDrafts(one)
+        // The drafts are not what a selector waits on: a head that cannot be
+        // fetched is said, once, and never ends the watch or changes its code.
+        await sightDrafts(one).catch((error: unknown) => {
+          io.stderr(`yrd: ${firstLine(error)}\n`)
+        })
       }
     }
     case "check": {
