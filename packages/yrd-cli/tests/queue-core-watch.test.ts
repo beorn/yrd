@@ -974,7 +974,7 @@ describe("the queue line under a selector (24196)", () => {
     await w.git(["commit", "--quiet", "-m", "task/here waits for a submit"])
     await w.git(["checkout", "--quiet", "main"])
     await w.git(["push", "--quiet", "origin", "task/here"])
-    // A run journal that has not moved for twenty minutes: the RUNNER rail then says how many changes wait.
+    // A run journal that has not moved for twenty minutes still reads idle — no word is derived from an mtime — and the row says how many changes wait.
     const journal = openLog(join(w.workdir, "logs"))
     journal.write({ base: "aaa", checks: ["verify"], kind: "run", queue: "test", target: "main" })
     const quiet = new Date(Date.now() - 20 * 60 * 1000)
@@ -990,13 +990,15 @@ describe("the queue line under a selector (24196)", () => {
     expect(
       {
         queueLine: lines[lines.findIndex((line) => line.includes("YRD QUEUES")) + 1]?.trim(),
-        rail: /while \d+ changes? waits? in line/u.exec(page.stdout())?.[0],
+        // The runner's ROW carries the count now, and it counts the QUEUE and
+        // not the view: the selector shows one change, the row says two.
+        rail: /nothing under a check, and \d+ in line/u.exec(page.stdout())?.[0],
         scope: lines.some((line) => line.includes("1 of 2 change(s) match task/one")),
       },
       page.stdout(),
     ).toEqual({
       queueLine: "2 waiting: 2 submitted · 1 draft (7d)",
-      rail: "while 2 changes wait in line",
+      rail: "nothing under a check, and 2 in line",
       scope: true,
     })
   })

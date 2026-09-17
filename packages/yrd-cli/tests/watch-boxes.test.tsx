@@ -108,21 +108,23 @@ describe("the runner's marker, live (item 13, 24196)", () => {
  * a theme change moves the arm with it instead of breaking it.
  */
 describe("item 27 — an ERROR is never dimmed, and wears the state's own color", () => {
-  const STOPPED: RunnerFacts = {
-    journalDir: "/w/logs",
-    latest: {
-      alive: true,
-      checks: ["typecheck"],
-      gitlink: "3c285a41af46".padEnd(40, "0"),
-      id: "q-20260903T115800000Z-0badf00d",
-      lastWriteAt: new Date(NOW.getTime() - 12 * 60_000),
-      startedAt: new Date(NOW.getTime() - 20 * 60_000),
-      target: "main",
-    },
+  // `stuck` is the loudest word an S1 reading can actually produce: the line
+  // stopped at a change the queue could not judge, read from the queue's own
+  // stop record. The states that would have been louder — `silent`, `stopped` —
+  // are the runner's own published beat, and it publishes none yet.
+  const STUCK = {
+    by: "yrd-service",
+    cause: "stuck" as const,
+    change: `task/s@${"4".repeat(40)}`,
+    since: new Date(NOW.getTime() - 6 * 60_000).toISOString(),
   }
 
   async function paintStopped() {
-    const app = render(runnerRow(STOPPED, { waiting: 3 }), { cols: 120, rows: 4, autoRender: true })
+    const app = render(runnerRow(RUNNING, { stopped: STUCK, waiting: 3 }), {
+      cols: 120,
+      rows: 4,
+      autoRender: true,
+    })
     await app.waitForLayoutStable()
     const at = (needle: string, within?: string) => {
       const row = app.lines.findIndex((line) => line.includes(within ?? needle))
@@ -134,9 +136,9 @@ describe("item 27 — an ERROR is never dimmed, and wears the state's own color"
 
   it("the affected text wears the state word's color, not a muted one", async () => {
     const { app, at } = await paintStopped()
-    const word = at("stopped", "\u25b8 stopped")
-    const explain = at("no journal write")
-    const timer = at("stopped 12:00")
+    const word = at("stuck", "\u25b8 stuck")
+    const explain = at("line stopped at")
+    const timer = at("stuck 6:00")
     app.unmount()
 
     expect(word.fg).not.toBeNull()
@@ -148,7 +150,7 @@ describe("item 27 — an ERROR is never dimmed, and wears the state's own color"
 
   it("CONTROL: an idle runner's own text is muted, so this is a distinction and not a red row", async () => {
     const { app, at } = await paintStopped()
-    const word = at("stopped", "\u25b8 stopped")
+    const word = at("stuck", "\u25b8 stuck")
     app.unmount()
 
     const idle = render(runnerRow(RUNNING, { waiting: 0 }), { cols: 120, rows: 4, autoRender: true })

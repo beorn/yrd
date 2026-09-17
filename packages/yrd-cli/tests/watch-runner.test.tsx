@@ -16,7 +16,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { runId } from "@yrd/queue-core"
-import { SILENT_AFTER_MS, readRunnerFacts, runnerLine, runnerWord, type RunnerFacts } from "../src/watch-runner.ts"
+import { readRunnerFacts, runnerLine, runnerWord, type RunnerFacts } from "../src/watch-runner.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
@@ -142,7 +142,10 @@ describe("readRunnerFacts", () => {
     expect(facts.latest?.alive).toBe(false)
     // No header fields, and that is now a NAMED state rather than a refusal.
     expect(facts.latest?.queue).toBeUndefined()
-    expect(runnerWord(facts, NOW, false)).toBe("unstarted")
+    // The ruled runner words have none for this, so the WORD is the ordinary
+    // one and the row's second line carries the fact and its evidence.
+    expect(runnerWord(facts, false)).toBe("idle")
+    expect(runnerLine(facts, NOW).detail).toContain("died in its Git preamble")
   })
 
   /**
@@ -174,7 +177,7 @@ describe("readRunnerFacts", () => {
     // Mid-preamble, so no queue yet — and emphatically not a dead run.
     expect(facts.latest?.queue).toBeUndefined()
     expect(facts.latest?.unstarted).toBeUndefined()
-    expect(runnerWord(facts, NOW, false)).not.toBe("unstarted")
+    expect(runnerLine(facts, NOW).detail).not.toContain("died in its Git preamble")
   })
 
   // The control: a run whose queue record IS there is an ordinary run, and the
@@ -206,7 +209,7 @@ describe("runnerWord, the one word", () => {
     journalDir: "/w/logs",
     latest: { alive: false, id: "q-x", lastWriteAt: NOW, startedAt: NOW, ...over },
   })
-  const STOPPED = {
+  const STUCK = {
     by: "yrd-service",
     cause: "stuck" as const,
     change: `task/s@${"4".repeat(40)}`,
@@ -215,31 +218,16 @@ describe("runnerWord, the one word", () => {
   const PAUSED = { by: "@chief", cause: "operator" as const, change: null, since: NOW.toISOString() }
 
   /**
-   * CHANGED MEANING, deliberately, and kept here rather than retyped quietly.
-   * This arm asserted the defect items 1 and 5 name: `running` whenever the
-   * PROCESS lived, "whatever else is true" -- including a journal that had not
-   * moved since the epoch. That short-circuit sat ABOVE the silence check, so a
-   * live process whose journal had stopped read healthy, and the wedged case
-   * was masked by the very process that was wedged.
-   */
-  it("a live process whose journal has stopped reads STOPPED, not healthy", () => {
-    expect(runnerWord(facts({ alive: true, lastWriteAt: new Date(0) }), NOW, false)).toBe("stopped")
-    // And it stays silent even if a row still claims a check is live: a service
-    // that died mid-check leaves exactly that residue.
-    expect(runnerWord(facts({ alive: true, lastWriteAt: new Date(0) }), NOW, true)).toBe("stopped")
-  })
-
-  /**
    * @failure The marker reads the same word in every state it exists to tell
    *          apart, so an operator cannot see whether anything is being checked.
    * @level   l1
    */
   it("is CHECKING when a change is under a check right now (items 1 and 5)", () => {
-    // `processing` retired in S1: it named the checking phase and the merging
-    // phase with one word, on a row that now shares its column with a change's.
-    expect(runnerWord(facts({ alive: true }), NOW, true)).toBe("checking")
+    // `processing` retired: it named the checking phase and the merging phase
+    // with one word, on a row that now shares its column with a change's.
+    expect(runnerWord(facts({ alive: true }), true)).toBe("checking")
     // The process does not enter into it, in either direction.
-    expect(runnerWord(facts({ alive: false }), NOW, true)).toBe("checking")
+    expect(runnerWord(facts({ alive: false }), true)).toBe("checking")
   })
 
   /**
@@ -249,83 +237,65 @@ describe("runnerWord, the one word", () => {
    * nothing and this slice would have changed only a word.
    */
   it("CONTROL: a live process with NOTHING under a check is idle, never checking", () => {
-    expect(runnerWord(facts({ alive: true }), NOW, false)).toBe("idle")
-  })
-
-  it("is `?` with no journal and no stop, stopped past the ceiling, idle otherwise", () => {
-    // S1 does not invent a status source: the runner publishes none of its own
-    // until S2, so a reading off its machine says so rather than guessing.
-    expect(runnerWord({ journalDir: "/w/logs", absent: "none" }, NOW, false)).toBe("unpublished")
-    expect(runnerWord(undefined, NOW, false)).toBe("unpublished")
-    const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
-    expect(runnerWord(quiet, NOW, false)).toBe("stopped")
-    expect(runnerWord(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), NOW, false)).toBe(
-      "idle",
-    )
+    expect(runnerWord(facts({ alive: true }), false)).toBe("idle")
   })
 
   /**
    * The line is not moving BY DECISION, which is the answer the reader wants,
-   * and the stop is a git fact — the one word this row can still say off the
-   * queue's own machine.
+   * and the stop is a git fact. A pause record naming a stuck change IS `stuck`
+   * — the same word that change wears, in the same column.
    */
-  it("says stopped at a change, paused by a person, and says either with no journal here", () => {
-    // @cto, relayed by @chief cf4677f8: a pause record naming a stuck change
-    // IS `stuck` — the same word the change wears, in the same column.
-    expect(runnerWord(facts({ alive: true }), NOW, false, STOPPED)).toBe("stuck")
-    expect(runnerWord(facts({ alive: true }), NOW, false, PAUSED)).toBe("paused")
-    expect(runnerWord(undefined, NOW, false, PAUSED)).toBe("paused")
-    // A stop never hides a check that IS running, because the stop outranks it.
-    expect(runnerWord(facts({ alive: true }), NOW, true, STOPPED)).toBe("stuck")
+  it("says stuck at a change, paused by a person, and lets neither hide behind a live row", () => {
+    expect(runnerWord(facts({ alive: true }), false, STUCK)).toBe("stuck")
+    expect(runnerWord(facts({ alive: true }), false, PAUSED)).toBe("paused")
+    // A stop halts the line, so a row still marked live under one is the
+    // residue of a run that ended; taking it at face value would announce work
+    // over a halted queue.
+    expect(runnerWord(facts({ alive: true }), true, STUCK)).toBe("stuck")
   })
 
   /**
-   * SILENCE OUTRANKS THE STOP. A round still opens and records through a pause,
-   * so a paused queue whose journal has stopped moving is a SERVICE that is
-   * down on top of a pause — the louder and the more actionable of the two.
+   * S1 does not invent a status source: the runner publishes none of its own
+   * until S2, so a reading with no journal of its own says so rather than
+   * guessing — and says it whether or not a stop stands.
    */
-  it("CONTROL: a quiet journal outranks a stop, and a definite outcome outranks both", () => {
-    const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
-    expect(runnerWord(quiet, NOW, false, PAUSED)).toBe("stopped")
-    expect(runnerWord({ ...quiet, latest: { ...quiet.latest!, unstarted: true } }, NOW, false, PAUSED)).toBe(
-      "unstarted",
-    )
+  it("is `?` with no journal on this machine, whatever else is true", () => {
+    expect(runnerWord({ journalDir: "/w/logs", absent: "none" }, false)).toBe("unpublished")
+    expect(runnerWord(undefined, false)).toBe("unpublished")
+    expect(runnerWord(undefined, true, PAUSED)).toBe("unpublished")
   })
 
   /**
-   * @failure An empty queue whose service is dead reads `idle`, so the seat
-   *          about to submit into it sees a healthy queue and submits.
+   * @failure THE GAP THIS TEST EXISTS TO KEEP VISIBLE, not one it closes.
+   *
+   *          A journal that has not moved for hours reads `idle`, exactly as
+   *          one written a second ago does. That is RULED (@cto, relayed by
+   *          @chief): `silent` is the runner's own published beat, read from
+   *          `refs/yrd/<queue>/runner` from S2, and is never inferred from a run
+   *          journal's mtime. The inference this replaces called a healthy queue
+   *          between rounds dead and a dead queue alive by turns.
+   *
+   *          What it costs is @i/10-yrd/24486, and the cost is real: measured
+   *          2026-09-11 during an outage, three rows sat queued with no live
+   *          check while the service was down, and a fourth seat submitted into
+   *          it. Until S2 publishes a beat, NOTHING on this page catches that.
+   *
+   *          So this arm pins the absence deliberately. Anyone restoring an
+   *          mtime-derived silence will fail here and read this first.
+   * @level   l1
    */
-  it("goes loud on an EMPTY queue too — the state a submitter arrives into (@i/10-yrd/24486)", () => {
-    const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
-    expect(runnerWord(quiet, NOW, false)).toBe("stopped")
-  })
+  it("never infers silence from a journal's age: a stale journal reads idle, and that gap waits for S2", () => {
+    const hours = facts({ lastWriteAt: new Date(NOW.getTime() - 6 * 60 * 60 * 1000) })
 
-  /**
-   * @failure The weaker silence condition turns a healthy queue between polls
-   *          into a false alarm, and a box that cries wolf gets ignored.
-   * @level l1
-   */
-  it("NEGATIVE CONTROL: a healthy queue between polls never reads stopped", () => {
-    // The live queue's measured cadence, 2026-09-11: journals at 09:01:16,
-    // 09:03:21, 09:05:26, 09:07:30, 09:09:35, 09:11:40 — about 2:05 apart,
-    // nearly five times inside the ceiling, and written whether or not the
-    // round had work.
-    const cadenceMs = 125_000
-    expect(cadenceMs * 4).toBeLessThan(SILENT_AFTER_MS)
-    expect(runnerWord(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs) }), NOW, false)).toBe("idle")
-    expect(runnerWord(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs * 4) }), NOW, false)).toBe("idle")
-    // And the queue depth cannot change that answer, because the signature no
-    // longer admits one: whatever is in line, these are the same two facts.
+    expect(runnerWord(hours, false)).toBe("idle")
+    expect(runnerWord(hours, false)).not.toBe("silent")
+    expect(runnerWord(hours, false)).not.toBe("stopped")
+    // The age itself is still READ — the row's second line reports it — so the
+    // fact is on screen even though no word is derived from it.
+    expect(runnerLine(hours, NOW).detail).toContain("beat 6h00m ago")
   })
 })
 
-/**
- * The runner's ROW, as the flow page draws it: the word, what it holds or why
- * it holds nothing, and the second line of host-only detail that is NEVER
- * blank. The box's four rails are gone with the box; what survived is the one
- * line an operator acted on, in the table's own columns.
- */
 describe("the runner's row", () => {
   const latest = (over: Partial<NonNullable<RunnerFacts["latest"]>>): RunnerFacts => ({
     journalDir: "/w/logs",
@@ -374,25 +344,19 @@ describe("the runner's row", () => {
   })
 
   /**
-   * @failure The runner reads `idle` at the exact moment a seat is deciding
-   *          whether to submit, and the submission goes into a dead queue.
+   * The count is the queue's, and the row says what it is idle OVER, so an
+   * operator never reads "idle" beside a line with work in it and has to go
+   * looking for the number somewhere else.
    */
-  it("goes loud on an EMPTY queue too, and says what submitting now would do (@i/10-yrd/24486)", () => {
-    const line = runnerLine(latest({ lastWriteAt: new Date(NOW.getTime() - 12 * 60_000) }), NOW, { waiting: 0 })
+  it("says how many wait while it holds nothing, and reports a stale journal's age without deriving a word from it", () => {
+    const stale = latest({ lastWriteAt: new Date(NOW.getTime() - 12 * 60_000) })
 
-    expect(line.state).toBe("stopped")
-    expect(line.duration).toBe("stopped 12:00")
-    expect(line.holds).toContain("no journal write for 12:00")
-    expect(line.holds).toContain("nothing is in line, so a change submitted now would not be picked up")
-    // Never the in-line sentence, which would be a lie at zero.
-    expect(line.holds).not.toContain("wait in line")
-  })
-
-  it("goes loud when changes wait and nothing has written past the ceiling", () => {
-    const line = runnerLine(latest({ lastWriteAt: new Date(NOW.getTime() - 12 * 60_000) }), NOW, { waiting: 3 })
-
-    expect(line.duration).toBe("stopped 12:00")
-    expect(line.holds).toBe("no journal write for 12:00 while 3 changes wait in line")
+    // No word is derived from the age (see the runnerWord block above: `silent`
+    // is the runner's own published beat, and S1 publishes none).
+    expect(runnerLine(stale, NOW, { waiting: 0 })).toMatchObject({ holds: "nothing in line", state: "idle" })
+    expect(runnerLine(stale, NOW, { waiting: 3 }).holds).toBe("nothing under a check, and 3 in line")
+    // The age itself is on screen, on the row's own second line.
+    expect(runnerLine(stale, NOW, { waiting: 3 }).detail).toContain("beat 12:00 ago")
   })
 
   /**
@@ -404,13 +368,15 @@ describe("the runner's row", () => {
     const line = runnerLine(
       { journalDir: "/w/logs", absent: "no run journal was read: /w/logs — there is no such directory" },
       NOW,
-      { waiting: 2 },
+      { queue: "main", waiting: 2 },
     )
 
     expect(line.state).toBe("unpublished")
-    expect(line.holds).toBe("no runner status is published for this queue")
+    // The ref is named so a reader knows WHERE the status will be, not to claim
+    // it is there: S2 writes it, and until then this row says `?`.
+    expect(line.holds).toBe("no runner status published at origin (refs/yrd/main/runner)")
     expect(line.detail).toContain("/w/logs")
-    expect(line.detail).toContain("publishes no status of its own yet")
+    expect(line.detail).toContain("the check output is on the queue's machine only")
     expect(line.at).toBeUndefined()
     expect(line.duration).toBeUndefined()
     // And with no facts at all, still a sentence and still no guess.
@@ -424,8 +390,13 @@ describe("the runner's row", () => {
     })
     expect(stopped.state).toBe("stuck")
     expect(stopped.duration).toBe("stuck 6:00")
-    expect(stopped.holds).toContain("the line stopped at task/s since")
+    expect(stopped.holds).toContain("line stopped at task/s since")
+    // EVERY cure a reader is handed must be a command they can run: the verb is
+    // `yrd queue withdraw` (cli.ts), and there is no `yrd cancel`.
+    expect(stopped.holds).toContain("fix and yrd merge <fix>")
+    expect(stopped.holds).toContain("yrd queue withdraw task/s")
     expect(stopped.holds).toContain("yrd queue resume")
+    expect(stopped.holds).not.toContain("yrd cancel")
 
     const paused = runnerLine(latest({}), NOW, {
       stopped: { by: "@chief", cause: "operator", change: null, since: since.toISOString() },
@@ -437,11 +408,18 @@ describe("the runner's row", () => {
     expect(paused.detail).toContain("beat")
   })
 
-  it("names the journal of a run that died in its Git preamble, which is where the failing call is", () => {
+  /**
+   * 24470 has no WORD in the ruled eight, and inventing one would put a tenth
+   * word in a column that is meant to read as one vocabulary. The fact is
+   * host-only, so it goes where host-only facts go — the row's second line,
+   * which never goes blank — and it still points at the journal row that IS the
+   * failing call.
+   */
+  it("names the journal of a run that died in its Git preamble on its second line, where host-only facts go", () => {
     const line = runnerLine(latest({ unstarted: true }), NOW, {})
 
-    expect(line.state).toBe("unstarted")
-    expect(line.holds).toContain("died in its Git preamble")
+    expect(line.state).toBe("idle")
+    expect(line.detail).toContain("died in its Git preamble")
     expect(line.detail).toContain("/w/logs/q-20260903T115800000Z-0badf00d.jsonl")
     expect(line.detail).toContain("names the call that failed")
   })

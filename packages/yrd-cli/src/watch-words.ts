@@ -45,43 +45,62 @@ export const LEGEND_STATES = [
 ] as const
 
 /**
- * The RUNNER's own states, in legend order. `checking` and `merging` are a
- * change's words too, and deliberately so: the flow page draws the runner as a
- * row in the same STATUS column as every change, so the column reads one
- * vocabulary. `processing` — the one word the retired RUNNER box showed for
- * both phases — retires here, because a phase earns a word when it takes time
- * and can fail, and writing the target is not running checks.
+ * THE RUNNER'S EIGHT STATES, in legend order (@cto, relayed by @chief). Four of
+ * them — `verifying`, `checking`, `merging`, `stuck` — are a change's words
+ * too, and deliberately so: the flow page draws the runner as a row in the same
+ * STATUS column as every change, so the column reads one vocabulary and no word
+ * is minted twice for one fact. When the runner is checking, the change it
+ * holds is checking; that overlap IS the design.
  *
- * `silent` and `stopped` are SIGNALS, derived where the page is drawn from the
- * absence or the age of a beat, never stored: writing either into a record
- * would make a derived fact durable and let it go stale (@i/10-yrd/24523).
- *
- * `stuck` and `paused` are the line's own stop, which is a git fact and so the
- * one thing this row can still say off the queue's machine. `stopped` is
- * derived where the page is drawn, from a journal that has gone quiet.
- *
- * `merging` and `silent` are in the legend and on no row yet (@cto, relayed by
- * @chief cf4677f8): nothing a reading can see locally says a merge is being
- * written, and `silent` is read from the runner's own published ref, which
- * does not exist until S2. Until then the row reads `?` rather than a guess.
+ * `processing` retires here. It named the checking phase and the merging phase
+ * with one word, and a phase earns a word when it takes time and can fail:
+ * running the project's own checks and writing the target are two such phases,
+ * and `verifying` (git machinery) is a third.
  */
 export const RUNNER_STATES = [
   "idle",
+  "verifying",
+  "provisioning",
   "checking",
   "merging",
+  "deprovisioning",
   "stuck",
   "paused",
-  "stopped",
-  "silent",
-  "unstarted",
-  "unpublished",
 ] as const
+
+/**
+ * The two SIGNALS, plus the unpublished case. A signal is derived where the
+ * page is drawn and stored NOWHERE — never a record kind, never a field:
+ * writing one down would make a derived fact durable and let it go stale
+ * (@i/10-yrd/24523).
+ *
+ * `silent` means the runner's own beat is overdue, read from the status it
+ * publishes at `refs/yrd/<queue>/runner`. **S1 publishes no such ref, so S1
+ * never prints `silent`** — and it is NOT derived from a run journal's mtime
+ * instead, which is ruled out: that reading called a healthy queue between
+ * rounds dead and a dead queue alive by turns. The cost is named rather than
+ * hidden: until S2 publishes, nothing on this page catches a runner that has
+ * stopped writing, and the incident that makes that matter is
+ * @i/10-yrd/24486 — three rows sat queued with no live check while the service
+ * was down, and a fourth seat submitted into it.
+ *
+ * `stopped` means no runner process. It is S2's for the same reason.
+ */
+export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
+
+/**
+ * The runner words a reading can actually produce today, on the queue's own
+ * machine or off it. The rest are defined so that S2 FILLS this table rather
+ * than editing it, and {@link legendLines} says which is which rather than
+ * promising a word no reading can reach.
+ */
+export const RUNNER_STATES_SAID = ["idle", "checking", "stuck", "paused", "unpublished"] as const
 
 /** A word a change's row can show: one of the nine, or `direct`, which is no change. */
 export type DisplayState = (typeof LEGEND_STATES)[number] | "direct"
 
-/** A word the runner's row can show. */
-export type RunnerState = (typeof RUNNER_STATES)[number]
+/** A word the runner's row can show: one of the eight, a signal, or the unpublished `?`. */
+export type RunnerState = (typeof RUNNER_STATES)[number] | (typeof RUNNER_SIGNALS)[number]
 
 export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took" | "runner", WordEntry> = {
   draft: { color: "$fg-muted", means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
@@ -135,6 +154,24 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
     word: "direct",
   },
   // The runner's own, drawn on its row in the same column.
+  verifying: {
+    color: "$fg-info",
+    means: "the runner is settling the change's git state, before any check runs",
+    next: "provisioning, or stuck",
+    word: "verifying",
+  },
+  provisioning: {
+    color: "$fg-info",
+    means: "the runner is preparing the worktree the checks will run in",
+    next: "checking",
+    word: "provisioning",
+  },
+  deprovisioning: {
+    color: "$fg-info",
+    means: "the runner is clearing the worktree the checks ran in",
+    next: "idle",
+    word: "deprovisioning",
+  },
   idle: {
     color: "$fg-muted",
     means: "the runner holds nothing; the line is empty or it is between rounds",
@@ -143,7 +180,7 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   },
   stopped: {
     color: "$fg-error",
-    means: "no run has written here for ten minutes: nothing is running on this machine",
+    means: "no runner process; the runner says so itself, and nothing here infers it",
     next: "yrd queue up",
     word: "stopped",
   },
@@ -155,19 +192,13 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   },
   silent: {
     color: "$fg-error",
-    means: "the runner's own published status has no recent beat",
+    means: "the runner's own published beat is overdue",
     next: "read the service",
     word: "silent",
   },
-  unstarted: {
-    color: "$fg-error",
-    means: "the newest run died in its Git preamble, before it read its queue",
-    next: "its journal's last Git row names the call that failed",
-    word: "unstarted",
-  },
   unpublished: {
     color: "$fg-muted",
-    means: "the runner's status is not published, and this reading is not on its machine",
+    means: "no runner status published at origin",
     next: "read it on the queue's own machine",
     word: "?",
   },
@@ -178,14 +209,19 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   runner: { color: "$fg-muted", word: "RUNNER" },
 }
 
-/** The legend's word column: the longest word and its gap. */
-const WORD_COLUMN = 13
+/** The legend's word column: the longest word and its gap (`deprovisioning`). */
+const WORD_COLUMN = 16
 
 /**
  * The legend: the change's words (`word  what it means → what happens next`),
  * then `direct` apart under "not a change", then the runner's own under "the
  * runner". An entry longer than `width` wraps at a space and hangs under its
  * meaning.
+ *
+ * The runner's section says which of its words a reading can reach today. A
+ * legend that listed all of them flat would promise an operator a word they
+ * will never see, and the cure for that is to say so — never to invent a source
+ * that emits it.
  */
 export function legendLines(width: number = Number.POSITIVE_INFINITY): readonly string[] {
   const entry = (key: DisplayState | RunnerState): readonly string[] => {
@@ -201,16 +237,24 @@ export function legendLines(width: number = Number.POSITIVE_INFINITY): readonly 
     }
     return [...rows, row]
   }
-  // `checking` and `merging` are listed once, with the changes: the runner's
-  // row and a change's row mean the same thing by them.
-  const runnerOnly = RUNNER_STATES.filter((key): key is RunnerState => key !== "checking" && key !== "merging")
+  // A word the changes already listed is listed once: the runner's row and a
+  // change's row mean the same thing by it.
+  const listed = new Set<string>(LEGEND_STATES)
+  const runnerOnly = [...RUNNER_STATES, ...RUNNER_SIGNALS].filter((key) => !listed.has(key as never))
+  const said = new Set<string>(RUNNER_STATES_SAID)
+  // Every runner word no reading can reach, INCLUDING the ones listed above
+  // with the changes: `merging` is in the change legend and on no row either,
+  // and a legend that quietly dropped it from this line would promise it.
+  const waiting = [...RUNNER_STATES, ...RUNNER_SIGNALS].filter((key) => !said.has(key))
   return [
     ...LEGEND_STATES.flatMap(entry),
     "",
     "not a change",
     ...entry("direct"),
     "",
-    "the runner, which says checking and merging as a change does",
+    "the runner, which says checking, merging and stuck as a change does",
     ...runnerOnly.flatMap(entry),
+    "",
+    `not said yet: ${waiting.map((key) => STATE_WORDS[key].word).join(", ")} — the runner publishes no status of its own here`,
   ]
 }

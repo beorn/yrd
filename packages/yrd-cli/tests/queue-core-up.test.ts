@@ -518,8 +518,12 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(page.findIndex((line) => line.includes("paused by @chief"))).toBeLessThan(
       page.findIndex((line) => line.includes("RUNNER")),
     )
+    // No run journal on this machine, so the row says `?` and names where the
+    // status will be published — it does NOT borrow the stop to look informed.
+    // The pause itself is the loud line above, said exactly once.
     const runnerRow = page.find((line) => line.includes("RUNNER"))
-    expect(runnerRow, listed.stdout()).toContain("paused")
+    expect(runnerRow, listed.stdout()).toContain("?")
+    expect(runnerRow, listed.stdout()).toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,

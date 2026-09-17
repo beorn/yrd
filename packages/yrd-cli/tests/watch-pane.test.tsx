@@ -1497,16 +1497,20 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       },
     ]
 
-    const painted = await lines(snapshot({ rows, runner: SILENT }), 120, 40)
+    // Nothing is under a check here, so the runner draws its OWN row and it is
+    // the row that carries the count. Both counts come from one `lineOf`
+    // (watch-frame.tsx) over the whole reading, which is what stops them
+    // disagreeing; the fixture splits two changes into four run rows so a count
+    // that counted ROWS would read 5, not 3.
+    const unheld = rows.map(({ row, ...rest }) => ({ ...rest, row: { ...row, live: undefined } }))
+    const painted = await lines(snapshot({ rows: unheld, runner: RUNNER }), 120, 40)
 
-    // The RUNNER box's rails are the runner's ROW now, so the count is read off
-    // the row rather than out of a border.
     const rail = (painted.find((line) => line.includes("RUNNER")) ?? "").replace(/\s+/gu, " ")
     const top = topLineOf(painted).line.trim()
     expect({
-      rail: /while (\d+) changes? waits? in line/u.exec(rail)?.[1],
-      top: top.startsWith(`3 ${W.waiting.word}`) ? "3" : top,
-    }).toEqual({ rail: "3", top: "3" })
+      rail: /and (\d+) in line/u.exec(rail)?.[1],
+      top: top.startsWith(`4 ${W.waiting.word}`) ? "4" : top,
+    }).toEqual({ rail: "4", top: "4" })
   })
 
   it("counts the drafts in their window and the heads not yet read apart, and w asks the loader for the other window, where the unread drafts are marked rows (A2-set-v3 Q1)", async () => {
@@ -2142,17 +2146,19 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     }).toEqual({ full: [1, true], withDetail: [1, true] })
   }, 15_000)
 
-  it("says a runner that has stopped writing without naming a supervisor: yrd does not depend on hab (24869)", async () => {
+  it("says what it knows about the runner without naming a supervisor: yrd does not depend on hab (24869)", async () => {
     const painted = await lines(snapshot({ rows: [{ row: row({ position: 1 }) }], runner: SILENT }), 120, 40)
 
-    // The word is `stopped` since S1 (@cto, relayed by @chief cf4677f8):
-    // `silent` is read from the runner's own published status, which does not
-    // exist yet, and this is read from a journal's mtime on this machine.
+    // A stale journal reads `idle` and reports its age on the second line: no
+    // word is derived from an mtime (@cto, relayed by @chief). `silent` and
+    // `stopped` are the runner's own published beat, and it publishes none yet.
     const at = painted.findIndex((line) => line.includes("RUNNER"))
     const runner = painted.slice(at, at + 2).join("\n")
-    expect({ said: runner.includes("stopped"), supervisor: /\bhab\b/u.test(runner) }).toEqual({
-      said: true,
-      supervisor: false,
-    })
+    expect({
+      age: /beat \d/u.test(runner),
+      said: runner.includes("idle"),
+      silent: runner.includes("silent"),
+      supervisor: /\bhab\b/u.test(runner),
+    }).toEqual({ age: true, said: true, silent: false, supervisor: false })
   })
 })
