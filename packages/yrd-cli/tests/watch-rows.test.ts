@@ -7,9 +7,10 @@
  * these decide only what is on screen.
  */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { Journals, Row } from "@yrd/queue-core"
 import { journalKey } from "@yrd/queue-core"
+import * as format from "../src/watch-format.ts"
 import { clocksLine, noticeLine, watchNotice } from "../src/watch-notice.ts"
 import { filterRows, rowLine, watchRows, watchRowKey } from "../src/watch-rows.ts"
 
@@ -222,6 +223,39 @@ describe("the notice", () => {
     expect(watchNotice(historical, true)).toMatchObject({ word: "change failed #1", cause: "run result: stuck verify" })
     // The join is a caller's fact, not inferred from a result or run identifier.
     expect(watchNotice(historical).word).toBe("failed #1")
+  })
+
+  /**
+   * @failure  The notice kept a state-to-word map of its own beside the one table's (@i/10-yrd/24196, /plat
+   *           finding 1): the two agreed only because each was typed out, so a change to which word a state
+   *           reads would reach the table and leave the notice saying the old one.
+   */
+  it("reads every state's word from the one word table, so it cannot drift from the table; direct apart", () => {
+    // Every state a row can have, each its own value: a state the core adds fails to compile here until listed.
+    const states = Object.values({
+      checked: "checked",
+      direct: "direct",
+      draft: "draft",
+      failed: "failed",
+      merged: "merged",
+      queued: "queued",
+      stuck: "stuck",
+      withdrawn: "withdrawn",
+    } as const satisfies { readonly [S in Row["state"]]: S })
+    // The table answers with a word no second map could hold, so a notice reading a map of its own cannot match.
+    const table = vi.spyOn(format, "stateWord").mockImplementation(({ state }) => `the table's word for ${state}`)
+    try {
+      expect(Object.fromEntries(states.map((state) => [state, watchNotice(row({ state })).word]))).toEqual(
+        Object.fromEntries(
+          states.map((state) => [
+            state,
+            state === "direct" ? "went around the queue" : `the table's word for ${state}`,
+          ]),
+        ),
+      )
+    } finally {
+      table.mockRestore()
+    }
   })
 })
 
