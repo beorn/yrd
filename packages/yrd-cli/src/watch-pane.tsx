@@ -456,7 +456,6 @@ export function WatchPane({
         <WatchDetail
           detail={detail}
           joinedRun={selected?.run !== undefined}
-          live={live}
           {...(tab === undefined ? {} : { selected: tab })}
           onSelect={setTab}
           diffOpen={diffOpen}

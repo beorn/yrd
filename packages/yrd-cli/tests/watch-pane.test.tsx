@@ -348,7 +348,7 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
       "main",
       CHECKS.map((check) => ({ ...check, state: "passed" as const })),
     )
-    const text = await paint(at(<RunStatusBox run={run} live={false} />))
+    const text = await paint(at(<RunStatusBox run={run} />))
 
     expect(text).toContain("✓ passed, merged")
     expect(text).toContain("Merged as b234234abcde at")
@@ -367,7 +367,7 @@ describe("the status box (items 1, 23, 29a, 39)", () => {
         { name: "smoke", state: "not-run" },
       ],
     }
-    const text = await paint(at(<RunStatusBox run={mock} live={false} />))
+    const text = await paint(at(<RunStatusBox run={mock} />))
 
     expect(text).toContain("RUN staging#")
     expect(text).toMatch(/✓ build image\s+1:30/u)
@@ -414,7 +414,7 @@ describe("the change list and the Changes tab (items 2, 4, 6, 24, 25, 31)", () =
       diffStat: { additions: 214, deletions: 38, files: 4 },
       records,
     })
-    const text = await paint(at(<WatchDetail detail={detail} live={false} selected={CHANGES_TAB} />), [], 100)
+    const text = await paint(at(<WatchDetail detail={detail} selected={CHANGES_TAB} />), [], 100)
 
     // Header on the box, then the bold title and the body.
     expect(text).toContain("task/one@abcdef012345")
@@ -471,12 +471,12 @@ describe("which tab a reader lands on", () => {
       { name: "verify", phase: "base", state: "passed", output: "BASE_PASS", log: "/base/log" },
     ]
     const detail = detailOf(item, checks)
-    const candidate = await paint(at(<WatchDetail detail={detail} live={false} selected="0" />))
+    const candidate = await paint(at(<WatchDetail detail={detail} selected="0" />))
     expect(candidate).toContain("verify (merge)")
     expect(candidate).toContain("verify (base)")
     expect(candidate).toContain("CANDIDATE_FAIL")
     expect(candidate).not.toContain("BASE_PASS")
-    const base = await paint(at(<WatchDetail detail={detail} live={false} selected="1" />))
+    const base = await paint(at(<WatchDetail detail={detail} selected="1" />))
     expect(base).toContain("BASE_PASS")
     expect(base).not.toContain("CANDIDATE_FAIL")
   })
@@ -496,7 +496,7 @@ describe("which tab a reader lands on", () => {
   })
 
   it("renders the check after a failing one as NOT RUN, with the command that would have run it", async () => {
-    const text = await paint(at(<WatchDetail detail={detailOf({ row: failedRow() })} live={false} selected="2" />))
+    const text = await paint(at(<WatchDetail detail={detailOf({ row: failedRow() })} selected="2" />))
 
     expect(text).toContain("bun run lint")
     expect(text).toContain("NOT RUN")
@@ -646,7 +646,7 @@ describe("the layout tier", () => {
 })
 
 describe("the running step and the check-less declaration", () => {
-  it("shows how long the running step has run, from the row's own live instant, beside the pulse (item 39)", async () => {
+  it("shows how long the running step has run, from the row's own live instant, beside its marker (item 39)", async () => {
     const live = row({
       live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: new Date(NOW.getTime() - 151_000) },
       position: 1,
@@ -656,7 +656,7 @@ describe("the running step and the check-less declaration", () => {
       { name: "typecheck", result: { ms: 8_000, result: "pass" }, state: "passed" },
       { name: "affected-tests", state: "running" },
     ])
-    const text = await paint(at(<RunStatusBox run={run} live={false} />))
+    const text = await paint(at(<RunStatusBox run={run} />))
 
     expect(text).toMatch(/◉ affected-tests 2:31/u)
     expect(text).toMatch(/✓ typecheck 0:08/u)
@@ -664,7 +664,7 @@ describe("the running step and the check-less declaration", () => {
 
   it("says so when the declaration a change was judged by names no check, instead of a bare tab strip", async () => {
     const detail = detailOf({ row: row() }, [])
-    const text = await paint(at(<WatchDetail detail={detail} live={false} />))
+    const text = await paint(at(<WatchDetail detail={detail} />))
 
     expect(text).toContain("names no check")
     expect(text).toContain("Changes")
@@ -678,9 +678,7 @@ describe("the running step and the check-less declaration", () => {
       state: "direct",
       subject: undefined,
     })
-    const text = await paint(
-      at(<WatchDetail detail={detailOf({ row: direct }, [])} live={false} selected={CHANGES_TAB} />),
-    )
+    const text = await paint(at(<WatchDetail detail={detailOf({ row: direct }, [])} selected={CHANGES_TAB} />))
 
     expect(text).toContain("main moved around the queue at 333333333333")
   })
@@ -700,7 +698,7 @@ describe("the status box's step keys", () => {
         { name: "affected-tests", state: "running" },
       ],
     }
-    const text = await paint(at(<RunStatusBox run={run} live={false} />))
+    const text = await paint(at(<RunStatusBox run={run} />))
 
     expect(text.match(/✓ setup 0:01/gu)).toHaveLength(2)
     expect(text).toContain("◉ affected-tests")

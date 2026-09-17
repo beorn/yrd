@@ -395,11 +395,12 @@ export const ListRow = memo(function ListRow({
             ),
           status: (
             <Box flexDirection="row" minWidth={0}>
-              {/* The cursor row is exempted (item 13's archaeology): `forced`
-                  is the selected pair and must read as a plain, steady color,
-                  never overridden by a pulse the cell can't also apply. Off
-                  the cursor, a live row's glyph pulses like the RUNNER box's
-                  own marker — same foreground-vs-background shape, same
+              {/* The held row's glyph is the one pulse on screen, cursor or
+                  not (24196 P1): the held row sorts first, so the cursor
+                  starts on it, and item 13's cursor exemption hid the only
+                  live marker. On the cursor it pulses in the selection's own
+                  pair, so the row still reads as selected; off it, against
+                  the surface — foreground-vs-background either way, at the
                   900ms rate. `live` (never rendering `<Pulse>` at all when
                   false) is what keeps a one-shot print safe: silvery's
                   `usePulse` calls `useScopeEffect` UNCONDITIONALLY, so even an
@@ -409,8 +410,13 @@ export const ListRow = memo(function ListRow({
                   it (measured 2026-09-09: `yrd queue list` crashed on any row
                   with a check running; swapping to `active=` still crashed,
                   one hook deeper). */}
-              {live && row.live !== undefined && forced === undefined ? (
-                <Pulse synchronized colors={[color, "$bg-surface-default"]} intervalMs={900} flexShrink={0}>
+              {live && row.live !== undefined ? (
+                <Pulse
+                  synchronized
+                  colors={forced === undefined ? [color, "$bg-surface-default"] : [forced, "$bg-selected"]}
+                  intervalMs={900}
+                  flexShrink={0}
+                >
                   {stateGlyph(row)}
                 </Pulse>
               ) : (
