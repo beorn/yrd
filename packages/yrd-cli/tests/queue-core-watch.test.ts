@@ -11,7 +11,16 @@
  *           reading the live table
  */
 
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, resolve } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
@@ -932,6 +941,54 @@ describe("the timing a one-row page prints under its row (24196)", () => {
     expect({ cell, trailer: lines[notice + 1]?.trim() }, page.stdout()).toEqual({
       cell: expect.stringMatching(/^waiting \d/u),
       trailer: cell,
+    })
+  })
+})
+
+/**
+ * @failure  Under a selector, the queue line and the RUNNER rail counted the view, while the stop, the unread
+ *           drafts and STATS counted the whole queue (@i/10-yrd/24196, review finding 4): `yrd list task/x`,
+ *           how a seat looks at its own change, read `1 waiting: 1 submitted` with other changes ahead of it,
+ *           and dropped the drafts clause because the selector filtered the draft rows away.
+ * @level    l2 (a real remote and a clone; the list command's own page, run journal written in place)
+ * @consumer a seat waiting on its own change, reading how long the line ahead of it is
+ */
+describe("the queue line under a selector (24196)", () => {
+  it("counts the whole line and every draft, and so does the RUNNER rail, whatever the selector shows", async () => {
+    const w = await world()
+    await change(w, "task/one", true)
+    await change(w, "task/two", true)
+    // A draft this clone holds, so it is dated: pushed, never submitted, and no selector term matches it.
+    await w.git(["checkout", "--quiet", "-b", "task/here", "main"])
+    writeFileSync(join(w.work, "here.txt"), "here\n")
+    await w.git(["add", "."])
+    await w.git(["commit", "--quiet", "-m", "task/here waits for a submit"])
+    await w.git(["checkout", "--quiet", "main"])
+    await w.git(["push", "--quiet", "origin", "task/here"])
+    // A run journal that has not moved for twenty minutes: the RUNNER rail then says how many changes wait.
+    const journal = openLog(join(w.workdir, "logs"))
+    journal.write({ base: "aaa", checks: ["verify"], kind: "run", queue: "test", target: "main" })
+    const quiet = new Date(Date.now() - 20 * 60 * 1000)
+    utimesSync(journal.path, quiet, quiet)
+
+    const page = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, page.io, { command: "list", terms: ["task/one"] }, { workdir: w.workdir }),
+      page.stderr(),
+    ).toBe(0)
+
+    const lines = page.stdout().split("\n")
+    expect(
+      {
+        queueLine: lines[lines.findIndex((line) => line.includes("YRD QUEUES")) + 1]?.trim(),
+        rail: /while \d+ changes? waits? in line/u.exec(page.stdout())?.[0],
+        scope: lines.some((line) => line.includes("1 of 2 change(s) match task/one")),
+      },
+      page.stdout(),
+    ).toEqual({
+      queueLine: "2 waiting: 2 submitted · 1 draft (7d)",
+      rail: "while 2 changes wait in line",
+      scope: true,
     })
   })
 })
