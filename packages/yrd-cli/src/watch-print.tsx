@@ -16,7 +16,7 @@
 
 import React from "react"
 import { Box, Text, renderString } from "silvery"
-import { ListStack, LoudPause } from "./watch-frame.tsx"
+import { ListStack, LoudPause, QueueLine } from "./watch-frame.tsx"
 import { NowProvider } from "./watch-clock.ts"
 import { ListHeader, ListRow, TopLine, listLayout, separatorBefore } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
@@ -46,6 +46,7 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
         {/* The queue's own name, as a stranger spells it — the line a logged round's `updated` stamp sits under. */}
         <Text wrap="truncate">{snapshot.queue}</Text>
         <TopLine queues={queues} visible={undefined} onToggle={() => undefined} allOn />
+        <QueueLine snapshot={snapshot} columns={columns} />
         {snapshot.journalAbsent === undefined ? null : (
           <Text color="$fg-muted" wrap="truncate">
             {snapshot.journalAbsent}
@@ -57,8 +58,8 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
           </Text>
         )}
         {/* RUNNER above the table, as the retired page had it (24169-old-list.md §1.3), then the rows. */}
-        <ListStack snapshot={snapshot} label={label} columns={columns - 2} live={false}>
-          <ListHeader layout={layout} />
+        <ListStack snapshot={snapshot} label={label} columns={columns - 2}>
+          <ListHeader layout={layout} draftWindow={snapshot.drafts?.window ?? "7d"} />
           {rows.length === 0 ? (
             <Text color="$fg-muted">nothing in line</Text>
           ) : (
@@ -90,7 +91,8 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
             </Text>
           ))}
           {options.scope === undefined ? (
-            <Text color="$fg-muted">{`${String(rows.length)} change(s) · one row per run per change`}</Text>
+            // A draft is a row and no change: the queue line counts the drafts.
+            <Text color="$fg-muted">{`${String(rows.filter((item) => item.row.state !== "draft").length)} change(s) · one row per run per change`}</Text>
           ) : null}
         </ListStack>
       </Box>

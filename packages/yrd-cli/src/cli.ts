@@ -32,6 +32,7 @@ import { closeEnvironment, listEnvironments, openEnvironment } from "./env-comma
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import { resolveQueueLocation } from "./queue-location.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
+import { legendLines } from "./watch-words.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 /** The seat a submit names. Never the git author: the fleet's git identity
@@ -390,7 +391,10 @@ function buildProgram(
         "--require-match",
         "exit 1 instead of 0 when a filter term matches no rows (default: exit 0, said loudly either way)",
       )
-  const LIST_DESCRIPTION = "every change in line, then the failed and the merged; filters are case-insensitive OR terms"
+  const LIST_DESCRIPTION =
+    "the change under a check, every change in line, the ended newest first, then the drafts; filters are case-insensitive OR terms"
+  // The legend, one line per state from the one word table (watch-words.ts), read when the program is built.
+  const STATES_HELP = legendLines().join("\n")
   const WATCH_FLAG_HELP = "refresh until the selected change ends, exiting with its code as yrd check does"
   const queueList = async (filters: readonly string[] | undefined, options: unknown): Promise<void> => {
     const { interval, json, latest, status, watch, queue, requireMatch } = options as {
@@ -421,7 +425,11 @@ function buildProgram(
     setExit(taken)
   }
   listOptions(
-    queue.command("list [filter...]").description(LIST_DESCRIPTION).option("--watch", WATCH_FLAG_HELP),
+    queue
+      .command("list [filter...]")
+      .description(LIST_DESCRIPTION)
+      .option("--watch", WATCH_FLAG_HELP)
+      .addHelpSection("States:", STATES_HELP),
   ).action(async (filters, options) => queueList(filters as string[] | undefined, options))
   // `yrd list` is `yrd queue list` (the operator's spelling, 2026-09-04),
   // registered the way `yrd submit` is: the same action, the same options, one
@@ -430,7 +438,8 @@ function buildProgram(
     program
       .command("list [filter...]")
       .description(`${LIST_DESCRIPTION} (the same as ${name} queue list)`)
-      .option("--watch", WATCH_FLAG_HELP),
+      .option("--watch", WATCH_FLAG_HELP)
+      .addHelpSection("States:", STATES_HELP),
   ).action(async (filters, options) => queueList(filters as string[] | undefined, options))
   queue
     .command("stats")
@@ -601,7 +610,7 @@ function addExamples(program: CliCommand, name: string): void {
   ])
   program.addHelpSection("Examples:", [
     [`$ ${name} submit fix-login`, "push the branch and open its change"],
-    [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
+    [`$ ${name} queue list`, "the change under a check, the line, the ended, then the drafts"],
     [`$ ${name} queue stats --since 1d`, "merged, failed, retries, re-pushes and latency, per submitter"],
     [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
     [`$ ${name} queue run`, "one round of queue work, run now"],
@@ -613,7 +622,7 @@ function addExamples(program: CliCommand, name: string): void {
 function addQueueExamples(queue: CliCommand, name: string): void {
   queue.addHelpSection("Examples:", [
     [`$ ${name} queue submit fix-login`, "push the branch and open its change"],
-    [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
+    [`$ ${name} queue list`, "the change under a check, the line, the ended, then the drafts"],
     [`$ ${name} queue stats --since 1d`, "merged, failed, retries, re-pushes and latency, per submitter"],
     [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
     [`$ ${name} queue run`, "one round of queue work, run now"],

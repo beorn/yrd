@@ -16,7 +16,7 @@
  */
 
 import type { CheckView, Row } from "@yrd/queue-core"
-import { clock, mediaDuration, runShortName } from "./watch-format.ts"
+import { STATE_WORDS, clock, mediaDuration, runShortName } from "./watch-format.ts"
 import { watchNotice } from "./watch-notice.ts"
 
 /** The kinds a run can be. `queue` is the only one built; the union exists so the next one is a data change. */
@@ -92,7 +92,7 @@ export function headlineOf(row: Row, joinedRun = false): string {
   // A merged change whose run passed is the operator's own sample, joined or
   // not: the box IS the run, so the `change merged` qualifier is kept only
   // where the run's own result disagrees with the change's state.
-  if (row.state === "merged" && row.result?.startsWith("pass") === true) return "passed, merged"
+  if (row.state === "merged" && row.result?.startsWith("pass") === true) return `passed, ${STATE_WORDS.merged.word}`
   // A check running now is the present, not a historical run's reading: the
   // `change` qualifier that tells the two apart has nothing to tell apart.
   if (row.live !== undefined) return notice.word.replace(/^change /u, "")

@@ -10,6 +10,33 @@
 
 import { homedir } from "node:os"
 import { runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
+import { STATE_WORDS, type DisplayState } from "./watch-words.ts"
+
+export { LEGEND_STATES, STATE_WORDS, legendLines, type DisplayState, type WordEntry } from "./watch-words.ts"
+
+/**
+ * The word a row's state reads as (watch-words.ts): a check running on it now
+ * reads checking whatever its records say; otherwise the core's state, in the
+ * operator's word.
+ */
+export function displayState(row: Pick<Row, "state" | "live">): DisplayState {
+  if (row.live !== undefined) return "checking"
+  switch (row.state) {
+    case "queued":
+      return "submitted"
+    case "checked":
+      return "pending"
+    case "withdrawn":
+      return "cancelled"
+    default:
+      return row.state
+  }
+}
+
+/** The word for a row, read from the one table when it draws. */
+export function stateWord(row: Pick<Row, "state" | "live">): string {
+  return STATE_WORDS[displayState(row)].word
+}
 
 /** Full recorded warnings, shared by plain output and the selected change detail. */
 export function diagnosticLines(

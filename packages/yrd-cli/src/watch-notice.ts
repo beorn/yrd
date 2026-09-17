@@ -14,10 +14,12 @@
  *
  * So every mapping here is a TABLE keyed by the state the core handed over. A
  * new state added to the core is a compile error here, which is the point.
+ * The words themselves are the one word table's (watch-words.ts), read when
+ * the notice is made (@i/10-yrd/24196).
  */
 
 import { incidentLine, clocks, type Row } from "@yrd/queue-core"
-import { mediaDuration, stateGlyph } from "./watch-format.ts"
+import { STATE_WORDS, mediaDuration, stateGlyph, type DisplayState } from "./watch-format.ts"
 
 export type Notice = Readonly<{
   glyph: string
@@ -30,19 +32,24 @@ export type Notice = Readonly<{
 }>
 
 /**
- * How each state reads in a notice. The core's six words plus `direct` stand
- * as they are — renaming a state at the edge is how two surfaces come to
- * disagree about one change — and only the parenthetical is ours.
+ * Which word each state reads as in a notice: the one table's, so the notice
+ * and the table cannot disagree about one change. `direct` is no change and
+ * says what happened instead.
  */
-const WORD: Readonly<Record<Row["state"], string>> = {
-  checked: "checked",
+const WORD: Readonly<Record<Row["state"], DisplayState | "went around the queue">> = {
+  checked: "pending",
   direct: "went around the queue",
   draft: "draft",
   failed: "failed",
   merged: "merged",
-  queued: "queued",
+  queued: "submitted",
   stuck: "stuck",
-  withdrawn: "withdrawn",
+  withdrawn: "cancelled",
+}
+
+function wordOf(state: Row["state"]): string {
+  const key = WORD[state]
+  return key === "went around the queue" ? key : STATE_WORDS[key].word
 }
 
 export function watchNotice(row: Row, joinedRun = false): Notice {
@@ -54,7 +61,7 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
       : joinedRun && row.result !== undefined
         ? `run result: ${row.result}`
         : (row.reason ?? row.result)
-  const state = joinedRun ? `change ${WORD[row.state]}` : WORD[row.state]
+  const state = joinedRun ? `change ${wordOf(row.state)}` : wordOf(row.state)
   const next =
     row.incident !== undefined
       ? row.incident.next
@@ -65,9 +72,10 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
     glyph: stateGlyph(row),
     // The overlay says what is happening RIGHT NOW; the state still says what
     // the records say, and both are on the line, because a change under a
-    // check reads `queued` until its checked record merges and that is an
+    // check reads submitted until its checked record merges and that is an
     // answer, not a bug to paper over.
-    word: live === undefined ? `${state}${position}` : `${state}${position}, checking ${live.check}`,
+    word:
+      live === undefined ? `${state}${position}` : `${state}${position}, ${STATE_WORDS.checking.word} ${live.check}`,
     ...(cause === undefined ? {} : { cause }),
     ...(next === undefined ? {} : { next }),
   }
