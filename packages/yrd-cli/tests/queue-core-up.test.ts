@@ -35,6 +35,7 @@ import {
   appendRecord,
   changeRef,
   gitIn,
+  parseQueueHealthDocument,
   readConfig,
   readRecords,
   readRemoteCommit,
@@ -2522,7 +2523,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
     }
     // The document left on disk is the last one published: the probe below reads the writer's final word.
     const last = writes.at(-1)?.document
-    expect(same(last, JSON.parse(readFileSync(join(workdir, "service-health.json"), "utf8")))).toBe(true)
+    expect(same(last, parseQueueHealthDocument(readFileSync(join(workdir, "service-health.json"), "utf8")))).toBe(true)
     const writtenAt = Date.parse(String(last?.facts?.writtenAt))
     const at = (ms: number) => new Date(writtenAt + ms)
     // Believed through the instant interval plus grace runs out...
