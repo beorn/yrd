@@ -130,6 +130,31 @@ function logRows(): Readonly<{
 
 const DECLARATION = "{}\n"
 
+/**
+ * How many 0.05 s turns a fixture shell waits to be released before it gives up
+ * and exits: 120 s, above this file's longest test timeout (60 s). A fixture
+ * that waits without a bound outlives the run whenever the test dies before
+ * releasing it, and that leak is what km-infra's test-fixture-process-leaks
+ * guard reads; a bound under the timeout would cut a legitimate wait short
+ * instead.
+ */
+const FIXTURE_WAIT_TURNS = 2400
+
+/** The lines of a fixture's bounded wait: turn until `test` stops holding, then give up loudly. */
+function waitingFor(test: string, why: string): readonly string[] {
+  return [
+    "turns=0",
+    `while ${test}; do`,
+    "  turns=$((turns + 1))",
+    `  if [ "$turns" -gt ${String(FIXTURE_WAIT_TURNS)} ]; then`,
+    `    echo "${why}" >&2`,
+    "    exit 1",
+    "  fi",
+    "  sleep 0.05",
+    "done",
+  ]
+}
+
 async function identity(git: Git): Promise<void> {
   await git(["config", "user.email", "queue@yrd.test"])
   await git(["config", "user.name", "yrd"])
@@ -2389,7 +2414,7 @@ describe("the service keeps its document fresh and names its writer (24523)", ()
       [
         "#!/bin/sh",
         `echo "$(pwd)" >> ${started}`,
-        `while [ ! -f ${released} ]; do sleep 0.05; done`,
+        ...waitingFor(`[ ! -f ${released} ]`, "held-setup: the test never released this round; giving up"),
         "exit 0",
         "",
       ].join("\n"),
@@ -3397,7 +3422,7 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
         "#!/bin/sh",
         "[ -f first.txt ] || exit 0",
         `touch "${entered}"`,
-        `while [ -f "${holding}" ]; do sleep 0.05; done`,
+        ...waitingFor(`[ -f "${holding}" ]`, "slow check: the test never stopped holding this round; giving up"),
         "exit 0",
         "",
       ].join("\n"),
