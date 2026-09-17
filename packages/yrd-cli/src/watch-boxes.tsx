@@ -15,7 +15,15 @@
 
 import { Box, Text } from "silvery"
 import { useMinute } from "./watch-clock.ts"
-import { countCell, statsBuckets, timeCell, STATS_ROWS, STATS_TIME_ROWS, type RunDecision, type StatsBucket } from "./watch-stats.ts"
+import {
+  countCell,
+  statsBuckets,
+  timeCell,
+  STATS_ROWS,
+  STATS_TIME_ROWS,
+  type RunDecision,
+  type StatsBucket,
+} from "./watch-stats.ts"
 import { TitledBox } from "./watch-primitives.tsx"
 
 /** Gutter 2 + borders 2 + the box's paddingX 2: what a box's own content cannot have (the retired box's accounting). */

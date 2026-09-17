@@ -743,13 +743,7 @@ function Table({
             const separator = separatorBefore(rows, index)
             const brk = plan.before.get(index)
             const row = (
-              <ListRow
-                item={item}
-                layout={layout}
-                cursor={index === cursor}
-                hovered={meta.isHovered}
-                live={live}
-              />
+              <ListRow item={item} layout={layout} cursor={index === cursor} hovered={meta.isHovered} live={live} />
             )
             if (separator === undefined && brk === undefined && plan.holding !== index) return row
             return (

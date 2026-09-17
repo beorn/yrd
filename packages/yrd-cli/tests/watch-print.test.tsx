@@ -243,8 +243,18 @@ function flowJournals(): Journals {
       [
         twice,
         [
-          runOfChange("task/twice", "2".repeat(40), "q-20260917T161500000Z-22222222", new Date(READ_AT.getTime() - 600_000)),
-          runOfChange("task/twice", "2".repeat(40), "q-20260917T160000000Z-11111111", new Date(READ_AT.getTime() - 1_500_000)),
+          runOfChange(
+            "task/twice",
+            "2".repeat(40),
+            "q-20260917T161500000Z-22222222",
+            new Date(READ_AT.getTime() - 600_000),
+          ),
+          runOfChange(
+            "task/twice",
+            "2".repeat(40),
+            "q-20260917T160000000Z-11111111",
+            new Date(READ_AT.getTime() - 1_500_000),
+          ),
         ],
       ],
     ]),
@@ -293,7 +303,10 @@ describe("the flow page: four bands, one row per change", () => {
     expect(runner, text).toBeGreaterThan(waiting)
     expect(done, text).toBeGreaterThan(runner)
     // The whole bug: two runs checked this change, and the page is about changes.
-    expect(lines.filter((line) => line.includes("task/twice")), text).toHaveLength(1)
+    expect(
+      lines.filter((line) => line.includes("task/twice")),
+      text,
+    ).toHaveLength(1)
   })
 
   it("puts the front of the line at the bottom of waiting, against the runner, and the newest done at the top of done", async () => {

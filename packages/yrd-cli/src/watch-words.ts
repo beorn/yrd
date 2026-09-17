@@ -83,10 +83,7 @@ export type DisplayState = (typeof LEGEND_STATES)[number] | "direct"
 /** A word the runner's row can show. */
 export type RunnerState = (typeof RUNNER_STATES)[number]
 
-export const STATE_WORDS: Record<
-  DisplayState | RunnerState | "waiting" | "took" | "runner",
-  WordEntry
-> = {
+export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took" | "runner", WordEntry> = {
   draft: { color: "$fg-muted", means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
   submitted: {
     color: "$fg-accent",

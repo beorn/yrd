@@ -206,7 +206,12 @@ describe("runnerWord, the one word", () => {
     journalDir: "/w/logs",
     latest: { alive: false, id: "q-x", lastWriteAt: NOW, startedAt: NOW, ...over },
   })
-  const STOPPED = { by: "yrd-service", cause: "stuck" as const, change: `task/s@${"4".repeat(40)}`, since: NOW.toISOString() }
+  const STOPPED = {
+    by: "yrd-service",
+    cause: "stuck" as const,
+    change: `task/s@${"4".repeat(40)}`,
+    since: NOW.toISOString(),
+  }
   const PAUSED = { by: "@chief", cause: "operator" as const, change: null, since: NOW.toISOString() }
 
   /**

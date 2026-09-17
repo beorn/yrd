@@ -3,7 +3,7 @@
  *           `<Pulse>` existed anywhere in this file — so a change with a
  *           check running RIGHT NOW read identically to one sitting still,
  *           the same silent-flicker regression item 13 named for the RUNNER
- *           box's `$` marker (watch-boxes.test.tsx), just never restored here.
+ *           marker (watch-boxes.test.tsx), just never restored here.
  *           And a naive restoration would let the pulse fight the cursor
  *           row's forced selection color, since `forced` otherwise
  *           unconditionally overrides every cell color; the cursor row
@@ -22,7 +22,7 @@ import { NowContext, NowProvider } from "../src/watch-clock.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
-const LAYOUT: ListLayout = { byWidth: 0, durationWidth: 7, runWidth: 6, statusWidth: 12, timeWidth: 8 }
+const LAYOUT: ListLayout = { byWidth: 0, durationWidth: 7, statusWidth: 12, timeWidth: 8 }
 
 const RUNNING_ROW: Row = {
   branch: "task/checking-something",
@@ -38,7 +38,7 @@ function item(): WatchRow {
 async function paint(cursor: boolean) {
   const app = render(
     <NowContext.Provider value={NOW}>
-      <ListRow cursor={cursor} item={item()} label="main" layout={LAYOUT} previous={undefined} />
+      <ListRow cursor={cursor} item={item()} layout={LAYOUT} />
     </NowContext.Provider>,
     { cols: 60, rows: 3, autoRender: true },
   )
@@ -106,7 +106,7 @@ const AGE_LAYOUT: ListLayout = { ...LAYOUT, durationWidth: 13 }
 async function paintAge(row: Row) {
   const app = render(
     <NowProvider readAt={NOW} live>
-      <ListRow cursor={false} item={{ row }} label="main" layout={AGE_LAYOUT} previous={undefined} />
+      <ListRow cursor={false} item={{ row }} layout={AGE_LAYOUT} />
     </NowProvider>,
     { autoRender: true, cols: 80, rows: 3 },
   )

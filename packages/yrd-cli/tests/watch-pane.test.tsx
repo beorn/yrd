@@ -28,7 +28,7 @@ import {
   type CheckPanel,
 } from "../src/watch-detail.tsx"
 import { MinuteContext, NowContext } from "../src/watch-clock.ts"
-import { clock, runShortName } from "../src/watch-format.ts"
+import { clock } from "../src/watch-format.ts"
 import { noticeLine } from "../src/watch-notice.ts"
 import { printListing } from "../src/watch-print.tsx"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
@@ -1060,9 +1060,7 @@ describe("the RUNNER marker is wired to the ROWS, not to the process (items 1, 5
     // The runner is the QUEUE's, never the selector's: the row is hidden, so the
     // runner's own row is drawn and says what the whole reading says it holds.
     expect(app.text).toContain("checking 2:31")
-    expect(app.text, "the queue is checking a change the selector hides, so it is not idle").not.toMatch(
-      /\bidle \d/u,
-    )
+    expect(app.text, "the queue is checking a change the selector hides, so it is not idle").not.toMatch(/\bidle \d/u)
     app.unmount()
   })
 })
@@ -1556,8 +1554,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     app.unmount()
     // The window is named on the drafts BAND's rule now, over the rows it is
     // true of, and not on a header that spans every band.
-    const header = (painted: readonly string[]): string =>
-      painted.find((line) => line.includes("not submitted")) ?? ""
+    const header = (painted: readonly string[]): string => painted.find((line) => line.includes("not submitted")) ?? ""
     const counted = (painted: readonly string[]): string =>
       topLineOf(painted)
         .line.trim()
