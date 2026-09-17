@@ -1423,17 +1423,20 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   it("each row shows one clock, the instant its place in the table is ordered by, and one duration cell whose word names its basis; AGE and RUNTIME are gone, and a narrow table keeps the clock to the minute", async () => {
     const W = await words()
     // In line: submitted at, and the wait since then; the held row's check by its own run time; a stuck
-    // change since it stopped the line. Ended: ended at, and submit to end.
+    // change since the stop record, the instant the top line prints as "line stopped at task/s since T",
+    // written here ten seconds after the change's own stuck record so the two cannot pass for each other.
+    // Ended: ended at, and submit to end.
     const wanted: Readonly<Record<string, Readonly<{ time: Date; duration: string }>>> = {
       "task/f": { duration: `${W.took.word} 5:00`, time: ago(20 * MINUTE) },
       "task/m": { duration: `${W.took.word} 7:10`, time: ago(4 * MINUTE + 50_000) },
-      "task/s": { duration: `${W.stuck.word} 6:00`, time: ago(10 * MINUTE) },
+      "task/s": { duration: `${W.stuck.word} 5:50`, time: ago(10 * MINUTE) },
       "task/w": { duration: `${W.took.word} 10:00`, time: ago(30 * MINUTE) },
       "task/x": { duration: `${W.checking.word} 3:21`, time: ago(40 * MINUTE) },
       "task/y1": { duration: `${W.waiting.word} 50:00`, time: ago(50 * MINUTE) },
       "task/z": { duration: `${W.waiting.word} 12:03`, time: ago(12 * MINUTE + 3_000) },
     }
-    const snap = snapshot({ rows: EVERY_STATE, runner: RUNNER })
+    const stopped = { ...STOP, since: ago(5 * MINUTE + 50_000).toISOString() }
+    const snap = snapshot({ rows: EVERY_STATE, runner: RUNNER, stopped } as Partial<WatchSnapshot>)
 
     const wide = await lines(snap, 100, 31)
     const narrow = await lines(snap, 60, 40)

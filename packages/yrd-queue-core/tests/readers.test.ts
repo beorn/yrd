@@ -543,15 +543,16 @@ describe("the clocks", () => {
     expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000 })
   })
 
-  // 24196 (A2-set-v2 item 2, superseding decisions 5 and 6's basis): a row shows ONE clock, the instant its
-  // place in the table is ordered by, and one duration whose word names its basis. Both are named fields
-  // derived here once, never a renderer's relabel of `ageMs`: `clockAt` is the submit instant while the
-  // change is in line and its ending record's instant once it ended (never the notice sent after it);
-  // `waitingMs` is now less the submit, for a change in line that is neither being checked nor stuck;
-  // `checkingMs` is how long the check running now has run; `stuckMs` is how long a stuck change has
-  // stopped the line; `tookMs` is an ended change's submit to its end. The fields are read through a cast
-  // only until they exist, so this file compiles red-first.
-  it("names the one clock a row is ordered by, and the one duration its word names: waiting since submit, this check's run time, stuck since the stop, took from submit to end", () => {
+  // 24196 (A2-set-v2 items 4 and 5, superseding decisions 5 and 6's basis): a row shows ONE clock, the
+  // instant its place in the table is ordered by, and one duration whose word names its basis. They are
+  // named fields derived here once, never a renderer's relabel of `ageMs`: `clockAt` is the submit instant
+  // while the change is in line, held and stuck rows included, and its ending record's instant once it
+  // ended (never the notice sent after it); `waitingMs` is now less the submit for every change in line,
+  // absent while its check runs and once it ended; `checkingMs` is how long the check running now has run;
+  // `tookMs` is an ended change's submit to its end. A stuck change's duration counts from the stop record
+  // (the instant the top line prints), which a row does not carry, so it is pinned where the stop is known,
+  // not here. The fields are read through a cast only until they exist, so this file compiles red-first.
+  it("names the one clock a row is ordered by, and the durations a row alone can name: waiting since submit for every change in line, this check's run time, took from submit to end", () => {
     const opened = new Date("2026-09-03T19:48:00.000Z")
     const stuckAt = new Date("2026-09-03T19:50:00.000Z")
     const withdrawnAt = new Date("2026-09-03T19:40:00.000Z")
@@ -584,13 +585,12 @@ describe("the clocks", () => {
       return {
         checkingMs: measured["checkingMs"],
         clockAt: measured["clockAt"],
-        stuckMs: measured["stuckMs"],
         tookMs: measured["tookMs"],
         waitingMs: measured["waitingMs"],
       }
     }
     const minutes = (count: number): number => count * 60 * 1000
-    const none = { checkingMs: undefined, stuckMs: undefined, tookMs: undefined, waitingMs: undefined }
+    const none = { checkingMs: undefined, tookMs: undefined, waitingMs: undefined }
 
     expect({
       checked: read(checked),
@@ -604,7 +604,7 @@ describe("the clocks", () => {
       merged: { ...none, clockAt: passed, tookMs: minutes(57) },
       queued: { ...none, clockAt: opened, waitingMs: minutes(12) },
       running: { ...none, checkingMs: minutes(3) + 30_000, clockAt: since },
-      stuck: { ...none, clockAt: since, stuckMs: minutes(10) },
+      stuck: { ...none, clockAt: since, waitingMs: minutes(60) },
       withdrawn: { ...none, clockAt: withdrawnAt, tookMs: minutes(40) },
     })
   })
