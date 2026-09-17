@@ -12,14 +12,14 @@
  * `~1477`, and the cure was never a better comparison — it was having only one
  * place that decides.
  *
- * So every mapping here is a TABLE keyed by the state the core handed over. A
- * new state added to the core is a compile error here, which is the point.
- * The words themselves are the one word table's (watch-words.ts), read when
- * the notice is made (@i/10-yrd/24196).
+ * So nothing here maps a state to a word. The word is the one word table's
+ * (`stateWord`, watch-format.ts), read when the notice is made, so the notice
+ * and the table cannot disagree about which word a state reads
+ * (@i/10-yrd/24196).
  */
 
 import { incidentLine, clocks, type Row } from "@yrd/queue-core"
-import { STATE_WORDS, mediaDuration, stateGlyph, type DisplayState } from "./watch-format.ts"
+import { STATE_WORDS, mediaDuration, stateGlyph, stateWord } from "./watch-format.ts"
 
 export type Notice = Readonly<{
   glyph: string
@@ -31,27 +31,6 @@ export type Notice = Readonly<{
   next?: string
 }>
 
-/**
- * Which word each state reads as in a notice: the one table's, so the notice
- * and the table cannot disagree about one change. `direct` is no change and
- * says what happened instead.
- */
-const WORD: Readonly<Record<Row["state"], DisplayState | "went around the queue">> = {
-  checked: "pending",
-  direct: "went around the queue",
-  draft: "draft",
-  failed: "failed",
-  merged: "merged",
-  queued: "submitted",
-  stuck: "stuck",
-  withdrawn: "cancelled",
-}
-
-function wordOf(state: Row["state"]): string {
-  const key = WORD[state]
-  return key === "went around the queue" ? key : STATE_WORDS[key].word
-}
-
 export function watchNotice(row: Row, joinedRun = false): Notice {
   const live = row.live
   const position = row.position === undefined ? "" : ` #${String(row.position)}`
@@ -61,7 +40,9 @@ export function watchNotice(row: Row, joinedRun = false): Notice {
       : joinedRun && row.result !== undefined
         ? `run result: ${row.result}`
         : (row.reason ?? row.result)
-  const state = joinedRun ? `change ${wordOf(row.state)}` : wordOf(row.state)
+  // The state's own word, the check overlay apart below; `direct` is no change and says what happened instead.
+  const word = row.state === "direct" ? "went around the queue" : stateWord({ state: row.state })
+  const state = joinedRun ? `change ${word}` : word
   const next =
     row.incident !== undefined
       ? row.incident.next
