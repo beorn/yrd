@@ -12,9 +12,12 @@
  */
 
 import type React from "react"
+import { act } from "react"
 import { describe, expect, it, vi } from "vitest"
 import { bufferToText, render } from "silvery/test"
 import type { ChangeRecord, GitObservation, JournalRun, Row } from "@yrd/queue-core"
+import { runYrdProcess } from "../src/cli.ts"
+import type { YrdCliIO } from "../src/types.ts"
 import { WatchPane, watchTier, type WatchSnapshot } from "../src/watch-pane.tsx"
 import {
   CHANGES_TAB,
@@ -29,7 +32,7 @@ import { clock, runShortName } from "../src/watch-format.ts"
 import { noticeLine } from "../src/watch-notice.ts"
 import { printListing } from "../src/watch-print.tsx"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
-import { watchRowKey, type WatchRow } from "../src/watch-rows.ts"
+import { rowLine, watchRowKey, type WatchRow } from "../src/watch-rows.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 const RUN_ID = "q-20260903T113000000Z-0badf00d"
@@ -1056,39 +1059,41 @@ describe("the RUNNER marker is wired to the ROWS, not to the process (items 1, 5
 /**
  * @failure  The operator read `yrd watch` on 2026-09-16 and could not tell what was going on: "20+
  *           checked? what does that mean", "checked does NOT obviously mean 'waiting in line to be
- *           merged'", "why is the status idle then???" Nothing said how many changes wait, what runs
- *           now or when the last merge landed; the state words were the queue's internal names, spelled
- *           separately on every surface; RUNTIME was blank or stale on every row not running; a
- *           standing observation line said nothing a reader could act on; and `?` drew its help in the
- *           pane's flow, where it took the table's rows (@i/10-yrd/24196).
- * @level    l2 (the pane, the page and the notice, rendered into a headless terminal)
+ *           merged'", "why is the status idle then???", "the ordering looks weird - look at the time
+ *           stamps". Nothing said how many changes wait or why the line was not moving; the state words
+ *           were the queue's internal names, spelled separately on every surface; RUNTIME was blank or
+ *           stale on every row not running, beside a second and a third clock; a pushed branch nobody
+ *           submitted was nowhere; a standing observation line said nothing a reader could act on; `?`
+ *           drew its help in the pane's flow; and two things pulsed while one change was being worked on
+ *           (@i/10-yrd/24196).
+ * @level    l2 (the pane, the page, the notice and both helps, rendered into a headless terminal)
  * @consumer the operator reading `yrd watch` and `yrd list`
  */
 describe("the watch says what waits, what runs and what happens next (24196)", () => {
   /**
-   * The keys of the ONE word table (decision 3, as corrected): the queue's own state names, the check
-   * running now (`live`), the landing act (`landing`), and the TIME cell's lead words (`waiting`, `took`,
-   * decision 5). Its VALUES are @cto's to rule, so no assertion here spells a state word: each reads the
-   * table.
+   * The ONE word table: the operator's nine state words (v3, 2026-09-16) in legend order, `direct` (a
+   * commit that went around the queue, which is not a change), the duration cell's lead words (decision
+   * 5) and the phrase that names the table's order (decision 4). Every surface reads its word from here,
+   * so apart from the legend test below no assertion spells a word: each reads the table.
    */
-  const WORD_KEYS = [
-    "queued",
-    "checked",
-    "stuck",
+  const STATES = [
+    "draft",
+    "submitted",
+    "checking",
+    "pending",
+    "merging",
     "merged",
+    "stuck",
     "failed",
-    "withdrawn",
-    "direct",
-    "live",
-    "landing",
-    "waiting",
-    "took",
+    "cancelled",
   ] as const
-  type WordTable = Record<(typeof WORD_KEYS)[number], string>
+  const KEYS = [...STATES, "direct", "waiting", "took", "order"] as const
+  type Entry = { word: string; means?: string; next?: string }
+  type WordTable = Record<(typeof KEYS)[number], Entry>
 
   /**
    * The table as watch-format.ts exports it, read through the module's namespace so this file compiles
-   * before the table exists. Until it does, every word is a placeholder no surface prints, so each test
+   * before the table exists. Until it does, every entry is a placeholder no surface prints, so each test
    * fails on its own assertion, naming what is missing, rather than on an import.
    */
   async function words(): Promise<WordTable> {
@@ -1096,35 +1101,63 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       "STATE_WORDS"
     ]
     if (table !== undefined) return table as WordTable
-    return Object.fromEntries(WORD_KEYS.map((key) => [key, `<no STATE_WORDS.${key}>`])) as WordTable
+    return Object.fromEntries(
+      KEYS.map((key) => [key, { means: `<no means: ${key}>`, next: `<no next: ${key}>`, word: `<no word: ${key}>` }]),
+    ) as WordTable
+  }
+
+  /** `yrd list --help`, captured in process. */
+  async function listHelp(): Promise<string> {
+    let text = ""
+    const io: YrdCliIO = {
+      color: false,
+      columns: 120,
+      cwd: process.cwd(),
+      stderr: (chunk) => void (text += chunk),
+      stdout: (chunk) => void (text += chunk),
+    }
+    await runYrdProcess(["bun", "yrd", "list", "--help"], io)
+    return text
   }
 
   const MINUTE = 60_000
   const ago = (ms: number): Date => new Date(NOW.getTime() - ms)
   const MERGED_RUN = "q-20260903T115230000Z-feedf00d"
   const FAILED_RUN = "q-20260903T113500000Z-deadf00d"
+  const EARLIER_RUN = "q-20260903T111000000Z-0ea1f00d"
   const RUNNING_SINCE = ago(3 * MINUTE + 21_000)
   const RUNNER = {
     journalDir: "/w/logs",
     latest: { alive: true, id: RUN_ID, lastWriteAt: ago(20_000), startedAt: ago(3 * MINUTE + 30_000) },
   }
+  /** The same runner, its journal quiet past the silence ceiling. */
+  const SILENT = { ...RUNNER, latest: { ...RUNNER.latest, lastWriteAt: ago(12 * MINUTE) } }
   const DECISIONS = [
-    { at: ago(3 * MINUTE + 12_000), decision: "merged" as const, duplicate: false, run: MERGED_RUN },
+    { at: ago(4 * MINUTE + 50_000), decision: "merged" as const, duplicate: false, run: MERGED_RUN },
     { at: ago(20 * MINUTE), decision: "failed" as const, duplicate: false, run: FAILED_RUN },
   ]
+  /** The line stop a stuck change makes, as the queue read derives it (`stopFact`, the page's `stopped`). */
+  const STOP = {
+    by: "yrd-service",
+    cause: "stuck",
+    change: `task/s@${"4".repeat(40)}`,
+    since: ago(6 * MINUTE).toISOString(),
+  }
 
-  /** The change under a check: its only check started when its run did, so every reading of its runtime is 3:21. */
+  /** The change the runner holds: under its first check, submitted and second in line. */
   function running(over: Partial<Row> = {}): Row {
     return row({
       at: ago(20_000),
       branch: "task/x",
       head: "1".repeat(40),
-      live: { check: "affected-tests", phase: "merge", run: RUN_ID, since: RUNNING_SINCE },
-      position: 1,
+      live: { check: "affected-tests", phase: "submit", run: RUN_ID, since: RUNNING_SINCE },
+      position: 2,
       run: RUN_ID,
+      since: ago(40 * MINUTE),
       startedAt: RUNNING_SINCE,
-      state: "checked",
+      state: "queued",
       subject: "the change under a check",
+      submitter: "@dev/2",
       ...over,
     })
   }
@@ -1143,9 +1176,15 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     return { row: { ...item, run: id }, run }
   }
 
+  /** A draft (v3): a branch pushed and never submitted, dated and signed by its head commit. No record exists for it. */
+  function draft(branch: string, head: string, committedAt: Date, committer: string): WatchRow {
+    return { row: { at: committedAt, branch, committer, head, state: "draft" } as unknown as Row }
+  }
+
   /**
-   * EVERY_STATE: one row in each state the table draws, and one under a check. The width renders in
-   * the 24196 phase A report are drawn from it, and the tier ladder below reads it.
+   * EVERY_STATE: one row for each word the table draws, in the order decision 4 gives them: the row the
+   * runner holds, then the line by position, then the ended rows newest first, then the drafts. The width
+   * renders in the 24196 phase A report are drawn from it, and the tier ladder below reads it.
    */
   const EVERY_STATE: readonly WatchRow[] = [
     { row: running() },
@@ -1154,11 +1193,12 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         at: ago(3 * MINUTE),
         branch: "task/y1",
         head: "2".repeat(40),
-        position: 2,
-        since: ago(30 * MINUTE),
+        position: 1,
+        since: ago(50 * MINUTE),
         startedAt: ago(20 * MINUTE),
         state: "checked",
         subject: "passed, waits to merge",
+        submitter: "@dev/4",
       }),
     },
     {
@@ -1170,6 +1210,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         since: ago(12 * MINUTE + 3_000),
         state: "queued",
         subject: "not checked yet",
+        submitter: "@dev/5",
       }),
     },
     {
@@ -1180,23 +1221,27 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         head: "4".repeat(40),
         position: 4,
         reason: "yrd-check-unresolved",
+        since: ago(45 * MINUTE),
         state: "stuck",
         subject: "the queue could not judge it",
+        submitter: "@dev/6",
       }),
     },
     {
       row: row({
-        at: ago(4 * MINUTE + 50_000),
+        // The notice went out a minute ago; the change merged before that.
+        at: ago(MINUTE),
         branch: "task/m",
         endedAt: ago(4 * MINUTE + 50_000),
         head: "5".repeat(40),
         merge: "9".repeat(40),
         result: "pass affected-tests",
         run: MERGED_RUN,
-        since: ago(9 * MINUTE),
+        since: ago(12 * MINUTE),
         startedAt: ago(9 * MINUTE),
         state: "merged",
         subject: "merged a moment ago",
+        submitter: "@chief",
       }),
     },
     {
@@ -1209,19 +1254,22 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         result: "fail test",
         run: FAILED_RUN,
         since: ago(25 * MINUTE),
-        startedAt: ago(25 * MINUTE),
+        startedAt: ago(22 * MINUTE),
         state: "failed",
         subject: "a test failed",
+        submitter: "@dev/2",
       }),
     },
     {
       row: row({
         at: ago(30 * MINUTE),
         branch: "task/w",
+        endedAt: ago(30 * MINUTE),
         head: "7".repeat(40),
-        reason: "replaced",
+        since: ago(40 * MINUTE),
         state: "withdrawn",
-        subject: "a newer head replaced it",
+        subject: "taken back by its submitter",
+        submitter: "@dev/3",
       }),
     },
     {
@@ -1234,9 +1282,10 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         subject: "fix: a hotfix",
       },
     },
+    draft("task/d", "a".repeat(40), ago(2 * 60 * MINUTE), "ada"),
   ]
 
-  /** Paint the pane and hand back its lines, with the `?` help open when asked. */
+  /** Paint the pane and hand back its lines, pressing the keys given first. */
   async function lines(snap: WatchSnapshot, cols: number, rows: number, keys: readonly string[] = []) {
     const app = render(<WatchPane snapshot={snap} live={false} />, { cols, rows })
     await settle(app)
@@ -1255,70 +1304,183 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     return { line: painted[title + 1] ?? "", next: painted[title + 2] ?? "" }
   }
 
-  it("the top line counts the changes in line — passed and waiting to merge, not yet checked — names the running change and its step, and the last merge with its age, counting a change once however many runs it has", async () => {
+  /** The first table row under the header whose text includes `needle`. */
+  function tableRow(painted: readonly string[], needle: string): string {
+    const header = painted.findIndex((line) => /\bSTATUS\b/u.test(line))
+    return header < 0 ? "" : (painted.slice(header + 1).find((line) => line.includes(needle)) ?? "")
+  }
+
+  it("the legend is the operator's nine words, each with what it means and what happens next, and the clock words decision 5 named", async () => {
+    const W = await words()
+
+    expect({
+      ...Object.fromEntries(STATES.map((key) => [key, W[key]])),
+      direct: W.direct.word,
+      took: W.took.word,
+      waiting: W.waiting.word,
+    }).toEqual({
+      cancelled: {
+        means: "taken back, or given up without a verdict; ended (yrd queue withdraw produces it)",
+        next: "nothing",
+        word: "cancelled",
+      },
+      checking: { means: "the runner is testing it now", next: "pending, stuck or failed", word: "checking" },
+      direct: "direct",
+      draft: { means: "pushed to the remote, not submitted", next: "yrd submit", word: "draft" },
+      failed: { means: "a check failed; ended", next: "a new head is a new change", word: "failed" },
+      merged: { means: "on the queue branch; ended", next: "nothing; a revert is a new change", word: "merged" },
+      merging: { means: "the runner is writing main for it now", next: "merged or failed", word: "merging" },
+      pending: {
+        means: "checks passed; waiting in line to merge",
+        next: "it merges when the line reaches it",
+        word: "pending",
+      },
+      stuck: {
+        means: "the queue could not judge it and stopped the line (ADR-0015)",
+        next: "repair and resume, merge, or cancel",
+        word: "stuck",
+      },
+      submitted: {
+        means: "in the queue, waiting for its first check",
+        next: "the runner checks it",
+        word: "submitted",
+      },
+      took: "took",
+      waiting: "waiting",
+    })
+  })
+
+  it("the top line says how many changes wait and why the line is not moving: what is checked and for how long, where the line stopped and since when, and a silent runner, counting a change once however many runs it has", async () => {
     const W = await words()
     const recheck = "q-20260903T112000000Z-5ecf00d0"
-    const earlier = "q-20260903T111000000Z-0ea1f00d"
     const { live: _running, ...before } = running()
-    const passed = row({ branch: "task/y1", head: "2".repeat(40), position: 2, state: "checked" })
+    const passed = row({ branch: "task/y1", head: "2".repeat(40), position: 1, state: "checked" })
+    const stuckAt = ago(6 * MINUTE)
     const rows: WatchRow[] = [
-      // The running change, split into its run now and the run that checked it before: ONE change running.
+      // The change being checked, split into its run now and an earlier run that decided nothing: ONE change.
       split(running(), RUN_ID),
-      split({ ...before, at: ago(40 * MINUTE), endedAt: ago(40 * MINUTE) }, earlier, "checked"),
+      split({ ...before, at: ago(40 * MINUTE) }, EARLIER_RUN),
       // A change checked twice (the target moved under it) is ONE change waiting to merge.
       split({ ...passed, at: ago(3 * MINUTE), endedAt: ago(3 * MINUTE) }, recheck, "checked"),
-      split({ ...passed, at: ago(25 * MINUTE), endedAt: ago(25 * MINUTE) }, earlier, "checked"),
+      split({ ...passed, at: ago(25 * MINUTE), endedAt: ago(25 * MINUTE) }, EARLIER_RUN, "checked"),
       { row: row({ branch: "task/y2", head: "3".repeat(40), position: 3, state: "checked" }) },
-      { row: row({ branch: "task/z1", head: "4".repeat(40), position: 4, state: "queued" }) },
-      { row: row({ branch: "task/z2", head: "5".repeat(40), position: 5, state: "queued" }) },
-      split(
-        row({
-          branch: "task/y",
-          endedAt: ago(3 * MINUTE + 12_000),
-          head: "6".repeat(40),
-          merge: "9".repeat(40),
-          state: "merged",
+      { row: row({ branch: "task/z1", head: "5".repeat(40), position: 4, state: "queued" }) },
+      { row: row({ branch: "task/z2", head: "6".repeat(40), position: 5, state: "queued" }) },
+      {
+        row: row({
+          branch: "task/s",
+          endedAt: stuckAt,
+          head: "4".repeat(40),
+          position: 6,
+          reason: "yrd-check-unresolved",
+          state: "stuck",
         }),
+      },
+      split(
+        row({ branch: "task/y", endedAt: ago(3 * MINUTE + 12_000), head: "7".repeat(40), state: "merged" }),
         MERGED_RUN,
         "merged",
       ),
     ]
-    const decisions = [
-      { at: ago(3 * MINUTE + 12_000), decision: "merged" as const, duplicate: false, run: MERGED_RUN },
-      { at: ago(60 * MINUTE), decision: "merged" as const, duplicate: false, run: earlier },
-    ]
+    const stopped = { ...STOP, since: stuckAt.toISOString() }
 
-    const painted = await lines(snapshot({ decisions, rows, runner: RUNNER }), 120, 40)
+    const busy = await lines(snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>), 120, 40)
+    const silent = await lines(snapshot({ rows, runner: SILENT, stopped } as Partial<WatchSnapshot>), 120, 40)
 
-    expect(topLineOf(painted).line.trim()).toBe(
-      `5 in line: 2 ${W.checked}, 2 ${W.queued} · ${W.live} task/x (affected-tests) · last merge 3:12 ago (task/y)`,
-    )
+    const waiting = `4 ${W.waiting.word}: 2 ${W.pending.word}, 2 ${W.submitted.word}`
+    expect({ busy: topLineOf(busy).line.trim(), silent: topLineOf(silent).line.trim() }).toEqual({
+      busy: `${waiting} · ${W.checking.word} task/x for 3:21 · line stopped at task/s since ${clock(stuckAt)}`,
+      // Silence outranks a check the journal still marks as running: nothing is said to be checked.
+      silent: `${waiting} · line stopped at task/s since ${clock(stuckAt)} · runner silent since ${clock(SILENT.latest.lastWriteAt)}`,
+    })
   })
 
-  it("the TIME cell names its own meaning: the running word and how long it has run, waiting since the change entered its state, took on an ended row", async () => {
+  it("each row shows one clock, when it entered the state it is in, and one duration cell whose word names it; AGE and RUNTIME are gone, and a narrow table keeps the clock to the minute", async () => {
     const W = await words()
-    const byBranch = new Map(EVERY_STATE.map((item) => [item.row.branch, item]))
-    const wanted: Readonly<Record<string, string>> = {
-      "task/f": `${W.took} 5:00`,
-      "task/m": `${W.took} 4:10`,
-      "task/x": `${W.live} 3:21`,
-      "task/y1": `${W.waiting} 3:00`,
-      "task/z": `${W.waiting} 12:03`,
+    const wanted: Readonly<Record<string, Readonly<{ time: Date; duration: string }>>> = {
+      "task/f": { duration: `${W.took.word} 5:00`, time: ago(20 * MINUTE) },
+      "task/m": { duration: `${W.took.word} 7:10`, time: ago(4 * MINUTE + 50_000) },
+      "task/s": { duration: `${W.waiting.word} 6:00`, time: ago(6 * MINUTE) },
+      "task/w": { duration: `${W.took.word} 10:00`, time: ago(30 * MINUTE) },
+      "task/x": { duration: `${W.checking.word} 3:21`, time: RUNNING_SINCE },
+      "task/y1": { duration: `${W.waiting.word} 3:00`, time: ago(3 * MINUTE) },
+      "task/z": { duration: `${W.waiting.word} 12:03`, time: ago(12 * MINUTE + 3_000) },
     }
-    const rows = Object.keys(wanted).map((branch) => byBranch.get(branch)!)
-    const runName = runShortName("main", RUN_ID)
+    const snap = snapshot({ rows: EVERY_STATE, runner: RUNNER })
 
-    const painted = await lines(snapshot({ rows }), 120, 40)
+    const wide = await lines(snap, 100, 31)
+    const narrow = await lines(snap, 60, 40)
 
-    const cells = Object.fromEntries(
-      Object.entries(wanted).map(([branch, cell]) => {
-        const tail = (
-          painted.find((line) => line.includes(`${branch} `) && (branch !== "task/x" || line.includes(runName))) ?? ""
-        ).trimEnd()
-        return [branch, tail.endsWith(cell) ? cell : tail.slice(-24)]
-      }),
-    )
-    expect(cells).toEqual(wanted)
+    const cell = (painted: readonly string[], branch: string, width: number) => {
+      const line = tableRow(painted, ` ${branch} `)
+      const duration = wanted[branch]?.duration ?? ""
+      return {
+        duration: line.trimEnd().endsWith(duration) ? duration : line.trimEnd().slice(-16),
+        time: line.trimStart().slice(0, width),
+      }
+    }
+    const header = wide.find((line) => /\bSTATUS\b/u.test(line)) ?? ""
+    expect({
+      header: { age: /\bAGE\b/u.test(header), runtime: /\bRUNTIME\b/u.test(header) },
+      narrow: {
+        "task/m": tableRow(narrow, " task/m ")
+          .trimStart()
+          .startsWith(`${clock(ago(4 * MINUTE + 50_000))} `),
+        "task/x": tableRow(narrow, " task/x ")
+          .trimStart()
+          .startsWith(`${clock(RUNNING_SINCE)} `),
+      },
+      wide: Object.fromEntries(Object.keys(wanted).map((branch) => [branch, cell(wide, branch, 8)])),
+    }).toEqual({
+      header: { age: false, runtime: false },
+      narrow: { "task/m": true, "task/x": true },
+      wide: Object.fromEntries(
+        Object.entries(wanted).map(([branch, { time, duration }]) => [
+          branch,
+          { duration, time: clock(time, { seconds: true }) },
+        ]),
+      ),
+    })
+  })
+
+  it("the table header names the one order its rows are in", async () => {
+    const W = await words()
+
+    const painted = await lines(snapshot({ rows: EVERY_STATE, runner: RUNNER }), 120, 40)
+
+    const header = painted.find((line) => /\bSTATUS\b/u.test(line)) ?? ""
+    expect(W.order.word.trim() !== "" && header.includes(W.order.word)).toBe(true)
+  })
+
+  it("draws a pushed branch nobody submitted as a draft row, with who committed its head and when, and counts drafts on their own, never among the changes waiting", async () => {
+    const W = await words()
+    const committedAt = ago(2 * 60 * MINUTE)
+    const rows: WatchRow[] = [
+      {
+        row: row({
+          at: ago(12 * MINUTE),
+          branch: "task/z",
+          head: "3".repeat(40),
+          position: 1,
+          since: ago(12 * MINUTE),
+          state: "queued",
+          subject: "not checked yet",
+        }),
+      },
+      draft("task/d", "a".repeat(40), committedAt, "ada"),
+    ]
+
+    const painted = await lines(snapshot({ rows, runner: RUNNER }), 120, 40)
+
+    const line = tableRow(painted, " task/d")
+    const segments = topLineOf(painted).line.trim().split(" · ")
+    expect({
+      by: / ada\b/u.test(line),
+      clock: line.trimStart().startsWith(clock(committedAt, { seconds: true })),
+      counted: segments.slice(1).some((segment) => segment.startsWith(`1 ${W.draft.word}`)),
+      waiting: segments[0] === `1 ${W.waiting.word}: 1 ${W.submitted.word}`,
+      word: line.includes(` ${W.draft.word} `),
+    }).toEqual({ by: true, clock: true, counted: true, waiting: true, word: true })
   })
 
   it("draws no child-observation line for the native contract, which has nothing to say every round", async () => {
@@ -1367,7 +1529,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(drawn).toEqual({ loud: true, shown: true })
   })
 
-  it("? opens the help as an overlay centred over the pane, which keeps its footer, with a States section drawn from the word table", async () => {
+  it("? opens the help as an overlay centred over the pane, which keeps its footer, with the legend: every state's word, what it means and what happens next, and direct apart as not a change", async () => {
     const W = await words()
     const full = snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER })
     const closed = await lines(full, 160, 48)
@@ -1383,104 +1545,270 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         .filter((line) => line.trim() !== "")
         .at(-1)
         ?.trimEnd() ?? ""
-    // The States entries, read inside the dialog only: from its `States` heading's column, so no word the
-    // table rows or the pills draw beside the dialog can answer for the section.
-    const heading = open.findIndex((line) => /\bStates\b/u.test(line))
-    const column = heading < 0 ? -1 : (open[heading] ?? "").search(/\bStates\b/u)
-    const section = open
-      .slice(heading < 0 ? open.length : heading + 1, heading + 16)
-      .map((line) => line.slice(column, column + 60))
-      .join("\n")
-    const stateKeys = ["queued", "checked", "stuck", "merged", "failed", "withdrawn", "direct", "live"] as const
+    // The legend, read over a pane with nothing else on it, so no table text beside the dialog can answer
+    // for it. Wrapped legend lines are joined back: this reads what the legend says, the overlay's shape
+    // is read above.
+    const bare = snapshot({ rows: [] })
+    const bareClosed = await lines(bare, 160, 48)
+    const band = (await lines(bare, 160, 48, ["?"]))
+      .filter((line, index) => line.trimEnd() !== bareClosed[index]?.trimEnd())
+      .join(" ")
+      .replace(/\s+/gu, " ")
+    const said = (entry: Entry): boolean => {
+      const word = band.indexOf(`${entry.word} `)
+      const means = entry.means === undefined || word < 0 ? -1 : band.indexOf(entry.means, word)
+      const next = entry.next === undefined || means < 0 ? -1 : band.indexOf(entry.next, means + entry.means!.length)
+      return word >= 0 && means >= 0 && next >= 0 && next - word < 200
+    }
+    const apart = band.indexOf("not a change")
 
     expect({
       centred: first > 0 && last < 48 - 1 && Math.abs((first + last) / 2 - (48 - 1) / 2) <= 2,
+      directApart: apart >= 0 && band.indexOf(`${W.direct.word} `, apart) > apart,
       footerKept: footer(open) === footer(closed),
-      statesMissing: stateKeys.filter((key) => !section.includes(W[key])),
-    }).toEqual({ centred: true, footerKept: true, statesMissing: [] })
+      legendMissing: [...STATES, "direct" as const].filter((key) => !said(W[key])),
+    }).toEqual({ centred: true, directApart: true, footerKept: true, legendMissing: [] })
   })
 
-  it("one change to the word table changes every surface that draws a state word", async () => {
+  it("one change to the word table changes every surface that draws a state word, both helps included", async () => {
     const W = await words()
-    const SENTINEL = "LIVEWORD"
-    const was = W.live
-    const runName = runShortName("main", RUN_ID)
-    const item = running()
-    const snap = snapshot({ decisions: DECISIONS, rows: [{ row: item }], runner: RUNNER })
-    W.live = SENTINEL
+    const SENTINEL = "PENDINGWORD"
+    const was = W.pending.word
+    const item = row({
+      at: ago(3 * MINUTE),
+      branch: "task/y1",
+      head: "2".repeat(40),
+      position: 1,
+      since: ago(50 * MINUTE),
+      state: "checked",
+      subject: "passed, waits to merge",
+    })
+    const snap = snapshot({ rows: [{ row: item }], runner: RUNNER })
+    W.pending.word = SENTINEL
     try {
       const pane = await lines(snap, 120, 40)
-      const help = await lines(snapshot({ rows: [] }), 120, 40, ["?"])
+      const help = await lines(snapshot({ rows: [] }), 160, 48, ["?"])
       const page = (await printListing(snap, { color: false, columns: 120 })).split("\n")
-      const paneRow = pane.find((line) => line.includes(runName) && line.includes("task/x")) ?? ""
-      const pageRow = page.find((line) => line.includes(runName) && line.includes("task/x")) ?? ""
+      const cli = await listHelp()
       const pageTop = page[page.findIndex((line) => line.includes("YRD QUEUES")) + 1] ?? ""
       const surfaces: Readonly<Record<string, boolean>> = {
+        "? legend": help.some((line) => line.includes(SENTINEL)),
         "notice line": noticeLine(item).includes(SENTINEL),
-        "pane STATUS cell": paneRow.includes(`◉ ${SENTINEL}`),
-        "pane TIME cell": paneRow.includes(`${SENTINEL} 3:21`),
-        "pane top line": topLineOf(pane).line.includes(`${SENTINEL} task/x`),
-        "page STATUS cell": pageRow.includes(`◉ ${SENTINEL}`),
-        "page TIME cell": pageRow.includes(`${SENTINEL} 3:21`),
-        "page top line": pageTop.includes(`${SENTINEL} task/x`),
-        "? States section": help.some((line) => line.includes(SENTINEL)),
+        "page STATUS cell": tableRow(page, "task/y1 passed").includes(` ${SENTINEL} `),
+        "page top line": pageTop.includes(`1 ${SENTINEL}`),
+        "pane STATUS cell": tableRow(pane, "task/y1 passed").includes(` ${SENTINEL} `),
+        "pane top line": topLineOf(pane).line.includes(`1 ${SENTINEL}`),
+        "queue show line": rowLine({ row: item }).includes(SENTINEL),
+        "yrd list --help legend": cli.includes(SENTINEL),
       }
 
       expect(Object.keys(surfaces).filter((surface) => surfaces[surface] !== true)).toEqual([])
     } finally {
-      W.live = was
+      W.pending.word = was
     }
   })
 
-  it("never draws `checked` as a state word, on any surface", async () => {
-    const waiting = row({ at: ago(3 * MINUTE), branch: "task/y1", position: 1, state: "checked", subject: "passed" })
-    const snap = snapshot({ rows: [{ row: waiting }], runner: RUNNER })
+  it("never draws the queue's internal names queued, checked or withdrawn as a state word, on any surface", async () => {
+    const pending = row({
+      at: ago(3 * MINUTE),
+      branch: "task/y1",
+      head: "2".repeat(40),
+      position: 1,
+      state: "checked",
+      subject: "passed, waits to merge",
+    })
+    const submitted = row({
+      branch: "task/z",
+      head: "3".repeat(40),
+      position: 2,
+      state: "queued",
+      subject: "not checked yet",
+    })
+    const cancelled = row({
+      at: ago(30 * MINUTE),
+      branch: "task/w",
+      endedAt: ago(30 * MINUTE),
+      head: "7".repeat(40),
+      reason: "replaced",
+      state: "withdrawn",
+      subject: "a newer head replaced it",
+    })
+    const snap = snapshot({ rows: [pending, submitted, cancelled].map((item) => ({ row: item })), runner: RUNNER })
     const pane = await lines(snap, 120, 40)
-    const help = await lines(snapshot({ rows: [] }), 120, 40, ["?"])
+    const help = await lines(snapshot({ rows: [] }), 160, 48, ["?"])
     const page = (await printListing(snap, { color: false, columns: 120 })).split("\n")
-    const checked = /\bchecked\b/u
+    const cli = await listHelp()
+    const internal = /\b(queued|checked|withdrawn)\b/u
+    // The notice's own word, before its cause and its next owner: the prose after it is the core's.
+    const noticeWord = (item: Row): string => noticeLine(item).split("  ·  ")[0] ?? ""
     const surfaces: Readonly<Record<string, string>> = {
-      "notice line": noticeLine(waiting),
-      "pane STATUS cell": pane.find((line) => line.includes("task/y1 passed")) ?? "",
-      "pane top line": topLineOf(pane).line,
-      "page STATUS cell": page.find((line) => line.includes("task/y1 passed")) ?? "",
-      "page top line": page[page.findIndex((line) => line.includes("YRD QUEUES")) + 1] ?? "",
       "? help": help.join("\n"),
+      "notice word, cancelled": noticeWord(cancelled),
+      "notice word, pending": noticeWord(pending),
+      "notice word, submitted": noticeWord(submitted),
+      "page row, cancelled": tableRow(page, "task/w a newer"),
+      "page row, pending": tableRow(page, "task/y1 passed"),
+      "page row, submitted": tableRow(page, "task/z not checked"),
+      "page top line": page[page.findIndex((line) => line.includes("YRD QUEUES")) + 1] ?? "",
+      "pane row, cancelled": tableRow(pane, "task/w a newer"),
+      "pane row, pending": tableRow(pane, "task/y1 passed"),
+      "pane row, submitted": tableRow(pane, "task/z not checked"),
+      "pane top line": topLineOf(pane).line,
+      "queue show line, cancelled": rowLine({ row: cancelled }),
+      "queue show line, pending": rowLine({ row: pending }),
+      "queue show line, submitted": rowLine({ row: submitted }),
+      "yrd list --help": cli,
     }
 
     // A surface this test cannot find is listed too, so a line it failed to locate never passes as clean.
     const offending = (surface: string): boolean =>
-      (surfaces[surface] ?? "") === "" || checked.test(surfaces[surface] ?? "")
+      (surfaces[surface] ?? "").trim() === "" || internal.test(surfaces[surface] ?? "")
     expect(Object.keys(surfaces).filter(offending)).toEqual([])
   })
 
-  it("at each size of the tier ladder draws the top line on one row, and the running row keeps its word and its time", async () => {
+  it("at each size of the tier ladder draws the top line on one row, and the checked row keeps its word, its clock and its duration", async () => {
     const W = await words()
-    const runName = runShortName("main", RUN_ID)
     const seen = []
     for (const [cols, rows] of [
       [213, 50],
       [212, 50],
       [100, 31],
     ] as const) {
-      const painted = await lines(snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER }), cols, rows)
+      const painted = await lines(
+        snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER, stopped: STOP } as Partial<WatchSnapshot>),
+        cols,
+        rows,
+      )
       const top = topLineOf(painted)
-      const runningRow = painted.find((line) => line.includes(runName) && line.includes("task/x")) ?? ""
+      const held = tableRow(painted, "task/x the change")
       seen.push({
-        runningRowDrawn: runningRow !== "",
-        runningTime: runningRow.includes(`${W.live} 3:21`),
-        runningWord: runningRow.includes(`◉ ${W.live}`),
+        heldClock: held.trimStart().startsWith(clock(RUNNING_SINCE, { seconds: true })),
+        heldDuration: held.includes(`${W.checking.word} 3:21`),
+        heldRowDrawn: held !== "",
+        heldWord: held.includes(` ${W.checking.word} `),
         size: `${String(cols)}x${String(rows)}`,
         tier: watchTier(cols, rows),
-        topLineOneRow: top.line.includes(`${W.live} task/x`) && top.next.includes("╭─ RUNNER"),
+        topLineOneRow: top.line.includes(`${W.checking.word} task/x`) && top.next.includes("╭─ RUNNER"),
       })
     }
 
-    const drawn = { runningRowDrawn: true, runningTime: true, runningWord: true, topLineOneRow: true }
+    const drawn = { heldClock: true, heldDuration: true, heldRowDrawn: true, heldWord: true, topLineOneRow: true }
     expect(seen).toEqual([
       { ...drawn, size: "213x50", tier: "right" },
       { ...drawn, size: "212x50", tier: "below" },
       { ...drawn, size: "100x31", tier: "full" },
     ])
+  })
+
+  it("at tiny heights nothing overlaps: the top line keeps its own row, a change row stays whole, and the pills give way first", async () => {
+    const W = await words()
+    const seen = []
+    for (const [cols, rows] of [
+      [60, 10],
+      [100, 12],
+    ] as const) {
+      const painted = await lines(
+        snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER, stopped: STOP } as Partial<WatchSnapshot>),
+        cols,
+        rows,
+      )
+      const title = painted.findIndex((line) => line.includes("YRD QUEUES"))
+      const header = painted.findIndex((line) => /\bSTATUS\b/u.test(line))
+      const first = painted[header + 1] ?? ""
+      const pills = /\bopen\b.*\brunning\b.*\bdone\b.*\bfailed\b/u
+      seen.push({
+        changeRowWhole: header > title + 1 && first.includes("task/x") && !pills.test(first),
+        pillsWhole: painted
+          .filter((line) => pills.test(line))
+          .every((line) => line.trim() === "open running done failed all"),
+        size: `${String(cols)}x${String(rows)}`,
+        topLineOwnRow: (painted[title + 1] ?? "").trim().startsWith(`2 ${W.waiting.word}`),
+      })
+    }
+
+    const whole = { changeRowWhole: true, pillsWhole: true, topLineOwnRow: true }
+    expect(seen).toEqual([
+      { ...whole, size: "60x10" },
+      { ...whole, size: "100x12" },
+    ])
+  })
+
+  it("marks the change the runner holds now, and only it: its row in the working colour with a pulsing marker, and nothing else on screen pulses", async () => {
+    const { live: _running, ...before } = running()
+    const rows: WatchRow[] = [
+      split(running(), RUN_ID),
+      split({ ...before, at: ago(40 * MINUTE) }, EARLIER_RUN),
+      ...EVERY_STATE.slice(1),
+    ]
+    const cols = 100
+    const height = 31
+    // `autoRender`: a live pane repaints on its own timers (the clock, the pulse), not only on a key.
+    const app = render(<WatchPane snapshot={snapshot({ decisions: DECISIONS, rows, runner: RUNNER })} live />, {
+      autoRender: true,
+      cols,
+      rows: height,
+    })
+    await settle(app)
+    // The cursor starts on the top row, which is the held one, and a cursor row wears the selection's
+    // colours: step off it, so this reads the marker and the colour the held row has on its own.
+    app.press("j")
+    await settle(app)
+    const read = () =>
+      Array.from({ length: height }, (_, y) =>
+        Array.from({ length: cols }, (_, x) => {
+          const cell = app.cell(x, y)
+          return { char: cell.char, fg: JSON.stringify(cell.fg) }
+        }),
+      )
+    // Across more than one 900 ms pulse period: a cell pulses when its character holds and its colour moves.
+    const samples = [read()]
+    for (const wait of [470, 470]) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, wait))
+        await app.waitForLayoutStable()
+      })
+      samples.push(read())
+    }
+    const pulsingRows = new Set<number>()
+    let markers = 0
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        const seen = samples.map((sample) => sample[y]?.[x])
+        const [firstSeen] = seen
+        if (firstSeen === undefined || firstSeen.char.trim() === "") continue
+        if (seen.every((cell) => cell?.char === firstSeen.char) && new Set(seen.map((cell) => cell?.fg)).size > 1) {
+          markers += 1
+          pulsingRows.add(y)
+        }
+      }
+    }
+    const painted = app.lines
+    const held = painted.findIndex((line) => line.includes("task/x the change"))
+    const fgOf = (y: number, needle: string): string | undefined => {
+      const x = (painted[y] ?? "").indexOf(needle)
+      return x < 0 ? undefined : JSON.stringify(app.cell(x, y).fg)
+    }
+    const heldBranch = fgOf(held, "task/x")
+    const waitingBranch = fgOf(
+      painted.findIndex((line) => line.includes("task/z not checked")),
+      "task/z",
+    )
+    app.unmount()
+
+    expect({
+      heldTextStandsOut: heldBranch !== undefined && waitingBranch !== undefined && heldBranch !== waitingBranch,
+      markers,
+      onlyTheHeldRow: pulsingRows.size === 1 && pulsingRows.has(held),
+    }).toEqual({ heldTextStandsOut: true, markers: 1, onlyTheHeldRow: true })
+  }, 10_000)
+
+  it("says a silent runner without naming a supervisor: yrd does not depend on hab (24869)", async () => {
+    const painted = await lines(snapshot({ rows: [{ row: row({ position: 1 }) }], runner: SILENT }), 120, 40)
+
+    const runner = painted.filter((line) => line.includes("│")).join("\n")
+    expect({ said: runner.includes("SILENT"), supervisor: /\bhab\b/u.test(runner) }).toEqual({
+      said: true,
+      supervisor: false,
+    })
   })
 })
