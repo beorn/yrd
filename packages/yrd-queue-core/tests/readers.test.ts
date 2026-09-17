@@ -317,6 +317,7 @@ describe("a run's journal, read back", () => {
     expect(
       watchRows([{ ...change, state: "merged" }], {
         journals: readJournals(dir, { now: at }),
+        perRun: true,
       })[0]?.row.endedAt,
     ).toBeUndefined()
 
@@ -334,7 +335,7 @@ describe("a run's journal, read back", () => {
       { ...diagnostic, at: first.toISOString(), run: log.id },
       { ...diagnostic, at: at.toISOString(), run: log.id },
     ])
-    const row = watchRows([{ ...change, state: "merged" }], { journals })[0]?.row
+    const row = watchRows([{ ...change, state: "merged" }], { journals, perRun: true })[0]?.row
     expect(row).toMatchObject({ state: "merged", result: "pass", endedAt: ended, diagnostics: run?.diagnostics })
   })
 
@@ -416,14 +417,14 @@ describe("a run's journal, read back", () => {
     }
     const { dir, run: oldId } = journalDir([check], start)
     const current: Row = { branch: check.branch, head: check.head, state: "failed" }
-    const newestUnended = watchRows([current], { journals: readJournals(dir, { now: later }) })[0]!
+    const newestUnended = watchRows([current], { journals: readJournals(dir, { now: later }), perRun: true })[0]!
     expect(newestUnended.row.live?.run).toBe(oldId)
     expect(clocks(newestUnended.row, later).runtimeMs).toBe(60 * 60 * 1000)
     const log = openLog(dir, () => later)
     log.write({ ...check, log: "/w/new/test.log", start: later.toISOString() })
     log.write({ ...check, kind: "result", result: "fail", exit: "1" })
     log.write({ branch: check.branch, head: check.head, kind: "change", decision: "failed", reason: "test" })
-    const rows = watchRows([current], { journals: readJournals(dir, { now: later }) })
+    const rows = watchRows([current], { journals: readJournals(dir, { now: later }), perRun: true })
     expect(rows.map(({ row }) => row.run)).toEqual([log.id, oldId])
     const old = rows[1]!
     expect(old.row.live).toBeUndefined()
@@ -751,6 +752,7 @@ describe("the declared checks, joined to what ran", () => {
     ])
     const current: Row = { branch: "task/one", head: "abc", state: "failed" }
     const projected = watchRows([current], {
+      perRun: true,
       journals: {
         dir: "/logs",
         malformed: [],

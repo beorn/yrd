@@ -302,8 +302,12 @@ export const SILENT_AFTER_MS = 10 * 60 * 1000
  *    could not start, and the cure is in the journal's last Git row rather
  *    than in `hab ps`. Reporting it as silence would be true of the symptom
  *    and useless about the cause.
- * 2. `silent` — nothing has written for {@link SILENT_AFTER_MS}. SILENCE
- *    OUTRANKS EVERY LIVE WORD. `underCheck` is read off the rows, and a
+ * 2. `stopped` — nothing has written for {@link SILENT_AFTER_MS}, so nothing
+ *    is running on this machine. The word is `stopped` and not `silent`:
+ *    `silent` is read from the runner's OWN published status, which does not
+ *    exist until S2, and this is read from a file mtime here (@cto, relayed by
+ *    @chief cf4677f8). SILENCE OUTRANKS EVERY LIVE WORD, whatever it is
+ *    called. `underCheck` is read off the rows, and a
  *    service that died mid-check leaves a row still marked live; taking that
  *    at face value would announce a check running over a dead queue — a worse
  *    lie than the one being removed, and precisely the failure 24486 exists to
@@ -311,7 +315,7 @@ export const SILENT_AFTER_MS = 10 * 60 * 1000
  *    and records through a PAUSE, so a paused queue whose journal has stopped
  *    moving is a SERVICE that is down on top of a pause, which is the louder
  *    and the more actionable of the two.
- * 3. `stopped` / `paused` — the line is not moving BY DECISION, which is the
+ * 3. `stuck` / `paused` — the line is not moving BY DECISION, which is the
  *    answer to the question the reader is asking. The stop is the reading's
  *    own (queue-core `stopFact`), a git fact, so it is the one word this row
  *    can still say off the queue's machine.
@@ -352,9 +356,9 @@ export function runnerWord(
   const latest = facts?.latest
   if (latest !== undefined) {
     if (latest.unstarted === true) return "unstarted"
-    if (now.getTime() - latest.lastWriteAt.getTime() > SILENT_AFTER_MS) return "silent"
+    if (now.getTime() - latest.lastWriteAt.getTime() > SILENT_AFTER_MS) return "stopped"
   }
-  if (stopped !== undefined && stopped !== null) return stopped.change === null ? "paused" : "stopped"
+  if (stopped !== undefined && stopped !== null) return stopped.change === null ? "paused" : "stuck"
   if (latest === undefined) return "unpublished"
   if (underCheck) return "checking"
   return "idle"
@@ -393,9 +397,9 @@ export type RunnerLine = Readonly<{
 export function runnerLine(
   facts: RunnerFacts | undefined,
   now: Date,
-  options: Readonly<{ held?: HeldChange; waiting?: number; stopped?: StopFact | null; pause?: string }> = {},
+  options: Readonly<{ held?: HeldChange; waiting?: number; stopped?: StopFact | null }> = {},
 ): RunnerLine {
-  const { held, waiting = 0, stopped, pause } = options
+  const { held, waiting = 0, stopped } = options
   const state = runnerWord(facts, now, held !== undefined, stopped)
   const latest = facts?.latest
   const word = STATE_WORDS[state].word
@@ -425,14 +429,17 @@ export function runnerLine(
         ...(holding.submitter === undefined ? {} : { by: holding.submitter }),
       }
     }
-    case "stopped":
+    case "stuck":
     case "paused": {
       const stop = stopped as StopFact
       const at2 = new Date(stop.since)
       const change = stop.change === null ? undefined : stop.change.slice(0, stop.change.lastIndexOf("@"))
       return {
         ...at,
-        detail: pause ?? detail,
+        // NOT the pause record's own sentence: that is the loud line at the top
+        // of the page and it is said exactly once (watch-frame.tsx LoudPause).
+        // This row says the WORD, who stopped the line and what lifts it.
+        detail,
         duration: `${word} ${since(at2)}`,
         holds:
           change === undefined
@@ -441,7 +448,7 @@ export function runnerLine(
         state,
       }
     }
-    case "silent": {
+    case "stopped": {
       return {
         ...at,
         detail,

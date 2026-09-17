@@ -1,23 +1,22 @@
 /**
- * @failure  The port had no RUNNER box at all: a queue whose service had
- *           died read exactly like one with nothing to do, and a running
- *           check gave no sign of the process behind it (watch-redesign
- *           items 13, 14, 16, 17, 27, 29, 37). The one instrument the new
- *           core leaves is the run journal and the run's own `.pid` file.
- * @level    l1 (the reader and the health word, against a temp workdir) and
- *           l2 (the box, painted)
- * @consumer the operator reading the bottom of `yrd watch`
+ * @failure  The port had no RUNNER at all: a queue whose service had died
+ *           read exactly like one with nothing to do, and a running check
+ *           gave no sign of the process behind it (watch-redesign items 13,
+ *           14, 16, 17, 27, 29, 37). The one instrument the new core leaves is
+ *           the run journal and the run's own `.pid` file. Since S1 it is a
+ *           ROW in the table's own columns rather than a box beside it, so its
+ *           word comes from THE ONE WORD TABLE and sits in the same STATUS
+ *           column as every change's.
+ * @level    l1 (the reader, the word and the line, against a temp workdir)
+ * @consumer the operator reading `yrd list` and `yrd watch`
  */
 
 import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { render } from "silvery/test"
 import { runId } from "@yrd/queue-core"
-import { RunnerBox } from "../src/watch-boxes.tsx"
-import { MinuteContext, NowContext } from "../src/watch-clock.ts"
-import { SILENT_AFTER_MS, readRunnerFacts, runnerHealth, type RunnerFacts } from "../src/watch-runner.ts"
+import { SILENT_AFTER_MS, readRunnerFacts, runnerLine, runnerWord, type RunnerFacts } from "../src/watch-runner.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
@@ -143,7 +142,7 @@ describe("readRunnerFacts", () => {
     expect(facts.latest?.alive).toBe(false)
     // No header fields, and that is now a NAMED state rather than a refusal.
     expect(facts.latest?.queue).toBeUndefined()
-    expect(runnerHealth(facts, NOW, false)).toBe("unstarted")
+    expect(runnerWord(facts, NOW, false)).toBe("unstarted")
   })
 
   /**
@@ -175,7 +174,7 @@ describe("readRunnerFacts", () => {
     // Mid-preamble, so no queue yet — and emphatically not a dead run.
     expect(facts.latest?.queue).toBeUndefined()
     expect(facts.latest?.unstarted).toBeUndefined()
-    expect(runnerHealth(facts, NOW, false)).not.toBe("unstarted")
+    expect(runnerWord(facts, NOW, false)).not.toBe("unstarted")
   })
 
   // The control: a run whose queue record IS there is an ordinary run, and the
@@ -202,11 +201,13 @@ describe("readRunnerFacts", () => {
   })
 })
 
-describe("runnerHealth, the one word", () => {
+describe("runnerWord, the one word", () => {
   const facts = (over: Partial<NonNullable<RunnerFacts["latest"]>>): RunnerFacts => ({
     journalDir: "/w/logs",
     latest: { alive: false, id: "q-x", lastWriteAt: NOW, startedAt: NOW, ...over },
   })
+  const STOPPED = { by: "yrd-service", cause: "stuck" as const, change: `task/s@${"4".repeat(40)}`, since: NOW.toISOString() }
+  const PAUSED = { by: "@chief", cause: "operator" as const, change: null, since: NOW.toISOString() }
 
   /**
    * CHANGED MEANING, deliberately, and kept here rather than retyped quietly.
@@ -216,11 +217,11 @@ describe("runnerHealth, the one word", () => {
    * live process whose journal had stopped read healthy, and the wedged case
    * was masked by the very process that was wedged.
    */
-  it("a live process whose journal has stopped is SILENT, not healthy", () => {
-    expect(runnerHealth(facts({ alive: true, lastWriteAt: new Date(0) }), NOW, false)).toBe("silent")
+  it("a live process whose journal has stopped reads STOPPED, not healthy", () => {
+    expect(runnerWord(facts({ alive: true, lastWriteAt: new Date(0) }), NOW, false)).toBe("stopped")
     // And it stays silent even if a row still claims a check is live: a service
     // that died mid-check leaves exactly that residue.
-    expect(runnerHealth(facts({ alive: true, lastWriteAt: new Date(0) }), NOW, true)).toBe("silent")
+    expect(runnerWord(facts({ alive: true, lastWriteAt: new Date(0) }), NOW, true)).toBe("stopped")
   })
 
   /**
@@ -228,10 +229,12 @@ describe("runnerHealth, the one word", () => {
    *          apart, so an operator cannot see whether anything is being checked.
    * @level   l1
    */
-  it("is PROCESSING when a change is under a check right now (items 1 and 5)", () => {
-    expect(runnerHealth(facts({ alive: true }), NOW, true)).toBe("processing")
+  it("is CHECKING when a change is under a check right now (items 1 and 5)", () => {
+    // `processing` retired in S1: it named the checking phase and the merging
+    // phase with one word, on a row that now shares its column with a change's.
+    expect(runnerWord(facts({ alive: true }), NOW, true)).toBe("checking")
     // The process does not enter into it, in either direction.
-    expect(runnerHealth(facts({ alive: false }), NOW, true)).toBe("processing")
+    expect(runnerWord(facts({ alive: false }), NOW, true)).toBe("checking")
   })
 
   /**
@@ -240,16 +243,47 @@ describe("runnerHealth, the one word", () => {
    * nearly always; if that still produced the marker, the marker would separate
    * nothing and this slice would have changed only a word.
    */
-  it("CONTROL: a live process with NOTHING under a check is idle, never processing", () => {
-    expect(runnerHealth(facts({ alive: true }), NOW, false)).toBe("idle")
+  it("CONTROL: a live process with NOTHING under a check is idle, never checking", () => {
+    expect(runnerWord(facts({ alive: true }), NOW, false)).toBe("idle")
   })
 
-  it("is absent with no journal, silent past the ceiling, idle otherwise", () => {
-    expect(runnerHealth({ journalDir: "/w/logs", absent: "none" }, NOW, false)).toBe("absent")
+  it("is `?` with no journal and no stop, stopped past the ceiling, idle otherwise", () => {
+    // S1 does not invent a status source: the runner publishes none of its own
+    // until S2, so a reading off its machine says so rather than guessing.
+    expect(runnerWord({ journalDir: "/w/logs", absent: "none" }, NOW, false)).toBe("unpublished")
+    expect(runnerWord(undefined, NOW, false)).toBe("unpublished")
     const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
-    expect(runnerHealth(quiet, NOW, false)).toBe("silent")
-    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), NOW, false)).toBe(
+    expect(runnerWord(quiet, NOW, false)).toBe("stopped")
+    expect(runnerWord(facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS + 1_000) }), NOW, false)).toBe(
       "idle",
+    )
+  })
+
+  /**
+   * The line is not moving BY DECISION, which is the answer the reader wants,
+   * and the stop is a git fact — the one word this row can still say off the
+   * queue's own machine.
+   */
+  it("says stopped at a change, paused by a person, and says either with no journal here", () => {
+    // @cto, relayed by @chief cf4677f8: a pause record naming a stuck change
+    // IS `stuck` — the same word the change wears, in the same column.
+    expect(runnerWord(facts({ alive: true }), NOW, false, STOPPED)).toBe("stuck")
+    expect(runnerWord(facts({ alive: true }), NOW, false, PAUSED)).toBe("paused")
+    expect(runnerWord(undefined, NOW, false, PAUSED)).toBe("paused")
+    // A stop never hides a check that IS running, because the stop outranks it.
+    expect(runnerWord(facts({ alive: true }), NOW, true, STOPPED)).toBe("stuck")
+  })
+
+  /**
+   * SILENCE OUTRANKS THE STOP. A round still opens and records through a pause,
+   * so a paused queue whose journal has stopped moving is a SERVICE that is
+   * down on top of a pause — the louder and the more actionable of the two.
+   */
+  it("CONTROL: a quiet journal outranks a stop, and a definite outcome outranks both", () => {
+    const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
+    expect(runnerWord(quiet, NOW, false, PAUSED)).toBe("stopped")
+    expect(runnerWord({ ...quiet, latest: { ...quiet.latest!, unstarted: true } }, NOW, false, PAUSED)).toBe(
+      "unstarted",
     )
   })
 
@@ -257,9 +291,9 @@ describe("runnerHealth, the one word", () => {
    * @failure An empty queue whose service is dead reads `idle`, so the seat
    *          about to submit into it sees a healthy queue and submits.
    */
-  it("is silent on an EMPTY queue too — the state a submitter arrives into (@i/10-yrd/24486)", () => {
+  it("goes loud on an EMPTY queue too — the state a submitter arrives into (@i/10-yrd/24486)", () => {
     const quiet = facts({ lastWriteAt: new Date(NOW.getTime() - SILENT_AFTER_MS - 1) })
-    expect(runnerHealth(quiet, NOW, false)).toBe("silent")
+    expect(runnerWord(quiet, NOW, false)).toBe("stopped")
   })
 
   /**
@@ -267,42 +301,27 @@ describe("runnerHealth, the one word", () => {
    *          into a false alarm, and a box that cries wolf gets ignored.
    * @level l1
    */
-  it("NEGATIVE CONTROL: a healthy queue between polls is never silent", () => {
+  it("NEGATIVE CONTROL: a healthy queue between polls never reads stopped", () => {
     // The live queue's measured cadence, 2026-09-11: journals at 09:01:16,
     // 09:03:21, 09:05:26, 09:07:30, 09:09:35, 09:11:40 — about 2:05 apart,
     // nearly five times inside the ceiling, and written whether or not the
     // round had work.
     const cadenceMs = 125_000
     expect(cadenceMs * 4).toBeLessThan(SILENT_AFTER_MS)
-    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs) }), NOW, false)).toBe("idle")
-    expect(runnerHealth(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs * 4) }), NOW, false)).toBe("idle")
+    expect(runnerWord(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs) }), NOW, false)).toBe("idle")
+    expect(runnerWord(facts({ lastWriteAt: new Date(NOW.getTime() - cadenceMs * 4) }), NOW, false)).toBe("idle")
     // And the queue depth cannot change that answer, because the signature no
     // longer admits one: whatever is in line, these are the same two facts.
   })
 })
 
-describe("the RUNNER box", () => {
-  async function paint(facts: RunnerFacts, inLine: number, pause?: string, underCheck = false): Promise<string> {
-    const app = render(
-      <NowContext.Provider value={NOW}>
-        <MinuteContext.Provider value={NOW}>
-          <RunnerBox
-            facts={facts}
-            label="main"
-            inLine={inLine}
-            underCheck={underCheck}
-            columns={70}
-            {...(pause === undefined ? {} : { pause })}
-          />
-        </MinuteContext.Provider>
-      </NowContext.Provider>,
-      { cols: 72, rows: 12 },
-    )
-    await app.waitForLayoutStable()
-    const text = app.text
-    app.unmount()
-    return text
-  }
+/**
+ * The runner's ROW, as the flow page draws it: the word, what it holds or why
+ * it holds nothing, and the second line of host-only detail that is NEVER
+ * blank. The box's four rails are gone with the box; what survived is the one
+ * line an operator acted on, in the table's own columns.
+ */
+describe("the runner's row", () => {
   const latest = (over: Partial<NonNullable<RunnerFacts["latest"]>>): RunnerFacts => ({
     journalDir: "/w/logs",
     latest: {
@@ -316,100 +335,109 @@ describe("the RUNNER box", () => {
       ...over,
     },
   })
+  const held = {
+    branch: "task/x",
+    since: new Date(NOW.getTime() - 120_000),
+    subject: "the change under a check",
+    submitter: "@dev/2",
+  }
 
   // CHANGED MEANING (items 1 and 5): this used to paint a live PROCESS and
   // expect the run rails. The process being up is no longer the predicate, so
-  // the same rails are now reached by a change actually being under a check --
+  // the same facts are now reached by a change actually being under a check --
   // which is what they were always describing.
-  it("names the run under check with its pid on the `$` line, the run's facts and the measured-at clock under it, hanging off one gutter", async () => {
-    const text = await paint(latest({ alive: true, pid: 4242 }), 1, undefined, true)
+  it("names the change under a check, its submitter and how long, with the beat and the round under it", () => {
+    const line = runnerLine(latest({ alive: true, pid: 4242 }), NOW, { held, waiting: 1 })
 
-    expect(text).toContain("RUNNER")
-    // Item 1: the marker shows its own word, as idle and silent always did.
-    expect(text).toContain("processing 2:00")
-    expect(text).toContain("$ yrd queue run · main#")
-    expect(text).toContain("[pid 4242]")
-    expect(text).toMatch(/^\s*│\s{3}target main · gitlink 3c285a41af46 · checks typecheck, test/mu)
-    expect(text).toMatch(/progress \d\d:\d\d:\d\d · 0:02 ago/u)
+    expect(line.state).toBe("checking")
+    expect(line.holds).toBe("task/x the change under a check")
+    expect(line.by).toBe("@dev/2")
+    expect(line.duration).toBe("checking 2:00")
+    expect(line.at).toEqual(new Date(NOW.getTime() - 120_000))
+    expect(line.detail).toContain("alive: beat 0:02 ago")
+    expect(line.detail).toMatch(/this round since \d\d:\d\d:\d\d/u)
+    expect(line.detail).toContain("typecheck, test, output 0:02 ago (this machine only)")
   })
 
-  it("reads idle between runs, naming the last run and how long ago it wrote", async () => {
-    const text = await paint(latest({}), 0)
-
-    expect(text).toContain("idle 0:02")
-    expect(text).toContain("$ yrd queue up · last run main#")
-    expect(text).toContain("wrote 0:02 ago")
-    expect(text).not.toContain("SILENT")
+  it("reads idle between runs, and says what it is idle over", () => {
+    expect(runnerLine(latest({}), NOW, { waiting: 0 })).toMatchObject({
+      duration: "idle 0:02",
+      holds: "nothing in line",
+      state: "idle",
+    })
+    expect(runnerLine(latest({}), NOW, { waiting: 3 }).holds).toBe("nothing under a check, and 3 in line")
   })
 
   /**
-   * @failure The box reads `idle` at the exact moment a seat is deciding
+   * @failure The runner reads `idle` at the exact moment a seat is deciding
    *          whether to submit, and the submission goes into a dead queue.
    */
-  it("goes loud on an EMPTY queue too, and says what submitting now would do (@i/10-yrd/24486)", async () => {
-    const text = await paint(latest({ lastWriteAt: new Date(NOW.getTime() - 12 * 60_000) }), 0)
+  it("goes loud on an EMPTY queue too, and says what submitting now would do (@i/10-yrd/24486)", () => {
+    const line = runnerLine(latest({ lastWriteAt: new Date(NOW.getTime() - 12 * 60_000) }), NOW, { waiting: 0 })
 
-    // The rail hangs across rows, so read the sentence with the box chrome
-    // taken out rather than asserting on wherever this width happens to wrap.
-    const rail = text.replaceAll("│", " ").replaceAll(/\s+/gu, " ")
-
-    expect(text).toContain("silent 12:00")
-    expect(rail).toContain("RUNNER SILENT — no journal write for 12:00")
-    expect(rail).toContain("nothing is in line, so a change submitted now would not be picked up")
+    expect(line.state).toBe("stopped")
+    expect(line.duration).toBe("stopped 12:00")
+    expect(line.holds).toContain("no journal write for 12:00")
+    expect(line.holds).toContain("nothing is in line, so a change submitted now would not be picked up")
     // Never the in-line sentence, which would be a lie at zero.
-    expect(rail).not.toContain("wait in line")
+    expect(line.holds).not.toContain("wait in line")
   })
 
-  it("goes loud when changes wait and nothing has written past the ceiling", async () => {
-    const text = await paint(latest({ lastWriteAt: new Date(NOW.getTime() - 12 * 60_000) }), 3)
+  it("goes loud when changes wait and nothing has written past the ceiling", () => {
+    const line = runnerLine(latest({ lastWriteAt: new Date(NOW.getTime() - 12 * 60_000) }), NOW, { waiting: 3 })
 
-    expect(text).toContain("silent 12:00")
-    // The banner is pre-wrapped into rows under its marker (never a live wrap): read it row by row.
-    expect(text).toContain("RUNNER SILENT — no journal write for 12:00 while 3 changes wait")
-    expect(text).toContain("in line")
+    expect(line.duration).toBe("stopped 12:00")
+    expect(line.holds).toBe("no journal write for 12:00 while 3 changes wait in line")
   })
 
-  it("says where the journal was looked for when there is none, never a blank", async () => {
-    const text = await paint(
+  /**
+   * @failure A blank where a fact belongs reads as a queue with nothing to say.
+   *          Off the queue's own machine there is no journal at all, and S1
+   *          publishes no status to replace it, so the row must say both.
+   */
+  it("says where the journal was looked for when there is none, never a blank, and never an invented status", () => {
+    const line = runnerLine(
       { journalDir: "/w/logs", absent: "no run journal was read: /w/logs — there is no such directory" },
-      2,
+      NOW,
+      { waiting: 2 },
     )
 
-    expect(text).toContain("$ yrd queue up")
-    expect(text).toContain("/w/logs")
+    expect(line.state).toBe("unpublished")
+    expect(line.holds).toBe("no runner status is published for this queue")
+    expect(line.detail).toContain("/w/logs")
+    expect(line.detail).toContain("publishes no status of its own yet")
+    expect(line.at).toBeUndefined()
+    expect(line.duration).toBeUndefined()
+    // And with no facts at all, still a sentence and still no guess.
+    expect(runnerLine(undefined, NOW).detail).not.toBe("")
   })
 
-  it("carries the pause on its own warning rail (item 27)", async () => {
-    const text = await paint(latest({}), 0, "paused by @chief: the host is down")
+  it("names the change the line stopped at and what lifts it, and an operator's pause by who", () => {
+    const since = new Date(NOW.getTime() - 6 * 60_000)
+    const stopped = runnerLine(latest({}), NOW, {
+      stopped: { by: "yrd-service", cause: "stuck", change: `task/s@${"4".repeat(40)}`, since: since.toISOString() },
+    })
+    expect(stopped.state).toBe("stuck")
+    expect(stopped.duration).toBe("stuck 6:00")
+    expect(stopped.holds).toContain("the line stopped at task/s since")
+    expect(stopped.holds).toContain("yrd queue resume")
 
-    expect(text).toContain("⚠︎ paused by @chief: the host is down")
+    const paused = runnerLine(latest({}), NOW, {
+      stopped: { by: "@chief", cause: "operator", change: null, since: since.toISOString() },
+    })
+    expect(paused.state).toBe("paused")
+    expect(paused.holds).toContain("by @chief")
+    // The pause RECORD's own sentence is the loud line at the top of the page
+    // and is said exactly once; this row says the word and the cure.
+    expect(paused.detail).toContain("beat")
   })
 
-  it("wraps a long command with a hanging indent bounded to three rows, so the rails under it survive (item 29)", async () => {
-    // `underCheck` because the long `yrd queue run · <label>` rail this measures
-    // only exists while processing; an idle box renders the shorter `queue up`
-    // form and the wrap would not be exercised at all.
-    const app = render(
-      <NowContext.Provider value={NOW}>
-        <MinuteContext.Provider value={NOW}>
-          <RunnerBox
-            facts={latest({ alive: true, pid: 4242 })}
-            label="a-very-long-queue-label-indeed-and-then-some-more-of-it"
-            inLine={1}
-            underCheck
-            columns={30}
-          />
-        </MinuteContext.Provider>
-      </NowContext.Provider>,
-      { cols: 32, rows: 14 },
-    )
-    await app.waitForLayoutStable()
-    const lines = app.text.split("\n")
-    const command = lines.findIndex((line) => line.includes("$ yrd"))
-    expect(command).toBeGreaterThan(-1)
-    // At most three rows of command, the third ending in an ellipsis, then the rails.
-    expect(lines.slice(command, command + 3).join("\n")).toContain("…")
-    expect(app.text).toContain("progress")
-    app.unmount()
+  it("names the journal of a run that died in its Git preamble, which is where the failing call is", () => {
+    const line = runnerLine(latest({ unstarted: true }), NOW, {})
+
+    expect(line.state).toBe("unstarted")
+    expect(line.holds).toContain("died in its Git preamble")
+    expect(line.detail).toContain("/w/logs/q-20260903T115800000Z-0badf00d.jsonl")
+    expect(line.detail).toContain("names the call that failed")
   })
 })

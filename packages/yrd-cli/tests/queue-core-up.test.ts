@@ -510,13 +510,16 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
 
     const listed = capture(w.work)
     expect(await coreQueueCommand(w.work, listed.io, { command: "list" }, { workdir: w.workdir })).toBe(0)
-    // The pause rides the RUNNER box's last rail, once — under the title, not above it (watch-frame.tsx).
+    // The pause is the loudest state on the page and it LEADS it, once; the
+    // runner's row says the WORD paused and what lifts the stop, never the
+    // record's own sentence a second time (watch-frame.tsx).
     const page = listed.stdout().split("\n")
     expect(page.filter((line) => line.includes("paused by @chief"))).toHaveLength(1)
-    expect(page.findIndex((line) => line.includes("paused by @chief"))).toBeGreaterThan(
+    expect(page.findIndex((line) => line.includes("paused by @chief"))).toBeLessThan(
       page.findIndex((line) => line.includes("RUNNER")),
     )
-    expect(page.findIndex((line) => line.includes("RUNNER"))).toBeGreaterThan(-1)
+    const runnerRow = page.find((line) => line.includes("RUNNER"))
+    expect(runnerRow, listed.stdout()).toContain("paused")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,
@@ -1930,7 +1933,7 @@ describe("yrd watch's own detail pane (openDetail), one change's evidence", () =
     // `world()` actually hands out comes from `gitIn()`, declared `GitRunner`
     // (the same value the CLI's own `readListing` call site is given).
     const { all, journals, queue } = await readListing(w.git as GitRunner, config, w.workdir, oid)
-    const rows = watchRows(all, { journals })
+    const rows = watchRows(all, { journals, perRun: true })
     const item = rows.find((row) => row.row.branch === change.branch)
     if (item === undefined) throw new Error("test setup: the change did not appear in the watch rows")
 

@@ -56,20 +56,24 @@ export const LEGEND_STATES = [
  * absence or the age of a beat, never stored: writing either into a record
  * would make a derived fact durable and let it go stale (@i/10-yrd/24523).
  *
- * `merging` and `off` are in the legend and on no row yet: nothing a reading
- * can see locally says a merge is being written, or tells a service that
- * stopped cleanly from one between rounds. The runner says so itself from S2,
- * and until then the row reads `?` rather than a guess.
+ * `stuck` and `paused` are the line's own stop, which is a git fact and so the
+ * one thing this row can still say off the queue's machine. `stopped` is
+ * derived where the page is drawn, from a journal that has gone quiet.
+ *
+ * `merging` and `silent` are in the legend and on no row yet (@cto, relayed by
+ * @chief cf4677f8): nothing a reading can see locally says a merge is being
+ * written, and `silent` is read from the runner's own published ref, which
+ * does not exist until S2. Until then the row reads `?` rather than a guess.
  */
 export const RUNNER_STATES = [
   "idle",
   "checking",
   "merging",
-  "stopped",
+  "stuck",
   "paused",
+  "stopped",
   "silent",
   "unstarted",
-  "off",
   "unpublished",
 ] as const
 
@@ -141,9 +145,9 @@ export const STATE_WORDS: Record<
     word: "idle",
   },
   stopped: {
-    color: "$fg-warning",
-    means: "the line stopped at a change the queue could not judge",
-    next: "repair and yrd queue resume, merge the fix, or cancel the change",
+    color: "$fg-error",
+    means: "no run has written here for ten minutes: nothing is running on this machine",
+    next: "yrd queue up",
     word: "stopped",
   },
   paused: {
@@ -154,8 +158,8 @@ export const STATE_WORDS: Record<
   },
   silent: {
     color: "$fg-error",
-    means: "the runner's journal has not moved for ten minutes",
-    next: "read the journal and the service",
+    means: "the runner's own published status has no recent beat",
+    next: "read the service",
     word: "silent",
   },
   unstarted: {
@@ -163,12 +167,6 @@ export const STATE_WORDS: Record<
     means: "the newest run died in its Git preamble, before it read its queue",
     next: "its journal's last Git row names the call that failed",
     word: "unstarted",
-  },
-  off: {
-    color: "$fg-muted",
-    means: "the service stopped cleanly",
-    next: "yrd queue up",
-    word: "off",
   },
   unpublished: {
     color: "$fg-muted",

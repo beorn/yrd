@@ -271,7 +271,6 @@ export function runnerOf(snapshot: WatchSnapshot, now: Date) {
             ...(held.submitter === undefined ? {} : { submitter: held.submitter }),
           },
         }),
-    ...(snapshot.pause === undefined ? {} : { pause: snapshot.pause }),
     ...(snapshot.stopped === undefined ? {} : { stopped: snapshot.stopped }),
     waiting: waiting.length,
   })

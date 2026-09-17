@@ -1,6 +1,6 @@
 /**
- * The watch's pure list: filters, the `--latest` lens, and the one row
- * renderer both the watch and plain `yrd queue list` draw with.
+ * The watch's pure list: filters, the per-run lens, and the one row renderer
+ * both the watch and plain `yrd queue list` draw with.
  *
  * Nothing here touches a ref, a file or a process. That is the point of the
  * two modules under test: every reading was already made by the core, and
@@ -40,24 +40,34 @@ function journals(entries: Readonly<Record<string, readonly string[]>>): Journal
 }
 
 describe("the rows a watch shows", () => {
-  it("preserves every run that touched a change by default, which is what a reader asking what the queue DID wants", () => {
+  it("gives a change ONE row by default, however many runs touched it, because the page is about changes", () => {
+    // The operator read their own queue on 2026-09-17 and saw one branch twice.
+    // Two runs per change was the default wherever a run journal could be read,
+    // which made the duplicate host-only by construction: from any other clone
+    // there is no journal and each change already had one row.
     const rows = watchRows([row()], {
-      journals: journals({ [journalKey("task/one", "a".repeat(40))]: ["q-2", "q-1"] }),
-    })
-
-    expect(rows.map((entry) => entry.run?.id)).toEqual(["q-2", "q-1"])
-    const first = rows[0]!
-    expect(watchRowKey(first)).not.toBe(watchRowKey({ ...first, row: { ...first.row, branch: "task/other" } }))
-  })
-
-  it("collapses to one row per change under --latest, the opt-in lens", () => {
-    const rows = watchRows([row()], {
-      latest: true,
       journals: journals({ [journalKey("task/one", "a".repeat(40))]: ["q-2", "q-1"] }),
     })
 
     expect(rows).toHaveLength(1)
     expect(rows[0]?.run).toBeUndefined()
+    const first = rows[0]!
+    expect(watchRowKey(first)).not.toBe(watchRowKey({ ...first, row: { ...first.row, branch: "task/other" } }))
+  })
+
+  it("preserves every run that touched a change under perRun, the lens STATS counts decisions from", () => {
+    const rows = watchRows([row()], {
+      perRun: true,
+      journals: journals({ [journalKey("task/one", "a".repeat(40))]: ["q-2", "q-1"] }),
+    })
+
+    expect(rows.map((entry) => entry.run?.id)).toEqual(["q-2", "q-1"])
+  })
+
+  it("accepts --latest and does nothing with it: one row per change is the only lens the table has", () => {
+    const options = { journals: journals({ [journalKey("task/one", "a".repeat(40))]: ["q-2", "q-1"] }) }
+
+    expect(watchRows([row()], { ...options, latest: true })).toEqual(watchRows([row()], options))
   })
 
   it("gives one row per change where there is no journal to split it by, rather than none", () => {
@@ -89,7 +99,7 @@ describe("the rows a watch shows", () => {
       live: { run: "later", check: "later", phase: "merge", since: now },
       next: { owner: "submitter", because: "fix the change" },
     })
-    const options = { journals: journals({ [journalKey(current.branch, current.head)]: ["old"] }) }
+    const options = { journals: journals({ [journalKey(current.branch, current.head)]: ["old"] }), perRun: true }
     const historical = watchRows([current], options)[0]!
     expect(historical.row).toMatchObject({ state: "failed", next: current.next, run: "old" })
     for (const key of [
@@ -106,7 +116,7 @@ describe("the rows a watch shows", () => {
       expect(historical.row[key], key).toBeUndefined()
     }
     expect(filterRows([historical], ["later"])).toHaveLength(0)
-    expect(watchRows([current], { ...options, latest: true })[0]?.row).toBe(current)
+    expect(watchRows([current], { ...options, perRun: false })[0]?.row).toBe(current)
     expect(watchRows([current])[0]?.row).toBe(current)
   })
 })
