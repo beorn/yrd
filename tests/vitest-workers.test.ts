@@ -22,3 +22,7 @@ describe("yrd vitest worker cap", () => {
     expect(resolveVitestMaxWorkers({ VITEST_MAX_WORKERS: "many" }, 32)).toBe(6)
   })
 })
+
+// Second deliberate-red commit for 24530 rows 7+11: the gitlink must MOVE for the
+// component leg to fire, while this file stays red at BOTH pins so the failure is
+// INHERITED rather than NEW. Never merged.
