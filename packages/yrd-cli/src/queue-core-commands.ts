@@ -1302,9 +1302,21 @@ export async function coreQueueCommand(
           options.json === true ? {} : { shown: { draftWindow } },
         )
         if (options.json !== true) narrateMalformed(io, journals, said)
-        const unfiltered = watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) })
-        const rows = filterRows(unfiltered, request.terms ?? [])
-        const changes = rows.filter((item) => item.row.state !== "draft")
+        // TWO LENSES OVER ONE READING, and which is which is the whole of S1.
+        //
+        // `unfiltered` is one row per RUN: what the queue DID. The document
+        // keeps it, because the spec keeps runs in `--json` and a machine
+        // reader that has always had a row per judgement must not silently get
+        // one per change; the queue line and STATS count from it too, and both
+        // already fold a change's runs into one themselves.
+        //
+        // `rows` is the TABLE's, one row per change: where each change STANDS.
+        // The operator read their own queue on 2026-09-17 and saw one branch
+        // on two rows, which is what the old default did wherever a run
+        // journal could be read.
+        const unfiltered = watchRows(all, { journals, perRun: true })
+        const changes = filterRows(unfiltered, request.terms ?? []).filter((item) => item.row.state !== "draft")
+        const rows = filterRows(watchRows(all, { journals }), request.terms ?? [])
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
         const pause = queue.stop
@@ -1338,11 +1350,9 @@ export async function coreQueueCommand(
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
           runner: readRunnerFacts(workdir),
-          // Every row, per RUN, whatever the filter and the lens: the box counts
-          // decisions and a change checked twice made two, so it asks for the
-          // per-run lens by name now that the table's own lens is one row per
-          // change. It counts the queue, not the view.
-          decisions: decisionsOfRows(watchRows(all, { journals, perRun: true })),
+          // Every row, per run, whatever the filter: the box counts the queue,
+          // not the view, and a change checked twice made two decisions.
+          decisions: decisionsOfRows(unfiltered),
           ...(pause === undefined ? {} : { pause: pauseLine(pause) }),
           ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
           ...(scope === undefined ? {} : { scope }),
@@ -2245,15 +2255,22 @@ export async function openDetail(
   const histories = own.length === 0 ? [] : await readHistories(git, own, config.target.remote, config.target.branch)
   const shown = histories.flatMap((entry) => show([entry], entry.change.branch))
   const records = shown.flatMap((change) => change.records)
-  // ONE JUDGEMENT PER ROW. A change judged more than once has one row per run
-  // — a stuck change the line re-took after a resume and that stuck again (the
-  // andon) — and every run's `Check:` trailers sit on its records. Folding them
-  // all opened the OLD row on the newest run's checks. So a row opens on the
-  // judgement its own run ended, found by that run's id in each trailer's
-  // create-only log path; within it, the records stay the full account (a
-  // merged change's submit-phase checks can come from an earlier run,
-  // 1fca452c). A row whose run no judgement names keeps the whole fold.
-  const packed = judgementOf(records, row.run).flatMap((record) => trailers(record, "Check"))
+  // ONE JUDGEMENT PER ROW, scoped by THE RUN THIS ROW IS ABOUT and never by the
+  // newest run the change carries. A row a journal split (`item.run`) opens on
+  // the judgement that run ended, found by its id in each trailer's create-only
+  // log path: folding them all opened the OLD row on the newest run's checks
+  // (the andon — a stuck change the line re-took after a resume and that stuck
+  // again). Within a judgement the records stay the full account, because a
+  // merged change's submit-phase checks can come from an earlier run
+  // (1fca452c).
+  //
+  // A row that stands for its WHOLE change splits by nothing and so keeps the
+  // whole fold — every run's `Check:` trailers, which is the only place the
+  // older run's output is still reachable now that the table is one row per
+  // change (S1). Reading `row.run` here instead would scope that row to the
+  // newest run and drop the rest in silence, which is the same defect as the
+  // incident above with the rows the other way round.
+  const packed = judgementOf(records, item.run?.id).flatMap((record) => trailers(record, "Check"))
   const declared = await declarationFor(git, config, row.base)
   const ending = endingOf(row)
   // A DECIDED change's records are its full account: `packed` (folded from

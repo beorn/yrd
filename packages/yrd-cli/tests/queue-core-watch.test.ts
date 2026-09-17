@@ -723,20 +723,25 @@ describe("what a watch says it looked at", () => {
 
     const plain = capture(w.work)
     await coreQueueCommand(w.work, plain.io, { command: "list" }, { workdir: w.workdir })
-    // Each historical run keeps its own row on the page, named by its reason in
-    // the status suffix (two runs started in one second share a `main#HHMMSS`).
-    // Table rows only: while the line is stopped, the runner box names the
-    // change it stopped for too.
+    // ONE row per change on the page, however many runs judged it (S1): the
+    // page says where a change stands and the runs are in `--json` above and
+    // in the change's own detail below. The runner's row carries a clock like
+    // any row now, and while the line is stopped it names the change it
+    // stopped at, so it is told apart by its own word and not by its shape.
     const historyLines = plain
       .stdout()
       .split("\n")
       .filter((line) => /^\d\d:\d\d:\d\d /u.test(line) && line.includes("task/history"))
-    expect(historyLines, plain.stdout()).toHaveLength(2)
+    const changeLines = historyLines.filter((line) => !line.includes("RUNNER"))
+    expect(changeLines, plain.stdout()).toHaveLength(1)
+    expect(changeLines[0], plain.stdout()).toContain(`stuck=${String(original.reason)}`)
     expect(
-      historyLines.every((line) => line.includes(`stuck=${String(original.reason)}`)),
+      historyLines.some((line) => line.includes("RUNNER") && line.includes("stopped")),
       plain.stdout(),
     ).toBe(true)
-    expect(plain.stdout()).toContain(runShortName("main", secondId))
+    // The RUN column is retired with the box: a run id in local-time digits on
+    // a page whose rows are changes said nothing a reader could act on.
+    expect(plain.stdout(), plain.stdout()).not.toContain(runShortName("main", secondId))
 
     rendered.snapshot = undefined
     const interactive = capture(w.work)
@@ -751,21 +756,24 @@ describe("what a watch says it looked at", () => {
     ).toBe(0)
     const snapshot = renderedSnapshot()
     if (snapshot === undefined) throw new Error("interactive list rendered no snapshot")
-    expect(snapshot.rows.map((entry) => entry.row.run)).toEqual([secondId, firstId])
+    // ONE row, and it opens on the WHOLE account: `judgementOf` keeps every
+    // record when the row names no run (queue-core-commands.ts), so collapsing
+    // the rows cost the SELECTOR between two runs and not the evidence. That
+    // is the property worth a test, because it is the one that would rot in
+    // silence.
+    expect(snapshot.rows.map((entry) => entry.row.run)).toEqual([secondId])
     const details = await renderedDetails(snapshot)
-    expect(details).toHaveLength(2)
-    expect(details.find((detail) => detail.row.run === firstId)?.checks[0]).toMatchObject({
-      state: "stuck",
-      log: original.log,
-      output: "FIRST_RUN_MISSING  slow \n",
-    })
-    // The second judgement ran the check again, so its row opens on that run's
-    // own check and never on the first run's.
-    expect(details.find((detail) => detail.row.run === secondId)?.checks[0]).toMatchObject({
-      state: "stuck",
-      log: latest.log,
-      output: "SECOND_RUN_MISSING\n",
-    })
+    expect(details).toHaveLength(1)
+    // The row stands for its whole change, so its detail is scoped by NO run
+    // and every run's `Check:` trailers are in hand (measured: four packed,
+    // two per run). `checksOf` still gives a check declared in ONE phase a
+    // single slot — its own final say, deliberately (queue-core check.ts) — so
+    // what the pane shows is the newest judgement's output. The older run's
+    // output is NOT lost: it is in the `--json` rows above, each with its own
+    // log, and in that log on disk.
+    expect(details[0]?.checks.map((check) => check.log)).toEqual([latest.log])
+    expect(details[0]?.checks[0]).toMatchObject({ state: "stuck", log: latest.log, output: "SECOND_RUN_MISSING\n" })
+    expect(readFileSync(String(old.log), "utf8")).toContain("FIRST_RUN_MISSING")
   })
 })
 
