@@ -1038,6 +1038,20 @@ describe("the RUNNER marker is wired to the ROWS, not to the process (items 1, 5
     expect(app.text, "nothing is under a check, so nothing is processing").not.toContain("processing")
     app.unmount()
   })
+
+  // RUNNER is the queue's, not the selector's (24196, review finding 4): a
+  // selector that hides the change under a check must not turn the box idle.
+  it("reads PROCESSING while the row under a check is one the selector hides", async () => {
+    const mine = row({ branch: "task/mine", position: 2 })
+    const selected = snapshot({ runner, rows: [{ row: mine }], unfiltered: [{ row: underCheck }, { row: mine }] })
+    const app = render(<WatchPane snapshot={selected} live={false} />, { cols: 120, rows: 30 })
+    await app.waitForLayoutStable()
+    await settle(app)
+
+    expect(app.text).toContain("processing 2:00")
+    expect(app.text, "the queue is checking a change the selector hides, so it is not idle").not.toMatch(/\bidle \d/u)
+    app.unmount()
+  })
 })
 
 /**
