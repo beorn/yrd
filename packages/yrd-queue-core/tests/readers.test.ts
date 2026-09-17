@@ -522,17 +522,19 @@ describe("the clocks", () => {
     expect(later).toBe(2 * 60 * 60 * 1000)
   })
 
-  it.each(["queued", "checked"] as const)("keeps counting the runtime of a %s change", (state) => {
-    const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state }
+  // /plat finding 3: an attempt's runtime is how long its checks ran, from its first check's start to its
+  // decision, or to now while a check holds the row. A change waiting in line holds no check, so nothing about
+  // it is running: a runtime that kept counting there read like a check that never ended.
+  it("counts an attempt's runtime to now only while a check holds the row, never while a change waits in line", () => {
+    const waits: Row = { branch: "task/one", head: "abc", since, startedAt: started, state: "checked" }
+    const held: Row = { ...waits, live: { check: "test", phase: "merge", run: "q-1", since: started } }
 
-    for (const state of ["queued", "checked"] as const) {
-      expect(clocks({ ...row, state }, now).runtimeMs, state).toBe(30 * 60 * 1000)
-    }
-    // Git can prove a change merged or its branch disappeared without an
-    // ending record. Missing evidence must not turn a stopped clock live.
-    for (const state of ["merged", "failed", "stuck", "direct"] as const) {
-      expect(ages(clocks({ ...row, state }, now)), state).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
-    }
+    expect({
+      checked: clocks(waits, now).runtimeMs,
+      decided: clocks({ ...waits, endedAt: new Date("2026-09-03T19:45:00.000Z") }, now).runtimeMs,
+      held: clocks(held, now).runtimeMs,
+      queued: clocks({ ...waits, state: "queued" }, now).runtimeMs,
+    }).toEqual({ checked: undefined, decided: 15 * 60 * 1000, held: 30 * 60 * 1000, queued: undefined })
   })
 
   it.each(["merged", "failed", "stuck", "direct"] as const)(

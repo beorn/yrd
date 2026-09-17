@@ -907,3 +907,31 @@ describe("the ending instant the table times a row by (24196)", () => {
     ])
   })
 })
+
+/**
+ * @failure  A one-row page, which `yrd list <branch>` prints and a plain `yrd watch <branch>` prints every round,
+ *           put `Age · Runtime · Wait time` under its row, each on a basis of its own, while the row's own cell
+ *           said `waiting` (@i/10-yrd/24196, /plat finding 3). One word, one basis: the page's timing is the cell's.
+ * @level    l2 (a real remote and a clone; the list command's own page)
+ * @consumer a seat reading its own change under `yrd watch <branch>`, live or in a log
+ */
+describe("the timing a one-row page prints under its row (24196)", () => {
+  it("is the row's own duration, in the cell's word and on its basis, never Age or Wait time", async () => {
+    const w = await world()
+    await change(w, "task/good", true)
+    const page = capture(w.work)
+    expect(
+      await coreQueueCommand(w.work, page.io, { command: "list", terms: ["task/good"] }, { workdir: w.workdir }),
+      page.stderr(),
+    ).toBe(0)
+
+    const lines = page.stdout().split("\n")
+    const row = lines.find((line) => /^\d\d:\d\d:\d\d /u.test(line) && line.includes("task/good")) ?? ""
+    const cell = /\S+ \d+:\d\d$/u.exec(row.trimEnd())?.[0] ?? ""
+    const notice = lines.findIndex((line) => line.includes("next: "))
+    expect({ cell, trailer: lines[notice + 1]?.trim() }, page.stdout()).toEqual({
+      cell: expect.stringMatching(/^waiting \d/u),
+      trailer: cell,
+    })
+  })
+})

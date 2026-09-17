@@ -1664,6 +1664,42 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     }).toEqual({ drawn: true, stuckFor: false, waiting: false })
   })
 
+  /**
+   * @failure  The detail kept `Age · Runtime · Wait time`, each on a basis of its own, beside the table cell's
+   *           one duration (/plat finding 3): a change submitted 50 minutes ago, whose 3-minute run passed 35
+   *           minutes ago, read `waiting 50:00` in the table and `Age 15:00 · Runtime 3:00 · Wait time 12:00`
+   *           in its detail. One word, one basis (A2-set-v4); the attempt's runtime stays in the detail.
+   */
+  it("a pending row's detail says the waiting number its table cell says, and the attempt's runtime under its own name, with no Age or Wait time", async () => {
+    const W = await words()
+    const pending = row({
+      at: ago(35 * MINUTE),
+      branch: "task/y1",
+      endedAt: ago(35 * MINUTE),
+      head: "2".repeat(40),
+      position: 1,
+      run: RUN_ID,
+      since: ago(50 * MINUTE),
+      startedAt: ago(38 * MINUTE),
+      state: "checked",
+      subject: "passed, waits to merge",
+    })
+
+    const page = (await printListing(snapshot({ rows: [{ row: pending }] }), { color: false, columns: 120 })).split(
+      "\n",
+    )
+    const detail = await paint(at(<RunStatusBox run={runOf(pending, "main", [])} />))
+
+    const waiting = (text: string): string | undefined =>
+      new RegExp(`\\b${W.waiting.word} (\\d+:\\d\\d)\\b`, "u").exec(text)?.[1]
+    expect({
+      detail: waiting(detail),
+      oldClocks: /\b(Age|Wait time)\b/u.test(detail),
+      runtime: /\bruntime (\d+:\d\d)\b/u.exec(detail)?.[1],
+      table: waiting(tableRow(page, "task/y1 passed")),
+    }).toEqual({ detail: "50:00", oldClocks: false, runtime: "3:00", table: "50:00" })
+  })
+
   it("the table header names the one order its rows are in", async () => {
     const W = await words()
 
