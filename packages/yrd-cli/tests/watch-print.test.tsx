@@ -156,7 +156,8 @@ describe("a one-shot render when a row's check is running right now", () => {
     const text = await printListing(snapshot({ rows: [{ row: liveRow }] }), { color: false, columns: 120 })
 
     expect(text).toContain("task/one")
-    expect(text).toContain("checked")
+    // A check running now reads checking whatever the records say (24196).
+    expect(text).toContain("◉ checking")
   })
 
   it("still leaves the RUNNER box's own marker crash-free while a run is active", async () => {

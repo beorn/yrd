@@ -21,7 +21,7 @@ import { NowContext, NowProvider } from "../src/watch-clock.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
-const LAYOUT: ListLayout = { ageWidth: 4, byWidth: 0, durationWidth: 7, runWidth: 6, statusWidth: 12, timeWidth: 8 }
+const LAYOUT: ListLayout = { byWidth: 0, durationWidth: 7, runWidth: 6, statusWidth: 12, timeWidth: 8 }
 
 const RUNNING_ROW: Row = {
   branch: "task/checking-something",
@@ -73,11 +73,12 @@ describe("ListRow STATUS cell pulse, live (item 13 archaeology)", () => {
   }, 10_000)
 })
 
-// The AGE column, read across a real tick of the watch's own clock
+// The duration cell, read across a real tick of the watch's own clock
 // (`NowProvider`, not a still `NowContext.Provider` value): a decided row's
-// age must read the same before and after, while an open row's keeps
+// duration must read the same before and after, while an open row's keeps
 // counting — the operator's 2026-09-09 report that AGE "just goes forever"
-// past a merge.
+// past a merge. AGE is gone (24196): an ended row's one duration is `took`,
+// submitted to ended, and it stops there the way AGE had to.
 const DECIDED_ROW: Row = {
   branch: "task/merged-thing",
   endedAt: new Date(NOW.getTime() - 15 * 60 * 1000),
@@ -93,9 +94,9 @@ const OPEN_ROW: Row = {
   state: "queued",
 }
 
-// LAYOUT's ageWidth (4) is sized for the pulse tests above, which never read
-// this column; "30:00"/"45:00" are 5 characters and would truncate in it.
-const AGE_LAYOUT: ListLayout = { ...LAYOUT, ageWidth: 6 }
+// LAYOUT's durationWidth (7) is sized for the pulse tests above, which never
+// read this cell; "took 30:00" and "waiting 45:00" would not fit in it.
+const AGE_LAYOUT: ListLayout = { ...LAYOUT, durationWidth: 13 }
 
 async function paintAge(row: Row) {
   const app = render(
@@ -119,17 +120,17 @@ async function paintAge(row: Row) {
   return { first, second }
 }
 
-describe("AgeCell freezes once a row is decided (the operator's 2026-09-09 report)", () => {
-  it("keeps a merged row's age at its ending record, not at `now`, across a real tick", async () => {
+describe("the duration freezes once a row is decided (the operator's 2026-09-09 report)", () => {
+  it("keeps a merged row's duration at its ending record, not at `now`, across a real tick", async () => {
     const { first, second } = await paintAge(DECIDED_ROW)
     // endedAt (15m ago) − since (45m ago) = 30m, fixed — never 45m (now − since).
-    expect(first).toContain("30:00")
-    expect(second).toContain("30:00")
+    expect(first).toContain("took 30:00")
+    expect(second).toContain("took 30:00")
   }, 10_000)
 
-  it("keeps counting an open row's age past the same tick (existing behavior preserved)", async () => {
+  it("keeps counting an open row's wait past the same tick (existing behavior preserved)", async () => {
     const { first, second } = await paintAge(OPEN_ROW)
-    expect(first).toContain("45:00")
+    expect(first).toContain("waiting 45:00")
     expect(second).not.toContain("45:00")
   }, 10_000)
 })

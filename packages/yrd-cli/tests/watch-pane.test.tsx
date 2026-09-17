@@ -223,15 +223,15 @@ describe("the top line (items 30, 32d, 33)", () => {
 })
 
 describe("the table (items 3, 28, 38)", () => {
-  it("has the operator's columns: TIME STATUS RUN CHANGES BY AGE RUN, and rows that read across them", async () => {
+  it("has the operator's columns: TIME STATUS RUN CHANGES BY and the duration, and rows that read across them", async () => {
     const text = await paint(<WatchPane snapshot={snapshot()} live={false} />)
 
     const header = text.split("\n").find((line) => line.includes("CHANGES"))
     expect(header).toBeDefined()
-    for (const column of ["TIME", "STATUS", "RUN", "CHANGES", "BY", "AGE", "RUNTIME"]) expect(header).toContain(column)
-    // The run and its duration are two columns with two names, in this order.
+    for (const column of ["TIME", "STATUS", "RUN", "CHANGES", "BY"]) expect(header).toContain(column)
+    // The run comes before the change; the one duration cell is last, and its word names it on every row (24196).
     expect(header!.indexOf("RUN ")).toBeLessThan(header!.indexOf("CHANGES"))
-    expect(header!.trimEnd().endsWith("RUNTIME")).toBe(true)
+    expect(header!.trimEnd().endsWith("BY")).toBe(true)
     // The CHANGES cell is the change's branch and its subject, never the branch alone (28), with the failure's code as status.
     const line = text.split("\n").find((candidate) => candidate.includes("task/one"))
     expect(line).toContain("× failed")
@@ -248,7 +248,7 @@ describe("the table (items 3, 28, 38)", () => {
 
     const line = text.split("\n").find((candidate) => candidate.includes("task/one"))
     expect(line).toContain("—")
-    expect(line).toContain("○ queued")
+    expect(line).toContain("○ submitted")
   })
 
   it("filters by status bucket with o r d f, and a shows everything again (items 9, 32)", async () => {
@@ -261,22 +261,15 @@ describe("the table (items 3, 28, 38)", () => {
     const app = render(<WatchPane snapshot={snapshot({ rows })} live={false} />, { cols: 120, rows: 40 })
     await app.waitForLayoutStable()
     expect(app.text).toContain("3 of 3 change(s)")
-    // Runtime needs the row's lifecycle: a terminal row with no recorded ending stays unknown.
+    // The duration needs the row's lifecycle: a change in line has waited since it was submitted, and an ended
+    // row with no recorded ending has no `took` to show (24196: the one duration cell, last on the row).
+    const durationOf = (painted: readonly string[], branch: string): string | undefined =>
+      /\b(?:waiting|took|checking|stuck) \S+$/u.exec(
+        painted.find((line) => line.includes(branch))?.trimEnd() ?? "",
+      )?.[0]
     const lines = app.text.split("\n")
-    const runtimeColumn = lines.find((line) => line.includes("RUNTIME"))!.indexOf("RUNTIME")
-    expect(runtimeColumn).toBeGreaterThan(0)
-    expect(
-      lines
-        .find((line) => line.includes("task/merged"))
-        ?.slice(runtimeColumn)
-        .trim(),
-    ).toBe("")
-    expect(
-      lines
-        .find((line) => line.includes("task/queued"))
-        ?.slice(runtimeColumn)
-        .trim(),
-    ).toBe("1:30")
+    expect(durationOf(lines, "task/merged")).toBeUndefined()
+    expect(durationOf(lines, "task/queued")).toBe("waiting 1h00m")
 
     app.press("f")
     await app.waitForLayoutStable()
@@ -294,18 +287,8 @@ describe("the table (items 3, 28, 38)", () => {
     await app.waitForLayoutStable()
     expect(app.text).toContain("3 of 3 change(s)")
     const restored = app.text.split("\n")
-    expect(
-      restored
-        .find((line) => line.includes("task/queued"))
-        ?.slice(runtimeColumn)
-        .trim(),
-    ).toBe("1:30")
-    expect(
-      restored
-        .find((line) => line.includes("task/merged"))
-        ?.slice(runtimeColumn)
-        .trim(),
-    ).toBe("")
+    expect(durationOf(restored, "task/queued")).toBe("waiting 1h00m")
+    expect(durationOf(restored, "task/merged")).toBeUndefined()
     app.unmount()
   })
 

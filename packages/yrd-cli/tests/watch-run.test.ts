@@ -41,7 +41,8 @@ describe("the status box's own lines", () => {
 
   it("names the reason a failed or stuck change carries, and the position of one in line", () => {
     expect(headlineOf(row({ reason: "test", state: "failed" }))).toBe("failed test")
-    expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("queued #2")
+    // The state in the one word table's word (24196): the core's queued reads submitted.
+    expect(headlineOf(row({ position: 2, state: "queued" }))).toBe("submitted #2")
   })
 
   it("says how a change merged, whether or not a record names the merge", () => {
@@ -122,11 +123,12 @@ describe("HISTORY and METADATA (watch-change)", () => {
         ["To", "@chief"],
       ]),
     ])
+    // Each record in the word for the state it put the change in (24196): the record checked reads pending.
     expect(entries.map((entry) => entry.text)).toEqual([
       "message to @chief failed",
       "failed test",
       "resubmitted by @chief",
-      "checked at 3c285a41af46",
+      "pending at 3c285a41af46",
       "submitted by @chief",
     ])
   })
@@ -146,15 +148,16 @@ describe("HISTORY and METADATA (watch-change)", () => {
         ["Note", "superseded by task/two"],
       ]),
     ])
-    expect(entries[0]?.text).toBe("withdrawn by @dev/9")
+    // The record withdrawn reads cancelled (24196), still naming who acted.
+    expect(entries[0]?.text).toBe("cancelled by @dev/9")
     expect(entries[0]?.detail).toBe("superseded by task/two")
     // The note is optional; the ending and its actor are not.
     expect(historyEntries([record("withdrawn", 0, [["By", "@chief"]])])[0]).toEqual({
       at: new Date(NOW_MS - 3_600_000),
-      text: "withdrawn by @chief",
+      text: "cancelled by @chief",
     })
-    // And a record with neither still says the change was withdrawn.
-    expect(historyEntries([record("withdrawn", 0, [])])[0]?.text).toBe("withdrawn")
+    // And a record with neither still says the change was cancelled.
+    expect(historyEntries([record("withdrawn", 0, [])])[0]?.text).toBe("cancelled")
   })
 
   it("says a direct merge went around the queue, says nothing about the queue's own merges, and carries a failure's detail", () => {
@@ -214,7 +217,7 @@ describe("a check running now", () => {
       position: 1,
       state: "checked",
     })
-    expect(headlineOf(live, true)).toBe("checked #1, checking affected-tests")
-    expect(headlineOf(live)).toBe("checked #1, checking affected-tests")
+    expect(headlineOf(live, true)).toBe("pending #1, checking affected-tests")
+    expect(headlineOf(live)).toBe("pending #1, checking affected-tests")
   })
 })

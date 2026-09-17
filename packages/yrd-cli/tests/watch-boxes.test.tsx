@@ -21,28 +21,6 @@ import type { RunnerFacts } from "../src/watch-runner.ts"
 
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
-/** WCAG relative luminance (0..1) of a resolved RGB triple. */
-function relativeLuminance({ r, g, b }: { r: number; g: number; b: number }): number {
-  const channel = (value: number): number => {
-    const s = value / 255
-    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
-  }
-  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
-}
-
-/** WCAG contrast ratio between two resolved colors: 1 (identical) to 21 (black/white). */
-function contrastRatio(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): number {
-  const la = relativeLuminance(a)
-  const lb = relativeLuminance(b)
-  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
-}
-
-// The audit measured the broken foreground-vs-foreground swing at ~1.12:1 and
-// the working idle marker's foreground-vs-background swing well above it.
-// This floor sits between the two: it fails the broken pair and clears easily
-// for a swing that actually reads as a marker turning on and off.
-const PERCEPTIBLE_SWING = 2
-
 // `alive` is retained because the box still names the run's pid, but it is no
 // longer what makes the marker pulse: `underCheck` is (items 1 and 5). A fixture
 // that only set `alive` would now paint an idle box and the pulse arm would
@@ -60,12 +38,15 @@ const RUNNING: RunnerFacts = {
   },
 }
 
-describe("RunnerBox `$` marker pulse, live (item 13)", () => {
-  it("swings the running marker's own color enough to actually read as pulsing, not two look-alike foregrounds", async () => {
+// 24196 (A2-set-v2 item 8): the `$` no longer pulses. The one thing on screen that pulses is the marker of
+// the change a check holds, on its own row (watch-pane.test.tsx), so this arm now pins the marker still
+// across the same real half-period, while a check runs.
+describe("RunnerBox `$` marker, live (item 13, 24196)", () => {
+  it("holds the running marker still: the one pulse on screen is the held change's row", async () => {
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
-          <RunnerBox facts={RUNNING} label="main" inLine={1} underCheck columns={70} live />
+          <RunnerBox facts={RUNNING} label="main" inLine={1} underCheck columns={70} />
         </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols: 72, rows: 12, autoRender: true },
@@ -80,10 +61,10 @@ describe("RunnerBox `$` marker pulse, live (item 13)", () => {
     expect(phaseA.char).toBe("$")
     expect(phaseA.fg).not.toBeNull()
 
-    // The marker pulses on a real, shared wall-clock timer (silvery's
-    // synchronized phase, item C's 900ms interval) — there is no injectable
-    // clock for it, so this waits out one real half-period to see the other
-    // phase, the same way an operator's eye would.
+    // A pulse would run on a real, shared wall-clock timer (silvery's
+    // synchronized phase, a 900ms interval) with no injectable clock, so this
+    // waits out one real half-period, where a pulsing marker would show its
+    // other phase.
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 950))
       await app.waitForLayoutStable()
@@ -92,9 +73,7 @@ describe("RunnerBox `$` marker pulse, live (item 13)", () => {
     app.unmount()
 
     expect(phaseB.char).toBe("$")
-    expect(phaseB.fg).not.toBeNull()
-    expect(phaseA.fg).not.toEqual(phaseB.fg)
-    expect(contrastRatio(phaseA.fg!, phaseB.fg!)).toBeGreaterThan(PERCEPTIBLE_SWING)
+    expect(phaseB.fg).toEqual(phaseA.fg)
   }, 10_000)
 })
 
@@ -137,7 +116,7 @@ describe("item 27 — an ERROR is never dimmed, and wears the border's own color
     const app = render(
       <NowContext.Provider value={NOW}>
         <MinuteContext.Provider value={NOW}>
-          <RunnerBox facts={SILENT} label="main" inLine={3} underCheck={false} columns={70} live={false} />
+          <RunnerBox facts={SILENT} label="main" inLine={3} underCheck={false} columns={70} />
         </MinuteContext.Provider>
       </NowContext.Provider>,
       { cols: 72, rows: 14, autoRender: true },
@@ -179,10 +158,10 @@ describe("item 27 — an ERROR is never dimmed, and wears the border's own color
     expect(target.fg).not.toEqual(border.fg)
     expect(progress.fg).not.toEqual(border.fg)
     // NO CONTRAST-RATIO ASSERTION HERE, and the reason is worth keeping: I wrote
-    // one, and it FAILED ON CORRECT CODE. `contrastRatio` is WCAG relative
+    // one, and it FAILED ON CORRECT CODE. A WCAG contrast ratio is relative
     // luminance, and these two differ by HUE at near-identical lightness —
     // muted rgb(143,149,161) against error rgb(225,127,135) measures 1.09:1.
-    // The pulse arm above uses the same helper correctly because a pulse swings
+    // The retired pulse arm used that ratio correctly, because a pulse swung
     // foreground against BACKGROUND, which is a luminance swing. Asserting a
     // luminance floor on a hue distinction measures the wrong axis and would
     // reject a correct implementation. Inequality is the honest claim.
