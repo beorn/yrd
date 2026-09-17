@@ -433,7 +433,13 @@ export function RunnerRow({ line, layout }: { line: RunnerLine; layout: ListLayo
                 {STATE_WORDS.runner.word}
               </Text>
               <Box paddingLeft={1} minWidth={0} overflow="hidden">
-                <Text color="$fg-muted" wrap="truncate" minWidth={0}>
+                {/* ITEM 27: the affected text takes the state's OWN colour, and
+                    muting never dims an error. Reading the colour off the same
+                    entry the word came from is what makes that automatic: an
+                    idle runner's text is muted because `idle` is muted, and a
+                    stopped one's is loud because `stopped` is. Item 14's muted
+                    rail is the detail line below, which is metadata. */}
+                <Text color={color} wrap="truncate" minWidth={0}>
                   {line.holds}
                 </Text>
               </Box>
