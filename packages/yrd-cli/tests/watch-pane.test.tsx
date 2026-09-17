@@ -1643,6 +1643,29 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     })
   })
 
+  it("a stuck row whose own stuck record the reading cannot date shows no duration, never the wait it keeps in line (A2-set-v4)", async () => {
+    const W = await words()
+    // A stuck change keeps its place in line, so the core still measures its wait; its one cell is stuck's alone,
+    // and with no instant for its stuck record it says nothing rather than borrow the waiting word.
+    const stuck = row({
+      at: ago(5 * MINUTE),
+      branch: "task/undated",
+      position: 1,
+      reason: "yrd-check-unresolved",
+      since: ago(30 * MINUTE),
+      state: "stuck",
+    })
+
+    const painted = await lines(snapshot({ rows: [{ row: stuck }], runner: RUNNER }), 100, 31)
+
+    const line = tableRow(painted, " task/undated ").trimEnd()
+    expect({
+      drawn: line !== "",
+      stuckFor: new RegExp(`\\b${W.stuck.word} \\d`, "u").test(line),
+      waiting: line.includes(W.waiting.word),
+    }).toEqual({ drawn: true, stuckFor: false, waiting: false })
+  })
+
   it("the table header names the one order its rows are in", async () => {
     const W = await words()
 
