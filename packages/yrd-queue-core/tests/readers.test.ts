@@ -18,14 +18,18 @@ import {
   checksOf,
   clocks,
   gitIn,
+  incidentTrailers,
   journalKey,
+  list,
   nextOwner,
+  readChange,
   readJournals,
   runStartedAt,
   subjects,
   watchRows,
 } from "../src/index.ts"
-import type { CheckSpec, Git, Row } from "../src/index.ts"
+import type { ChangeRecord, CheckSpec, Git, Row } from "../src/index.ts"
+import type { QueueEntry } from "../src/remote.ts"
 // `openLog` is the writer, and index.ts lists only what a consumer outside the
 // package imports. A test that writes a journal is inside it.
 import { openLog } from "../src/log.ts"
@@ -539,13 +543,19 @@ describe("the clocks", () => {
     expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000 })
   })
 
-  // 24196 decision 6: the TIME cell's `waiting 12:03` is a named field derived here once, never a renderer's
-  // relabel of `ageMs`. It is now less the moment the change entered the state it is in: its opening while
-  // queued, its check passing while checked. A change under a check is running, and an ended one waits for
-  // nothing. The field is read through a cast only until it exists, so this file compiles red-first.
-  it("names how long a change in line has waited in its current state, and nothing while it runs or once it ended", () => {
+  // 24196 decisions 5 and 6: a row shows ONE clock, the instant it entered the state it is in, and one
+  // duration beside it. Both are named fields derived here once, never a renderer's relabel of `ageMs`:
+  // `enteredAt` is the change's opening while queued, its check passing while checked, the check starting
+  // while one runs, and its ending record once it ended; `waitingMs` is how long a change in line has been
+  // in that state, and nothing while a check runs on it or once it ended; `tookMs` is an ended change's
+  // whole time, submit to ending. The fields are read through a cast only until they exist, so this file
+  // compiles red-first.
+  it("names the one clock a row shows, when it entered its state, how long a change in line has waited there, and how long an ended change took from submit to its end", () => {
     const opened = new Date("2026-09-03T19:48:00.000Z")
+    const stuckAt = new Date("2026-09-03T19:50:00.000Z")
+    const withdrawnAt = new Date("2026-09-03T19:40:00.000Z")
     const passed = new Date("2026-09-03T19:57:00.000Z")
+    const noticed = new Date("2026-09-03T19:59:00.000Z")
     const queued: Row = { at: opened, branch: "task/queued", head: "abc", since: opened, state: "queued" }
     const checked: Row = {
       at: passed,
@@ -555,16 +565,182 @@ describe("the clocks", () => {
       startedAt: started,
       state: "checked",
     }
+    const stuck: Row = { at: stuckAt, branch: "task/stuck", endedAt: stuckAt, head: "abe", since, state: "stuck" }
     const running: Row = { ...checked, live: { check: "test", phase: "merge", run: "q-1", since: started } }
-    const merged: Row = { ...checked, endedAt: passed, state: "merged" }
-    const waiting = (row: Row): unknown => (clocks(row, now) as Readonly<Record<string, unknown>>)["waitingMs"]
+    // The tip is the notice sent after the merge: the ending is the merged record's instant, not the notice's.
+    const merged: Row = { ...checked, at: noticed, endedAt: passed, state: "merged" }
+    const withdrawn: Row = {
+      at: withdrawnAt,
+      branch: "task/withdrawn",
+      endedAt: withdrawnAt,
+      head: "abf",
+      since,
+      state: "withdrawn",
+    }
+    const read = (row: Row) => {
+      const measured = clocks(row, now) as Readonly<Record<string, unknown>>
+      return { enteredAt: measured["enteredAt"], tookMs: measured["tookMs"], waitingMs: measured["waitingMs"] }
+    }
+    const minutes = (count: number): number => count * 60 * 1000
 
     expect({
-      checked: waiting(checked),
-      merged: waiting(merged),
-      queued: waiting(queued),
-      running: waiting(running),
-    }).toEqual({ checked: 3 * 60 * 1000, merged: undefined, queued: 12 * 60 * 1000, running: undefined })
+      checked: read(checked),
+      merged: read(merged),
+      queued: read(queued),
+      running: read(running),
+      stuck: read(stuck),
+      withdrawn: read(withdrawn),
+    }).toEqual({
+      checked: { enteredAt: passed, tookMs: undefined, waitingMs: minutes(3) },
+      merged: { enteredAt: passed, tookMs: minutes(57), waitingMs: undefined },
+      queued: { enteredAt: opened, tookMs: undefined, waitingMs: minutes(12) },
+      running: { enteredAt: started, tookMs: undefined, waitingMs: undefined },
+      stuck: { enteredAt: stuckAt, tookMs: undefined, waitingMs: minutes(10) },
+      withdrawn: { enteredAt: withdrawnAt, tookMs: minutes(40), waitingMs: undefined },
+    })
+  })
+})
+
+/**
+ * @failure  The operator, 2026-09-16 21:34 PDT: "also the ordering looks weird - look at the time stamps".
+ *           Ended rows were ordered by their tip's instant, and the tip of a merged change is the notice
+ *           sent after it, so a merge rose to the top whenever its notice went out again; the change the
+ *           runner holds sat wherever its place in line put it; and a branch pushed without a submit was
+ *           nowhere (@i/10-yrd/24196, decision 4; the operator's v3 words).
+ * @level    l1 (the table read from records built in memory)
+ * @consumer the operator reading `yrd watch` and `yrd list`, top to bottom
+ */
+describe("the table's one order (24196)", () => {
+  const now = new Date("2026-09-03T20:00:00.000Z")
+  const ago = (minutes: number): Date => new Date(now.getTime() - minutes * 60 * 1000)
+  let shas = 0
+  const sha = (): string => (shas += 1).toString(16).padStart(40, "0")
+
+  /** One change's records, oldest first, each carrying its name and when it was opened, as every record does. */
+  function change(
+    branch: string,
+    opened: Date,
+    steps: readonly Readonly<{
+      kind: ChangeRecord["kind"]
+      at: Date
+      trailers?: readonly (readonly [string, string])[]
+    }>[],
+    over: Partial<Pick<QueueEntry["change"], "headOnTarget" | "branchHead">> = {},
+  ): QueueEntry {
+    const head = sha()
+    const record = (kind: ChangeRecord["kind"], at: Date, trailers: readonly (readonly [string, string])[] = []) => ({
+      at,
+      kind,
+      sha: sha(),
+      subject: kind,
+      trailers: [
+        ["Record", kind],
+        ["Change", `${branch}@${head}`],
+        ["Opened", opened.toISOString()],
+        ...trailers,
+      ] as const,
+    })
+    const records = [record("opened", opened), ...steps.map((step) => record(step.kind, step.at, step.trailers))] as [
+      ChangeRecord,
+      ...ChangeRecord[],
+    ]
+    const changeRecords = { branch, branchHead: head, head, headOnTarget: false, records, ...over }
+    return { change: changeRecords, reading: readChange(changeRecords) }
+  }
+
+  it("puts the change the runner holds first, then the line by its places, stuck where it stands, then the ended rows newest ending first, then the drafts newest first", () => {
+    const pending = change("task/a-pending", ago(60), [{ at: ago(3), kind: "checked" }])
+    const held = change("task/b-held", ago(50), [])
+    const incident = incidentTrailers({
+      code: "yrd-check-unresolved",
+      evidence: "/w/logs/q-1.jsonl",
+      next: "repair and resume",
+      owner: "the queue's operator",
+      subject: "the check could not be resolved",
+      via: "affected-tests",
+    })
+    const stuck = change("task/c-stuck", ago(40), [{ at: ago(6), kind: "stuck", trailers: incident }])
+    const submitted = change("task/d-submitted", ago(30), [])
+    const merged = change(
+      "task/e-merged",
+      ago(90),
+      [
+        { at: ago(80), kind: "checked" },
+        { at: ago(10), kind: "merged" },
+        // The notice, a minute ago: the change ended nine minutes before it.
+        {
+          at: ago(1),
+          kind: "sent",
+          trailers: [
+            ["State", "merged"],
+            ["Delivery", "sent"],
+            ["To", "@dev/2"],
+          ],
+        },
+      ],
+      { headOnTarget: true },
+    )
+    const failed = change("task/f-failed", ago(70), [{ at: ago(5), kind: "failed", trailers: [["Reason", "test"]] }])
+    const withdrawn = change("task/g-withdrawn", ago(100), [{ at: ago(20), kind: "withdrawn" }])
+    const run = "q-20260903T195500000Z-0000b0b0"
+    const check = { name: "affected-tests", phase: "submit", startedAt: ago(4) }
+    const journals = {
+      dir: "/w/logs",
+      malformed: [],
+      runs: new Map([
+        [
+          journalKey(held.change.branch, held.change.head),
+          [
+            {
+              at: ago(4),
+              branch: held.change.branch,
+              checks: [check],
+              head: held.change.head,
+              id: run,
+              running: check,
+              startedAt: ago(5),
+            },
+          ],
+        ],
+      ]),
+    }
+    const directMerges = [
+      {
+        at: ago(15),
+        commit: sha(),
+        gitlinks: [],
+        parents: [],
+        subject: "a hotfix",
+        target: "main",
+        why: "a direct push",
+      },
+    ]
+    // The drafts' input is named here as phase A assumes it: the branch, its head, and its head commit's
+    // committer and instant. Phase B may name it otherwise; the order is the requirement.
+    const drafts = [
+      { branch: "task/h-draft-older", committedAt: ago(120), committer: "ada", head: sha() },
+      { branch: "task/i-draft-newer", committedAt: ago(30), committer: "grace", head: sha() },
+    ]
+
+    const rows = list([withdrawn, submitted, merged, held, failed, stuck, pending], {
+      directMerges,
+      drafts,
+      journals,
+      now,
+    } as Parameters<typeof list>[1])
+
+    expect(rows.map((row) => row.branch)).toEqual([
+      "task/b-held",
+      "task/a-pending",
+      "task/c-stuck",
+      "task/d-submitted",
+      "task/f-failed",
+      "task/e-merged",
+      "main",
+      "task/g-withdrawn",
+      "task/i-draft-newer",
+      "task/h-draft-older",
+    ])
   })
 })
 
