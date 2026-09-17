@@ -31,6 +31,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
+import { tryAcquireFlock } from "@bearly/flock"
 import {
   appendRecord,
   changeRef,
@@ -43,7 +44,6 @@ import {
   ROUND_LOCK,
   runId,
   submit,
-  takeRoundLock,
   trailer,
   watchRows,
   type ChangeRecord,
@@ -645,7 +645,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       wrapper,
       [
         "#!/bin/sh",
-        `test -n "$(ls -A "${join(w.workdir, ROUND_LOCK)}" 2>/dev/null)" || exec git-upload-pack "$@"`,
+        `test -e "${join(w.workdir, ROUND_LOCK)}" || exec git-upload-pack "$@"`,
         `count=0; test ! -f "${calls}" || count=$(cat "${calls}")`,
         "count=$((count + 1))",
         `printf '%s\\n' "$count" > "${calls}"`,
@@ -3238,7 +3238,10 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
   it("while up waits on a held lock, its health document reads healthy and its facts name the holder", async () => {
     const w = await world()
     const holder = { command: "yrd merge task/elsewhere", pid: process.pid }
-    const held = await takeRoundLock(w.workdir, { command: holder.command })
+    const since = new Date().toISOString()
+    // A holder in this process: the flock is taken once per process, so the service below waits on it.
+    const held = tryAcquireFlock(join(w.workdir, ROUND_LOCK), { body: `${JSON.stringify({ ...holder, since })}\n` })
+    if (held === null) throw new Error(`the round lock in ${w.workdir} is already held`)
     const { log, rows } = logRows()
     const run = capture(w.work)
     const stop = new AbortController()
@@ -3263,7 +3266,7 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
       { json: true, log, workdir: w.workdir },
     )
     try {
-      const waiting = { holder, since: held.holder.since, waitingSince: expect.any(String) }
+      const waiting = { holder, since, waitingSince: expect.any(String) }
       await vi.waitFor(
         async () =>
           expect((await readQueueHealth(w.workdir, SERVICE)).facts?.waitingForRoundLock, run.stderr()).toEqual(waiting),

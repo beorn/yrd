@@ -4,8 +4,8 @@
  * The one parser of `/proc/[pid]/stat` field 22. Two callers read it:
  * `path-reaper.ts`'s path-holder census, to attribute a held path to the
  * process that has held it since before the census began, and the queue's
- * round lock, to tell the process that holds the lock from an unrelated one
- * that has since been given its pid.
+ * round lock, whose body names its holder's boot and start tick as diagnostic
+ * bytes. The lock itself is a kernel flock, so yrd compares neither.
  */
 
 import { readFileSync } from "node:fs"

@@ -117,9 +117,6 @@ export { pauseStop, STOPPED_BY } from "./with-pause.ts"
 
 export { remoteUrl } from "./remote.ts"
 
-export { ROUND_LOCK, takeRoundLock } from "./queue-lock.ts"
-export type { RoundLock, RoundLockHolder, RoundLockWait } from "./queue-lock.ts"
-
 export {
   absentHealthDocument,
   believableHealthDocument,
@@ -131,6 +128,7 @@ export {
   queueHealthExitCode,
   relaunchStalledHealthDocument,
   ROUND_BUDGET_MS,
+  ROUND_LOCK,
   roundHealthDocument,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,

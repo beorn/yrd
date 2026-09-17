@@ -14,11 +14,13 @@
  */
 
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { hostname } from "node:os"
 import { dirname, join, relative, sep } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
+import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 import type { ConditionalLogger } from "loggily"
-import { adaptProcessGit, createProcess, gitFailure } from "@yrd/process"
+import { adaptProcessGit, createProcess, gitFailure, processStartIdentity } from "@yrd/process"
 import {
   CHANGE_REF_DIAGNOSTICS,
   directMergeCommits,
@@ -63,9 +65,9 @@ import {
   HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
   ROUND_BUDGET_MS,
+  ROUND_LOCK,
   relaunchStalledHealthDocument,
   roundHealthDocument,
-  takeRoundLock,
   writtenHealthDocument,
   runtimeGitlinkPath,
   readStop,
@@ -95,8 +97,6 @@ import {
   type RuntimeGitlinkOff,
   type ChangeRecord,
   type Change,
-  type RoundLock,
-  type RoundLockWait,
   type Row,
 } from "@yrd/queue-core"
 import { clocksLine, noticeLine } from "./watch-notice.ts"
@@ -457,18 +457,41 @@ export async function coreQueueCommand(
   }
 
   /**
-   * ONE ROUND AT A TIME in this workdir (andon phase 2, the queue lock). Every
+   * This process as the round lock's body names it, beside when it took the
+   * lock: diagnostic bytes for a waiter, judged nowhere. The start is the
+   * runtime's own, as the health document's writer states it; the boot and
+   * start tick are the pair a supervisor compares by equality (24340).
+   */
+  const lockHolder: Omit<RoundLockHolder, "since"> = {
+    command: process.argv.join(" "),
+    host: hostname(),
+    pid: process.pid,
+    startedAt: new Date(performance.timeOrigin).toISOString(),
+    ...processStartIdentity(process.pid),
+  }
+
+  /**
+   * ONE ROUND AT A TIME in this workdir (andon phase 2, the round lock). Every
    * round-runner — `queue up`, `queue run` and `merge` — runs its round
    * through here, and this is the whole order, with no branch for whether it
    * waited: take the lock, read the declaration, `before` (the service's
    * reload), run the round, release. `only` scopes the round to one change.
+   *
+   * The lock is a kernel flock on the workdir's {@link ROUND_LOCK} file, held
+   * on one descriptor for the round. The kernel releases it when that
+   * descriptor closes, which a holder that exits or dies does whatever it
+   * leaves running, so nothing here judges whether a holder is alive. The
+   * file's body names the holder (command, pid, host, start, and when it took
+   * the lock) only so a waiter can say whose round it waits for; it is judged
+   * nowhere. Between a take and its body's write, a waiter can read the body
+   * of the holder before, and says the new holder once it reads it.
    *
    * The declaration is read under the lock, so a round never judges a target
    * captured before it waited. The lock is released before the caller does
    * anything with the outcome, so a document, a hook or a sleep after a round
    * never holds the next runner up.
    *
-   * A runner in the foreground names the holder on stderr once when it starts
+   * A runner in the foreground names the holder on stderr when it starts
    * waiting, and once more past the round budget; the service passes
    * `waiting` to put the wait on its health document as a fact instead, and
    * stays healthy. Neither ever takes the lock over.
@@ -485,32 +508,56 @@ export async function coreQueueCommand(
       }>
     }> = {},
   ): Promise<Readonly<{ declared: CapturedDeclaration; outcome: QueueRunOutcome }> | YrdCliExitCode> => {
-    let lock: RoundLock
-    try {
-      lock = await takeRoundLock(workdir, {
-        command: process.argv.join(" "),
-        onStall:
-          round.waiting?.onStall ??
-          ((wait) => {
-            io.stderr(
-              `yrd: still waiting after ${mediaDuration(wait.waitedMs)} for the round lock in ${workdir}: ` +
-                `${lockHolderLine(wait)}. A round that runs this long is still judging or is wedged, and its own ` +
-                "output says which; nothing takes the lock over, so this waits until that process releases it or exits\n",
-            )
-          }),
-        onWait:
-          round.waiting?.onWait ??
-          ((wait) => {
-            io.stderr(
-              `yrd: waiting for the round lock in ${workdir}: ${lockHolderLine(wait)}; this round runs when that one ends\n`,
-            )
-          }),
-        signal: round.stop,
-        stallMs: round.stallMs,
-      })
-    } catch (error) {
-      if (round.stop?.aborted === true) return 0
-      throw error
+    // Read through a call each time: the signal flips while the lock is waited for.
+    const stopped = (): boolean => round.stop?.aborted === true
+    if (stopped()) return 0
+    const lockPath = join(workdir, ROUND_LOCK)
+    const take = (): FlockHandle | null =>
+      tryAcquireFlock(lockPath, { body: `${JSON.stringify({ ...lockHolder, since: new Date().toISOString() })}\n` })
+    let lock = take()
+    if (lock === null) {
+      const onWait =
+        round.waiting?.onWait ??
+        ((wait: RoundLockWait) => {
+          io.stderr(
+            `yrd: waiting for the round lock in ${workdir}: ${lockHolderLine(wait)}; this round runs when that one ends\n`,
+          )
+        })
+      const onStall =
+        round.waiting?.onStall ??
+        ((wait: RoundLockWait & Readonly<{ waitedMs: number }>) => {
+          io.stderr(
+            `yrd: still waiting after ${mediaDuration(wait.waitedMs)} for the round lock in ${workdir}: ` +
+              `${lockHolderLine(wait)}. A round that runs this long is still judging or is wedged, and its own ` +
+              "output says which; nothing takes the lock over, so this waits until that process releases it or exits\n",
+          )
+        })
+      const stallMs = round.stallMs ?? ROUND_BUDGET_MS
+      const waitingSince = new Date()
+      let named: string | undefined
+      let stalled = false
+      try {
+        while (lock === null) {
+          const holder = lockHolderOf(lockBody(lockPath))
+          const wait: RoundLockWait = { holder, waitingSince }
+          // Said once for each holder a waiter reads, not once per look.
+          const reading = holder === undefined ? "unnamed" : `${String(holder.pid)} ${holder.since}`
+          if (reading !== named) {
+            named = reading
+            onWait(wait)
+          }
+          const waitedMs = Date.now() - waitingSince.getTime()
+          if (!stalled && waitedMs >= stallMs) {
+            stalled = true
+            onStall({ ...wait, waitedMs })
+          }
+          await delay(ROUND_LOCK_POLL_MS, undefined, { signal: round.stop })
+          lock = take()
+        }
+      } catch (error) {
+        if (stopped()) return 0
+        throw error
+      }
     }
     try {
       let declared: CapturedDeclaration | undefined
@@ -2288,25 +2335,83 @@ function inLineState(state: Row["state"]): boolean {
   return state === "queued" || state === "checked" || state === "stuck"
 }
 
+/** How often a waiter tries the round lock again: well inside the service's shortest sleep, so a waiter wins the gap between two rounds. */
+const ROUND_LOCK_POLL_MS = 200
+
+/** The process holding the round lock, as the lock's body names it. */
+type RoundLockHolder = Readonly<{
+  command: string
+  pid: number
+  /** When it took the lock. */
+  since: string
+  host?: string
+  /** The runtime's own start. */
+  startedAt?: string
+  /** `/proc/sys/kernel/random/boot_id`, when it could be read. */
+  boot?: string
+  /** The clock tick it started at, when it could be read. */
+  tick?: number
+}>
+
+/** A wait for the round lock: the holder its body names, when it names one, and when the wait began. */
+type RoundLockWait = Readonly<{ holder?: RoundLockHolder; waitingSince: Date }>
+
+/** The round lock's body as a waiter reads it; undefined when the file is not there. */
+function lockBody(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+}
+
+/**
+ * The holder a round lock body names, or undefined when it names none: the
+ * body is empty or half-written between a take and its write, and the waiter
+ * says so and reads it again on its next look.
+ */
+function lockHolderOf(body: string | undefined): RoundLockHolder | undefined {
+  if (body === undefined || body.trim() === "") return undefined
+  let value: unknown
+  try {
+    value = JSON.parse(body)
+  } catch {
+    // silent-fallback-allow: a body caught mid-write names no holder yet; the
+    // wait is stated as unnamed and the next look reads the body again.
+    return undefined
+  }
+  const holder = value as Partial<Record<keyof RoundLockHolder, unknown>> | null
+  if (
+    typeof holder !== "object" ||
+    holder === null ||
+    typeof holder.command !== "string" ||
+    typeof holder.pid !== "number" ||
+    typeof holder.since !== "string"
+  ) {
+    return undefined
+  }
+  return holder as RoundLockHolder
+}
+
 /** The holder of the round lock, as a waiter names it. */
 function lockHolderLine(wait: RoundLockWait): string {
   const { holder } = wait
-  return (
-    `pid ${String(holder.pid)} (${holder.command}) has held it since ${holder.since}` +
-    (wait.unproven
-      ? "; that process's start cannot be read, so it is waited on without proof that it is still the process that took the lock"
-      : "")
-  )
+  if (holder === undefined) return "a process holds it whose name the lock file does not carry yet"
+  return `pid ${String(holder.pid)} (${holder.command}) has held it since ${holder.since}`
 }
 
 /**
  * The wait for the round lock, as the service's health document carries it,
  * and the one place it is shaped: the holder's command and pid, when it took
- * the lock, and when this service began waiting on it.
+ * the lock, and when this service began waiting on it. A holder the body does
+ * not name yet leaves only the wait's start.
  */
 function lockWaitFact(wait: RoundLockWait): Readonly<Record<string, unknown>> {
+  const waitingSince = wait.waitingSince.toISOString()
+  if (wait.holder === undefined) return { waitingSince }
   const { command, pid, since } = wait.holder
-  return { holder: { command, pid }, since, waitingSince: wait.waitingSince.toISOString() }
+  return { holder: { command, pid }, since, waitingSince }
 }
 
 /**

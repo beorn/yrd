@@ -28,6 +28,13 @@ export const QUEUE_HEALTH_SCHEMA = "hab-service-health/2" as const
 export const QUEUE_HEALTH_DOCUMENT = "service-health.json"
 
 /**
+ * The round lock's file, relative to the queue workdir: a kernel flock that one
+ * round holds at a time. Its body names the holder for a waiter to say whose
+ * round it waits for, and is judged nowhere.
+ */
+export const ROUND_LOCK = "round.lock"
+
+/**
  * How long a round was once measured to take at most, and NO LONGER A DEADLINE.
  *
  * It was the staleness term (@cto, 2026-09-11): a document written at a round's

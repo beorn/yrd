@@ -54,7 +54,7 @@ Every command takes `--json`. `yrd submit` refuses the queue branch itself: it i
 
 **A stopped line.** A paused queue does no automatic checking or merging, and `yrd queue up` stays up and visible. A pause has a cause. `yrd queue pause` is an operator's, and only `yrd queue resume` lifts it. A stuck change stops the line by itself: the queue pauses naming that change, and the stop lifts when the change leaves the line (withdrawn with `yrd queue withdraw`, or merged) or when `yrd queue resume` follows a repair of the queue. No timer ever lifts a stop. While a stuck stop stands, the service's health probe reports unhealthy with the stuck record's cures, and it clears when the stop lifts. A stopped line still accepts work: submit and dry-run succeed and echo who stopped the line, why, and what lifts it, and the change waits in line behind the stop. `yrd queue list --json` carries `stopped: {cause, change, by, since}`, `null` while the line runs. An explicit `yrd queue run` is permitted while stopped and leaves the stop in place. `yrd merge <branch>` merges on a stopped line too: its round works that one change, so a stuck change ahead of it does not hold it back, and once it has merged, the stuck change the stop names is judged once more on the new target. If that passes, it merges and the stop lifts. A stop that still stands is said, with the command that merges what it waits on.
 
-**One round at a time.** Every round in a queue workdir takes that workdir's round lock first: the service's, `yrd queue run`'s and `yrd merge`'s. A second round waits for the first to end and names the process it waits on. Past ten minutes a foreground command says so once more. The service stays healthy while it waits, and its health document names the holder and when the wait began: a long round is not a fault, whoever runs it. Nothing takes the lock over: it passes when its holder releases it or exits.
+**One round at a time.** Every round in a queue workdir takes that workdir's round lock first: the service's, `yrd queue run`'s and `yrd merge`'s. A second round waits for the first to end and names the process it waits on. Past ten minutes a foreground command says so once more. The service stays healthy while it waits, and its health document names the holder and when the wait began: a long round is not a fault, whoever runs it. Nothing takes the lock over: it is a kernel flock on the workdir's `round.lock`, so it passes when its holder releases it or exits, whatever that holder leaves running.
 
 With a commit operand, `yrd env open` requires a full commit object ID already present locally and refuses `--issue`.
 
@@ -137,7 +137,7 @@ For queue-owner and reader commands, the host root is `git config yrd.workdir`, 
   worktrees/<run id>/[compose/]<phase>/<sha>/        temporary composition and check worktrees
   checks/<change>/<run id>/<phase>/<name>.log        retained check logs
   logs/<run id>.jsonl                               the run journal
-  round-lock/                                       the round lock: one round at a time in this workdir
+  round.lock                                        the round lock: a kernel flock, one round at a time; its body names the holder
   tmp/                                              TMPDIR for checks
 ```
 
