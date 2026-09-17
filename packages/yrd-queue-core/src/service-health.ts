@@ -28,43 +28,48 @@ export const QUEUE_HEALTH_SCHEMA = "hab-service-health/2" as const
 export const QUEUE_HEALTH_DOCUMENT = "service-health.json"
 
 /**
- * How long past its own next-round instant a document is still believed.
+ * How long a round was once measured to take at most, and NO LONGER A DEADLINE.
  *
- * THE DEFECT THIS EXISTS FOR (@cto, 2026-09-11): a document with no expiry is
- * an instrument that asserts a verdict it did not measure. If a round hangs
- * inside the run, the loop never writes again and the probe keeps printing the
- * last round's `healthy` for as long as the hang lasts — the longer the outage,
- * the more confident the lie. That is the silent-fallback shape with a clock
- * attached, and it is worse than having no probe, because a page that never
- * opens reads exactly like a service that is fine.
+ * It was the staleness term (@cto, 2026-09-11): a document written at a round's
+ * end was believed for the loop's sleep plus this budget, because a document
+ * with no expiry asserts a verdict it did not measure. Rounds outgrew it —
+ * @dev/11 read 289 round journals on 2026-09-16 and 31 ran past ten minutes,
+ * the longest 36.9 — and nothing ends a round at it, so a live round read
+ * overdue and paged. Freshness now follows the WRITER, not the round
+ * (@i/4-supervision/24523 F4): see {@link HEARTBEAT_INTERVAL_MS}.
  *
- * Ten minutes, and the number is MEASURED rather than borrowed. @cto read all
- * 189 queue journals since 2026-09-10 and timed each round from its first event
- * to its last: median 3 s, p90 262 s, p95 346 s, p99 388 s, max 489 s — 8.2
- * minutes, run q-20260911T075823542Z-25b8774a. Fourteen rounds passed five
- * minutes, one passed eight, none passed ten.
- *
- * SO THE MARGIN IS ABOUT 1.8 MINUTES ABOVE THE WORST ROUND EVER OBSERVED, and
- * that is written here so the next reader sees how thin it is instead of
- * rediscovering it. What an overrun costs is a PAGE, not delivery: the round
- * that finally finishes writes healthy and the supervisor drops the page by
- * itself.
- *
- * BATCHING MOVES THIS NUMBER (@i/10-yrd/24227, M10). One round will check N
- * changes by design, so rounds get longer and ten minutes stops being a
- * measurement of anything. When batching lands, derive the budget from the
- * round's OWN declared check limits rather than from a constant — then a round
- * cannot legitimately outlive its deadline, and the reader still only reads the
- * loop's word.
- *
- * The number also happens to be the fleet's own ceiling — a request older than
- * ten minutes is broken, not slow — which is why it reads naturally, but the
- * measurement above is the reason to keep it. It is a BUDGET ON TOP of the
- * sleep the loop actually chose, so a deliberately long interval does not read
- * as overdue — staleness is measured against the loop's own declared intent,
- * never against a fixed cadence a reader assumed.
+ * What survives is a WAIT CAP: the relaunch that waits for its checkout replaces
+ * a round, so it announces a stall once it has waited as long as a round was
+ * allowed to take. A real bound on a round belongs to @i/10-yrd/24227, derived
+ * from the round's own declared check limits.
  */
 export const ROUND_BUDGET_MS = 10 * 60 * 1000
+
+/**
+ * How often the service restates its document while it lives
+ * (@i/4-supervision/24523 D6).
+ *
+ * Every minute, whatever the loop is doing — a round open for half an hour, an
+ * idle sleep, a line held stopped, a relaunch waiting on its checkout — so a
+ * document's freshness follows its writer, never the length of a round.
+ */
+export const HEARTBEAT_INTERVAL_MS = 60_000
+
+/**
+ * How long past its next heartbeat a document is still believed.
+ *
+ * The heartbeat is a timer on the loop's own event loop, so a live writer misses
+ * a beat for exactly as long as synchronous work holds that loop. The grace is
+ * the longest such stall a LIVE writer may have before it reads overdue; past it
+ * the writer is gone or wedged, and the page opens within six minutes of its last
+ * write (before the heartbeat: the sleep plus ten minutes, plus the round itself).
+ *
+ * The longest synchronous stretch known on the loop's path is the direct-merge
+ * notifier re-reading every run journal (with-notify.ts `toldDirect`), once per
+ * commit that went around the queue: seconds on 2026-09-16, and growing with the
+ * journals, which are never pruned. Measure it before shrinking this.
+ */
+export const HEARTBEAT_GRACE_MS = 300_000
 
 export type QueueHealthState = "healthy" | "absent" | "unhealthy" | "unknown"
 
@@ -112,7 +117,57 @@ export function queueHealthExitCode(state: QueueHealthState): 0 | 1 | 2 | 3 {
 }
 
 /**
- * The document the loop writes at the end of every round.
+ * The process that writes the document, in the shape the supervisor identifies
+ * a writer by (`facts.runner`, @i/4-supervision/24523 D2): whether the process
+ * at `pid` is still the one that started at `startedAt` is the supervisor's
+ * question to answer, never a reader's.
+ */
+export type HealthWriter = Readonly<{ pid: number; startedAt: string; command: string }>
+
+/** How often a writer restates its document, and how long past that the document is still believed. */
+export type HealthHeartbeat = Readonly<{ intervalMs: number; graceMs: number }>
+
+const SERVICE_HEARTBEAT: HealthHeartbeat = { graceMs: HEARTBEAT_GRACE_MS, intervalMs: HEARTBEAT_INTERVAL_MS }
+
+/**
+ * WHEN A DOCUMENT STOPS BEING BELIEVABLE, written by its writer rather than
+ * computed by a reader: one heartbeat plus grace from the write, and nothing
+ * else — not the sleep a round chose, not how long a round may take. The writer
+ * is the only party that knows its heartbeat, so a reader re-deriving the
+ * deadline would be a second opinion about the one thing the writer is
+ * authoritative on.
+ */
+function freshness(heartbeat: HealthHeartbeat, now: Date): Readonly<{ writtenAt: string; staleAfter: string }> {
+  return {
+    writtenAt: now.toISOString(),
+    staleAfter: new Date(now.getTime() + heartbeat.intervalMs + heartbeat.graceMs).toISOString(),
+  }
+}
+
+/**
+ * The document as its writer publishes it at `now`: written then, believed for
+ * one heartbeat plus grace, and naming the process that wrote it.
+ *
+ * EVERY WRITE THE LOOP MAKES GOES THROUGH HERE — its start, each round's end,
+ * the relaunch wait's documents and every heartbeat — which is what makes the
+ * freshness rule one rule rather than a formula per builder (24523 F4). The
+ * state is the caller's and is carried unchanged, so a heartbeat restating a
+ * stopped line's page restates the page.
+ */
+export function writtenHealthDocument(
+  document: QueueHealthDocument,
+  writer: HealthWriter,
+  heartbeat: HealthHeartbeat,
+  now: Date,
+): QueueHealthDocument {
+  const written = freshness(heartbeat, now)
+  return { ...document, facts: { ...document.facts, ...written, runner: { ...writer, lastTickAt: written.writtenAt } } }
+}
+
+/**
+ * The document the loop writes at the end of every round, and at its start for
+ * the line as it stands then (24523 F1): a relaunch continues a standing page
+ * rather than clearing it and opening it again.
  *
  * `running` either way: the loop IS the instance, and it is alive to write
  * this. What changes is `state`, which is what the supervisor pages on, and it
@@ -128,13 +183,8 @@ export function roundHealthDocument(
   now: Date,
 ): QueueHealthDocument {
   const base = { schema: QUEUE_HEALTH_SCHEMA, service, verdict: { kind: "running" } as const }
-  // WHEN THIS STOPS BEING BELIEVABLE, written by the loop rather than computed
-  // by a reader. The loop is the only party that knows what sleep it chose, so
-  // a reader re-deriving the deadline would be a second opinion about the one
-  // thing the loop is authoritative on.
   const facts = {
-    writtenAt: now.toISOString(),
-    staleAfter: new Date(now.getTime() + sleepMs + ROUND_BUDGET_MS).toISOString(),
+    ...freshness(SERVICE_HEARTBEAT, now),
     nextRoundInMs: sleepMs,
     stopped: stopFact(stop),
   }
@@ -165,11 +215,14 @@ export const STUCK_RECORD_CODE = "yrd-round-stuck"
 
 /**
  * The document a reader should act on: the stored one, or an OVERDUE verdict
- * when the loop stopped writing.
+ * when its writer stopped writing.
  *
  * Overdue outranks whatever the document last said, including `healthy`, and
  * that ordering is the point: past `staleAfter` the interesting fact is not
- * what the last round found, it is that no round has finished since. A stale
+ * what the last write said, it is that nothing has been written since. The
+ * writer restates its document on a heartbeat through long rounds, idle sleeps
+ * and stopped lines alike, so a round's length never makes a document overdue;
+ * only a writer that is gone, or whose event loop is held, does. A stale
  * `healthy` is the confident lie; a stale `unhealthy` is at least alarming for
  * the wrong reason, and both are cured by the same sentence.
  *
@@ -191,13 +244,13 @@ export function believableHealthDocument(document: QueueHealthDocument, now: Dat
     error: {
       code: "queue-round-overdue",
       cause:
-        `no round has finished since ${typeof writtenAt === "string" ? writtenAt : "an unrecorded instant"}; ` +
-        `the loop declared its next round due by ${staleAfter} and has written nothing since, ` +
+        `the service last wrote this document at ${typeof writtenAt === "string" ? writtenAt : "an unrecorded instant"} ` +
+        `and declared it believable until ${staleAfter}; nothing has been written since, ` +
         `so its last verdict (${document.state}) is no longer a measurement of anything`,
       resolution: [
-        "A round is hung or the loop is gone; the document cannot tell which apart, and says so rather than guessing.",
-        "Read the newest run journal to see where the round stopped.",
-        "This clears by itself the moment any round finishes and writes again.",
+        "The service restates this document on a heartbeat, through long rounds, idle sleeps and a stopped line alike, so overdue means its writer stopped writing: the process is gone, or its event loop is held.",
+        "facts.runner names that writer when the document carries one: if the process is gone, start the service again; if it is still running, it is alive and not writing, so inspect it before stopping it.",
+        "A hand `yrd queue run` does not write this document, so it cannot clear this page; the page clears the moment the service writes again.",
       ],
     },
     facts: { ...document.facts, overdueBy: now.getTime() - deadline },
@@ -235,6 +288,10 @@ export function believableHealthDocument(document: QueueHealthDocument, now: Dat
  * the wrong place. The overdue answer is built by merging `facts`, so dropping
  * them here would delete the only thing that makes a later overdue page explain
  * itself at all.
+ *
+ * `stop` is the last stop the loop knew, read at its start or at its latest
+ * round's end, and it is stated like every other document states it: the fact is
+ * always present, so its absence can never be read as a running line (24523 F3).
  */
 export function relaunchStalledHealthDocument(
   service: string,
@@ -244,6 +301,7 @@ export function relaunchStalledHealthDocument(
   stalls: number,
   nextAlarmInMs: number,
   now: Date,
+  stop?: PauseRecord,
 ): QueueHealthDocument {
   return {
     schema: QUEUE_HEALTH_SCHEMA,
@@ -258,24 +316,25 @@ export function relaunchStalledHealthDocument(
       // FOUR LINES, EACH OF THEM TRUE. The last one is the one that is easy to
       // get subtly wrong, and @cto caught me getting it wrong: the page does
       // NOT clear when the checkout lands. The process exits 0 then, and this
-      // document stays on disk until the RELAUNCHED service finishes its first
-      // round and writes over it.
+      // document stays on disk until the RELAUNCHED service writes over it,
+      // which it does at its start, before its first round (24523 F1).
       resolution: [
         `Check out ${awaited.path}@${awaited.sha} in ${awaited.checkout}.`,
         "No restart, and nothing to delete: this process relaunches itself with exit 0 the moment that checkout lands.",
         "No queue round runs until then.",
-        "This page clears after the relaunched service finishes its first round.",
+        "This page clears when the relaunched service starts and writes its own document.",
       ],
     },
     // No `nextRoundInMs`: there is no next round to promise. `nextAlarmInMs` is
-    // the interval this document is re-written on, which is a different claim.
+    // the interval this page is re-announced on, an alarm and a different claim
+    // from the heartbeat that keeps it fresh.
     facts: {
       ...waiting,
-      writtenAt: now.toISOString(),
-      staleAfter: new Date(now.getTime() + nextAlarmInMs + ROUND_BUDGET_MS).toISOString(),
+      ...freshness(SERVICE_HEARTBEAT, now),
       reasonKey: `relaunch-wait:${awaited.path}`,
       stalledAlarms: stalls,
       nextAlarmInMs,
+      stopped: stopFact(stop),
     },
   }
 }
@@ -299,8 +358,8 @@ export function absentHealthDocument(service: string, why: string): QueueHealthD
     facts: {
       why,
       resolution: [
-        "Start the service — `yrd queue up` writes this document at the end of every round.",
-        "A service that IS running and has not finished its first round has not written one yet.",
+        "Start the service — `yrd queue up` writes this document as it starts, before its first round, and restates it on a heartbeat while it runs.",
+        "A service still reading its queue's declaration and stop has not written one yet; one that runs past that and leaves none could not write here, and its log names why.",
       ],
     },
   }
@@ -323,8 +382,8 @@ export function unreadableHealthDocument(service: string, why: string, observed:
       code: "queue-health-document-unreadable",
       cause: why,
       resolution: [
-        "The document is written whole by the service at the end of each round; a partial one is a defect, not a state.",
-        "The next completed round overwrites it.",
+        "The service writes the document whole, staged and renamed into place; a partial one is a defect, not a state.",
+        "The service's next write replaces it, within one heartbeat while the service runs.",
       ],
     },
   }

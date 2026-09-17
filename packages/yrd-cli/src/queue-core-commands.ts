@@ -58,10 +58,13 @@ import {
   NothingToWithdraw,
   liftLine,
   pauseStop,
+  HEARTBEAT_GRACE_MS,
+  HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
   ROUND_BUDGET_MS,
   relaunchStalledHealthDocument,
   roundHealthDocument,
+  writtenHealthDocument,
   runtimeGitlinkPath,
   readStop,
   stopFact,
@@ -80,6 +83,7 @@ import {
   type GitRunner,
   type GitObservation,
   type GitSelection,
+  type HealthWriter,
   type Incident,
   type LogRecord,
   type QueueConfig,
@@ -133,9 +137,11 @@ function issueOutput(io: YrdCliIO, branch: string, resolution: IssueResolution |
  * How long the relaunch may wait for the shared checkout before it says so.
  *
  * The round budget, deliberately: this wait REPLACES a round, so the service
- * should not be silent for longer than a round is allowed to take. Past it the
- * wait is no longer "the updater is a moment behind" — it is a checkout that is
- * not coming, and the difference has to reach a person rather than accumulate.
+ * should not wait unannounced for longer than a round was allowed to take. Past
+ * it the wait is no longer "the updater is a moment behind" — it is a checkout
+ * that is not coming, and the difference has to reach a person rather than
+ * accumulate. The heartbeat keeps the waiting document fresh meanwhile; this cap
+ * is the alarm, not the freshness.
  */
 const RELAUNCH_WAIT_CAP_MS = ROUND_BUDGET_MS
 
@@ -208,6 +214,19 @@ export type CoreQueueCommand =
        * at 50ms and at ten minutes.
        */
       relaunchWaitCapMs?: number
+      /**
+       * How often the loop restates its health document. Defaults to
+       * {@link HEARTBEAT_INTERVAL_MS}.
+       *
+       * A test names it, and the grace below, for the reason it names
+       * `relaunchWaitCapMs`: the production heartbeat is a minute and its grace
+       * five, and the behaviour under test — a document that stays fresh while
+       * its writer lives, and goes overdue once it stops — is the same at a
+       * tenth of a second.
+       */
+      heartbeatIntervalMs?: number
+      /** How long past its next heartbeat the document is still believed. Defaults to {@link HEARTBEAT_GRACE_MS}. */
+      heartbeatGraceMs?: number
       /** Awaited after each round, before the gitlink is read; a test mutates the world or stops the service here. */
       afterRound?: (outcome: QueueRunOutcome) => void | Promise<void>
       /**
@@ -551,17 +570,36 @@ export async function coreQueueCommand(
       const interval = (request.intervalSeconds ?? 15) * 1000
       // Read through a call each time: the signal flips while the loop runs.
       const stopped = (): boolean => request.stop?.aborted === true
+      /** This process, as the supervisor identifies the writer of the document (24523 D2). */
+      const writer: HealthWriter = {
+        command: process.argv.join(" "),
+        pid: process.pid,
+        // The runtime's own start, so nothing here reads /proc: the supervisor
+        // owns that reader and checks this against it.
+        startedAt: new Date(performance.timeOrigin).toISOString(),
+      }
+      const heartbeat = {
+        graceMs: request.heartbeatGraceMs ?? HEARTBEAT_GRACE_MS,
+        intervalMs: request.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS,
+      }
+      /** The last document written, which every heartbeat restates unchanged but for its clocks. */
+      let stated: QueueHealthDocument | undefined
       /**
-       * Leave the document where the declared health probe reads it.
+       * Leave the document where the declared health probe reads it, stamped
+       * with this write's instant, its deadline and its writer, and answer with
+       * the document as written.
        *
        * Best-effort ON PURPOSE, and this is the one place in this change where
        * that is the right call: a filesystem that cannot take the document must
        * not end the delivery service, which is the exact failure mode being
        * removed. It is not silent — the failure is logged and named — and the
-       * probe reports `unknown` rather than inventing a state, so a document
-       * that stopped being written is visible as itself.
+       * probe keeps reading the last document written until that document's own
+       * deadline, then reads it overdue, so a document that stopped being
+       * written is visible as itself.
        */
-      const writeHealth = (document: QueueHealthDocument): void => {
+      const writeHealth = (document: QueueHealthDocument): QueueHealthDocument => {
+        const written = writtenHealthDocument(document, writer, heartbeat, new Date())
+        stated = written
         try {
           // ATOMIC, and the reason is a page nobody should ever have got:
           // `writeFileSync` truncates before it writes, so a probe landing in
@@ -573,15 +611,16 @@ export async function coreQueueCommand(
           // 2026-09-11).
           const path = join(workdir, QUEUE_HEALTH_DOCUMENT)
           const staging = `${path}.${String(process.pid)}.tmp`
-          writeFileSync(staging, `${JSON.stringify(document, undefined, 2)}\n`)
+          writeFileSync(staging, `${JSON.stringify(written, undefined, 2)}\n`)
           renameSync(staging, path)
         } catch (error) {
           log?.warn?.(
             `could not write the service health document to ${join(workdir, QUEUE_HEALTH_DOCUMENT)}: ${
               error instanceof Error ? error.message : String(error)
-            }; the declared health probe will report unknown until the next round writes one`,
+            }; the declared health probe reads the last document written until its deadline, then reads it overdue`,
           )
         }
+        return written
       }
       // THE RELAUNCH EXIT, and whether it is armed (@i/10-yrd/24515). An
       // injected gitlink is a test's, and arms it by construction; otherwise
@@ -600,6 +639,26 @@ export async function coreQueueCommand(
       const gitlink = identified.kind === "gitlink" ? identified : undefined
       /** A fact in every health document while the exit is disarmed, so a reader meets it without looking. */
       const relaunchOff = identified.kind === "off" ? { relaunchExit: identified.reason } : {}
+      /**
+       * THE PAGE READS THE STOP. What the loop writes for the line as `stop`
+       * leaves it: at start, from the stop read then, and at every round's end,
+       * from the stop that round derived (pause.ts `lineStop`) — one builder, so
+       * the first document is exactly what a round end would have written.
+       *
+       * The disarmed exit is carried where a reader already looks. A warning is
+       * read once, at the moment nobody is watching; a fact in the health
+       * document is read every time anyone asks how this service is.
+       */
+      const lineDocument = (stop: PauseRecord | undefined, sleepMs: number): QueueHealthDocument => {
+        const base = roundHealthDocument(SERVICE, stop, sleepMs, new Date())
+        return identified.kind === "off" ? { ...base, facts: { ...base.facts, ...relaunchOff } } : base
+      }
+      /**
+       * The last stop the loop knows: read at start, then derived by every round.
+       * Every document states it, the relaunch wait's included, because the fact
+       * is always present and its absence can never be read as a running line.
+       */
+      let lastStop: PauseRecord | undefined
       // A relaunch can beat the checkout updater. Do not run an old round or
       // spend the supervisor's restart budget repeatedly loading the old gitlink.
       const reload = async (targetOid: string): Promise<YrdCliExitCode | undefined> => {
@@ -674,7 +733,7 @@ export async function coreQueueCommand(
               waitingCheckout: gitlink.checkout,
               waitingCheckoutHead: checkout,
             }
-            const alive = roundHealthDocument(SERVICE, undefined, waitCapMs, new Date())
+            const alive = roundHealthDocument(SERVICE, lastStop, waitCapMs, new Date())
             writeHealth({ ...alive, facts: { ...alive.facts, ...waitingFacts } })
             emit(
               io,
@@ -740,6 +799,7 @@ export async function coreQueueCommand(
                 stalls,
                 waitCapMs,
                 new Date(),
+                lastStop,
               ),
             )
             emit(
@@ -781,50 +841,75 @@ export async function coreQueueCommand(
         )
         return 0
       }
-      let current = captured
-      for (let round = 1; ; round += 1) {
-        // The declaration again, as the target holds it now: a correct edit at
-        // the target is the next round's, never a restart's.
-        if (round > 1) {
-          let why: string | undefined
-          try {
-            const next = await declaration()
-            if (next === undefined) why = `${targetLabel} no longer carries a .yrd.yml`
-            else current = next
-          } catch (error) {
-            why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
+      // THE LINE AS IT STANDS AT START, read the way a round reads it (remote.ts
+      // `readStop`, the round's own derivation) and written before round 1 opens
+      // (24523 F1). A supervisor waiting for this process's own document reads
+      // it now instead of waiting out a long first round against its
+      // predecessor's, and a stuck stop that stands writes the stuck page, so a
+      // relaunch continues the page rather than clearing it and opening it again.
+      // A stop that cannot be read is what a round that cannot read its queue
+      // already is: stuck, exit 2, and no document claiming a state nobody read.
+      try {
+        lastStop = (await readStop(git, config.target.remote, config.target.branch, captured.oid)).stop
+      } catch (error) {
+        return stuck(
+          `the line's stop cannot be read at start: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      writeHealth(lineDocument(lastStop, 0))
+      // THE HEARTBEAT (24523 D6): one timer for the whole loop, restating the last
+      // document on a fixed interval through open rounds, idle sleeps, a stopped
+      // line and the relaunch wait alike. Rounds are awaited child processes, so
+      // the event loop is free to write, and the document is fresh exactly while
+      // its writer lives. The `finally` clears it on every way out of the loop.
+      const beat = setInterval(() => {
+        if (stated !== undefined) writeHealth(stated)
+      }, heartbeat.intervalMs)
+      try {
+        let current = captured
+        for (let round = 1; ; round += 1) {
+          // The declaration again, as the target holds it now: a correct edit at
+          // the target is the next round's, never a restart's.
+          if (round > 1) {
+            let why: string | undefined
+            try {
+              const next = await declaration()
+              if (next === undefined) why = `${targetLabel} no longer carries a .yrd.yml`
+              else current = next
+            } catch (error) {
+              why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
+            }
+            if (why !== undefined) return stuck(why)
           }
-          if (why !== undefined) return stuck(why)
+          const before = await reload(current.oid)
+          if (before !== undefined) return before
+          const outcome = await oneRound(current)
+          if (outcome === undefined) return 2
+
+          // The round derived whether the line is stopped and said so on its
+          // outcome; the document states that and nothing more. A stuck stop is
+          // unhealthy for every round that holds it and clears on the first round
+          // after an act lifts it. The hook sees the document as written, with
+          // nothing awaited between the write and the call.
+          const sleepMs = sleepAfter(outcome, interval)
+          lastStop = pauseStop(outcome.stopped)
+          const document = writeHealth(lineDocument(lastStop, sleepMs))
+          await request.afterHealth?.(document)
+          if (stopped()) return 0
+
+          await request.afterRound?.(outcome)
+          // The gitlink, at the target as this round left it: the round that merged
+          // the change moving this yrd's own gitlink is the last one this code runs.
+          const after = await reload(outcome.target)
+          if (after !== undefined) return after
+          if (stopped()) return 0
+          await new Promise((resolve) => {
+            setTimeout(resolve, sleepMs)
+          })
+          if (stopped()) return 0
         }
-        const before = await reload(current.oid)
-        if (before !== undefined) return before
-        const outcome = await oneRound(current)
-        if (outcome === undefined) return 2
-
-        // THE PAGE READS THE STOP. The round derived whether the line is stopped
-        // (pause.ts `lineStop`) and said so on its outcome; the document states
-        // that and nothing more. A stuck stop is unhealthy for every round that
-        // holds it and clears on the first round after an act lifts it.
-        const sleepMs = sleepAfter(outcome, interval)
-        const base = roundHealthDocument(SERVICE, pauseStop(outcome.stopped), sleepMs, new Date())
-        // The disarmed exit, carried where a reader already looks. A warning is
-        // read once, at the moment nobody is watching; a fact in the health
-        // document is read every time anyone asks how this service is.
-        const document = identified.kind === "off" ? { ...base, facts: { ...base.facts, ...relaunchOff } } : base
-        writeHealth(document)
-        await request.afterHealth?.(document)
-        if (stopped()) return 0
-
-        await request.afterRound?.(outcome)
-        // The gitlink, at the target as this round left it: the round that merged
-        // the change moving this yrd's own gitlink is the last one this code runs.
-        const after = await reload(outcome.target)
-        if (after !== undefined) return after
-        if (stopped()) return 0
-        await new Promise((resolve) => {
-          setTimeout(resolve, sleepMs)
-        })
-        if (stopped()) return 0
+      } finally {
+        clearInterval(beat)
       }
     }
     case "list": {
