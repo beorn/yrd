@@ -95,6 +95,7 @@ import {
   bandHeight,
   bandPlan,
   bandedRows,
+  holdsChange,
   runnerOf,
   type BandPlan,
 } from "./watch-frame.tsx"
@@ -151,8 +152,10 @@ export type WatchTier = "right" | "below" | "full"
 const STATS_MIN_ROWS = 30
 const STATS_TIME_MIN_ROWS = 44
 // Below this many rows the status pills give way first, so the table keeps a
-// row under the title, the queue line, a five-row RUNNER box, the header and
-// the footer (1 + 1 + 5 + 1 + 1 + 1 = 10, and the pills make 11).
+// row under the title, the queue line, the header, a band rule, the runner's
+// two rows and the footer. The box the 5 in this sum came from is a row now
+// (1 + 1 + 1 + 1 + 2 + 1 = 7, and the pills make 8); the ceiling is left where
+// it was, which only means the pills give way a little earlier than they must.
 const PILLS_MIN_ROWS = 11
 
 export function watchTier(columns: number, rows: number): WatchTier {
@@ -283,6 +286,7 @@ export function WatchPane({
         buckets.has(bucketOf(item.row)) &&
         (visibleQueues === undefined || shown.queues.length === 0 || visibleQueues.has(shown.queues[0]?.label ?? "")),
     ),
+    holdsChange(runnerOf(shown, shown.at).state),
   )
   const allOn = buckets.size === BUCKETS.length && visibleQueues === undefined
   // Where the cursor's row is NOW; when it left the table, the cursor stays
@@ -704,8 +708,9 @@ function Table({
   // minute at most; the seconds belong to the cells, not to the table.
   const minute = useMinute()
   const { columns } = useWindowSize()
-  const layout = listLayout(rows, columns, minute, runnerOf(snapshot, minute))
-  const plan: BandPlan = bandPlan(rows, columns - 4, snapshot.drafts?.window ?? "7d")
+  const runner = runnerOf(snapshot, minute)
+  const layout = listLayout(rows, columns, minute, runner)
+  const plan: BandPlan = bandPlan(rows, columns - 4, snapshot.drafts?.window ?? "7d", holdsChange(runner.state))
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <ListHeader layout={layout} />

@@ -24,6 +24,7 @@ import {
   RunnerDetail,
   bandPlan,
   bandedRows,
+  holdsChange,
   runnerOf,
 } from "./watch-frame.tsx"
 import { NowProvider } from "./watch-clock.ts"
@@ -47,10 +48,11 @@ export function ListingPage({ snapshot, options }: { snapshot: WatchSnapshot; op
   const columns = Math.max(40, options.columns)
   // The bands, their order and their rules all come from watch-frame.tsx: a
   // page that spelled them here is how the pane drifted last time.
-  const rows = bandedRows(snapshot.rows)
   const runner = runnerOf(snapshot, snapshot.at)
+  const holding = holdsChange(runner.state)
+  const rows = bandedRows(snapshot.rows, holding)
   const layout = listLayout(rows, columns, snapshot.at, runner)
-  const plan = bandPlan(rows, columns - 2, snapshot.drafts?.window ?? "7d")
+  const plan = bandPlan(rows, columns - 2, snapshot.drafts?.window ?? "7d", holding)
   return (
     <NowProvider readAt={snapshot.at} live={false}>
       <Box flexDirection="column" width={columns} minWidth={0}>

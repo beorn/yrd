@@ -25,6 +25,7 @@ import { Box, Text } from "silvery"
 import type { Row } from "@yrd/queue-core"
 import { useNow } from "./watch-clock.ts"
 import { RUNNER_GLYPH, STATE_WORDS, clock, displayState, mediaDuration } from "./watch-format.ts"
+import type { RunnerState } from "./watch-words.ts"
 import { RunnerRow, bucketOf, clockOf, type ListLayout } from "./watch-list.tsx"
 import { runnerLine } from "./watch-runner.ts"
 import type { WatchSnapshot } from "./watch-pane.tsx"
@@ -160,12 +161,25 @@ export type Band = (typeof BANDS)[number]
  * RUNNER'S ROW — it is not drawn again above it, and it is not dropped either:
  * dropping it would take the one row an operator most wants to open out of the
  * pane's reach, and drawing it twice is the duplication the band replaced.
+ *
+ * `holding` is FALSE when the runner's own word is not `checking` or `merging`,
+ * and then a row still marked live goes back to what waits while the runner
+ * draws its own row. A service that died mid-check leaves exactly that residue,
+ * and letting the row stand in for the runner would print `checking` over a
+ * dead queue — the 24486 lie, moved onto the band. The runner's word already
+ * refuses to be `checking` in that case (watch-runner.ts); this is the same
+ * ruling applied to the row.
  */
-export function bandOf(row: Pick<Row, "state" | "position" | "live">): Band {
-  if (row.live !== undefined) return "runner"
+export function bandOf(row: Pick<Row, "state" | "position" | "live">, holding = true): Band {
+  if (row.live !== undefined && holding) return "runner"
   if (row.state === "draft") return "drafts"
   if (row.position !== undefined) return "waiting"
   return "done"
+}
+
+/** Is the runner actually holding the change a row claims is under a check. */
+export function holdsChange(state: RunnerState): boolean {
+  return state === "checking" || state === "merging"
 }
 
 /**
@@ -177,8 +191,8 @@ export function bandOf(row: Pick<Row, "state" | "position" | "live">): Band {
  * that goes next. A stuck change stopped the line, so it stands at the front
  * and lands directly above the runner without a rule of its own.
  */
-export function bandedRows(rows: readonly WatchRow[]): readonly WatchRow[] {
-  const of = (band: Band): readonly WatchRow[] => rows.filter((item) => bandOf(item.row) === band)
+export function bandedRows(rows: readonly WatchRow[], holding = true): readonly WatchRow[] {
+  const of = (band: Band): readonly WatchRow[] => rows.filter((item) => bandOf(item.row, holding) === band)
   const waiting = [...of("waiting")].sort((left, right) => (right.row.position ?? 0) - (left.row.position ?? 0))
   return [...of("drafts"), ...waiting, ...of("runner"), ...of("done")]
 }
@@ -219,7 +233,7 @@ export type BandPlan = Readonly<{
   holding: number | undefined
 }>
 
-export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow = "7d"): BandPlan {
+export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow = "7d", holds = true): BandPlan {
   const before = new Map<number, BandBreak>()
   const opening = new Map<number, string[]>()
   let after: BandBreak | undefined
@@ -227,7 +241,7 @@ export function bandPlan(rows: readonly WatchRow[], width: number, draftWindow =
   let cursor = 0
   let runnerAt: number | undefined
   for (const band of BANDS) {
-    const count = rows.filter((item) => bandOf(item.row) === band).length
+    const count = rows.filter((item) => bandOf(item.row, holds) === band).length
     if (band === "runner") {
       if (count === 0) runnerAt = cursor
       else holding = cursor
