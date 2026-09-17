@@ -874,3 +874,36 @@ describe("the drafts a watch reads (24196)", () => {
     })
   })
 })
+
+/**
+ * @failure  24196 times an ended row by its ending record, never the notice sent after it, and carried that
+ *           instant on the row as `endingAt`. `yrd queue show --json` spreads the row into its document, so the
+ *           display fact became a new JSON field, where A2-set-v3 holds every `--json` document byte-identical.
+ * @level    l2 (a real remote, a real queue round, both JSON documents a row reaches)
+ * @consumer every `yrd list --json` and `yrd queue show --json` reader
+ */
+describe("the ending instant the table times a row by (24196)", () => {
+  it("is never a field of a --json document: neither list nor show carries endingAt", async () => {
+    const w = await world()
+    await change(w, "task/good", true)
+    await drain(w)
+
+    const documents: { command: string; endingAt: unknown; state: unknown }[] = []
+    for (const request of [
+      { command: "list" as const, terms: ["task/good"] },
+      { command: "show" as const, branch: "task/good" },
+    ]) {
+      const json = capture(w.work)
+      expect(await coreQueueCommand(w.work, json.io, request, { json: true, workdir: w.workdir }), json.stderr()).toBe(
+        0,
+      )
+      const [row] = (JSON.parse(json.stdout()) as { changes: Record<string, unknown>[] }).changes
+      documents.push({ command: request.command, endingAt: row?.["endingAt"], state: row?.["state"] })
+    }
+
+    expect(documents).toEqual([
+      { command: "list", endingAt: undefined, state: "merged" },
+      { command: "show", endingAt: undefined, state: "merged" },
+    ])
+  })
+})
