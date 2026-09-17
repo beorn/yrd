@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "vitest"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createLogger, type Event as LogEvent } from "loggily"
 import { createProcess, type Spawn } from "../src/index.ts"
 
 const temporary: string[] = []
@@ -210,7 +211,12 @@ describe("createProcess — explicit output-progress lease (21057)", () => {
         close: () => stop(),
       },
     })
-    await using proc = createProcess({ inject: { spawn }, killGraceMs: 10 })
+    // The stalled run abandons a descriptor that never reaches EOF and says so
+    // twice, by design. Those warnings belong to the verdict, so they are
+    // captured and asserted, never printed (24822).
+    const entries: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (entry: LogEvent) => entries.push(entry) }])
+    await using proc = createProcess({ inject: { spawn, log }, killGraceMs: 10 })
     try {
       const result = await proc.run({
         argv: ["fake-test"],
@@ -221,8 +227,19 @@ describe("createProcess — explicit output-progress lease (21057)", () => {
       expect(result).toMatchObject({ stalled: true, lastProgressBytes: 8, stdout: "started\n" })
       expect(result.extraStdio?.totalBytes).toBeGreaterThan(1)
       expect(result.extraStdio?.eof).toBe(false)
+      const warnings = entries.filter(
+        (entry): entry is Extract<LogEvent, { kind: "log" }> => entry.kind === "log" && entry.level === "warn",
+      )
+      expect(warnings.map(({ namespace, message }) => ({ namespace, message }))).toEqual([
+        {
+          namespace: "yrd:process",
+          message: "fake-test exited, but a child process kept its output open; stopped waiting for more output.",
+        },
+        { namespace: "yrd:process", message: "yrd: descriptor 3: drain was abandoned before EOF" },
+      ])
     } finally {
       clearInterval(timer)
+      log.end()
     }
   })
 
