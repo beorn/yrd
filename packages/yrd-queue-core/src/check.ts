@@ -4,13 +4,14 @@
  *
  * A check is a command the target declares, run in a change's worktree with a
  * bound. Its result is one of three words, read off the exit code once the run
- * itself settled cleanly: 0 is pass, 1 is fail, 2 is stuck — the check's own
- * statement that the *queue* could not judge. Exit 3 is cannot-judge owned by
- * the change (`AFFECTED_CANNOT_JUDGE_EXIT`): bounce it to the submitter as
- * fail, or the runner halts fleet-wide (`yrd-check-unresolved`). A check that
- * is not there, one that runs past its bound, or one that exits with any other
- * code could not judge either, and that is the queue's fault until proven
- * otherwise, so it is stuck too.
+ * itself settled cleanly: 0 is pass, 1 is fail, and everything else is stuck.
+ * 2 and 3 are the check's own statement that it could not judge (3 is the
+ * affected tests' cannot-judge). Neither is ever billed to the submitter: a
+ * stuck change stops the line until the fault is fixed (the andon, @cto
+ * 7645ec3a ruling 1, which reverted bouncing 3 to the submitter as a fail). A
+ * check that is not there, one that runs past its bound, or one that exits
+ * with any other code could not judge either, and that is the queue's fault
+ * until proven otherwise, so it is stuck too.
  * Every result names the check, its exit, its duration and its log path,
  * because a result nobody can read is not a result. That log is readable while
  * the check is still running: it is created before the child starts and grows
@@ -425,8 +426,8 @@ export function readCheckResult(text: string): "pass" | "fail" | undefined {
     const body = parsed as { result?: unknown; exit?: unknown }
     if (body.result === "pass" || body.result === "fail") return body.result
     if (body.exit === 0 || body.exit === "0") return "pass"
-    if (body.exit === 1 || body.exit === 3 || body.exit === "1" || body.exit === "3") return "fail"
-    console.error(`${CHECK_RESULT_MARKER} named neither pass/fail nor a known exit; not treating it as a verdict`)
+    if (body.exit === 1 || body.exit === "1") return "fail"
+    console.error(`${CHECK_RESULT_MARKER} named neither pass nor fail (exit 0 or 1); not treating it as a verdict`)
   } catch (error) {
     console.error(
       `${CHECK_RESULT_MARKER} is unreadable; not treating it as a verdict:`,
@@ -491,8 +492,8 @@ function checkProgressFromLog(log: string): string | undefined {
 /**
  * A trailer's own verdict, read off the exit `checkTrailer` packed onto it,
  * through the exact classifier `runCheck` judged the live run by: `0` is a
- * pass, `1` and `3` are fail (`3` = cannot-judge, bounced to the submitter),
- * and everything else — another number, `timeout`, `signal`, `missing`,
+ * pass, `1` is a fail, and everything else — `2` or `3` (the check's own
+ * could-not-judge), another number, `timeout`, `signal`, `missing`,
  * `unsettled`, or a trailer so malformed its exit did not parse at all —
  * could not judge, so it is stuck (check.ts's own default for an exit code
  * that is not a verdict). Never the change's ending, never the check's place
@@ -502,7 +503,7 @@ function checkProgressFromLog(log: string): string | undefined {
  * ending as if it were this check's word about itself.
  */
 function resultOfExit(exit: string | undefined): CheckRun["result"] {
-  return exit === "0" ? "pass" : exit === "1" || exit === "3" ? "fail" : "stuck"
+  return exit === "0" ? "pass" : exit === "1" ? "fail" : "stuck"
 }
 
 /**
@@ -753,17 +754,11 @@ export async function runCheck(run: RunCheck): Promise<CheckResult> {
     case 1:
       return { ...base, exit: 1, result: "fail" }
     case 2:
-      return { ...base, exit: 2, result: "stuck", why: "the check said it could not judge" }
+    // 3 is the affected tests' cannot-judge. It is stuck like 2, never a fail
+    // billed to the submitter: a check that did not judge the change has no
+    // verdict about it, and a stuck change stops the line (@cto 7645ec3a).
     case 3:
-      // affected-tests AFFECTED_CANNOT_JUDGE_EXIT. Mapping this to stuck
-      // halted the runner (yrd-check-unresolved). Renumbering to 2 is a
-      // no-op: arm 2 is also stuck. Bounce to the submitter instead.
-      return {
-        ...base,
-        exit: 3,
-        result: "fail",
-        why: "cannot-judge: bounced to the submitter",
-      }
+      return { ...base, exit: result.exitCode, result: "stuck", why: "the check said it could not judge" }
     default:
       return { ...base, exit: result.exitCode, result: "stuck", why: `exit ${result.exitCode} is not a verdict` }
   }

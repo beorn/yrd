@@ -569,12 +569,15 @@ describe("check exit codes", () => {
     })
   })
 
-  it("bounces exit 3 cannot-judge to the submitter as fail, not stuck", async () => {
+  it("treats 3 as stuck — cannot-judge is the check's own word that it could not judge, never the submitter's fail", async () => {
+    // The andon (@cto 7645ec3a ruling 1): exit 3 used to bounce to the
+    // submitter as a fail, billing a change for a check that never judged it.
+    // Stuck stops the line instead, so the fault is fixed rather than billed.
     const result = await runCheck({ ...place("exit-3"), spec: { name: "affected-tests", run: "exit 3" } })
     expect(result).toMatchObject({
       exit: 3,
-      result: "fail",
-      why: "cannot-judge: bounced to the submitter",
+      result: "stuck",
+      why: "the check said it could not judge",
     })
   })
 

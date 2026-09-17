@@ -1463,6 +1463,22 @@ describe("a queue run", () => {
     )
   })
 
+  it("a YRD-CHECK-RESULT naming exit 3 on timeout is stuck, not rescued as a fail (@cto 7645ec3a)", async () => {
+    const w = await world()
+    await submitCommit(w, "task/one", "one.txt")
+    const check = join(w.workdir, "cannot-judge-then-hang.sh")
+    writeFileSync(check, ["#!/bin/sh", `echo 'YRD-CHECK-RESULT {"exit":3}'`, "sleep 3", "exit 0", ""].join("\n"))
+    chmodSync(check, 0o755)
+    const base = await w.options({ timeoutMs: 500 })
+
+    const outcome = await queueRun({
+      ...base,
+      checks: [{ ...base.checks[0]!, run: check, timeoutMs: 500 }],
+    })
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/one"] })
+  })
+
   it.each([
     ["pass", "pass", 0, ["opened", "checked", "merged", "sent"]],
     ["fail", "fail", 1, ["opened", "checked", "failed", "sent"]],
@@ -3039,6 +3055,29 @@ describe("a stuck change stops the line (the andon, operator 2026-09-16)", () =>
     expect(readFileSync(w.checkLog, "utf8")).toBe(log)
   })
 
+  it("a check that exits 3, cannot-judge, stops the line too: the change is not billed and nothing behind it merges", async () => {
+    // @cto 7645ec3a ruling 1: exit 3 used to end the change `failed` and keep
+    // merging the line behind it, billing the submitter for a check that never
+    // judged the change. It is stuck like any other could-not-judge.
+    const w = await world()
+    const head = await submitCommit(w, "task/cannot-judge", "one.txt")
+    await submitCommit(w, "task/two", "two.txt")
+
+    const outcome = await queueRun(await w.options({ exit: 3, on: ["submit"] }))
+
+    expect(outcome).toMatchObject({ exitCode: 2, failed: [], merged: [], stuck: ["task/cannot-judge"] })
+    expect(await remoteTarget(w)).toBe(w.target)
+    const records = await recordsOf(w, "task/cannot-judge", head)
+    expect(records.map((record) => record.kind)).not.toContain("failed")
+    expect(records.flatMap((record) => record.trailers).filter(([name]) => name === "Fault")).toEqual([])
+    expect(await readPause(w.git, "origin", "main")).toMatchObject({
+      by: "yrd",
+      cause: "stuck",
+      change: { branch: "task/cannot-judge", head },
+      kind: "paused",
+    })
+  })
+
   it("a bookkeeping stuck stops the line too, before the first judge", async () => {
     const w = await world()
     const headOne = await submitCommit(w, "task/one", "one.txt")
@@ -3553,19 +3592,6 @@ describe("the target's setup", () => {
    * the settled base, so the queue's ground was never broken — one change's
    * content was, and every other change in line waited for a person.
    */
-  it("bounces cannot-judge (exit 3) to the submitter and keeps judging the line", async () => {
-    const w = await world()
-    await submitCommit(w, "task/cannot-judge", "one.txt")
-    await submitCommit(w, "task/two", "two.txt")
-
-    const outcome = await queueRun(await w.options({ exit: 3, on: ["submit"] }))
-
-    expect(outcome.exitCode).toBe(1)
-    expect(outcome.failed).toEqual(["task/cannot-judge"])
-    expect(outcome.stuck).toEqual([])
-    expect(outcome.merged).toEqual(["task/two"])
-  })
-
   it("bills the submitter when the setup fails only with the candidate's own content", async () => {
     const w = await world()
     const head = await submitCommit(w, "task/breaks-setup", "BREAK_SETUP")

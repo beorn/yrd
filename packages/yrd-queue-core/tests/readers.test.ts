@@ -600,6 +600,16 @@ describe("the declared checks, joined to what ran", () => {
     expect(views[1]?.log).toBe("/w/test.log")
   })
 
+  it("reads a packed exit=3 as stuck: cannot-judge is never a fail (@cto 7645ec3a)", () => {
+    const views = checksOf(["affected-tests exit=3 ms=5 log=/w/affected.log"], "stuck", [
+      { name: "affected-tests", run: "bun run affected-tests" },
+    ])
+
+    expect(views.map((view) => [view.name, view.state, view.result?.result])).toEqual([
+      ["affected-tests", "stuck", "stuck"],
+    ])
+  })
+
   it("reads a packed check's OWN exit even when the change's ending disagrees — the shape a merge conflict makes: every check passed, the change still ended failed", () => {
     // Before the fix, the LAST packed trailer's verdict was inferred from the
     // change's ending ("failed" -> fail) rather than read from its own exit.
