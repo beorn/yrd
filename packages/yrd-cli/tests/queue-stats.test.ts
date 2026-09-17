@@ -413,20 +413,22 @@ describe("the window and the pushed refs", () => {
 /**
  * @failure  24196's draft rows need the pushed branches nobody submitted, and `yrd queue stats` already
  *           derived them its own way: a second `ls-remote` (queue-core-commands.ts `pushedRefs`) whose
- *           lenient parse skips a row the queue read would refuse. Consolidating onto the queue read's
- *           own heads is approved (A2-set-v2 item 1) on one condition: stats keeps its CURRENT population,
- *           numbers and JSON unchanged, because `tent pm-metrics` prints `pushedNeverSubmitted` as a KPI and
- *           changing that population is its owner's call.
+ *           lenient parse skipped a row the queue read would refuse, counting by branch, with the queue's
+ *           own `yrd/*` pins, `preserve/*` keeps and heads already on the target inside the count. The KPI
+ *           ruling on 24163 (A2-set-v3) moves `pushedNeverSubmitted` onto the one definition of a draft:
+ *           keyed by head, off the target, outside `yrd/*` and `preserve/*`, inside the `--since` window,
+ *           with a head this repository never read counted as `ageUnknown`. The document keeps its keys
+ *           and its shape until the rename; stats fetches nothing.
  * @level    l2 (a real remote, real branches and a real submit, read by the real queue read)
  * @consumer pm-metrics, and every `yrd queue stats --json` reader
  */
-describe("the pushed refs, read through the one shared derivation (24196, A2-set-v2)", () => {
+describe("the pushed refs are the drafts, read through the one shared derivation (24196, A2-set-v3)", () => {
   const roots: string[] = []
   afterAll(() => {
     for (const root of roots) rmSync(root, { force: true, recursive: true })
   })
 
-  it("keeps `pushedNeverSubmitted` byte-identical when its refs come from the queue read's own heads instead of a second ls-remote", async () => {
+  it("counts `pushedNeverSubmitted` as the drafts under the one definition, with the same keys and shape", async () => {
     const now = new Date("2026-09-03T12:00:00.000Z")
     const hour = 3_600_000
     const ago = (ms: number): Date => new Date(now.getTime() - ms)
@@ -470,10 +472,9 @@ describe("the pushed refs, read through the one shared derivation (24196, A2-set
     })
     const recent = await pushed("task/pushed-recent", ago(hour))
     await pushed("task/pushed-old", ago(10 * 24 * hour))
-    // The current population counts the queue's own and the kept namespaces, and a head already on the
-    // target: the draft definition leaves those out, the stats do not.
-    const pin = await pushed("yrd/kept-pin", ago(3 * hour))
-    const kept = await pushed("preserve/kept", ago(4 * hour))
+    // The queue's own and the kept namespaces, and a head already on the target: no draft, so no count.
+    await pushed("yrd/kept-pin", ago(3 * hour))
+    await pushed("preserve/kept", ago(4 * hour))
     await git(["push", "--quiet", "origin", `${target}:refs/heads/task/on-target`])
     // A head this clone never fetched: it cannot be dated here.
     await seed(["clone", "--quiet", remote, other])
@@ -487,29 +488,30 @@ describe("the pushed refs, read through the one shared derivation (24196, A2-set
     await elsewhere(["push", "--quiet", "origin", "task/elsewhere"])
     const absent = (await elsewhere(["rev-parse", "HEAD"])).trim()
 
-    // The shared derivation, as phase A assumes stats will reach it: one function of the queue read and the
-    // clone it read into. Read through the module namespace so this file compiles before it exists.
+    // The shared derivation the stats command reads, over the stats' own default window. Read through the
+    // module namespace so this file compiles before it exists.
     const read = await readQueue(git, "origin", "main", target)
-    const shared = ((await import("../src/queue-stats.ts")) as unknown as Readonly<Record<string, unknown>>)[
-      "pushedRefsFrom"
-    ]
-    const refs =
+    const shared = ((await import("@yrd/queue-core")) as unknown as Readonly<Record<string, unknown>>)["readDrafts"]
+    const drafts =
       typeof shared === "function"
-        ? await (shared as (git: unknown, read: unknown) => Promise<readonly PushedRef[]>)(git, read)
-        : []
-    const stats = queueStats([], refs, { now })
+        ? await (
+            shared as (
+              git: unknown,
+              read: unknown,
+              options: unknown,
+            ) => Promise<Readonly<{ dated: readonly PushedRef[]; undated: readonly PushedRef[] }>>
+          )(git, read, { since: new Date(now.getTime() - 7 * 24 * hour), targetSha: target })
+        : { dated: [], undated: [] }
+    const stats = queueStats([], [...drafts.dated, ...drafts.undated], { now })
 
-    // What `pushedRefs` and this reader print today for the same remote, byte for byte.
+    // One draft in the window, one head never read here; the keys and their order are today's.
     expect(JSON.stringify(stats.pushedNeverSubmitted)).toBe(
       JSON.stringify({
         ageBasis: "tip committer date",
         ageUnknown: 1,
-        count: 4,
-        oldestCommitAgeMs: 5 * hour,
+        count: 1,
+        oldestCommitAgeMs: hour,
         refs: [
-          { branch: "task/on-target", commitAgeMs: 5 * hour, head: target },
-          { branch: "preserve/kept", commitAgeMs: 4 * hour, head: kept },
-          { branch: "yrd/kept-pin", commitAgeMs: 3 * hour, head: pin },
           { branch: "task/pushed-recent", commitAgeMs: hour, head: recent },
           { branch: "task/elsewhere", head: absent },
         ],
