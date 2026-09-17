@@ -538,6 +538,34 @@ describe("the clocks", () => {
 
     expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000 })
   })
+
+  // 24196 decision 6: the TIME cell's `waiting 12:03` is a named field derived here once, never a renderer's
+  // relabel of `ageMs`. It is now less the moment the change entered the state it is in: its opening while
+  // queued, its check passing while checked. A change under a check is running, and an ended one waits for
+  // nothing. The field is read through a cast only until it exists, so this file compiles red-first.
+  it("names how long a change in line has waited in its current state, and nothing while it runs or once it ended", () => {
+    const opened = new Date("2026-09-03T19:48:00.000Z")
+    const passed = new Date("2026-09-03T19:57:00.000Z")
+    const queued: Row = { at: opened, branch: "task/queued", head: "abc", since: opened, state: "queued" }
+    const checked: Row = {
+      at: passed,
+      branch: "task/checked",
+      head: "abd",
+      since,
+      startedAt: started,
+      state: "checked",
+    }
+    const running: Row = { ...checked, live: { check: "test", phase: "merge", run: "q-1", since: started } }
+    const merged: Row = { ...checked, endedAt: passed, state: "merged" }
+    const waiting = (row: Row): unknown => (clocks(row, now) as Readonly<Record<string, unknown>>)["waitingMs"]
+
+    expect({
+      checked: waiting(checked),
+      merged: waiting(merged),
+      queued: waiting(queued),
+      running: waiting(running),
+    }).toEqual({ checked: 3 * 60 * 1000, merged: undefined, queued: 12 * 60 * 1000, running: undefined })
+  })
 })
 
 describe("the declared checks, joined to what ran", () => {
