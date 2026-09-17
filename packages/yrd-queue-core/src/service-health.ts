@@ -58,16 +58,12 @@ export const HEARTBEAT_INTERVAL_MS = 60_000
 /**
  * How long past its next heartbeat a document is still believed.
  *
- * The heartbeat is a timer on the loop's own event loop, so a live writer misses
- * a beat for exactly as long as synchronous work holds that loop. The grace is
- * the longest such stall a LIVE writer may have before it reads overdue; past it
- * the writer is gone or wedged, and the page opens within six minutes of its last
- * write (before the heartbeat: the sleep plus ten minutes, plus the round itself).
- *
- * The longest synchronous stretch known on the loop's path is the direct-merge
- * notifier re-reading every run journal (with-notify.ts `toldDirect`), once per
- * commit that went around the queue: seconds on 2026-09-16, and growing with the
- * journals, which are never pruned. Measure it before shrinking this.
+ * The heartbeat is a timer on the loop's own event loop, so synchronous work
+ * that holds the loop holds the heartbeat too. This grace bounds how long such
+ * work may stall the loop before a live writer reads overdue. A longer stall is
+ * a true page, not a false one: a loop held that long is not doing its work,
+ * whether or not its process is alive. A writer that is gone or wedged pages
+ * within six minutes of its last write.
  */
 export const HEARTBEAT_GRACE_MS = 300_000
 
