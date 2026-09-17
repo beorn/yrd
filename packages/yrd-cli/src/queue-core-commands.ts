@@ -98,7 +98,7 @@ import {
   type Row,
   type StopFact,
 } from "@yrd/queue-core"
-import { clocksLine, noticeLine } from "./watch-notice.ts"
+import { noticeLine } from "./watch-notice.ts"
 import { FILTER_FIELDS, filterRows, rowLine, watchRows, type WatchRow } from "./watch-rows.ts"
 import type { ChangeDetail, CheckPanel, DiffText } from "./watch-detail.tsx"
 
@@ -106,7 +106,15 @@ import type { DraftWindow, WatchQueue } from "./watch-list.tsx"
 import type { WatchSnapshot } from "./watch-pane.tsx"
 import { runOf } from "./watch-run.ts"
 import { stripAnsi } from "@silvery/ansi"
-import { CHECK_GLYPH, STATE_WORDS, clock, diagnosticLines, firstLine, mediaDuration } from "./watch-format.ts"
+import {
+  CHECK_GLYPH,
+  STATE_WORDS,
+  clock,
+  diagnosticLines,
+  firstLine,
+  mediaDuration,
+  timingLine,
+} from "./watch-format.ts"
 import { readRunnerFacts, type RunnerFacts } from "./watch-runner.ts"
 import { decisionsOfRows, type RunDecision } from "./watch-stats.ts"
 import {
@@ -1056,14 +1064,16 @@ export async function coreQueueCommand(
       const page = async (one: Awaited<ReturnType<typeof round>>): Promise<string> => {
         const { printListing } = await import("./watch-print.tsx")
         const single = one.rows.length === 1 ? one.rows[0] : undefined
-        const listing = await printListing(snapshotOf(one), {
+        const snapshot = snapshotOf(one)
+        const listing = await printListing(snapshot, {
           color: io.color === true,
           columns: io.columns ?? 120,
           ...(one.scope === undefined ? {} : { scope: one.scope }),
           ...(single === undefined
             ? {}
             : {
-                trailer: [noticeLine(single.row, single.run !== undefined), clocksLine(single.row)].filter(
+                // Timed at the reading's own instant, as the row's cell is, so the two say one number.
+                trailer: [noticeLine(single.row, single.run !== undefined), timingLine(single.row, snapshot.at)].filter(
                   (part) => part !== "",
                 ),
               }),

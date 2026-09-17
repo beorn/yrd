@@ -59,12 +59,14 @@ describe("the status box's own lines", () => {
     )
   })
 
-  it("puts the run's clocks and the operator's three metrics on two rows, leaving out what nobody measured", () => {
-    const rows = timingRows(row({ startedAt: new Date(NOW_MS - 60_000) }), { ageMs: 3_600_000, runtimeMs: 60_000 })
+  it("puts the run's clocks and the one timing line on two rows, leaving out what nobody measured", () => {
+    const started = new Date(NOW_MS - 60_000)
+    const held = row({ live: { check: "test", phase: "merge", run: "q-1", since: started }, startedAt: started })
+    const rows = timingRows(held, new Date(NOW_MS))
     expect(rows).toHaveLength(2)
     expect(rows[0]).toMatch(/^Submitted \d\d:\d\d:\d\d, Started \d\d:\d\d:\d\d$/u)
-    expect(rows[1]).toBe("Age 1h00m · Runtime 1:00")
-    expect(timingRows(row({ since: undefined }), {})).toEqual([])
+    expect(rows[1]).toBe("checking 1:00 · runtime 1:00")
+    expect(timingRows(row({ since: undefined }), new Date(NOW_MS))).toEqual([])
   })
 
   it("names the run on the border by its start instant and gives a pre-run row no title", () => {

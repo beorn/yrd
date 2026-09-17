@@ -5,7 +5,7 @@
  *   ╭──────────────────────────────── RUN main#000406 ─╮   the status box IS the run:
  *   │ ✓ merged                                          │   identity on the border, no
  *   │   Merged as b234234abcde at 14:15:31.             │   title row above it (23);
- *   │   Age 34:23 · Runtime 3:45 · Wait time 0:10       │   one derivation, `clocks()`;
+ *   │   took 34:23 · runtime 3:45                       │   the table cell's duration;
  *   │ ✓ typecheck  1:02                                 │   one step line per check,
  *   │ × test       0:04 — the submitter — it failed …   │   hanging glyphs (29a), the
  *   │ − lint       not run                              │   remedy on the failed one (39)
@@ -39,7 +39,6 @@
 import { hyperlink } from "@silvery/ansi"
 import { Box, MarkdownView, ScrollArea, Tab, TabList, TabPanel, Tabs, Text } from "silvery"
 import type { ChangeRecord, CheckView, JournalRun, Row } from "@yrd/queue-core"
-import { clocks } from "@yrd/queue-core"
 import { diffSummary, historyEntries, metadataGroups, metadataKeyWidth, type ChangeCommits } from "./watch-change.ts"
 import { useMinute, useNow } from "./watch-clock.ts"
 import {
@@ -238,7 +237,7 @@ export function RunStatusBox({ run, joinedRun = false }: { run: WatchRun; joined
 /** The clocks rows, the one part of the status box that moves every second: its own leaf on the second clock. */
 function TimingRows({ row }: { row: Row }) {
   const now = useNow()
-  const timing = timingRows(row, clocks(row, now))
+  const timing = timingRows(row, now)
   return (
     <>
       {timing.map((line) => (

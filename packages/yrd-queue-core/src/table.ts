@@ -323,15 +323,14 @@ export function show(
  *
  * Each is absent rather than zero when what it is measured from is absent: a
  * change with no journal on this machine and no checked record has no instant
- * checking began, so it has no wait and no runtime, and a reader that printed
- * `0s` for it would be stating a measurement nobody made.
+ * checking began, so it has no runtime, and a reader that printed `0s` for it
+ * would be stating a measurement nobody made.
  */
 export type Clocks = Readonly<{
-  /** How long the change has existed: now, less when it was opened. */
-  ageMs?: number
-  /** How long it waited before checking began. */
-  waitMs?: number
-  /** How long checking has run, or ran; unknown when an ending has no recorded instant. */
+  /**
+   * How long this attempt's checks ran: from its first check's start to its decision, or to now while a check
+   * holds the row. A row no check holds never counts to now, and one whose decision has no instant has none.
+   */
   runtimeMs?: number
   /**
    * The ONE clock a row shows, the instant its place in the table is ordered by: when it was submitted, for
@@ -353,21 +352,9 @@ export type Clocks = Readonly<{
 }>
 
 export function clocks(row: Row, now: Date = new Date()): Clocks {
-  // Age stops at the row's own ending record, exactly as runtime already does
-  // below (`until`): a decided change's age is when it was opened and when it
-  // ended, not how long the reader has since kept the pane open. Absent an
-  // ending record (git proved it merged or moved with no record to date it)
-  // there is no instant to freeze at, so age keeps counting from `now` — an
-  // honest ticking clock beats a fabricated freeze (the operator's 2026-09-09
-  // report: age on a merged row ran forever in `yrd watch`).
-  const ageUntil = row.endedAt ?? now
-  const ageMs = row.since === undefined ? undefined : Math.max(0, ageUntil.getTime() - row.since.getTime())
-  const waitMs =
-    row.since === undefined || row.startedAt === undefined
-      ? undefined
-      : Math.max(0, row.startedAt.getTime() - row.since.getTime())
-  const until =
-    row.endedAt ?? (row.live !== undefined || row.state === "queued" || row.state === "checked" ? now : undefined)
+  // A change waiting in line holds no check, so nothing about it is running:
+  // only a check holding the row runs its clock to now (@i/10-yrd/24196).
+  const until = row.endedAt ?? (row.live === undefined ? undefined : now)
   const runtimeMs =
     row.startedAt === undefined || until === undefined
       ? undefined
@@ -386,8 +373,6 @@ export function clocks(row: Row, now: Date = new Date()): Clocks {
       ? Math.max(0, endedWhen.getTime() - row.since.getTime())
       : undefined
   return {
-    ...(ageMs === undefined ? {} : { ageMs }),
-    ...(waitMs === undefined ? {} : { waitMs }),
     ...(runtimeMs === undefined ? {} : { runtimeMs }),
     ...(clockAt === undefined ? {} : { clockAt }),
     ...(checkingMs === undefined ? {} : { checkingMs }),

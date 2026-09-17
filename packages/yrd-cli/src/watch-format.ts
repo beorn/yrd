@@ -9,7 +9,7 @@
  */
 
 import { homedir } from "node:os"
-import { runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
+import { clocks, runStartedAt, type CheckView, type JournalRun, type Row } from "@yrd/queue-core"
 import { STATE_WORDS, type DisplayState } from "./watch-words.ts"
 
 export { LEGEND_STATES, STATE_WORDS, legendLines, type DisplayState, type WordEntry } from "./watch-words.ts"
@@ -226,6 +226,39 @@ export function mediaDuration(milliseconds: number): string {
   const totalDays = Math.floor(totalHours / 24)
   if (totalDays < 100) return `${String(totalDays)}d${String(totalHours % 24).padStart(2, "0")}h`
   return `${String(totalDays)}d`
+}
+
+/**
+ * A row's one duration, its word naming its basis (queue-core `clocks`): how
+ * long the check running now has run, how long a stuck change has been stuck,
+ * how long a change in line has waited since it was submitted, or how long an
+ * ended change took. A draft has none. The table cell draws it, and the
+ * timing line under a change leads with it, so the two say one number.
+ */
+export function durationText(row: Row, now: Date): string {
+  const measured = clocks(row, now)
+  if (measured.checkingMs !== undefined) return `${STATE_WORDS.checking.word} ${mediaDuration(measured.checkingMs)}`
+  if (measured.stuckMs !== undefined) return `${STATE_WORDS.stuck.word} ${mediaDuration(measured.stuckMs)}`
+  // A stuck change keeps its place in line, and so a wait, but its cell is stuck's alone: with no instant for its
+  // stuck record it says nothing rather than borrow the waiting word (A2-set-v4).
+  if (row.state === "stuck") return ""
+  if (measured.waitingMs !== undefined) return `${STATE_WORDS.waiting.word} ${mediaDuration(measured.waitingMs)}`
+  if (measured.tookMs !== undefined) return `${STATE_WORDS.took.word} ${mediaDuration(measured.tookMs)}`
+  return ""
+}
+
+/**
+ * The timing line the detail and a one-row page print for a change
+ * (@i/10-yrd/24196): its one duration, word and basis exactly as its table
+ * cell says it, then the attempt's runtime under its own name, which counts
+ * on only while a check holds the row. A clock nothing measured is left out,
+ * never printed as zero.
+ */
+export function timingLine(row: Row, now: Date): string {
+  const { runtimeMs } = clocks(row, now)
+  return [durationText(row, now), runtimeMs === undefined ? "" : `runtime ${mediaDuration(runtimeMs)}`]
+    .filter((part) => part !== "")
+    .join(" · ")
 }
 
 /** A local wall-clock time, `HH:MM` or `HH:MM:SS`, for the absolute half of every time on screen. */

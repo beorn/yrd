@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { Journals, Row } from "@yrd/queue-core"
 import { journalKey } from "@yrd/queue-core"
 import * as format from "../src/watch-format.ts"
-import { clocksLine, noticeLine, watchNotice } from "../src/watch-notice.ts"
+import { noticeLine, watchNotice } from "../src/watch-notice.ts"
 import { filterRows, rowLine, watchRows, watchRowKey } from "../src/watch-rows.ts"
 
 const since = new Date("2026-09-03T19:00:00.000Z")
@@ -226,7 +226,7 @@ describe("the notice", () => {
   })
 
   /**
-   * @failure  The notice kept a state-to-word map of its own beside the one table's (@i/10-yrd/24196, /plat
+   * @failure  The notice kept a state-to-word map of its own beside the one table's (@i/10-yrd/24196, review
    *           finding 1): the two agreed only because each was typed out, so a change to which word a state
    *           reads would reach the table and leave the notice saying the old one.
    */
@@ -259,9 +259,9 @@ describe("the notice", () => {
   })
 })
 
-describe("the clocks line", () => {
-  it("reads Age, Runtime and Wait time in the operator's own order and duration form (item 1)", () => {
-    const line = clocksLine(
+describe("the timing line", () => {
+  it("reads the row's one duration as its table cell does, then the attempt's runtime under its own name (24196)", () => {
+    const line = format.timingLine(
       row({
         endedAt: new Date("2026-09-03T19:45:00.000Z"),
         startedAt: new Date("2026-09-03T19:30:00.000Z"),
@@ -270,12 +270,12 @@ describe("the clocks line", () => {
       now,
     )
 
-    // Age freezes at the ending record (19:45 − 19:00 = 45m), same as runtime
-    // already does, rather than counting to `now` (20:00, which read 1h00m).
-    expect(line).toBe("Age 45:00 · Runtime 15:00 · Wait time 30:00")
+    // Took stops at the ending record (19:45 − 19:00 = 45m), and so does the
+    // attempt's runtime, rather than counting on to `now` (20:00).
+    expect(line).toBe("took 45:00 · runtime 15:00")
   })
 
   it("leaves out a clock nothing measured rather than printing it as zero", () => {
-    expect(clocksLine(row(), now)).toBe("Age 1h00m")
+    expect(format.timingLine(row(), now)).toBe("waiting 1h00m")
   })
 })

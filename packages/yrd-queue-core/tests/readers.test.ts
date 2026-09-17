@@ -475,56 +475,9 @@ describe("the clocks", () => {
   const since = new Date("2026-09-03T19:00:00.000Z")
   const started = new Date("2026-09-03T19:30:00.000Z")
   const now = new Date("2026-09-03T20:00:00.000Z")
-  /** Age, wait and runtime alone: the clocks these tests are about, apart from the one clock and duration 24196 added. */
-  const ages = (measured: ReturnType<typeof clocks>) => ({
-    ageMs: measured.ageMs,
-    runtimeMs: measured.runtimeMs,
-    waitMs: measured.waitMs,
-  })
-
-  it("reads age, wait and runtime from one place, so no two views can disagree", () => {
-    const row: Row = {
-      branch: "task/one",
-      endedAt: new Date("2026-09-03T19:45:00.000Z"),
-      head: "abc",
-      since,
-      startedAt: started,
-      state: "merged",
-    }
-
-    // Age freezes at the same ending record runtime already freezes at
-    // (19:45 − 19:00 = 45m), not at `now` (20:00): a merged row does not keep
-    // aging while the reader leaves the pane open.
-    expect(ages(clocks(row, now))).toEqual({ ageMs: 45 * 60 * 1000, runtimeMs: 15 * 60 * 1000, waitMs: 30 * 60 * 1000 })
-  })
-
-  it("keeps a decided row's age fixed at its ending record however much later it is read", () => {
-    const row: Row = {
-      branch: "task/one",
-      endedAt: new Date("2026-09-03T19:45:00.000Z"),
-      head: "abc",
-      since,
-      state: "merged",
-    }
-
-    const soon = clocks(row, now).ageMs
-    const muchLater = clocks(row, new Date("2026-09-10T20:00:00.000Z")).ageMs
-    expect(soon).toBe(45 * 60 * 1000)
-    expect(muchLater).toBe(soon)
-  })
-
-  it("keeps counting an undecided row's age as `now` advances", () => {
-    const row: Row = { branch: "task/one", head: "abc", since, state: "queued" }
-
-    const soon = clocks(row, now).ageMs
-    const later = clocks(row, new Date("2026-09-03T21:00:00.000Z")).ageMs
-    expect(soon).toBe(60 * 60 * 1000)
-    expect(later).toBe(2 * 60 * 60 * 1000)
-  })
-
-  // /plat finding 3: an attempt's runtime is how long its checks ran, from its first check's start to its
-  // decision, or to now while a check holds the row. A change waiting in line holds no check, so nothing about
-  // it is running: a runtime that kept counting there read like a check that never ended.
+  // @i/10-yrd/24196 (review finding 3): an attempt's runtime is how long its checks ran, from its first check's
+  // start to its decision, or to now while a check holds the row. A change waiting in line holds no check, so
+  // nothing about it is running: a runtime that kept counting there read like a check that never ended.
   it("counts an attempt's runtime to now only while a check holds the row, never while a change waits in line", () => {
     const waits: Row = { branch: "task/one", head: "abc", since, startedAt: started, state: "checked" }
     const held: Row = { ...waits, live: { check: "test", phase: "merge", run: "q-1", since: started } }
@@ -537,23 +490,31 @@ describe("the clocks", () => {
     }).toEqual({ checked: undefined, decided: 15 * 60 * 1000, held: 30 * 60 * 1000, queued: undefined })
   })
 
+  // Git can prove a change merged or its branch disappeared without an ending
+  // record. Missing evidence must not turn a stopped clock live.
   it.each(["merged", "failed", "stuck", "direct"] as const)(
     "leaves runtime unknown for a %s change with no recorded ending time",
     (state) => {
       const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state }
-      expect(ages(clocks(row, now))).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+      expect(clocks(row, now).runtimeMs).toBeUndefined()
     },
   )
 
-  it("leaves wait and runtime ABSENT when nothing recorded that checking began, rather than answering zero", () => {
-    const row: Row = { branch: "task/one", head: "abc", since, state: "queued" }
+  it("leaves runtime ABSENT when nothing recorded that checking began, rather than answering zero", () => {
+    const row: Row = {
+      branch: "task/one",
+      head: "abc",
+      live: { check: "test", phase: "merge", run: "q-1", since: started },
+      since,
+      state: "queued",
+    }
 
-    expect(ages(clocks(row, now))).toEqual({ ageMs: 60 * 60 * 1000 })
+    expect(clocks(row, now).runtimeMs).toBeUndefined()
   })
 
   // 24196 (A2-set-v2 items 4 and 5, superseding decisions 5 and 6's basis): a row shows ONE clock, the
   // instant its place in the table is ordered by, and one duration whose word names its basis. They are
-  // named fields derived here once, never a renderer's relabel of `ageMs`: `clockAt` is the submit instant
+  // named fields derived here once, never a renderer's relabel of another clock: `clockAt` is the submit instant
   // while the change is in line, held and stuck rows included, and its ending record's instant once it
   // ended (never the notice sent after it); `waitingMs` is now less the submit for every change in line,
   // absent while its check runs and once it ended; `checkingMs` is how long the check running now has run;

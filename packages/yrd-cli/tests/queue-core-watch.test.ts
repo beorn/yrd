@@ -911,7 +911,7 @@ describe("the ending instant the table times a row by (24196)", () => {
 /**
  * @failure  A one-row page, which `yrd list <branch>` prints and a plain `yrd watch <branch>` prints every round,
  *           put `Age · Runtime · Wait time` under its row, each on a basis of its own, while the row's own cell
- *           said `waiting` (@i/10-yrd/24196, /plat finding 3). One word, one basis: the page's timing is the cell's.
+ *           said `waiting` (@i/10-yrd/24196, review finding 3). One word, one basis: the page's timing is the cell's.
  * @level    l2 (a real remote and a clone; the list command's own page)
  * @consumer a seat reading its own change under `yrd watch <branch>`, live or in a log
  */

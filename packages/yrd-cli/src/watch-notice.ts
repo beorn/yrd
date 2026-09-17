@@ -18,8 +18,8 @@
  * (@i/10-yrd/24196).
  */
 
-import { incidentLine, clocks, type Row } from "@yrd/queue-core"
-import { STATE_WORDS, mediaDuration, stateGlyph, stateWord } from "./watch-format.ts"
+import { incidentLine, type Row } from "@yrd/queue-core"
+import { STATE_WORDS, stateGlyph, stateWord } from "./watch-format.ts"
 
 export type Notice = Readonly<{
   glyph: string
@@ -72,25 +72,4 @@ export function noticeLine(row: Row, joinedRun = false): string {
   ]
     .filter((part): part is string => part !== undefined)
     .join("  ·  ")
-}
-
-/**
- * The clocks line (watch-redesign item 1, S2.16): `Age · Runtime · Wait time`,
- * in the operator's own order, separator and duration form (`34:23`, not `34m`).
- *
- * A clock nothing measured is LEFT OUT, never printed as zero: off the queue's
- * own machine there is no run journal, so a queued change has no instant
- * checking began and therefore no wait and no runtime. An empty line is the
- * honest answer and the caller says why (the journal reading carries the
- * sentence).
- */
-export function clocksLine(row: Row, now: Date = new Date()): string {
-  const measured = clocks(row, now)
-  return [
-    measured.ageMs === undefined ? undefined : `Age ${mediaDuration(measured.ageMs)}`,
-    measured.runtimeMs === undefined ? undefined : `Runtime ${mediaDuration(measured.runtimeMs)}`,
-    measured.waitMs === undefined ? undefined : `Wait time ${mediaDuration(measured.waitMs)}`,
-  ]
-    .filter((part): part is string => part !== undefined)
-    .join(" · ")
 }

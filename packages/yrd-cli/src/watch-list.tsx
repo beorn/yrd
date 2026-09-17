@@ -30,8 +30,8 @@ import { useNow } from "./watch-clock.ts"
 import {
   STATE_WORDS,
   clock,
+  durationText,
   friendlyPath,
-  mediaDuration,
   runShortName,
   stateColor,
   stateGlyph,
@@ -112,24 +112,6 @@ export function changesSuffix(row: Row): Readonly<{ text: string; color: string 
     return { color: "$fg-muted", text: `${STATE_WORDS.cancelled.word}=${row.reason}` }
   }
   return undefined
-}
-
-/**
- * The one duration cell's text, its word naming its basis: how long the check
- * running now has run, how long a stuck change has been stuck, how long a
- * change in line has waited since it was submitted, or how long an ended
- * change took. A draft has none.
- */
-export function durationText(row: Row, now: Date): string {
-  const measured = clocks(row, now)
-  if (measured.checkingMs !== undefined) return `${STATE_WORDS.checking.word} ${mediaDuration(measured.checkingMs)}`
-  if (measured.stuckMs !== undefined) return `${STATE_WORDS.stuck.word} ${mediaDuration(measured.stuckMs)}`
-  // A stuck change keeps its place in line, and so a wait, but its cell is stuck's alone: with no instant for its
-  // stuck record it says nothing rather than borrow the waiting word (A2-set-v4).
-  if (row.state === "stuck") return ""
-  if (measured.waitingMs !== undefined) return `${STATE_WORDS.waiting.word} ${mediaDuration(measured.waitingMs)}`
-  if (measured.tookMs !== undefined) return `${STATE_WORDS.took.word} ${mediaDuration(measured.tookMs)}`
-  return ""
 }
 
 /** The widths every row and the header share, so they cannot drift (the retired `timelineCellLayout`). */
