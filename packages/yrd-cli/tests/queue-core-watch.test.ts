@@ -11,6 +11,7 @@
  *           reading the live table
  */
 
+import { execFileSync } from "node:child_process"
 import {
   appendFileSync,
   chmodSync,
@@ -990,5 +991,88 @@ describe("the queue line under a selector (24196)", () => {
       rail: "while 2 changes wait in line",
       scope: true,
     })
+  })
+})
+
+/**
+ * @failure  A plain `yrd watch <branch>` fetched the draft heads it had not read with nothing around the fetch, so
+ *           a head the remote would not serve ended the watch the way a stuck change does, whatever became of the
+ *           change the seat was waiting on. The loader also marked the whole batch read before its one fetch, so
+ *           that one head left every head beside it unread (@i/10-yrd/24196, review finding 9).
+ * @level    l2 (a real remote, two clones, and the plain watch loop over a Git that refuses one head)
+ * @consumer a seat scripting `yrd watch my-branch && deploy`
+ */
+describe("a draft fetch that fails under a plain watch (24196)", () => {
+  it("is said once, still fetches the heads the remote serves, and the watch exits with its own change's ending", async () => {
+    const w = await world()
+    await change(w, "task/good", true)
+    // Two drafts pushed from a second clone, so this clone has read neither.
+    const root = dirname(w.work)
+    const other = join(root, "other")
+    await gitIn(root)(["clone", "--quiet", join(root, "remote.git"), other])
+    const elsewhere = gitIn(other)
+    await elsewhere(["config", "user.email", "grace@yrd.test"])
+    await elsewhere(["config", "user.name", "grace"])
+    const pushElsewhere = async (branch: string): Promise<string> => {
+      await elsewhere(["checkout", "--quiet", "-b", branch, "origin/main"])
+      writeFileSync(join(other, `${branch.replaceAll("/", "-")}.txt`), `${branch}\n`)
+      await elsewhere(["add", "."])
+      await elsewhere(["commit", "--quiet", "-m", `${branch} from elsewhere`])
+      await elsewhere(["push", "--quiet", "origin", branch])
+      return (await elsewhere(["rev-parse", "HEAD"])).trim()
+    }
+    const served = await pushElsewhere("task/served")
+    const refused = await pushElsewhere("task/refused")
+    // The Git the watch runs: any call naming the refused head fails, as a remote that no longer has it answers.
+    const realGit = Bun.which("git")
+    if (realGit === null) throw new Error("no git on PATH for the fixture's wrapper")
+    const executable = join(w.workdir, "refuses-one-head.sh")
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+case " $* " in
+  *" ${refused} "*) echo "fatal: remote error: upload-pack: not our ref ${refused}" >&2; exit 128 ;;
+esac
+exec '${realGit}' "$@"
+`,
+    )
+    chmodSync(executable, 0o755)
+    const readHere = async (sha: string): Promise<boolean> =>
+      w.git(["cat-file", "-e", `${sha}^{commit}`]).then(
+        () => true,
+        () => false,
+      )
+
+    // Once the first round has printed, the watched change's branch is deleted, so a later round reads it ended.
+    const watched = capture(w.work)
+    let printed = false
+    const io: YrdCliIO = {
+      ...watched.io,
+      stdout(text) {
+        watched.io.stdout(text)
+        if (printed) return
+        printed = true
+        execFileSync(realGit, ["--git-dir", join(root, "remote.git"), "update-ref", "-d", "refs/heads/task/good"])
+      },
+    }
+    const exit = await coreQueueCommand(
+      w.work,
+      io,
+      { command: "list", intervalSeconds: 1, terms: ["task/good"], watch: true },
+      { selection: { contract: "native", executable, origin: "fixture", scope: "local" }, workdir: w.workdir },
+    ).catch((error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`)
+
+    expect(
+      {
+        exit,
+        refused: await readHere(refused),
+        said: watched
+          .stderr()
+          .split("\n")
+          .filter((line) => line.includes(refused.slice(0, 12))).length,
+        served: await readHere(served),
+      },
+      watched.stderr(),
+    ).toEqual({ exit: 1, refused: false, said: 1, served: true })
   })
 })
