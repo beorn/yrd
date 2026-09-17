@@ -16,7 +16,14 @@ afterEach(() => {
 
 const bunExe = process.execPath
 
-/** Poll until `pid` is gone or `ms` elapses; true = dead. */
+/**
+ * Poll until `pid` is dead or `ms` elapses; true = dead. A zombie IS dead: it
+ * has released everything it held and waits only for its parent's reap. A
+ * grandchild outlives its parent, so that reap belongs to whichever subreaper
+ * adopted it, and `kill(pid, 0)` still succeeds on the zombie. Under a
+ * supervisor that reaps adopted orphans on a 15 s tick, the kill-only check read
+ * a SIGKILLed grandchild as a survivor in 9 of 12 runs (24821, 2026-09-16).
+ */
 async function waitDead(pid: number, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms
   while (Date.now() < deadline) {
@@ -25,9 +32,20 @@ async function waitDead(pid: number, ms: number): Promise<boolean> {
     } catch {
       return true // ESRCH — gone
     }
+    if (isZombie(pid)) return true
     await new Promise((r) => setTimeout(r, 100))
   }
   return false
+}
+
+/** State `Z` as `ps` reports it on Linux and macOS alike. A pid that exits
+ * between the two reads prints nothing, and the next `kill(pid, 0)` says ESRCH. */
+function isZombie(pid: number): boolean {
+  const listed = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)])
+  const stderr = new TextDecoder().decode(listed.stderr).trim()
+  // NO SILENT ERRORS: a state read that failed must not decide dead or alive.
+  if (stderr !== "") throw new Error(`ps -p ${pid} failed (exit ${String(listed.exitCode)}): ${stderr}`)
+  return new TextDecoder().decode(listed.stdout).trim().startsWith("Z")
 }
 
 describe("createProcess — full process-tree settlement (21012 S1)", () => {
