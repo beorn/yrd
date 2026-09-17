@@ -1351,7 +1351,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     })
   })
 
-  it("the top line says how many changes wait and why the line is not moving: what is checked and for how long, where the line stopped and since when, when the last merge landed and how many drafts there are, counting a change once however many runs it has, and past its width drops the drafts, the breakdown, the last merge, the times, then the branch names", async () => {
+  it("the top line says how many changes wait and why the line is not moving: what is checked and for how long, where the line stopped and since when, when the last merge landed and how many drafts there are, counting a change once however many runs it has, and past its width drops the drafts, the breakdown, the last merge's branch, the last merge, the times, then the branch names", async () => {
     const W = await words()
     const recheck = "q-20260903T112000000Z-5ecf00d0"
     const { live: _running, ...before } = running()
@@ -1391,18 +1391,20 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     const at = async (cols: number, runner = RUNNER) =>
       topLineOf(await lines(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), cols, 40)).line.trim()
 
-    // A2-set-v2 item 3, each width the widest the next form does not fit (the pane lays the line out two
-    // columns narrower than the terminal): drafts, breakdown, last merge, times, branch names.
+    // A2-set-v3 Q4, each width the widest the next form does not fit (the pane lays the line out two
+    // columns narrower than the terminal): drafts, breakdown, the last merge's branch, the last merge,
+    // times, branch names.
     const waiting = `5 ${W.waiting.word}`
     const breakdown = `: 2 ${W.pending.word}, 2 ${W.submitted.word}, 1 ${W.stuck.word}`
     const check = (times: boolean) => ` · ${W.checking.word} task/x${times ? " for 3:21" : ""}`
     const stop = (times: boolean) => ` · line stopped at task/s${times ? ` since ${clock(stuckAt)}` : ""}`
-    const merge = ` · last merge ${clock(mergedAt)} (task/y)`
+    const merge = (branch: boolean) => ` · last merge ${clock(mergedAt)}${branch ? " (task/y)" : ""}`
     const drafts = ` · 2 ${W.draft.word}s (7d)`
     expect({
       160: await at(160),
       144: await at(144),
       120: await at(120),
+      100: await at(100),
       90: await at(90),
       64: await at(64),
       44: await at(44),
@@ -1410,14 +1412,199 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       // long check as silence, so "runner silent" waits for the runner's own claim (A2-set-v2 item 4).
       quiet: await at(160, SILENT),
     }).toEqual({
-      160: waiting + breakdown + check(true) + stop(true) + merge + drafts,
-      144: waiting + breakdown + check(true) + stop(true) + merge,
-      120: waiting + check(true) + stop(true) + merge,
+      160: waiting + breakdown + check(true) + stop(true) + merge(true) + drafts,
+      144: waiting + breakdown + check(true) + stop(true) + merge(true),
+      120: waiting + check(true) + stop(true) + merge(true),
+      100: waiting + check(true) + stop(true) + merge(false),
       90: waiting + check(true) + stop(true),
       64: waiting + check(false) + stop(false),
       44: `${waiting} · ${W.checking.word} · line stopped`,
-      quiet: waiting + breakdown + check(true) + stop(true) + merge + drafts,
+      quiet: waiting + breakdown + check(true) + stop(true) + merge(true) + drafts,
     })
+  })
+
+  it("at 100x31 the top line drops the last merge's branch past the breakdown and keeps the last merge's time (A2-set-v3 Q4)", async () => {
+    const W = await words()
+
+    const painted = await lines(
+      snapshot({ decisions: DECISIONS, rows: EVERY_STATE, runner: RUNNER, stopped: STOP } as Partial<WatchSnapshot>),
+      100,
+      31,
+    )
+
+    expect(topLineOf(painted).line.trim()).toBe(
+      `3 ${W.waiting.word} · ${W.checking.word} task/x for 3:21 · line stopped at task/s since ${clock(new Date(STOP.since))}` +
+        ` · last merge ${clock(ago(4 * MINUTE + 50_000))}`,
+    )
+  })
+
+  it("says an operator's pause that names no change as paused, since when and by whom, in the stop's slot, and never drops the word (A2-set-v3 Q3)", async () => {
+    const W = await words()
+    const since = ago(25 * MINUTE)
+    const rows: WatchRow[] = [
+      { row: row({ branch: "task/p1", head: "2".repeat(40), position: 1, state: "checked" }) },
+      { row: row({ branch: "task/p2", head: "3".repeat(40), position: 2, state: "checked" }) },
+      { row: row({ branch: "task/s1", head: "4".repeat(40), position: 3, state: "queued" }) },
+      { row: row({ branch: "task/s2", head: "5".repeat(40), position: 4, state: "queued" }) },
+      { row: row({ branch: "task/s3", head: "6".repeat(40), position: 5, state: "queued" }) },
+    ]
+    const stopped = { by: "@chief", cause: "operator", change: null, since: since.toISOString() }
+    const at = async (cols: number) =>
+      topLineOf(
+        await lines(snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>), cols, 40),
+      ).line.trim()
+    const waiting = `5 ${W.waiting.word}`
+
+    expect({ 70: await at(70), 50: await at(50), 40: await at(40) }).toEqual({
+      70: `${waiting}: 2 ${W.pending.word}, 3 ${W.submitted.word} · paused since ${clock(since)} by @chief`,
+      50: `${waiting} · paused since ${clock(since)} by @chief`,
+      40: `${waiting} · paused by @chief`,
+    })
+  })
+
+  it("the RUNNER rail counts the changes waiting in line as the top line does: once per change, the held one apart (A2-set-v3 Q5)", async () => {
+    const W = await words()
+    const { live: _running, ...before } = running()
+    const passed = row({ branch: "task/y1", head: "2".repeat(40), position: 1, state: "checked" })
+    const rows: WatchRow[] = [
+      split(running(), RUN_ID),
+      split({ ...before, at: ago(40 * MINUTE) }, EARLIER_RUN),
+      split({ ...passed, at: ago(3 * MINUTE), endedAt: ago(3 * MINUTE) }, "q-20260903T112000000Z-5ecf00d0", "checked"),
+      split({ ...passed, at: ago(25 * MINUTE), endedAt: ago(25 * MINUTE) }, EARLIER_RUN, "checked"),
+      { row: row({ branch: "task/z1", head: "5".repeat(40), position: 3, state: "queued" }) },
+      {
+        row: row({
+          branch: "task/s",
+          endedAt: ago(6 * MINUTE),
+          head: "4".repeat(40),
+          position: 4,
+          reason: "yrd-check-unresolved",
+          state: "stuck",
+        }),
+      },
+    ]
+
+    const painted = await lines(snapshot({ rows, runner: SILENT }), 120, 40)
+
+    const rail = painted
+      .filter((line) => line.includes("│"))
+      .join(" ")
+      .replaceAll("│", " ")
+      .replace(/\s+/gu, " ")
+    const top = topLineOf(painted).line.trim()
+    expect({
+      rail: /while (\d+) changes? waits? in line/u.exec(rail)?.[1],
+      top: top.startsWith(`3 ${W.waiting.word}`) ? "3" : top,
+    }).toEqual({ rail: "3", top: "3" })
+  })
+
+  it("counts the drafts in their window and the heads not yet read apart, and w asks the loader for the other window, where the unread drafts are marked rows (A2-set-v3 Q1)", async () => {
+    const W = await words()
+    const change: WatchRow = {
+      row: row({
+        at: ago(12 * MINUTE),
+        branch: "task/z",
+        head: "3".repeat(40),
+        position: 1,
+        since: ago(12 * MINUTE),
+        state: "queued",
+        subject: "not judged yet",
+      }),
+    }
+    const unread = (branch: string, head: string): WatchRow => ({
+      row: { branch, head, state: "draft" } as unknown as Row,
+    })
+    const week = snapshot({
+      drafts: { unread: 2, window: "7d" },
+      rows: [
+        change,
+        draft("task/d1", "a".repeat(40), ago(2 * 60 * MINUTE), "ada"),
+        draft("task/d2", "b".repeat(40), ago(3 * 60 * MINUTE), "bob"),
+      ],
+      runner: RUNNER,
+    } as Partial<WatchSnapshot>)
+    const all = snapshot({
+      drafts: { unread: 2, window: "all" },
+      rows: [
+        ...week.rows,
+        draft("task/old", "d".repeat(40), ago(10 * 24 * 60 * MINUTE), "grace"),
+        unread("task/unread", "c".repeat(40)),
+        unread("task/unread2", "e".repeat(40)),
+      ],
+      runner: RUNNER,
+    } as Partial<WatchSnapshot>)
+    const load = vi.fn(async (_request?: unknown) => all)
+    const app = render(<WatchPane snapshot={week} load={load as never} live={false} />, { cols: 140, rows: 40 })
+    await settle(app)
+    const before = app.text.split("\n")
+    app.press("w")
+    await settle(app)
+    const after = app.text.split("\n")
+    app.unmount()
+    const header = (painted: readonly string[]): string => painted.find((line) => /\bSTATUS\b/u.test(line)) ?? ""
+    const counted = (painted: readonly string[]): string =>
+      topLineOf(painted)
+        .line.trim()
+        .split(" · ")
+        .find((segment) => segment.includes(`${W.draft.word}s (`)) ?? ""
+
+    expect({
+      after: {
+        header: header(after).includes(`${W.draft.word}s all`),
+        top: counted(after),
+        unreadRow: tableRow(after, " task/unread ").includes("not yet read"),
+      },
+      before: {
+        header: header(before).includes(`${W.draft.word}s 7d`),
+        top: counted(before),
+        unreadRow: tableRow(before, " task/unread "),
+      },
+      requested: load.mock.calls.map(([request]) => request),
+    }).toEqual({
+      after: { header: true, top: `3 ${W.draft.word}s (all), 2 not yet read`, unreadRow: true },
+      before: { header: true, top: `2 ${W.draft.word}s (7d), 2 not yet read`, unreadRow: "" },
+      requested: [{ draftWindow: "all" }],
+    })
+  })
+
+  it("draws draft rows and a draft's detail from the snapshot alone: redrawing, moving over drafts and opening one reads nothing (A2-set-v3)", async () => {
+    const moved: WatchRow = {
+      row: {
+        at: ago(30 * MINUTE),
+        author: "grace",
+        branch: "task/moved",
+        head: "f".repeat(40),
+        movedSinceSubmit: true,
+        state: "draft",
+      } as unknown as Row,
+    }
+    const unread: WatchRow = { row: { branch: "task/unread", head: "c".repeat(40), state: "draft" } as unknown as Row }
+    const snap = snapshot({
+      drafts: { unread: 1, window: "all" },
+      rows: [moved, draft("task/d1", "a".repeat(40), ago(2 * 60 * MINUTE), "ada"), unread],
+      runner: RUNNER,
+    } as Partial<WatchSnapshot>)
+    const load = vi.fn(async () => snap)
+    const open = vi.fn(async (item: WatchRow) => detailOf(item, CHECKS))
+    const loadDiff = vi.fn(async () => ({ text: "" }))
+    const app = render(<WatchPane snapshot={snap} load={load} open={open} loadDiff={loadDiff} live={false} />, {
+      cols: 220,
+      rows: 50,
+    })
+    await settle(app)
+    const shown: string[] = []
+    for (const key of ["Enter", "j", "j", "v"]) {
+      app.press(key)
+      await settle(app)
+      shown.push(app.text)
+    }
+    app.unmount()
+
+    expect({
+      moved: (shown[0] ?? "").includes("moved since its last submit") && (shown[0] ?? "").includes("run yrd submit"),
+      read: { load: load.mock.calls.length, loadDiff: loadDiff.mock.calls.length, open: open.mock.calls.length },
+      unread: (shown[2] ?? "").includes("not yet read") && (shown[2] ?? "").includes("run yrd submit"),
+    }).toEqual({ moved: true, read: { load: 0, loadDiff: 0, open: 0 }, unread: true })
   })
 
   it("each row shows one clock, the instant its place in the table is ordered by, and one duration cell whose word names its basis; AGE and RUNTIME are gone, and a narrow table keeps the clock to the minute", async () => {
