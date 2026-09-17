@@ -43,6 +43,7 @@ const SNAPSHOT: WatchSnapshot = {
   queue: "example.test/repo#main",
   queues: [{ branch: "main", label: "main", path: "/repo" }],
   rows: ROWS.map((item) => ({ row: item })),
+  unfiltered: ROWS.map((item) => ({ row: item })),
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))

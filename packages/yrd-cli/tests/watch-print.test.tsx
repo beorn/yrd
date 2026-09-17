@@ -33,12 +33,15 @@ function row(over: Partial<Row> = {}): Row {
 }
 
 function snapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
+  const rows = over.rows ?? [{ row: row() }]
   return {
     at: NOW,
     queue: "example.test/repo#main",
     queues: [{ branch: "main", label: "main", path: "/repo" }],
-    rows: [{ row: row() }],
     ...over,
+    rows,
+    // A snapshot built from its rows alone is a reading nothing was selected from.
+    unfiltered: over.unfiltered ?? rows,
   }
 }
 

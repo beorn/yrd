@@ -10,8 +10,8 @@
  * lives here and both render it.
  *
  * Under the title, both draw the queue line (@i/10-yrd/24196): how many
- * changes wait and why the line is not moving, read from the same rows the
- * table shows.
+ * changes wait and why the line is not moving, read from the whole reading
+ * whatever a selector narrowed the table to, as the stop and STATS are.
  */
 
 import type { ReactNode } from "react"
@@ -72,21 +72,21 @@ export function lineOf(rows: readonly WatchRow[]): Readonly<{ held: Row | undefi
  * none and says who paused.
  */
 export function queueLine(snapshot: WatchSnapshot, now: Date, width: number): string {
-  const { held, waiting } = lineOf(snapshot.rows)
+  const { held, waiting } = lineOf(snapshot.unfiltered)
   const breakdown = (["pending", "submitted", "stuck"] as const)
     .map((word) => [word, waiting.filter((row) => displayState(row) === word).length] as const)
     .filter(([, count]) => count > 0)
     .map(([word, count]) => `${String(count)} ${STATE_WORDS[word].word}`)
     .join(", ")
   const stop = snapshot.stopped ?? undefined
-  const merged = snapshot.rows
+  const merged = snapshot.unfiltered
     .flatMap(({ row }) => {
       const at = row.state === "merged" ? clockOf(row) : undefined
       return at === undefined ? [] : [{ at, branch: row.branch }]
     })
     .sort((left, right) => right.at.getTime() - left.at.getTime())[0]
   const drafted = new Set(
-    snapshot.rows
+    snapshot.unfiltered
       .filter(({ row }) => row.state === "draft" && row.at !== undefined)
       .map(({ row }) => `${row.branch}@${row.head}`),
   ).size
@@ -168,8 +168,10 @@ export function ListStack({
   // The marker's predicate, item 5: a change is under a check RIGHT NOW, never
   // "the service process exists". Read through `bucketOf` so this and the
   // status pills answer the question from one definition -- a second predicate
-  // here would drift from the list sitting directly below the box.
-  const underCheck = snapshot.rows.some((item) => bucketOf(item.row) === "running")
+  // here would drift from the list sitting directly below the box. Like the
+  // rail's count, it reads the whole reading: RUNNER is the queue's, not the
+  // selector's, and must not say idle while the queue line says checking.
+  const underCheck = snapshot.unfiltered.some((item) => bucketOf(item.row) === "running")
   // Nothing to say is said by nothing: the native contract observes the root
   // queue only, every round, and a clean root-v1 round has no notice. A
   // reading that failed is loud.
@@ -187,7 +189,7 @@ export function ListStack({
         <RunnerBox
           facts={snapshot.runner}
           label={label}
-          inLine={lineOf(snapshot.rows).waiting.length}
+          inLine={lineOf(snapshot.unfiltered).waiting.length}
           underCheck={underCheck}
           columns={columns}
           {...(snapshot.pause === undefined ? {} : { pause: snapshot.pause })}

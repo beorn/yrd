@@ -103,6 +103,11 @@ export type WatchSnapshot = Readonly<{
   /** Where the run journal was looked for and why there was none — never a blank where a fact belongs. */
   journalAbsent?: string
   rows: readonly WatchRow[]
+  /**
+   * Every row of the reading, whatever a selector narrowed `rows` to: the queue line and the RUNNER box count the
+   * queue, not the view, as STATS does. The same rows as `rows` when nothing was selected.
+   */
+  unfiltered: readonly WatchRow[]
   /** What the RUNNER box shows: the newest run journal and its process, read on the queue's own machine. */
   runner?: RunnerFacts
   /** What the STATS box counts: every decision the run journals on this machine recorded. */

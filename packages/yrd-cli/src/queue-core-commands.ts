@@ -946,6 +946,8 @@ export async function coreQueueCommand(
       ): Promise<
         Readonly<{
           rows: readonly WatchRow[]
+          /** Every row of the reading in the same lens, whatever the selector narrowed `rows` to. */
+          unfiltered: readonly WatchRow[]
           /** The rows that are changes: every row but the drafts, which the document, the selector and the ending never count. */
           changes: readonly WatchRow[]
           observation: GitObservation
@@ -979,10 +981,8 @@ export async function coreQueueCommand(
           options.json === true ? {} : { shown: { draftWindow } },
         )
         if (options.json !== true) narrateMalformed(io, journals, said)
-        const rows = filterRows(
-          watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) }),
-          request.terms ?? [],
-        )
+        const unfiltered = watchRows(all, { journals, ...(request.latest === true ? { latest: true } : {}) })
+        const rows = filterRows(unfiltered, request.terms ?? [])
         const changes = rows.filter((item) => item.row.state !== "draft")
         // The stop the reading DERIVED, never the tip's kind: a stuck stop whose
         // change has left the line is over, and a reader must not see it.
@@ -1023,6 +1023,7 @@ export async function coreQueueCommand(
           ...(journals.absent === undefined ? {} : { journalAbsent: journals.absent }),
           ...(scope === undefined ? {} : { scope }),
           rows,
+          unfiltered,
           changes,
           stopped: stopFact(pause),
           ...(drafts === undefined
@@ -2007,6 +2008,7 @@ async function readDiff(git: Git, config: QueueConfig, item: WatchRow): Promise<
 function snapshotOf(
   round: Readonly<{
     rows: readonly WatchRow[]
+    unfiltered: readonly WatchRow[]
     queue: string
     queues: readonly WatchQueue[]
     pause?: string
@@ -2025,6 +2027,7 @@ function snapshotOf(
     queue: round.queue,
     queues: round.queues,
     rows: round.rows,
+    unfiltered: round.unfiltered,
     runner: round.runner,
     stopped: round.stopped,
     ...(round.drafts === undefined
