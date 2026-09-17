@@ -64,6 +64,7 @@ import {
   ROUND_BUDGET_MS,
   relaunchStalledHealthDocument,
   roundHealthDocument,
+  takeRoundLock,
   writtenHealthDocument,
   runtimeGitlinkPath,
   readStop,
@@ -92,6 +93,8 @@ import {
   type PauseRecord,
   type RuntimeGitlinkOff,
   type ChangeRecord,
+  type RoundLock,
+  type RoundLockWait,
   type Row,
 } from "@yrd/queue-core"
 import { clocksLine, noticeLine } from "./watch-notice.ts"
@@ -214,6 +217,13 @@ export type CoreQueueCommand =
        * at 50ms and at ten minutes.
        */
       relaunchWaitCapMs?: number
+      /**
+       * How long the loop waits on another round's lock before it logs the wait
+       * as long. Defaults to `ROUND_BUDGET_MS`. A test names it for the reason
+       * it names `relaunchWaitCapMs`: the behaviour past the budget is the same
+       * at 50ms and at ten minutes.
+       */
+      roundLockStallMs?: number
       /**
        * How often the loop restates its health document. Defaults to
        * {@link HEARTBEAT_INTERVAL_MS}.
@@ -429,6 +439,80 @@ export async function coreQueueCommand(
     )
   }
 
+  /**
+   * ONE ROUND AT A TIME in this workdir (andon phase 2, the queue lock). Every
+   * round-runner — `queue up`, `queue run` and `merge` — runs its round
+   * through here, and this is the whole order, with no branch for whether it
+   * waited: take the lock, read the declaration, `before` (the service's
+   * reload), run the round, release.
+   *
+   * The declaration is read under the lock, so a round never judges a target
+   * captured before it waited. The lock is released before the caller does
+   * anything with the outcome, so a document, a hook or a sleep after a round
+   * never holds the next runner up.
+   *
+   * A runner in the foreground names the holder on stderr once when it starts
+   * waiting, and once more past the round budget; the service passes
+   * `waiting` to put the wait on its health document as a fact instead, and
+   * stays healthy. Neither ever takes the lock over.
+   */
+  const lockedRound = async (
+    round: Readonly<{
+      before?: (declared: CapturedDeclaration) => Promise<YrdCliExitCode | undefined>
+      stallMs?: number
+      stop?: AbortSignal
+      waiting?: Readonly<{
+        onWait: (wait: RoundLockWait) => void
+        onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>) => void
+      }>
+    }> = {},
+  ): Promise<Readonly<{ declared: CapturedDeclaration; outcome: QueueRunOutcome }> | YrdCliExitCode> => {
+    let lock: RoundLock
+    try {
+      lock = await takeRoundLock(workdir, {
+        command: process.argv.join(" "),
+        onStall:
+          round.waiting?.onStall ??
+          ((wait) => {
+            io.stderr(
+              `yrd: still waiting after ${mediaDuration(wait.waitedMs)} for the round lock in ${workdir}: ` +
+                `${lockHolderLine(wait)}. A round that runs this long is still judging or is wedged, and its own ` +
+                "output says which; nothing takes the lock over, so this waits until that process releases it or exits\n",
+            )
+          }),
+        onWait:
+          round.waiting?.onWait ??
+          ((wait) => {
+            io.stderr(
+              `yrd: waiting for the round lock in ${workdir}: ${lockHolderLine(wait)}; this round runs when that one ends\n`,
+            )
+          }),
+        signal: round.stop,
+        stallMs: round.stallMs,
+      })
+    } catch (error) {
+      if (round.stop?.aborted === true) return 0
+      throw error
+    }
+    try {
+      let declared: CapturedDeclaration | undefined
+      try {
+        declared = await declaration()
+      } catch (error) {
+        return stuck(
+          `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
+      const before = await round.before?.(declared)
+      if (before !== undefined) return before
+      const outcome = await oneRound(declared)
+      return outcome === undefined ? 2 : { declared, outcome }
+    } finally {
+      lock.release()
+    }
+  }
+
   switch (request.command) {
     case "pause":
     case "resume": {
@@ -547,10 +631,10 @@ export async function coreQueueCommand(
       // the contract — a round a stuck change stopped, doing no other work,
       // ends 2 here (run.ts's on-submit and on-merge steps set `exitCode: 2`
       // the moment anything comes back stuck, never 0). A run that could not
-      // even judge is `undefined` here, and `?? 2` is that same stuck, already
+      // even judge answers 2 from the locked round, that same stuck, already
       // said by `stuck()` above (@i/10-yrd/24141 AC1).
-      const outcome = await oneRound(captured)
-      return outcome?.exitCode ?? 2
+      const ran = await lockedRound()
+      return typeof ran === "number" ? ran : ran.outcome.exitCode
     }
     case "up": {
       // The service: the same round on a loop, what hab runs. A STUCK CHANGE
@@ -865,26 +949,47 @@ export async function coreQueueCommand(
       const beat = setInterval(() => {
         if (stated !== undefined) writeHealth(stated)
       }, heartbeat.intervalMs)
+      /**
+       * A round the service waits for — a `yrd merge` or `yrd queue run` in the
+       * same workdir — is stated where the service is read: the holder as a
+       * fact on the document when the wait begins, cleared by the round this
+       * service then runs. The document stays HEALTHY however long the wait
+       * lasts. A long round is not a fault, whoever runs it (24523 F4: round
+       * length is not a deadline), so past the budget the wait is logged and
+       * pages nobody.
+       */
+      let lockWaitStated = false
+      const waiting = {
+        onWait: (wait: RoundLockWait): void => {
+          lockWaitStated = true
+          log?.info?.(`waiting for the round lock in ${workdir}: ${lockHolderLine(wait)}`)
+          const alive = lineDocument(lastStop, 0)
+          writeHealth({ ...alive, facts: { ...alive.facts, waitingForRoundLock: lockWaitFact(wait) } })
+        },
+        onStall: (wait: RoundLockWait & Readonly<{ waitedMs: number }>): void => {
+          log?.warn?.(
+            `waited ${mediaDuration(wait.waitedMs)} for the round lock in ${workdir}: ${lockHolderLine(wait)}`,
+          )
+        },
+      }
       try {
-        let current = captured
-        for (let round = 1; ; round += 1) {
-          // The declaration again, as the target holds it now: a correct edit at
-          // the target is the next round's, never a restart's.
-          if (round > 1) {
-            let why: string | undefined
-            try {
-              const next = await declaration()
-              if (next === undefined) why = `${targetLabel} no longer carries a .yrd.yml`
-              else current = next
-            } catch (error) {
-              why = `the target's declaration cannot be read: ${error instanceof Error ? error.message : String(error)}`
-            }
-            if (why !== undefined) return stuck(why)
-          }
-          const before = await reload(current.oid)
-          if (before !== undefined) return before
-          const outcome = await oneRound(current)
-          if (outcome === undefined) return 2
+        for (;;) {
+          // The declaration again under the lock, as the target holds it now: a
+          // correct edit at the target is the next round's, never a restart's.
+          const ran = await lockedRound({
+            before: async (declared) => {
+              if (lockWaitStated) {
+                lockWaitStated = false
+                writeHealth(lineDocument(lastStop, 0))
+              }
+              return reload(declared.oid)
+            },
+            stallMs: request.roundLockStallMs,
+            stop: request.stop,
+            waiting,
+          })
+          if (typeof ran === "number") return ran
+          const { outcome } = ran
 
           // The round derived whether the line is stopped and said so on its
           // outcome; the document states that and nothing more. A stuck stop is
@@ -2007,6 +2112,27 @@ function readOutput(check: CheckView): CheckPanel {
         : `the log at ${check.log} could not be read: ${error instanceof Error ? error.message : String(error)}`
     return { ...check, why }
   }
+}
+
+/** The holder of the round lock, as a waiter names it. */
+function lockHolderLine(wait: RoundLockWait): string {
+  const { holder } = wait
+  return (
+    `pid ${String(holder.pid)} (${holder.command}) has held it since ${holder.since}` +
+    (wait.unproven
+      ? "; that process's start cannot be read, so it is waited on without proof that it is still the process that took the lock"
+      : "")
+  )
+}
+
+/**
+ * The wait for the round lock, as the service's health document carries it,
+ * and the one place it is shaped: the holder's command and pid, when it took
+ * the lock, and when this service began waiting on it.
+ */
+function lockWaitFact(wait: RoundLockWait): Readonly<Record<string, unknown>> {
+  const { command, pid, since } = wait.holder
+  return { holder: { command, pid }, since, waitingSince: wait.waitingSince.toISOString() }
 }
 
 /**

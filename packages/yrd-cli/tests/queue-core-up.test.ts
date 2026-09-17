@@ -40,8 +40,10 @@ import {
   readRecords,
   readRemoteCommit,
   readRunLog,
+  ROUND_LOCK,
   runId,
   submit,
+  takeRoundLock,
   trailer,
   watchRows,
   type ChangeRecord,
@@ -626,8 +628,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     })
 
     // B exists at the remote but is not main yet. The upload-pack wrapper
-    // advances main after declaration A is captured and fetched, immediately
-    // before the queue's broad advertisement.
+    // advances main after the round's declaration A is captured and fetched,
+    // immediately before the queue's broad advertisement. A round reads its
+    // declaration once it holds the round lock, so what the service reads
+    // before that — its start-up declaration and stop — is not counted.
     writeFileSync(join(w.work, ".yrd.yml"), `checks:\n  - fixed:\n      run: ${checkB}\n      on: submit\n`)
     await w.git(["commit", "--quiet", "-am", "declaration B"])
     const b = (await w.git(["rev-parse", "HEAD"])).trim()
@@ -639,6 +643,7 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       wrapper,
       [
         "#!/bin/sh",
+        `test -n "$(ls -A "${join(w.workdir, ROUND_LOCK)}" 2>/dev/null)" || exec git-upload-pack "$@"`,
         `count=0; test ! -f "${calls}" || count=$(cat "${calls}")`,
         "count=$((count + 1))",
         `printf '%s\\n' "$count" > "${calls}"`,
@@ -2998,10 +3003,9 @@ describe("yrd merge and yrd withdraw, the verbs beside submit (ADR-0015 decision
 
     // The target's newest merge names the change asked for, not the one first in line.
     const tip = await mainAt(w)
-    expect(
-      (await w.git(["log", "-1", "--format=%(trailers:key=Change,valueonly)", tip])).trim(),
-      merged.report,
-    ).toBe(`task/named@${namedHead}`)
+    expect((await w.git(["log", "-1", "--format=%(trailers:key=Change,valueonly)", tip])).trim(), merged.report).toBe(
+      `task/named@${namedHead}`,
+    )
     expect(await onMain(w, namedHead)).toBe(true)
     // The older checked change is untouched: not merged, not re-judged, still checked.
     expect(await onMain(w, olderHead)).toBe(false)
@@ -3217,4 +3221,71 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
       "task/two",
     ])
   }, 60_000)
+
+  // O1 (phase B review). A round the service waits for is someone's work, not a
+  // fault: the probe reads healthy for the whole wait, past the budget included,
+  // and the document says whose round it waits for.
+  it("while up waits on a held lock, its health document reads healthy and its facts name the holder", async () => {
+    const w = await world()
+    const holder = { command: "yrd merge task/elsewhere", pid: process.pid }
+    const held = await takeRoundLock(w.workdir, { command: holder.command })
+    const { log, rows } = logRows()
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const stallMs = 50
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        // Heartbeats well inside the wait, so the fact is seen to survive them.
+        heartbeatIntervalMs: 100,
+        heartbeatGraceMs: 500,
+        intervalSeconds: 0,
+        roundLockStallMs: stallMs,
+        stop: stop.signal,
+        afterHealth: (document) => {
+          seen.push(document)
+          stop.abort()
+        },
+      },
+      { json: true, log, workdir: w.workdir },
+    )
+    try {
+      const waiting = { holder, since: held.holder.since, waitingSince: expect.any(String) }
+      await vi.waitFor(
+        async () =>
+          expect((await readQueueHealth(w.workdir, SERVICE)).facts?.waitingForRoundLock, run.stderr()).toEqual(waiting),
+        { timeout: 20_000 },
+      )
+      const readings: QueueHealthDocument[] = []
+      const from = Date.now()
+      while (Date.now() - from < 10 * stallMs) {
+        readings.push(await readQueueHealth(w.workdir, SERVICE))
+        await delay(25)
+      }
+      // The instrument, before anything is concluded from it: the wait did run past its budget.
+      expect(rows.filter((row) => row.level === "warn" && row.message.includes("for the round lock"))).toHaveLength(1)
+      expect(seen, "round 1 has not run").toHaveLength(0)
+      for (const reading of readings) {
+        expect(reading, JSON.stringify(reading)).toMatchObject({
+          facts: { waitingForRoundLock: waiting },
+          state: "healthy",
+          verdict: { kind: "running" },
+        })
+        expect(reading.error, JSON.stringify(reading)).toBeUndefined()
+      }
+
+      held.release()
+      expect(await service, run.stderr()).toBe(0)
+      // The round it waited for ran, and that round's document names no wait.
+      expect(seen).toHaveLength(1)
+      expect(seen[0]?.facts, JSON.stringify(seen[0])).not.toHaveProperty("waitingForRoundLock")
+    } finally {
+      held.release()
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
 })

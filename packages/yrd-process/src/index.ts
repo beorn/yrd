@@ -15,6 +15,8 @@ export {
 
 export { adaptProcessGit, cleanGitEnvironment, gitFailure, type GitProcessDefaults } from "./git-super.ts"
 
+export { processStartIdentity, type ProcessStartIdentity } from "./pid-identity.ts"
+
 export {
   inspectPathHolderCensus,
   pathHolderRefusal,
