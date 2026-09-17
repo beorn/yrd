@@ -1349,7 +1349,7 @@ export async function coreQueueCommand(
           // Pre-M8 a repository has exactly one queue: the target's branch, on
           // this repository. M8 turns this list of one into N.
           queues: [{ branch: config.target.branch, label: config.target.branch, path: repo }],
-          runner: readRunnerFacts(workdir),
+          runner: await readRunnerFacts(workdir),
           // Every row, per run, whatever the filter: the box counts the queue,
           // not the view, and a change checked twice made two decisions.
           decisions: decisionsOfRows(unfiltered),

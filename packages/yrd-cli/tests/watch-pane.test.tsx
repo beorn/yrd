@@ -34,6 +34,9 @@ import { printListing } from "../src/watch-print.tsx"
 import { runOf, type WatchRun } from "../src/watch-run.ts"
 import { rowLine, watchRowKey, type WatchRow } from "../src/watch-rows.ts"
 
+/** The service's own health document, believable by the deadline its writer declared: the runner is up. */
+const BEATING = { kind: "beating", state: "healthy" } as const
+
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 const RUN_ID = "q-20260903T113000000Z-0badf00d"
 
@@ -179,6 +182,7 @@ describe("the top line (items 30, 32d, 33)", () => {
           pause,
           runner: {
             journalDir: "/w/logs",
+            service: BEATING,
             latest: {
               alive: false,
               id: RUN_ID,
@@ -939,6 +943,7 @@ describe("the RUNNER box's wrapped rails and the height budget", () => {
     "paused by @ci since Sep 5, 2026, 8:51:32 AM PDT: CI garage: M8 git-process prerequisite merged as 4431d6d8ad163ef1d560963f3f70782f4ffca156; full round audit and remaining M8 reconciliation before another admission; no service activation"
   const runner = {
     journalDir: "/w/logs",
+    service: BEATING,
     latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
   }
   const decisions = [{ at: NOW, decision: "merged" as const, duplicate: false, run: RUN_ID }]
@@ -969,6 +974,7 @@ describe("the frame's order under the table", () => {
   // pills last, below STATS, where a full-height box pushed them off screen.
   const runner = {
     journalDir: "/w/logs",
+    service: BEATING,
     latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
   }
   const decisions = [{ at: NOW, decision: "merged" as const, duplicate: false, run: RUN_ID }]
@@ -1009,6 +1015,7 @@ describe("the RUNNER marker is wired to the ROWS, not to the process (items 1, 5
   // could not go `processing` and the control could not stay `idle`.
   const runner = {
     journalDir: "/w/logs",
+    service: BEATING,
     latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: new Date(NOW.getTime() - 120_000) },
   }
   const underCheck = row({
@@ -1137,6 +1144,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
   const RUNNING_SINCE = ago(3 * MINUTE + 21_000)
   const RUNNER = {
     journalDir: "/w/logs",
+    service: BEATING,
     latest: { alive: true, id: RUN_ID, lastWriteAt: ago(20_000), startedAt: ago(3 * MINUTE + 30_000) },
   }
   /** The same runner, its journal quiet past the silence ceiling. */

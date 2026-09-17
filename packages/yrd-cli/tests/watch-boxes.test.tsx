@@ -22,6 +22,9 @@ import { MinuteContext, NowContext } from "../src/watch-clock.ts"
 import { RunnerRow, listLayout } from "../src/watch-list.tsx"
 import { runnerLine, type RunnerFacts } from "../src/watch-runner.ts"
 
+/** The service's own health document, believable by the deadline its writer declared: the runner is up. */
+const BEATING = { kind: "beating", state: "healthy" } as const
+
 const NOW = new Date("2026-09-03T12:00:00.000Z")
 
 // `alive` is retained because the row still says whether the process answers,
@@ -30,6 +33,7 @@ const NOW = new Date("2026-09-03T12:00:00.000Z")
 // would measure a marker that is deliberately not pulsing.
 const RUNNING: RunnerFacts = {
   journalDir: "/w/logs",
+  service: BEATING,
   latest: {
     alive: true,
     checks: ["typecheck"],

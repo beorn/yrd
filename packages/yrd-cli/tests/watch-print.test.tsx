@@ -19,6 +19,9 @@ import { journalKey, watchRows, type Journals, type JournalRun, type Row } from 
 import { ListingPage, printListing } from "../src/watch-print.tsx"
 import type { WatchSnapshot } from "../src/watch-pane.tsx"
 
+/** The service's own health document, believable by the deadline its writer declared: the runner is up. */
+const BEATING = { kind: "beating", state: "healthy" } as const
+
 const NOW = new Date("2026-09-05T14:00:00Z")
 const RUN_ID = "q-20260905T135900000Z-abcdef12"
 
@@ -105,6 +108,7 @@ describe("the printed page's frame", () => {
   const pause = "paused by @chief: the host is down"
   const runner = {
     journalDir: "/w/logs",
+    service: BEATING,
     latest: { alive: false, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
   }
 
@@ -178,6 +182,7 @@ describe("a one-shot render when a row's check is running right now", () => {
     })
     const runner = {
       journalDir: "/w/logs",
+      service: BEATING,
       latest: { alive: true, id: RUN_ID, lastWriteAt: NOW, startedAt: NOW },
     }
 
@@ -278,6 +283,7 @@ function flowSnapshot(over: Partial<WatchSnapshot> = {}): WatchSnapshot {
     rows: [...watchRows(flowRows(), { journals: flowJournals() })],
     runner: {
       journalDir: "/w/logs",
+      service: BEATING,
       latest: {
         alive: true,
         id: RUN_ID,

@@ -518,12 +518,16 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
     expect(page.findIndex((line) => line.includes("paused by @chief"))).toBeLessThan(
       page.findIndex((line) => line.includes("RUNNER")),
     )
-    // No run journal on this machine, so the row says `?` and names where the
-    // status will be published — it does NOT borrow the stop to look informed.
-    // The pause itself is the loud line above, said exactly once.
+    // There is no run journal and no health document in this workdir, and the
+    // row still says `paused`: a stop record is a GIT fact and reads from any
+    // clone, so it outranks every host-only rung. `?` here would hide the one
+    // thing an operator most needs to see behind "I am not on that machine".
+    // The row says the WORD and the cure; the record's own sentence is the loud
+    // line above and is said exactly once.
     const runnerRow = page.find((line) => line.includes("RUNNER"))
-    expect(runnerRow, listed.stdout()).toContain("?")
-    expect(runnerRow, listed.stdout()).toContain("refs/yrd/main/runner")
+    expect(runnerRow, listed.stdout()).toContain("paused")
+    expect(runnerRow, listed.stdout()).toContain("resume: yrd queue resume")
+    expect(runnerRow, listed.stdout()).not.toContain("refs/yrd/main/runner")
     const listedJson = capture(w.work)
     expect(await coreQueueCommand(w.work, listedJson.io, { command: "list" }, { json: true, workdir: w.workdir })).toBe(
       0,

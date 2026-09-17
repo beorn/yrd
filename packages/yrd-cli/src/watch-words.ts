@@ -78,13 +78,21 @@ export const RUNNER_STATES = [
  * publishes at `refs/yrd/<queue>/runner`. **S1 publishes no such ref, so S1
  * never prints `silent`** — and it is NOT derived from a run journal's mtime
  * instead, which is ruled out: that reading called a healthy queue between
- * rounds dead and a dead queue alive by turns. The cost is named rather than
- * hidden: until S2 publishes, nothing on this page catches a runner that has
- * stopped writing, and the incident that makes that matter is
- * @i/10-yrd/24486 — three rows sat queued with no live check while the service
- * was down, and a fourth seat submitted into it.
+ * rounds dead and a dead queue alive by turns. What S1 loses by not having it
+ * is narrower than it looks and is named rather than hidden: a runner whose
+ * event loop is held publishes nothing at either place, and `stopped` below
+ * catches it from the health document; what waits for S2 is a beat published
+ * where a clone can read it, so this page says the same word off the queue's
+ * machine as on it. The incident that makes that matter is @i/10-yrd/24486 —
+ * three rows sat queued with no live check while the service was down, and a
+ * fourth seat submitted into it.
  *
- * `stopped` means no runner process. It is S2's for the same reason.
+ * `stopped` means no runner process, and S1 DOES say it: the service restates
+ * its own health document on a heartbeat that keeps firing during a check, so
+ * a document past the deadline its writer declared — or one naming a writer
+ * that does not answer — is the loop reporting its own liveness. That is a
+ * reading, not an inference from silence, which is why it is said here and
+ * `silent` is not.
  */
 export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
 
@@ -94,7 +102,7 @@ export const RUNNER_SIGNALS = ["silent", "stopped", "unpublished"] as const
  * than editing it, and {@link legendLines} says which is which rather than
  * promising a word no reading can reach.
  */
-export const RUNNER_STATES_SAID = ["idle", "checking", "stuck", "paused", "unpublished"] as const
+export const RUNNER_STATES_SAID = ["idle", "checking", "stopped", "stuck", "paused", "unpublished"] as const
 
 /** A word a change's row can show: one of the nine, or `direct`, which is no change. */
 export type DisplayState = (typeof LEGEND_STATES)[number] | "direct"
@@ -180,7 +188,7 @@ export const STATE_WORDS: Record<DisplayState | RunnerState | "waiting" | "took"
   },
   stopped: {
     color: "$fg-error",
-    means: "no runner process; the runner says so itself, and nothing here infers it",
+    means: "no runner process: the service's own health document is overdue, or its writer is gone",
     next: "yrd queue up",
     word: "stopped",
   },
