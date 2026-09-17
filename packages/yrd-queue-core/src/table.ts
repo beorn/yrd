@@ -93,8 +93,9 @@ export type Row = Readonly<{
   endedAt?: Date
   /**
    * When the change ended, as the table times and orders it: the ending record's instant, read through
-   * the notice's `For:` when the tip is the notice sent after it ({@link endingInstants}). A display fact:
-   * `--json` prints `endedAt` as the tip read gives it and leaves this out.
+   * the notice's `For:` when the tip is the notice sent after it ({@link endingInstants}). A display fact,
+   * present only when the reading asked for ending instants ({@link ListOptions.endings}), which only a
+   * surface a person reads does: a `--json` document spreads the row and never carries it.
    */
   endingAt?: Date
   /** A draft's head commit author; absent for a change, and for a draft whose head is not read here. */
@@ -251,7 +252,10 @@ export type ListOptions = Readonly<{
   journals?: Journals
   /** Each head's commit subject, by full sha (`subjects`); a head not in the map has none. */
   subjects?: ReadonlyMap<string, string>
-  /** Each ending record's instant, by its sha (`endingInstants`): what a tip that is the notice sent after it cannot say. */
+  /**
+   * Each ending record's instant, by its sha (`endingInstants`): what a tip that is the notice sent after it
+   * cannot say. Given, the rows carry {@link Row.endingAt}; absent, no row does.
+   */
   endings?: ReadonlyMap<string, Date>
   /** The drafts of the same reading (`readDrafts`), listed after everything else: newest first, then the undated. */
   drafts?: readonly Draft[]
@@ -463,10 +467,11 @@ function row(entry: QueueEntry, position: number | undefined, options: ListOptio
       ? entry.change.records.findLast((record) => record.kind === ended)?.at
       : undefined
   const noticed = tip.kind === "sent" ? trailer(tip, "For") : undefined
+  const endings = options.endings
   const endingAt =
-    ended === "merged" || ended === "failed" || ended === "stuck" || ended === "withdrawn"
+    endings !== undefined && (ended === "merged" || ended === "failed" || ended === "stuck" || ended === "withdrawn")
       ? (entry.change.records.findLast((record) => record.kind === ended)?.at ??
-        (noticed === undefined ? undefined : options.endings?.get(noticed)))
+        (noticed === undefined ? undefined : endings.get(noticed)))
       : undefined
   const submitter = trailer(tip, "Submitter")
   const runs = options.journals?.runs.get(journalKey(entry.change.branch, entry.change.head)) ?? []

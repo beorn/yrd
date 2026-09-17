@@ -994,8 +994,7 @@ export async function coreQueueCommand(
           observation,
           data: {
             observation,
-            // `endingAt` is how the table times an ending, never a field of the document.
-            changes: changes.map(({ row: { endingAt: _ending, ...row } }) => row),
+            changes: changes.map((row) => row.row),
             journal: journalFact(journals),
             pause: pause ?? null,
             // The everyday reader of a stopped line: always present, null while
