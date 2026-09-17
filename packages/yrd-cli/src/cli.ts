@@ -166,15 +166,14 @@ function buildProgram(
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
   queue
     .command("health")
-    .description(
-      "print the service's own health document, as the last finished round wrote it; the declared supervisor probe",
-    )
+    .description("print the service's own health document, as the service last wrote it; the declared supervisor probe")
     .option("--queue <value>", QUEUE_HELP)
     .addHelpSection(
       "On health:",
       "Reads a file and nothing else — no network, no declaration, no second judgement of the queue. " +
-        "The service writes the document at the end of every round, so this reports the loop's own verdict " +
-        "rather than forming one. Exits 0 healthy, 1 no document, 2 stuck, 3 the document is unreadable.",
+        "The service writes the document as it starts and at the end of every round, and restates it on a " +
+        "heartbeat between, so this reports the loop's own verdict rather than forming one; past the document's " +
+        "own deadline it reports overdue. Exits 0 healthy, 1 no document, 2 stuck or overdue, 3 the document is unreadable.",
     )
     .action(async (options) => {
       const declared = options as { queue?: string }

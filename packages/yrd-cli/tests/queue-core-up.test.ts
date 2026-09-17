@@ -15,14 +15,27 @@
  *           expects the next round to read it
  */
 
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import * as fs from "node:fs"
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   appendRecord,
   changeRef,
   gitIn,
+  parseQueueHealthDocument,
   readConfig,
   readRecords,
   readRemoteCommit,
@@ -40,6 +53,10 @@ import { coreQueueCommand, openDetail, readListing } from "../src/queue-core-com
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import type { YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
+
+// A mutable facade, so a test can catch each health document at the rename
+// that publishes it. Every call passes through to the real filesystem.
+vi.mock("node:fs", async (original) => ({ ...(await original<typeof import("node:fs")>()) }))
 
 // A submodule at a local path: git refuses file transport for submodule clones
 // unless every git in the chain is told. Every git runner below and the
@@ -894,9 +911,10 @@ await appendRecord(git, "main", { change, kind: "merged", subject: "another obse
       expect(resolution).toContain("No restart, and nothing to delete")
       // AND IT DOES NOT OVER-PROMISE. The page does not clear when the checkout
       // lands — the process exits 0 then and THIS document stays on disk until
-      // the relaunched service finishes its first round. I had written the
-      // easier, wrong version of that line and @cto caught it.
-      expect(resolution).toContain("clears after the relaunched service finishes its first round")
+      // the relaunched service writes its own, which it does as it starts
+      // (24523 F1). I had written the easier, wrong version of that line and
+      // @cto caught it.
+      expect(resolution).toContain("clears when the relaunched service starts and writes its own document")
       // No prefix: a reader grepping the stuck-round code must not land here.
       expect(paged.error?.cause).not.toContain("yrd-round-stuck")
       expect(paged.facts).not.toHaveProperty("nextRoundInMs")
@@ -2249,6 +2267,512 @@ describe("a stopped line still takes work (the andon, operator 2026-09-16)", () 
       since: expect.any(String),
     })
   })
+})
+
+/**
+ * @failure  The loop writes its document only when a round ENDS, so freshness
+ *           rides on a round budget: a live round longer than the budget reads
+ *           overdue, a dead writer's document is believed for the whole budget,
+ *           a first round leaves no document at all, and nothing in the file says
+ *           WHICH process wrote it — so the supervisor refuses or trusts a start
+ *           on a document nobody may still be writing (@i/4-supervision/24523,
+ *           D2 and D6 as refined, F1–F4).
+ * @level    l2 (a real remote and a clone under a temporary root; the loop driven
+ *           directly, every published document caught at the rename that
+ *           publishes it)
+ * @consumer hab, which decides from `facts.runner` whether a start may proceed
+ *           and whether the child it spawned is ready · the page an overdue
+ *           document opens
+ */
+describe("the service keeps its document fresh and names its writer (24523)", () => {
+  /**
+   * The heartbeat at test scale. The behaviour under test is the same at a
+   * tenth of a second as at production's cadence, and a test that waited out
+   * the real one would be deleted rather than fixed (the `relaunchWaitCapMs`
+   * precedent).
+   */
+  const HEARTBEAT = { heartbeatIntervalMs: 100, heartbeatGraceMs: 500 } as const
+  /** How long one write is believed: interval plus grace, and nothing else (F4). */
+  const WINDOW = HEARTBEAT.heartbeatIntervalMs + HEARTBEAT.heartbeatGraceMs
+
+  /** One health document as it was published, and whether the held round's setup had begun by then. */
+  type Published = Readonly<{ at: number; document: QueueHealthDocument; setupStarted: boolean }>
+
+  /**
+   * Every health document the service publishes, in order, caught at the rename
+   * that makes it the probe's: the writer stages the file, then renames it into
+   * place. Sampling the file instead misses whatever the next write replaces
+   * before the next look, and "every write carries X" is then a claim only
+   * about the writes somebody happened to see.
+   */
+  async function publishedHealth(
+    workdir: string,
+    started?: string,
+  ): Promise<Readonly<{ writes: readonly Published[]; [Symbol.dispose](): void }>> {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs")
+    const path = join(workdir, "service-health.json")
+    const writes: Published[] = []
+    const rename = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (String(to) === path) {
+        writes.push({
+          at: Date.now(),
+          document: JSON.parse(actual.readFileSync(from, "utf8")) as QueueHealthDocument,
+          setupStarted: started !== undefined && actual.existsSync(started),
+        })
+      }
+      actual.renameSync(from, to)
+    })
+    return { writes, [Symbol.dispose]: () => rename.mockRestore() }
+  }
+
+  /** The same document, by its serialized form: what the probe reads is JSON. */
+  function same(left: QueueHealthDocument | undefined, right: QueueHealthDocument | undefined): boolean {
+    return JSON.stringify(left) === JSON.stringify(right)
+  }
+
+  /** What a heartbeat carries unchanged from the document it re-writes: everything but the clocks. */
+  function stateOf(document: QueueHealthDocument | undefined): unknown {
+    return {
+      error: document?.error,
+      schema: document?.schema,
+      service: document?.service,
+      state: document?.state,
+      stopped: document?.facts?.stopped,
+      verdict: document?.verdict,
+    }
+  }
+
+  /**
+   * hab's reader of a document's writer (`observedExternalOwner`), restated as
+   * assertions because this package cannot import the host that vendors it: a
+   * running verdict for this service, a pid that is a safe integer above 1,
+   * `startedAt` and `lastTickAt` that both parse with `lastTickAt` at or after
+   * `startedAt`, and a command that is not empty. Then D2's values: this
+   * process, its own start from the runtime, the instant of this write, its argv.
+   */
+  function expectRunner(document: QueueHealthDocument | undefined): void {
+    const why = JSON.stringify(document)
+    expect(document?.service, why).toBe(SERVICE)
+    expect(document?.verdict, why).toEqual({ kind: "running" })
+    const runner = document?.facts?.runner as Record<string, unknown> | undefined
+    expect(runner, `facts.runner is missing from ${why}`).toBeTypeOf("object")
+    const { command, lastTickAt, pid, startedAt } = runner ?? {}
+    expect(Number.isSafeInteger(pid) && (pid as number) > 1, why).toBe(true)
+    expect(typeof startedAt === "string" && Number.isFinite(Date.parse(startedAt)), why).toBe(true)
+    expect(typeof lastTickAt === "string" && Number.isFinite(Date.parse(lastTickAt)), why).toBe(true)
+    expect(Date.parse(String(lastTickAt)) >= Date.parse(String(startedAt)), why).toBe(true)
+    expect(typeof command === "string" && command.trim() !== "", why).toBe(true)
+    expect(runner, why).toEqual({
+      command: process.argv.join(" "),
+      lastTickAt: document?.facts?.writtenAt,
+      pid: process.pid,
+      startedAt: new Date(performance.timeOrigin).toISOString(),
+    })
+  }
+
+  /** A setup that holds its round open until the test releases it, and leaves a mark when it begins. */
+  function heldSetup(dir: string): Readonly<{ command: string; started: string; release: () => void }> {
+    const started = join(dir, "held-setup-started")
+    const released = join(dir, "held-setup-released")
+    const script = join(dir, "held-setup.sh")
+    writeFileSync(
+      script,
+      [
+        "#!/bin/sh",
+        `echo "$(pwd)" >> ${started}`,
+        `while [ ! -f ${released} ]; do sleep 0.05; done`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(script, 0o755)
+    return { command: script, started, release: () => writeFileSync(released, "released\n") }
+  }
+
+  /** One change waiting in the line, so a round has something to judge. */
+  async function oneChange(w: World, branch: string): Promise<string> {
+    await w.git(["checkout", "--quiet", "-b", branch, "main"])
+    writeFileSync(join(w.work, `${branch.replace("/", "-")}.txt`), "work\n")
+    await w.git(["add", "-A"])
+    await w.git(["commit", "--quiet", "-m", branch])
+    const head = (await w.git(["rev-parse", "HEAD"])).trim()
+    await w.git(["checkout", "--quiet", "main"])
+    await submit(w.git, "origin", { branch, submitter: "@dev/4", target: { branch: "main", remote: "origin" } })
+    return head
+  }
+
+  /**
+   * Two rounds over an empty line, one second apart, stopped after the second:
+   * a start, an idle sleep for the heartbeat to cover, and two round ends.
+   *
+   * `roundEnds` holds the index of each round's own write. A round publishes
+   * its document and hands it to `afterHealth` with nothing awaited between,
+   * so the write just before the hook runs is that round's, whatever else the
+   * document carries.
+   */
+  async function idleService(): Promise<
+    Readonly<{
+      exit: number
+      stderr: string
+      roundEnds: readonly number[]
+      workdir: string
+      writes: readonly Published[]
+    }>
+  > {
+    const w = await world()
+    using published = await publishedHealth(w.workdir)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const roundEnds: number[] = []
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 1,
+        stop: stop.signal,
+        ...HEARTBEAT,
+        afterHealth: () => {
+          roundEnds.push(published.writes.length - 1)
+          if (roundEnds.length === 2) stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    // The instrument, before anything is concluded from it: both rounds' own writes were caught.
+    expect(
+      roundEnds.filter((index) => index >= 0),
+      run.stderr(),
+    ).toHaveLength(2)
+    // THE WRITER HAS STOPPED. Whatever is published from here on was written
+    // by a loop that already returned (F2: the heartbeat is cleared on the way out).
+    const written = published.writes.length
+    await delay(3 * HEARTBEAT.heartbeatIntervalMs)
+    expect(published.writes, "documents published after the loop returned").toHaveLength(written)
+    return { exit, roundEnds, stderr: run.stderr(), workdir: w.workdir, writes: [...published.writes] }
+  }
+
+  // T1 (D6 as refined). A round is held open for three staleness windows —
+  // the test-scale stand-in for a round past ROUND_BUDGET_MS, which 31 of
+  // 289 measured rounds were. Freshness comes from the writer writing, never
+  // from a budget on how long a round may take.
+  it("a round held open past its staleness window stays fresh while the heartbeat runs", async () => {
+    const w = await world()
+    const held = heldSetup(w.workdir)
+    await redeclare(w, `setup: ${held.command}\n`)
+    using published = await publishedHealth(w.workdir)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        ...HEARTBEAT,
+        afterHealth: async (document) => {
+          seen.push(document)
+          // Round 1 found the line empty and ended at once. Round 2 gets a
+          // change, and its setup holds it open until the test lets go.
+          if (seen.length === 1) await oneChange(w, "task/long")
+          else stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(existsSync(held.started), run.stderr()).toBe(true), { timeout: 20_000 })
+      const heldSince = Date.now()
+      const readings: string[] = []
+      while (Date.now() - heldSince < 3 * WINDOW) {
+        const reading = await readQueueHealth(w.workdir, SERVICE)
+        readings.push(reading.error?.code ?? reading.state)
+        await delay(25)
+      }
+      expect(seen, "round 2 is still open").toHaveLength(1)
+      // The instrument, before anything is concluded from it: round 1's own write was caught.
+      expect(published.writes.filter((write) => write.at < heldSince).length, run.stderr()).toBeGreaterThan(0)
+      // What the supervisor reads, at real time, for the whole hold: the loop's
+      // own verdict, never overdue and never absent.
+      expect(readings.filter((reading) => reading !== "healthy")).toEqual([])
+      // And it is the heartbeat that keeps it so: documents keep being written
+      // while no round ends, each carrying round 1's verdict unchanged.
+      const beats = published.writes.filter((write) => write.at >= heldSince)
+      expect(beats.length, "documents written while round 2 was held open").toBeGreaterThanOrEqual(2)
+      for (const beat of beats) expect(stateOf(beat.document)).toEqual(stateOf(seen[0]))
+      held.release()
+      expect(await service, run.stderr()).toBe(0)
+      expect(seen).toHaveLength(2)
+    } finally {
+      held.release()
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
+
+  // T2 (F4). ONE freshness rule for every write, event-driven and heartbeat
+  // alike, so overdue means exactly one thing: the writer stopped writing.
+  it("a writer that stops writing reads overdue only after interval plus grace, never before", async () => {
+    const { exit, stderr, workdir, writes } = await idleService()
+    expect(exit, stderr).toBe(0)
+    for (const { document } of writes) {
+      const declared = Date.parse(String(document.facts?.staleAfter)) - Date.parse(String(document.facts?.writtenAt))
+      expect(declared, `staleAfter - writtenAt in ${JSON.stringify(document)}`).toBe(WINDOW)
+    }
+    // The document left on disk is the last one published: the probe below reads the writer's final word.
+    const last = writes.at(-1)?.document
+    expect(same(last, parseQueueHealthDocument(readFileSync(join(workdir, "service-health.json"), "utf8")))).toBe(true)
+    const writtenAt = Date.parse(String(last?.facts?.writtenAt))
+    const at = (ms: number) => new Date(writtenAt + ms)
+    // Believed through the instant interval plus grace runs out...
+    expect((await readQueueHealth(workdir, SERVICE, at(WINDOW))).error?.code).toBeUndefined()
+    // ...and overdue the millisecond after, whatever the round budget says.
+    expect((await readQueueHealth(workdir, SERVICE, at(WINDOW + 1))).error?.code).toBe("queue-round-overdue")
+  }, 30_000)
+
+  // T3 (@cto amendment 2). A stuck change stops the line and the service holds
+  // it. Every document across the hold, heartbeats included, reads the stop and
+  // pages it — never overdue, which would say the writer died.
+  it("a stopped line reads stopped, never overdue, across a long hold, heartbeat writes included", async () => {
+    const w = await world()
+    const fault = brokenSetup(w.workdir)
+    await redeclare(w, `setup: ${fault.command}\n`)
+    const head = await oneChange(w, "task/stuck")
+    using published = await publishedHealth(w.workdir)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const roundEnds: number[] = []
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        // A second between holding rounds: idle time only a heartbeat covers.
+        intervalSeconds: 1,
+        stop: stop.signal,
+        ...HEARTBEAT,
+        afterHealth: (document) => {
+          seen.push(document)
+          roundEnds.push(published.writes.length - 1)
+          // The round that stuck, and two that hold the stop.
+          if (seen.length === 3) stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(seen.length, run.stderr()).toBeGreaterThan(0), { timeout: 20_000 })
+      const heldSince = Date.now()
+      const readings: QueueHealthDocument[] = []
+      while (seen.length < 3) {
+        readings.push(await readQueueHealth(w.workdir, SERVICE))
+        await delay(25)
+      }
+      expect(await service, run.stderr()).toBe(0)
+      expect(
+        roundEnds.filter((index) => index >= 0),
+        "the recorder caught every round's own write",
+      ).toHaveLength(3)
+      const stopped = { by: "yrd", cause: "stuck", change: `task/stuck@${head}`, since: expect.any(String) }
+      expect(seen[0]?.error?.code).toBe("queue-round-stuck")
+      expect(seen[0]?.facts?.stopped).toEqual(stopped)
+      // The supervisor's reading, every 25ms of the hold: the stop's page, never an overdue one.
+      expect(readings.length).toBeGreaterThan(0)
+      expect([...new Set(readings.map((reading) => reading.error?.code ?? reading.state))]).toEqual([
+        "queue-round-stuck",
+      ])
+      for (const reading of readings) expect(reading.facts?.stopped).toEqual(stopped)
+      // The idle time was covered by heartbeats, and every one carried the stop.
+      const beats = published.writes.filter((write, index) => write.at >= heldSince && !roundEnds.includes(index))
+      expect(beats.length, "heartbeat documents published while the stopped line was held").toBeGreaterThanOrEqual(2)
+      for (const beat of beats) expect(stateOf(beat.document)).toEqual(stateOf(seen[0]))
+    } finally {
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
+
+  // T4, the loop's own writes (D2). hab decides from `facts.runner` whether a
+  // start may proceed; a document without it reads as absent identity, which
+  // is today's conflict. The start, each heartbeat and each round's end name
+  // their writer.
+  it("every document names its writer in hab's shape: the start, each heartbeat, each round end", async () => {
+    const { exit, roundEnds, stderr, writes } = await idleService()
+    expect(exit, stderr).toBe(0)
+    for (const { document } of writes) expectRunner(document)
+    // Not vacuously: each kind of write was among them.
+    const [firstRoundEnd = -1] = roundEnds
+    expect(firstRoundEnd, "documents published before round 1 ended").toBeGreaterThan(0)
+    expect(
+      writes.length - firstRoundEnd - roundEnds.length,
+      "heartbeat documents published after round 1 ended",
+    ).toBeGreaterThan(0)
+  }, 30_000)
+
+  /**
+   * A relaunch that waits for a checkout which does not come: the target
+   * records b, the runtime's own checkout stays at a, and the stall alarm fires
+   * on a 50ms cap. Once it has, the checkout lands and the loop exits 0.
+   */
+  async function stalledRelaunch(): Promise<Readonly<{ exit: number; output: string; writes: readonly Published[] }>> {
+    const w = await gitlinkWorld()
+    await w.git(["update-index", "--cacheinfo", "160000", w.b, "submodule"])
+    await w.git(["commit", "--quiet", "-m", "target records b, checkout does not follow"])
+    await w.git(["push", "--quiet", "origin", "main"])
+    using published = await publishedHealth(w.workdir)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const service = w.command(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        relaunchWaitCapMs: 50,
+        ...HEARTBEAT,
+        afterRound: () => stop.abort(),
+      },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(run.stdout()).toContain("relaunch-wait-stalled"), { timeout: 8000 })
+      const sub = gitIn(join(w.work, "submodule"))
+      await sub(["fetch", "--quiet", "origin", "main"])
+      await sub(["checkout", "--quiet", w.b])
+      const exit = await service
+      return { exit, output: `${run.stdout()}\n${run.stderr()}`, writes: [...published.writes] }
+    } finally {
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }
+
+  // T4, the relaunch wait's writes (D2). The wait replaces a round and writes
+  // its own documents — the announcement and the stall page — and a start gate
+  // reading either must find the writer named there too.
+  it("the relaunch wait's documents, the announcement and the stall page, name their writer too", async () => {
+    const { exit, output, writes } = await stalledRelaunch()
+    expect(exit, output).toBe(0)
+    const announced = writes.filter(
+      ({ document }) => document.state === "healthy" && document.facts?.waitingForCheckout === "submodule",
+    )
+    const stalled = writes.filter(({ document }) => document.error?.code === "queue-relaunch-stalled")
+    expect(announced.length, "relaunch-wait announcements published").toBeGreaterThan(0)
+    expect(stalled.length, "relaunch-stalled pages published").toBeGreaterThan(0)
+    for (const { document } of writes) expectRunner(document)
+  }, 30_000)
+
+  // F3. The stall page is the one document that never said whether the line is
+  // stopped, and the stop fact is always present precisely so that its absence
+  // can never be read as running (pause.ts `stopFact`). It carries the last
+  // known stop, which on a line nothing stopped is none.
+  it("the relaunch-stalled page carries the stop fact, like every other document", async () => {
+    const { exit, output, writes } = await stalledRelaunch()
+    expect(exit, output).toBe(0)
+    const stalled = writes.filter(({ document }) => document.error?.code === "queue-relaunch-stalled")
+    expect(stalled.length, "relaunch-stalled pages published").toBeGreaterThan(0)
+    for (const { document } of stalled) expect(document.facts, JSON.stringify(document)).toHaveProperty("stopped", null)
+  }, 30_000)
+
+  // T5 (F1). Before round 1 opens the loop has already written. Without it,
+  // hab's readiness (D5) waits out a long first round against an absence or a
+  // predecessor's document.
+  it("writes its first document at start, before round 1 opens, saying the line runs", async () => {
+    const w = await world()
+    const held = heldSetup(w.workdir)
+    await redeclare(w, `setup: ${held.command}\n`)
+    await oneChange(w, "task/first")
+    using published = await publishedHealth(w.workdir, held.started)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const service = coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        ...HEARTBEAT,
+        afterHealth: (document) => {
+          seen.push(document)
+          stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    try {
+      await vi.waitFor(() => expect(existsSync(held.started), run.stderr()).toBe(true), { timeout: 20_000 })
+      expect(seen, "round 1 is still open").toHaveLength(0)
+      // What readiness reads while round 1 is open: this loop's own document, not an absence.
+      const reading = await readQueueHealth(w.workdir, SERVICE)
+      expect(reading.state, JSON.stringify(reading)).toBe("healthy")
+      const [first] = published.writes
+      expect(first?.setupStarted, "the first document was published before round 1's setup began").toBe(false)
+      expect(first?.document).toMatchObject({
+        state: "healthy",
+        verdict: { kind: "running" },
+        facts: { stopped: null },
+      })
+      expectRunner(first?.document)
+      held.release()
+      expect(await service, run.stderr()).toBe(0)
+    } finally {
+      held.release()
+      stop.abort()
+      await service.catch(() => undefined)
+    }
+  }, 30_000)
+
+  // T5, the stop half (F1). A line already stopped at start says so from the
+  // first document: `stopped: null` for the length of round 1 would be the lie
+  // the always-present stop fact exists to prevent.
+  it("the first document names a stop that already stands at start", async () => {
+    const w = await world()
+    expect(
+      await coreQueueCommand(
+        w.work,
+        capture(w.work).io,
+        { by: "@chief", command: "pause", reason: "inspecting" },
+        { workdir: w.workdir },
+      ),
+    ).toBe(0)
+    using published = await publishedHealth(w.workdir)
+    const run = capture(w.work)
+    const stop = new AbortController()
+    const seen: QueueHealthDocument[] = []
+    const roundEnds: number[] = []
+    const exit = await coreQueueCommand(
+      w.work,
+      run.io,
+      {
+        command: "up",
+        intervalSeconds: 0,
+        stop: stop.signal,
+        ...HEARTBEAT,
+        afterHealth: (document) => {
+          seen.push(document)
+          roundEnds.push(published.writes.length - 1)
+          stop.abort()
+        },
+      },
+      { json: true, workdir: w.workdir },
+    )
+    expect(exit, run.stderr()).toBe(0)
+    const [roundEnd = -1] = roundEnds
+    expect(roundEnd, "the recorder caught round 1's own write").toBeGreaterThanOrEqual(0)
+    const stopped = { by: "@chief", cause: "operator", change: null, since: expect.any(String) }
+    expect(seen[0]?.facts?.stopped).toEqual(stopped)
+    const beforeRound = published.writes.slice(0, roundEnd)
+    expect(beforeRound.length, "documents published before round 1 ended").toBeGreaterThan(0)
+    for (const { document } of beforeRound) {
+      expect(document.facts?.stopped, JSON.stringify(document)).toEqual(seen[0]?.facts?.stopped)
+    }
+  }, 30_000)
 })
 
 /**

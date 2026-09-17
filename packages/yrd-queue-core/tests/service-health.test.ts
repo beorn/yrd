@@ -3,10 +3,11 @@ import { describe, expect, test } from "vitest"
 import {
   absentHealthDocument,
   believableHealthDocument,
+  HEARTBEAT_GRACE_MS,
+  HEARTBEAT_INTERVAL_MS,
   parseQueueHealthDocument,
   QUEUE_HEALTH_SCHEMA,
   queueHealthExitCode,
-  ROUND_BUDGET_MS,
   roundHealthDocument,
   STUCK_RECORD_CODE,
   unreadableHealthDocument,
@@ -132,46 +133,48 @@ describe("reading a stored document", () => {
 })
 
 /**
- * @failure  A round hangs inside the run, the loop never writes again, and the
- *           probe keeps printing the last round's `healthy` for as long as the
- *           hang lasts — an instrument asserting a verdict it did not measure,
- *           getting more confident the longer the outage runs. Worse than no
- *           probe at all, because a page that never opens reads exactly like a
- *           service that is fine (@cto follow-up F1, 2026-09-11).
+ * @failure  The writer stops writing — its process gone or its event loop held —
+ *           and the probe keeps printing the last `healthy` for as long as that
+ *           lasts: an instrument asserting a verdict it did not measure, getting
+ *           more confident the longer the outage runs. Worse than no probe at
+ *           all, because a page that never opens reads exactly like a service
+ *           that is fine (@cto follow-up F1, 2026-09-11).
  * @level    l1
  * @consumer the supervisor, which pages on unhealthy-while-running
  */
 describe("a document expires", () => {
   const written = (sleepMs: number) => roundHealthDocument("yrd-service", undefined, sleepMs, NOW)
   const at = (ms: number) => new Date(NOW.getTime() + ms)
+  /** One heartbeat plus grace: how long any document is believed after its write (24523 F4). */
+  const WINDOW = HEARTBEAT_INTERVAL_MS + HEARTBEAT_GRACE_MS
 
   test("carries when it was written and when it stops being believable", () => {
     const doc = written(INTERVAL)
     expect(doc.facts).toMatchObject({
       writtenAt: NOW.toISOString(),
-      staleAfter: at(INTERVAL + ROUND_BUDGET_MS).toISOString(),
+      staleAfter: at(WINDOW).toISOString(),
     })
   })
 
-  // The deadline is the loop's OWN sleep plus a budget, never a fixed cadence a
-  // reader assumed — so a deliberate thirty-minute interval is not overdue at
-  // minute eleven.
-  test("a long deliberate interval is not overdue", () => {
+  // The deadline is one heartbeat plus grace, whatever sleep the round chose.
+  // The loop restates its document through the sleep, so a deliberate
+  // thirty-minute interval stays fresh by being rewritten, never by a deadline
+  // stretched to cover it (24523 F4).
+  test("a long deliberate interval does not move the deadline", () => {
     const long = 30 * 60 * 1000
     const doc = written(long)
-    const stillFine = believableHealthDocument(doc, at(long + ROUND_BUDGET_MS - 1))
-    expect(stillFine).toEqual(doc)
+    expect(doc.facts).toMatchObject({ nextRoundInMs: long, staleAfter: at(WINDOW).toISOString() })
   })
 
   test("is believed right up to its deadline", () => {
     const doc = written(INTERVAL)
-    expect(believableHealthDocument(doc, at(INTERVAL + ROUND_BUDGET_MS))).toEqual(doc)
+    expect(believableHealthDocument(doc, at(WINDOW))).toEqual(doc)
   })
 
   // THE ONE THAT MATTERS: a stale HEALTHY is the confident lie.
   test("past its deadline a healthy document reads OVERDUE, and names when it was written", () => {
     const doc = written(INTERVAL)
-    const overdue = believableHealthDocument(doc, at(INTERVAL + ROUND_BUDGET_MS + 60_000))
+    const overdue = believableHealthDocument(doc, at(WINDOW + 60_000))
     expect(overdue.state).toBe("unhealthy")
     expect(overdue.verdict).toEqual({ kind: "running" })
     expect(overdue.error?.code).toBe("queue-round-overdue")
@@ -180,10 +183,10 @@ describe("a document expires", () => {
     expect(queueHealthExitCode(overdue.state)).toBe(2)
   })
 
-  test("overdue outranks a stale unhealthy too — the interesting fact is that nothing has finished", () => {
+  test("overdue outranks a stale unhealthy too — the interesting fact is that nothing has been written since", () => {
     const doc = roundHealthDocument("yrd-service", stuckStop, INTERVAL, NOW)
     expect(doc.error?.code).toBe("queue-round-stuck")
-    const overdue = believableHealthDocument(doc, at(INTERVAL + ROUND_BUDGET_MS + 1))
+    const overdue = believableHealthDocument(doc, at(WINDOW + 1))
     expect(overdue.error?.code).toBe("queue-round-overdue")
   })
 
@@ -203,6 +206,26 @@ describe("a document expires", () => {
   test("an unparseable deadline is passed through rather than guessed at", () => {
     const doc = { ...written(INTERVAL), facts: { writtenAt: "x", staleAfter: "not a date" } }
     expect(believableHealthDocument(doc, at(999_999_999))).toEqual(doc)
+  })
+
+  // R5 (@i/4-supervision/24523). Only the service writes this document. A page
+  // promising that ANY finished round clears it sends its reader to run one by
+  // hand, and a hand `yrd queue run` writes nothing here, so the page stands and
+  // the reader concludes the queue itself is broken.
+  test("the overdue page says a hand yrd queue run does not write this document", () => {
+    // Written out rather than built, so the deadline is this test's and not a builder's formula.
+    const doc = {
+      schema: QUEUE_HEALTH_SCHEMA,
+      service: "yrd-service",
+      state: "healthy",
+      verdict: { kind: "running" },
+      facts: { writtenAt: NOW.toISOString(), staleAfter: at(INTERVAL).toISOString(), stopped: null },
+    } as const
+    const overdue = believableHealthDocument(doc, at(INTERVAL + 1))
+    expect(overdue.error?.code).toBe("queue-round-overdue")
+    const body = overdue.error?.resolution.join("\n") ?? ""
+    expect(body).toMatch(/a hand `yrd queue run` does not write this document/iu)
+    expect(body).not.toContain("any round finishes")
   })
 })
 

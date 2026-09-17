@@ -63,9 +63,10 @@ export default {
         // The declared health probe (2026-09-11). M7 rejected a probe on
         // 2026-09-03 as noise with a SECOND OPINION, and that objection is
         // answered rather than overruled: `queue health` re-derives nothing.
-        // It reads the document the loop itself wrote at the end of its last
-        // round, so there is exactly one opinion and it is the loop's. No
-        // network, no declaration read, no judgement of the queue.
+        // It reads the document the loop itself last wrote — as it started, at
+        // a round's end, or on the heartbeat that restates it between — so
+        // there is exactly one opinion and it is the loop's. No network, no
+        // declaration read, no process census, no judgement of the queue.
         //
         // This is where the stuck ALARM lives. A stuck change stops the line —
         // the queue pauses itself naming it — and the service stays up holding

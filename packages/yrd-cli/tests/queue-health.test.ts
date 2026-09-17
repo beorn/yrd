@@ -9,16 +9,18 @@
  *           the state and the exit code agreeing
  */
 
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import {
+  believableHealthDocument,
+  HEARTBEAT_GRACE_MS,
+  HEARTBEAT_INTERVAL_MS,
   QUEUE_HEALTH_DOCUMENT,
   QUEUE_HEALTH_SCHEMA,
-  ROUND_BUDGET_MS,
-  queueHealthExitCode,
   roundHealthDocument,
+  type QueueHealthDocument,
 } from "@yrd/queue-core"
 import { queueHealthCommand, readQueueHealth, SERVICE } from "../src/queue-health.ts"
 import type { YrdCliIO } from "../src/types.ts"
@@ -128,223 +130,20 @@ describe("the declared health probe", () => {
 })
 
 /**
- * @failure  A round hangs, the loop stops writing, and the probe keeps printing
- *           the last round's `healthy` — so the supervisor never pages and a
- *           dead queue reads exactly like a working one (@cto follow-up F1,
- *           2026-09-11). The end-to-end half: the probe must apply the
- *           document's own deadline, not just possess it.
+ * @failure  The writer stops writing, and the probe keeps printing its last
+ *           `healthy` — so the supervisor never pages and a dead queue reads
+ *           exactly like a working one (@cto follow-up F1, 2026-09-11). The
+ *           end-to-end half: the probe must apply the document's own deadline,
+ *           one heartbeat plus grace from the write, not just possess it.
  * @level    l1
  */
 describe("the probe applies the document's deadline", () => {
-  // @failure An open round pages throughout a long, journal-silent check.
-  // @level l2 — real child holding the round's own worktree
-  // @consumer Hab's overdue page; a live loop PID alone must not suppress it.
-  it("keeps a journal-silent round open only while its worktree has a live process", async () => {
-    const dir = workdir()
-    const id = "q-20260911T120100000Z-12345678"
-    const tree = join(dir, "worktrees", id, "merge")
-    mkdirSync(tree, { recursive: true })
-    mkdirSync(join(dir, "logs"))
-    const journal = join(dir, "logs", `${id}.jsonl`)
-    writeFileSync(journal, `${JSON.stringify({ kind: "run", target: "main", run: id, at: NOW.toISOString() })}\n`)
-    // A newer submission can finish while this older merge round is running.
-    writeFileSync(join(dir, "logs", "q-20260911T120200000Z-abcdef12.jsonl"), "{}\n")
-    utimesSync(journal, NOW, NOW)
-    writeFileSync(join(dir, "worktrees", id, ".pid"), String(process.pid))
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
-    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
-    const child = Bun.spawn([process.execPath, "-e", 'console.log("ready"); setInterval(() => {}, 1000)'], {
-      cwd: tree,
-      stdout: "pipe",
-      stderr: "inherit",
-    })
-    try {
-      const reader = child.stdout.getReader()
-      await reader.read()
-      reader.releaseLock()
-      const health = await readQueueHealth(dir, SERVICE, late)
-      expect(health.state).toBe("healthy")
-      expect(health.facts?.activeRound).toBe(id)
-      writeFileSync(journal, "{}\n")
-      const unreadable = await readQueueHealth(dir, SERVICE, late)
-      expect(unreadable.state).toBe("unknown")
-      expect(unreadable.error?.cause).toContain(journal)
-    } finally {
-      child.kill()
-      await child.exited
-    }
-    const ended = await readQueueHealth(dir, SERVICE, late)
-    // Was `toContain(["queue-round-overdue", "queue-round-unobserved"])`: the
-    // code depended on whether this host's census happened to be complete, and
-    // on a host with a systemd user session it never is. Since 24665 the verdict
-    // no longer rides on that, so the expectation is one code again.
-    expect(ended.error?.code).toBe("queue-round-overdue")
-    expect(ended.facts?.activeRound).toBeUndefined()
-    expect(ended.error?.cause).toContain(join(dir, "worktrees"))
-  })
-
-  /**
-   * @failure  A run threw in its Git preamble, before it could write its run
-   *           header. The probe found the round overdue, found no live process
-   *           holding a worktree (the dead run never claimed one), and reported
-   *           the generic "no live process holds a round worktree" — a tolerated
-   *           absence. The journal that names the failing Git call was sitting
-   *           right there, unread (@i/10-yrd/24470 AC2).
-   * @level    l1 (a directory and two files)
-   * @consumer Hab's page: "the queue died before it could start a round" and
-   *           "a round is hung" need different hands.
-   */
-  it("names a run that died in its Git preamble, distinct from a malformed journal", async () => {
-    const dir = workdir()
-    const id = "q-20260911T120100000Z-deadbeef"
-    mkdirSync(join(dir, "logs"), { recursive: true })
-    // An empty census root: the run threw before it claimed a worktree, so
-    // nothing holds one and the round is definitively over.
-    mkdirSync(join(dir, "worktrees"), { recursive: true })
-    const journal = join(dir, "logs", `${id}.jsonl`)
-    // 2147483647 is the largest pid Linux can hand out and is not a live one.
-    writeFileSync(
-      journal,
-      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: 2_147_483_647 })}\n` +
-        `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: join(dir, "logs", id, "git", "1.stdout.bin.json") })}\n`,
-    )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
-    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
-    const health = await readQueueHealth(dir, SERVICE, late)
-    expect(health.error?.code).toBe("queue-round-unstarted")
-    expect(health.state).toBe("unhealthy")
-    // It names the journal, so the reader goes straight to the failing Git row,
-    // and the evidence it actually took rather than one it could have.
-    expect(health.error?.cause).toContain(journal)
-    expect(health.error?.cause).toContain("pid 2147483647) is not running")
-  })
-
-  /**
-   * @failure  THE FALSE ALARM. A run claims its worktree only after the whole
-   *           Git preamble, so for the entire window this state exists in there
-   *           is no worktree and no `.pid` file. Deriving "it died" from that
-   *           absence pages `unhealthy`/exit 2 about a run three seconds into a
-   *           perfectly healthy preamble (@i/10-yrd/24470, caught in review).
-   */
-  it("will not call a run unstarted while its own runner is still executing", async () => {
-    const dir = workdir()
-    const id = "q-20260911T120100000Z-aaaabbbb"
-    mkdirSync(join(dir, "logs"), { recursive: true })
-    mkdirSync(join(dir, "worktrees"), { recursive: true })
-    // Header, one Git row, no queue record, no worktree — and the runner it
-    // names is this very process, so the round is mid-preamble, not over.
-    writeFileSync(
-      join(dir, "logs", `${id}.jsonl`),
-      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: process.pid })}\n` +
-        `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: "x" })}\n`,
-    )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
-    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
-    const health = await readQueueHealth(dir, SERVICE, late)
-    expect(health.error?.code).not.toBe("queue-round-unstarted")
-  })
-
-  // A journal from before the header-first writer carries no pid, so the older
-  // and weaker evidence still answers — and the document says which it used.
-  it("falls back to worktree absence for a legacy journal, and says so", async () => {
-    const dir = workdir()
-    const id = "q-20260911T120100000Z-ccccdddd"
-    mkdirSync(join(dir, "logs"), { recursive: true })
-    mkdirSync(join(dir, "worktrees"), { recursive: true })
-    writeFileSync(
-      join(dir, "logs", `${id}.jsonl`),
-      `${JSON.stringify({ kind: "git", run: id, at: NOW.toISOString(), evidence: "x" })}\n`,
-    )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
-    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
-    const health = await readQueueHealth(dir, SERVICE, late)
-    expect(health.error?.code).toBe("queue-round-unstarted")
-    expect(health.error?.cause).toContain("names no runner pid")
-  })
-
-  // The negative control on the same distinction: a journal whose records
-  // cannot be read is a WRITER DEFECT, not a run that died early, and it keeps
-  // the `unparsed` verdict and exit 3 it has always had.
-  it("keeps an unreadable journal unparsed rather than calling it unstarted", async () => {
-    const dir = workdir()
-    const id = "q-20260911T120100000Z-12345678"
-    mkdirSync(join(dir, "logs"), { recursive: true })
-    mkdirSync(join(dir, "worktrees"), { recursive: true })
-    writeFileSync(join(dir, "logs", `${id}.jsonl`), "{}\n")
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
-    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
-    const health = await readQueueHealth(dir, SERVICE, late)
-    expect(health.error?.code).not.toBe("queue-round-unstarted")
-  })
-
-  /**
-   * @failure  On any host with a systemd user session, three same-uid processes
-   *           are non-dumpable every time, so the holder census is never
-   *           `complete` and the completeness check threw FIRST: every overdue
-   *           round read `queue-round-unobserved` / unparsed / exit 3 instead of
-   *           `queue-round-overdue` / exit 2. The verdict was unreachable
-   *           exactly when it mattered (@i/10-yrd/b-wrong/24665).
-   * @level    l1 against the real census of this host's own process table
-   * @consumer Hab's page, which gates on the state and the exit code agreeing.
-   */
-  it("reads an overdue round as overdue whether or not the holder census is complete", async () => {
-    const dir = workdir()
-    const id = "q-20260911T120100000Z-eeeeffff"
-    mkdirSync(join(dir, "logs"), { recursive: true })
-    mkdirSync(join(dir, "worktrees"), { recursive: true })
-    // A finished run: header, queue record, so it is neither unstarted nor in
-    // its preamble. Its runner is long gone.
-    writeFileSync(
-      join(dir, "logs", `${id}.jsonl`),
-      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: 2_147_483_647 })}\n` +
-        `${JSON.stringify({ kind: "queue", run: id, at: NOW.toISOString(), queue: "main on origin" })}\n`,
-    )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
-    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
-    const health = await readQueueHealth(dir, SERVICE, late)
-    expect(health.error?.code).toBe("queue-round-overdue")
-    expect(health.state).toBe("unhealthy")
-    expect(queueHealthExitCode(health.state)).toBe(2)
-    // The incompleteness survives as a FACT rather than as the verdict, and the
-    // cause carries the census's own count of what it could not read. On a host
-    // with a systemd user session that count is nonzero, which is the case this
-    // bead exists for; the assertion holds either way.
-    const coverage = health.facts?.coverage as { complete: boolean; processes?: { sourceDenied: number } } | undefined
-    expect(coverage).toBeDefined()
-    if (coverage?.complete === false) {
-      expect(health.error?.cause).toContain(`${String(coverage.processes?.sourceDenied ?? 0)} same-uid process`)
-    }
-    // And the runner the header names is reported, alive or not.
-    expect(health.error?.cause).toContain("2147483647")
-  })
-
-  // The other half of the same claim: a runner that IS alive but has stopped
-  // making progress is still overdue. Liveness explains the fault; it never
-  // excuses it.
-  it("still reads overdue when the runner named by the header is alive", async () => {
-    const dir = workdir()
-    const id = "q-20260911T120100000Z-11112222"
-    mkdirSync(join(dir, "logs"), { recursive: true })
-    mkdirSync(join(dir, "worktrees"), { recursive: true })
-    writeFileSync(
-      join(dir, "logs", `${id}.jsonl`),
-      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: process.pid })}\n` +
-        `${JSON.stringify({ kind: "queue", run: id, at: NOW.toISOString(), queue: "main on origin" })}\n`,
-    )
-    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(roundHealthDocument(SERVICE, undefined, 0, NOW)))
-    const late = new Date(NOW.getTime() + ROUND_BUDGET_MS + 60_000)
-    const health = await readQueueHealth(dir, SERVICE, late)
-    expect(health.error?.code).toBe("queue-round-overdue")
-    expect(health.state).toBe("unhealthy")
-    expect(health.error?.cause).toContain("is still running")
-  })
-
   it("prints OVERDUE and exits 2 when the loop stopped writing", async () => {
     const dir = workdir()
     const written = roundHealthDocument(SERVICE, undefined, 120_000, NOW)
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(written))
-    // Long past the instant the loop itself declared its next round due by.
-    const late = new Date(NOW.getTime() + 120_000 + ROUND_BUDGET_MS + 60_000)
+    // A minute past one heartbeat plus grace from the write: the writer has stopped writing.
+    const late = new Date(NOW.getTime() + HEARTBEAT_INTERVAL_MS + HEARTBEAT_GRACE_MS + 60_000)
     const run = capture()
     expect(await queueHealthCommand(dir, SERVICE, run.io, late)).toBe(2)
     const printed = JSON.parse(run.stdout()) as { state: string; error: { code: string; cause: string } }
@@ -353,14 +152,60 @@ describe("the probe applies the document's deadline", () => {
     expect(printed.error.cause).toContain(NOW.toISOString())
   })
 
-  // The control: inside the deadline the stored verdict stands unaltered, so
+  // The control: through the deadline the stored verdict stands unaltered, so
   // the expiry cannot be mistaken for a probe that distrusts every document.
   it("prints the stored verdict unchanged while the deadline holds", async () => {
     const dir = workdir()
     const written = roundHealthDocument(SERVICE, undefined, 120_000, NOW)
     writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(written))
     const run = capture()
-    expect(await queueHealthCommand(dir, SERVICE, run.io, new Date(NOW.getTime() + 60_000))).toBe(0)
+    const deadline = new Date(NOW.getTime() + HEARTBEAT_INTERVAL_MS + HEARTBEAT_GRACE_MS)
+    expect(await queueHealthCommand(dir, SERVICE, run.io, deadline)).toBe(0)
     expect(JSON.parse(run.stdout())).toEqual(written)
+  })
+
+  /**
+   * @failure  Past the deadline the probe formed a SECOND OPINION: a process
+   *           census over the round worktrees and a bare `kill -0` on the pid a
+   *           journal names. That is a second liveness reader beside the
+   *           supervisor's, and its EPERM means dead where hab's means alive
+   *           (@i/4-supervision/24523 D1, @cto amendment 2: deleted, not demoted
+   *           to text). Overdue now means the writer stopped writing, and the
+   *           supervisor alone asks whether that writer lives.
+   * @level    l1 (a directory and three files)
+   * @consumer hab, which gates a start on the writer's identity and relays this
+   *           verdict as the page
+   */
+  it("relays the stored overdue verdict unchanged, consulting no process census and no kill -0", async () => {
+    const dir = workdir()
+    const id = "q-20260911T120100000Z-11112222"
+    // Everything a second opinion would reach for: a round worktree, and a
+    // journal whose header names a runner that is alive — this very process.
+    mkdirSync(join(dir, "worktrees", id), { recursive: true })
+    mkdirSync(join(dir, "logs"), { recursive: true })
+    writeFileSync(
+      join(dir, "logs", `${id}.jsonl`),
+      `${JSON.stringify({ kind: "run", run: id, at: NOW.toISOString(), target: "main", pid: process.pid })}\n` +
+        `${JSON.stringify({ kind: "queue", run: id, at: NOW.toISOString(), queue: "main on origin" })}\n`,
+    )
+    // Written out rather than built, so the deadline is this test's and not a builder's formula.
+    const stored: QueueHealthDocument = {
+      schema: QUEUE_HEALTH_SCHEMA,
+      service: SERVICE,
+      state: "healthy",
+      verdict: { kind: "running" },
+      facts: {
+        writtenAt: NOW.toISOString(),
+        staleAfter: new Date(NOW.getTime() + 30_000).toISOString(),
+        stopped: null,
+      },
+    }
+    writeFileSync(join(dir, QUEUE_HEALTH_DOCUMENT), JSON.stringify(stored))
+    const late = new Date(NOW.getTime() + 90_000)
+    using kill = vi.spyOn(process, "kill")
+    // The probe's answer IS the document's own deadline applied to it: nothing
+    // appended to the cause, no resolution swapped, no state re-derived.
+    expect(await readQueueHealth(dir, SERVICE, late)).toEqual(believableHealthDocument(stored, late))
+    expect(kill).not.toHaveBeenCalled()
   })
 })
