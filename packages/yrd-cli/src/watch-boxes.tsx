@@ -142,8 +142,7 @@ export function RunnerBox({
         )
       : []
   // 24470: the run threw before it reached the queue it was for. Name the state
-  // and point at the evidence — the journal's last Git row IS the failing call,
-  // which is a different hand from the one `hab ps` sends you to for silence.
+  // and point at the evidence — the journal's last Git row IS the failing call.
   const unstartedRows =
     latest !== undefined && health === "unstarted"
       ? boundedHangingLines(
