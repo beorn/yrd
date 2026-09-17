@@ -1482,7 +1482,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(W.order.word.trim() !== "" && header.includes(W.order.word)).toBe(true)
   })
 
-  it("draws a pushed branch nobody submitted as a draft row, with its head commit's author and time, and counts drafts on their own, never among the changes waiting", async () => {
+  it("draws a pushed branch nobody submitted as a draft row, with its head commit's author and time and no duration, and counts drafts on their own, never among the changes waiting", async () => {
     const W = await words()
     const committedAt = ago(2 * 60 * MINUTE)
     const rows: WatchRow[] = [
@@ -1508,9 +1508,11 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       by: / ada\b/u.test(line),
       clock: line.trimStart().startsWith(clock(committedAt, { seconds: true })),
       counted: segments.slice(1).some((segment) => segment.startsWith(`1 ${W.draft.word}`)),
+      // The duration cell is the row's last (A2-set-v2 item 5): a draft leaves it empty, so its author ends the row.
+      noDuration: line.trimEnd().endsWith(" ada"),
       waiting: segments[0] === `1 ${W.waiting.word}: 1 ${W.submitted.word}`,
       word: line.includes(` ${W.draft.word} `),
-    }).toEqual({ by: true, clock: true, counted: true, waiting: true, word: true })
+    }).toEqual({ by: true, clock: true, counted: true, noDuration: true, waiting: true, word: true })
   })
 
   it("draws no child-observation line for the native contract, which has nothing to say every round", async () => {
