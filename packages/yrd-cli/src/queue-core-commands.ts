@@ -43,6 +43,7 @@ import {
   readJournals,
   readHistories,
   readQueue,
+  readRunLog,
   remoteUrl,
   subjects,
   targetName,
@@ -93,6 +94,7 @@ import {
   type PauseRecord,
   type RuntimeGitlinkOff,
   type ChangeRecord,
+  type Change,
   type RoundLock,
   type RoundLockWait,
   type Row,
@@ -198,6 +200,19 @@ export type CoreQueueCommand =
   | Readonly<{ command: "withdraw"; branch: string; by: string; reason?: string }>
   | Readonly<{ command: "run" }>
   | Readonly<{
+      command: "merge"
+      branch: string
+      submitter: string
+      issue?: string
+      rebase?: boolean
+      /**
+       * The author's checkout, which a change that is not open is submitted
+       * from; absent when the command runs outside a clone, which can merge
+       * only a change already in line.
+       */
+      author?: Readonly<{ repo: string; selection: GitSelection; remote?: string }>
+    }>
+  | Readonly<{
       command: "up"
       intervalSeconds?: number
       stop?: AbortSignal
@@ -291,6 +306,7 @@ const NAMED: Readonly<Record<CoreQueueCommand["command"], string>> = {
   check: "check",
   pause: "queue pause",
   list: "queue list",
+  merge: "merge",
   run: "queue run",
   show: "queue show",
   stats: "queue stats",
@@ -400,12 +416,13 @@ export async function coreQueueCommand(
    * cannot be read — is stuck, has no change to stop the line on, and has
    * already said so.
    */
-  const oneRound = async (declared: CapturedDeclaration): Promise<QueueRunOutcome | undefined> => {
+  const oneRound = async (declared: CapturedDeclaration, only?: Change): Promise<QueueRunOutcome | undefined> => {
     let outcome: QueueRunOutcome
     try {
       outcome = await queueRun({
         ...runOptions(repo, declared, workdir, selection, options.env, options.log, options.populateReference),
-        foreground: request.command === "run",
+        foreground: request.command === "run" || request.command === "merge",
+        ...(only === undefined ? {} : { only }),
       })
     } catch (error) {
       stuck(`the queue run could not judge: ${error instanceof Error ? error.message : String(error)}`)
@@ -444,7 +461,7 @@ export async function coreQueueCommand(
    * round-runner — `queue up`, `queue run` and `merge` — runs its round
    * through here, and this is the whole order, with no branch for whether it
    * waited: take the lock, read the declaration, `before` (the service's
-   * reload), run the round, release.
+   * reload), run the round, release. `only` scopes the round to one change.
    *
    * The declaration is read under the lock, so a round never judges a target
    * captured before it waited. The lock is released before the caller does
@@ -459,6 +476,7 @@ export async function coreQueueCommand(
   const lockedRound = async (
     round: Readonly<{
       before?: (declared: CapturedDeclaration) => Promise<YrdCliExitCode | undefined>
+      only?: Change
       stallMs?: number
       stop?: AbortSignal
       waiting?: Readonly<{
@@ -506,10 +524,56 @@ export async function coreQueueCommand(
       if (declared === undefined) return stuck(`${targetLabel} no longer carries a .yrd.yml`)
       const before = await round.before?.(declared)
       if (before !== undefined) return before
-      const outcome = await oneRound(declared)
+      const outcome = await oneRound(declared, round.only)
       return outcome === undefined ? 2 : { declared, outcome }
     } finally {
       lock.release()
+    }
+  }
+
+  /** Where one change stands now, and the stop that same reading derives. */
+  const readChangeNow = async (change: Change) => {
+    const target = await readRemoteCommit(git, config.target.remote, `refs/heads/${config.target.branch}`)
+    if (target === undefined) throw new Error(`the target ${targetLabel} is not at ${config.target.remote}`)
+    const now = await readQueue(git, config.target.remote, config.target.branch, target)
+    const entry = now.changes.find(
+      (candidate) => candidate.change.branch === change.branch && candidate.change.head === change.head,
+    )
+    if (entry === undefined) {
+      throw new Error(`${changeName(change)} is not at ${targetLabel} after its round: its change ref is gone`)
+    }
+    return { entry, stop: now.stop }
+  }
+
+  /**
+   * Why a round that worked one change left it in line, from that round's own
+   * journal: the lease that moved when the merge was pushed, naming which one,
+   * or that the round never reached it.
+   */
+  const notMerged = (outcome: QueueRunOutcome, change: Change): string => {
+    const decided = readRunLog(join(workdir, "logs"), outcome.run).findLast(
+      (record) =>
+        record.kind === "change" &&
+        record.branch === change.branch &&
+        record.head === change.head &&
+        typeof record.reason === "string",
+    )
+    const saw = typeof decided?.saw === "string" && decided.saw !== "gone" ? ` to ${decided.saw.slice(0, 12)}` : ""
+    switch (decided?.reason) {
+      case "target-moved":
+        return `the target ${targetLabel} moved${saw} after this round read it at ${outcome.base.slice(0, 12)}, so the merge was not pushed`
+      case "branch-moved":
+        return `the branch ${change.branch} moved off ${change.head.slice(0, 12)} after this round read it, so the merge was not pushed`
+      case "change-ref-moved":
+        return "the change's own record ref moved after this round read it, so the merge was not pushed"
+      case "pause-moved":
+        return "the queue's pause record moved after this round read it, so the merge was not pushed"
+      case undefined:
+        return outcome.stopped === undefined
+          ? "this round did not reach it"
+          : `this round stopped before it: ${outcome.stopped.says}`
+      default:
+        return `this round left it there (${String(decided?.reason)})`
     }
   }
 
@@ -635,6 +699,111 @@ export async function coreQueueCommand(
       // said by `stuck()` above (@i/10-yrd/24141 AC1).
       const ran = await lockedRound()
       return typeof ran === "number" ? ran : ran.outcome.exitCode
+    }
+    case "merge": {
+      // `yrd merge <branch>`: the branch's change merged NOW, ahead of the line
+      // and on a stopped line too, in a foreground round that judges and merges
+      // that change and no other (ADR-0015 decision 5).
+      //
+      // Merge is submit, idempotent. A change already open is merged on its
+      // standing, so a checked verdict is kept rather than dropped by a
+      // same-head retry. A merged change is an answer: exit 0, nothing written
+      // and no round run. Anything else is submitted first, from the author's
+      // checkout, exactly as `yrd submit` would.
+      const { branch } = request
+      const author =
+        request.author === undefined
+          ? undefined
+          : gitIn(request.author.repo, undefined, request.author.selection, { env: options.env })
+      const local = author === undefined ? undefined : await refAt(author, `refs/heads/${branch}`)
+      const read = await readQueue(git, config.target.remote, config.target.branch, captured.oid)
+      const own = read.changes.filter((entry) => entry.change.branch === branch)
+      // A local branch names its head's change; with none, the change of this
+      // branch that holds a place in line is the one.
+      const standing =
+        local === undefined
+          ? own.find((entry) => inLineState(entry.reading.state))
+          : own.find((entry) => entry.change.head === local)
+      if (standing?.reading.state === "merged") {
+        emit(
+          io,
+          options.json,
+          { branch, change: changeName(standing.change), exitCode: 0, state: "merged" },
+          `${changeName(standing.change)} is already merged into ${targetName(config.target)}; nothing to merge`,
+        )
+        return 0
+      }
+      let change: Change
+      if (standing !== undefined && inLineState(standing.reading.state)) {
+        change = { branch, head: standing.change.head }
+      } else {
+        if (author === undefined || request.author === undefined) {
+          io.stderr(
+            `yrd: merge needs ${branch} submitted, and no change of it is in line on ${targetName(config.target)}; ` +
+              `submitting needs a clone that has ${branch}: run yrd merge ${branch} inside one\n`,
+          )
+          return 2
+        }
+        const remote = request.author.remote ?? "origin"
+        const submitted = await submit(author, remote, {
+          branch,
+          submitter: request.submitter,
+          target: { branch: config.target.branch, remote },
+          ...(request.issue === undefined ? {} : { issue: request.issue }),
+          ...(request.rebase === true ? { rebase: true } : {}),
+        })
+        // The stop the submit was accepted under is not echoed here: this
+        // command does not wait for it to lift, and the stop that still stands
+        // once its rounds are done is said below.
+        const { stop: _acceptedUnder, ...accepted } = submitted
+        emit(
+          io,
+          options.json,
+          { ...accepted, ...issueOutput(io, branch, submitted.issue) },
+          `${submitted.retry ? "retried" : "submitted"} ${branch} at ${submitted.head.slice(0, 12)} to ${targetName(config.target)}; ${freshnessLine(submitted.targetHead)}`,
+        )
+        change = { branch, head: submitted.head }
+      }
+
+      const merging = await lockedRound({ only: change })
+      if (typeof merging === "number") return merging
+      let after = await readChangeNow(change)
+      // A stopped line waits on a stuck change, and a change merged past it may
+      // be the repair it waited for: its head is judged once more, in a round
+      // of its own under a fresh declaration. Its verdict is its own; this
+      // command's exit stays the named change's.
+      const waitsOn = after.stop?.cause === "stuck" ? after.stop.change : undefined
+      if (after.entry.reading.state === "merged" && waitsOn !== undefined && waitsOn.branch !== branch) {
+        await lockedRound({ only: waitsOn })
+        after = await readChangeNow(change)
+      }
+
+      // A stop that still stands is said, with the command that merges what it
+      // waits on: the named change's exit never hides a stopped line.
+      if (after.stop !== undefined) {
+        const stuckOn = after.stop.cause === "stuck" ? after.stop.change : undefined
+        io.stderr(
+          `yrd: the line is still stopped — ${pauseLine(after.stop)}; ` +
+            (stuckOn === undefined ? "" : `once it is repaired, merge it with yrd merge ${stuckOn.branch}; `) +
+            `${liftLine(after.stop, config.target.remote, config.target.branch)}\n`,
+        )
+      }
+      const state = after.entry.reading.state
+      const ending = endingCode([state])
+      emit(
+        io,
+        options.json,
+        { branch, change: changeName(change), exitCode: ending ?? 2, state, stopped: stopFact(after.stop) },
+        `${changeName(change)} ${state}`,
+      )
+      if (ending !== undefined) return ending
+      // Still in line: checked and not merged, or never reached. Exit 2 and no
+      // retry, naming why and the command that tries again.
+      io.stderr(
+        `yrd: ${changeName(change)} is still in line, ${state}: ${notMerged(merging.outcome, change)}; ` +
+          `it keeps its place and the queue merges it in turn, or run yrd merge ${branch} again\n`,
+      )
+      return 2
     }
     case "up": {
       // The service: the same round on a loop, what hab runs. A STUCK CHANGE
@@ -1230,7 +1399,7 @@ export async function coreQueueCommand(
         else io.stdout(`${stampRound(await page(one), one.queue, new Date())}\n`)
         if (one.observation.contract === "root-v1" && one.observation.outcome === "invalid") return 2
         if (selected) {
-          const ending = endingCode(one.rows)
+          const ending = endingCode(one.rows.map((row) => row.row.state))
           if (ending !== undefined) return ending
         }
         if (stopped()) return 0
@@ -2114,6 +2283,11 @@ function readOutput(check: CheckView): CheckPanel {
   }
 }
 
+/** Whether a change in this state holds a place in line: queued, checked or stuck. */
+function inLineState(state: Row["state"]): boolean {
+  return state === "queued" || state === "checked" || state === "stuck"
+}
+
 /** The holder of the round lock, as a waiter names it. */
 function lockHolderLine(wait: RoundLockWait): string {
   const { holder } = wait
@@ -2143,8 +2317,7 @@ function lockWaitFact(wait: RoundLockWait): Readonly<Record<string, unknown>> {
  * withdrawn change stands on the failed rung: it did not land, and the next
  * move is its submitter's (@i/10-yrd/24492).
  */
-function endingCode(rows: readonly WatchRow[]): YrdCliExitCode | undefined {
-  const states = rows.map((row) => row.row.state)
+function endingCode(states: readonly Row["state"][]): YrdCliExitCode | undefined {
   if (states.some((state) => state === "queued" || state === "checked")) return undefined
   if (states.some((state) => state === "stuck")) return 2
   if (states.some((state) => state === "failed" || state === "withdrawn")) return 1

@@ -49,12 +49,14 @@ import {
   type ChangeRecord,
   type Git,
   type QueueHealthDocument,
+  type QueueRunOutcome,
   type GitRunner,
 } from "@yrd/queue-core"
 import { createLogger, type ConditionalLogger, type Event } from "loggily"
 import { runYrdProcess } from "../src/cli.ts"
 import { coreQueueCommand, openDetail, readListing } from "../src/queue-core-commands.ts"
 import { readQueueHealth, SERVICE } from "../src/queue-health.ts"
+import { resolveQueueLocation } from "../src/queue-location.ts"
 import type { YrdCliExitCode, YrdCliIO } from "../src/types.ts"
 import { installSelectedGit } from "./support/selected-git.ts"
 
@@ -2869,9 +2871,7 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
  *           stopped line never reaches; the one verb that runs work out of turn,
  *           `yrd queue run`, takes the whole line in order; so the operator
  *           either resumes a queue that is still broken or pushes the fix around
- *           the queue. And withdraw, the other escape, is spelled one level
- *           deeper than submit (ADR-0015 decision 5: three user verbs — submit,
- *           merge, withdraw — and no fourth).
+ *           the queue.
  * @level    l2 (a real remote and a clone; the CLI driven as the shell runs it,
  *           argv in and exit code out, with the queue's workdir named inside the
  *           world)
@@ -2879,7 +2879,7 @@ describe("an unreachable remote is recorded as its own reason (@i/10-yrd/24486)"
  *           queue" (2026-09-16) · every seat unsticking a stopped line · every
  *           submitter whose change waits behind a stuck one
  */
-describe("yrd merge and yrd withdraw, the verbs beside submit (ADR-0015 decision 5)", () => {
+describe("yrd merge, the verb beside submit (ADR-0015 decision 5)", () => {
   type Ran = Readonly<{ exitCode: YrdCliExitCode; stdout: string; stderr: string; report: string }>
 
   /** The CLI as the shell runs it, standing in the world's clone: argv in, exit code and both streams out. */
@@ -3115,43 +3115,53 @@ describe("yrd merge and yrd withdraw, the verbs beside submit (ADR-0015 decision
     expect(merged.exitCode, merged.report).toBe(0)
   })
 
-  // ACCEPTANCE (chief, 2026-09-16: withdraw goes top-level beside submit and
-  // merge, `yrd queue withdraw` kept): one verb, two spellings, never two
-  // implementations — the same ending, the same record, the same answer, the
-  // same refusal and the same options.
-  it("yrd withdraw <branch> ends a change exactly as yrd queue withdraw does", async () => {
+  // ACCEPTANCE (Q6): a merge that loses the target at the lease is not retried
+  // by this command. It exits 2, says what moved, and names the command that
+  // tries again; the change keeps its place and its verdict.
+  it("when the target moves at the lease, yrd merge exits 2 naming what moved and the command to run again", async () => {
     const w = await verbWorld()
-    const oneHead = await submitted(w, "task/one", "one.txt")
-    const twoHead = await submitted(w, "task/two", "two.txt")
-    const flags = ["--reason", "superseded by a later change", "--notify", "@chief", "--json"]
-
-    const canonical = await yrd(w, "queue", "withdraw", "task/one", ...flags)
-    const alias = await yrd(w, "withdraw", "task/two", ...flags)
-
-    expect(canonical.exitCode, canonical.report).toBe(0)
-    expect(alias.exitCode, alias.report).toBe(canonical.exitCode)
-    expect(await kindsOf(w, "task/two", twoHead)).toEqual(await kindsOf(w, "task/one", oneHead))
-    const ending = async (branch: string, head: string) => {
-      const record = (await recordsAt(w, branch, head)).at(-1)
-      return { by: record && trailer(record, "By"), kind: record?.kind, note: record && trailer(record, "Note") }
-    }
-    expect(await ending("task/two", twoHead)).toEqual(await ending("task/one", oneHead))
-    const answer = (ran: Ran) => {
-      const parsed = JSON.parse(ran.stdout) as { branch: string; withdrawn: readonly Record<string, unknown>[] }
-      return { ...parsed, branch: undefined, withdrawn: parsed.withdrawn.map((one) => Object.keys(one).sort()) }
-    }
-    expect(answer(alias)).toEqual(answer(canonical))
-
-    const canonicalAgain = await yrd(w, "queue", "withdraw", "task/one", "--json")
-    const aliasAgain = await yrd(w, "withdraw", "task/two", "--json")
-    expect(canonicalAgain.exitCode, canonicalAgain.report).toBe(1)
-    expect(aliasAgain.exitCode, aliasAgain.report).toBe(canonicalAgain.exitCode)
-
-    const optionsOf = (help: string): string[] =>
-      [...help.matchAll(/^\s+(--[a-z-]+)/gmu)].map((match) => match[1] ?? "").sort()
-    expect(optionsOf((await yrd(w, "withdraw", "--help")).stdout)).toEqual(
-      optionsOf((await yrd(w, "queue", "withdraw", "--help")).stdout),
+    // A commit made around the queue, ready to land on main.
+    const around = await branchWith(w, "around", "around.txt")
+    const head = await branchWith(w, "task/moved", "moved.txt")
+    const before = await mainAt(w)
+    // The window the lease exists for: the merge's own atomic push has reached
+    // the remote, its checks all passed and its reads are done, and main moves
+    // before the refs update. The remote's pre-receive hook lands the commit
+    // around the queue once, for the first push that moves main; that push of
+    // its own moves main too, and finds the mark.
+    const root = dirname(w.workdir)
+    const moved = join(root, "target-moved-at-the-lease")
+    const hook = join(root, "remote.git", "hooks", "pre-receive")
+    mkdirSync(dirname(hook), { recursive: true })
+    writeFileSync(
+      hook,
+      [
+        "#!/bin/sh",
+        "updates=$(cat)",
+        `printf '%s\\n' "$updates" | grep -q ' refs/heads/main$' || exit 0`,
+        `[ -e "${moved}" ] && exit 0`,
+        `touch "${moved}"`,
+        "env -u GIT_DIR -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \\",
+        `  git -C "${w.work}" push --quiet origin ${around}:refs/heads/main`,
+        "",
+      ].join("\n"),
     )
+    chmodSync(hook, 0o755)
+
+    const merged = await yrd(w, "merge", "task/moved")
+
+    // The instrument, before anything is concluded from it: the lease saw the
+    // move, and the target is the commit around the queue, not this merge.
+    expect(existsSync(moved), merged.report).toBe(true)
+    expect(await mainAt(w), merged.report).toBe(around)
+    expect(await onMain(w, head)).toBe(false)
+    expect(await kindsOf(w, "task/moved", head)).toEqual(["opened", "checked"])
+    expect(merged.stderr, merged.report).toContain(
+      `yrd: task/moved@${head} is still in line, checked: the target origin/main moved to ${around.slice(0, 12)} ` +
+        `after this round read it at ${before.slice(0, 12)}, so the merge was not pushed; `,
+    )
+    expect(merged.stderr, merged.report).toContain("or run yrd merge task/moved again")
+    expect(merged.exitCode, merged.report).toBe(2)
   })
 })
 
@@ -3288,4 +3298,118 @@ describe("one round at a time in a queue workdir (andon phase 2, the queue lock)
       await service.catch(() => undefined)
     }
   }, 30_000)
+
+  // THE SCENARIO THE LOCK IS FOR: the service is inside a round with a slow
+  // merge check, and a person merges another change beside it. The merge waits
+  // and names what it waits on, runs its round only once the service's round has
+  // ended, and its change is on the target before the service's next round
+  // begins. The service's hook awaits the merge: the service released its lock
+  // before the hook, and cannot start its next round until the hook returns.
+  it("a yrd merge beside the service waits out the service's round, and lands before the service's next one", async () => {
+    const w = await world()
+    await w.git(["config", "yrd.workdir", w.workdir])
+    const root = dirname(w.workdir)
+    const holding = join(root, "the-service-round-holds")
+    const entered = join(root, "the-slow-check-entered")
+    const slow = join(root, "slow.sh")
+    // A merge-phase check that holds the round merging task/first while `holding`
+    // exists, and says it began; every other merge it passes at once.
+    writeFileSync(
+      slow,
+      [
+        "#!/bin/sh",
+        "[ -f first.txt ] || exit 0",
+        `touch "${entered}"`,
+        `while [ -f "${holding}" ]; do sleep 0.05; done`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(slow, 0o755)
+    writeFileSync(holding, "")
+    await redeclare(w, `checks:\n  - slow:\n      run: ${slow}\n`)
+    const heads = new Map<string, string>()
+    for (const name of ["first", "second"]) {
+      await w.git(["checkout", "--quiet", "-b", `task/${name}`, "main"])
+      writeFileSync(join(w.work, `${name}.txt`), `${name}\n`)
+      await w.git(["add", `${name}.txt`])
+      await w.git(["commit", "--quiet", "-m", name])
+      heads.set(name, (await w.git(["rev-parse", "HEAD"])).trim())
+      await w.git(["checkout", "--quiet", "main"])
+    }
+    await submit(w.git, "origin", {
+      branch: "task/first",
+      submitter: "@dev/4",
+      target: { branch: "main", remote: "origin" },
+    })
+    const second = heads.get("second") ?? ""
+    const carries = async (commit: string, head: string): Promise<boolean> =>
+      (await w.git(["merge-base", head, commit])).trim() === head
+
+    // The service where `yrd merge` finds it: the queue's own clone and workdir.
+    const location = await resolveQueueLocation(w.work, undefined, process.env)
+    const stop = new AbortController()
+    const service = capture(w.work)
+    const merge = capture(w.work)
+    let merging: Promise<YrdCliExitCode> | undefined
+    const rounds: QueueRunOutcome[] = []
+    let merged: YrdCliExitCode | undefined
+    let landedBeforeNextRound: boolean | undefined
+    const running = coreQueueCommand(
+      location.repo,
+      service.io,
+      {
+        afterRound: async (outcome) => {
+          rounds.push(outcome)
+          if (rounds.length === 1) {
+            merged = await merging
+            const tip = await readRemoteCommit(w.git, "origin", "refs/heads/main")
+            landedBeforeNextRound = tip !== undefined && (await carries(tip, second))
+          } else {
+            stop.abort()
+          }
+        },
+        command: "up",
+        // Long, so the service's own cadence is never what lets the merge in.
+        intervalSeconds: 3600,
+        stop: stop.signal,
+      },
+      {
+        json: true,
+        populateReference: location.owned,
+        queue: location.queue,
+        selection: location.selection,
+        workdir: location.workdir,
+      },
+    )
+
+    // The service's round is inside its slow merge check, holding the lock.
+    await vi.waitFor(() => expect(existsSync(entered), service.stderr()).toBe(true), { timeout: 20_000 })
+    let settled = false
+    merging = runYrdProcess([process.execPath, "/usr/local/bin/yrd", "merge", "task/second"], merge.io).finally(() => {
+      settled = true
+    })
+    await vi.waitFor(
+      () => expect(settled || merge.stderr().includes("waiting for the round lock"), merge.stderr()).toBe(true),
+      { timeout: 20_000 },
+    )
+    const said = (): string =>
+      `--- service ---\n${service.stdout()}${service.stderr()}\n--- merge ---\n${merge.stdout()}${merge.stderr()}`
+    // Waiting, not merged beside the service's round, and saying whom it waits on.
+    expect(settled, said()).toBe(false)
+    expect(merge.stderr()).toMatch(/waiting for the round lock in .+: pid \d+ \(.+\) has held it since \d{4}-/u)
+    const tip = await readRemoteCommit(w.git, "origin", "refs/heads/main")
+    expect(tip !== undefined && (await carries(tip, second)), said()).toBe(false)
+
+    rmSync(holding)
+    expect(await running, said()).toBe(0)
+    expect(
+      rounds.map((round) => round.merged),
+      said(),
+    ).toEqual([["task/first"], []])
+    expect(merged, said()).toBe(0)
+    expect(landedBeforeNextRound, said()).toBe(true)
+    // The service's next round judged a target that already carried the merge.
+    expect(await carries(rounds[1]?.base ?? "", second), said()).toBe(true)
+  }, 60_000)
 })

@@ -2,10 +2,12 @@
  * The whole command surface ([plan](../../../../pm/@i/10-yrd/plan.md)
  * § The final design, Commands).
  *
- * The command surface is `yrd queue submit|run|up|pause|resume|list|stats|show`,
- * `yrd check`, `yrd env open|list`, with `yrd submit` and `yrd list` as the
- * aliases of the two used most, `yrd watch` as `queue list --watch`, and
- * `yrd bay` as `env`'s until flag day's word is retired. Every
+ * The command surface is
+ * `yrd queue submit|withdraw|run|up|pause|resume|list|stats|show|health`,
+ * `yrd merge`, `yrd check`, `yrd env open|list|close`, with `yrd submit` and
+ * `yrd list` as the aliases of the two used most, `yrd watch` as
+ * `queue list --watch`, and `yrd bay` as `env`'s until flag day's word is
+ * retired. Every
  * queue command is `@yrd/queue-core` through `coreQueueCommand`; nothing here
  * holds queue state, and nothing here parses `.yrd.yml` past the one line
  * that selects the core.
@@ -30,6 +32,7 @@ import { drainOutput } from "loggily"
 import type { CoreQueueCommand } from "./queue-core-commands.ts"
 import { closeEnvironment, listEnvironments, openEnvironment } from "./env-commands.ts"
 import { createYrdLogger, resolveYrdObservability, type YrdObservabilityFlags } from "./observability.ts"
+import { repositoryHere } from "./declaration.ts"
 import { resolveQueueLocation } from "./queue-location.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
@@ -49,6 +52,7 @@ type SubmitOptions = Readonly<{
   queue?: string
 }>
 type PauseOptions = Readonly<{ json?: boolean; notify?: string; queue?: string; reason?: string }>
+type MergeOptions = Readonly<{ json?: boolean; notify?: string; issue?: string; rebase?: boolean; queue?: string }>
 
 // Only queue actions load the runtime identity fence. Help and --version must
 // not perform its Git reads (version owns its own bounded source diagnostic).
@@ -86,6 +90,33 @@ const SUBMIT_HELP: [string, string][] = [
     "record the exact resulting commit after any rebase; atomically push that commit as the branch head and its opened record with leases against observed remote refs",
   ],
   ["5. Return", "the change is queued; checks and the merge run later, and the queue revalidates at merge"],
+]
+
+const MERGE_HELP: [string, string][] = [
+  [
+    "1. Find the change",
+    "the change of this checkout's branch head, or, with no such local branch, the branch's change in line; one already merged exits 0 and nothing runs",
+  ],
+  [
+    "2. Submit unless open",
+    "a change not in line is submitted from this checkout exactly as submit does; a change already queued, checked or stuck is not resubmitted, so a checked verdict is kept",
+  ],
+  [
+    "3. Wait for the round lock",
+    "one round at a time in the queue's workdir: a round already running, the service's or anyone's, finishes first, and the wait names it",
+  ],
+  [
+    "4. Run this change's round",
+    "its checks and its merge, now, ahead of the line and on a stopped line too; a stuck change ahead of it does not hold it back",
+  ],
+  [
+    "5. Judge the stuck change again",
+    "when this change merged while a stuck change stopped the line, that stuck head is judged once more on the new target, and the stop lifts if it passes",
+  ],
+  [
+    "6. Exit with this change's state",
+    "0 merged, 1 failed or withdrawn, 2 stuck or still in line; a change left in line is named with why and the command to run again, and a stop that still stands is named with the command that merges what it waits on",
+  ],
 ]
 
 export function resolveSubmitter(declared: string | undefined, env: NodeJS.ProcessEnv): string {
@@ -286,7 +317,10 @@ function buildProgram(
     })
   queue
     .command("run")
-    .description("one round of queue work, run now rather than by the service")
+    .description(
+      "one round of queue work, run now rather than by the service; a round already running in the queue's " +
+        "workdir finishes first",
+    )
     .option("--json", "emit stable JSON")
     .option("--queue <value>", QUEUE_HELP)
     .action(async (options) => {
@@ -311,8 +345,10 @@ function buildProgram(
   queue
     .command("up")
     .description(
-      "the service: the same round on a loop; a stuck ROUND is reported by queue health and the loop runs on, " +
-        "and it exits 0 when the gitlink moves under it, 2 only when no round could fix what is wrong",
+      "the service: the same round on a loop; a stuck change stops the line, and the service stays up holding " +
+        "the stop and paging through queue health until the change is merged (yrd merge) or withdrawn " +
+        "(yrd queue withdraw) or the queue is resumed; it exits 0 when the gitlink moves under it, 2 only when " +
+        "no round can run at all",
     )
     .option("--interval <seconds>", "seconds between rounds (default 15)", int)
     .option("--json", "emit stable JSON")
@@ -525,6 +561,59 @@ function buildProgram(
     )
     .action(async (branch, options) => queueSubmit(branch, options as SubmitOptions))
 
+  const queueMerge = async (branch: string, options: MergeOptions): Promise<void> => {
+    // A change not in line yet is submitted from the checkout this runs in,
+    // exactly as submit does; outside a clone only a change already in line
+    // can be merged. The round itself runs where every queue round runs.
+    const author =
+      repositoryHere(cwd()) === undefined ? undefined : await resolveQueueLocation(cwd(), options.queue, env, "submit")
+    const location = await resolveQueueLocation(cwd(), options.queue, env)
+    setExit(
+      await coreQueueCommand(
+        location.repo,
+        io,
+        {
+          branch,
+          command: "merge",
+          submitter: resolveSubmitter(options.notify, env),
+          ...(options.issue === undefined ? {} : { issue: options.issue }),
+          ...(options.rebase === true ? { rebase: true } : {}),
+          ...(author === undefined
+            ? {}
+            : {
+                author: {
+                  repo: author.repo,
+                  selection: author.selection,
+                  ...(author.remote === undefined ? {} : { remote: author.remote }),
+                },
+              }),
+        },
+        {
+          json: options.json,
+          env,
+          log: log(),
+          selection: location.selection,
+          populateReference: location.owned,
+          queue: location.queue,
+          workdir: location.workdir,
+        },
+      ),
+    )
+  }
+  program
+    .command("merge <branch>")
+    .description(
+      "merge the branch's change now, ahead of the line and on a stopped line too: submit it unless it is in " +
+        "line, then run its checks and its merge in this process",
+    )
+    .option("--json", "emit stable JSON")
+    .option("--notify <seat>", NOTIFY_HELP)
+    .option("--issue <id>", ISSUE_HELP)
+    .option("--queue <value>", QUEUE_HELP)
+    .option("--rebase", "rebase this clean, checked-out branch onto the captured target before submitting")
+    .addHelpSection("On merge:", MERGE_HELP)
+    .action(async (branch, options) => queueMerge(branch as string, options as MergeOptions))
+
   program
     .command("check <name...>")
     .description("run one of the queue's checks here, now, in a fresh worktree of HEAD")
@@ -601,6 +690,7 @@ function addExamples(program: CliCommand, name: string): void {
   ])
   program.addHelpSection("Examples:", [
     [`$ ${name} submit fix-login`, "push the branch and open its change"],
+    [`$ ${name} merge fix-login`, "merge the branch now, ahead of the line: its checks, then its merge"],
     [`$ ${name} queue list`, "every change in line, then the failed and the merged"],
     [`$ ${name} queue stats --since 1d`, "merged, failed, retries, re-pushes and latency, per submitter"],
     [`$ ${name} queue show fix-login`, "the branch's changes, each check's result and log"],
