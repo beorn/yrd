@@ -475,6 +475,12 @@ describe("the clocks", () => {
   const since = new Date("2026-09-03T19:00:00.000Z")
   const started = new Date("2026-09-03T19:30:00.000Z")
   const now = new Date("2026-09-03T20:00:00.000Z")
+  /** Age, wait and runtime alone: the clocks these tests are about, apart from the one clock and duration 24196 added. */
+  const ages = (measured: ReturnType<typeof clocks>) => ({
+    ageMs: measured.ageMs,
+    runtimeMs: measured.runtimeMs,
+    waitMs: measured.waitMs,
+  })
 
   it("reads age, wait and runtime from one place, so no two views can disagree", () => {
     const row: Row = {
@@ -489,7 +495,7 @@ describe("the clocks", () => {
     // Age freezes at the same ending record runtime already freezes at
     // (19:45 − 19:00 = 45m), not at `now` (20:00): a merged row does not keep
     // aging while the reader leaves the pane open.
-    expect(clocks(row, now)).toEqual({ ageMs: 45 * 60 * 1000, runtimeMs: 15 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+    expect(ages(clocks(row, now))).toEqual({ ageMs: 45 * 60 * 1000, runtimeMs: 15 * 60 * 1000, waitMs: 30 * 60 * 1000 })
   })
 
   it("keeps a decided row's age fixed at its ending record however much later it is read", () => {
@@ -525,7 +531,7 @@ describe("the clocks", () => {
     // Git can prove a change merged or its branch disappeared without an
     // ending record. Missing evidence must not turn a stopped clock live.
     for (const state of ["merged", "failed", "stuck", "direct"] as const) {
-      expect(clocks({ ...row, state }, now), state).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+      expect(ages(clocks({ ...row, state }, now)), state).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
     }
   })
 
@@ -533,14 +539,14 @@ describe("the clocks", () => {
     "leaves runtime unknown for a %s change with no recorded ending time",
     (state) => {
       const row: Row = { branch: "task/one", head: "abc", since, startedAt: started, state }
-      expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
+      expect(ages(clocks(row, now))).toEqual({ ageMs: 60 * 60 * 1000, waitMs: 30 * 60 * 1000 })
     },
   )
 
   it("leaves wait and runtime ABSENT when nothing recorded that checking began, rather than answering zero", () => {
     const row: Row = { branch: "task/one", head: "abc", since, state: "queued" }
 
-    expect(clocks(row, now)).toEqual({ ageMs: 60 * 60 * 1000 })
+    expect(ages(clocks(row, now))).toEqual({ ageMs: 60 * 60 * 1000 })
   })
 
   // 24196 (A2-set-v2 items 4 and 5, superseding decisions 5 and 6's basis): a row shows ONE clock, the
@@ -549,10 +555,11 @@ describe("the clocks", () => {
   // while the change is in line, held and stuck rows included, and its ending record's instant once it
   // ended (never the notice sent after it); `waitingMs` is now less the submit for every change in line,
   // absent while its check runs and once it ended; `checkingMs` is how long the check running now has run;
-  // `tookMs` is an ended change's submit to its end. A stuck change's duration counts from the stop record
-  // (the instant the top line prints), which a row does not carry, so it is pinned where the stop is known,
-  // not here. The fields are read through a cast only until they exist, so this file compiles red-first.
-  it("names the one clock a row is ordered by, and the durations a row alone can name: waiting since submit for every change in line, this check's run time, took from submit to end", () => {
+  // `tookMs` is an ended change's submit to its end; `stuckMs` is how long a stuck change has been stuck,
+  // from its OWN stuck record (A2-set-v4: the stop record a round writes after it is the top line's
+  // "line stopped since T", and a second stuck change under an older stop has no stop record of its own).
+  // The fields are read through a cast only until they exist, so this file compiles red-first.
+  it("names the one clock a row is ordered by, and its durations: waiting since submit for every change in line, this check's run time, stuck since its own stuck record, took from submit to end", () => {
     const opened = new Date("2026-09-03T19:48:00.000Z")
     const stuckAt = new Date("2026-09-03T19:50:00.000Z")
     const withdrawnAt = new Date("2026-09-03T19:40:00.000Z")
@@ -585,12 +592,13 @@ describe("the clocks", () => {
       return {
         checkingMs: measured["checkingMs"],
         clockAt: measured["clockAt"],
+        stuckMs: measured["stuckMs"],
         tookMs: measured["tookMs"],
         waitingMs: measured["waitingMs"],
       }
     }
     const minutes = (count: number): number => count * 60 * 1000
-    const none = { checkingMs: undefined, tookMs: undefined, waitingMs: undefined }
+    const none = { checkingMs: undefined, stuckMs: undefined, tookMs: undefined, waitingMs: undefined }
 
     expect({
       checked: read(checked),
@@ -604,7 +612,7 @@ describe("the clocks", () => {
       merged: { ...none, clockAt: passed, tookMs: minutes(57) },
       queued: { ...none, clockAt: opened, waitingMs: minutes(12) },
       running: { ...none, checkingMs: minutes(3) + 30_000, clockAt: since },
-      stuck: { ...none, clockAt: since, waitingMs: minutes(60) },
+      stuck: { ...none, clockAt: since, stuckMs: minutes(10), waitingMs: minutes(60) },
       withdrawn: { ...none, clockAt: withdrawnAt, tookMs: minutes(40) },
     })
   })
@@ -724,11 +732,11 @@ describe("the table's one order (24196)", () => {
         why: "a direct push",
       },
     ]
-    // The drafts' input is named here as phase A assumes it: the branch, its head, and its head commit's
-    // author and instant (A2-set-v2 item 1). Phase B may name it otherwise; the order is the requirement.
+    // The drafts as the one derivation reads them (drafts.ts): the branch, its head, and its head commit's
+    // author and instant.
     const drafts = [
-      { author: "ada", branch: "task/h-draft-older", committedAt: ago(120), head: sha() },
-      { author: "grace", branch: "task/i-draft-newer", committedAt: ago(30), head: sha() },
+      { author: "ada", branch: "task/h-draft-older", committedAt: ago(120), head: sha(), movedSinceSubmit: false },
+      { author: "grace", branch: "task/i-draft-newer", committedAt: ago(30), head: sha(), movedSinceSubmit: false },
     ]
 
     const rows = list([withdrawn, submitted, merged, held, failed, stuck, pending], {
