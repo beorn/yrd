@@ -1176,15 +1176,16 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     return { row: { ...item, run: id }, run }
   }
 
-  /** A draft (v3): a branch pushed and never submitted, dated and signed by its head commit. No record exists for it. */
-  function draft(branch: string, head: string, committedAt: Date, committer: string): WatchRow {
-    return { row: { at: committedAt, branch, committer, head, state: "draft" } as unknown as Row }
+  /** A draft (v3): a branch pushed and never submitted, dated by its head commit and signed by its author. No record exists for it. */
+  function draft(branch: string, head: string, committedAt: Date, author: string): WatchRow {
+    return { row: { at: committedAt, author, branch, head, state: "draft" } as unknown as Row }
   }
 
   /**
    * EVERY_STATE: one row for each word the table draws, in the order decision 4 gives them: the row the
-   * runner holds, then the line by position, then the ended rows newest first, then the drafts. The width
-   * renders in the 24196 phase A report are drawn from it, and the tier ladder below reads it.
+   * runner holds, then the line by position (which is submit order), then the ended rows newest ending
+   * first, then the drafts newest first. The width renders in the 24196 phase A report are drawn from it,
+   * and the tier ladder below reads it.
    */
   const EVERY_STATE: readonly WatchRow[] = [
     { row: running() },
@@ -1221,7 +1222,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
         head: "4".repeat(40),
         position: 4,
         reason: "yrd-check-unresolved",
-        since: ago(45 * MINUTE),
+        since: ago(10 * MINUTE),
         state: "stuck",
         subject: "the queue could not judge it",
         submitter: "@dev/6",
@@ -1350,12 +1351,13 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     })
   })
 
-  it("the top line says how many changes wait and why the line is not moving: what is checked and for how long, where the line stopped and since when, and a silent runner, counting a change once however many runs it has", async () => {
+  it("the top line says how many changes wait and why the line is not moving: what is checked and for how long, where the line stopped and since when, when the last merge landed and how many drafts there are, counting a change once however many runs it has, and past its width drops the drafts, the breakdown, the last merge, the times, then the branch names", async () => {
     const W = await words()
     const recheck = "q-20260903T112000000Z-5ecf00d0"
     const { live: _running, ...before } = running()
     const passed = row({ branch: "task/y1", head: "2".repeat(40), position: 1, state: "checked" })
     const stuckAt = ago(6 * MINUTE)
+    const mergedAt = ago(3 * MINUTE + 12_000)
     const rows: WatchRow[] = [
       // The change being checked, split into its run now and an earlier run that decided nothing: ONE change.
       split(running(), RUN_ID),
@@ -1376,34 +1378,59 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
           state: "stuck",
         }),
       },
+      split(row({ branch: "task/y", endedAt: mergedAt, head: "7".repeat(40), state: "merged" }), MERGED_RUN, "merged"),
       split(
-        row({ branch: "task/y", endedAt: ago(3 * MINUTE + 12_000), head: "7".repeat(40), state: "merged" }),
-        MERGED_RUN,
+        row({ branch: "task/older", endedAt: ago(50 * MINUTE), head: "8".repeat(40), state: "merged" }),
+        EARLIER_RUN,
         "merged",
       ),
+      draft("task/d1", "a".repeat(40), ago(2 * 60 * MINUTE), "ada"),
+      draft("task/d2", "b".repeat(40), ago(3 * 60 * MINUTE), "bob"),
     ]
     const stopped = { ...STOP, since: stuckAt.toISOString() }
+    const at = async (cols: number, runner = RUNNER) =>
+      topLineOf(await lines(snapshot({ rows, runner, stopped } as Partial<WatchSnapshot>), cols, 40)).line.trim()
 
-    const busy = await lines(snapshot({ rows, runner: RUNNER, stopped } as Partial<WatchSnapshot>), 120, 40)
-    const silent = await lines(snapshot({ rows, runner: SILENT, stopped } as Partial<WatchSnapshot>), 120, 40)
-
-    const waiting = `4 ${W.waiting.word}: 2 ${W.pending.word}, 2 ${W.submitted.word}`
-    expect({ busy: topLineOf(busy).line.trim(), silent: topLineOf(silent).line.trim() }).toEqual({
-      busy: `${waiting} · ${W.checking.word} task/x for 3:21 · line stopped at task/s since ${clock(stuckAt)}`,
-      // Silence outranks a check the journal still marks as running: nothing is said to be checked.
-      silent: `${waiting} · line stopped at task/s since ${clock(stuckAt)} · runner silent since ${clock(SILENT.latest.lastWriteAt)}`,
+    // A2-set-v2 item 3, each width the widest the next form does not fit (the pane lays the line out two
+    // columns narrower than the terminal): drafts, breakdown, last merge, times, branch names.
+    const waiting = `5 ${W.waiting.word}`
+    const breakdown = `: 2 ${W.pending.word}, 2 ${W.submitted.word}, 1 ${W.stuck.word}`
+    const check = (times: boolean) => ` · ${W.checking.word} task/x${times ? " for 3:21" : ""}`
+    const stop = (times: boolean) => ` · line stopped at task/s${times ? ` since ${clock(stuckAt)}` : ""}`
+    const merge = ` · last merge ${clock(mergedAt)} (task/y)`
+    const drafts = ` · 2 ${W.draft.word}s (7d)`
+    expect({
+      160: await at(160),
+      144: await at(144),
+      120: await at(120),
+      90: await at(90),
+      64: await at(64),
+      44: await at(44),
+      // A journal quiet past the ceiling changes nothing here: its only local source reads a healthy round's
+      // long check as silence, so "runner silent" waits for the runner's own claim (A2-set-v2 item 4).
+      quiet: await at(160, SILENT),
+    }).toEqual({
+      160: waiting + breakdown + check(true) + stop(true) + merge + drafts,
+      144: waiting + breakdown + check(true) + stop(true) + merge,
+      120: waiting + check(true) + stop(true) + merge,
+      90: waiting + check(true) + stop(true),
+      64: waiting + check(false) + stop(false),
+      44: `${waiting} · ${W.checking.word} · line stopped`,
+      quiet: waiting + breakdown + check(true) + stop(true) + merge + drafts,
     })
   })
 
-  it("each row shows one clock, when it entered the state it is in, and one duration cell whose word names it; AGE and RUNTIME are gone, and a narrow table keeps the clock to the minute", async () => {
+  it("each row shows one clock, the instant its place in the table is ordered by, and one duration cell whose word names its basis; AGE and RUNTIME are gone, and a narrow table keeps the clock to the minute", async () => {
     const W = await words()
+    // In line: submitted at, and the wait since then; the held row's check by its own run time; a stuck
+    // change since it stopped the line. Ended: ended at, and submit to end.
     const wanted: Readonly<Record<string, Readonly<{ time: Date; duration: string }>>> = {
       "task/f": { duration: `${W.took.word} 5:00`, time: ago(20 * MINUTE) },
       "task/m": { duration: `${W.took.word} 7:10`, time: ago(4 * MINUTE + 50_000) },
-      "task/s": { duration: `${W.waiting.word} 6:00`, time: ago(6 * MINUTE) },
+      "task/s": { duration: `${W.stuck.word} 6:00`, time: ago(10 * MINUTE) },
       "task/w": { duration: `${W.took.word} 10:00`, time: ago(30 * MINUTE) },
-      "task/x": { duration: `${W.checking.word} 3:21`, time: RUNNING_SINCE },
-      "task/y1": { duration: `${W.waiting.word} 3:00`, time: ago(3 * MINUTE) },
+      "task/x": { duration: `${W.checking.word} 3:21`, time: ago(40 * MINUTE) },
+      "task/y1": { duration: `${W.waiting.word} 50:00`, time: ago(50 * MINUTE) },
       "task/z": { duration: `${W.waiting.word} 12:03`, time: ago(12 * MINUTE + 3_000) },
     }
     const snap = snapshot({ rows: EVERY_STATE, runner: RUNNER })
@@ -1428,7 +1455,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
           .startsWith(`${clock(ago(4 * MINUTE + 50_000))} `),
         "task/x": tableRow(narrow, " task/x ")
           .trimStart()
-          .startsWith(`${clock(RUNNING_SINCE)} `),
+          .startsWith(`${clock(ago(40 * MINUTE))} `),
       },
       wide: Object.fromEntries(Object.keys(wanted).map((branch) => [branch, cell(wide, branch, 8)])),
     }).toEqual({
@@ -1452,7 +1479,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
     expect(W.order.word.trim() !== "" && header.includes(W.order.word)).toBe(true)
   })
 
-  it("draws a pushed branch nobody submitted as a draft row, with who committed its head and when, and counts drafts on their own, never among the changes waiting", async () => {
+  it("draws a pushed branch nobody submitted as a draft row, with its head commit's author and time, and counts drafts on their own, never among the changes waiting", async () => {
     const W = await words()
     const committedAt = ago(2 * 60 * MINUTE)
     const rows: WatchRow[] = [
@@ -1698,7 +1725,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
       const top = topLineOf(painted)
       const held = tableRow(painted, "task/x the change")
       seen.push({
-        heldClock: held.trimStart().startsWith(clock(RUNNING_SINCE, { seconds: true })),
+        heldClock: held.trimStart().startsWith(clock(ago(40 * MINUTE), { seconds: true })),
         heldDuration: held.includes(`${W.checking.word} 3:21`),
         heldRowDrawn: held !== "",
         heldWord: held.includes(` ${W.checking.word} `),
@@ -1738,7 +1765,7 @@ describe("the watch says what waits, what runs and what happens next (24196)", (
           .filter((line) => pills.test(line))
           .every((line) => line.trim() === "open running done failed all"),
         size: `${String(cols)}x${String(rows)}`,
-        topLineOwnRow: (painted[title + 1] ?? "").trim().startsWith(`2 ${W.waiting.word}`),
+        topLineOwnRow: (painted[title + 1] ?? "").trim().startsWith(`3 ${W.waiting.word}`),
       })
     }
 
