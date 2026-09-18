@@ -22,7 +22,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { Process } from "@yrd/process"
@@ -42,6 +42,14 @@ import {
   watchRows,
 } from "../src/index.ts"
 import type { Git, QueueRunOptions } from "../src/index.ts"
+
+/**
+ * Resolve the workspace's own git-super binary so the hermetic root-suite PATH
+ * does not silently replace it with shared main's build.  reference.test.ts
+ * carries the same cure with the comment "a subcommand is a PATH lookup, so a
+ * compose silently takes the ambient binary".
+ */
+const gitSuperBin = resolve(Bun.resolveSync("git-super", import.meta.dirname), "../../bin")
 
 const roots: string[] = []
 
@@ -133,7 +141,7 @@ async function world(): Promise<World> {
       return {
         checks: check === undefined ? [] : [{ name: "submodule-check", on: check.on, run: check.run }],
         configBlob: "test-config",
-        env: process.env,
+        env: { ...process.env, PATH: `${gitSuperBin}:${process.env.PATH ?? ""}` },
         repo: work,
         target: { branch: "main", remote: "origin" },
         targetSha: await remoteTip(git, "refs/heads/main"),
